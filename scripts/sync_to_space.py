@@ -221,7 +221,8 @@ def main():
 
     # ── 5. Git commit & push ───────────────────────────
     print(f"\n📤 提交并推送...")
-
+    run('git config user.email "github-actions[bot]@users.noreply.github.com"', cwd=tmpdir)
+    run('git config user.name "github-actions[bot]"', cwd=tmpdir)
     ret, out, err = run("git add data/search_data.json", cwd=tmpdir)
     if ret != 0:
         print(f"   ⚠ git add 失败: {err}")
