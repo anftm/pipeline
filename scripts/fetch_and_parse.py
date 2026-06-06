@@ -128,10 +128,13 @@ def parse_one_line(line: str, repo: str, size_map: dict) -> dict | None:
         "HasTxt": false
       }
     """
-    line = line.strip()
+        line = line.strip()
     if not line or line.startswith("#"):
         return None
 
+    # 过滤 Git LFS 指针行
+    if line.startswith("version https://git-lfs") or line.startswith("oid sha256:") or line.startswith("size "):
+        return None
     # 去掉开头的 ./
     if line.startswith("./"):
         rel_path = line[2:]
@@ -289,7 +292,7 @@ def main():
         print(f"   ✅ 获取到 {len(size_map)} 个文件的大小信息")
 
         # 4b. 下载 直接目录.txt
-        txt_url = f"{RAW_BASE}/{repo}/raw/main/{urllib.parse.quote('直接目录.txt')}"
+        txt_url = f"{RAW_BASE}/{repo}/resolve/main/{urllib.parse.quote('直接目录.txt')}"
         print(f"   📄 下载: {txt_url}")
         txt_content = http_get_text(txt_url, token)
 
