@@ -253,28 +253,28 @@ def main():
 
     # ── 3. 判断是否需要重新生成 ─────────────────────────
     # 检查 output 是否有效
-output_is_valid = OUTPUT_FILE.exists()
-if output_is_valid:
-    try:
-        existing = json.loads(OUTPUT_FILE.read_text(encoding="utf-8"))
-        if not isinstance(existing, list) or len(existing) == 0:
+    output_is_valid = OUTPUT_FILE.exists()
+    if output_is_valid:
+        try:
+            existing = json.loads(OUTPUT_FILE.read_text(encoding="utf-8"))
+            if not isinstance(existing, list) or len(existing) == 0:
+                output_is_valid = False
+        except Exception:
             output_is_valid = False
-    except Exception:
-        output_is_valid = False
+ 
+    if not changed_repos and output_is_valid:
+        print("\n✅ 所有仓库无变更，跳过生成。")
+        STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        STATE_FILE.write_text(
+            json.dumps(new_state, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        return 0
 
-if not changed_repos and output_is_valid:
-    print("\n✅ 所有仓库无变更，跳过生成。")
-    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    STATE_FILE.write_text(
-        json.dumps(new_state, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    return 0
+    if not changed_repos and not output_is_valid:
+        print("\n⚠ 仓库无变更，但 output 为空，强制重新生成...")
 
-if not changed_repos and not output_is_valid:
-    print("\n⚠ 仓库无变更，但 output 为空，强制重新生成...")
-
-    print(f"\n🔄 {len(changed_repos)} 个仓库有变更，开始重新生成...")
+        print(f"\n🔄 {len(changed_repos)} 个仓库有变更，开始重新生成...")
 
     # ── 4. 拉取 txt 并解析 ─────────────────────────────
     all_records = []
