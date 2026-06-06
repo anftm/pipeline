@@ -277,7 +277,7 @@ def main():
         print(f"   ✅ 获取到 {len(size_map)} 个文件的大小信息")
 
         # 4b. 下载 直接目录.txt
-        txt_url = f"{RAW_BASE}/{repo}/raw/main/直接目录.txt"
+        txt_url = f"{RAW_BASE}/{repo}/raw/main/{urllib.parse.quote('直接目录.txt')}"
         print(f"   📄 下载: {txt_url}")
         txt_content = http_get_text(txt_url, token)
 
@@ -312,7 +312,7 @@ def main():
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     STATE_FILE.write_text(
         json.dumps(new_state, ensure_ascii=False, indent=2),
-        encoding="utf-8",
+        encoding="utf-8"，
     )
     print(f"💾 已更新 {STATE_FILE}")
 
