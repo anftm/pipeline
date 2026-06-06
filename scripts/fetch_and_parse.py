@@ -312,7 +312,7 @@ def main():
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     STATE_FILE.write_text(
         json.dumps(new_state, ensure_ascii=False, indent=2),
-        encoding="utf-8"，
+        encoding="utf-8",
     )
     print(f"💾 已更新 {STATE_FILE}")
 
