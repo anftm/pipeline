@@ -54,14 +54,24 @@ def _make_request(url: str, token: str) -> urllib.request.Request:
 
 
 def http_get_json(url: str, token: str = "") -> dict | list:
-    """GET JSON 端点，成功返回 dict/list，失败返回空 dict。"""
-    try:
-        with urllib.request.urlopen(_make_request(url, token), timeout=30) as resp:
-            body = resp.read().decode("utf-8")
-            return json.loads(body)
-    except Exception as e:
-        print(f"  ⚠ HTTP GET JSON 失败 [{url}]: {e}")
-        return {}
+    """GET JSON 端点，遇 429 自动重试，带指数退避。"""
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(_make_request(url, token), timeout=30) as resp:
+                body = resp.read().decode("utf-8")
+                return json.loads(body)
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                wait = 2 ** attempt
+                print(f"  ⏳ 频率限制 (429)，等待 {wait}s 后重试...")
+                time.sleep(wait)
+                continue
+            print(f"  ⚠ HTTP {e.code}: {url}")
+            return {}
+        except Exception as e:
+            print(f"  ⚠ HTTP GET JSON 失败 [{url}]: {e}")
+            return {}
+    return {}
 
 
 def http_get_text(url: str, token: str = "") -> str:
@@ -287,7 +297,7 @@ def main():
         print(f"   ✅ 解析到 {repo_count} 条记录")
 
         # 避免请求过快
-        time.sleep(0.3)
+        time.sleep(1.5)
 
     print(f"\n📊 总计生成 {len(all_records)} 条记录")
 
