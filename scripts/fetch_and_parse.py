@@ -128,7 +128,7 @@ def parse_one_line(line: str, repo: str, size_map: dict) -> dict | None:
         "HasTxt": false
       }
     """
-        line = line.strip()
+    line = line.strip()
     if not line or line.startswith("#"):
         return None
 
