@@ -94,14 +94,8 @@ def encode_url_path(raw_path: str) -> str:
     """
     return urllib.parse.quote(raw_path, safe="/")
 
-def batch_get_sizes(repo: str, paths: list[str], token: str, batch_size: int = 800) -> dict:
-    """
-    使用 paths-info 批量获取文件大小。
-    POST https://huggingface.co/api/datasets/{repo}/paths-info
-    请求体: {"paths": ["path1", "path2", ...]}
-    返回: {"path1": 12345, "path2": 67890, ...}
-    """
-    url = f"https://huggingface.co/api/datasets/{repo}/paths-info"
+def batch_get_sizes(repo: str, paths: list[str], token: str, batch_size: int = 150) -> dict:
+    url = f"https://huggingface.co/api/datasets/{repo}/paths-info/main"  # ← 加 /main
     size_map = {}
 
     for i in range(0, len(paths), batch_size):
