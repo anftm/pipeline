@@ -94,12 +94,30 @@ def encode_url_path(raw_path: str) -> str:
     """
     return urllib.parse.quote(raw_path, safe="/")
 
-def batch_get_sizes(repo: str, paths: list[str], token: str, batch_size: int = 150) -> dict:
-    url = f"https://huggingface.co/api/datasets/{repo}/paths-info/main"  # ← 加 /main
+def batch_get_sizes(repo: str, paths: list[str], token: str, max_bytes: int = 80000) -> dict:
+    url = f"https://huggingface.co/api/datasets/{repo}/paths-info/main"
     size_map = {}
+    total = len(paths)
+    idx = 0
+    batch_num = 0
 
-    for i in range(0, len(paths), batch_size):
-        batch = paths[i:i + batch_size]
+    while idx < total:
+        # 动态取一批，控制 payload 不超过 max_bytes
+        batch = []
+        payload_size = 0
+        overhead = 30  # {"paths":[]} 的固定开销
+
+        while idx < total and payload_size + overhead + len(paths[idx].encode('utf-8')) + 5 < max_bytes:
+            batch.append(paths[idx])
+            payload_size += len(paths[idx].encode('utf-8')) + 3  # 每条加引号和逗号
+            idx += 1
+
+        if not batch:
+            # 单条路径就超长（罕见），强制单独发送
+            batch = [paths[idx]]
+            idx += 1
+
+        batch_num += 1
         payload = json.dumps({"paths": batch}).encode("utf-8")
 
         req = urllib.request.Request(url, data=payload, method="POST")
@@ -117,9 +135,9 @@ def batch_get_sizes(repo: str, paths: list[str], token: str, batch_size: int = 1
                     if p and s:
                         size_map[p] = s
         except Exception as e:
-            print(f"  ⚠ paths-info 请求失败 (batch {i//batch_size + 1}): {e}")
+            print(f"  ⚠ paths-info 失败 (batch {batch_num}, {len(batch)}条): {e}")
 
-        if i + batch_size < len(paths):
+        if idx < total:
             time.sleep(0.3)
 
     return size_map
