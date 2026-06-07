@@ -329,8 +329,8 @@ def main():
 
         # 3. 批量获取大小
         print(f"   📏 批量获取文件大小 ({len(all_paths)} 个文件)...")
-        size_map = batch_get_sizes(repo, all_paths, token, batch_size=800)
-
+        size_map = batch_get_sizes(repo, all_paths, token)
+        
         # 4. 补全 Size
         filled = 0
         for i, rec in enumerate(repo_records):
