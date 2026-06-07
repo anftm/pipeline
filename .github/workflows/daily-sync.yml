@@ -2,8 +2,8 @@ name: Daily Sync
 
 on:
   schedule:
-    - cron: '0 0 * * *'        # UTC 0:00 = 北京时间 8:00
-  workflow_dispatch:             # 手动触发
+    - cron: '0 0 * * *'
+  workflow_dispatch:
 
 jobs:
   sync:
@@ -12,10 +12,10 @@ jobs:
 
     steps:
       - name: Checkout pipeline repo
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
 
       - name: Setup Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
@@ -28,7 +28,7 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
-      - name: Check if data changed
+      - name: Check if new data generated
         id: check
         run: |
           if [ -f output/search_data.json ]; then
@@ -43,11 +43,23 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
+      - name: Sync to GitHub Pages
+        if: steps.check.outputs.data_changed == 'true'
+        run: python scripts/sync_to_pages.py
+        env:
+          PAGES_TOKEN: ${{ secrets.PAGES_TOKEN }}
+          PAGES_REPO: ${{ secrets.PAGES_REPO }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+
       - name: Commit updated state
         if: steps.check.outputs.data_changed == 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add state/commits.json
-          git diff --staged --quiet || git commit -m "chore: update commit state [skip ci]"
-          git push
+          if git diff --staged --quiet; then
+            echo "No state changes to commit"
+          else
+            git commit -m "chore: update commit state [skip ci]"
+            git push
+          fi
