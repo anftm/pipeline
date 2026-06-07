@@ -2,7 +2,6 @@
 """
 每天拉取 9 个 HF 仓库的 直接目录.txt，生成 search_data.json。
 仅当有仓库 commit SHA 变化时才重新生成。
-文件大小通过 huggingface_hub 的 get_paths_info 批量获取（每次最多 500 条路径）。
 
 用法:
   python scripts/fetch_and_parse.py
@@ -16,8 +15,6 @@ import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
-
-from huggingface_hub import HfApi
 
 # ═══════════════════════════════════════════════════════════
 # 配置
@@ -41,7 +38,6 @@ OUTPUT_FILE = OUTPUT_DIR / "search_data.json"
 
 API_DATASETS = "https://huggingface.co/api/datasets"
 RAW_BASE = "https://huggingface.co/datasets"
-PATHS_INFO_BATCH_SIZE = 500
 
 
 # ═══════════════════════════════════════════════════════════
@@ -49,6 +45,7 @@ PATHS_INFO_BATCH_SIZE = 500
 # ═══════════════════════════════════════════════════════════
 
 def _make_request(url: str, token: str) -> urllib.request.Request:
+    """构造带 User-Agent 和可选 Bearer token 的 HTTP 请求。"""
     req = urllib.request.Request(url)
     req.add_header("User-Agent", "VoiceOfML-Search-Pipeline/1.0")
     if token:
@@ -57,15 +54,28 @@ def _make_request(url: str, token: str) -> urllib.request.Request:
 
 
 def http_get_json(url: str, token: str = "") -> dict | list:
-    try:
-        with urllib.request.urlopen(_make_request(url, token), timeout=30) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except Exception as e:
-        print(f"  ⚠ HTTP GET JSON 失败 [{url}]: {e}")
-        return {}
+    """GET JSON 端点，遇 429 自动重试，带指数退避。"""
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(_make_request(url, token), timeout=30) as resp:
+                body = resp.read().decode("utf-8")
+                return json.loads(body)
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                wait = 2 ** attempt
+                print(f"  ⏳ 频率限制 (429)，等待 {wait}s 后重试...")
+                time.sleep(wait)
+                continue
+            print(f"  ⚠ HTTP {e.code}: {url}")
+            return {}
+        except Exception as e:
+            print(f"  ⚠ HTTP GET JSON 失败 [{url}]: {e}")
+            return {}
+    return {}
 
 
 def http_get_text(url: str, token: str = "") -> str:
+    """GET 文本端点，成功返回字符串，失败返回空字符串。"""
     try:
         with urllib.request.urlopen(_make_request(url, token), timeout=30) as resp:
             return resp.read().decode("utf-8")
@@ -75,18 +85,78 @@ def http_get_text(url: str, token: str = "") -> str:
 
 
 def encode_url_path(raw_path: str) -> str:
+    """
+    对路径进行 URL 百分号编码 (UTF-8)，保留 '/' 不编码。
+
+    示例:
+      •重要资料/《国际歌》.pdf
+      → %E2%80%A2%E9%87%8D%E8%A6%81%E8%B5%84%E6%96%99/%E3%80%8A%E5%9B%BD%E9%99%85%E6%AD%8C%E3%80%8B.pdf
+    """
     return urllib.parse.quote(raw_path, safe="/")
 
-
-def parse_one_line(line: str, repo: str) -> dict | None:
+def batch_get_sizes(repo: str, paths: list[str], token: str, batch_size: int = 800) -> dict:
     """
-    解析 txt 中的一行路径，返回一条 JSON 记录。
-    Size 暂留空，稍后批量填充。
+    使用 paths-info 批量获取文件大小。
+    POST https://huggingface.co/api/datasets/{repo}/paths-info
+    请求体: {"paths": ["path1", "path2", ...]}
+    返回: {"path1": 12345, "path2": 67890, ...}
+    """
+    url = f"https://huggingface.co/api/datasets/{repo}/paths-info"
+    size_map = {}
+
+    for i in range(0, len(paths), batch_size):
+        batch = paths[i:i + batch_size]
+        payload = json.dumps({"paths": batch}).encode("utf-8")
+
+        req = urllib.request.Request(url, data=payload, method="POST")
+        req.add_header("User-Agent", "VoiceOfML-Search-Pipeline/1.0")
+        req.add_header("Content-Type", "application/json")
+        if token:
+            req.add_header("Authorization", f"Bearer {token}")
+
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                results = json.loads(resp.read().decode("utf-8"))
+                for item in results:
+                    p = item.get("path", "")
+                    s = item.get("size", 0)
+                    if p and s:
+                        size_map[p] = s
+        except Exception as e:
+            print(f"  ⚠ paths-info 请求失败 (batch {i//batch_size + 1}): {e}")
+
+        if i + batch_size < len(paths):
+            time.sleep(0.3)
+
+    return size_map
+
+def parse_one_line(line: str, repo: str, size_map: dict) -> dict | None:
+    """
+    解析 txt 中的一行路径，返回一条 JSON 记录。不合法则返回 None。
+
+    输入示例:
+      ./•重要资料/《国际歌》在中国——国际歌的译本、底本与传播.pdf
+
+    返回:
+      {
+        "Repo": "VoiceOfML/MLMRL-Hub",
+        "File": "《国际歌》在中国——国际歌的译本、底本与传播",
+        "Extension": "pdf",
+        "Link": "https://huggingface.co/datasets/VoiceOfML/MLMRL-Hub/resolve/main/%E2%80%A2...",
+        "Path": "https://huggingface.co/datasets/VoiceOfML/MLMRL-Hub/blob/main/%E2%80%A2...",
+        "Folder": ["•重要资料"],
+        "Size": 12345,
+        "HasTxt": false
+      }
     """
     line = line.strip()
     if not line or line.startswith("#"):
         return None
 
+    # 过滤 Git LFS 指针行
+    if line.startswith("version https://git-lfs") or line.startswith("oid sha256:") or line.startswith("size "):
+        return None
+    # 去掉开头的 ./
     if line.startswith("./"):
         rel_path = line[2:]
     elif line.startswith("/"):
@@ -97,26 +167,35 @@ def parse_one_line(line: str, repo: str) -> dict | None:
     if not rel_path:
         return None
 
+    # 拆分文件夹部分和文件名部分
     parts = rel_path.split("/")
     filename_part = parts[-1] if parts else ""
     folder_parts = parts[:-1] if len(parts) > 1 else []
 
+    # 提取文件名和扩展名
     if "." in filename_part and not filename_part.startswith("."):
+        # 普通文件: name.ext
         last_dot = filename_part.rfind(".")
         file_name = filename_part[:last_dot]
         extension = filename_part[last_dot + 1:]
     elif filename_part.startswith(".") and filename_part.count(".") >= 2:
+        # 隐藏文件带扩展名: .gitignore
         last_dot = filename_part.rfind(".")
         file_name = filename_part[:last_dot]
         extension = filename_part[last_dot + 1:]
     else:
+        # 无后缀文件（纯文件名 或 只以点开头的隐藏文件如 .hidden）
         file_name = filename_part
         extension = ""
 
+    # 构造两个链接（路径做 URL 编码）
     encoded_rel = encode_url_path(rel_path)
 
     link = f"https://huggingface.co/datasets/{repo}/resolve/main/{encoded_rel}"
     path_url = f"https://huggingface.co/datasets/{repo}/blob/main/{encoded_rel}"
+
+    # 文件大小（可能为空字符串）
+    size = size_map.get(rel_path, "")
 
     return {
         "Repo": repo,
@@ -125,76 +204,21 @@ def parse_one_line(line: str, repo: str) -> dict | None:
         "Link": link,
         "Path": path_url,
         "Folder": folder_parts,
-        "Size": "",          # 稍后填充
+        "Size": size,
         "HasTxt": False,
-        "_rel_path": rel_path,  # 临时字段，填充完 Size 后删除
     }
 
 
 def get_repo_sha(repo: str, token: str) -> str:
+    """
+    通过 HF API 获取仓库最新 commit SHA。
+    返回空字符串表示获取失败。
+    """
     url = f"{API_DATASETS}/{repo}"
     data = http_get_json(url, token)
     if isinstance(data, dict):
         return data.get("sha", "")
     return ""
-
-
-def batch_fetch_sizes(
-    api: HfApi,
-    repo: str,
-    paths: list[str],
-) -> dict[str, int]:
-    """
-    分批调用 get_paths_info，返回 {路径: 文件大小} 映射。
-    """
-    size_map: dict[str, int] = {}
-    total = len(paths)
-
-    for start in range(0, total, PATHS_INFO_BATCH_SIZE):
-        batch = paths[start:start + PATHS_INFO_BATCH_SIZE]
-        end = min(start + PATHS_INFO_BATCH_SIZE, total)
-        print(f"   📏 获取文件大小 {start + 1}-{end}/{total} ...")
-
-        try:
-            infos = api.get_paths_info(
-                repo_id=repo,
-                repo_type="dataset",
-                paths=batch,
-            )
-            for info in infos:
-                if info.size is not None:
-                    size_map[info.path] = info.size
-            print(f"      本批匹配 {len([i for i in infos if i.size is not None])} 个")
-        except Exception as e:
-            print(f"   ⚠ 获取大小失败: {e}")
-            # 等待后重试一次
-            time.sleep(5)
-            try:
-                infos = api.get_paths_info(
-                    repo_id=repo,
-                    repo_type="dataset",
-                    paths=batch,
-                )
-                for info in infos:
-                    if info.size is not None:
-                        size_map[info.path] = info.size
-                print(f"      重试成功")
-            except Exception as e2:
-                print(f"   ❌ 重试也失败: {e2}")
-
-    return size_map
-
-
-def fill_sizes(records: list[dict], size_map: dict[str, int]):
-    """用 size_map 填充每条记录的 Size 字段，并删除临时 _rel_path。"""
-    count = 0
-    for rec in records:
-        rel_path = rec.pop("_rel_path", "")
-        if rel_path in size_map:
-            rec["Size"] = size_map[rel_path]
-            count += 1
-    return count
-
 
 # ═══════════════════════════════════════════════════════════
 # 主流程
@@ -239,7 +263,17 @@ def main():
             print(f"  ✅ 无变更: {sha[:8]}")
 
     # ── 3. 判断是否需要重新生成 ─────────────────────────
-    if not changed_repos:
+    # 检查 output 是否有效
+    output_is_valid = OUTPUT_FILE.exists()
+    if output_is_valid:
+        try:
+            existing = json.loads(OUTPUT_FILE.read_text(encoding="utf-8"))
+            if not isinstance(existing, list) or len(existing) == 0:
+                output_is_valid = False
+        except Exception:
+            output_is_valid = False
+ 
+    if not changed_repos and output_is_valid:
         print("\n✅ 所有仓库无变更，跳过生成。")
         STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
         STATE_FILE.write_text(
@@ -248,61 +282,61 @@ def main():
         )
         return 0
 
-    print(f"\n🔄 {len(changed_repos)} 个仓库有变更，开始重新生成...")
+    if not changed_repos and not output_is_valid:
+        print("\n⚠ 仓库无变更，但 output 为空，强制重新生成...")
+
+        print(f"\n🔄 {len(changed_repos)} 个仓库有变更，开始重新生成...")
 
     # ── 4. 拉取 txt 并解析 ─────────────────────────────
-    api = HfApi(token=token)
     all_records = []
 
     for repo in REPOS:
         print(f"\n📥 处理仓库: {repo}")
 
-        # 4a. 下载 直接目录.txt
-        txt_url = f"{RAW_BASE}/{repo}/raw/main/直接目录.txt"
+        # 1. 下载 txt
+        txt_url = f"{RAW_BASE}/{repo}/resolve/main/{urllib.parse.quote('直接目录.txt')}"
         print(f"   📄 下载: {txt_url}")
         txt_content = http_get_text(txt_url, token)
-
         if not txt_content:
-            print(f"   ⚠ 无法下载 直接目录.txt，跳过该仓库")
+            print(f"   ⚠ 无法下载，跳过")
             continue
 
-        # 4b. 逐行解析
+        # 2. 先解析（Size 暂时为空）
         lines = txt_content.split("\n")
         repo_records = []
-        repo_paths: list[str] = []
+        all_paths = []
         for line in lines:
-            record = parse_one_line(line, repo)
-            if record:
-                repo_records.append(record)
-                repo_paths.append(record["_rel_path"])
+            rec = parse_one_line(line, repo, {})  # 空 size_map
+            if rec:
+                repo_records.append(rec)
+                # 提取相对路径用于 paths-info 请求
+                rel_path = "/".join(rec["Folder"] + [rec["File"] + ("." + rec["Extension"] if rec["Extension"] else "")])
+                all_paths.append(rel_path)
 
         print(f"   ✅ 解析到 {len(repo_records)} 条记录")
 
-        # 4c. 批量获取文件大小
-        print(f"   📏 批量获取文件大小（共 {len(repo_paths)} 条路径）...")
-        size_map = batch_fetch_sizes(api, repo, repo_paths)
-        print(f"   ✅ 获取到 {len(size_map)} 个文件的大小信息")
+        # 3. 批量获取大小
+        print(f"   📏 批量获取文件大小 ({len(all_paths)} 个文件)...")
+        size_map = batch_get_sizes(repo, all_paths, token, batch_size=800)
 
-        # 4d. 填充 Size
-        filled = fill_sizes(repo_records, size_map)
-        print(f"   ✅ 成功填充 {filled}/{len(repo_records)} 条 Size")
+        # 4. 补全 Size
+        filled = 0
+        for i, rec in enumerate(repo_records):
+            path_key = all_paths[i]
+            sz = size_map.get(path_key, "")
+            if sz:
+                rec["Size"] = sz
+                filled += 1
+        print(f"   ✅ 补全了 {filled} 个文件的大小")
 
         all_records.extend(repo_records)
-        time.sleep(1)  # 仓库之间间隔
-
-    print(f"\n📊 总计生成 {len(all_records)} 条记录")
-
+        time.sleep(0.5)
     # ── 5. 写入 output/search_data.json ────────────────
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     json_text = json.dumps(all_records, ensure_ascii=False, indent=2)
     OUTPUT_FILE.write_text(json_text, encoding="utf-8")
     file_size_mb = len(json_text.encode("utf-8")) / 1024 / 1024
     print(f"💾 已写入 {OUTPUT_FILE} ({file_size_mb:.1f} MB)")
-
-    # 统计 Size 覆盖率
-    total = len(all_records)
-    with_size = sum(1 for r in all_records if r.get("Size"))
-    print(f"📏 Size 覆盖率: {with_size}/{total} ({with_size / max(total, 1) * 100:.1f}%)")
 
     # ── 6. 更新 state/commits.json ─────────────────────
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
