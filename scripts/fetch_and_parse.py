@@ -29,7 +29,7 @@ REPOS = [
     "VoiceOfML/Japanese-Materials",
     "VoiceOfML/A-Historical-Learning-Data",
     "VoiceOfML/MLMRL-Hub",
-    "VoiceOfML/IMPMaterial",
+    "VoiceOfML/Omnibus",
 ]
 
 STATE_FILE = Path("state/commits.json")
