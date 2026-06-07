@@ -37,7 +37,7 @@ def run(cmd: str, cwd: str = None, env: dict = None) -> tuple[int, str, str]:
 def main():
     token = os.environ.get("PAGES_TOKEN", "")
     pages_repo = os.environ.get("PAGES_REPO", "")
-    username = os.environ.get("GITHUB_ACTOR", "github-actions[bot]")
+    username = "x-access-token"
 
     if not token:
         print("❌ 缺少 GITHUB_TOKEN")
