@@ -67,10 +67,14 @@ const ICONS = {
  
 let RECORDS = [];
 let wordIndex = {};
+let wordIndexFilesOnly = {};
 let extensionCounts = {};
 let repoCounts = {};
 let folderIndex = {};
 let didYouMeanVocab = {};
+let didYouMeanVocabFilesOnly = {};
+let didYouMeanSorted = [];
+let didYouMeanSortedFilesOnly = [];
 let repoList = [];
 let extensionList = [];
  
@@ -79,10 +83,15 @@ function tokenize(text) {
   const lower = text.toLowerCase();
   const alpha = lower.match(/[a-z0-9]+/g);
   if (alpha) tokens.push(...alpha);
+  const chineseChars = [];
   for (const ch of lower) {
     if (("\u4e00" <= ch && ch <= "\u9fff") || ("\u3400" <= ch && ch <= "\u4dbf")) {
+      chineseChars.push(ch);
       tokens.push(ch);
     }
+  }
+  for (let i = 0; i < chineseChars.length - 1; i++) {
+    tokens.push(chineseChars[i] + chineseChars[i + 1]);
   }
   return [...new Set(tokens)];
 }
@@ -108,59 +117,143 @@ function editDistance(s1, s2, maxDist) {
 }
  
 function buildIndex() {
-  wordIndex = {};
-  extensionCounts = {};
-  repoCounts = {};
-  folderIndex = {};
-  didYouMeanVocab = {};
- 
-  for (let i = 0; i < RECORDS.length; i++) {
-    const rec = RECORDS[i];
-    const repo = rec.Repo || "";
-    const ext = (rec.Extension || "").toLowerCase();
- 
-    repoCounts[repo] = (repoCounts[repo] || 0) + 1;
-    if (ext) extensionCounts[ext] = (extensionCounts[ext] || 0) + 1;
- 
-    const folders = rec.Folder || [];
-    const text = [rec.File || "", ...folders].join(" ");
-    const tokens = tokenize(text);
-    for (const tok of tokens) {
-      if (!wordIndex[tok]) wordIndex[tok] = [];
-      wordIndex[tok].push(i);
-      didYouMeanVocab[tok] = (didYouMeanVocab[tok] || 0) + 1;
+  return new Promise(function(resolve) {
+    wordIndex = {};
+    wordIndexFilesOnly = {};
+    extensionCounts = {};
+    repoCounts = {};
+    folderIndex = {};
+    didYouMeanVocab = {};
+    didYouMeanVocabFilesOnly = {};
+
+    let i = 0;
+    const chunkSize = 5000;
+
+    function processChunk() {
+      const end = Math.min(i + chunkSize, RECORDS.length);
+      for (; i < end; i++) {
+        const rec = RECORDS[i];
+        const repo = rec.Repo || "";
+        const ext = (rec.Extension || "").toLowerCase();
+
+        repoCounts[repo] = (repoCounts[repo] || 0) + 1;
+        if (ext) extensionCounts[ext] = (extensionCounts[ext] || 0) + 1;
+
+        const folders = rec.Folder || [];
+        const text = [rec.File || "", ...folders].join(" ");
+        const tokens = tokenize(text);
+        for (const tok of tokens) {
+          if (!wordIndex[tok]) wordIndex[tok] = [];
+          wordIndex[tok].push(i);
+          didYouMeanVocab[tok] = (didYouMeanVocab[tok] || 0) + 1;
+        }
+
+        const fileTokens = tokenize(rec.File || "");
+        for (const tok of fileTokens) {
+          if (!wordIndexFilesOnly[tok]) wordIndexFilesOnly[tok] = [];
+          wordIndexFilesOnly[tok].push(i);
+          didYouMeanVocabFilesOnly[tok] = (didYouMeanVocabFilesOnly[tok] || 0) + 1;
+        }
+
+        if (!folderIndex[repo]) folderIndex[repo] = {};
+        for (let d = 0; d <= folders.length; d++) {
+          const fp = d === 0 ? "" : folders.slice(0, d).join("/");
+          folderIndex[repo][fp] = (folderIndex[repo][fp] || 0) + 1;
+        }
+      }
+
+      if (i < RECORDS.length) {
+        setTimeout(processChunk, 0);
+      } else {
+        repoList = Object.entries(repoCounts)
+          .map(([name, count]) => ({ name, count }))
+          .sort((a, b) => a.name.localeCompare(b.name));
+        extensionList = Object.keys(extensionCounts).sort();
+        didYouMeanSorted = Object.entries(didYouMeanVocab).sort((a, b) => b[1] - a[1]);
+        didYouMeanSortedFilesOnly = Object.entries(didYouMeanVocabFilesOnly).sort((a, b) => b[1] - a[1]);
+        resolve();
+      }
     }
- 
-    if (!folderIndex[repo]) folderIndex[repo] = {};
-    for (let d = 0; d <= folders.length; d++) {
-      const fp = d === 0 ? "" : folders.slice(0, d).join("/");
-      if (!folderIndex[repo][fp]) folderIndex[repo][fp] = [];
-      folderIndex[repo][fp].push(i);
-    }
-  }
- 
-  repoList = Object.entries(repoCounts)
-    .map(([name, count]) => ({ name, count }))
-    .sort((a, b) => a.name.localeCompare(b.name));
- 
-  extensionList = Object.keys(extensionCounts).sort();
+
+    processChunk();
+  });
 }
  
 async function loadData() {
+  const bar = DOM.progressBar;
+  const text = DOM.progressText;
+  bar.style.width = "0%";
+  text.textContent = "连接中...";
+
   try {
     const resp = await fetch(DATA_URL);
     if (!resp.ok) throw new Error("HTTP " + resp.status);
-    const buf = await resp.arrayBuffer();
+
+    const total = parseInt(resp.headers.get("Content-Length") || "0", 10);
+    const reader = resp.body.getReader();
+    const chunks = [];
+    let received = 0;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      received += value.length;
+      if (total > 0) {
+        const pct = Math.round((received / total) * 70);
+        bar.style.width = pct + "%";
+        text.textContent = "下载中 " + (pct > 40 ? formatSize(received) : "");
+      } else {
+        bar.style.width = Math.min(70, Math.round(received / 1024)) + "%";
+        text.textContent = "下载中 " + formatSize(received);
+      }
+    }
+
+    bar.style.width = "75%";
+    text.textContent = "解压中...";
+
+    let buf;
+    if (chunks.length === 1) {
+      buf = chunks[0];
+    } else {
+      buf = new Uint8Array(received);
+      let pos = 0;
+      for (const chunk of chunks) {
+        buf.set(chunk, pos);
+        pos += chunk.length;
+      }
+    }
+
+    bar.style.width = "82%";
     const ds = new DecompressionStream("gzip");
-    const stream = new Response(new Uint8Array(buf)).body.pipeThrough(ds);
-    const text = await new Response(stream).text();
-    RECORDS = JSON.parse(text);
+    const stream = new Response(buf).body.pipeThrough(ds);
+    const jsonText = await new Response(stream).text();
+
+    bar.style.width = "90%";
+    text.textContent = "解析中...";
+
+    RECORDS = JSON.parse(jsonText);
     console.log("Loaded " + RECORDS.length.toLocaleString() + " records");
-    buildIndex();
+
+    bar.style.width = "95%";
+    text.textContent = "建立索引...";
+
+    await buildIndex();
     console.log("Index: " + Object.keys(wordIndex).length + " tokens, " + repoList.length + " repos");
+
+    bar.style.width = "100%";
+    text.textContent = "完成";
+
+    setTimeout(function() {
+      DOM.progressContainer.classList.add("progress-done");
+    }, 400);
+
     return true;
   } catch (e) {
     console.error("Data load failed:", e);
+    bar.style.width = "100%";
+    bar.style.background = "var(--error)";
+    text.textContent = "加载失败";
     return false;
   }
 }
@@ -234,51 +327,63 @@ function doSearchLocal(params) {
  
   let matched = [];
   let didYouMean = null;
- 
+
+  const activeIndex = searchFolders ? wordIndex : wordIndexFilesOnly;
+  const activeVocabSorted = searchFolders ? didYouMeanSorted : didYouMeanSortedFilesOnly;
+  const activeVocab = searchFolders ? didYouMeanVocab : didYouMeanVocabFilesOnly;
+
   if (!q) {
     matched = Array.from({ length: RECORDS.length }, (_, i) => i);
   } else {
     const tokens = tokenize(q);
- 
+
     let exact = null;
     for (const tok of tokens) {
-      const idxs = wordIndex[tok];
+      const idxs = activeIndex[tok];
       if (!idxs) { exact = []; break; }
       if (exact === null) exact = [...idxs];
-      else exact = exact.filter(i => idxs.includes(i));
+      else {
+        const idxsSet = new Set(idxs);
+        exact = exact.filter(i => idxsSet.has(i));
+      }
     }
- 
+
     let fuzzy = [];
     for (const tok of tokens) {
-      if (wordIndex[tok]) continue;
+      if (activeIndex[tok]) continue;
       const candidates = [];
-      const sortedVocab = Object.entries(didYouMeanVocab).sort((a, b) => b[1] - a[1]);
-      for (const [vocab] of sortedVocab) {
+      for (const [vocab] of activeVocabSorted) {
         if (Math.abs(vocab.length - tok.length) > 2) continue;
         if (editDistance(tok, vocab) <= 2) {
-          candidates.push(...(wordIndex[vocab] || []));
+          candidates.push(...(activeIndex[vocab] || []));
           if (candidates.length >= 200) break;
         }
       }
       if (candidates.length > 0) {
         if (fuzzy.length === 0) fuzzy = [...new Set(candidates)];
-        else fuzzy = fuzzy.filter(i => candidates.includes(i));
+        else {
+          const candidateSet = new Set(candidates);
+          fuzzy = fuzzy.filter(i => candidateSet.has(i));
+        }
       }
     }
- 
+
     if (exact && exact.length > 0) {
       matched = exact;
-      if (fuzzy.length > 0) matched = [...matched, ...fuzzy.filter(i => !exact.includes(i))];
+      if (fuzzy.length > 0) {
+        const exactSet = new Set(exact);
+        matched = [...matched, ...fuzzy.filter(i => !exactSet.has(i))];
+      }
     } else if (fuzzy.length > 0) {
       matched = fuzzy;
     }
- 
+
     if (matched.length < 10) {
       const suggestions = [];
       for (const tok of tokens) {
-        if (wordIndex[tok]) continue;
+        if (activeIndex[tok]) continue;
         let best = null, bestDist = 999;
-        for (const vocab of Object.keys(didYouMeanVocab)) {
+        for (const vocab of Object.keys(activeVocab)) {
           if (Math.abs(vocab.length - tok.length) > 2) continue;
           const dist = editDistance(tok, vocab);
           if (dist < bestDist) { bestDist = dist; best = vocab; }
@@ -353,17 +458,28 @@ function buildFilterFolderTree(repo) {
     }
   }
  
-  for (const [fp, idxs] of Object.entries(folderIndex[repo])) {
-    if (nodeMap[fp]) nodeMap[fp].count = idxs.length;
+  for (const [fp, count] of Object.entries(folderIndex[repo])) {
+    if (nodeMap[fp]) nodeMap[fp].count = count;
   }
  
   return [root];
 }
  
+const folderContentsCache = new Map();
+const FOLDER_CACHE_MAX = 100;
+
 function getFolderContents(repo, path) {
+  const cacheKey = repo + "|" + (path || "");
+  if (folderContentsCache.has(cacheKey)) {
+    const val = folderContentsCache.get(cacheKey);
+    folderContentsCache.delete(cacheKey);
+    folderContentsCache.set(cacheKey, val);
+    return val;
+  }
+
   const pathParts = path ? path.split("/").filter(Boolean) : [];
   const pathDepth = pathParts.length;
- 
+
   const matching = RECORDS.filter(rec => {
     if (rec.Repo !== repo) return false;
     const folders = rec.Folder || [];
@@ -373,7 +489,7 @@ function getFolderContents(repo, path) {
     }
     return true;
   });
- 
+
   const subfolders = {};
   for (const rec of matching) {
     const folders = rec.Folder || [];
@@ -389,7 +505,7 @@ function getFolderContents(repo, path) {
       count,
     }))
     .sort((a, b) => a.name.localeCompare(b.name));
- 
+
   const fileList = matching
     .filter(rec => (rec.Folder || []).length === pathDepth)
     .map(rec => ({
@@ -401,8 +517,14 @@ function getFolderContents(repo, path) {
       size: rec.Size || "",
     }))
     .sort((a, b) => a.name.localeCompare(b.name));
- 
-  return { folders: folderList, files: fileList, current_path: path };
+
+  const result = { folders: folderList, files: fileList, current_path: path };
+  if (folderContentsCache.size >= FOLDER_CACHE_MAX) {
+    const firstKey = folderContentsCache.keys().next().value;
+    folderContentsCache.delete(firstKey);
+  }
+  folderContentsCache.set(cacheKey, result);
+  return result;
 }
  
 function getRandom(repo) {
@@ -421,6 +543,7 @@ const STATE = {
   repo: null,
   repoFull: null,
   query: "",
+  sort: "relevance",
   page: 1,
   pageSize: 100,
   total: 0,
@@ -464,6 +587,9 @@ const $ = (sel) => document.querySelector(sel);
 const DOM = {};
  
 function cacheDOM() {
+  DOM.progressContainer = $("#progress-container");
+  DOM.progressBar = $("#progress-bar");
+  DOM.progressText = $("#progress-text");
   DOM.headerTitle = $("#header-title");
   DOM.headerLogo = $("#header-logo");
   DOM.searchInput = $("#search-input");
@@ -589,21 +715,22 @@ const ROUTER = {
     return { mode: mode, repo: repo, params: params };
   },
  
-  navigate: function(mode, repo) {
+  navigate: function(mode, repo, folder) {
     let hash = mode === "global" ? "#/" : "#/" + repo;
     const sp = new URLSearchParams();
     if (STATE.query) sp.set("q", STATE.query);
     if (STATE.filterExtensions.length) sp.set("ext", STATE.filterExtensions.join(","));
     if (STATE.browserPath) sp.set("path", STATE.browserPath);
-    if (DOM.sortSelect.value !== "relevance") sp.set("sort", DOM.sortSelect.value);
+    if (STATE.sort !== "relevance") sp.set("sort", STATE.sort);
     if (STATE.filterMinSize !== null) sp.set("min_size", STATE.filterMinSize);
     if (STATE.filterMaxSize !== null) sp.set("max_size", STATE.filterMaxSize);
     if (!STATE.searchFolders) sp.set("search_folders", "false");
+    if (folder) sp.set("f", folder);
     const qs = sp.toString();
     if (qs) hash += "?" + qs;
     window.location.hash = hash;
   },
- 
+
   apply: function() {
     const route = this.parse();
     const prevMode = STATE.mode;
@@ -620,6 +747,7 @@ const ROUTER = {
       STATE.browserPath = "";
       STATE.filterFolders = [];
       STATE.folderTree = null;
+      folderContentsCache.clear();
       DOM.leftSidebar.classList.remove("expanded-wide");
       if (DOM.sidebarExpandBtn) DOM.sidebarExpandBtn.textContent = "↔";
     }
@@ -650,8 +778,13 @@ const ROUTER = {
     } else if (prevMode !== STATE.mode || prevRepo !== STATE.repo) {
       STATE.browserPath = "";
     }
- 
-    if (route.params.sort) DOM.sortSelect.value = route.params.sort;
+
+    if (route.params.f) {
+      STATE.filterFolders = [route.params.f];
+    }
+
+    STATE.sort = route.params.sort || "relevance";
+    DOM.sortSelect.value = STATE.sort;
     STATE.filterMinSize = route.params.min_size ? parseInt(route.params.min_size) : null;
     STATE.filterMaxSize = route.params.max_size ? parseInt(route.params.max_size) : null;
     DOM.filterMinSize.value = STATE.filterMinSize || "";
@@ -712,7 +845,8 @@ function syncStateToURL() {
     });
   }
   if (STATE.filterExtensions.length) sp.set("ext", STATE.filterExtensions.join(","));
-  if (DOM.sortSelect.value !== "relevance") sp.set("sort", DOM.sortSelect.value);
+  if (STATE.sort !== "relevance") sp.set("sort", STATE.sort);
+  if (STATE.filterFolders.length) sp.set("f", STATE.filterFolders.join(","));
   if (STATE.filterMinSize !== null) sp.set("min_size", STATE.filterMinSize);
   if (STATE.filterMaxSize !== null) sp.set("max_size", STATE.filterMaxSize);
   if (!STATE.searchFolders) sp.set("search_folders", "false");
@@ -731,7 +865,8 @@ function syncStateToURL() {
    ═══════════════════════════════════════════════════════════ */
  
 let searchTimer = null;
- 
+let searchId = 0;
+
 function debouncedSearch() {
   clearTimeout(searchTimer);
   searchTimer = setTimeout(function() {
@@ -741,10 +876,12 @@ function debouncedSearch() {
     doSearch();
   }, 300);
 }
- 
+
 function doSearch(append) {
-  if (!STATE.dataLoaded || STATE.isLoading) return;
- 
+  if (!STATE.dataLoaded) return;
+
+  const id = ++searchId;
+
   const params = {
     q: STATE.query,
     repos: STATE.mode === "repo" ? [STATE.repoFull] : (STATE.filterRepos.length > 0 ? STATE.filterRepos : null),
@@ -752,39 +889,40 @@ function doSearch(append) {
     folders: STATE.filterFolders.length > 0 ? STATE.filterFolders : null,
     minSize: STATE.filterMinSize,
     maxSize: STATE.filterMaxSize,
-    sort: DOM.sortSelect.value,
+    sort: STATE.sort,
     searchFolders: STATE.searchFolders,
     page: STATE.page,
     pageSize: STATE.pageSize,
   };
- 
+
   STATE.isLoading = true;
   DOM.resultsLoading.style.display = "flex";
   DOM.emptyState.style.display = "none";
   DOM.didYouMean.style.display = "none";
- 
-  setTimeout(function() {
+
+  requestAnimationFrame(function() {
+    if (id !== searchId) return;
     try {
       const data = doSearchLocal(params);
       STATE.total = data.total;
       STATE.didYouMean = data.didYouMean || null;
- 
+
       if (append) {
         STATE.results = STATE.results.concat(data.results);
       } else {
         STATE.results = data.results;
       }
- 
+
       STATE.hasMore = STATE.results.length < STATE.total;
       renderResults();
       updateStatusBar();
       updateLoadInfo();
- 
+
       if (STATE.didYouMean) {
         DOM.didYouMean.textContent = "你是不是想找: " + STATE.didYouMean;
         DOM.didYouMean.style.display = "inline";
       }
- 
+
       syncStateToURL();
     } catch (err) {
       console.error(err);
@@ -822,9 +960,9 @@ function renderResults() {
     for (let i = oldLen; i < len; i++) {
       VSCROLL.heights[i] = VSCROLL.estimatedHeight;
     }
-    VSCROLL.renderStart = 0;
-    VSCROLL.renderEnd = 0;
   }
+  VSCROLL.renderStart = 0;
+  VSCROLL.renderEnd = 0;
 
   renderVisible();
 }
@@ -871,7 +1009,7 @@ function renderVisible() {
   const scrollTop = container.scrollTop;
   const viewH = container.clientHeight;
   const est = VSCROLL.estimatedHeight;
-  const overscanItems = 5;
+  const overscanItems = Math.max(10, Math.floor(viewH / (est || 60)));
 
   let cum = 0;
   let start = 0;
@@ -901,36 +1039,24 @@ function renderVisible() {
   let topH = 0;
   for (let i = 0; i < start; i++) topH += VSCROLL.heights[i] || est;
 
-  let bottomH = 0;
-  for (let i = end; i < len; i++) bottomH += VSCROLL.heights[i] || est;
-
-  DOM.resultsList.innerHTML = "";
-
+  let html = "";
   if (topH > 0) {
-    const spacer = document.createElement("div");
-    spacer.style.height = topH + "px";
-    spacer.style.flexShrink = "0";
-    DOM.resultsList.appendChild(spacer);
+    html += '<div style="height:' + topH + 'px;flex-shrink:0"></div>';
   }
-
-  const fragment = document.createDocumentFragment();
-  for (let i = start; i < end; i++) {
-    const rec = items[i];
-    const item = document.createElement("div");
-    item.className = "result-item";
-    item.dataset.index = i;
-    if (i % 2 === 1) item.style.background = "var(--surface-variant)";
-    item.innerHTML = buildResultHTML(rec);
-    fragment.appendChild(item);
+  for (let ri = start; ri < end; ri++) {
+    const rec = items[ri];
+    html += '<div class="result-item" data-index="' + ri + '"' +
+      (ri % 2 === 1 ? ' style="background:var(--surface-variant)"' : "") +
+      '>' + buildResultHTML(rec) + '</div>';
   }
-  DOM.resultsList.appendChild(fragment);
-
+  let bottomH = 0;
+  for (let bi = end; bi < len; bi++) bottomH += VSCROLL.heights[bi] || est;
   if (bottomH > 0) {
-    const spacer = document.createElement("div");
-    spacer.style.height = bottomH + "px";
-    spacer.style.flexShrink = "0";
-    DOM.resultsList.appendChild(spacer);
+    html += '<div style="height:' + bottomH + 'px;flex-shrink:0"></div>';
   }
+  var tpl = document.createElement("template");
+  tpl.innerHTML = html;
+  DOM.resultsList.replaceChildren(tpl.content);
 
   requestAnimationFrame(function() {
     measureHeights();
@@ -1061,7 +1187,9 @@ function renderBrowser(path) {
         return function(e) {
           if (e.target.closest(".browser-action")) {
             e.stopPropagation();
-            const stem = ff.ext ? ff.name : ff.name;
+            const stem = ff.ext && ff.name.toLowerCase().endsWith("." + ff.ext.toLowerCase())
+              ? ff.name.slice(0, ff.name.lastIndexOf("."))
+              : ff.name;
             const txtPath = (path ? path + "/" : "") + stem;
             window.open(TXT_BASE + "/" + encodeURIComponent(txtPath) + ".txt", "_blank");
             return;
@@ -1431,7 +1559,7 @@ function setupVirtualScroll() {
       });
       scrollTicking = true;
     }
-  });
+  }, { passive: true });
 }
  
 function updateScrollThumb() {
@@ -1446,26 +1574,42 @@ function updateScrollThumb() {
  
 function setupQuickScroll() {
   let dragging = false, startY, startST;
-  DOM.scrollThumb.addEventListener("mousedown", (e) => {
-    dragging = true; startY = e.clientY; startST = DOM.resultsContainer.scrollTop; e.preventDefault();
-  });
-  document.addEventListener("mousemove", (e) => {
-    if (!dragging) return;
+
+  function onMouseMove(e) {
     const delta = e.clientY - startY;
     const ratio = delta / (DOM.scrollTrack.clientHeight - DOM.scrollThumb.clientHeight);
     DOM.resultsContainer.scrollTop = startST + ratio * (DOM.resultsContainer.scrollHeight - DOM.resultsContainer.clientHeight);
+  }
+
+  function onMouseUp() {
+    dragging = false;
+    document.removeEventListener("mousemove", onMouseMove);
+    document.removeEventListener("mouseup", onMouseUp);
+  }
+
+  DOM.scrollThumb.addEventListener("mousedown", (e) => {
+    dragging = true; startY = e.clientY; startST = DOM.resultsContainer.scrollTop; e.preventDefault();
+    document.addEventListener("mousemove", onMouseMove);
+    document.addEventListener("mouseup", onMouseUp);
   });
-  document.addEventListener("mouseup", () => { dragging = false; });
-  DOM.scrollThumb.addEventListener("touchstart", (e) => {
-    dragging = true; startY = e.touches[0].clientY; startST = DOM.resultsContainer.scrollTop;
-  });
-  document.addEventListener("touchmove", (e) => {
-    if (!dragging) return;
+
+  function onTouchMove(e) {
     const delta = e.touches[0].clientY - startY;
     const ratio = delta / (DOM.scrollTrack.clientHeight - DOM.scrollThumb.clientHeight);
     DOM.resultsContainer.scrollTop = startST + ratio * (DOM.resultsContainer.scrollHeight - DOM.resultsContainer.clientHeight);
+  }
+
+  function onTouchEnd() {
+    dragging = false;
+    document.removeEventListener("touchmove", onTouchMove);
+    document.removeEventListener("touchend", onTouchEnd);
+  }
+
+  DOM.scrollThumb.addEventListener("touchstart", (e) => {
+    dragging = true; startY = e.touches[0].clientY; startST = DOM.resultsContainer.scrollTop;
+    document.addEventListener("touchmove", onTouchMove, { passive: true });
+    document.addEventListener("touchend", onTouchEnd);
   });
-  document.addEventListener("touchend", () => { dragging = false; });
 }
  
 /* ═══════════════════════════════════════════════════════════
@@ -1614,11 +1758,7 @@ function setupKeyboard() {
       } else {
         keyboardResultIndex = Math.max(keyboardResultIndex - 1, 0);
       }
-      var targetY = 0;
-      var estH = VSCROLL.estimatedHeight;
-      for (var vi = 0; vi < keyboardResultIndex; vi++) {
-        targetY += VSCROLL.heights[vi] || estH;
-      }
+      var targetY = keyboardResultIndex * VSCROLL.estimatedHeight;
       DOM.resultsContainer.scrollTop = targetY;
       requestAnimationFrame(function() {
         var all = DOM.resultsList.querySelectorAll(".result-item");
@@ -1734,14 +1874,7 @@ function setupResultDelegation() {
       const folder = folderLink.dataset.folder;
       const frepo = folderLink.dataset.repo;
       if (frepo && STATE.mode === "global") {
-        ROUTER.navigate("repo", frepo);
-        setTimeout(function() {
-          STATE.filterFolders = folder ? [folder] : [];
-          STATE.page = 1;
-          STATE.results = [];
-          renderFilters();
-          doSearch();
-        }, 200);
+        ROUTER.navigate("repo", frepo, folder || null);
       } else if (folder !== undefined) {
         STATE.filterFolders = folder ? [folder] : [];
         STATE.page = 1;
@@ -1810,6 +1943,7 @@ function init() {
       doSearch();
     });
     DOM.sortSelect.addEventListener("change", function() {
+      STATE.sort = DOM.sortSelect.value;
       STATE.page = 1;
       STATE.results = [];
       doSearch();
