@@ -720,13 +720,14 @@ const ROUTER = {
     const sp = new URLSearchParams();
     if (STATE.query) sp.set("q", STATE.query);
     if (STATE.filterExtensions.length) sp.set("ext", STATE.filterExtensions.join(","));
-    if (STATE.browserPath) sp.set("path", STATE.browserPath);
+    if (mode !== "global" && STATE.browserPath) sp.set("path", STATE.browserPath);
     if (STATE.sort !== "relevance") sp.set("sort", STATE.sort);
     if (STATE.filterMinSize !== null) sp.set("min_size", STATE.filterMinSize);
     if (STATE.filterMaxSize !== null) sp.set("max_size", STATE.filterMaxSize);
     if (!STATE.searchFolders) sp.set("search_folders", "false");
     const qs = sp.toString();
     if (qs) hash += "?" + qs;
+    if (mode === "global") STATE.browserPath = "";
     window.location.hash = hash;
   },
 
@@ -804,6 +805,7 @@ const ROUTER = {
       if (route.params.wide === "1") {
         DOM.leftSidebar.classList.add("expanded-wide");
         if (DOM.sidebarExpandBtn) DOM.sidebarExpandBtn.textContent = "→";
+        syncStateToURL();
       }
     } else {
       renderSidebar();
@@ -828,7 +830,7 @@ const ROUTER = {
  
   onModeChanged: function() {
     if (DOM.sidebarExpandBtn) {
-      DOM.sidebarExpandBtn.style.display = STATE.mode === "repo" ? "" : "none";
+      DOM.sidebarExpandBtn.style.display = (STATE.mode === "repo" && !STATE.isMobile) ? "" : "none";
     }
     DOM.leftSidebar.classList.remove("expanded-wide");
     if (DOM.sidebarExpandBtn) DOM.sidebarExpandBtn.textContent = "↔";
@@ -857,7 +859,7 @@ function syncStateToURL() {
   if (STATE.filterMinSize !== null) sp.set("min_size", STATE.filterMinSize);
   if (STATE.filterMaxSize !== null) sp.set("max_size", STATE.filterMaxSize);
   if (!STATE.searchFolders) sp.set("search_folders", "false");
-  if (STATE.browserPath) sp.set("path", STATE.browserPath);
+  if (STATE.mode !== "global" && STATE.browserPath) sp.set("path", STATE.browserPath);
   if (DOM.leftSidebar.classList.contains("expanded-wide")) sp.set("wide", "1");
   if (!STATE.leftSidebarOpen) sp.set("sidebar", "0");
   const qs = sp.toString();
@@ -1683,6 +1685,7 @@ function applyMobileMode() {
     STATE.rightSidebarOpen = false;
   }
   updateSidebarVisibility();
+  if (DOM.sidebarExpandBtn) DOM.sidebarExpandBtn.style.display = (STATE.mode === "repo" && !STATE.isMobile) ? "" : "none";
 }
  
 function autoDetectMobile() { return window.innerWidth <= 768; }
