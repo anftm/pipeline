@@ -477,7 +477,7 @@ function getFolderContents(repo, path) {
     return val;
   }
 
-  const pathParts = path ? path.split("/").filter(Boolean) : [];
+  const pathParts = (path || "").replace(/^\/+|\/+$/g, "").split("/").filter(Boolean);
   const pathDepth = pathParts.length;
 
   const matching = RECORDS.filter(rec => {
@@ -787,12 +787,24 @@ const ROUTER = {
     STATE.searchFolders = route.params.search_folders !== "false";
     if (DOM.searchFoldersToggle) DOM.searchFoldersToggle.checked = STATE.searchFolders;
  
+    if (route.params.sidebar !== undefined) {
+      STATE.leftSidebarOpen = route.params.sidebar !== "0";
+      updateSidebarVisibility();
+    }
+    if (route.params.wide !== undefined) {
+      DOM.leftSidebar.classList.toggle("expanded-wide", route.params.wide === "1");
+      if (DOM.sidebarExpandBtn) DOM.sidebarExpandBtn.textContent = route.params.wide === "1" ? "→" : "↔";
+    }
     this.updateUI();
  
     if (!STATE.dataLoaded) return;
  
     if (prevMode !== STATE.mode || prevRepo !== STATE.repo) {
       this.onModeChanged();
+      if (route.params.wide === "1") {
+        DOM.leftSidebar.classList.add("expanded-wide");
+        if (DOM.sidebarExpandBtn) DOM.sidebarExpandBtn.textContent = "→";
+      }
     } else {
       renderSidebar();
       renderFilters();
@@ -847,6 +859,7 @@ function syncStateToURL() {
   if (!STATE.searchFolders) sp.set("search_folders", "false");
   if (STATE.browserPath) sp.set("path", STATE.browserPath);
   if (DOM.leftSidebar.classList.contains("expanded-wide")) sp.set("wide", "1");
+  if (!STATE.leftSidebarOpen) sp.set("sidebar", "0");
   const qs = sp.toString();
   if (qs) hash += "?" + qs;
  
@@ -1100,7 +1113,7 @@ function renderSidebar() {
   if (STATE.mode === "global") {
     renderRepoList();
   } else {
-    renderBrowser("");
+    renderBrowser(STATE.browserPath || "");
   }
 }
  
@@ -1683,8 +1696,8 @@ function toggleLeftSidebar() {
   if (!STATE.leftSidebarOpen) {
     DOM.leftSidebar.classList.remove("expanded-wide");
     DOM.sidebarExpandBtn.textContent = "↔";
-    syncStateToURL();
   }
+  syncStateToURL();
   if (STATE.leftSidebarOpen && STATE.rightSidebarOpen) STATE.rightSidebarOpen = false;
   updateSidebarVisibility();
 }
