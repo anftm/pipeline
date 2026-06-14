@@ -1,3 +1,2 @@
 aiohttp==3.9.5
 huggingface_hub>=0.23.0
-jieba==0.42.1

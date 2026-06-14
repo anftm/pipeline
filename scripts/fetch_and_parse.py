@@ -10,18 +10,11 @@
 
 import json
 import os
-import re
 import sys
 import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
-
-try:
-    import jieba
-    HAS_JIEBA = True
-except ImportError:
-    HAS_JIEBA = False
 
 # ═══════════════════════════════════════════════════════════
 # 配置
@@ -225,7 +218,6 @@ def parse_one_line(line: str, repo: str, size_map: dict) -> dict | None:
         "Folder": folder_parts,
         "Size": size,
         "HasTxt": False,
-        "_Tokens": [],
     }
 
 
@@ -351,44 +343,14 @@ def main():
 
         all_records.extend(repo_records)
         time.sleep(0.5)
-    # ── 5. 用 jieba 预计算 _Tokens ─────────────────────
-    if HAS_JIEBA:
-        print(f"\n🔪 用 jieba 预计算 _Tokens ({len(all_records)} 条)...")
-        for idx, rec in enumerate(all_records):
-            text = " ".join([rec.get("File", "")] + rec.get("Folder", []))
-            tokens_set = set()
-            lower = text.lower()
-            for m in re.finditer(r'[a-z0-9]+', lower):
-                tokens_set.add(m.group())
-            cjk = re.sub(r'[a-z0-9\s]+', ' ', lower)
-            cjk = re.sub(r'[^\u4e00-\u9fff\u3400-\u4dbf\s]+', ' ', cjk)
-            try:
-                for t in jieba.lcut(cjk):
-                    t = t.strip()
-                    if t and re.search(r'[a-z0-9\u4e00-\u9fff\u3400-\u4dbf]', t):
-                        tokens_set.add(t)
-            except Exception:
-                pass
-            has_cjk = any(re.search(r'[\u4e00-\u9fff\u3400-\u4dbf]', t) for t in tokens_set)
-            if not has_cjk:
-                for ch in lower:
-                    if '\u4e00' <= ch <= '\u9fff' or '\u3400' <= ch <= '\u4dbf':
-                        tokens_set.add(ch)
-            rec["_Tokens"] = sorted(tokens_set)
-            if (idx + 1) % 50000 == 0:
-                print(f"   已处理 {idx + 1}/{len(all_records)} ...")
-        avg = sum(len(r["_Tokens"]) for r in all_records) / len(all_records) if all_records else 0
-        print(f"   ✅ 平均每条 {avg:.1f} 个 token")
-    else:
-        print("\n⚠ jieba 未安装，跳过 _Tokens 预计算")
-    # ── 6. 写入 output/search_data.json ────────────────
+    # ── 5. 写入 output/search_data.json ────────────────
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     json_text = json.dumps(all_records, ensure_ascii=False, indent=2)
     OUTPUT_FILE.write_text(json_text, encoding="utf-8")
     file_size_mb = len(json_text.encode("utf-8")) / 1024 / 1024
     print(f"💾 已写入 {OUTPUT_FILE} ({file_size_mb:.1f} MB)")
 
-    # ── 7. 更新 state/commits.json ─────────────────────
+    # ── 6. 更新 state/commits.json ─────────────────────
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     STATE_FILE.write_text(
         json.dumps(new_state, ensure_ascii=False, indent=2),
