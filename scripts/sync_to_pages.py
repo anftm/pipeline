@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-将 search_data.json.gz 和静态文件推送到 GitHub Pages 仓库。
+将 search_data.json.gz 推送到 GitHub Pages 仓库（仅数据文件，不含前端代码）。
 
 用法:
   python scripts/sync_to_pages.py
-  需要环境变量: GITHUB_TOKEN, PAGES_REPO (如 anftm/search)
+  需要环境变量: PAGES_TOKEN, PAGES_REPO (如 anftm/search)
 """
 
 import json
@@ -140,22 +140,7 @@ def main():
 
     print("   ✅ 克隆成功")
 
-    # ── 5. 复制文件 ────────────────────────────────────
-    # static/
-    static_src = Path("static")
-    static_dst = Path(tmpdir) / "static"
-    if static_dst.exists():
-        shutil.rmtree(static_dst, ignore_errors=True)
-    shutil.copytree(static_src, static_dst)
-    print(f"   ✅ 已复制 static/")
-
-    # index.html 放到根目录
-    index_src = static_src / "index.html"
-    if index_src.exists():
-        shutil.copy2(index_src, Path(tmpdir) / "index.html")
-        print(f"   ✅ 已复制 index.html")
-
-    # data/
+    # ── 5. 生成数据文件 ────────────────────────────────
     import gzip
     data_dir = Path(tmpdir) / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -183,7 +168,7 @@ def main():
         print("   ⚠ 无变化，跳过提交")
     else:
         ret, out, err = run(
-            'git commit -m "chore: update search data and static files [skip ci]"',
+            'git commit -m "chore: update search data [skip ci]"',
             cwd=tmpdir,
         )
         if ret != 0 and "nothing to commit" not in err:
