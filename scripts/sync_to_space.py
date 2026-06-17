@@ -219,10 +219,7 @@ def main():
     data_dir = Path(tmpdir) / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
 
-    # 保存未压缩版（本地使用）
     json_text = json.dumps(records, ensure_ascii=False, indent=2)
-    dest_json = data_dir / "search_data.json"
-    dest_json.write_text(json_text, encoding="utf-8")
 
     # 生成压缩版（推送到 Space）
     import gzip
@@ -234,7 +231,6 @@ def main():
     file_size_mb = len(json_text.encode("utf-8")) / 1024 / 1024
     gz_size_mb = dest_gz.stat().st_size / 1024 / 1024
     print(f"\n💾 已写入:")
-    print(f"   {dest_json} ({file_size_mb:.1f} MB)")
     print(f"   {dest_gz} ({gz_size_mb:.1f} MB)")
     # ── 5. Git commit & push ───────────────────────────
     print(f"\n📤 提交并推送...")
