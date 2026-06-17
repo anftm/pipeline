@@ -32,6 +32,8 @@ from pathlib import Path
 # ═══════════════════════════════════════════════════════════
 
 SOURCE_JSON = Path("output/search_data.json")
+FOLDER_TREE_JSON = Path("output/folder_tree.json")
+FOLDER_BROWSER_JSON = Path("output/folder_browser.json")
 SPACE_REPO = "VoiceOfML/Search"
 
 
@@ -163,6 +165,9 @@ def main():
     if not SOURCE_JSON.exists():
         print(f"❌ 源文件不存在: {SOURCE_JSON}")
         sys.exit(1)
+    if not FOLDER_TREE_JSON.exists() or not FOLDER_BROWSER_JSON.exists():
+        print("❌ 目录元数据不存在，请先运行 fetch_and_parse.py")
+        sys.exit(1)
 
     print("=" * 60)
     print("📤 VoiceOfML Search Pipeline — sync_to_space")
@@ -223,6 +228,8 @@ def main():
     import gzip
     dest_gz = data_dir / "search_data.json.gz"
     dest_gz.write_bytes(gzip.compress(json_text.encode("utf-8"), compresslevel=9))
+    (data_dir / "folder_tree.json.gz").write_bytes(FOLDER_TREE_JSON.with_suffix(".json.gz").read_bytes())
+    (data_dir / "folder_browser.json.gz").write_bytes(FOLDER_BROWSER_JSON.with_suffix(".json.gz").read_bytes())
 
     file_size_mb = len(json_text.encode("utf-8")) / 1024 / 1024
     gz_size_mb = dest_gz.stat().st_size / 1024 / 1024
@@ -233,7 +240,7 @@ def main():
     print(f"\n📤 提交并推送...")
     run('git config user.email "github-actions[bot]@users.noreply.github.com"', cwd=tmpdir)
     run('git config user.name "github-actions[bot]"', cwd=tmpdir)
-    ret, out, err = run("git add data/search_data.json.gz", cwd=tmpdir)
+    ret, out, err = run("git add data/search_data.json.gz data/folder_tree.json.gz data/folder_browser.json.gz", cwd=tmpdir)
     if ret != 0:
         print(f"   ⚠ git add 失败: {err}")
 

@@ -22,6 +22,8 @@ from pathlib import Path
 # ═══════════════════════════════════════════════════════════
 
 SOURCE_JSON = Path("output/search_data.json")
+FOLDER_TREE_JSON = Path("output/folder_tree.json")
+FOLDER_BROWSER_JSON = Path("output/folder_browser.json")
 HF_SPACE_REPO = "VoiceOfML/Search"
 TXT_BASE_URL = f"https://huggingface.co/spaces/{HF_SPACE_REPO}/resolve/main/txt"
 
@@ -48,6 +50,9 @@ def main():
 
     if not SOURCE_JSON.exists():
         print(f"❌ 源文件不存在: {SOURCE_JSON}")
+        sys.exit(1)
+    if not FOLDER_TREE_JSON.exists() or not FOLDER_BROWSER_JSON.exists():
+        print("❌ 目录元数据不存在，请先运行 fetch_and_parse.py")
         sys.exit(1)
 
     print("=" * 60)
@@ -148,6 +153,8 @@ def main():
     json_text = json.dumps(records, ensure_ascii=False, indent=2)
     gz_path = data_dir / "search_data.json.gz"
     gz_path.write_bytes(gzip.compress(json_text.encode("utf-8"), compresslevel=9))
+    (data_dir / "folder_tree.json.gz").write_bytes(FOLDER_TREE_JSON.with_suffix(".json.gz").read_bytes())
+    (data_dir / "folder_browser.json.gz").write_bytes(FOLDER_BROWSER_JSON.with_suffix(".json.gz").read_bytes())
 
     file_size_mb = len(json_text.encode("utf-8")) / 1024 / 1024
     gz_size_mb = gz_path.stat().st_size / 1024 / 1024

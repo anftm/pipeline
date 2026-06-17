@@ -12,6 +12,7 @@ import json
 import os
 import sys
 import time
+import gzip
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -35,6 +36,8 @@ REPOS = [
 STATE_FILE = Path("state/commits.json")
 OUTPUT_DIR = Path("output")
 OUTPUT_FILE = OUTPUT_DIR / "search_data.json"
+FOLDER_TREE_FILE = OUTPUT_DIR / "folder_tree.json"
+FOLDER_BROWSER_FILE = OUTPUT_DIR / "folder_browser.json"
 
 API_DATASETS = "https://huggingface.co/api/datasets"
 RAW_BASE = "https://huggingface.co/datasets"
@@ -232,6 +235,96 @@ def get_repo_sha(repo: str, token: str) -> str:
         return data.get("sha", "")
     return ""
 
+
+def build_folder_tree(records: list[dict]) -> dict:
+    tree_by_repo = {}
+    browser_by_repo = {}
+
+    for rec in records:
+        repo = rec.get("Repo", "")
+        folders = rec.get("Folder", []) or []
+        dir_path = "/".join(folders)
+
+        if repo not in tree_by_repo:
+            short = repo.split("/")[-1] if repo else ""
+            tree_by_repo[repo] = [{
+                "name": short,
+                "path": "",
+                "count": 0,
+                "hasDirectFiles": False,
+                "hasChildren": False,
+                "showSelfToggle": False,
+                "children": [],
+            }]
+            browser_by_repo[repo] = {}
+
+        root = tree_by_repo[repo][0]
+        root["count"] += 1
+
+        if dir_path not in browser_by_repo[repo]:
+            browser_by_repo[repo][dir_path] = {"folders": [], "files": [], "current_path": dir_path}
+
+        browser_by_repo[repo][dir_path]["files"].append({
+            "name": rec.get("File", ""),
+            "ext": rec.get("Extension", ""),
+            "link": rec.get("Link", ""),
+            "path": rec.get("Path", ""),
+            "hasTxt": rec.get("HasTxt", False),
+            "size": rec.get("Size", ""),
+        })
+
+        node = root
+        parent_path = ""
+        for depth, part in enumerate(folders, start=1):
+            path = "/".join(folders[:depth])
+            child = next((c for c in node["children"] if c["path"] == path), None)
+            if child is None:
+                child = {
+                    "name": part,
+                    "path": path,
+                    "count": 0,
+                    "hasDirectFiles": False,
+                    "hasChildren": False,
+                    "showSelfToggle": False,
+                    "children": [],
+                }
+                node["children"].append(child)
+                parent_entry = browser_by_repo[repo].setdefault(parent_path, {"folders": [], "files": [], "current_path": parent_path})
+                parent_entry["folders"].append({"name": part, "path": path, "count": 0})
+            child["count"] += 1
+            node = child
+            parent_path = path
+
+        if folders:
+            node["hasDirectFiles"] = True
+        else:
+            root["hasDirectFiles"] = True
+
+    for repo, roots in tree_by_repo.items():
+        def finalize(node: dict) -> None:
+            node["children"].sort(key=lambda x: x["name"])
+            node["hasChildren"] = len(node["children"]) > 0
+            node["showSelfToggle"] = bool(node["hasDirectFiles"] and node["hasChildren"] and node["path"] != "")
+            browser_entry = browser_by_repo[repo].setdefault(node["path"], {"folders": [], "files": [], "current_path": node["path"]})
+            browser_entry["folders"].sort(key=lambda x: x["name"])
+            browser_entry["files"].sort(key=lambda x: x["name"])
+            for folder_item in browser_entry["folders"]:
+                child_node = next((c for c in node["children"] if c["path"] == folder_item["path"]), None)
+                if child_node:
+                    folder_item["count"] = child_node["count"]
+            for child in node["children"]:
+                finalize(child)
+
+        finalize(roots[0])
+
+    return {"tree": tree_by_repo, "browser": browser_by_repo}
+
+
+def write_json_gz(path: Path, data) -> None:
+    json_text = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+    path.write_text(json_text, encoding="utf-8")
+    path.with_suffix(path.suffix + ".gz").write_bytes(gzip.compress(json_text.encode("utf-8"), compresslevel=9))
+
 # ═══════════════════════════════════════════════════════════
 # 主流程
 # ═══════════════════════════════════════════════════════════
@@ -343,12 +436,20 @@ def main():
 
         all_records.extend(repo_records)
         time.sleep(0.5)
-    # ── 5. 写入 output/search_data.json ────────────────
+    # ── 5. 写入 output/*.json(+gz) ─────────────────────
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     json_text = json.dumps(all_records, ensure_ascii=False, indent=2)
     OUTPUT_FILE.write_text(json_text, encoding="utf-8")
+    OUTPUT_FILE.with_suffix(".json.gz").write_bytes(gzip.compress(json_text.encode("utf-8"), compresslevel=9))
+
+    folder_meta = build_folder_tree(all_records)
+    write_json_gz(FOLDER_TREE_FILE, folder_meta["tree"])
+    write_json_gz(FOLDER_BROWSER_FILE, folder_meta["browser"])
+
     file_size_mb = len(json_text.encode("utf-8")) / 1024 / 1024
     print(f"💾 已写入 {OUTPUT_FILE} ({file_size_mb:.1f} MB)")
+    print(f"💾 已写入 {FOLDER_TREE_FILE} / {FOLDER_TREE_FILE.name}.gz")
+    print(f"💾 已写入 {FOLDER_BROWSER_FILE} / {FOLDER_BROWSER_FILE.name}.gz")
 
     # ── 6. 更新 state/commits.json ─────────────────────
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
