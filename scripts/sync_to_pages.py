@@ -17,6 +17,8 @@ import time
 import urllib.parse
 from pathlib import Path
 
+from fetch_and_parse import export_outputs
+
 # ═══════════════════════════════════════════════════════════
 # 配置
 # ═══════════════════════════════════════════════════════════
@@ -34,6 +36,14 @@ def run(cmd: str, cwd: str = None, env: dict = None) -> tuple[int, str, str]:
         merged_env.update(env)
     proc = subprocess.run(cmd, shell=True, cwd=cwd, capture_output=True, text=True, env=merged_env)
     return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
+
+
+def mirror_output_tree(source_dir: Path, target_dir: Path) -> None:
+    if not source_dir.exists():
+        return
+    if target_dir.exists():
+        shutil.rmtree(target_dir)
+    shutil.copytree(source_dir, target_dir)
 
 
 def main():
@@ -146,20 +156,19 @@ def main():
     print("   ✅ 克隆成功")
 
     # ── 5. 生成数据文件 ────────────────────────────────
-    import gzip
     data_dir = Path(tmpdir) / "data"
-    data_dir.mkdir(parents=True, exist_ok=True)
+    summary = export_outputs(records, data_dir)
 
-    json_text = json.dumps(records, ensure_ascii=False, indent=2)
+    mirror_output_tree(data_dir / "search", Path(tmpdir) / "search")
+    mirror_output_tree(data_dir / "repos", Path(tmpdir) / "repos")
+    mirror_output_tree(data_dir / "legacy", Path(tmpdir) / "legacy")
+    shutil.copy2(data_dir / "meta.json", Path(tmpdir) / "meta.json")
+    shutil.copy2(data_dir / "meta.json.gz", Path(tmpdir) / "meta.json.gz")
+
     gz_path = data_dir / "search_data.json.gz"
-    gz_path.write_bytes(gzip.compress(json_text.encode("utf-8"), compresslevel=9))
-    (data_dir / "folder_tree.json.gz").write_bytes(FOLDER_TREE_JSON.with_suffix(".json.gz").read_bytes())
-    (data_dir / "folder_browser.json.gz").write_bytes(FOLDER_BROWSER_JSON.with_suffix(".json.gz").read_bytes())
-
-    file_size_mb = len(json_text.encode("utf-8")) / 1024 / 1024
     gz_size_mb = gz_path.stat().st_size / 1024 / 1024
     print(f"\n💾 已写入:")
-    print(f"   原始: {file_size_mb:.1f} MB")
+    print(f"   meta: {summary['repoCount']} 个仓库, {summary['searchGlobalCount']} 条轻搜索记录")
     print(f"   gzip: {gz_size_mb:.1f} MB")
 
     # ── 6. Git commit & push ───────────────────────────

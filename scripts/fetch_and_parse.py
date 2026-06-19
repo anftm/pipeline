@@ -8,13 +8,15 @@
   可选环境变量: HF_TOKEN（提升 API 频率限制）
 """
 
+import gzip
 import json
 import os
+import re
 import sys
 import time
-import gzip
 import urllib.parse
 import urllib.request
+from collections import defaultdict
 from pathlib import Path
 
 # ═══════════════════════════════════════════════════════════
@@ -38,6 +40,10 @@ OUTPUT_DIR = Path("output")
 OUTPUT_FILE = OUTPUT_DIR / "search_data.json"
 FOLDER_TREE_FILE = OUTPUT_DIR / "folder_tree.json"
 FOLDER_BROWSER_FILE = OUTPUT_DIR / "folder_browser.json"
+META_FILE = OUTPUT_DIR / "meta.json"
+SEARCH_DIR = OUTPUT_DIR / "search"
+REPOS_DIR = OUTPUT_DIR / "repos"
+LEGACY_DIR = OUTPUT_DIR / "legacy"
 
 API_DATASETS = "https://huggingface.co/api/datasets"
 RAW_BASE = "https://huggingface.co/datasets"
@@ -96,6 +102,20 @@ def encode_url_path(raw_path: str) -> str:
       → %E2%80%A2%E9%87%8D%E8%A6%81%E8%B5%84%E6%96%99/%E3%80%8A%E5%9B%BD%E9%99%85%E6%AD%8C%E3%80%8B.pdf
     """
     return urllib.parse.quote(raw_path, safe="/")
+
+
+def repo_to_id(repo: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", repo.lower()).strip("-")
+    return slug or "repo"
+
+
+def normalize_size(size) -> int:
+    if isinstance(size, (int, float)):
+        return max(0, int(size))
+    try:
+        return max(0, int(size or 0))
+    except Exception:
+        return 0
 
 def batch_get_sizes(repo: str, paths: list[str], token: str, max_bytes: int = 80000) -> dict:
     url = f"https://huggingface.co/api/datasets/{repo}/paths-info/main"
@@ -210,10 +230,11 @@ def parse_one_line(line: str, repo: str, size_map: dict) -> dict | None:
     path_url = f"https://huggingface.co/datasets/{repo}/blob/main/{encoded_rel}"
 
     # 文件大小（可能为空字符串）
-    size = size_map.get(rel_path, "")
+    size = normalize_size(size_map.get(rel_path, 0))
 
     return {
         "Repo": repo,
+        "RepoId": repo_to_id(repo),
         "File": file_name,
         "Extension": extension,
         "Link": link,
@@ -236,7 +257,7 @@ def get_repo_sha(repo: str, token: str) -> str:
     return ""
 
 
-def build_folder_tree(records: list[dict]) -> dict:
+def build_legacy_folder_tree(records: list[dict]) -> dict:
     tree_by_repo = {}
     browser_by_repo = {}
 
@@ -270,7 +291,7 @@ def build_folder_tree(records: list[dict]) -> dict:
             "link": rec.get("Link", ""),
             "path": rec.get("Path", ""),
             "hasTxt": rec.get("HasTxt", False),
-            "size": rec.get("Size", ""),
+            "size": normalize_size(rec.get("Size", 0)),
         })
 
         node = root
@@ -320,10 +341,193 @@ def build_folder_tree(records: list[dict]) -> dict:
     return {"tree": tree_by_repo, "browser": browser_by_repo}
 
 
+def build_repo_tree_browser(repo: str, repo_records: list[dict]) -> tuple[list[dict], dict[str, dict]]:
+    short = repo.split("/")[-1] if repo else ""
+    root = {
+        "name": short,
+        "path": "",
+        "count": 0,
+        "hasDirectFiles": False,
+        "hasChildren": False,
+        "showSelfToggle": False,
+        "children": [],
+    }
+    browser: dict[str, dict] = {}
+
+    for rec in repo_records:
+        folders = rec.get("Folder", []) or []
+        dir_path = "/".join(folders)
+        root["count"] += 1
+
+        entry = browser.setdefault(dir_path, {"currentPath": dir_path, "folders": [], "files": []})
+        entry["files"].append({
+            "id": rec["Id"],
+            "name": rec.get("File", ""),
+            "ext": rec.get("Extension", ""),
+            "size": normalize_size(rec.get("Size", 0)),
+            "hasTxt": bool(rec.get("HasTxt", False)),
+        })
+
+        node = root
+        parent_path = ""
+        for depth, part in enumerate(folders, start=1):
+            path = "/".join(folders[:depth])
+            child = next((item for item in node["children"] if item["path"] == path), None)
+            if child is None:
+                child = {
+                    "name": part,
+                    "path": path,
+                    "count": 0,
+                    "hasDirectFiles": False,
+                    "hasChildren": False,
+                    "showSelfToggle": False,
+                    "children": [],
+                }
+                node["children"].append(child)
+                parent_entry = browser.setdefault(parent_path, {"currentPath": parent_path, "folders": [], "files": []})
+                parent_entry["folders"].append({"name": part, "path": path, "count": 0})
+            child["count"] += 1
+            node = child
+            parent_path = path
+
+        if folders:
+            node["hasDirectFiles"] = True
+        else:
+            root["hasDirectFiles"] = True
+
+    def finalize(node: dict) -> None:
+        node["children"].sort(key=lambda item: item["name"])
+        node["hasChildren"] = len(node["children"]) > 0
+        node["showSelfToggle"] = bool(node["hasDirectFiles"] and node["hasChildren"] and node["path"] != "")
+        entry = browser.setdefault(node["path"], {"currentPath": node["path"], "folders": [], "files": []})
+        entry["folders"].sort(key=lambda item: item["name"])
+        entry["files"].sort(key=lambda item: item["name"])
+        for folder_item in entry["folders"]:
+            child_node = next((child for child in node["children"] if child["path"] == folder_item["path"]), None)
+            if child_node:
+                folder_item["count"] = child_node["count"]
+        for child in node["children"]:
+            finalize(child)
+
+    finalize(root)
+    return [root], browser
+
+
+def build_search_record(rec: dict) -> dict:
+    return {
+        "id": rec["Id"],
+        "repoId": rec["RepoId"],
+        "repo": rec["Repo"],
+        "file": rec.get("File", ""),
+        "ext": rec.get("Extension", ""),
+        "folders": rec.get("Folder", []) or [],
+        "size": normalize_size(rec.get("Size", 0)),
+    }
+
+
+def build_detail_record(rec: dict) -> dict:
+    return {
+        "id": rec["Id"],
+        "link": rec.get("Link", ""),
+        "path": rec.get("Path", ""),
+        "hasTxt": bool(rec.get("HasTxt", False)),
+    }
+
+
 def write_json_gz(path: Path, data) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     json_text = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
     path.write_text(json_text, encoding="utf-8")
     path.with_suffix(path.suffix + ".gz").write_bytes(gzip.compress(json_text.encode("utf-8"), compresslevel=9))
+
+
+def export_outputs(records: list[dict], output_dir: Path = OUTPUT_DIR) -> dict:
+    normalized_records = []
+    for idx, rec in enumerate(records, start=1):
+        item = dict(rec)
+        item["Id"] = int(item.get("Id") or idx)
+        item["RepoId"] = item.get("RepoId") or repo_to_id(item.get("Repo", ""))
+        item["Folder"] = item.get("Folder", []) or []
+        item["Size"] = normalize_size(item.get("Size", 0))
+        item["HasTxt"] = bool(item.get("HasTxt", False))
+        normalized_records.append(item)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    records_by_repo: dict[str, list[dict]] = defaultdict(list)
+    ext_counts: dict[str, int] = {}
+    for rec in normalized_records:
+        records_by_repo[rec["Repo"]].append(rec)
+        ext = (rec.get("Extension") or "").lower()
+        if ext:
+            ext_counts[ext] = ext_counts.get(ext, 0) + 1
+
+    repos_meta = []
+    for repo in sorted(records_by_repo.keys()):
+        repo_records = records_by_repo[repo]
+        repos_meta.append({
+            "id": repo_to_id(repo),
+            "name": repo,
+            "count": len(repo_records),
+        })
+
+    meta = {
+        "version": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "totalRecords": len(normalized_records),
+        "repoCount": len(repos_meta),
+        "repos": repos_meta,
+        "extensions": [
+            {"name": ext, "count": ext_counts[ext]}
+            for ext in sorted(ext_counts.keys())
+        ],
+    }
+    write_json_gz(output_dir / "meta.json", meta)
+
+    search_dir = output_dir / "search"
+    repos_dir = output_dir / "repos"
+    search_global = [build_search_record(rec) for rec in normalized_records]
+    write_json_gz(search_dir / "global.json", search_global)
+
+    for repo in sorted(records_by_repo.keys()):
+        repo_records = records_by_repo[repo]
+        repo_id = repo_to_id(repo)
+        write_json_gz(search_dir / f"{repo_id}.json", [build_search_record(rec) for rec in repo_records])
+        write_json_gz(repos_dir / repo_id / "details.json", [build_detail_record(rec) for rec in repo_records])
+        repo_tree, repo_browser = build_repo_tree_browser(repo, repo_records)
+        write_json_gz(repos_dir / repo_id / "tree.json", repo_tree)
+        write_json_gz(repos_dir / repo_id / "browser.json", repo_browser)
+
+    legacy_records = [
+        {
+            "Repo": rec["Repo"],
+            "RepoId": rec["RepoId"],
+            "Id": rec["Id"],
+            "File": rec.get("File", ""),
+            "Extension": rec.get("Extension", ""),
+            "Link": rec.get("Link", ""),
+            "Path": rec.get("Path", ""),
+            "Folder": rec.get("Folder", []) or [],
+            "Size": rec.get("Size", 0),
+            "HasTxt": rec.get("HasTxt", False),
+        }
+        for rec in normalized_records
+    ]
+    legacy_folder_meta = build_legacy_folder_tree(normalized_records)
+    write_json_gz(output_dir / "search_data.json", legacy_records)
+    write_json_gz(output_dir / "folder_tree.json", legacy_folder_meta["tree"])
+    write_json_gz(output_dir / "folder_browser.json", legacy_folder_meta["browser"])
+
+    legacy_dir = output_dir / "legacy"
+    write_json_gz(legacy_dir / "search_data.json", legacy_records)
+    write_json_gz(legacy_dir / "folder_tree.json", legacy_folder_meta["tree"])
+    write_json_gz(legacy_dir / "folder_browser.json", legacy_folder_meta["browser"])
+
+    return {
+        "meta": meta,
+        "repos": repos_meta,
+        "searchGlobalCount": len(search_global),
+        "repoCount": len(repos_meta),
+    }
 
 # ═══════════════════════════════════════════════════════════
 # 主流程
@@ -430,26 +634,25 @@ def main():
             path_key = all_paths[i]
             sz = size_map.get(path_key, "")
             if sz:
-                rec["Size"] = sz
+                rec["Size"] = normalize_size(sz)
                 filled += 1
         print(f"   ✅ 补全了 {filled} 个文件的大小")
 
         all_records.extend(repo_records)
         time.sleep(0.5)
-    # ── 5. 写入 output/*.json(+gz) ─────────────────────
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    json_text = json.dumps(all_records, ensure_ascii=False, indent=2)
-    OUTPUT_FILE.write_text(json_text, encoding="utf-8")
-    OUTPUT_FILE.with_suffix(".json.gz").write_bytes(gzip.compress(json_text.encode("utf-8"), compresslevel=9))
+    # ── 5. 分配 ID 并导出新旧产物 ──────────────────────
+    for idx, rec in enumerate(all_records, start=1):
+        rec["Id"] = idx
+        rec["RepoId"] = repo_to_id(rec.get("Repo", ""))
+        rec["Size"] = normalize_size(rec.get("Size", 0))
 
-    folder_meta = build_folder_tree(all_records)
-    write_json_gz(FOLDER_TREE_FILE, folder_meta["tree"])
-    write_json_gz(FOLDER_BROWSER_FILE, folder_meta["browser"])
-
-    file_size_mb = len(json_text.encode("utf-8")) / 1024 / 1024
-    print(f"💾 已写入 {OUTPUT_FILE} ({file_size_mb:.1f} MB)")
-    print(f"💾 已写入 {FOLDER_TREE_FILE} / {FOLDER_TREE_FILE.name}.gz")
-    print(f"💾 已写入 {FOLDER_BROWSER_FILE} / {FOLDER_BROWSER_FILE.name}.gz")
+    summary = export_outputs(all_records, OUTPUT_DIR)
+    legacy_search = OUTPUT_DIR / "legacy" / "search_data.json.gz"
+    search_global = OUTPUT_DIR / "search" / "global.json"
+    print(f"💾 已写入 {META_FILE} / meta.json.gz")
+    print(f"💾 已写入 {search_global} / global.json.gz")
+    print(f"💾 已写入 {legacy_search} / search_data.json.gz")
+    print(f"💾 已生成 {summary['repoCount'] if 'repoCount' in summary else len(summary['repos'])} 个 repo 分片")
 
     # ── 6. 更新 state/commits.json ─────────────────────
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
