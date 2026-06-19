@@ -164,6 +164,7 @@ def main():
     # ── 5. 生成数据文件 ────────────────────────────────
     data_dir = Path(tmpdir) / "data"
     summary = export_outputs(records, data_dir)
+    remove_uncompressed_json(data_dir)
 
     mirror_output_tree(data_dir / "search", Path(tmpdir) / "search")
     mirror_output_tree(data_dir / "repos", Path(tmpdir) / "repos")

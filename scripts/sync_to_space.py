@@ -234,6 +234,7 @@ def main():
     # ── 4. 写入并压缩 data/search_data.json ────────────
     data_dir = Path(tmpdir) / "data"
     summary = export_outputs(records, data_dir)
+    remove_uncompressed_json(data_dir)
     mirror_output_tree(data_dir / "search", Path(tmpdir) / "search")
     mirror_output_tree(data_dir / "repos", Path(tmpdir) / "repos")
     mirror_output_tree(data_dir / "legacy", Path(tmpdir) / "legacy")
