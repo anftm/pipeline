@@ -61,6 +61,12 @@ def mirror_output_tree(source_dir: Path, target_dir: Path) -> None:
     shutil.copytree(source_dir, target_dir)
 
 
+def remove_uncompressed_json(root_dir: Path) -> None:
+    for path in root_dir.rglob("*.json"):
+        if path.name.endswith(".json"):
+            path.unlink()
+
+
 def scan_txt_directory(space_dir: Path) -> set:
     """
     扫描 Space 仓库中 txt/ 目录，返回所有 txt 文件对应的 stem 集合。
@@ -233,6 +239,11 @@ def main():
     mirror_output_tree(data_dir / "legacy", Path(tmpdir) / "legacy")
     shutil.copy2(data_dir / "meta.json", Path(tmpdir) / "meta.json")
     shutil.copy2(data_dir / "meta.json.gz", Path(tmpdir) / "meta.json.gz")
+    remove_uncompressed_json(Path(tmpdir) / "search")
+    remove_uncompressed_json(Path(tmpdir) / "repos")
+    remove_uncompressed_json(Path(tmpdir) / "legacy")
+    if (Path(tmpdir) / "meta.json").exists():
+        (Path(tmpdir) / "meta.json").unlink()
 
     dest_gz = data_dir / "search_data.json.gz"
     gz_size_mb = dest_gz.stat().st_size / 1024 / 1024
