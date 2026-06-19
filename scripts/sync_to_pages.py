@@ -38,17 +38,24 @@ def run(cmd: str, cwd: str = None, env: dict = None) -> tuple[int, str, str]:
     return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
 
 
-def mirror_output_tree(source_dir: Path, target_dir: Path) -> None:
-    if not source_dir.exists():
-        return
-    if target_dir.exists():
-        shutil.rmtree(target_dir)
-    shutil.copytree(source_dir, target_dir)
-
-
 def remove_uncompressed_json(root_dir: Path) -> None:
     for path in root_dir.rglob("*.json"):
         if path.name.endswith(".json"):
+            path.unlink()
+
+
+def remove_legacy_root_artifacts(repo_dir: Path) -> None:
+    obsolete_paths = [
+        repo_dir / "search",
+        repo_dir / "repos",
+        repo_dir / "legacy",
+        repo_dir / "meta.json",
+        repo_dir / "meta.json.gz",
+    ]
+    for path in obsolete_paths:
+        if path.is_dir():
+            shutil.rmtree(path)
+        elif path.exists():
             path.unlink()
 
 
@@ -165,17 +172,7 @@ def main():
     data_dir = Path(tmpdir) / "data"
     summary = export_outputs(records, data_dir)
     remove_uncompressed_json(data_dir)
-
-    mirror_output_tree(data_dir / "search", Path(tmpdir) / "search")
-    mirror_output_tree(data_dir / "repos", Path(tmpdir) / "repos")
-    mirror_output_tree(data_dir / "legacy", Path(tmpdir) / "legacy")
-    shutil.copy2(data_dir / "meta.json", Path(tmpdir) / "meta.json")
-    shutil.copy2(data_dir / "meta.json.gz", Path(tmpdir) / "meta.json.gz")
-    remove_uncompressed_json(Path(tmpdir) / "search")
-    remove_uncompressed_json(Path(tmpdir) / "repos")
-    remove_uncompressed_json(Path(tmpdir) / "legacy")
-    if (Path(tmpdir) / "meta.json").exists():
-        (Path(tmpdir) / "meta.json").unlink()
+    remove_legacy_root_artifacts(Path(tmpdir))
 
     gz_path = data_dir / "search_data.json.gz"
     gz_size_mb = gz_path.stat().st_size / 1024 / 1024
