@@ -27,8 +27,6 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from fetch_and_parse import export_outputs
-
 # ═══════════════════════════════════════════════════════════
 # 配置
 # ═══════════════════════════════════════════════════════════
@@ -51,27 +49,6 @@ def run(cmd: str, cwd: str = None, env: dict = None) -> tuple[int, str, str]:
         cmd, shell=True, cwd=cwd, capture_output=True, text=True, env=merged_env,
     )
     return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
-
-
-def remove_uncompressed_json(root_dir: Path) -> None:
-    for path in root_dir.rglob("*.json"):
-        if path.name.endswith(".json"):
-            path.unlink()
-
-
-def remove_legacy_root_artifacts(repo_dir: Path) -> None:
-    obsolete_paths = [
-        repo_dir / "search",
-        repo_dir / "repos",
-        repo_dir / "legacy",
-        repo_dir / "meta.json",
-        repo_dir / "meta.json.gz",
-    ]
-    for path in obsolete_paths:
-        if path.is_dir():
-            shutil.rmtree(path)
-        elif path.exists():
-            path.unlink()
 
 
 def scan_txt_directory(space_dir: Path) -> set:
@@ -240,20 +217,26 @@ def main():
 
     # ── 4. 写入并压缩 data/search_data.json ────────────
     data_dir = Path(tmpdir) / "data"
-    summary = export_outputs(records, data_dir)
-    remove_uncompressed_json(data_dir)
-    remove_legacy_root_artifacts(Path(tmpdir))
+    data_dir.mkdir(parents=True, exist_ok=True)
 
+    json_text = json.dumps(records, ensure_ascii=False, indent=2)
+
+    # 生成压缩版（推送到 Space）
+    import gzip
     dest_gz = data_dir / "search_data.json.gz"
+    dest_gz.write_bytes(gzip.compress(json_text.encode("utf-8"), compresslevel=9))
+    (data_dir / "folder_tree.json.gz").write_bytes(FOLDER_TREE_JSON.with_suffix(".json.gz").read_bytes())
+    (data_dir / "folder_browser.json.gz").write_bytes(FOLDER_BROWSER_JSON.with_suffix(".json.gz").read_bytes())
+
+    file_size_mb = len(json_text.encode("utf-8")) / 1024 / 1024
     gz_size_mb = dest_gz.stat().st_size / 1024 / 1024
     print(f"\n💾 已写入:")
-    print(f"   meta: {summary['repoCount']} 个仓库, {summary['searchGlobalCount']} 条轻搜索记录")
     print(f"   {dest_gz} ({gz_size_mb:.1f} MB)")
     # ── 5. Git commit & push ───────────────────────────
     print(f"\n📤 提交并推送...")
     run('git config user.email "github-actions[bot]@users.noreply.github.com"', cwd=tmpdir)
     run('git config user.name "github-actions[bot]"', cwd=tmpdir)
-    ret, out, err = run("git add -A", cwd=tmpdir)
+    ret, out, err = run("git add data/search_data.json.gz data/folder_tree.json.gz data/folder_browser.json.gz", cwd=tmpdir)
     if ret != 0:
         print(f"   ⚠ git add 失败: {err}")
 
