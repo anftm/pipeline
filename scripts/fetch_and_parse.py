@@ -382,7 +382,7 @@ def main():
         print("\n✅ 所有仓库无变更，跳过生成。")
         STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
         STATE_FILE.write_text(
-            json.dumps(new_state, ensure_ascii=False, indent=2),
+            json.dumps(new_state, ensure_ascii=False, separators=(",", ":")),
             encoding="utf-8",
         )
         return 0
@@ -438,7 +438,7 @@ def main():
         time.sleep(0.5)
     # ── 5. 写入 output/*.json(+gz) ─────────────────────
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    json_text = json.dumps(all_records, ensure_ascii=False, indent=2)
+    json_text = json.dumps(all_records, ensure_ascii=False, separators=(",", ":"))
     OUTPUT_FILE.write_text(json_text, encoding="utf-8")
     OUTPUT_FILE.with_suffix(".json.gz").write_bytes(gzip.compress(json_text.encode("utf-8"), compresslevel=9))
 
@@ -454,7 +454,7 @@ def main():
     # ── 6. 更新 state/commits.json ─────────────────────
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     STATE_FILE.write_text(
-        json.dumps(new_state, ensure_ascii=False, indent=2),
+        json.dumps(new_state, ensure_ascii=False, separators=(",", ":")),
         encoding="utf-8",
     )
     print(f"💾 已更新 {STATE_FILE}")
