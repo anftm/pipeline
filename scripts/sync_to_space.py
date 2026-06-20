@@ -219,12 +219,12 @@ def main():
     data_dir = Path(tmpdir) / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
 
-    json_text = json.dumps(records, ensure_ascii=False, indent=2)
+    json_text = json.dumps(records, ensure_ascii=False, separators=(",", ":"))
 
     # 生成压缩版（推送到 Space）
     import gzip
     dest_gz = data_dir / "search_data.json.gz"
-    dest_gz.write_bytes(gzip.compress(json_text.encode("utf-8"), compresslevel=9))
+    dest_gz.write_bytes(gzip.compress(json_text.encode("utf-8"), compresslevel=9, mtime=0))
     (data_dir / "folder_tree.json.gz").write_bytes(FOLDER_TREE_JSON.with_suffix(".json.gz").read_bytes())
     (data_dir / "folder_browser.json.gz").write_bytes(FOLDER_BROWSER_JSON.with_suffix(".json.gz").read_bytes())
 

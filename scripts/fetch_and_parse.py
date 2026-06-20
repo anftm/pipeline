@@ -323,7 +323,7 @@ def build_folder_tree(records: list[dict]) -> dict:
 def write_json_gz(path: Path, data) -> None:
     json_text = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
     path.write_text(json_text, encoding="utf-8")
-    path.with_suffix(path.suffix + ".gz").write_bytes(gzip.compress(json_text.encode("utf-8"), compresslevel=9))
+    path.with_suffix(path.suffix + ".gz").write_bytes(gzip.compress(json_text.encode("utf-8"), compresslevel=9, mtime=0))
 
 # ═══════════════════════════════════════════════════════════
 # 主流程
@@ -440,7 +440,7 @@ def main():
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     json_text = json.dumps(all_records, ensure_ascii=False, separators=(",", ":"))
     OUTPUT_FILE.write_text(json_text, encoding="utf-8")
-    OUTPUT_FILE.with_suffix(".json.gz").write_bytes(gzip.compress(json_text.encode("utf-8"), compresslevel=9))
+    OUTPUT_FILE.with_suffix(".json.gz").write_bytes(gzip.compress(json_text.encode("utf-8"), compresslevel=9, mtime=0))
 
     folder_meta = build_folder_tree(all_records)
     write_json_gz(FOLDER_TREE_FILE, folder_meta["tree"])
