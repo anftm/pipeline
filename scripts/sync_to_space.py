@@ -51,6 +51,25 @@ def run(cmd: str, cwd: str = None, env: dict = None) -> tuple[int, str, str]:
     return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
 
 
+def clone_space_repo(clone_url: str, target_dir: str) -> tuple[int, str, str]:
+    env = {"GIT_LFS_SKIP_SMUDGE": "1"}
+    last = (1, "", "")
+    for attempt in range(4):
+        ret, out, err = run(f"git clone --depth 1 {clone_url} {target_dir}", env=env)
+        if ret == 0:
+            return ret, out, err
+        last = (ret, out, err)
+        text = (out + "\n" + err).lower()
+        if "429" in text or "rate limit" in text or "too many requests" in text:
+            wait = 2 ** attempt
+            print(f"   ⚠ HF 限流，等待 {wait}s 后重试克隆...")
+            shutil.rmtree(target_dir, ignore_errors=True)
+            time.sleep(wait)
+            continue
+        return ret, out, err
+    return last
+
+
 def scan_txt_directory(space_dir: Path) -> set:
     """
     扫描 Space 仓库中 txt/ 目录，返回所有 txt 文件对应的 stem 集合。
@@ -130,24 +149,31 @@ def create_space_if_missing(token: str, username: str) -> bool:
     req.add_header("Authorization", f"Bearer {token}")
     req.add_header("Content-Type", "application/json")
     req.add_header("User-Agent", "VoiceOfML-Search-Pipeline/1.0")
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            print(f"   ✅ Space 创建成功 (HTTP {resp.status})")
-            return True
-    except urllib.error.HTTPError as e:
-        body = ""
+    for attempt in range(4):
         try:
-            body = e.read().decode("utf-8")
-        except Exception:
-            pass
-        if "already exists" in body.lower() or e.code == 409:
-            print("   ⚠ Space 已存在，继续...")
-            return True
-        print(f"   ❌ 创建 Space 失败: HTTP {e.code} {body}")
-        return False
-    except Exception as e:
-        print(f"   ❌ 创建 Space 异常: {e}")
-        return False
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                print(f"   ✅ Space 创建成功 (HTTP {resp.status})")
+                return True
+        except urllib.error.HTTPError as e:
+            body = ""
+            try:
+                body = e.read().decode("utf-8")
+            except Exception:
+                pass
+            if "already exists" in body.lower() or e.code == 409:
+                print("   ⚠ Space 已存在，继续...")
+                return True
+            if e.code == 429:
+                wait = 2 ** attempt
+                print(f"   ⚠ 创建 Space 被限流，等待 {wait}s 后重试...")
+                time.sleep(wait)
+                continue
+            print(f"   ❌ 创建 Space 失败: HTTP {e.code} {body}")
+            return False
+        except Exception as e:
+            print(f"   ❌ 创建 Space 异常: {e}")
+            return False
+    return False
 
 
 # ═══════════════════════════════════════════════════════════
@@ -183,18 +209,28 @@ def main():
     tmpdir = tempfile.mkdtemp(prefix="hf_space_sync_")
     clone_url = f"https://{username}:{token}@huggingface.co/spaces/{SPACE_REPO}"
 
-    ret, out, err = run(f"git clone --depth 1 {clone_url} {tmpdir}")
+    ret, out, err = clone_space_repo(clone_url, tmpdir)
 
     if ret != 0:
         print(f"   ⚠ 克隆失败: {err[:200]}")
-        print("   尝试创建 Space（可能不存在）...")
+        combined = (out + "\n" + err).lower()
+        if "429" in combined or "rate limit" in combined or "too many requests" in combined:
+            print("   ❌ Hugging Face 当前限流，稍后重试同步")
+            shutil.rmtree(tmpdir, ignore_errors=True)
+            sys.exit(1)
+        if "404" not in combined and "not found" not in combined and "repository not found" not in combined:
+            print("   ❌ 克隆失败且不像仓库不存在，停止自动创建")
+            shutil.rmtree(tmpdir, ignore_errors=True)
+            sys.exit(1)
+
+        print("   尝试创建 Space（仓库不存在）...")
         ok = create_space_if_missing(token, username)
         if not ok:
             shutil.rmtree(tmpdir, ignore_errors=True)
             sys.exit(1)
 
         time.sleep(2)
-        ret, out, err = run(f"git clone --depth 1 {clone_url} {tmpdir}")
+        ret, out, err = clone_space_repo(clone_url, tmpdir)
         if ret != 0:
             print(f"   ❌ 重试克隆仍然失败: {err[:200]}")
             shutil.rmtree(tmpdir, ignore_errors=True)
