@@ -29,6 +29,30 @@ HF_SPACE_REPO = "VoiceOfML/Search"
 TXT_BASE_URL = f"https://huggingface.co/spaces/{HF_SPACE_REPO}/resolve/main/txt"
 
 
+def decode_search_payload(data):
+    if isinstance(data, list):
+        return data
+    if not isinstance(data, dict):
+        return []
+    repos = data.get("rp", []) or []
+    folders = data.get("fd", []) or []
+    records = []
+    for item in data.get("rc", []) or []:
+        if not isinstance(item, list) or len(item) < 6:
+            continue
+        repo = repos[item[0]] if isinstance(item[0], int) and 0 <= item[0] < len(repos) else ""
+        folder = folders[item[3]] if isinstance(item[3], int) and 0 <= item[3] < len(folders) else []
+        records.append({
+            "Repo": repo,
+            "File": item[1],
+            "Extension": item[2],
+            "Folder": folder,
+            "Size": item[4],
+            "HasTxt": bool(item[5]),
+        })
+    return records
+
+
 def build_relative_path(record: dict) -> str:
     filename = record.get("File", "")
     extension = record.get("Extension", "")
@@ -77,7 +101,7 @@ def main():
 
     # ── 1. 读取本地 JSON ──────────────────────────────
     print(f"\n📖 读取 {SOURCE_JSON} ...")
-    records = json.loads(SOURCE_JSON.read_text(encoding="utf-8"))
+    records = decode_search_payload(json.loads(SOURCE_JSON.read_text(encoding="utf-8")))
     print(f"   共 {len(records)} 条记录")
 
     # ── 2. 从 HF Space 获取 txt 列表 ───────────────────

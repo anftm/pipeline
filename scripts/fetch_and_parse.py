@@ -54,26 +54,22 @@ RECORD_KEY_MAP = {
 
 TREE_KEY_MAP = {
     "name": "n",
-    "path": "p",
     "count": "c",
     "hasDirectFiles": "df",
-    "hasChildren": "hc",
-    "showSelfToggle": "st",
     "children": "ch",
-    "isRoot": "rt",
 }
 
 BROWSER_KEY_MAP = {
     "folders": "d",
     "files": "f",
-    "current_path": "p",
     "name": "n",
-    "path": "p",
     "count": "c",
     "ext": "e",
     "hasTxt": "t",
     "size": "s",
 }
+
+SEARCH_DATA_VERSION = 2
 
 
 # ═══════════════════════════════════════════════════════════
@@ -150,18 +146,48 @@ def encode_record(record: dict) -> dict:
     }
 
 
+def encode_search_payload(records: list[dict]) -> dict:
+    repo_ids = {}
+    repos = []
+    folder_ids = {}
+    folders = []
+    encoded_records = []
+
+    for record in records:
+        repo = record.get("Repo", "")
+        if repo not in repo_ids:
+            repo_ids[repo] = len(repos)
+            repos.append(repo)
+
+        folder_tuple = tuple(record.get("Folder", []) or [])
+        if folder_tuple not in folder_ids:
+            folder_ids[folder_tuple] = len(folders)
+            folders.append(list(folder_tuple))
+
+        encoded_records.append([
+            repo_ids[repo],
+            record.get("File", ""),
+            record.get("Extension", ""),
+            folder_ids[folder_tuple],
+            record.get("Size", ""),
+            1 if record.get("HasTxt", False) else 0,
+        ])
+
+    return {
+        "v": SEARCH_DATA_VERSION,
+        "rp": repos,
+        "fd": folders,
+        "rc": encoded_records,
+    }
+
+
 def encode_tree_node(node: dict) -> dict:
     encoded = {
         TREE_KEY_MAP["name"]: node.get("name", ""),
-        TREE_KEY_MAP["path"]: node.get("path", ""),
         TREE_KEY_MAP["count"]: node.get("count", 0),
         TREE_KEY_MAP["hasDirectFiles"]: node.get("hasDirectFiles", False),
-        TREE_KEY_MAP["hasChildren"]: node.get("hasChildren", False),
-        TREE_KEY_MAP["showSelfToggle"]: node.get("showSelfToggle", False),
         TREE_KEY_MAP["children"]: [encode_tree_node(child) for child in node.get("children", [])],
     }
-    if node.get("isRoot"):
-        encoded[TREE_KEY_MAP["isRoot"]] = True
     return encoded
 
 
@@ -175,7 +201,6 @@ def encode_folder_tree(tree_by_repo: dict) -> dict:
 def encode_browser_folder_item(item: dict) -> dict:
     return {
         BROWSER_KEY_MAP["name"]: item.get("name", ""),
-        BROWSER_KEY_MAP["path"]: item.get("path", ""),
         BROWSER_KEY_MAP["count"]: item.get("count", 0),
     }
 
@@ -197,7 +222,6 @@ def encode_folder_browser(browser_by_repo: dict) -> dict:
             encoded[repo][path] = {
                 BROWSER_KEY_MAP["folders"]: [encode_browser_folder_item(item) for item in entry.get("folders", [])],
                 BROWSER_KEY_MAP["files"]: [encode_browser_file_item(item) for item in entry.get("files", [])],
-                BROWSER_KEY_MAP["current_path"]: entry.get("current_path", ""),
             }
     return encoded
 
@@ -467,7 +491,11 @@ def main():
     if output_is_valid:
         try:
             existing = json.loads(OUTPUT_FILE.read_text(encoding="utf-8"))
-            if not isinstance(existing, list) or len(existing) == 0:
+            if isinstance(existing, list):
+                output_is_valid = len(existing) > 0
+            elif isinstance(existing, dict):
+                output_is_valid = bool(existing.get("rc"))
+            else:
                 output_is_valid = False
         except Exception:
             output_is_valid = False
@@ -532,8 +560,7 @@ def main():
         time.sleep(0.5)
     # ── 5. 写入 output/*.json(+gz) ─────────────────────
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    encoded_records = [encode_record(record) for record in all_records]
-    json_text = json.dumps(encoded_records, ensure_ascii=False, separators=(",", ":"))
+    json_text = json.dumps(encode_search_payload(all_records), ensure_ascii=False, separators=(",", ":"))
     OUTPUT_FILE.write_text(json_text, encoding="utf-8")
     OUTPUT_FILE.with_suffix(".json.gz").write_bytes(gzip.compress(json_text.encode("utf-8"), compresslevel=9, mtime=0))
 

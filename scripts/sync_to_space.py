@@ -38,6 +38,30 @@ FOLDER_BROWSER_JSON = Path("output/folder_browser.json")
 SPACE_REPO = "VoiceOfML/Search"
 
 
+def decode_search_payload(data):
+    if isinstance(data, list):
+        return data
+    if not isinstance(data, dict):
+        return []
+    repos = data.get("rp", []) or []
+    folders = data.get("fd", []) or []
+    records = []
+    for item in data.get("rc", []) or []:
+        if not isinstance(item, list) or len(item) < 6:
+            continue
+        repo = repos[item[0]] if isinstance(item[0], int) and 0 <= item[0] < len(repos) else ""
+        folder = folders[item[3]] if isinstance(item[3], int) and 0 <= item[3] < len(folders) else []
+        records.append({
+            "Repo": repo,
+            "File": item[1],
+            "Extension": item[2],
+            "Folder": folder,
+            "Size": item[4],
+            "HasTxt": bool(item[5]),
+        })
+    return records
+
+
 # ═══════════════════════════════════════════════════════════
 # 工具函数
 # ═══════════════════════════════════════════════════════════
@@ -196,7 +220,7 @@ def main():
 
     # ── 1. 读取本地 search_data.json ───────────────────
     print(f"\n📖 读取 {SOURCE_JSON} ...")
-    records = json.loads(SOURCE_JSON.read_text(encoding="utf-8"))
+    records = decode_search_payload(json.loads(SOURCE_JSON.read_text(encoding="utf-8")))
     print(f"   共 {len(records)} 条记录")
 
     # ── 2. 克隆 Space 仓库 ─────────────────────────────
