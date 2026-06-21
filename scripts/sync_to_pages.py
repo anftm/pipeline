@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import posixpath
 import urllib.parse
 from pathlib import Path
 
@@ -26,6 +27,21 @@ FOLDER_TREE_JSON = Path("output/folder_tree.json")
 FOLDER_BROWSER_JSON = Path("output/folder_browser.json")
 HF_SPACE_REPO = "VoiceOfML/Search"
 TXT_BASE_URL = f"https://huggingface.co/spaces/{HF_SPACE_REPO}/resolve/main/txt"
+
+
+def build_relative_path(record: dict) -> str:
+    filename = record.get("File", "")
+    extension = record.get("Extension", "")
+    full_name = f"{filename}.{extension}" if extension else filename
+    folders = record.get("Folder", []) or []
+    return posixpath.join(*folders, full_name) if folders else full_name
+
+
+def get_stem_from_relative_path(raw_path: str) -> str:
+    if "." not in raw_path:
+        return raw_path
+    base, ext = posixpath.splitext(raw_path)
+    return base if ext else raw_path
 
 
 def run(cmd: str, cwd: str = None, env: dict = None) -> tuple[int, str, str]:
@@ -89,24 +105,10 @@ def main():
     # ── 3. 设置 HasTxt + 替换在线阅读链接 ─────────────
     has_txt_count = 0
     for rec in records:
-        repo = rec.get("Repo", "")
-        link = rec.get("Link", "")
-        prefix = f"https://huggingface.co/datasets/{repo}/resolve/main/"
-        if link.startswith(prefix):
-            encoded = link[len(prefix):]
-            try:
-                raw = urllib.parse.unquote(encoded)
-            except Exception:
-                raw = encoded
-            stem = raw
-            if "." in raw:
-                last_dot = raw.rfind(".")
-                slash_after = raw.find("/", last_dot)
-                if slash_after == -1:
-                    stem = raw[:last_dot]
-            if stem in txt_set:
-                rec["HasTxt"] = True
-                has_txt_count += 1
+        stem = get_stem_from_relative_path(build_relative_path(rec))
+        if stem in txt_set:
+            rec["HasTxt"] = True
+            has_txt_count += 1
 
     print(f"   设置了 {has_txt_count} 个 HasTxt = True")
 

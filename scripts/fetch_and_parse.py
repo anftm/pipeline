@@ -14,6 +14,7 @@ import sys
 import time
 import gzip
 import urllib.parse
+import posixpath
 import urllib.request
 from pathlib import Path
 
@@ -41,6 +42,38 @@ FOLDER_BROWSER_FILE = OUTPUT_DIR / "folder_browser.json"
 
 API_DATASETS = "https://huggingface.co/api/datasets"
 RAW_BASE = "https://huggingface.co/datasets"
+
+RECORD_KEY_MAP = {
+    "Repo": "r",
+    "File": "f",
+    "Extension": "e",
+    "Folder": "d",
+    "Size": "s",
+    "HasTxt": "t",
+}
+
+TREE_KEY_MAP = {
+    "name": "n",
+    "path": "p",
+    "count": "c",
+    "hasDirectFiles": "df",
+    "hasChildren": "hc",
+    "showSelfToggle": "st",
+    "children": "ch",
+    "isRoot": "rt",
+}
+
+BROWSER_KEY_MAP = {
+    "folders": "d",
+    "files": "f",
+    "current_path": "p",
+    "name": "n",
+    "path": "p",
+    "count": "c",
+    "ext": "e",
+    "hasTxt": "t",
+    "size": "s",
+}
 
 
 # ═══════════════════════════════════════════════════════════
@@ -96,6 +129,77 @@ def encode_url_path(raw_path: str) -> str:
       → %E2%80%A2%E9%87%8D%E8%A6%81%E8%B5%84%E6%96%99/%E3%80%8A%E5%9B%BD%E9%99%85%E6%AD%8C%E3%80%8B.pdf
     """
     return urllib.parse.quote(raw_path, safe="/")
+
+
+def build_relative_path(record: dict) -> str:
+    filename = record.get("File", "")
+    extension = record.get("Extension", "")
+    full_name = f"{filename}.{extension}" if extension else filename
+    folders = record.get("Folder", []) or []
+    return posixpath.join(*folders, full_name) if folders else full_name
+
+
+def encode_record(record: dict) -> dict:
+    return {
+        RECORD_KEY_MAP["Repo"]: record.get("Repo", ""),
+        RECORD_KEY_MAP["File"]: record.get("File", ""),
+        RECORD_KEY_MAP["Extension"]: record.get("Extension", ""),
+        RECORD_KEY_MAP["Folder"]: record.get("Folder", []) or [],
+        RECORD_KEY_MAP["Size"]: record.get("Size", ""),
+        RECORD_KEY_MAP["HasTxt"]: record.get("HasTxt", False),
+    }
+
+
+def encode_tree_node(node: dict) -> dict:
+    encoded = {
+        TREE_KEY_MAP["name"]: node.get("name", ""),
+        TREE_KEY_MAP["path"]: node.get("path", ""),
+        TREE_KEY_MAP["count"]: node.get("count", 0),
+        TREE_KEY_MAP["hasDirectFiles"]: node.get("hasDirectFiles", False),
+        TREE_KEY_MAP["hasChildren"]: node.get("hasChildren", False),
+        TREE_KEY_MAP["showSelfToggle"]: node.get("showSelfToggle", False),
+        TREE_KEY_MAP["children"]: [encode_tree_node(child) for child in node.get("children", [])],
+    }
+    if node.get("isRoot"):
+        encoded[TREE_KEY_MAP["isRoot"]] = True
+    return encoded
+
+
+def encode_folder_tree(tree_by_repo: dict) -> dict:
+    return {
+        repo: [encode_tree_node(node) for node in nodes]
+        for repo, nodes in tree_by_repo.items()
+    }
+
+
+def encode_browser_folder_item(item: dict) -> dict:
+    return {
+        BROWSER_KEY_MAP["name"]: item.get("name", ""),
+        BROWSER_KEY_MAP["path"]: item.get("path", ""),
+        BROWSER_KEY_MAP["count"]: item.get("count", 0),
+    }
+
+
+def encode_browser_file_item(item: dict) -> dict:
+    return {
+        BROWSER_KEY_MAP["name"]: item.get("name", ""),
+        BROWSER_KEY_MAP["ext"]: item.get("ext", ""),
+        BROWSER_KEY_MAP["hasTxt"]: item.get("hasTxt", False),
+        BROWSER_KEY_MAP["size"]: item.get("size", ""),
+    }
+
+
+def encode_folder_browser(browser_by_repo: dict) -> dict:
+    encoded = {}
+    for repo, repo_browser in browser_by_repo.items():
+        encoded[repo] = {}
+        for path, entry in repo_browser.items():
+            encoded[repo][path] = {
+                BROWSER_KEY_MAP["folders"]: [encode_browser_folder_item(item) for item in entry.get("folders", [])],
+                BROWSER_KEY_MAP["files"]: [encode_browser_file_item(item) for item in entry.get("files", [])],
+                BROWSER_KEY_MAP["current_path"]: entry.get("current_path", ""),
+            }
+    return encoded
 
 def batch_get_sizes(repo: str, paths: list[str], token: str, max_bytes: int = 80000) -> dict:
     url = f"https://huggingface.co/api/datasets/{repo}/paths-info/main"
@@ -203,12 +307,6 @@ def parse_one_line(line: str, repo: str, size_map: dict) -> dict | None:
         file_name = filename_part
         extension = ""
 
-    # 构造两个链接（路径做 URL 编码）
-    encoded_rel = encode_url_path(rel_path)
-
-    link = f"https://huggingface.co/datasets/{repo}/resolve/main/{encoded_rel}"
-    path_url = f"https://huggingface.co/datasets/{repo}/blob/main/{encoded_rel}"
-
     # 文件大小（可能为空字符串）
     size = size_map.get(rel_path, "")
 
@@ -216,8 +314,6 @@ def parse_one_line(line: str, repo: str, size_map: dict) -> dict | None:
         "Repo": repo,
         "File": file_name,
         "Extension": extension,
-        "Link": link,
-        "Path": path_url,
         "Folder": folder_parts,
         "Size": size,
         "HasTxt": False,
@@ -267,8 +363,6 @@ def build_folder_tree(records: list[dict]) -> dict:
         browser_by_repo[repo][dir_path]["files"].append({
             "name": rec.get("File", ""),
             "ext": rec.get("Extension", ""),
-            "link": rec.get("Link", ""),
-            "path": rec.get("Path", ""),
             "hasTxt": rec.get("HasTxt", False),
             "size": rec.get("Size", ""),
         })
@@ -415,7 +509,7 @@ def main():
             if rec:
                 repo_records.append(rec)
                 # 提取相对路径用于 paths-info 请求
-                rel_path = "/".join(rec["Folder"] + [rec["File"] + ("." + rec["Extension"] if rec["Extension"] else "")])
+                rel_path = build_relative_path(rec)
                 all_paths.append(rel_path)
 
         print(f"   ✅ 解析到 {len(repo_records)} 条记录")
@@ -438,13 +532,14 @@ def main():
         time.sleep(0.5)
     # ── 5. 写入 output/*.json(+gz) ─────────────────────
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    json_text = json.dumps(all_records, ensure_ascii=False, separators=(",", ":"))
+    encoded_records = [encode_record(record) for record in all_records]
+    json_text = json.dumps(encoded_records, ensure_ascii=False, separators=(",", ":"))
     OUTPUT_FILE.write_text(json_text, encoding="utf-8")
     OUTPUT_FILE.with_suffix(".json.gz").write_bytes(gzip.compress(json_text.encode("utf-8"), compresslevel=9, mtime=0))
 
     folder_meta = build_folder_tree(all_records)
-    write_json_gz(FOLDER_TREE_FILE, folder_meta["tree"])
-    write_json_gz(FOLDER_BROWSER_FILE, folder_meta["browser"])
+    write_json_gz(FOLDER_TREE_FILE, encode_folder_tree(folder_meta["tree"]))
+    write_json_gz(FOLDER_BROWSER_FILE, encode_folder_browser(folder_meta["browser"]))
 
     file_size_mb = len(json_text.encode("utf-8")) / 1024 / 1024
     print(f"💾 已写入 {OUTPUT_FILE} ({file_size_mb:.1f} MB)")

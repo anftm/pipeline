@@ -22,6 +22,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import posixpath
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -104,13 +105,18 @@ def get_stem_from_raw_path(raw_path: str) -> str:
       •重要资料/《国际歌》.pdf → •重要资料/《国际歌》
       •重要资料/README → •重要资料/README（无扩展名原样返回）
     """
-    if "." in raw_path:
-        last_dot = raw_path.rfind(".")
-        # 确保不是路径中 / 之后的隐藏文件误判
-        slash_after_dot = raw_path.find("/", last_dot)
-        if slash_after_dot == -1:
-            return raw_path[:last_dot]
+    base, ext = posixpath.splitext(raw_path)
+    if ext:
+        return base
     return raw_path
+
+
+def build_relative_path(record: dict) -> str:
+    filename = record.get("File", "")
+    extension = record.get("Extension", "")
+    full_name = f"{filename}.{extension}" if extension else filename
+    folders = record.get("Folder", []) or []
+    return posixpath.join(*folders, full_name) if folders else full_name
 
 
 def has_txt_for_record(record: dict, txt_set: set) -> bool:
@@ -120,18 +126,7 @@ def has_txt_for_record(record: dict, txt_set: set) -> bool:
     从 Link 反推原始相对路径，去掉扩展名得到 stem，
     与 txt_set（txt 文件去掉 .txt 后的 stem 集合）比对。
     """
-    repo = record.get("Repo", "")
-    link = record.get("Link", "")
-    prefix = f"https://huggingface.co/datasets/{repo}/resolve/main/"
-    if not link.startswith(prefix):
-        return False
-
-    encoded_path = link[len(prefix):]
-    try:
-        raw_path = urllib.parse.unquote(encoded_path)
-    except Exception:
-        return False
-
+    raw_path = build_relative_path(record)
     stem = get_stem_from_raw_path(raw_path)
     return stem in txt_set
 
