@@ -36,6 +36,7 @@ SOURCE_JSON = Path("output/search_data.json")
 FOLDER_TREE_JSON = Path("output/folder_tree.json")
 FOLDER_BROWSER_JSON = Path("output/folder_browser.json")
 SPACE_REPO = "VoiceOfML/Search"
+SEARCH_DATA_VERSION = 2
 
 
 def decode_search_payload(data):
@@ -60,6 +61,41 @@ def decode_search_payload(data):
             "HasTxt": bool(item[5]),
         })
     return records
+
+
+def encode_search_payload(records: list[dict]) -> dict:
+    repo_ids = {}
+    repos = []
+    folder_ids = {}
+    folders = []
+    encoded_records = []
+
+    for record in records:
+        repo = record.get("Repo", "")
+        if repo not in repo_ids:
+            repo_ids[repo] = len(repos)
+            repos.append(repo)
+
+        folder_tuple = tuple(record.get("Folder", []) or [])
+        if folder_tuple not in folder_ids:
+            folder_ids[folder_tuple] = len(folders)
+            folders.append(list(folder_tuple))
+
+        encoded_records.append([
+            repo_ids[repo],
+            record.get("File", ""),
+            record.get("Extension", ""),
+            folder_ids[folder_tuple],
+            record.get("Size", ""),
+            1 if record.get("HasTxt", False) else 0,
+        ])
+
+    return {
+        "v": SEARCH_DATA_VERSION,
+        "rp": repos,
+        "fd": folders,
+        "rc": encoded_records,
+    }
 
 
 # ═══════════════════════════════════════════════════════════
@@ -274,7 +310,7 @@ def main():
     data_dir = Path(tmpdir) / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
 
-    json_text = json.dumps(records, ensure_ascii=False, separators=(",", ":"))
+    json_text = json.dumps(encode_search_payload(records), ensure_ascii=False, separators=(",", ":"))
 
     # 生成压缩版（推送到 Space）
     import gzip
