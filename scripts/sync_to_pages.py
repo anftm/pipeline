@@ -147,6 +147,52 @@ def write_initial_payloads(data_dir: Path, records: list[dict]) -> list[str]:
     return urls
 
 
+def normalize_browser_entry(entry: dict | None, repo: str, path: str = "") -> dict:
+    entry = entry or {}
+    folders = entry.get("folders") or entry.get("d") or []
+    files = entry.get("files") or entry.get("f") or []
+    return {
+        "repo": repo,
+        "path": path,
+        "folders": folders,
+        "files": files,
+    }
+
+
+def write_sidebar_payloads(data_dir: Path, records: list[dict], browser_data: dict) -> list[str]:
+    sidebar_dir = data_dir / "sidebar"
+    repos_dir = sidebar_dir / "repos"
+    if sidebar_dir.exists():
+        shutil.rmtree(sidebar_dir)
+    repos_dir.mkdir(parents=True, exist_ok=True)
+
+    repo_counts = {}
+    for record in records:
+        repo = record.get("Repo")
+        if repo:
+            repo_counts[repo] = repo_counts.get(repo, 0) + 1
+    repos = [{"name": repo, "count": repo_counts[repo]} for repo in sorted(repo_counts)]
+    urls = ["/search/data/sidebar/global.json"]
+    (sidebar_dir / "global.json").write_text(
+        json.dumps({"repos": repos}, ensure_ascii=False, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    for repo in sorted(repo_counts):
+        short = repo.split("/")[-1]
+        safe_short = urllib.parse.quote(short, safe="")
+        payload = normalize_browser_entry((browser_data.get(repo) or {}).get(""), repo, "")
+        (repos_dir / f"{safe_short}.json").write_text(
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        urls.append(f"/search/data/sidebar/repos/{safe_short}.json")
+    (sidebar_dir / "manifest.json").write_text(
+        json.dumps({"version": SEARCH_DATA_VERSION, "urls": urls}, ensure_ascii=False, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    return urls
+
+
 def build_relative_path(record: dict) -> str:
     filename = record.get("File", "")
     extension = record.get("Extension", "")
@@ -160,6 +206,17 @@ def get_stem_from_relative_path(raw_path: str) -> str:
         return raw_path
     base, ext = posixpath.splitext(raw_path)
     return base if ext else raw_path
+
+
+def copy_txt_directory(src_repo_dir: Path, dest_repo_dir: Path) -> int:
+    src = src_repo_dir / "txt"
+    dest = dest_repo_dir / "txt"
+    if dest.exists():
+        shutil.rmtree(dest)
+    if not src.exists():
+        return 0
+    shutil.copytree(src, dest)
+    return sum(1 for p in dest.rglob("*.txt") if p.is_file())
 
 
 def run(cmd: str, cwd: str = None, env: dict = None) -> tuple[int, str, str]:
@@ -201,9 +258,11 @@ def main():
     # ── 2. 从 HF Space 获取 txt 列表 ───────────────────
     print(f"\n📂 从 HF Space 获取 txt 文件列表...")
     txt_set = set()
+    tmp_hf_path = None
     try:
         clone_url = f"https://huggingface.co/spaces/{HF_SPACE_REPO}"
         tmp_hf = tempfile.mkdtemp(prefix="hf_txt_scan_")
+        tmp_hf_path = Path(tmp_hf)
         ret, out, err = run(f"git clone --depth 1 {clone_url} {tmp_hf}")
         if ret == 0:
             txt_dir = Path(tmp_hf) / "txt"
@@ -213,10 +272,11 @@ def main():
                         rel = str(f.relative_to(txt_dir))
                         if rel.endswith(".txt"):
                             txt_set.add(rel[:-4])
-            shutil.rmtree(tmp_hf, ignore_errors=True)
             print(f"   找到 {len(txt_set)} 个 txt 文件")
         else:
             print(f"   ⚠ 无法克隆 HF Space（可能首次运行），HasTxt 将全部为 false")
+            shutil.rmtree(tmp_hf, ignore_errors=True)
+            tmp_hf_path = None
     except Exception as e:
         print(f"   ⚠ 扫描 txt 失败: {e}")
 
@@ -275,6 +335,11 @@ def main():
 
     print("   ✅ 克隆成功")
 
+    if tmp_hf_path:
+        copied_txt = copy_txt_directory(tmp_hf_path, Path(tmpdir))
+        shutil.rmtree(tmp_hf_path, ignore_errors=True)
+        print(f"   已同步 {copied_txt} 个 txt 文件到 Pages 仓库")
+
     # ── 5. 生成数据文件 ────────────────────────────────
     import gzip
     data_dir = Path(tmpdir) / "data"
@@ -287,6 +352,7 @@ def main():
     browser_text = json.dumps(browser_data, ensure_ascii=False, separators=(",", ":"))
     (data_dir / "folder_browser.json.gz").write_bytes(gzip.compress(browser_text.encode("utf-8"), compresslevel=9, mtime=0))
     initial_urls = write_initial_payloads(data_dir, records)
+    sidebar_urls = write_sidebar_payloads(data_dir, records, browser_data)
 
     file_size_mb = len(json_text.encode("utf-8")) / 1024 / 1024
     gz_size_mb = gz_path.stat().st_size / 1024 / 1024
@@ -294,6 +360,7 @@ def main():
     print(f"   原始: {file_size_mb:.1f} MB")
     print(f"   gzip: {gz_size_mb:.1f} MB")
     print(f"   initial: {len(initial_urls)} 个首屏文件")
+    print(f"   sidebar: {len(sidebar_urls)} 个侧栏首屏文件")
 
     # ── 6. Git commit & push ───────────────────────────
     print(f"\n📤 提交并推送...")

@@ -156,6 +156,51 @@ def write_initial_payloads(data_dir: Path, records: list[dict]) -> list[str]:
     return urls
 
 
+def normalize_browser_entry(entry: dict | None, repo: str, path: str = "") -> dict:
+    entry = entry or {}
+    folders = entry.get("folders") or entry.get("d") or []
+    files = entry.get("files") or entry.get("f") or []
+    return {
+        "repo": repo,
+        "path": path,
+        "folders": folders,
+        "files": files,
+    }
+
+
+def write_sidebar_payloads(data_dir: Path, records: list[dict], browser_data: dict) -> list[str]:
+    sidebar_dir = data_dir / "sidebar"
+    repos_dir = sidebar_dir / "repos"
+    if sidebar_dir.exists():
+        shutil.rmtree(sidebar_dir)
+    repos_dir.mkdir(parents=True, exist_ok=True)
+    repo_counts = {}
+    for record in records:
+        repo = record.get("Repo")
+        if repo:
+            repo_counts[repo] = repo_counts.get(repo, 0) + 1
+    repos = [{"name": repo, "count": repo_counts[repo]} for repo in sorted(repo_counts)]
+    urls = ["/data/sidebar/global.json"]
+    (sidebar_dir / "global.json").write_text(
+        json.dumps({"repos": repos}, ensure_ascii=False, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    for repo in sorted(repo_counts):
+        short = repo.split("/")[-1]
+        safe_short = urllib.parse.quote(short, safe="")
+        payload = normalize_browser_entry((browser_data.get(repo) or {}).get(""), repo, "")
+        (repos_dir / f"{safe_short}.json").write_text(
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        urls.append(f"/data/sidebar/repos/{safe_short}.json")
+    (sidebar_dir / "manifest.json").write_text(
+        json.dumps({"version": SEARCH_DATA_VERSION, "urls": urls}, ensure_ascii=False, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    return urls
+
+
 # ═══════════════════════════════════════════════════════════
 # 工具函数
 # ═══════════════════════════════════════════════════════════
@@ -247,6 +292,81 @@ def has_txt_for_record(record: dict, txt_set: set) -> bool:
     raw_path = build_relative_path(record)
     stem = get_stem_from_raw_path(raw_path)
     return stem in txt_set
+
+
+def source_file_url(record: dict) -> str:
+    repo = record.get("Repo", "")
+    rel_path = build_relative_path(record)
+    return f"https://huggingface.co/datasets/{repo}/resolve/main/{urllib.parse.quote(rel_path, safe='/')}"
+
+
+def decode_text_bytes(raw: bytes) -> tuple[str, str]:
+    """Decode source txt bytes and normalize published files to UTF-8."""
+    if raw.startswith(b"\xef\xbb\xbf"):
+        return raw.decode("utf-8-sig"), "utf-8-sig"
+    if raw.startswith(b"\xff\xfe") or raw.startswith(b"\xfe\xff"):
+        return raw.decode("utf-16"), "utf-16"
+    if raw.startswith(b"\xff\xfe\x00\x00") or raw.startswith(b"\x00\x00\xfe\xff"):
+        return raw.decode("utf-32"), "utf-32"
+
+    encodings = (
+        "utf-8",
+        "gb18030",
+        "big5",
+        "cp932",
+        "shift_jis",
+        "euc_jp",
+        "cp1251",
+        "koi8_r",
+        "cp1252",
+    )
+    for encoding in encodings:
+        try:
+            return raw.decode(encoding), encoding
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="replace"), "utf-8-replace"
+
+
+def download_text_file(url: str, token: str) -> str | None:
+    req = urllib.request.Request(url)
+    req.add_header("User-Agent", "VoiceOfML-Search-Pipeline/1.0")
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            raw = resp.read()
+    except Exception as e:
+        print(f"   ⚠ txt 下载失败: {url} ({e})")
+        return None
+    text, encoding = decode_text_bytes(raw)
+    if encoding == "utf-8-replace":
+        print(f"   ⚠ txt 编码无法可靠识别，已用 UTF-8 replacement 兜底: {url}")
+    return text
+
+
+def publish_source_txt_files(records: list[dict], repo_dir: Path, token: str) -> set[str]:
+    """把源数据集中本身就是 .txt 的文件发布到 Space 的 txt/ 目录。"""
+    txt_dir = repo_dir / "txt"
+    published = set()
+    for record in records:
+        if str(record.get("Extension", "")).lower() != "txt":
+            continue
+        rel_path = build_relative_path(record)
+        stem = get_stem_from_raw_path(rel_path)
+        if not stem:
+            continue
+        dest = txt_dir / f"{stem}.txt"
+        if dest.exists():
+            published.add(stem)
+            continue
+        text = download_text_file(source_file_url(record), token)
+        if text is None:
+            continue
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(text, encoding="utf-8")
+        published.add(stem)
+    return published
 
 
 def create_space_if_missing(token: str, username: str) -> bool:
@@ -351,7 +471,11 @@ def main():
 
     print("   ✅ 克隆成功")
 
-    # ── 3. 扫描 txt/ 目录，设置 HasTxt ─────────────────
+    # ── 3. 发布源数据集中的 txt 文件，并扫描 txt/ 目录 ─────
+    print(f"\n📂 发布源数据集中的 txt 文件...")
+    published_txt = publish_source_txt_files(records, Path(tmpdir), token)
+    print(f"   发布/保留 {len(published_txt)} 个源 txt 文件")
+
     print(f"\n📂 扫描 txt/ 目录...")
     txt_set = scan_txt_directory(Path(tmpdir))
     print(f"   找到 {len(txt_set)} 个 txt 文件")
@@ -388,17 +512,19 @@ def main():
     browser_text = json.dumps(browser_data, ensure_ascii=False, separators=(",", ":"))
     (data_dir / "folder_browser.json.gz").write_bytes(gzip.compress(browser_text.encode("utf-8"), compresslevel=9, mtime=0))
     initial_urls = write_initial_payloads(data_dir, records)
+    sidebar_urls = write_sidebar_payloads(data_dir, records, browser_data)
 
     file_size_mb = len(json_text.encode("utf-8")) / 1024 / 1024
     gz_size_mb = dest_gz.stat().st_size / 1024 / 1024
     print(f"\n💾 已写入:")
     print(f"   {dest_gz} ({gz_size_mb:.1f} MB)")
     print(f"   initial: {len(initial_urls)} 个首屏文件")
+    print(f"   sidebar: {len(sidebar_urls)} 个侧栏首屏文件")
     # ── 5. Git commit & push ───────────────────────────
     print(f"\n📤 提交并推送...")
     run('git config user.email "github-actions[bot]@users.noreply.github.com"', cwd=tmpdir)
     run('git config user.name "github-actions[bot]"', cwd=tmpdir)
-    ret, out, err = run("git add data/search_data.json.gz data/folder_tree.json.gz data/folder_browser.json.gz data/initial", cwd=tmpdir)
+    ret, out, err = run("git add data/search_data.json.gz data/folder_tree.json.gz data/folder_browser.json.gz data/initial data/sidebar", cwd=tmpdir)
     if ret != 0:
         print(f"   ⚠ git add 失败: {err}")
 
