@@ -21,6 +21,7 @@ from pathlib import Path
 
 SOURCE_JSON = Path("output/search_data.json")
 SPACE_REPO = "VoiceOfML/Search"
+MAX_GIT_TXT_BYTES = 10 * 1024 * 1024
 
 
 def decode_search_payload(data):
@@ -108,18 +109,27 @@ def download_text_file(url: str, token: str) -> str | None:
     except Exception as e:
         print(f"   ⚠ 下载失败: {url} ({e})")
         return None
+    if len(raw) > MAX_GIT_TXT_BYTES:
+        print(f"   ⚠ 跳过超过 10 MiB 的 txt: {url} ({len(raw)} bytes)")
+        return None
     text, encoding = decode_text_bytes(raw)
     if encoding == "utf-8-replace":
         print(f"   ⚠ 编码无法可靠识别，已 replacement 兜底: {url}")
     return text
 
 
-def publish_source_txt_files(records: list[dict], repo_dir: Path, token: str) -> tuple[int, int]:
+def publish_source_txt_files(records: list[dict], repo_dir: Path, token: str) -> tuple[int, int, int]:
     txt_dir = repo_dir / "txt"
     written = 0
     existing = 0
+    skipped_large = 0
     for record in records:
         if str(record.get("Extension", "")).lower() != "txt":
+            continue
+        size = record.get("Size")
+        if isinstance(size, (int, float)) and size > MAX_GIT_TXT_BYTES:
+            skipped_large += 1
+            print(f"   ⚠ 跳过超过 10 MiB 的 txt: {build_relative_path(record)} ({int(size)} bytes)")
             continue
         rel_path = build_relative_path(record)
         stem = stem_from_relative_path(rel_path)
@@ -135,7 +145,7 @@ def publish_source_txt_files(records: list[dict], repo_dir: Path, token: str) ->
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(text, encoding="utf-8")
         written += 1
-    return written, existing
+    return written, existing, skipped_large
 
 
 def main() -> int:
@@ -159,8 +169,8 @@ def main() -> int:
         if ret != 0:
             print(f"❌ 克隆 Space 失败: {err[:300]}")
             return 1
-        written, existing = publish_source_txt_files(records, Path(tmpdir), token)
-        print(f"💾 新写入 {written} 个 txt，已存在 {existing} 个 txt")
+        written, existing, skipped_large = publish_source_txt_files(records, Path(tmpdir), token)
+        print(f"💾 新写入 {written} 个 txt，已存在 {existing} 个 txt，跳过大文件 {skipped_large} 个")
         run('git config user.email "github-actions[bot]@users.noreply.github.com"', cwd=tmpdir)
         run('git config user.name "github-actions[bot]"', cwd=tmpdir)
         ret, out, err = run("git add txt", cwd=tmpdir)
