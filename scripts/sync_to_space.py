@@ -294,81 +294,6 @@ def has_txt_for_record(record: dict, txt_set: set) -> bool:
     return stem in txt_set
 
 
-def source_file_url(record: dict) -> str:
-    repo = record.get("Repo", "")
-    rel_path = build_relative_path(record)
-    return f"https://huggingface.co/datasets/{repo}/resolve/main/{urllib.parse.quote(rel_path, safe='/')}"
-
-
-def decode_text_bytes(raw: bytes) -> tuple[str, str]:
-    """Decode source txt bytes and normalize published files to UTF-8."""
-    if raw.startswith(b"\xef\xbb\xbf"):
-        return raw.decode("utf-8-sig"), "utf-8-sig"
-    if raw.startswith(b"\xff\xfe") or raw.startswith(b"\xfe\xff"):
-        return raw.decode("utf-16"), "utf-16"
-    if raw.startswith(b"\xff\xfe\x00\x00") or raw.startswith(b"\x00\x00\xfe\xff"):
-        return raw.decode("utf-32"), "utf-32"
-
-    encodings = (
-        "utf-8",
-        "gb18030",
-        "big5",
-        "cp932",
-        "shift_jis",
-        "euc_jp",
-        "cp1251",
-        "koi8_r",
-        "cp1252",
-    )
-    for encoding in encodings:
-        try:
-            return raw.decode(encoding), encoding
-        except UnicodeDecodeError:
-            continue
-    return raw.decode("utf-8", errors="replace"), "utf-8-replace"
-
-
-def download_text_file(url: str, token: str) -> str | None:
-    req = urllib.request.Request(url)
-    req.add_header("User-Agent", "VoiceOfML-Search-Pipeline/1.0")
-    if token:
-        req.add_header("Authorization", f"Bearer {token}")
-    try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            raw = resp.read()
-    except Exception as e:
-        print(f"   ⚠ txt 下载失败: {url} ({e})")
-        return None
-    text, encoding = decode_text_bytes(raw)
-    if encoding == "utf-8-replace":
-        print(f"   ⚠ txt 编码无法可靠识别，已用 UTF-8 replacement 兜底: {url}")
-    return text
-
-
-def publish_source_txt_files(records: list[dict], repo_dir: Path, token: str) -> set[str]:
-    """把源数据集中本身就是 .txt 的文件发布到 Space 的 txt/ 目录。"""
-    txt_dir = repo_dir / "txt"
-    published = set()
-    for record in records:
-        if str(record.get("Extension", "")).lower() != "txt":
-            continue
-        rel_path = build_relative_path(record)
-        stem = get_stem_from_raw_path(rel_path)
-        if not stem:
-            continue
-        dest = txt_dir / f"{stem}.txt"
-        if dest.exists():
-            published.add(stem)
-            continue
-        text = download_text_file(source_file_url(record), token)
-        if text is None:
-            continue
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(text, encoding="utf-8")
-        published.add(stem)
-    return published
-
-
 def create_space_if_missing(token: str, username: str) -> bool:
     create_url = "https://huggingface.co/api/repos/create"
     payload = json.dumps({
@@ -471,11 +396,7 @@ def main():
 
     print("   ✅ 克隆成功")
 
-    # ── 3. 发布源数据集中的 txt 文件，并扫描 txt/ 目录 ─────
-    print(f"\n📂 发布源数据集中的 txt 文件...")
-    published_txt = publish_source_txt_files(records, Path(tmpdir), token)
-    print(f"   发布/保留 {len(published_txt)} 个源 txt 文件")
-
+    # ── 3. 扫描 txt/ 目录，设置 HasTxt ─────────────────
     print(f"\n📂 扫描 txt/ 目录...")
     txt_set = scan_txt_directory(Path(tmpdir))
     print(f"   找到 {len(txt_set)} 个 txt 文件")

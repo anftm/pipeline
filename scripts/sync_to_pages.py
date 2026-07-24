@@ -208,17 +208,6 @@ def get_stem_from_relative_path(raw_path: str) -> str:
     return base if ext else raw_path
 
 
-def copy_txt_directory(src_repo_dir: Path, dest_repo_dir: Path) -> int:
-    src = src_repo_dir / "txt"
-    dest = dest_repo_dir / "txt"
-    if dest.exists():
-        shutil.rmtree(dest)
-    if not src.exists():
-        return 0
-    shutil.copytree(src, dest)
-    return sum(1 for p in dest.rglob("*.txt") if p.is_file())
-
-
 def run(cmd: str, cwd: str = None, env: dict = None) -> tuple[int, str, str]:
     merged_env = os.environ.copy()
     if env:
@@ -258,11 +247,9 @@ def main():
     # ── 2. 从 HF Space 获取 txt 列表 ───────────────────
     print(f"\n📂 从 HF Space 获取 txt 文件列表...")
     txt_set = set()
-    tmp_hf_path = None
     try:
         clone_url = f"https://huggingface.co/spaces/{HF_SPACE_REPO}"
         tmp_hf = tempfile.mkdtemp(prefix="hf_txt_scan_")
-        tmp_hf_path = Path(tmp_hf)
         ret, out, err = run(f"git clone --depth 1 {clone_url} {tmp_hf}")
         if ret == 0:
             txt_dir = Path(tmp_hf) / "txt"
@@ -272,11 +259,11 @@ def main():
                         rel = str(f.relative_to(txt_dir))
                         if rel.endswith(".txt"):
                             txt_set.add(rel[:-4])
+            shutil.rmtree(tmp_hf, ignore_errors=True)
             print(f"   找到 {len(txt_set)} 个 txt 文件")
         else:
             print(f"   ⚠ 无法克隆 HF Space（可能首次运行），HasTxt 将全部为 false")
             shutil.rmtree(tmp_hf, ignore_errors=True)
-            tmp_hf_path = None
     except Exception as e:
         print(f"   ⚠ 扫描 txt 失败: {e}")
 
@@ -334,11 +321,6 @@ def main():
             sys.exit(1)
 
     print("   ✅ 克隆成功")
-
-    if tmp_hf_path:
-        copied_txt = copy_txt_directory(tmp_hf_path, Path(tmpdir))
-        shutil.rmtree(tmp_hf_path, ignore_errors=True)
-        print(f"   已同步 {copied_txt} 个 txt 文件到 Pages 仓库")
 
     # ── 5. 生成数据文件 ────────────────────────────────
     import gzip
