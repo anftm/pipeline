@@ -1,0 +1,34 @@
+name: Publish source txt once
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: publish-source-txt-once
+  cancel-in-progress: false
+
+jobs:
+  publish-source-txt:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: pipeline
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Generate search data
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: python scripts/fetch_and_parse.py
+
+      - name: Publish source txt files
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_USERNAME: ${{ vars.HF_USERNAME || 'VoiceOfML' }}
+        run: python scripts/publish_source_txt_once.py
