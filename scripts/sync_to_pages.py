@@ -28,6 +28,7 @@ FOLDER_BROWSER_JSON = Path("output/folder_browser.json")
 HF_SPACE_REPO = "VoiceOfML/Search"
 TXT_BASE_URL = f"https://huggingface.co/spaces/{HF_SPACE_REPO}/resolve/main/txt"
 SEARCH_DATA_VERSION = 2
+INITIAL_PAGE_SIZE = 100
 
 
 def decode_search_payload(data):
@@ -87,6 +88,63 @@ def encode_search_payload(records: list[dict]) -> dict:
         "fd": folders,
         "rc": encoded_records,
     }
+
+
+def trim_initial_results(records: list[dict]) -> list[dict]:
+    keys = ("Repo", "File", "Extension", "Folder", "Size", "HasTxt")
+    return [
+        {key: record.get(key, [] if key == "Folder" else "") for key in keys}
+        for record in records
+    ]
+
+
+def build_initial_payload(records: list[dict], repo: str | None = None) -> dict:
+    if repo:
+        filtered = [record for record in records if record.get("Repo") == repo]
+        mode = "repo"
+    else:
+        filtered = records
+        mode = "global"
+    return {
+        "version": SEARCH_DATA_VERSION,
+        "mode": mode,
+        "repo": repo,
+        "sort": "relevance",
+        "page": 1,
+        "page_size": INITIAL_PAGE_SIZE,
+        "total": len(filtered),
+        "results": trim_initial_results(filtered[:INITIAL_PAGE_SIZE]),
+    }
+
+
+def write_initial_payloads(data_dir: Path, records: list[dict]) -> list[str]:
+    initial_dir = data_dir / "initial"
+    repos_dir = initial_dir / "repos"
+    if initial_dir.exists():
+        shutil.rmtree(initial_dir)
+    repos_dir.mkdir(parents=True, exist_ok=True)
+
+    urls = ["/search/data/initial/global.json"]
+    (initial_dir / "global.json").write_text(
+        json.dumps(build_initial_payload(records), ensure_ascii=False, separators=(",", ":")),
+        encoding="utf-8",
+    )
+
+    repos = sorted({record.get("Repo", "") for record in records if record.get("Repo")})
+    for repo in repos:
+        short = repo.split("/")[-1]
+        safe_short = urllib.parse.quote(short, safe="")
+        (repos_dir / f"{short}.json").write_text(
+            json.dumps(build_initial_payload(records, repo), ensure_ascii=False, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        urls.append(f"/search/data/initial/repos/{safe_short}.json")
+
+    (initial_dir / "manifest.json").write_text(
+        json.dumps({"version": SEARCH_DATA_VERSION, "urls": urls}, ensure_ascii=False, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    return urls
 
 
 def build_relative_path(record: dict) -> str:
@@ -172,6 +230,16 @@ def main():
 
     print(f"   设置了 {has_txt_count} 个 HasTxt = True")
 
+    browser_data = json.loads(FOLDER_BROWSER_JSON.read_text(encoding="utf-8"))
+    for record in records:
+        repo_browser = browser_data.get(record.get("Repo", ""), {})
+        folder_path = "/".join(record.get("Folder", []) or [])
+        entry = repo_browser.get(folder_path, {})
+        for item in entry.get("f", []) or []:
+            if item.get("n", "") == record.get("File", "") and item.get("e", "") == record.get("Extension", ""):
+                item["t"] = bool(record.get("HasTxt", False))
+                break
+
     # ── 4. 克隆 Pages 仓库 ────────────────────────────
     print(f"\n📥 克隆 GitHub Pages 仓库: {pages_repo} ...")
     tmpdir = tempfile.mkdtemp(prefix="pages_sync_")
@@ -216,13 +284,16 @@ def main():
     gz_path = data_dir / "search_data.json.gz"
     gz_path.write_bytes(gzip.compress(json_text.encode("utf-8"), compresslevel=9, mtime=0))
     (data_dir / "folder_tree.json.gz").write_bytes(FOLDER_TREE_JSON.with_suffix(".json.gz").read_bytes())
-    (data_dir / "folder_browser.json.gz").write_bytes(FOLDER_BROWSER_JSON.with_suffix(".json.gz").read_bytes())
+    browser_text = json.dumps(browser_data, ensure_ascii=False, separators=(",", ":"))
+    (data_dir / "folder_browser.json.gz").write_bytes(gzip.compress(browser_text.encode("utf-8"), compresslevel=9, mtime=0))
+    initial_urls = write_initial_payloads(data_dir, records)
 
     file_size_mb = len(json_text.encode("utf-8")) / 1024 / 1024
     gz_size_mb = gz_path.stat().st_size / 1024 / 1024
     print(f"\n💾 已写入:")
     print(f"   原始: {file_size_mb:.1f} MB")
     print(f"   gzip: {gz_size_mb:.1f} MB")
+    print(f"   initial: {len(initial_urls)} 个首屏文件")
 
     # ── 6. Git commit & push ───────────────────────────
     print(f"\n📤 提交并推送...")
