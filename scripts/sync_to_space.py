@@ -143,7 +143,7 @@ def write_initial_payloads(data_dir: Path, records: list[dict]) -> list[str]:
     for repo in repos:
         short = repo.split("/")[-1]
         safe_short = urllib.parse.quote(short, safe="")
-        (repos_dir / f"{short}.json").write_text(
+        (repos_dir / f"{safe_short}.json").write_text(
             json.dumps(build_initial_payload(records, repo), ensure_ascii=False, separators=(",", ":")),
             encoding="utf-8",
         )
