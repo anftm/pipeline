@@ -22,6 +22,9 @@ from pathlib import Path
 SOURCE_JSON = Path("output/search_data.json")
 SPACE_REPO = "VoiceOfML/Search"
 MAX_GIT_TXT_BYTES = 10 * 1024 * 1024
+REPLACEMENT_CHAR = "\ufffd"
+STRICT_ENCODINGS = ("utf-8", "gb18030", "gbk", "big5", "cp932", "shift_jis", "euc_jp")
+REPLACE_ENCODINGS = ("gb18030", "utf-8")
 
 
 def decode_search_payload(data):
@@ -83,6 +86,44 @@ def source_file_url(record: dict) -> str:
     return f"https://huggingface.co/datasets/{repo}/resolve/main/{urllib.parse.quote(rel_path, safe='/')}"
 
 
+def looks_like_lfs_pointer(raw: bytes) -> bool:
+    return raw.startswith(b"version https://git-lfs.github.com/spec/v1\n") or raw.startswith(b"version https://git-lfs")
+
+
+def text_quality_score(text: str) -> float:
+    if not text:
+        return -1_000_000
+    sample = text[:20000]
+    cjk = 0
+    ascii_printable = 0
+    replacements = 0
+    controls = 0
+    mojibake = 0
+    for ch in sample:
+        code = ord(ch)
+        if "\u4e00" <= ch <= "\u9fff" or "\u3040" <= ch <= "\u30ff" or "\uac00" <= ch <= "\ud7af":
+            cjk += 1
+        elif ch == REPLACEMENT_CHAR:
+            replacements += 1
+        elif code < 32 and ch not in "\r\n\t":
+            controls += 1
+        elif 32 <= code < 127:
+            ascii_printable += 1
+        elif "\u0400" <= ch <= "\u04ff" or ch in "№¤±µґєЄЈЎўїЇ":
+            mojibake += 1
+    return cjk * 4 + ascii_printable * 0.15 - replacements * 30 - controls * 20 - mojibake * 6
+
+
+def is_probably_mojibake(text: str) -> bool:
+    sample = text[:4000]
+    if not sample:
+        return False
+    cjk = sum(1 for ch in sample if "\u4e00" <= ch <= "\u9fff")
+    cyrillic = sum(1 for ch in sample if "\u0400" <= ch <= "\u04ff")
+    suspicious = sum(1 for ch in sample if ch in "№¤±µґєЄЈЎўїЇ")
+    return cjk == 0 and (cyrillic + suspicious) >= 20
+
+
 def decode_text_bytes(raw: bytes) -> tuple[str, str]:
     if raw.startswith(b"\xef\xbb\xbf"):
         return raw.decode("utf-8-sig"), "utf-8-sig"
@@ -90,15 +131,28 @@ def decode_text_bytes(raw: bytes) -> tuple[str, str]:
         return raw.decode("utf-32"), "utf-32"
     if raw.startswith(b"\xff\xfe") or raw.startswith(b"\xfe\xff"):
         return raw.decode("utf-16"), "utf-16"
-    for encoding in ("utf-8", "gb18030", "big5", "cp932", "shift_jis", "euc_jp", "cp1251", "koi8_r", "cp1252"):
+
+    candidates: list[tuple[float, int, str, str]] = []
+    order = 0
+    for encoding in STRICT_ENCODINGS:
         try:
-            return raw.decode(encoding), encoding
+            text = raw.decode(encoding)
         except UnicodeDecodeError:
+            order += 1
             continue
-    return raw.decode("utf-8", errors="replace"), "utf-8-replace"
+        candidates.append((text_quality_score(text), -order, text, encoding))
+        order += 1
+
+    for encoding in REPLACE_ENCODINGS:
+        text = raw.decode(encoding, errors="replace")
+        candidates.append((text_quality_score(text), -order, text, f"{encoding}-replace"))
+        order += 1
+
+    candidates.sort(reverse=True)
+    return candidates[0][2], candidates[0][3]
 
 
-def download_text_file(url: str, token: str) -> tuple[str | None, int]:
+def download_text_file(url: str, token: str) -> tuple[str | None, str]:
     req = urllib.request.Request(url)
     req.add_header("User-Agent", "VoiceOfML-Search-Pipeline/1.0")
     if token:
@@ -109,16 +163,33 @@ def download_text_file(url: str, token: str) -> tuple[str | None, int]:
     except Exception as e:
         print(f"   ⚠ 下载失败: {url} ({e})")
         return None, 0
+    if looks_like_lfs_pointer(raw):
+        print(f"   ⚠ 源文件是 LFS pointer，跳过: {url}")
+        return None, "lfs-pointer"
     text, encoding = decode_text_bytes(raw)
-    if encoding == "utf-8-replace":
-        print(f"   ⚠ 编码无法可靠识别，已 replacement 兜底: {url}")
-    encoded_size = len(text.encode("utf-8"))
-    return text, encoded_size
+    if encoding.endswith("-replace"):
+        print(f"   ⚠ 编码含坏字节，使用 {encoding}: {url}")
+    if is_probably_mojibake(text):
+        print(f"   ⚠ 解码疑似乱码，跳过写入: {url} ({encoding})")
+        return None, encoding
+    return text, encoding
 
 
-def publish_source_txt_files(records: list[dict], repo_dir: Path, token: str) -> tuple[int, int, list[Path]]:
+def existing_txt_needs_rewrite(path: Path) -> bool:
+    raw = path.read_bytes()
+    if looks_like_lfs_pointer(raw):
+        return False
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return True
+    return is_probably_mojibake(text)
+
+
+def publish_source_txt_files(records: list[dict], repo_dir: Path, token: str) -> tuple[int, int, int, list[Path]]:
     txt_dir = repo_dir / "txt"
     written = 0
+    rewritten = 0
     existing = 0
     large_paths: list[Path] = []
     for record in records:
@@ -129,20 +200,24 @@ def publish_source_txt_files(records: list[dict], repo_dir: Path, token: str) ->
         if not stem:
             continue
         dest = txt_dir / f"{stem}.txt"
-        if dest.exists():
+        rewrite_existing = dest.exists() and existing_txt_needs_rewrite(dest)
+        if dest.exists() and not rewrite_existing:
             existing += 1
             continue
         downloaded = download_text_file(source_file_url(record), token)
-        text, encoded_size = downloaded
+        text, encoding = downloaded
         if text is None:
             continue
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(text, encoding="utf-8")
+        if rewrite_existing:
+            rewritten += 1
+            print(f"   ↻ 重写疑似乱码 txt: {dest.relative_to(txt_dir)} ({encoding})")
         if dest.stat().st_size > MAX_GIT_TXT_BYTES:
             large_paths.append(dest.relative_to(repo_dir))
             print(f"   ℹ 超过 10 MiB，改走 Git LFS: {dest.relative_to(txt_dir)} ({dest.stat().st_size} bytes)")
         written += 1
-    return written, existing, large_paths
+    return written, existing, rewritten, large_paths
 
 
 def track_large_txt_files(repo_dir: Path, large_paths: list[Path]) -> int:
@@ -171,13 +246,13 @@ def publish_once(records: list[dict], clone_url: str, token: str) -> tuple[int, 
         if ret != 0:
             print(f"❌ 克隆 Space 失败: {err[:300]}")
             return 1, False
-        written, existing, large_paths = publish_source_txt_files(records, Path(tmpdir), token)
+        written, existing, rewritten, large_paths = publish_source_txt_files(records, Path(tmpdir), token)
         try:
             lfs_count = track_large_txt_files(Path(tmpdir), large_paths)
         except RuntimeError as exc:
             print(f"❌ {exc}")
             return 1, False
-        print(f"💾 新写入 {written} 个 txt，已存在 {existing} 个 txt，LFS 大文件 {lfs_count} 个")
+        print(f"💾 写入/重写 {written} 个 txt（其中重写 {rewritten} 个），已存在 {existing} 个 txt，LFS 大文件 {lfs_count} 个")
         run('git config user.email "github-actions[bot]@users.noreply.github.com"', cwd=tmpdir)
         run('git config user.name "github-actions[bot]"', cwd=tmpdir)
         ret, out, err = run("git add txt .gitattributes", cwd=tmpdir)
