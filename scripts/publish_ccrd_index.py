@@ -12,20 +12,19 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import tarfile
 import tempfile
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-from huggingface_hub import (
-    HfApi,
-    batch_bucket_files,
-    download_bucket_files,
-    list_bucket_tree,
-    snapshot_download,
-)
+from huggingface_hub import batch_bucket_files, download_bucket_files, list_bucket_tree
 
 
-SOURCE_REPO = "vomebook/Search"
+SOURCE_ARCHIVE_URL = "https://github.com/anftm/voiceofml-search-pipeline/releases/download/ccrd/ccrd-corpus.tar.gz"
+SOURCE_ARCHIVE_SHA256 = "a6b1615054303740e892e535e3c9a6d4f4805ac572f7f1577b10685249a862f1"
+BUILDER_URL = "https://huggingface.co/spaces/vomebook/Search/resolve/main/build_fulltext_db.py"
+BUILDER_SHA256 = "33112f1b29164887c761be30203ee42f0d0e745fbe45d3389f748511d69b7d0d"
 BUCKET = "vomebook/ccrd-index"
 SOURCES = ("CCRD", "CW")
 TOKENIZER_VERSION = "cjk-bigram-boundary-fts5-v5"
@@ -38,6 +37,21 @@ def sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def download(url: str, destination: Path) -> None:
+    request = urllib.request.Request(url, headers={"User-Agent": "VoiceOfML-CCRD-Index-Pipeline/1.0"})
+    with urllib.request.urlopen(request, timeout=300) as response, destination.open("wb") as output:
+        shutil.copyfileobj(response, output)
+
+
+def extract_corpus(archive: Path, destination: Path) -> None:
+    with tarfile.open(archive, "r:gz") as bundle:
+        for member in bundle.getmembers():
+            path = Path(member.name)
+            if path.is_absolute() or ".." in path.parts or not (member.isdir() or member.isfile()):
+                raise RuntimeError(f"unsafe archive member: {member.name}")
+        bundle.extractall(destination, filter="data")
 
 
 def expected_counts(search_data: Path) -> dict[str, int]:
@@ -81,6 +95,8 @@ def read_current(workdir: Path, token: str) -> dict | None:
         return None
     try:
         return json.loads(target.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
     except (OSError, json.JSONDecodeError) as exc:
         raise RuntimeError("existing current.json is unreadable; refusing to replace it") from exc
 
@@ -95,20 +111,22 @@ def main() -> int:
 
     workdir = Path(tempfile.mkdtemp(prefix="ccrd_index_"))
     try:
-        api = HfApi(token=token)
-        source_info = api.repo_info(SOURCE_REPO, repo_type="space", revision="main")
-        source_revision = source_info.sha
-        print(f"Downloading {SOURCE_REPO}@{source_revision}", flush=True)
-        checkout = Path(
-            snapshot_download(
-                SOURCE_REPO,
-                repo_type="space",
-                revision=source_revision,
-                allow_patterns=["CCRD/**", "CW/**", "data/search_data.json.gz", "build_fulltext_db.py"],
-                local_dir=workdir / "source",
-                token=token,
-            )
-        )
+        archive = workdir / "ccrd-corpus.tar.gz"
+        print("Downloading CCRD corpus release asset", flush=True)
+        download(SOURCE_ARCHIVE_URL, archive)
+        archive_digest = sha256(archive)
+        if archive_digest != SOURCE_ARCHIVE_SHA256:
+            raise RuntimeError(f"unexpected corpus archive SHA-256: {archive_digest}")
+
+        checkout = workdir / "source"
+        checkout.mkdir()
+        extract_corpus(archive, checkout)
+        builder = checkout / "build_fulltext_db.py"
+        print("Downloading current CCRD index builder", flush=True)
+        download(BUILDER_URL, builder)
+        builder_digest = sha256(builder)
+        if builder_digest != BUILDER_SHA256:
+            raise RuntimeError(f"unexpected builder SHA-256: {builder_digest}")
         search_data = checkout / "data/search_data.json.gz"
         if not search_data.exists():
             raise RuntimeError("source checkout lacks data/search_data.json.gz")
@@ -126,12 +144,16 @@ def main() -> int:
             databases[source] = inspect_database(path, counts[source])
             files[source] = path
 
-        generation = source_revision
+        generation = f"ccrd-{archive_digest[:16]}-{builder_digest[:16]}"
         prefix = f"generations/{generation}"
         manifest = {
             "format": 1,
-            "source_repo": SOURCE_REPO,
-            "source_revision": source_revision,
+            "source_archive": {
+                "url": SOURCE_ARCHIVE_URL,
+                "sha256": archive_digest,
+                "bytes": archive.stat().st_size,
+            },
+            "builder": {"url": BUILDER_URL, "sha256": builder_digest},
             "tokenizer_version": TOKENIZER_VERSION,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "databases": {
@@ -147,7 +169,7 @@ def main() -> int:
         manifest_path = workdir / "current.json"
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
 
-        previous = read_current(workdir, token)
+        read_current(workdir, token)
         print(f"Uploading completed generation {generation}", flush=True)
         batch_bucket_files(
             BUCKET,
