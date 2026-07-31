@@ -16,6 +16,7 @@
 """
 
 import json
+import hashlib
 import os
 import shutil
 import subprocess
@@ -27,6 +28,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
+from collections import defaultdict
 
 # ═══════════════════════════════════════════════════════════
 # 配置
@@ -38,6 +40,7 @@ FOLDER_BROWSER_JSON = Path("output/folder_browser.json")
 SPACE_REPO = "VoiceOfML/Search"
 SEARCH_DATA_VERSION = 2
 INITIAL_PAGE_SIZE = 100
+NGRAM_MAGIC = b"VNG2"
 
 
 def decode_search_payload(data):
@@ -97,6 +100,53 @@ def encode_search_payload(records: list[dict]) -> dict:
         "fd": folders,
         "rc": encoded_records,
     }
+
+
+def encode_varint(value: int) -> bytes:
+    output = bytearray()
+    while value >= 0x80:
+        output.append((value & 0x7F) | 0x80)
+        value >>= 7
+    output.append(value)
+    return bytes(output)
+
+
+def write_ngram_index(path: Path, records: list[dict], width: int) -> None:
+    postings: dict[str, set[int]] = defaultdict(set)
+    digest = hashlib.sha256()
+    for record_id, record in enumerate(records):
+        file_name = str(record.get("File") or "").lower()
+        repo_name = str(record.get("Repo") or "").lower()
+        folder_path = "/".join(str(item).lower() for item in (record.get("Folder") or []))
+        digest.update(file_name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(repo_name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(folder_path.encode("utf-8"))
+        digest.update(b"\0")
+        grams = set()
+        for value in (file_name, repo_name, folder_path):
+            grams.update(value[index:index + width] for index in range(len(value) - width + 1))
+        for gram in grams:
+            postings[gram].add(record_id)
+
+    output = bytearray(NGRAM_MAGIC)
+    output.append(width)
+    output.extend(digest.digest())
+    output.extend(encode_varint(len(records)))
+    output.extend(encode_varint(len(postings)))
+    for gram in sorted(postings):
+        key = gram.encode("utf-8")
+        record_ids = sorted(postings[gram])
+        output.extend(encode_varint(len(key)))
+        output.extend(key)
+        output.extend(encode_varint(len(record_ids)))
+        previous = 0
+        for record_id in record_ids:
+            output.extend(encode_varint(record_id - previous))
+            previous = record_id
+    import gzip
+    path.write_bytes(gzip.compress(bytes(output), compresslevel=9, mtime=0))
 
 
 def trim_initial_results(records: list[dict]) -> list[dict]:
@@ -432,6 +482,8 @@ def main():
     (data_dir / "folder_tree.json.gz").write_bytes(FOLDER_TREE_JSON.with_suffix(".json.gz").read_bytes())
     browser_text = json.dumps(browser_data, ensure_ascii=False, separators=(",", ":"))
     (data_dir / "folder_browser.json.gz").write_bytes(gzip.compress(browser_text.encode("utf-8"), compresslevel=9, mtime=0))
+    write_ngram_index(data_dir / "search_ngrams_2.bin.gz", records, 2)
+    write_ngram_index(data_dir / "search_ngrams_3.bin.gz", records, 3)
     initial_urls = write_initial_payloads(data_dir, records)
     sidebar_urls = write_sidebar_payloads(data_dir, records, browser_data)
 
@@ -439,13 +491,14 @@ def main():
     gz_size_mb = dest_gz.stat().st_size / 1024 / 1024
     print(f"\n💾 已写入:")
     print(f"   {dest_gz} ({gz_size_mb:.1f} MB)")
+    print(f"   ngrams: 2={((data_dir / 'search_ngrams_2.bin.gz').stat().st_size / 1024 / 1024):.1f} MB, 3={((data_dir / 'search_ngrams_3.bin.gz').stat().st_size / 1024 / 1024):.1f} MB")
     print(f"   initial: {len(initial_urls)} 个首屏文件")
     print(f"   sidebar: {len(sidebar_urls)} 个侧栏首屏文件")
     # ── 5. Git commit & push ───────────────────────────
     print(f"\n📤 提交并推送...")
     run('git config user.email "github-actions[bot]@users.noreply.github.com"', cwd=tmpdir)
     run('git config user.name "github-actions[bot]"', cwd=tmpdir)
-    ret, out, err = run("git add data/search_data.json.gz data/folder_tree.json.gz data/folder_browser.json.gz data/initial data/sidebar", cwd=tmpdir)
+    ret, out, err = run("git add data/search_data.json.gz data/folder_tree.json.gz data/folder_browser.json.gz data/search_ngrams_2.bin.gz data/search_ngrams_3.bin.gz data/initial data/sidebar", cwd=tmpdir)
     if ret != 0:
         print(f"   ⚠ git add 失败: {err}")
 
