@@ -24,10 +24,10 @@ from huggingface_hub import batch_bucket_files, download_bucket_files, list_buck
 SOURCE_ARCHIVE_URL = "https://github.com/anftm/voiceofml-search-pipeline/releases/download/ccrd/ccrd-corpus.tar.gz"
 SOURCE_ARCHIVE_SHA256 = "a6b1615054303740e892e535e3c9a6d4f4805ac572f7f1577b10685249a862f1"
 BUILDER_URL = "https://huggingface.co/spaces/vomebook/Search/resolve/main/build_fulltext_db.py"
-BUILDER_SHA256 = "33112f1b29164887c761be30203ee42f0d0e745fbe45d3389f748511d69b7d0d"
+BUILDER_SHA256 = "293f0c65db6a4709cb756f9bbbcaa95d3f7dbb2442e21e91f9f181f166dc1e53"
 BUCKET = "vomebook/ccrd-index"
 SOURCES = ("CCRD", "CW")
-TOKENIZER_VERSION = "cjk-bigram-boundary-fts5-v5"
+TOKENIZER_VERSION = "cjk-bigram-boundary-fts5-v6-snippet-anchors"
 CURRENT_PATH = "current.json"
 
 
@@ -75,6 +75,7 @@ def inspect_database(path: Path, expected_documents: int) -> dict[str, int | str
         documents = int(connection.execute("SELECT COUNT(*) FROM documents").fetchone()[0])
         fts_rows = int(connection.execute("SELECT COUNT(*) FROM content_fts").fetchone()[0])
         postings = int(connection.execute("SELECT COUNT(*) FROM postings").fetchone()[0])
+        anchors = int(connection.execute("SELECT COUNT(*) FROM snippet_anchors").fetchone()[0])
     if integrity != "ok":
         raise RuntimeError(f"{path.name}: integrity_check returned {integrity!r}")
     if not tokenizer or tokenizer[0] != TOKENIZER_VERSION:
@@ -83,7 +84,9 @@ def inspect_database(path: Path, expected_documents: int) -> dict[str, int | str
         raise RuntimeError(
             f"{path.name}: expected {expected_documents} documents/FTS rows, got {documents}/{fts_rows}"
         )
-    return {"documents": documents, "fts_rows": fts_rows, "postings": postings}
+    if anchors <= 0:
+        raise RuntimeError(f"{path.name}: snippet anchors are missing")
+    return {"documents": documents, "fts_rows": fts_rows, "postings": postings, "snippet_anchors": anchors}
 
 
 def read_current(workdir: Path, token: str) -> dict | None:
