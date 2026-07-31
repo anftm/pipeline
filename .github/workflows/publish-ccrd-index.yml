@@ -1,0 +1,30 @@
+name: Publish CCRD Index
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: publish-ccrd-index
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout pipeline repo
+        uses: actions/checkout@v5
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r scripts/requirements.txt
+
+      - name: Build and publish CCRD indexes
+        run: python scripts/publish_ccrd_index.py
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
