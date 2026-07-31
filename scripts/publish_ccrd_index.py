@@ -180,6 +180,9 @@ def main() -> int:
             token=token,
         )
         # Publish the pointer only after both immutable database files are present.
+        # Buckets are mutable but an existing small pointer can remain cached. Recreate it
+        # after the immutable generation is complete rather than relying on an overwrite.
+        batch_bucket_files(BUCKET, delete=[CURRENT_PATH], token=token)
         batch_bucket_files(BUCKET, add=[(str(manifest_path), CURRENT_PATH)], token=token)
 
         stale_paths = sorted(
