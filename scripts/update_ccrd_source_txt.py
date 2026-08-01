@@ -12,7 +12,7 @@ from pathlib import Path
 from ccrd_source_override import SPACE_PATH, download_override
 
 
-SPACE_REPO = "VoiceOfML/Search"
+SPACE_REPO = "vomebook/Search"
 
 
 def run(command: list[str], cwd: Path) -> None:
@@ -42,7 +42,7 @@ def main() -> int:
         if not changed:
             print("CCRD source TXT is already current")
             return 0
-        run(["git", "commit", "-m", "chore: update CCRD source text [skip ci]"], temporary)
+        run(["git", "commit", "-m", "chore: update CCRD source text"], temporary)
         run(["git", "push"], temporary)
         print(f"Updated CCRD source: {details['url']} ({details['sha256']})")
         return 0
