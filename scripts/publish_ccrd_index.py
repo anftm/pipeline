@@ -20,8 +20,10 @@ from pathlib import Path
 
 from huggingface_hub import batch_bucket_files, download_bucket_files, list_bucket_tree
 
+from ccrd_source_override import CORPUS_PATH, download_override
 
-SOURCE_ARCHIVE_URL = "https://github.com/anftm/voiceofml-search-pipeline/releases/download/ccrd/ccrd-corpus.tar.gz"
+
+SOURCE_ARCHIVE_URL = "https://github.com/anftm/pipeline/releases/download/ccrd/ccrd-corpus.tar.gz"
 SOURCE_ARCHIVE_SHA256 = "a6b1615054303740e892e535e3c9a6d4f4805ac572f7f1577b10685249a862f1"
 BUILDER_URL = "https://huggingface.co/spaces/vomebook/Search/resolve/main/build_fulltext_db.py"
 BUILDER_SHA256 = "293f0c65db6a4709cb756f9bbbcaa95d3f7dbb2442e21e91f9f181f166dc1e53"
@@ -134,6 +136,11 @@ def main() -> int:
         if not search_data.exists():
             raise RuntimeError("source checkout lacks data/search_data.json.gz")
         counts = expected_counts(search_data)
+        corpus_target = checkout / CORPUS_PATH
+        if not corpus_target.is_file():
+            raise RuntimeError(f"corpus lacks legacy CCRD target path: {CORPUS_PATH}")
+        print("Replacing the changing CCRD source text", flush=True)
+        override = download_override(corpus_target)
 
         print("Building CCRD full-text indexes", flush=True)
         subprocess.run([sys.executable, "build_fulltext_db.py"], cwd=checkout, check=True)
@@ -147,7 +154,7 @@ def main() -> int:
             databases[source] = inspect_database(path, counts[source])
             files[source] = path
 
-        generation = f"ccrd-{archive_digest[:16]}-{builder_digest[:16]}"
+        generation = f"ccrd-{archive_digest[:16]}-{builder_digest[:16]}-{override['sha256'][:16]}"
         prefix = f"generations/{generation}"
         manifest = {
             "format": 1,
@@ -157,6 +164,7 @@ def main() -> int:
                 "bytes": archive.stat().st_size,
             },
             "builder": {"url": BUILDER_URL, "sha256": builder_digest},
+            "source_overrides": {str(CORPUS_PATH): override},
             "tokenizer_version": TOKENIZER_VERSION,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "databases": {
