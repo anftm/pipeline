@@ -5,6 +5,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import sys
 import subprocess
 import time
@@ -109,14 +110,23 @@ def append_patch(existing, patch):
 
 
 def open_pull_request(token, repo, branch):
-    query = urllib.parse.urlencode({"head": f"{OWNER}:{branch}", "state": "open"})
+    query = urllib.parse.urlencode({"head": f"{OWNER}:{branch}", "state": "all", "per_page": 100})
     status, data = api_request(token, "GET", f"{repo_path(repo)}/pulls?{query}")
     if status == 200 and isinstance(data, list) and data:
-        return {
-            "number": data[0].get("number"),
-            "url": data[0].get("html_url"),
-            "sha": data[0].get("head", {}).get("sha"),
-        }
+        for pull in data:
+            if pull.get("state") == "closed" and not pull.get("merged"):
+                detail_status, detail = api_request(token, "GET", f"{repo_path(repo)}/pulls/{pull.get('number')}")
+                if detail_status != 200 or not detail.get("merged"):
+                    continue
+                pull = detail
+            if pull.get("state") == "open" or pull.get("merged"):
+                return {
+                    "number": pull.get("number"),
+                    "url": pull.get("html_url"),
+                    "sha": pull.get("head", {}).get("sha"),
+                    "base": pull.get("base", {}).get("ref"),
+                    "merge_commit_sha": pull.get("merge_commit_sha"),
+                }
     return None
 
 
@@ -124,6 +134,7 @@ def submit_file(token, repo, base, path, content, title, description, correction
     branch = f"proofread/{correction_id}-{base}"
     existing_pull = open_pull_request(token, repo, branch)
     if existing_pull:
+        existing_pull["base"] = base
         return existing_pull
     _base_content, base_file_sha = get_file(token, repo, base, path)
     branch_revision = branch_sha(token, repo, branch)
@@ -154,7 +165,10 @@ def submit_file(token, repo, base, path, content, title, description, correction
         (201,),
         {"title": title, "head": branch, "base": base, "body": description},
     )
-    return {"number": pull.get("number"), "url": pull.get("html_url"), "sha": pull.get("head", {}).get("sha")}
+    return {
+        "number": pull.get("number"), "url": pull.get("html_url"),
+        "sha": pull.get("head", {}).get("sha"), "base": base,
+    }
 
 
 def merge_pull(token, repo, pull):
@@ -180,6 +194,7 @@ def merge_pull(token, repo, pull):
             "commit_title": data.get("title"),
         })
         if status == 200 and result.get("merged"):
+            pull["merge_commit_sha"] = result.get("sha")
             return True
         if status in (405, 409):
             return False
@@ -238,6 +253,68 @@ def change_summary(request):
     changes.extend(labels.get(key, key) for key in article)
     changes.extend(labels.get(key, key) for key in source)
     return changes or ["校订"]
+
+
+def validate_patch(patch):
+    if not isinstance(patch, dict) or patch.get("version") != 2:
+        fail("patch must be a PatchV2 object")
+    if set(patch) - {"version", "parts", "comments", "description", "newComments"}:
+        fail("patch contains unsupported fields")
+    if not isinstance(patch.get("parts"), dict) or not isinstance(patch.get("comments"), dict):
+        fail("patch parts and comments must be objects")
+    if not isinstance(patch.get("description", ""), str):
+        fail("patch description must be a string")
+    if "newComments" in patch and (
+        not isinstance(patch["newComments"], list)
+        or any(not isinstance(value, str) for value in patch["newComments"])
+    ):
+        fail("patch newComments must be a string list")
+    for collection, allowed in ((patch["parts"], {"insertBefore", "insertAfter", "delete", "diff", "type"}),
+                                (patch["comments"], {"insertBefore", "insertAfter", "delete", "diff"})):
+        for index, change in collection.items():
+            if not isinstance(index, str) or not index.isdigit() or (len(index) > 1 and index[0] == "0"):
+                fail("patch index is invalid")
+            if not isinstance(change, dict) or not change or set(change) - allowed:
+                fail("patch operation is invalid")
+            if "delete" in change and not isinstance(change["delete"], bool):
+                fail("patch delete must be boolean")
+            if "diff" in change and not isinstance(change["diff"], str):
+                fail("patch diff must be a string")
+            for key in ("insertBefore", "insertAfter"):
+                if key in change and not isinstance(change[key], list):
+                    fail("patch insert operation must be a list")
+    if not patch["parts"] and not patch["comments"] and not patch.get("description") and "newComments" not in patch:
+        fail("patch contains no changes")
+
+
+def auto_merge_allowed(kind, patch, metadata):
+    if kind != "proofread" or not isinstance(patch, dict) or isinstance(metadata, dict):
+        return False
+    if patch.get("newComments") or patch.get("description"):
+        return False
+    if not patch.get("parts") and not patch.get("comments"):
+        return False
+    changes = [*patch.get("parts", {}).values(), *patch.get("comments", {}).values()]
+    if not changes or len(changes) > 3:
+        return False
+    cost = 0
+    for change in changes:
+        if not isinstance(change, dict) or set(change) != {"diff"} or not isinstance(change["diff"], str):
+            return False
+        for token in change["diff"].split("\t"):
+            if not token or token[0] not in {"=", "-", "+"}:
+                return False
+            if token[0] in {"=", "-"}:
+                if not token[1:].isdigit():
+                    return False
+                if token[0] == "-":
+                    cost += int(token[1:])
+            else:
+                try:
+                    cost += len(urllib.parse.unquote_to_bytes(token[1:].replace("+", "%2B")).decode("utf-8").encode("utf-16-le")) // 2
+                except (UnicodeDecodeError, ValueError):
+                    return False
+    return cost <= 20
 
 
 def upsert_tracker_issue(token, correction_id, request, repo, article_id, pulls):
@@ -345,7 +422,14 @@ def notify_auto_merged(token, correction_id, request, repo, article_id, pulls):
     ]
     if preview:
         lines.append(f"- BHA 预览：{preview}")
-    lines.extend(f"- 已合并 PR：[{repo}#{pull['number']}]({pull['url']})" for pull in pulls)
+    for pull in pulls:
+        lines.append(f"- 已合并 PR：[{repo}#{pull['number']}]({pull['url']})")
+        lines.append(f"  - 分支：`{pull.get('base', 'ocr_patch')}`；合并提交：`{pull.get('merge_commit_sha') or '待查询'}`")
+    lines.extend([
+        "",
+        f"如需撤回，请在本 Issue 评论：`/proofread-revert {correction_id} CONFIRM`。",
+        "撤回操作只会创建人工审核的 revert PR，不会直接修改仓库。",
+    ])
     response_or_fail(
         token, "POST", f"{full_repo_path(TRACKER_REPOSITORY)}/issues/{issue['number']}/comments", (201,),
         {"body": "\n".join(lines)},
@@ -366,6 +450,9 @@ def update_config(existing, request):
         text=True,
         capture_output=True,
         check=False,
+        # Config is fetched from a fork and evaluated by the helper. Never expose
+        # the archive-write token to that process or to code executed in its VM.
+        env={"PATH": os.environ.get("PATH", "")},
     )
     if process.returncode != 0:
         fail(f"config update failed: {process.stderr.strip()}")
@@ -434,6 +521,8 @@ def main():
                 metadata = None
         if patch is None and not isinstance(metadata, dict):
             fail("proofread requires patch or metadata")
+        if patch is not None:
+            validate_patch(patch)
         patch_path(archive_id, article_id, publication_id)
         title = request.get("title") or f"校订 {article_id}"
         description = request.get("description") or "由 BHA 校订后端提交。"
@@ -464,7 +553,7 @@ def main():
                 title, description, correction_id,
             ))
         auto_merged = []
-        if request.get("auto_merge") is True:
+        if request.get("auto_merge") is True and auto_merge_allowed(kind, patch, metadata):
             auto_merged = [pull["url"] for pull in pull_requests if merge_pull(token, repo, pull)]
         auto_merged_urls = set(auto_merged)
         pending_pulls = [pull for pull in pull_requests if pull["url"] not in auto_merged_urls]
@@ -517,7 +606,7 @@ def main():
             path = f"{publication_id}.ts"
         else:
             path = str(request.get("path", ""))
-            if not path or ".." in path:
+            if not re.fullmatch(r"[A-Za-z0-9_.-]+\.ts", path):
                 fail("config path is invalid")
             if not isinstance(request.get("content"), str):
                 fail("config content is required")
