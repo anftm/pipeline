@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import sys
+import subprocess
 import time
 import urllib.error
 import urllib.parse
@@ -132,14 +133,47 @@ def main():
         if patch is None:
             fail("patch_json is required")
     else:
-        path = str(request.get("path", ""))
-        if not path.startswith(f"archives{archive_id}/") or ".." in path:
-            fail("config path must stay inside the selected archive")
-        if not isinstance(request.get("content"), str):
-            fail("config content is required")
+        publication_id = str(request.get("publication_id", ""))
+        metadata = request.get("metadata", request.get("metadata_json"))
+        if isinstance(metadata, str):
+            try:
+                metadata = json.loads(metadata)
+            except json.JSONDecodeError as exc:
+                fail(f"metadata_json is invalid JSON: {exc}")
+            request["metadata"] = metadata
+        if publication_id and isinstance(metadata, dict):
+            if not all(char.isalnum() or char in "._-" for char in publication_id):
+                fail("publication_id contains invalid characters")
+            path = f"{publication_id}.ts"
+        else:
+            path = str(request.get("path", ""))
+            if not path or ".." in path:
+                fail("config path is invalid")
+            if not isinstance(request.get("content"), str):
+                fail("config content is required")
 
     existing, existing_sha = get_file(token, repo, base, path)
-    content = append_patch(existing, patch) if kind == "ocr_patch" else request["content"]
+    if kind == "ocr_patch":
+        content = append_patch(existing, patch)
+    elif isinstance(request.get("metadata"), dict):
+        helper = os.path.join(os.path.dirname(__file__), "update_archive_config.mjs")
+        process = subprocess.run(
+            ["node", helper],
+            input=json.dumps({
+                "content": existing,
+                "article_id": request.get("article_id"),
+                "locator": request.get("locator"),
+                "metadata": request["metadata"],
+            }, ensure_ascii=False),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if process.returncode != 0:
+            fail(f"config update failed: {process.stderr.strip()}")
+        content = process.stdout
+    else:
+        content = request["content"]
     suffix = hashlib.sha256(content.encode("utf-8")).hexdigest()[:10]
     branch = f"proofread/{int(time.time())}-{suffix}"
     base_sha = response_or_fail(token, "GET", ref_path(repo, base), (200,))["object"]["sha"]
