@@ -35,6 +35,7 @@ jobs:
       - name: Record accepted revisions
         if: steps.revisions.outputs.baseline == 'true' || steps.revisions.outputs.changed == 'true'
         run: |
+          git pull --rebase
           mv /tmp/bha-parsed-revisions.json state/bha-parsed-revisions.json
           git add state/bha-parsed-revisions.json
           git diff --cached --quiet && exit 0

@@ -8,9 +8,9 @@ on:
         required: true
         type: string
       kind:
-        description: ocr_patch or config
+        description: proofread, ocr_patch, or config
         required: true
-        default: ocr_patch
+        default: proofread
         type: string
       article_id:
         description: Article ID for ocr_patch
