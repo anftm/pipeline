@@ -16,6 +16,7 @@ permissions:
 jobs:
   update:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v5
       - name: Check parsed revisions
@@ -24,7 +25,6 @@ jobs:
           GH_PAT: ${{ secrets.GH_PAT }}
         run: python3 scripts/check_bha_revisions.py
       - name: Refresh proofreading review queue
-        continue-on-error: true
         env:
           TRACKER_TOKEN: ${{ github.token }}
         run: python3 scripts/update_proofread_issues.py
@@ -38,6 +38,30 @@ jobs:
             --request POST --header "Authorization: Bearer ${BHA_REINDEX_TOKEN}" \
             "${BHA_BASE_URL%/}/api/reindex")
           test "$status" = "202"
+      - name: Wait for accepted revisions
+        if: steps.revisions.outputs.changed == 'true'
+        env:
+          BHA_BASE_URL: ${{ vars.BHA_BASE_URL || 'https://vomebook-bha-search.hf.space' }}
+          BHA_REINDEX_TOKEN: ${{ secrets.BHA_REINDEX_TOKEN }}
+        run: |
+          for attempt in $(seq 1 180); do
+            curl --silent --show-error --fail \
+              --header "Authorization: Bearer ${BHA_REINDEX_TOKEN}" \
+              "${BHA_BASE_URL%/}/api/reindex/status" > /tmp/bha-reindex-status.json
+            if python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          expected = json.loads(Path("/tmp/bha-parsed-revisions.json").read_text())
+          actual = json.loads(Path("/tmp/bha-reindex-status.json").read_text())
+          raise SystemExit(0 if actual.get("index_status") == "ready" and actual.get("archive_revisions") == expected else 1)
+          PY
+            then
+              exit 0
+            fi
+            sleep 30
+          done
+          exit 1
       - name: Record accepted revisions
         if: steps.revisions.outputs.baseline == 'true' || steps.revisions.outputs.changed == 'true'
         run: |
