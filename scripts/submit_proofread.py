@@ -7,7 +7,6 @@ import json
 import os
 import sys
 import subprocess
-import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -48,6 +47,15 @@ def repo_path(repo):
 
 def ref_path(repo, branch):
     return f"{repo_path(repo)}/git/ref/heads/{urllib.parse.quote(branch, safe='')}"
+
+
+def branch_sha(token, repo, branch):
+    status, data = api_request(token, "GET", ref_path(repo, branch))
+    if status == 404:
+        return None
+    if status != 200:
+        fail(f"cannot read {repo}/{branch} ref: {data}")
+    return data.get("object", {}).get("sha")
 
 
 def fail(message):
@@ -91,6 +99,76 @@ def append_patch(existing, patch):
     return source[:index] + "  " + encoded_patch + ",\n" + source[index:]
 
 
+def open_pull_request(token, repo, branch):
+    query = urllib.parse.urlencode({"head": f"{OWNER}:{branch}", "state": "open"})
+    status, data = api_request(token, "GET", f"{repo_path(repo)}/pulls?{query}")
+    if status == 200 and isinstance(data, list) and data:
+        return data[0].get("html_url")
+    return None
+
+
+def submit_file(token, repo, base, path, content, title, description, correction_id):
+    branch = f"proofread/{correction_id}-{base}"
+    existing_pull = open_pull_request(token, repo, branch)
+    if existing_pull:
+        return existing_pull
+    _base_content, base_file_sha = get_file(token, repo, base, path)
+    branch_revision = branch_sha(token, repo, branch)
+    if branch_revision is None:
+        base_revision = response_or_fail(token, "GET", ref_path(repo, base), (200,))["object"]["sha"]
+        response_or_fail(
+            token, "POST", f"{repo_path(repo)}/git/refs", (201,),
+            {"ref": f"refs/heads/{branch}", "sha": base_revision},
+        )
+    branch_content, branch_file_sha = get_file(token, repo, branch, path)
+    if branch_content != content:
+        response_or_fail(
+            token,
+            "PUT",
+            f"{repo_path(repo)}/contents/{urllib.parse.quote(path, safe='')}",
+            (200, 201),
+            {
+                "branch": branch,
+                "message": title,
+                "content": base64.b64encode(content.encode("utf-8")).decode("ascii"),
+                **({"sha": branch_file_sha or base_file_sha} if branch_file_sha or base_file_sha else {}),
+            },
+        )
+    pull = response_or_fail(
+        token,
+        "POST",
+        f"{repo_path(repo)}/pulls",
+        (201,),
+        {"title": title, "head": branch, "base": base, "body": description},
+    )
+    return pull["html_url"]
+
+
+def update_config(existing, request):
+    helper = os.path.join(os.path.dirname(__file__), "update_archive_config.mjs")
+    process = subprocess.run(
+        ["node", helper],
+        input=json.dumps({
+            "content": existing,
+            "article_id": request.get("article_id"),
+            "locator": request.get("locator"),
+            "metadata": request["metadata"],
+        }, ensure_ascii=False),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if process.returncode != 0:
+        fail(f"config update failed: {process.stderr.strip()}")
+    try:
+        result = json.loads(process.stdout)
+    except json.JSONDecodeError as exc:
+        fail(f"config update returned invalid JSON: {exc}")
+    if not isinstance(result.get("content"), str) or not isinstance(result.get("article_id"), str):
+        fail("config update returned an invalid result")
+    return result["content"], result["article_id"]
+
+
 def load_request():
     event_path = os.environ.get("GITHUB_EVENT_PATH")
     if not event_path:
@@ -116,9 +194,72 @@ def main():
         fail("archive_id must be between 0 and 31")
 
     kind = request.get("kind", "ocr_patch")
-    if kind not in ("ocr_patch", "config"):
-        fail("kind must be ocr_patch or config")
+    if kind not in ("proofread", "ocr_patch", "config"):
+        fail("kind must be proofread, ocr_patch, or config")
     repo = f"{REPOSITORY_PREFIX}{archive_id}"
+    correction_id = hashlib.sha256(
+        json.dumps(request, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:12]
+    if kind == "proofread":
+        article_id = str(request.get("article_id", ""))
+        publication_id = str(request.get("publication_id", ""))
+        patch = request.get("patch", request.get("patch_json"))
+        metadata = request.get("metadata", request.get("metadata_json"))
+        if isinstance(patch, str):
+            if patch.strip():
+                try:
+                    patch = json.loads(patch)
+                except json.JSONDecodeError as exc:
+                    fail(f"patch_json is invalid JSON: {exc}")
+                request["patch"] = patch
+            else:
+                patch = None
+        if isinstance(metadata, str):
+            if metadata.strip():
+                try:
+                    metadata = json.loads(metadata)
+                except json.JSONDecodeError as exc:
+                    fail(f"metadata_json is invalid JSON: {exc}")
+                request["metadata"] = metadata
+            else:
+                metadata = None
+        if patch is None and not isinstance(metadata, dict):
+            fail("proofread requires patch or metadata")
+        patch_path(archive_id, article_id, publication_id)
+        title = request.get("title") or f"校订 {article_id}"
+        description = request.get("description") or "由 BHA 校订后端提交。"
+        pull_requests = []
+        new_article_id = article_id
+        if isinstance(metadata, dict):
+            config_path = f"{publication_id}.ts"
+            config_content, _sha = get_file(token, repo, "config", config_path)
+            if not config_content:
+                fail(f"config file does not exist: {config_path}")
+            updated_config, new_article_id = update_config(config_content, request)
+            pull_requests.append(submit_file(
+                token, repo, "config", config_path, updated_config,
+                title, description, correction_id,
+            ))
+        if patch is not None or new_article_id != article_id:
+            target_path = patch_path(archive_id, new_article_id, publication_id)
+            target_content, _sha = get_file(token, repo, "ocr_patch", target_path)
+            if not target_content and new_article_id != article_id:
+                old_path = patch_path(archive_id, article_id, publication_id)
+                target_content, _sha = get_file(token, repo, "ocr_patch", old_path)
+            if patch is not None:
+                target_content = append_patch(target_content, patch)
+            elif not target_content:
+                target_content = "export default [\n];"
+            pull_requests.append(submit_file(
+                token, repo, "ocr_patch", target_path, target_content,
+                title, description, correction_id,
+            ))
+        print(json.dumps({
+            "repository": repo,
+            "article_id": new_article_id,
+            "pull_requests": pull_requests,
+        }, ensure_ascii=False))
+        return
     base = kind
     if kind == "ocr_patch":
         path = patch_path(archive_id, request.get("article_id"), request.get("publication_id"))
@@ -152,65 +293,20 @@ def main():
             if not isinstance(request.get("content"), str):
                 fail("config content is required")
 
-    existing, existing_sha = get_file(token, repo, base, path)
+    existing, _existing_sha = get_file(token, repo, base, path)
     if kind == "ocr_patch":
         content = append_patch(existing, patch)
     elif isinstance(request.get("metadata"), dict):
-        helper = os.path.join(os.path.dirname(__file__), "update_archive_config.mjs")
-        process = subprocess.run(
-            ["node", helper],
-            input=json.dumps({
-                "content": existing,
-                "article_id": request.get("article_id"),
-                "locator": request.get("locator"),
-                "metadata": request["metadata"],
-            }, ensure_ascii=False),
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        if process.returncode != 0:
-            fail(f"config update failed: {process.stderr.strip()}")
-        content = process.stdout
+        content, _new_article_id = update_config(existing, request)
     else:
         content = request["content"]
-    suffix = hashlib.sha256(content.encode("utf-8")).hexdigest()[:10]
-    branch = f"proofread/{int(time.time())}-{suffix}"
-    base_sha = response_or_fail(token, "GET", ref_path(repo, base), (200,))["object"]["sha"]
-    response_or_fail(
-        token,
-        "POST",
-        f"{repo_path(repo)}/git/refs",
-        (201,),
-        {"ref": f"refs/heads/{branch}", "sha": base_sha},
-    )
     title = request.get("title") or f"校订 {path}"
-    response_or_fail(
-        token,
-        "PUT",
-        f"{repo_path(repo)}/contents/{urllib.parse.quote(path, safe='')}",
-        (200, 201),
-        {
-            "branch": branch,
-            "message": title,
-            "content": base64.b64encode(content.encode("utf-8")).decode("ascii"),
-            **({"sha": existing_sha} if existing_sha else {}),
-        },
+    pull = submit_file(
+        token, repo, base, path, content, title,
+        request.get("description") or f"自动提交到 {repo}/{base}，合并后由仓库 workflow 生成后续数据。",
+        correction_id,
     )
-    pull = response_or_fail(
-        token,
-        "POST",
-        f"{repo_path(repo)}/pulls",
-        (201,),
-        {
-            "title": title,
-            "head": branch,
-            "base": base,
-            "body": request.get("description")
-            or f"自动提交到 {repo}/{base}，合并后由仓库 workflow 生成后续数据。",
-        },
-    )
-    print(json.dumps({"repository": repo, "branch": branch, "path": path, "pull_request": pull["html_url"]}, ensure_ascii=False))
+    print(json.dumps({"repository": repo, "path": path, "pull_request": pull}, ensure_ascii=False))
 
 
 if __name__ == "__main__":

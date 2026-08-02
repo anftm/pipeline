@@ -142,6 +142,29 @@ def sync_branch(token: str, repo: str, branch: str) -> None:
         print(f"[{repo}/{branch}] created at upstream revision")
         return
 
+    compare_path = (
+        f"{repo_path(MIRROR_OWNER, repo)}/compare/"
+        f"{urllib.parse.quote(upstream_sha, safe='')}...{urllib.parse.quote(mirror_sha, safe='')}"
+    )
+    compare_status, comparison = api_request(token, "GET", compare_path)
+    if compare_status == 200:
+        relation = comparison.get("status")
+        if relation == "ahead":
+            print(f"[{repo}/{branch}] fork is ahead of upstream, preserved")
+            return
+        if relation == "identical":
+            print(f"[{repo}/{branch}] up to date")
+            return
+        if relation == "diverged":
+            raise RuntimeError(f"[{repo}/{branch}] diverged; manual sync required")
+        if relation != "behind":
+            raise RuntimeError(f"[{repo}/{branch}] unexpected comparison status: {relation}")
+    elif compare_status != 404:
+        raise RuntimeError(
+            f"[{repo}/{branch}] comparison failed ({compare_status}): "
+            f"{comparison.get('message', comparison)}"
+        )
+
     status, data = api_request(
         token,
         "PATCH",
