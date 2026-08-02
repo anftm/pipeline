@@ -21,10 +21,10 @@ permissions:
 
 jobs:
   revert:
-    if: github.event_name == 'workflow_dispatch' || (github.event.issue.pull_request == null && contains(github.event.comment.body, '/proofread-revert'))
+    if: github.event_name == 'workflow_dispatch' || (github.event.issue.pull_request == null && contains(github.event.issue.body, '<!-- proofreading-auto-merge-log -->') && contains(github.event.comment.body, '/proofread-revert'))
     runs-on: ubuntu-latest
     concurrency:
-      group: proofreading-revert-${{ github.event.inputs.correction_id || github.event.issue.number }}
+      group: proofreading-revert
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v5

@@ -53,6 +53,10 @@ permissions:
   pull-requests: write
   issues: write
 
+concurrency:
+  group: submit-proofread
+  cancel-in-progress: false
+
 jobs:
   submit:
     runs-on: ubuntu-latest

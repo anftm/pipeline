@@ -19,6 +19,8 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.ref_name }}
       - name: Check parsed revisions
         id: revisions
         env:
@@ -45,10 +47,10 @@ jobs:
           BHA_REINDEX_TOKEN: ${{ secrets.BHA_REINDEX_TOKEN }}
         run: |
           for attempt in $(seq 1 180); do
-            curl --silent --show-error --fail \
+            status=$(curl --silent --show-error --output /tmp/bha-reindex-status.json --write-out '%{http_code}' \
               --header "Authorization: Bearer ${BHA_REINDEX_TOKEN}" \
-              "${BHA_BASE_URL%/}/api/reindex/status" > /tmp/bha-reindex-status.json
-            if python3 - <<'PY'
+              "${BHA_BASE_URL%/}/api/reindex/status" || true)
+            if test "$status" = "200" && python3 - <<'PY'
           import json
           from pathlib import Path
 
@@ -65,11 +67,11 @@ jobs:
       - name: Record accepted revisions
         if: steps.revisions.outputs.baseline == 'true' || steps.revisions.outputs.changed == 'true'
         run: |
-          git pull --rebase
+          git pull --rebase origin "${GITHUB_REF_NAME}"
           mv /tmp/bha-parsed-revisions.json state/bha-parsed-revisions.json
           git add state/bha-parsed-revisions.json
           git diff --cached --quiet && exit 0
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git commit -m "Update BHA parsed revisions"
-          git push
+          git push origin "HEAD:${GITHUB_REF_NAME}"
