@@ -125,6 +125,7 @@ def open_pull_request(token, repo, branch):
                     "url": pull.get("html_url"),
                     "sha": pull.get("head", {}).get("sha"),
                     "base": pull.get("base", {}).get("ref"),
+                    "head": pull.get("head", {}).get("ref") or branch,
                     "merge_commit_sha": pull.get("merge_commit_sha"),
                 }
     return None
@@ -133,10 +134,17 @@ def open_pull_request(token, repo, branch):
 def submit_file(token, repo, base, path, content, title, description, correction_id):
     branch = f"proofread/{correction_id}-{base}"
     existing_pull = open_pull_request(token, repo, branch)
-    if existing_pull:
-        existing_pull["base"] = base
-        return existing_pull
     _base_content, base_file_sha = get_file(token, repo, base, path)
+    if existing_pull:
+        if existing_pull.get("base") != base or existing_pull.get("head") != branch:
+            fail(f"existing proofreading PR has an unexpected branch target: {existing_pull}")
+        branch_content, _branch_file_sha = get_file(token, repo, branch, path)
+        if branch_content != content:
+            fail("existing proofreading PR branch does not contain the requested file content")
+        status, files = api_request(token, "GET", f"{repo_path(repo)}/pulls/{existing_pull['number']}/files?per_page=100")
+        if status != 200 or not isinstance(files, list) or {item.get("filename") for item in files} != {path}:
+            fail("existing proofreading PR contains unexpected files")
+        return existing_pull
     branch_revision = branch_sha(token, repo, branch)
     if branch_revision is None:
         base_revision = response_or_fail(token, "GET", ref_path(repo, base), (200,))["object"]["sha"]
@@ -167,7 +175,7 @@ def submit_file(token, repo, base, path, content, title, description, correction
     )
     return {
         "number": pull.get("number"), "url": pull.get("html_url"),
-        "sha": pull.get("head", {}).get("sha"), "base": base,
+        "sha": pull.get("head", {}).get("sha"), "base": base, "head": branch,
     }
 
 
@@ -424,7 +432,7 @@ def notify_auto_merged(token, correction_id, request, repo, article_id, pulls):
         lines.append(f"- BHA 预览：{preview}")
     for pull in pulls:
         lines.append(f"- 已合并 PR：[{repo}#{pull['number']}]({pull['url']})")
-        lines.append(f"  - 分支：`{pull.get('base', 'ocr_patch')}`；合并提交：`{pull.get('merge_commit_sha') or '待查询'}`")
+        lines.append(f"  - 来源分支：`{pull.get('head', 'proofread')}`；目标分支：`{pull.get('base', 'ocr_patch')}`；合并提交：`{pull.get('merge_commit_sha') or '待查询'}`")
     lines.extend([
         "",
         f"如需撤回，请在本 Issue 评论：`/proofread-revert {correction_id} CONFIRM`。",
@@ -523,6 +531,10 @@ def main():
             fail("proofread requires patch or metadata")
         if patch is not None:
             validate_patch(patch)
+        correction_id = hashlib.sha256(json.dumps({
+            "archive_id": archive_id, "kind": "proofread", "article_id": article_id,
+            "publication_id": publication_id, "patch": patch, "metadata": metadata,
+        }, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:12]
         patch_path(archive_id, article_id, publication_id)
         title = request.get("title") or f"校订 {article_id}"
         description = request.get("description") or "由 BHA 校订后端提交。"

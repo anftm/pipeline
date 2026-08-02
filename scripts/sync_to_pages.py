@@ -15,6 +15,7 @@ import sys
 import tempfile
 import time
 import posixpath
+import re
 import urllib.parse
 from pathlib import Path
 
@@ -208,11 +209,11 @@ def get_stem_from_relative_path(raw_path: str) -> str:
     return base if ext else raw_path
 
 
-def run(cmd: str, cwd: str = None, env: dict = None) -> tuple[int, str, str]:
+def run(cmd: list[str], cwd: str = None, env: dict = None) -> tuple[int, str, str]:
     merged_env = os.environ.copy()
     if env:
         merged_env.update(env)
-    proc = subprocess.run(cmd, shell=True, cwd=cwd, capture_output=True, text=True, env=merged_env)
+    proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, env=merged_env)
     return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
 
 
@@ -226,6 +227,9 @@ def main():
         sys.exit(1)
     if not pages_repo:
         print("❌ 缺少 PAGES_REPO（如 anftm/search）")
+        sys.exit(1)
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", pages_repo):
+        print("❌ PAGES_REPO 必须使用 owner/name 格式")
         sys.exit(1)
 
     if not SOURCE_JSON.exists():
@@ -250,7 +254,7 @@ def main():
     try:
         clone_url = f"https://huggingface.co/spaces/{HF_SPACE_REPO}"
         tmp_hf = tempfile.mkdtemp(prefix="hf_txt_scan_")
-        ret, out, err = run(f"git clone --depth 1 {clone_url} {tmp_hf}")
+        ret, out, err = run(["git", "clone", "--depth", "1", clone_url, tmp_hf])
         if ret == 0:
             txt_dir = Path(tmp_hf) / "txt"
             if txt_dir.exists():
@@ -290,9 +294,14 @@ def main():
     # ── 4. 克隆 Pages 仓库 ────────────────────────────
     print(f"\n📥 克隆 GitHub Pages 仓库: {pages_repo} ...")
     tmpdir = tempfile.mkdtemp(prefix="pages_sync_")
-    clone_url = f"https://{username}:{token}@github.com/{pages_repo}.git"
+    clone_url = f"https://github.com/{pages_repo}.git"
+    auth_env = {
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "http.extraHeader",
+        "GIT_CONFIG_VALUE_0": f"Authorization: Bearer {token}",
+    }
 
-    ret, out, err = run(f"git clone --depth 1 {clone_url} {tmpdir}")
+    ret, out, err = run(["git", "clone", "--depth", "1", clone_url, tmpdir], env=auth_env)
     if ret != 0:
         print(f"   ⚠ 克隆失败: {err[:200]}")
         # 尝试创建
@@ -314,7 +323,7 @@ def main():
                 sys.exit(1)
 
         time.sleep(2)
-        ret, out, err = run(f"git clone {clone_url} {tmpdir}")
+        ret, out, err = run(["git", "clone", clone_url, tmpdir], env=auth_env)
         if ret != 0:
             print(f"   ❌ 重试克隆失败: {err[:200]}")
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -347,30 +356,30 @@ def main():
     # ── 6. Git commit & push ───────────────────────────
     print(f"\n📤 提交并推送...")
 
-    run('git config user.email "github-actions[bot]@users.noreply.github.com"', cwd=tmpdir)
-    run('git config user.name "github-actions[bot]"', cwd=tmpdir)
+    run(["git", "config", "user.email", "github-actions[bot]@users.noreply.github.com"], cwd=tmpdir)
+    run(["git", "config", "user.name", "github-actions[bot]"], cwd=tmpdir)
 
-    run("git add -A", cwd=tmpdir)
-    ret, out, err = run("git status --porcelain", cwd=tmpdir)
+    run(["git", "add", "-A"], cwd=tmpdir)
+    ret, out, err = run(["git", "status", "--porcelain"], cwd=tmpdir)
 
     if not out:
         print("   ⚠ 无变化，跳过提交")
     else:
         ret, out, err = run(
-            'git commit -m "chore: update search data [skip ci]"',
+            ["git", "commit", "-m", "chore: update search data [skip ci]"],
             cwd=tmpdir,
         )
         if ret != 0 and "nothing to commit" not in err:
             print(f"   ⚠ git commit 失败: {err}")
 
         for attempt in range(2):
-            ret, out, err = run("git push", cwd=tmpdir)
+            ret, out, err = run(["git", "push"], cwd=tmpdir, env=auth_env)
             if ret == 0:
                 print("   ✅ 推送成功")
                 break
             print(f"   ⚠ 推送失败 (第{attempt + 1}次): {err[:200]}")
             if attempt == 0:
-                run("git pull --rebase", cwd=tmpdir)
+                run(["git", "pull", "--rebase"], cwd=tmpdir, env=auth_env)
                 time.sleep(2)
 
     shutil.rmtree(tmpdir, ignore_errors=True)

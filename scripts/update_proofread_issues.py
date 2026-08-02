@@ -67,19 +67,22 @@ def main():
         raise RuntimeError("TRACKER_TOKEN or GITHUB_TOKEN is required")
     refreshed = 0
     closed = 0
-    for page in range(1, 11):
+    issues_to_refresh = []
+    for page in range(1, 101):
         status, issues = api_request(
             token, "GET",
             f"{full_repo_path(TRACKER_REPOSITORY)}/issues?state=open&labels=proofreading-review&per_page=100&page={page}",
         )
         if status != 200 or not isinstance(issues, list):
             raise RuntimeError(f"tracker issue listing failed with HTTP {status}")
-        for issue in issues:
-            if linked_pulls(issue.get("body")):
-                closed += int(refresh_issue(token, issue))
-                refreshed += 1
+        issues_to_refresh.extend(issue for issue in issues if linked_pulls(issue.get("body")))
         if len(issues) < 100:
             break
+    else:
+        raise RuntimeError("tracker issue listing exceeded pagination limit")
+    for issue in issues_to_refresh:
+        closed += int(refresh_issue(token, issue))
+        refreshed += 1
     print(json.dumps({"refreshed": refreshed, "closed": closed}))
 
 

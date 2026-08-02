@@ -32,6 +32,12 @@ HF_TOKEN = os.environ.get("HF_TOKEN", "")
 def run_cmd(cmd_list, cwd=None):
     env = os.environ.copy()
     env["GIT_LFS_SKIP_SMUDGE"] = "1"
+    if HF_TOKEN:
+        env.update({
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "http.extraHeader",
+            "GIT_CONFIG_VALUE_0": f"Authorization: Bearer {HF_TOKEN}",
+        })
     try:
         return subprocess.run(cmd_list, cwd=cwd, env=env, capture_output=True, text=True, check=True)
     except subprocess.CalledProcessError as exc:
@@ -44,7 +50,7 @@ def beijing_now_str():
 
 def process_repo(repo_path):
     repo_name = repo_path.split("/")[-1]
-    clone_url = f"https://{HF_USERNAME}:{HF_TOKEN}@huggingface.co/{repo_path}"
+    clone_url = f"https://huggingface.co/{repo_path}"
     print(f"\n=== [{repo_name}] ===")
 
     result = run_cmd(["git", "ls-remote", clone_url, "HEAD"])

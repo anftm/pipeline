@@ -61,7 +61,7 @@ def main() -> None:
     baseline = not isinstance(previous, dict)
     changed_ids = [key for key in current if isinstance(previous, dict) and previous.get(key) != current[key]]
     output("baseline", str(baseline).lower())
-    output("changed", str(bool(changed_ids)).lower())
+    output("changed", str(bool(changed_ids) or baseline).lower())
     output("changed_archives", ",".join(changed_ids))
 
 

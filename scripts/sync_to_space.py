@@ -255,21 +255,21 @@ def write_sidebar_payloads(data_dir: Path, records: list[dict], browser_data: di
 # 工具函数
 # ═══════════════════════════════════════════════════════════
 
-def run(cmd: str, cwd: str = None, env: dict = None) -> tuple[int, str, str]:
+def run(cmd: list[str], cwd: str = None, env: dict = None) -> tuple[int, str, str]:
     merged_env = os.environ.copy()
     if env:
         merged_env.update(env)
     proc = subprocess.run(
-        cmd, shell=True, cwd=cwd, capture_output=True, text=True, env=merged_env,
+        cmd, cwd=cwd, capture_output=True, text=True, env=merged_env,
     )
     return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
 
 
-def clone_space_repo(clone_url: str, target_dir: str) -> tuple[int, str, str]:
-    env = {"GIT_LFS_SKIP_SMUDGE": "1"}
+def clone_space_repo(clone_url: str, target_dir: str, auth_env: dict) -> tuple[int, str, str]:
+    env = {"GIT_LFS_SKIP_SMUDGE": "1", **auth_env}
     last = (1, "", "")
     for attempt in range(4):
-        ret, out, err = run(f"git clone --depth 1 {clone_url} {target_dir}", env=env)
+        ret, out, err = run(["git", "clone", "--depth", "1", clone_url, target_dir], env=env)
         if ret == 0:
             return ret, out, err
         last = (ret, out, err)
@@ -415,9 +415,14 @@ def main():
     # ── 2. 克隆 Space 仓库 ─────────────────────────────
     print(f"\n📥 克隆 Space 仓库: {SPACE_REPO} ...")
     tmpdir = tempfile.mkdtemp(prefix="hf_space_sync_")
-    clone_url = f"https://{username}:{token}@huggingface.co/spaces/{SPACE_REPO}"
+    clone_url = f"https://huggingface.co/spaces/{SPACE_REPO}"
+    auth_env = {
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "http.extraHeader",
+        "GIT_CONFIG_VALUE_0": f"Authorization: Bearer {token}",
+    }
 
-    ret, out, err = clone_space_repo(clone_url, tmpdir)
+    ret, out, err = clone_space_repo(clone_url, tmpdir, auth_env)
 
     if ret != 0:
         print(f"   ⚠ 克隆失败: {err[:200]}")
@@ -438,7 +443,7 @@ def main():
             sys.exit(1)
 
         time.sleep(2)
-        ret, out, err = clone_space_repo(clone_url, tmpdir)
+        ret, out, err = clone_space_repo(clone_url, tmpdir, auth_env)
         if ret != 0:
             print(f"   ❌ 重试克隆仍然失败: {err[:200]}")
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -496,31 +501,31 @@ def main():
     print(f"   sidebar: {len(sidebar_urls)} 个侧栏首屏文件")
     # ── 5. Git commit & push ───────────────────────────
     print(f"\n📤 提交并推送...")
-    run('git config user.email "github-actions[bot]@users.noreply.github.com"', cwd=tmpdir)
-    run('git config user.name "github-actions[bot]"', cwd=tmpdir)
-    ret, out, err = run("git add data/search_data.json.gz data/folder_tree.json.gz data/folder_browser.json.gz data/search_ngrams_2.bin.gz data/search_ngrams_3.bin.gz data/initial data/sidebar", cwd=tmpdir)
+    run(["git", "config", "user.email", "github-actions[bot]@users.noreply.github.com"], cwd=tmpdir)
+    run(["git", "config", "user.name", "github-actions[bot]"], cwd=tmpdir)
+    ret, out, err = run(["git", "add", "data/search_data.json.gz", "data/folder_tree.json.gz", "data/folder_browser.json.gz", "data/search_ngrams_2.bin.gz", "data/search_ngrams_3.bin.gz", "data/initial", "data/sidebar"], cwd=tmpdir)
     if ret != 0:
         print(f"   ⚠ git add 失败: {err}")
 
-    ret, out, err = run("git status --porcelain", cwd=tmpdir)
+    ret, out, err = run(["git", "status", "--porcelain"], cwd=tmpdir)
     if not out:
         print("   ⚠ 文件无变化，跳过提交")
     else:
         ret, out, err = run(
-            'git commit -m "chore: update search data [skip ci]"',
+            ["git", "commit", "-m", "chore: update search data [skip ci]"],
             cwd=tmpdir,
         )
         if ret != 0:
             print(f"   ⚠ git commit 失败: {err}")
 
         for attempt in range(2):
-            ret, out, err = run("git push", cwd=tmpdir)
+            ret, out, err = run(["git", "push"], cwd=tmpdir, env=auth_env)
             if ret == 0:
                 print("   ✅ 推送成功")
                 break
             print(f"   ⚠ 推送失败 (第{attempt + 1}次): {err[:200]}")
             if attempt == 0:
-                run("git pull --rebase", cwd=tmpdir)
+                run(["git", "pull", "--rebase"], cwd=tmpdir, env=auth_env)
                 time.sleep(2)
 
     # ── 6. 清理临时目录 ────────────────────────────────
