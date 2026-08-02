@@ -11,6 +11,7 @@ concurrency:
 
 permissions:
   contents: write
+  issues: write
 
 jobs:
   update:
@@ -22,6 +23,11 @@ jobs:
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
         run: python3 scripts/check_bha_revisions.py
+      - name: Refresh proofreading review queue
+        continue-on-error: true
+        env:
+          TRACKER_TOKEN: ${{ github.token }}
+        run: python3 scripts/update_proofread_issues.py
       - name: Trigger incremental BHA index update
         if: steps.revisions.outputs.changed == 'true'
         env:
