@@ -32,6 +32,10 @@ on:
         description: Complete config file content for config
         required: false
         type: string
+      metadata_json:
+        description: Structured metadata correction JSON for config
+        required: false
+        type: string
       title:
         description: Pull request title
         required: false
