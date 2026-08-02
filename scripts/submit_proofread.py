@@ -7,6 +7,7 @@ import json
 import os
 import sys
 import subprocess
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -17,6 +18,7 @@ OWNER = os.environ.get("PROOFREAD_OWNER", "anftm")
 REPOSITORY_PREFIX = os.environ.get(
     "PROOFREAD_REPOSITORY_PREFIX", "banned-historical-archives"
 )
+TRACKER_REPOSITORY = os.environ.get("PROOFREAD_TRACKER_REPOSITORY") or os.environ.get("GITHUB_REPOSITORY", "anftm/pipeline")
 
 
 def api_request(token, method, path, payload=None):
@@ -43,6 +45,13 @@ def api_request(token, method, path, payload=None):
 
 def repo_path(repo):
     return f"/repos/{urllib.parse.quote(OWNER)}/{urllib.parse.quote(repo)}"
+
+
+def full_repo_path(repository):
+    owner, separator, repo = repository.partition("/")
+    if not separator or not owner or not repo:
+        fail("tracker repository must use owner/name format")
+    return f"/repos/{urllib.parse.quote(owner)}/{urllib.parse.quote(repo)}"
 
 
 def ref_path(repo, branch):
@@ -103,7 +112,11 @@ def open_pull_request(token, repo, branch):
     query = urllib.parse.urlencode({"head": f"{OWNER}:{branch}", "state": "open"})
     status, data = api_request(token, "GET", f"{repo_path(repo)}/pulls?{query}")
     if status == 200 and isinstance(data, list) and data:
-        return data[0].get("html_url")
+        return {
+            "number": data[0].get("number"),
+            "url": data[0].get("html_url"),
+            "sha": data[0].get("head", {}).get("sha"),
+        }
     return None
 
 
@@ -141,7 +154,203 @@ def submit_file(token, repo, base, path, content, title, description, correction
         (201,),
         {"title": title, "head": branch, "base": base, "body": description},
     )
-    return pull["html_url"]
+    return {"number": pull.get("number"), "url": pull.get("html_url"), "sha": pull.get("head", {}).get("sha")}
+
+
+def merge_pull(token, repo, pull):
+    number = pull.get("number")
+    if not number:
+        return False
+    for _attempt in range(60):
+        data = response_or_fail(token, "GET", f"{repo_path(repo)}/pulls/{number}", (200,))
+        if data.get("merged"):
+            return True
+        if data.get("mergeable") is None:
+            time.sleep(5)
+            continue
+        state = data.get("mergeable_state")
+        if state in {"unknown", "unstable", "has_hooks"}:
+            time.sleep(5)
+            continue
+        if not data.get("mergeable") or state != "clean":
+            return False
+        status, result = api_request(token, "PUT", f"{repo_path(repo)}/pulls/{number}/merge", {
+            "sha": data.get("head", {}).get("sha"),
+            "merge_method": "squash",
+            "commit_title": data.get("title"),
+        })
+        if status == 200 and result.get("merged"):
+            return True
+        if status in (405, 409):
+            return False
+        fail(f"pull request merge failed ({status}): {result.get('message', result)}")
+    return False
+
+
+def ensure_tracker_label(token, name="proofreading-review", color="b54708", description="Proofreading pull requests awaiting manual review"):
+    encoded_name = urllib.parse.quote(name, safe="")
+    path = f"{full_repo_path(TRACKER_REPOSITORY)}/labels/{encoded_name}"
+    status, _data = api_request(token, "GET", path)
+    if status == 200:
+        return
+    if status != 404:
+        fail(f"tracker label lookup failed with HTTP {status}")
+    response_or_fail(token, "POST", f"{full_repo_path(TRACKER_REPOSITORY)}/labels", (201,), {
+        "name": name,
+        "color": color,
+        "description": description,
+    })
+
+
+def find_tracker_issue(token, correction_id):
+    marker = f"<!-- proofreading:{correction_id} -->"
+    for page in range(1, 11):
+        status, issues = api_request(
+            token, "GET",
+            f"{full_repo_path(TRACKER_REPOSITORY)}/issues?state=all&labels=proofreading-review&per_page=100&page={page}",
+        )
+        if status != 200 or not isinstance(issues, list):
+            fail(f"tracker issue listing failed with HTTP {status}")
+        for issue in issues:
+            if marker in str(issue.get("body") or ""):
+                return issue
+        if len(issues) < 100:
+            break
+    return None
+
+
+def change_summary(request):
+    changes = []
+    patch = request.get("patch") or {}
+    if patch.get("parts"):
+        changes.append(f"正文段落 {len(patch['parts'])} 处")
+    if patch.get("comments") or patch.get("newComments"):
+        changes.append("注释")
+    if patch.get("description"):
+        changes.append("描述")
+    metadata = request.get("metadata") or {}
+    article = metadata.get("article") or {}
+    source = metadata.get("source") or {}
+    labels = {
+        "title": "标题", "authors": "作者", "dates": "日期", "tags": "标签",
+        "name": "来源名称", "author": "来源作者", "type": "来源类型", "files": "来源文件",
+    }
+    changes.extend(labels.get(key, key) for key in article)
+    changes.extend(labels.get(key, key) for key in source)
+    return changes or ["校订"]
+
+
+def upsert_tracker_issue(token, correction_id, request, repo, article_id, pulls):
+    ensure_tracker_label(token)
+    title_text = " ".join(str(request.get("title") or article_id).split())[:100]
+    pull_state = [{"repo": repo, "number": pull["number"], "url": pull["url"]} for pull in pulls]
+    marker = json.dumps(pull_state, ensure_ascii=False, separators=(",", ":"))
+    doc_id = str(request.get("doc_id") or "")
+    bha_url = os.environ.get("BHA_PUBLIC_URL", "https://vomebook-bha-search.hf.space").rstrip("/")
+    preview = f"{bha_url}/?preview={urllib.parse.quote(doc_id)}" if doc_id else ""
+    lines = [
+        f"<!-- proofreading:{correction_id} -->",
+        f"<!-- proofreading-prs:{marker} -->",
+        "## 校订审核",
+        "",
+        f"- Archive：`{repo}`",
+        f"- Article ID：`{article_id}`",
+        f"- 修改：{'、'.join(change_summary(request))}",
+    ]
+    if preview:
+        lines.append(f"- BHA 预览：{preview}")
+    if request.get("description"):
+        lines.extend([f"- 说明：{request['description']}"])
+    lines.extend(["", "## Pull Requests", ""])
+    lines.extend(f"- [ ] [{repo}#{pull['number']}]({pull['url']})" for pull in pulls)
+    body = "\n".join(lines)
+    existing = find_tracker_issue(token, correction_id)
+    assignee = os.environ.get("PROOFREAD_TRACKER_ASSIGNEE", "").strip()
+    payload = {
+        "title": f"校订审核：{title_text}",
+        "body": body,
+        "labels": ["proofreading-review"],
+        **({"assignees": [assignee]} if assignee else {}),
+    }
+    if existing:
+        payload["state"] = "open"
+        issue = response_or_fail(
+            token, "PATCH", f"{full_repo_path(TRACKER_REPOSITORY)}/issues/{existing['number']}", (200,), payload,
+        )
+    else:
+        issue = response_or_fail(
+            token, "POST", f"{full_repo_path(TRACKER_REPOSITORY)}/issues", (201,), payload,
+        )
+    return issue.get("html_url")
+
+
+def find_auto_merge_log(token):
+    marker = "<!-- proofreading-auto-merge-log -->"
+    status, issues = api_request(
+        token, "GET",
+        f"{full_repo_path(TRACKER_REPOSITORY)}/issues?state=open&labels=proofreading-auto-merged&per_page=100",
+    )
+    if status != 200 or not isinstance(issues, list):
+        fail(f"auto-merge log lookup failed with HTTP {status}")
+    return next((issue for issue in issues if marker in str(issue.get("body") or "")), None)
+
+
+def ensure_auto_merge_log(token):
+    ensure_tracker_label(
+        token, "proofreading-auto-merged", "1a7f37",
+        "Notifications for proofreading pull requests merged automatically",
+    )
+    issue = find_auto_merge_log(token)
+    if issue:
+        return issue
+    assignee = os.environ.get("PROOFREAD_TRACKER_ASSIGNEE", "").strip()
+    payload = {
+        "title": "校订自动合并记录",
+        "body": "<!-- proofreading-auto-merge-log -->\n自动合并的低风险正文校订会记录在此 Issue 的评论中。",
+        "labels": ["proofreading-auto-merged"],
+        **({"assignees": [assignee]} if assignee else {}),
+    }
+    return response_or_fail(token, "POST", f"{full_repo_path(TRACKER_REPOSITORY)}/issues", (201,), payload)
+
+
+def auto_merge_comment_exists(token, issue_number, correction_id):
+    marker = f"<!-- auto-merged:{correction_id} -->"
+    for page in range(1, 11):
+        status, comments = api_request(
+            token, "GET",
+            f"{full_repo_path(TRACKER_REPOSITORY)}/issues/{issue_number}/comments?per_page=100&page={page}",
+        )
+        if status != 200 or not isinstance(comments, list):
+            fail(f"auto-merge comment listing failed with HTTP {status}")
+        if any(marker in str(comment.get("body") or "") for comment in comments):
+            return True
+        if len(comments) < 100:
+            return False
+    return False
+
+
+def notify_auto_merged(token, correction_id, request, repo, article_id, pulls):
+    issue = ensure_auto_merge_log(token)
+    if auto_merge_comment_exists(token, issue["number"], correction_id):
+        return issue.get("html_url")
+    doc_id = str(request.get("doc_id") or "")
+    bha_url = os.environ.get("BHA_PUBLIC_URL", "https://vomebook-bha-search.hf.space").rstrip("/")
+    preview = f"{bha_url}/?preview={urllib.parse.quote(doc_id)}" if doc_id else ""
+    lines = [
+        f"<!-- auto-merged:{correction_id} -->",
+        f"**已自动合并：{'、'.join(change_summary(request))}**",
+        "",
+        f"- Archive：`{repo}`",
+        f"- Article ID：`{article_id}`",
+    ]
+    if preview:
+        lines.append(f"- BHA 预览：{preview}")
+    lines.extend(f"- 已合并 PR：[{repo}#{pull['number']}]({pull['url']})" for pull in pulls)
+    response_or_fail(
+        token, "POST", f"{full_repo_path(TRACKER_REPOSITORY)}/issues/{issue['number']}/comments", (201,),
+        {"body": "\n".join(lines)},
+    )
+    return issue.get("html_url")
 
 
 def update_config(existing, request):
@@ -254,10 +463,30 @@ def main():
                 token, repo, "ocr_patch", target_path, target_content,
                 title, description, correction_id,
             ))
+        auto_merged = []
+        if request.get("auto_merge") is True:
+            auto_merged = [pull["url"] for pull in pull_requests if merge_pull(token, repo, pull)]
+        auto_merged_urls = set(auto_merged)
+        pending_pulls = [pull for pull in pull_requests if pull["url"] not in auto_merged_urls]
+        tracker_issue = None
+        auto_merge_log = None
+        tracker_token = os.environ.get("TRACKER_TOKEN", "")
+        if pending_pulls and tracker_token:
+            tracker_issue = upsert_tracker_issue(
+                tracker_token, correction_id, request, repo, new_article_id, pending_pulls,
+            )
+        merged_pulls = [pull for pull in pull_requests if pull["url"] in auto_merged_urls]
+        if merged_pulls and tracker_token:
+            auto_merge_log = notify_auto_merged(
+                tracker_token, correction_id, request, repo, new_article_id, merged_pulls,
+            )
         print(json.dumps({
             "repository": repo,
             "article_id": new_article_id,
-            "pull_requests": pull_requests,
+            "pull_requests": [pull["url"] for pull in pull_requests],
+            "auto_merged": auto_merged,
+            "tracker_issue": tracker_issue,
+            "auto_merge_log": auto_merge_log,
         }, ensure_ascii=False))
         return
     base = kind
@@ -306,7 +535,7 @@ def main():
         request.get("description") or f"自动提交到 {repo}/{base}，合并后由仓库 workflow 生成后续数据。",
         correction_id,
     )
-    print(json.dumps({"repository": repo, "path": path, "pull_request": pull}, ensure_ascii=False))
+    print(json.dumps({"repository": repo, "path": path, "pull_request": pull["url"]}, ensure_ascii=False))
 
 
 if __name__ == "__main__":
