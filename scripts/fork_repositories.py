@@ -21,7 +21,6 @@ REPO_START = int(os.environ.get("REPO_START", "0"))
 REPO_END = int(os.environ.get("REPO_END", "31"))
 GITHUB_API = "https://api.github.com"
 DEFAULT_BRANCH = "main"
-DATA_BRANCHES = ("main", "config", "ocr_cache", "ocr_patch", "parsed")
 FORK_WAIT_SECONDS = 120
 
 
@@ -104,6 +103,24 @@ def branch_sha(token: str, owner: str, repo: str, branch: str) -> str | None:
     return str(data.get("object", {}).get("sha") or "") or None
 
 
+def list_branches(token: str, owner: str, repo: str) -> list[str]:
+    branches: list[str] = []
+    page = 1
+    while True:
+        status, data = api_request(
+            token,
+            "GET",
+            f"{repo_path(owner, repo)}/branches?per_page=100&page={page}",
+        )
+        if status != 200 or not isinstance(data, list):
+            detail = data.get("message", data) if isinstance(data, dict) else data
+            raise RuntimeError(f"[{repo}] branch listing failed ({status}): {detail}")
+        branches.extend(str(item.get("name")) for item in data if item.get("name"))
+        if len(data) < 100:
+            return branches
+        page += 1
+
+
 def sync_branch(token: str, repo: str, branch: str) -> None:
     upstream_sha = branch_sha(token, UPSTREAM_OWNER, repo, branch)
     if not upstream_sha:
@@ -148,10 +165,8 @@ def main() -> int:
     for number in range(REPO_START, REPO_END + 1):
         repo = f"banned-historical-archives{number}"
         try:
-            branch = ensure_fork(token, repo)
-            if branch != DEFAULT_BRANCH:
-                raise RuntimeError(f"[{repo}] unexpected default branch: {branch}")
-            for data_branch in DATA_BRANCHES:
+            ensure_fork(token, repo)
+            for data_branch in list_branches(token, UPSTREAM_OWNER, repo):
                 sync_branch(token, repo, data_branch)
         except Exception as exc:
             print(str(exc), file=sys.stderr)
