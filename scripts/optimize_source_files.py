@@ -300,7 +300,7 @@ def main() -> int:
     if shutil.which("qpdf") is None:
         raise RuntimeError("qpdf is required (apt-get install qpdf)")
     if shutil.which("cwebp") is None:
-        raise RuntimeError("cwebp is required (apt-get install libwebp-tools)")
+        raise RuntimeError("cwebp is required (apt-get install webp)")
     api = HfApi(token=HF_TOKEN)
     with tempfile.TemporaryDirectory(prefix="bha-source-optimize-") as temp_dir:
         manifest = mirror.remote_manifest(api)
