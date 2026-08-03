@@ -39,6 +39,9 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_SOURCE_REPOSITORY: vomebook/BHA-Source-Files
           WEBP_QUALITY: ${{ inputs.webp_quality }}
+          OPTIMIZE_CONCURRENCY: "8"
+          OPTIMIZE_PACE_OBJECTS_PER_MINUTE: "200"
+          OPTIMIZE_PACE_MAX_SLEEP_SECONDS: "300"
           REPO_START: ${{ inputs.archive_id == 'all' && '0' || inputs.archive_id }}
           REPO_END: ${{ inputs.archive_id == 'all' && '31' || inputs.archive_id }}
         run: python scripts/optimize_source_files.py
