@@ -95,7 +95,13 @@ def process_repo(repo_path):
             "-c", "user.email=github-actions[bot]@users.noreply.github.com",
             "commit", "-m", f"{AUTO_COMMIT_PREFIX} [{beijing_now_str()}] [auto-bot]",
         ], cwd=repo_dir)
-        result = run_cmd(["git", "push"], cwd=repo_dir)
+        push_command = ["git"]
+        if HF_TOKEN:
+            # Keep authentication explicit for push; some Git versions do not
+            # apply the environment-injected extraHeader to the remote helper.
+            push_command.extend(["-c", f"http.extraHeader=Authorization: Bearer {HF_TOKEN}"])
+        push_command.append("push")
+        result = run_cmd(push_command, cwd=repo_dir)
         if result.returncode != 0:
             print(f"  push 失败: {result.stderr.strip()[:300]}")
             return False
