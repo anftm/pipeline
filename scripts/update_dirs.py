@@ -29,7 +29,7 @@ MUL_PY_PATH = os.path.join(SCRIPT_DIR, "mul.py")
 HF_TOKEN = os.environ.get("HF_TOKEN", "")
 
 
-def run_cmd(cmd_list, cwd=None):
+def run_cmd(cmd_list, cwd=None, extra_env=None):
     env = os.environ.copy()
     env["GIT_LFS_SKIP_SMUDGE"] = "1"
     if HF_TOKEN:
@@ -38,6 +38,8 @@ def run_cmd(cmd_list, cwd=None):
             "GIT_CONFIG_KEY_0": "http.extraHeader",
             "GIT_CONFIG_VALUE_0": f"Authorization: Bearer {HF_TOKEN}",
         })
+    if extra_env:
+        env.update(extra_env)
     try:
         return subprocess.run(cmd_list, cwd=cwd, env=env, capture_output=True, text=True, check=True)
     except subprocess.CalledProcessError as exc:
@@ -65,6 +67,18 @@ def process_repo(repo_path):
             print(f"  clone 失败: {result.stderr.strip()}")
             return False
 
+        # Directory files are Git LFS objects. The clone deliberately skips
+        # other large files, but these two files must be smudged before we can
+        # compare generated content with the current repository version.
+        result = run_cmd(
+            ["git", "lfs", "pull", "--include", ",".join(DIRECTORY_FILES)],
+            cwd=repo_dir,
+            extra_env={"GIT_LFS_SKIP_SMUDGE": "0"},
+        )
+        if result.returncode != 0:
+            print(f"  LFS 目录文件下载失败: {result.stderr.strip()[:300]}")
+            return False
+
         result = run_cmd(["git", "log", "-1", "--format=%an|%s"], cwd=repo_dir)
         author, message = (result.stdout.strip().split("|", 1) + [""])[:2] if result.returncode == 0 else ("", "")
         if author == BOT_AUTHOR and message.startswith(AUTO_COMMIT_PREFIX):
@@ -81,7 +95,7 @@ def process_repo(repo_path):
             print(f"  mul.py 失败: {result.stderr.strip()[:300]}")
             return False
 
-        result = run_cmd(["git", "status", "--porcelain"], cwd=repo_dir)
+        result = run_cmd(["git", "status", "--porcelain", "--", *DIRECTORY_FILES], cwd=repo_dir)
         if result.returncode != 0:
             print("  git status 失败")
             return False
@@ -96,12 +110,26 @@ def process_repo(repo_path):
             "commit", "-m", f"{AUTO_COMMIT_PREFIX} [{beijing_now_str()}] [auto-bot]",
         ], cwd=repo_dir)
         push_command = ["git"]
-        if HF_TOKEN:
-            # Keep authentication explicit for push; some Git versions do not
-            # apply the environment-injected extraHeader to the remote helper.
-            push_command.extend(["-c", f"http.extraHeader=Authorization: Bearer {HF_TOKEN}"])
         push_command.append("push")
-        result = run_cmd(push_command, cwd=repo_dir)
+        askpass = os.path.join(tmpdir, "git-askpass.sh")
+        with open(askpass, "w", encoding="utf-8") as handle:
+            handle.write(
+                "#!/bin/sh\n"
+                "case \"$1\" in\n"
+                "  *Username*) printf '%s\\n' \"$HF_USERNAME\" ;;\n"
+                "  *) printf '%s\\n' \"$HF_TOKEN\" ;;\n"
+                "esac\n"
+            )
+        os.chmod(askpass, 0o700)
+        result = run_cmd(
+            push_command,
+            cwd=repo_dir,
+            extra_env={
+                "GIT_ASKPASS": askpass,
+                "GIT_TERMINAL_PROMPT": "0",
+                "HF_USERNAME": HF_USERNAME,
+            },
+        )
         if result.returncode != 0:
             print(f"  push 失败: {result.stderr.strip()[:300]}")
             return False
