@@ -1,0 +1,44 @@
+name: Optimize BHA source files
+
+on:
+  workflow_dispatch:
+    inputs:
+      archive_id:
+        description: Archive number 0-31, or all
+        required: false
+        default: all
+        type: string
+      webp_quality:
+        description: Lossy WebP quality for jpg/jpeg (1-100)
+        required: false
+        default: "85"
+        type: string
+
+concurrency:
+  group: mirror-bha-source-files
+  cancel-in-progress: false
+
+jobs:
+  optimize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Install transformation tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qpdf libwebp-tools
+      - name: Install dependencies
+        run: pip install -r scripts/requirements.txt
+      - name: Optimize source files
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_SOURCE_REPOSITORY: vomebook/BHA-Source-Files
+          WEBP_QUALITY: ${{ inputs.webp_quality }}
+          REPO_START: ${{ inputs.archive_id == 'all' && '0' || inputs.archive_id }}
+          REPO_END: ${{ inputs.archive_id == 'all' && '31' || inputs.archive_id }}
+        run: python scripts/optimize_source_files.py
