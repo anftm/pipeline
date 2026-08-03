@@ -166,10 +166,12 @@ def main() -> int:
             ret, _, err = run(["git", "lfs", "install", "--local", "--skip-smudge"], cwd=repo_dir, env=auth)
             if ret != 0:
                 raise RuntimeError(f"git lfs install failed: {err}")
-            ret, _, err = run(["git", "lfs", "track", "archives/**", "*.pdf", "*.jpg", "*.jpeg", "*.png", "*.webp"], cwd=repo_dir, env=auth)
+            archive_patterns = [f"archives{archive_id}/**" for archive_id in range(REPO_START, REPO_END + 1)]
+            ret, _, err = run(["git", "lfs", "track", *archive_patterns, "*.pdf", "*.jpg", "*.jpeg", "*.png", "*.webp"], cwd=repo_dir, env=auth)
             if ret != 0:
                 raise RuntimeError(f"git lfs track failed: {err}")
-            ret, _, err = run(["git", "add", MANIFEST_NAME, ".gitattributes", "archives"], cwd=repo_dir, env=auth)
+            archive_dirs = [f"archives{archive_id}" for archive_id in range(REPO_START, REPO_END + 1) if (Path(repo_dir) / f"archives{archive_id}").exists()]
+            ret, _, err = run(["git", "add", MANIFEST_NAME, ".gitattributes", *archive_dirs], cwd=repo_dir, env=auth)
             if ret != 0:
                 raise RuntimeError(f"git add failed: {err}")
             ret, _, err = run(["git", "-c", "user.name=github-actions[bot]", "-c", "user.email=github-actions[bot]@users.noreply.github.com", "commit", "-m", "Update BHA source files"], cwd=repo_dir, env=auth)
