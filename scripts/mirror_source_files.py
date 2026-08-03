@@ -155,6 +155,7 @@ def main() -> int:
                         temporary.unlink(missing_ok=True)
                     files[url] = {"archive_id": archive_id, "path": path, "sha256": digest, "bytes": size}
                     changed += 1
+                print(f"archive{archive_id}: mirrored {changed} new files so far")
             except Exception as exc:
                 failures.append(f"archive{archive_id}: {exc}")
                 print(f"archive{archive_id} failed: {exc}")
@@ -162,10 +163,18 @@ def main() -> int:
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         if changed:
             auth = {"GIT_LFS_SKIP_SMUDGE": "1"}
-            run(["git", "lfs", "install", "--local", "--skip-smudge"], cwd=repo_dir, env=auth)
-            run(["git", "lfs", "track", "archives/**"], cwd=repo_dir, env=auth)
-            run(["git", "add", MANIFEST_NAME, ".gitattributes", "archives"], cwd=repo_dir, env=auth)
-            run(["git", "-c", "user.name=github-actions[bot]", "-c", "user.email=github-actions[bot]@users.noreply.github.com", "commit", "-m", "Update BHA source files"], cwd=repo_dir, env=auth)
+            ret, _, err = run(["git", "lfs", "install", "--local", "--skip-smudge"], cwd=repo_dir, env=auth)
+            if ret != 0:
+                raise RuntimeError(f"git lfs install failed: {err}")
+            ret, _, err = run(["git", "lfs", "track", "archives/**", "*.pdf", "*.jpg", "*.jpeg", "*.png", "*.webp"], cwd=repo_dir, env=auth)
+            if ret != 0:
+                raise RuntimeError(f"git lfs track failed: {err}")
+            ret, _, err = run(["git", "add", MANIFEST_NAME, ".gitattributes", "archives"], cwd=repo_dir, env=auth)
+            if ret != 0:
+                raise RuntimeError(f"git add failed: {err}")
+            ret, _, err = run(["git", "-c", "user.name=github-actions[bot]", "-c", "user.email=github-actions[bot]@users.noreply.github.com", "commit", "-m", "Update BHA source files"], cwd=repo_dir, env=auth)
+            if ret != 0:
+                raise RuntimeError(f"git commit failed: {err}")
             askpass = Path(temp_dir) / "hf-push-askpass.sh"
             askpass.write_text(
                 "#!/bin/sh\n"
