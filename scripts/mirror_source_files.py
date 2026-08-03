@@ -4,13 +4,14 @@
 import hashlib
 import json
 import os
-import posixpath
 import shutil
 import stat
 import subprocess
 import tempfile
+import time
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 UPSTREAM_OWNER = os.environ.get("BHA_ARCHIVE_OWNER", "banned-historical-archives")
@@ -21,6 +22,13 @@ HF_REPO = os.environ.get("HF_SOURCE_REPOSITORY", "vomebook/BHA-Source-Files")
 HF_TOKEN = os.environ.get("HF_TOKEN", "")
 MANIFEST_NAME = "manifest.json"
 MAX_FILE_BYTES = 2 * 1024 * 1024 * 1024
+PUSH_MAX_ATTEMPTS = int(os.environ.get("MIRROR_PUSH_MAX_ATTEMPTS", "10"))
+PUSH_BACKOFF_SECONDS = int(os.environ.get("MIRROR_PUSH_BACKOFF_SECONDS", "300"))
+PACE_OBJECTS_PER_MINUTE = float(os.environ.get("MIRROR_PACE_OBJECTS_PER_MINUTE", "120"))
+PACE_MAX_SLEEP_SECONDS = int(os.environ.get("MIRROR_PACE_MAX_SLEEP_SECONDS", "600"))
+LFS_MIN_BYTES = int(os.environ.get("MIRROR_LFS_MIN_BYTES", str(10 * 1024 * 1024)))
+DOWNLOAD_CONCURRENCY = int(os.environ.get("MIRROR_DOWNLOAD_CONCURRENCY", "8"))
+RATE_LIMIT_MARKERS = ("rate limit", "quota of", "429")
 
 
 def api_json(url: str, token: str = "") -> dict:
@@ -102,6 +110,72 @@ def run(args: list[str], cwd: str | None = None, env: dict | None = None) -> tup
     return result.returncode, result.stdout.strip(), result.stderr.strip()
 
 
+def is_rate_limited(output: str) -> bool:
+    lowered = output.lower()
+    return any(marker in lowered for marker in RATE_LIMIT_MARKERS)
+
+
+def pace_seconds(object_count: int) -> int:
+    if object_count <= 0 or PACE_OBJECTS_PER_MINUTE <= 0:
+        return 0
+    expected = float(object_count) / (float(PACE_OBJECTS_PER_MINUTE) / 60.0)
+    return min(int(expected), PACE_MAX_SLEEP_SECONDS)
+
+
+def lfs_object_count(updates: dict[str, dict]) -> int:
+    return sum(1 for value in updates.values() if value.get("bytes", 0) >= LFS_MIN_BYTES)
+
+
+def write_conditional_lfs_clean(config_dir: Path, min_bytes: int) -> Path:
+    script = config_dir / "lfs-clean-conditional.sh"
+    script.write_text(
+        "#!/bin/sh\n"
+        "path=\"$1\"\n"
+        "size=\"$(wc -c < \"$path\" 2>/dev/null || printf '0')\"\n"
+        f"if [ \"$size\" -ge {min_bytes} ]; then\n"
+        "    exec git lfs clean -- \"$path\"\n"
+        "fi\n"
+        "cat\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o700)
+    return script
+
+
+def _download_one(url: str, temp_dir: str) -> tuple[str, str, int, Path]:
+    with tempfile.NamedTemporaryFile(prefix="source-", dir=temp_dir, delete=False) as handle:
+        temporary = Path(handle.name)
+    try:
+        digest, size = download_to_path(url, temporary)
+        return url, digest, size, temporary
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def push_with_retry(repo_dir: str, askpass: Path) -> None:
+    env = {"GIT_ASKPASS": str(askpass), "GIT_TERMINAL_PROMPT": "0", "HF_USERNAME": HF_USERNAME}
+    for attempt in range(1, PUSH_MAX_ATTEMPTS + 1):
+        ret, out, err = run(["git", "push"], cwd=repo_dir, env=env)
+        combined = f"{out}\n{err}"
+        if ret == 0:
+            return
+        if not is_rate_limited(combined):
+            raise RuntimeError(f"HF push failed: {combined.strip() or '(no output)'}")
+        if attempt >= PUSH_MAX_ATTEMPTS:
+            break
+        print(
+            f"HF push hit the request rate limit; waiting {PUSH_BACKOFF_SECONDS}s before retry "
+            f"({attempt}/{PUSH_MAX_ATTEMPTS})",
+            flush=True,
+        )
+        time.sleep(PUSH_BACKOFF_SECONDS)
+    raise RuntimeError(
+        f"HF push kept hitting the request rate limit after {PUSH_MAX_ATTEMPTS} attempts; "
+        "wait 5 minutes and re-run (already-mirrored files are skipped)."
+    )
+
+
 def ensure_hf_repo(repo_dir: str) -> None:
     clone_url = f"https://huggingface.co/datasets/{HF_REPO}"
     askpass = Path(repo_dir).parent / "hf-askpass.sh"
@@ -111,7 +185,12 @@ def ensure_hf_repo(repo_dir: str) -> None:
         encoding="utf-8",
     )
     askpass.chmod(0o700)
-    auth_env = {"GIT_ASKPASS": str(askpass), "GIT_TERMINAL_PROMPT": "0", "HF_USERNAME": HF_USERNAME}
+    auth_env = {
+        "GIT_ASKPASS": str(askpass),
+        "GIT_TERMINAL_PROMPT": "0",
+        "HF_USERNAME": HF_USERNAME,
+        "GIT_LFS_SKIP_SMUDGE": "1",
+    }
     ret, _, err = run(["git", "clone", "--depth", "1", clone_url, repo_dir], env=auth_env)
     if ret == 0:
         return
@@ -126,19 +205,25 @@ def ensure_hf_repo(repo_dir: str) -> None:
         raise RuntimeError(f"HF repository clone failed: {err or retry_err}")
 
 
-def commit_and_push_archive(repo_dir: str, archive_id: int, manifest_path: Path, temp_dir: str) -> None:
+def commit_and_push_archive(repo_dir: str, archive_id: int, manifest_path: Path, temp_dir: str, object_count: int = 0) -> None:
     auth = {"GIT_LFS_SKIP_SMUDGE": "1"}
     ret, _, err = run(["git", "lfs", "install", "--local", "--skip-smudge"], cwd=repo_dir, env=auth)
     if ret != 0:
         raise RuntimeError(f"git lfs install failed: {err}")
-    archive_dir = f"archives{archive_id}"
-    ret, _, err = run(
-        ["git", "lfs", "track", f"{archive_dir}/**", "*.pdf", "*.jpg", "*.jpeg", "*.png", "*.webp"],
-        cwd=repo_dir,
-        env=auth,
-    )
+    ret, _, err = run(["git", "lfs", "track", "archives*/**"], cwd=repo_dir, env=auth)
     if ret != 0:
         raise RuntimeError(f"git lfs track failed: {err}")
+    clean_script = write_conditional_lfs_clean(Path(repo_dir) / ".git", LFS_MIN_BYTES)
+    for command in (
+        ["git", "config", "filter.lfs.clean", f"{clean_script} %f"],
+        ["git", "config", "filter.lfs.smudge", "git-lfs smudge -- %f"],
+        ["git", "config", "filter.lfs.required", "false"],
+    ):
+        ret, _, err = run(command, cwd=repo_dir, env=auth)
+        if ret != 0:
+            raise RuntimeError(f"git config failed ({command[2]}): {err}")
+    run(["git", "config", "--unset-all", "filter.lfs.process"], cwd=repo_dir, env=auth)
+    archive_dir = f"archives{archive_id}"
     ret, _, err = run(["git", "add", manifest_path.name, ".gitattributes", archive_dir], cwd=repo_dir, env=auth)
     if ret != 0:
         raise RuntimeError(f"git add failed: {err}")
@@ -160,46 +245,68 @@ def commit_and_push_archive(repo_dir: str, archive_id: int, manifest_path: Path,
         encoding="utf-8",
     )
     askpass.chmod(stat.S_IRWXU)
+    wait = pace_seconds(object_count)
+    if wait:
+        print(
+            f"archive{archive_id}: pacing push by {wait}s for {object_count} new LFS object(s) "
+            f"below the HF quota",
+            flush=True,
+        )
+        time.sleep(wait)
     print(f"archive{archive_id}: pushing Git LFS objects", flush=True)
-    ret, _, err = run(
-        ["git", "push"],
-        cwd=repo_dir,
-        env={"GIT_ASKPASS": str(askpass), "GIT_TERMINAL_PROMPT": "0", "HF_USERNAME": HF_USERNAME},
-    )
-    if ret != 0:
-        raise RuntimeError(f"HF push failed: {err}")
+    push_with_retry(repo_dir, askpass)
     print(f"archive{archive_id}: push complete ({disk_report(repo_dir)})", flush=True)
 
 
 def mirror_archive(repo_dir: str, temp_dir: str, archive_id: int, files: dict[str, dict]) -> int:
     urls = source_urls(archive_id)
     print(f"archive{archive_id}: {len(urls)} source URLs ({disk_report(repo_dir)})", flush=True)
+    pending = [
+        url for url in urls
+        if not (files.get(url) and (Path(repo_dir) / files[url]["path"]).exists())
+    ]
+    if not pending:
+        print(f"archive{archive_id}: no new files", flush=True)
+        return 0
+
+    print(f"archive{archive_id}: {len(pending)} new file(s) to download", flush=True)
+    downloads: list[tuple[str, str, int, Path]] = []
+    if DOWNLOAD_CONCURRENCY > 1:
+        print(f"archive{archive_id}: downloading with {DOWNLOAD_CONCURRENCY} concurrent workers", flush=True)
+        with ThreadPoolExecutor(max_workers=DOWNLOAD_CONCURRENCY) as pool:
+            futures = {pool.submit(_download_one, url, temp_dir): url for url in pending}
+            completed = 0
+            for future in as_completed(futures):
+                url = futures[future]
+                try:
+                    downloads.append(future.result())
+                except Exception as exc:
+                    pool.shutdown(cancel_futures=True)
+                    raise RuntimeError(f"archive{archive_id}: download failed for {url}: {exc}") from exc
+                completed += 1
+                if completed % 50 == 0 or completed == len(pending):
+                    print(f"archive{archive_id}: [{completed}/{len(pending)}] files downloaded", flush=True)
+    else:
+        for url in pending:
+            downloads.append(_download_one(url, temp_dir))
+
     updates: dict[str, dict] = {}
     created_paths: list[Path] = []
     try:
-        for index, url in enumerate(urls, 1):
-            old = files.get(url)
-            if old and (Path(repo_dir) / old["path"]).exists():
-                print(f"archive{archive_id}: [{index}/{len(urls)}] already mirrored", flush=True)
-                continue
-            with tempfile.NamedTemporaryFile(prefix="source-", dir=temp_dir, delete=False) as handle:
-                temporary = Path(handle.name)
-            try:
-                print(f"archive{archive_id}: [{index}/{len(urls)}] downloading {url}", flush=True)
-                digest, size = download_to_path(url, temporary)
-                path = mirror_path(archive_id, digest, url)
-                target = Path(repo_dir) / path
-                target.parent.mkdir(parents=True, exist_ok=True)
-                if not target.exists():
-                    shutil.move(str(temporary), str(target))
-                    created_paths.append(target)
-                else:
-                    temporary.unlink(missing_ok=True)
-                updates[url] = {"archive_id": archive_id, "path": path, "sha256": digest, "bytes": size}
-                print(f"archive{archive_id}: [{index}/{len(urls)}] downloaded {size / 1024 ** 2:.1f} MiB", flush=True)
-            except Exception:
+        for url, digest, size, temporary in downloads:
+            path = mirror_path(archive_id, digest, url)
+            target = Path(repo_dir) / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if not target.exists():
+                shutil.move(str(temporary), str(target))
+                created_paths.append(target)
+            else:
                 temporary.unlink(missing_ok=True)
-                raise
+            updates[url] = {"archive_id": archive_id, "path": path, "sha256": digest, "bytes": size}
+        print(
+            f"archive{archive_id}: downloaded {sum(v['bytes'] for v in updates.values()) / 1024 ** 3:.2f} GiB",
+            flush=True,
+        )
     except Exception:
         for target in created_paths:
             target.unlink(missing_ok=True)
@@ -226,7 +333,7 @@ def mirror_archive(repo_dir: str, temp_dir: str, archive_id: int, files: dict[st
         json.dumps({"version": 1, "files": dict(sorted(files.items()))}, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
-    commit_and_push_archive(repo_dir, archive_id, manifest_path, temp_dir)
+    commit_and_push_archive(repo_dir, archive_id, manifest_path, temp_dir, lfs_object_count(updates))
     return len(updates)
 
 
