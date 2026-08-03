@@ -148,6 +148,7 @@ def prepare_file(work: Path, url: str, meta: dict) -> dict:
         return result
     suffix, kind = transform
 
+    work.mkdir(parents=True, exist_ok=True)
     source = work / "in"
     try:
         _digest, _size = download_mirrored(meta["path"], source)
