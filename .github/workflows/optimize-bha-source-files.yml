@@ -13,6 +13,11 @@ on:
         required: false
         default: "85"
         type: string
+      reoptimize_images:
+        description: Re-encode existing WebP files with the current size limit
+        required: false
+        default: true
+        type: boolean
       pdf_preview_dpi:
         description: PDF preview rendering DPI
         required: false
@@ -50,7 +55,7 @@ jobs:
           HF_SOURCE_REPOSITORY: vomebook/BHA-Source-Files
           WEBP_QUALITY: ${{ inputs.webp_quality }}
           WEBP_MAX_DIMENSION: "2400"
-          REOPTIMIZE_IMAGES: "true"
+          REOPTIMIZE_IMAGES: ${{ inputs.reoptimize_images }}
           PDF_PREVIEW_DPI: ${{ inputs.pdf_preview_dpi }}
           PDF_PREVIEW_QUALITY: ${{ inputs.pdf_preview_quality }}
           OPTIMIZE_CONCURRENCY: "8"
@@ -58,4 +63,6 @@ jobs:
           OPTIMIZE_PACE_MAX_SLEEP_SECONDS: "300"
           REPO_START: ${{ inputs.archive_id == 'all' && '0' || inputs.archive_id }}
           REPO_END: ${{ inputs.archive_id == 'all' && '31' || inputs.archive_id }}
-        run: python scripts/optimize_source_files.py
+        run: |
+          echo "WEBP_MAX_DIMENSION=${WEBP_MAX_DIMENSION} REOPTIMIZE_IMAGES=${REOPTIMIZE_IMAGES} PDF_PREVIEW_DPI=${PDF_PREVIEW_DPI} PDF_PREVIEW_QUALITY=${PDF_PREVIEW_QUALITY}"
+          python scripts/optimize_source_files.py
