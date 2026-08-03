@@ -36,7 +36,10 @@ from pathlib import Path
 
 from huggingface_hub import CommitOperationAdd, CommitOperationDelete, HfApi
 
-from scripts import mirror_source_files as mirror
+try:
+    from scripts import mirror_source_files as mirror
+except ImportError:
+    import mirror_source_files as mirror
 
 HF_REPO = mirror.HF_REPO
 HF_TOKEN = mirror.HF_TOKEN
