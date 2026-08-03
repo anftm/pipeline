@@ -4,8 +4,9 @@
 Each already-mirrored source file is transformed in place on the Hugging Face
 mirror dataset:
 
-  - PDF               -> qpdf --linearize (lossless; enables byte-range
-                         streaming render in the browser and pdf.js)
+   - PDF               -> qpdf --linearize (lossless; enables byte-range
+                          streaming render in the browser and pdf.js), plus
+                          per-page WebP previews rendered with pdftocairo
   - jpg/jpeg/png      -> cwebp WebP (jpg/jpeg lossy at WEBP_QUALITY, png
                          lossless; far smaller than the original scans)
   - everything else   -> left untouched
@@ -51,6 +52,10 @@ REPO_START = mirror.REPO_START
 REPO_END = mirror.REPO_END
 
 WEBP_QUALITY = int(os.environ.get("WEBP_QUALITY", "85"))
+WEBP_MAX_DIMENSION = int(os.environ.get("WEBP_MAX_DIMENSION", "2400"))
+REOPTIMIZE_IMAGES = os.environ.get("REOPTIMIZE_IMAGES", "0").lower() in {"1", "true", "yes"}
+PDF_PREVIEW_DPI = int(os.environ.get("PDF_PREVIEW_DPI", "150"))
+PDF_PREVIEW_QUALITY = int(os.environ.get("PDF_PREVIEW_QUALITY", "85"))
 CONCURRENCY = int(os.environ.get("OPTIMIZE_CONCURRENCY", "8"))
 PACE_OBJECTS_PER_MINUTE = float(os.environ.get("OPTIMIZE_PACE_OBJECTS_PER_MINUTE", "200"))
 PACE_MAX_SLEEP_SECONDS = int(os.environ.get("OPTIMIZE_PACE_MAX_SLEEP_SECONDS", "300"))
@@ -92,6 +97,18 @@ def transformation_for(url: str) -> tuple[str, str] | None:
     return None
 
 
+def needs_processing(url: str, meta: dict) -> bool:
+    if not meta.get("optimized"):
+        return True
+    suffix = Path(urllib.parse.urlparse(url).path).suffix.lower()
+    if suffix in RASTER_SUFFIXES and REOPTIMIZE_IMAGES:
+        return meta.get("webp_max_dimension") != WEBP_MAX_DIMENSION
+    return (
+        suffix == PDF_SUFFIX
+        and "page_previews" not in meta
+    )
+
+
 def optimized_path(archive_id: int, digest: str, suffix: str) -> str:
     return f"archives{archive_id}/{digest[:2]}/{digest}{suffix}"
 
@@ -117,6 +134,73 @@ def looks_like_webp(path: Path) -> bool:
     return head[:4] == b"RIFF" and head[8:12] == b"WEBP"
 
 
+def image_dimensions(path: Path) -> tuple[int, int] | None:
+    """Read dimensions for the raster inputs supported by cwebp."""
+    with path.open("rb") as handle:
+        signature = handle.read(8)
+        if signature == b"\x89PNG\r\n\x1a\n":
+            handle.read(4)
+            if handle.read(4) == b"IHDR":
+                width = int.from_bytes(handle.read(4), "big")
+                height = int.from_bytes(handle.read(4), "big")
+                return width, height
+            return None
+        if signature[:4] == b"RIFF" and handle.read(4) == b"WEBP":
+            chunk = handle.read(8)
+            if len(chunk) != 8:
+                return None
+            chunk_type, chunk_size = chunk[:4], int.from_bytes(chunk[4:], "little")
+            payload = handle.read(chunk_size)
+            if chunk_type == b"VP8X" and len(payload) >= 10:
+                width = 1 + int.from_bytes(payload[4:7] + b"\0", "little")
+                height = 1 + int.from_bytes(payload[7:10] + b"\0", "little")
+                return width, height
+            if chunk_type == b"VP8 " and len(payload) >= 10 and payload[3:6] == b"\x9d\x01\x2a":
+                return int.from_bytes(payload[6:8], "little") & 0x3FFF, int.from_bytes(payload[8:10], "little") & 0x3FFF
+            if chunk_type == b"VP8L" and len(payload) >= 5 and payload[0] == 0x2F:
+                bits = int.from_bytes(payload[1:5], "little")
+                return 1 + (bits & 0x3FFF), 1 + ((bits >> 14) & 0x3FFF)
+            return None
+        if signature[:2] != b"\xff\xd8":
+            return None
+        while True:
+            marker_start = handle.read(1)
+            if not marker_start:
+                return None
+            if marker_start != b"\xff":
+                continue
+            marker = handle.read(1)
+            while marker == b"\xff":
+                marker = handle.read(1)
+            if not marker:
+                return None
+            if marker in {b"\xd8", b"\xd9"}:
+                continue
+            length_bytes = handle.read(2)
+            if len(length_bytes) != 2:
+                return None
+            length = int.from_bytes(length_bytes, "big")
+            if length < 2:
+                return None
+            if marker[0] in set(range(0xC0, 0xC4)) | set(range(0xC5, 0xC8)) | set(range(0xC9, 0xCC)) | set(range(0xCD, 0xD0)):
+                data = handle.read(5)
+                if len(data) == 5:
+                    return int.from_bytes(data[1:3], "big"), int.from_bytes(data[3:5], "big")
+                return None
+            handle.seek(length - 2, 1)
+
+
+def resize_args(path: Path) -> list[str]:
+    if WEBP_MAX_DIMENSION <= 0:
+        return []
+    dimensions = image_dimensions(path)
+    if not dimensions or max(dimensions) <= WEBP_MAX_DIMENSION:
+        return []
+    width, height = dimensions
+    scale = WEBP_MAX_DIMENSION / max(width, height)
+    return ["-resize", str(max(1, round(width * scale))), str(max(1, round(height * scale)))]
+
+
 def transform_file(kind: str, source: Path, target: Path) -> None:
     if kind == "pdf-linearize":
         returncode, _out, err = mirror.run(["qpdf", "--linearize", str(source), str(target)])
@@ -130,12 +214,44 @@ def transform_file(kind: str, source: Path, target: Path) -> None:
             args += ["-lossless", "-z", "9"]
         else:
             args += ["-q", str(WEBP_QUALITY)]
+        args += resize_args(source)
         args += [str(source), "-o", str(target)]
         returncode, _out, err = mirror.run(args)
         if returncode != 0:
             raise RuntimeError(f"cwebp failed: {err or 'unknown error'}")
         if not looks_like_webp(target):
             raise RuntimeError("cwebp output is not valid WebP")
+
+
+def render_pdf_previews(source: Path, work: Path, archive_id: int) -> tuple[dict, dict[str, Path]]:
+    """Render a PDF into content-addressed WebP pages."""
+    png_prefix = work / "page"
+    returncode, _out, err = mirror.run(
+        ["pdftocairo", "-png", "-r", str(PDF_PREVIEW_DPI), str(source), str(png_prefix)]
+    )
+    if returncode != 0:
+        raise RuntimeError(f"pdftocairo failed: {err or 'unknown error'}")
+    pages = sorted(work.glob("page-*.png"), key=lambda path: int(path.stem.rsplit("-", 1)[1]))
+    if not pages:
+        raise RuntimeError("pdftocairo produced no page images")
+
+    preview_outputs: dict[str, Path] = {}
+    paths: list[str] = []
+    for index, png in enumerate(pages, start=1):
+        local_webp = work / f"preview-{index}.webp"
+        returncode, _out, err = mirror.run(
+            ["cwebp", "-q", str(PDF_PREVIEW_QUALITY), str(png), "-o", str(local_webp)]
+        )
+        if returncode != 0:
+            raise RuntimeError(f"cwebp failed for PDF page {index}: {err or 'unknown error'}")
+        if not looks_like_webp(local_webp):
+            raise RuntimeError(f"PDF page {index} output is not valid WebP")
+        digest, _size = sha256_of(local_webp)
+        path = optimized_path(archive_id, digest, ".webp")
+        paths.append(path)
+        preview_outputs[path] = local_webp
+        png.unlink(missing_ok=True)
+    return {"count": len(paths), "paths": paths}, preview_outputs
 
 
 def prepare_file(work: Path, url: str, meta: dict) -> dict:
@@ -146,6 +262,8 @@ def prepare_file(work: Path, url: str, meta: dict) -> dict:
     updated entry metadata when the file was processed.
     """
     result = {"url": url, "status": None, "meta": dict(meta)}
+    if meta.get("page_previews"):
+        result["old_page_preview_paths"] = list(meta["page_previews"].get("paths", []))
     transform = transformation_for(url)
     if transform is None:
         result["status"] = "pass-through"
@@ -173,6 +291,8 @@ def prepare_file(work: Path, url: str, meta: dict) -> dict:
     result["meta"]["sha256"] = digest
     result["meta"]["bytes"] = size
     result["output"] = target
+    if suffix == ".webp":
+        result["meta"]["webp_max_dimension"] = WEBP_MAX_DIMENSION
     if suffix:
         result["meta"]["path"] = optimized_path(meta["archive_id"], digest, suffix)
     if result["meta"]["path"] == meta["path"]:
@@ -180,6 +300,15 @@ def prepare_file(work: Path, url: str, meta: dict) -> dict:
     else:
         result["status"] = "changed"
         result["old_path"] = meta["path"]
+    if kind == "pdf-linearize" and looks_like_pdf(target):
+        try:
+            page_previews, preview_outputs = render_pdf_previews(target, work, meta["archive_id"])
+        except Exception as exc:
+            result["status"] = "transform-failed"
+            result["error"] = str(exc)
+            return result
+        result["meta"]["page_previews"] = page_previews
+        result["preview_outputs"] = preview_outputs
     return result
 
 
@@ -197,10 +326,15 @@ def commit_archive(
     staged: dict[str, dict],
     deletions: set[str],
     temp_dir: Path,
+    staged_previews: dict[str, Path] | None = None,
 ) -> None:
     operations = [
         CommitOperationAdd(path_in_repo=meta["path"], path_or_fileobj=str(temp_dir / meta["path"]))
         for meta in staged.values()
+    ]
+    operations += [
+        CommitOperationAdd(path_in_repo=path, path_or_fileobj=str(local_path))
+        for path, local_path in sorted((staged_previews or {}).items())
     ]
     operations += [CommitOperationDelete(path_in_repo=path) for path in sorted(deletions)]
     manifest_bytes = (
@@ -280,9 +414,10 @@ def commit_archive_results(
     archive's download/transform work.
     """
 
-    def build() -> tuple[dict[str, dict], dict[str, dict], set[str]]:
+    def build() -> tuple[dict[str, dict], dict[str, dict], dict[str, Path], set[str]]:
         updates: dict[str, dict] = {}
         staged: dict[str, dict] = {}
+        staged_previews: dict[str, Path] = {}
         created_paths: list[Path] = []
         try:
             for result in results:
@@ -290,33 +425,55 @@ def commit_archive_results(
                     continue
                 updates[result["url"]] = result["meta"]
                 output = result.get("output")
-                if output is None or result["status"] == "unchanged":
-                    continue
-                target = temp_dir / result["meta"]["path"]
-                target.parent.mkdir(parents=True, exist_ok=True)
-                if not target.exists():
-                    shutil.move(str(output), str(target))
-                    created_paths.append(target)
-                staged[result["url"]] = result["meta"]
+                if output is not None and result["status"] == "changed":
+                    target = temp_dir / result["meta"]["path"]
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    if not target.exists():
+                        shutil.move(str(output), str(target))
+                        created_paths.append(target)
+                    staged[result["url"]] = result["meta"]
+                for path, preview_output in result.get("preview_outputs", {}).items():
+                    preview_target = temp_dir / path
+                    preview_target.parent.mkdir(parents=True, exist_ok=True)
+                    if not preview_target.exists():
+                        shutil.move(str(preview_output), str(preview_target))
+                        created_paths.append(preview_target)
+                    staged_previews[path] = preview_target
+                if result.get("preview_outputs"):
+                    staged[result["url"]] = result["meta"]
         except Exception:
             for target in created_paths:
                 target.unlink(missing_ok=True)
             raise
         files.update(updates)
         referenced = {meta["path"] for meta in files.values()}
-        deletions = {result["old_path"] for result in results if result.get("old_path")} - referenced
-        return updates, staged, deletions
+        referenced.update(
+            path
+            for meta in files.values()
+            for path in meta.get("page_previews", {}).get("paths", [])
+        )
+        old_paths = {result["old_path"] for result in results if result.get("old_path")}
+        old_paths.update(
+            path
+            for result in results
+            for path in result.get("old_page_preview_paths", [])
+        )
+        deletions = old_paths - referenced
+        return updates, staged, staged_previews, deletions
 
     if files_lock is not None:
         with files_lock:
-            updates, staged, deletions = build()
+            updates, staged, staged_previews, deletions = build()
     else:
-        updates, staged, deletions = build()
+        updates, staged, staged_previews, deletions = build()
     if not updates and not deletions:
         print(f"archive{archive_id}: no file changed", flush=True)
         return 0
 
-    commit_archive(api, archive_id, files, staged, deletions, temp_dir)
+    if staged_previews:
+        commit_archive(api, archive_id, files, staged, deletions, temp_dir, staged_previews)
+    else:
+        commit_archive(api, archive_id, files, staged, deletions, temp_dir)
     cleanup_archive_dir(temp_dir, archive_id)
     return len(updates)
 
@@ -326,7 +483,7 @@ def optimize_archive(api: HfApi, temp_dir: Path, archive_id: int, files: dict[st
     entries = [
         (url, meta)
         for url, meta in files.items()
-        if meta.get("archive_id") == archive_id and not meta.get("optimized")
+        if meta.get("archive_id") == archive_id and needs_processing(url, meta)
     ]
     total = sum(1 for meta in files.values() if meta.get("archive_id") == archive_id)
     if not entries:
@@ -343,6 +500,8 @@ def main() -> int:
         raise RuntimeError("qpdf is required (apt-get install qpdf)")
     if shutil.which("cwebp") is None:
         raise RuntimeError("cwebp is required (apt-get install webp)")
+    if shutil.which("pdftocairo") is None:
+        raise RuntimeError("pdftocairo is required (apt-get install poppler-utils)")
     api = HfApi(token=HF_TOKEN)
     with tempfile.TemporaryDirectory(prefix="bha-source-optimize-") as temp_dir:
         manifest = mirror.remote_manifest(api)
@@ -360,7 +519,7 @@ def main() -> int:
                         entries = [
                             (url, meta)
                             for url, meta in files.items()
-                            if meta.get("archive_id") == archive_id and not meta.get("optimized")
+                            if meta.get("archive_id") == archive_id and needs_processing(url, meta)
                         ]
                         total = sum(1 for meta in files.values() if meta.get("archive_id") == archive_id)
                     if not entries:
