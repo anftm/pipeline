@@ -58,6 +58,7 @@ jobs:
           REOPTIMIZE_IMAGES: ${{ inputs.reoptimize_images }}
           PDF_PREVIEW_DPI: ${{ inputs.pdf_preview_dpi }}
           PDF_PREVIEW_QUALITY: ${{ inputs.pdf_preview_quality }}
+          PDF_PREVIEW_CONCURRENCY: "2"
           OPTIMIZE_CONCURRENCY: "8"
           OPTIMIZE_PACE_OBJECTS_PER_MINUTE: "200"
           OPTIMIZE_PACE_MAX_SLEEP_SECONDS: "300"
