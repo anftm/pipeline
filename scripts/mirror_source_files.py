@@ -4,6 +4,7 @@
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -133,6 +134,19 @@ def run(args: list[str], cwd: str | None = None, env: dict | None = None) -> tup
 def is_rate_limited(output: str) -> bool:
     lowered = output.lower()
     return any(marker in lowered for marker in RATE_LIMIT_MARKERS)
+
+
+def rate_limit_reset_seconds(output: str) -> int | None:
+    for pattern in (
+        r"Retry-After:\s*(\d+)",
+        r"t=(\d+)",
+        r"retry in (\d+)",
+        r"in (\d+) second",
+    ):
+        match = re.search(pattern, output, re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+    return None
 
 
 def pace_seconds(object_count: int) -> int:
@@ -345,12 +359,14 @@ def push_with_retry(repo_dir: str, askpass: Path) -> None:
             raise RuntimeError(f"HF push failed: {combined.strip() or '(no output)'}")
         if attempt >= PUSH_MAX_ATTEMPTS:
             break
+        wait = rate_limit_reset_seconds(combined) or PUSH_BACKOFF_SECONDS
         print(
-            f"HF push hit the request rate limit; waiting {PUSH_BACKOFF_SECONDS}s before retry "
+            f"HF push hit the request rate limit; waiting {wait}s before retry "
             f"({attempt}/{PUSH_MAX_ATTEMPTS})",
             flush=True,
         )
-        time.sleep(PUSH_BACKOFF_SECONDS)
+        print(f"  detail: {' '.join(combined.split())[:500]}", flush=True)
+        time.sleep(wait)
     raise RuntimeError(
         f"HF push kept hitting the request rate limit after {PUSH_MAX_ATTEMPTS} attempts; "
         "wait 5 minutes and re-run (already-mirrored files are skipped)."
