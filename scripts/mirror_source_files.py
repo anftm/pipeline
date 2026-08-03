@@ -9,6 +9,7 @@ import stat
 import subprocess
 import tempfile
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -42,9 +43,28 @@ def api_json(url: str, token: str = "") -> dict:
 def github_tree(repo: str) -> list[dict]:
     url = f"https://api.github.com/repos/{UPSTREAM_OWNER}/{repo}/git/trees/parsed?recursive=1"
     data = api_json(url, os.environ.get("GH_PAT", ""))
-    if data.get("truncated"):
-        raise RuntimeError(f"GitHub tree is truncated for {repo}")
-    return [item for item in data.get("tree", []) if item.get("type") == "blob"]
+    if not data.get("truncated"):
+        return [item for item in data.get("tree", []) if item.get("type") == "blob"]
+    print(f"GitHub tree is truncated for {repo}; falling back to a shallow clone", flush=True)
+    return cloned_parsed_blobs(repo)
+
+
+def cloned_parsed_blobs(repo: str) -> list[dict]:
+    with tempfile.TemporaryDirectory(prefix=f"{repo}-parsed-") as clone_dir:
+        ret, out, err = run(
+            [
+                "git", "clone", "--depth", "1", "--single-branch", "--branch", "parsed",
+                "--filter=blob:none", "--no-checkout",
+                f"https://github.com/{UPSTREAM_OWNER}/{repo}", clone_dir,
+            ],
+            env={"GIT_TERMINAL_PROMPT": "0"},
+        )
+        if ret != 0:
+            raise RuntimeError(f"parsed branch clone failed for {repo}: {err or out}")
+        ret, out, err = run(["git", "ls-tree", "-r", "--name-only", "HEAD"], cwd=clone_dir)
+        if ret != 0:
+            raise RuntimeError(f"parsed branch listing failed for {repo}: {err or out}")
+        return [{"path": line, "type": "blob"} for line in out.splitlines() if line]
 
 
 def read_metadata(repo: str, path: str) -> dict:
@@ -142,12 +162,123 @@ def write_conditional_lfs_clean(config_dir: Path, min_bytes: int) -> Path:
     return script
 
 
-def _download_one(url: str, temp_dir: str) -> tuple[str, str, int, Path]:
+def write_lfs_filter_process(config_dir: Path, min_bytes: int) -> Path:
+    script = config_dir / "lfs-filter-process.py"
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        '"""Size-gated Git LFS filter process (filter.lfs.process)."""\n'
+        "import os\n"
+        "import subprocess\n"
+        "import sys\n"
+        "import tempfile\n"
+        "MAX_PACKET = 65516\n"
+        f"MIN_BYTES = {min_bytes}\n"
+        "def read_pkt():\n"
+        "    header = sys.stdin.buffer.read(4)\n"
+        "    if not header:\n"
+        "        return None\n"
+        "    length = int(header, 16)\n"
+        "    if length == 0:\n"
+        "        return b''\n"
+        "    return sys.stdin.buffer.read(length - 4)\n"
+        "def read_txt():\n"
+        "    data = read_pkt()\n"
+        "    if data is None:\n"
+        "        return None\n"
+        "    return data[:-1] if data.endswith(b'\\n') else data\n"
+        "def write_pkt(data):\n"
+        "    sys.stdout.buffer.write(('%04x' % (len(data) + 4)).encode() + data)\n"
+        "    sys.stdout.buffer.flush()\n"
+        "def write_flush():\n"
+        "    sys.stdout.buffer.write(b'0000')\n"
+        "    sys.stdout.buffer.flush()\n"
+        "def main():\n"
+        "    if read_txt() != b'git-filter-client':\n"
+        "        return 1\n"
+        "    if read_txt() != b'version=2':\n"
+        "        return 1\n"
+        "    if read_pkt() != b'':\n"
+        "        return 1\n"
+        "    write_pkt(b'git-filter-server\\n')\n"
+        "    write_pkt(b'version=2\\n')\n"
+        "    write_flush()\n"
+        "    while True:\n"
+        "        line = read_txt()\n"
+        "        if line is None:\n"
+        "            return 1\n"
+        "        if line == b'':\n"
+        "            break\n"
+        "        if not line.startswith(b'capability='):\n"
+        "            return 1\n"
+        "    write_pkt(b'capability=clean\\n')\n"
+        "    write_flush()\n"
+        "    while True:\n"
+        "        command = pathname = None\n"
+        "        while True:\n"
+        "            line = read_txt()\n"
+        "            if line is None:\n"
+        "                return 0\n"
+        "            if line == b'':\n"
+        "                break\n"
+        "            if line.startswith(b'command='):\n"
+        "                command = line[len(b'command='):]\n"
+        "            elif line.startswith(b'pathname='):\n"
+        "                pathname = line[len(b'pathname='):]\n"
+        "        if command is None or pathname is None:\n"
+        "            return 1\n"
+        "        with tempfile.NamedTemporaryFile(prefix='lfs-filter-', delete=False) as tmp:\n"
+        "            temp_path = tmp.name\n"
+        "            while True:\n"
+        "                chunk = read_pkt()\n"
+        "                if chunk is None:\n"
+        "                    return 0\n"
+        "                if chunk == b'':\n"
+        "                    break\n"
+        "                tmp.write(chunk)\n"
+        "        try:\n"
+        "            size = os.path.getsize(temp_path)\n"
+        "            with open(temp_path, 'rb') as source:\n"
+        "                if command == b'clean' and size >= MIN_BYTES:\n"
+        "                    proc = subprocess.run(\n"
+        "                        ['git', 'lfs', 'clean', '--', pathname.decode('utf-8', 'replace')],\n"
+        "                        stdin=source, stdout=subprocess.PIPE,\n"
+        "                    )\n"
+        "                    if proc.returncode != 0:\n"
+        "                        write_pkt(b'status=error\\n')\n"
+        "                        write_flush()\n"
+        "                        continue\n"
+        "                    output = proc.stdout\n"
+        "                else:\n"
+        "                    output = source.read()\n"
+        "        finally:\n"
+        "            os.unlink(temp_path)\n"
+        "        write_pkt(b'status=success\\n')\n"
+        "        write_flush()\n"
+        "        while output:\n"
+        "            write_pkt(output[:MAX_PACKET])\n"
+        "            output = output[MAX_PACKET:]\n"
+        "        write_flush()\n"
+        "        write_flush()\n"
+        "if __name__ == '__main__':\n"
+        "    raise SystemExit(main())\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o700)
+    return script
+
+
+def _download_one(url: str, temp_dir: str) -> tuple[str, str, int, Path] | None:
     with tempfile.NamedTemporaryFile(prefix="source-", dir=temp_dir, delete=False) as handle:
         temporary = Path(handle.name)
     try:
         digest, size = download_to_path(url, temporary)
         return url, digest, size, temporary
+    except urllib.error.HTTPError as exc:
+        temporary.unlink(missing_ok=True)
+        if exc.code == 404:
+            print(f"missing upstream (404), skipped: {url}", flush=True)
+            return None
+        raise
     except Exception:
         temporary.unlink(missing_ok=True)
         raise
@@ -205,24 +336,29 @@ def ensure_hf_repo(repo_dir: str) -> None:
         raise RuntimeError(f"HF repository clone failed: {err or retry_err}")
 
 
+def setup_lfs(repo_dir: str) -> None:
+    auth = {"GIT_LFS_SKIP_SMUDGE": "1"}
+    ret, out, err = run(["git", "lfs", "install", "--local", "--skip-smudge"], cwd=repo_dir, env=auth)
+    if ret != 0:
+        raise RuntimeError(f"git lfs install failed: {err or out}")
+    ret, out, err = run(["git", "lfs", "track", "archives*/**"], cwd=repo_dir, env=auth)
+    if ret != 0:
+        raise RuntimeError(f"git lfs track failed: {err or out}")
+    clean_script = write_conditional_lfs_clean(Path(repo_dir) / ".git", LFS_MIN_BYTES)
+    ret, out, err = run(["git", "config", "filter.lfs.clean", f"{clean_script} %f"], cwd=repo_dir, env=auth)
+    if ret != 0:
+        raise RuntimeError(f"git config failed (filter.lfs.clean): {err or out}")
+    process_script = write_lfs_filter_process(Path(repo_dir) / ".git", LFS_MIN_BYTES)
+    ret, out, err = run(["git", "config", "filter.lfs.process", str(process_script)], cwd=repo_dir, env=auth)
+    if ret != 0:
+        raise RuntimeError(f"git config failed (filter.lfs.process): {err or out}")
+    ret, out, err = run(["git", "config", "filter.lfs.required", "true"], cwd=repo_dir, env=auth)
+    if ret != 0:
+        raise RuntimeError(f"git config failed (filter.lfs.required): {err or out}")
+
+
 def commit_and_push_archive(repo_dir: str, archive_id: int, manifest_path: Path, temp_dir: str, object_count: int = 0) -> None:
     auth = {"GIT_LFS_SKIP_SMUDGE": "1"}
-    ret, _, err = run(["git", "lfs", "install", "--local", "--skip-smudge"], cwd=repo_dir, env=auth)
-    if ret != 0:
-        raise RuntimeError(f"git lfs install failed: {err}")
-    ret, _, err = run(["git", "lfs", "track", "archives*/**"], cwd=repo_dir, env=auth)
-    if ret != 0:
-        raise RuntimeError(f"git lfs track failed: {err}")
-    clean_script = write_conditional_lfs_clean(Path(repo_dir) / ".git", LFS_MIN_BYTES)
-    for command in (
-        ["git", "config", "filter.lfs.clean", f"{clean_script} %f"],
-        ["git", "config", "filter.lfs.smudge", "git-lfs smudge -- %f"],
-        ["git", "config", "filter.lfs.required", "false"],
-    ):
-        ret, _, err = run(command, cwd=repo_dir, env=auth)
-        if ret != 0:
-            raise RuntimeError(f"git config failed ({command[2]}): {err}")
-    run(["git", "config", "--unset-all", "filter.lfs.process"], cwd=repo_dir, env=auth)
     archive_dir = f"archives{archive_id}"
     ret, _, err = run(["git", "add", manifest_path.name, ".gitattributes", archive_dir], cwd=repo_dir, env=auth)
     if ret != 0:
@@ -256,6 +392,9 @@ def commit_and_push_archive(repo_dir: str, archive_id: int, manifest_path: Path,
     print(f"archive{archive_id}: pushing Git LFS objects", flush=True)
     push_with_retry(repo_dir, askpass)
     print(f"archive{archive_id}: push complete ({disk_report(repo_dir)})", flush=True)
+    run(["git", "lfs", "prune"], cwd=repo_dir, env=auth)
+    shutil.rmtree(Path(repo_dir) / archive_dir, ignore_errors=True)
+    print(f"archive{archive_id}: pruned LFS objects ({disk_report(repo_dir)})", flush=True)
 
 
 def mirror_archive(repo_dir: str, temp_dir: str, archive_id: int, files: dict[str, dict]) -> int:
@@ -289,6 +428,11 @@ def mirror_archive(repo_dir: str, temp_dir: str, archive_id: int, files: dict[st
     else:
         for url in pending:
             downloads.append(_download_one(url, temp_dir))
+
+    downloads = [item for item in downloads if item is not None]
+    if not downloads:
+        print(f"archive{archive_id}: all {len(pending)} source file(s) missing upstream (404), nothing to mirror", flush=True)
+        return 0
 
     updates: dict[str, dict] = {}
     created_paths: list[Path] = []
@@ -343,6 +487,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="bha-source-mirror-") as temp_dir:
         repo_dir = os.path.join(temp_dir, "source-files")
         ensure_hf_repo(repo_dir)
+        setup_lfs(repo_dir)
         manifest_path = Path(repo_dir) / MANIFEST_NAME
         manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {"version": 1, "files": {}}
         files = manifest.setdefault("files", {})
