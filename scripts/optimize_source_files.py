@@ -25,8 +25,10 @@ preprocessing itself.
 import hashlib
 import json
 import os
+import queue
 import shutil
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -49,7 +51,9 @@ REPO_START = mirror.REPO_START
 REPO_END = mirror.REPO_END
 
 WEBP_QUALITY = int(os.environ.get("WEBP_QUALITY", "85"))
-CONCURRENCY = int(os.environ.get("OPTIMIZE_CONCURRENCY", "2"))
+CONCURRENCY = int(os.environ.get("OPTIMIZE_CONCURRENCY", "8"))
+PACE_OBJECTS_PER_MINUTE = float(os.environ.get("OPTIMIZE_PACE_OBJECTS_PER_MINUTE", "200"))
+PACE_MAX_SLEEP_SECONDS = int(os.environ.get("OPTIMIZE_PACE_MAX_SLEEP_SECONDS", "300"))
 PDF_SUFFIX = ".pdf"
 RASTER_SUFFIXES = {".jpg", ".jpeg", ".png"}
 LOSSLESS_SUFFIXES = {".png"}
@@ -162,7 +166,6 @@ def prepare_file(work: Path, url: str, meta: dict) -> dict:
     except Exception as exc:
         result["status"] = "transform-failed"
         result["error"] = str(exc)
-        result["meta"]["optimized"] = True
         return result
 
     digest, size = sha256_of(target)
@@ -181,10 +184,10 @@ def prepare_file(work: Path, url: str, meta: dict) -> dict:
 
 
 def pace_seconds(operations: int) -> int:
-    if operations <= 0 or mirror.PACE_OBJECTS_PER_MINUTE <= 0:
+    if operations <= 0 or PACE_OBJECTS_PER_MINUTE <= 0:
         return 0
-    expected = float(operations) / (float(mirror.PACE_OBJECTS_PER_MINUTE) / 60.0)
-    return min(int(expected), mirror.PACE_MAX_SLEEP_SECONDS)
+    expected = float(operations) / (float(PACE_OBJECTS_PER_MINUTE) / 60.0)
+    return min(int(expected), PACE_MAX_SLEEP_SECONDS)
 
 
 def commit_archive(
@@ -228,21 +231,17 @@ def cleanup_archive_dir(temp_dir: Path, archive_id: int) -> None:
         shutil.rmtree(directory, ignore_errors=True)
 
 
-def optimize_archive(api: HfApi, temp_dir: Path, archive_id: int, files: dict[str, dict]) -> int:
-    entries = [
-        (url, meta)
-        for url, meta in files.items()
-        if meta.get("archive_id") == archive_id and not meta.get("optimized")
-    ]
-    total = sum(1 for meta in files.values() if meta.get("archive_id") == archive_id)
-    if not entries:
-        print(f"archive{archive_id}: {total} files already processed", flush=True)
-        return 0
+def prepare_archive(temp_dir: Path, archive_id: int, entries: list[tuple[str, dict]]) -> list[dict]:
+    """Download and transform one archive's entries. Pure offline work.
 
-    print(f"archive{archive_id}: {len(entries)} file(s) to process", flush=True)
+    Returns result dicts; callers aggregate and commit them separately so the
+    download/transform of later archives overlaps the commit (and its pace
+    sleep) of earlier ones.
+    """
     work_root = temp_dir / f"archives{archive_id}"
     work_root.mkdir(parents=True, exist_ok=True)
 
+    print(f"archive{archive_id}: {len(entries)} file(s) to process", flush=True)
     results: list[dict] = []
     if CONCURRENCY > 1:
         print(f"archive{archive_id}: processing with {CONCURRENCY} concurrent workers", flush=True)
@@ -262,33 +261,57 @@ def optimize_archive(api: HfApi, temp_dir: Path, archive_id: int, files: dict[st
     else:
         for index, (url, meta) in enumerate(entries):
             results.append(prepare_file(work_root / str(index), url, meta))
+    return results
 
-    updates: dict[str, dict] = {}
-    staged: dict[str, dict] = {}
-    created_paths: list[Path] = []
-    try:
-        for result in results:
-            if result["status"] not in ("changed", "unchanged", "transform-failed"):
-                continue
-            updates[result["url"]] = result["meta"]
-            output = result.get("output")
-            if output is None or result["status"] == "unchanged":
-                continue
-            target = temp_dir / result["meta"]["path"]
-            target.parent.mkdir(parents=True, exist_ok=True)
-            if not target.exists():
-                shutil.move(str(output), str(target))
-                created_paths.append(target)
-            staged[result["url"]] = result["meta"]
-    except Exception:
-        for target in created_paths:
-            target.unlink(missing_ok=True)
-        cleanup_archive_dir(temp_dir, archive_id)
-        raise
 
-    files.update(updates)
-    referenced = {meta["path"] for meta in files.values()}
-    deletions = {result["old_path"] for result in results if result.get("old_path")} - referenced
+def commit_archive_results(
+    api: HfApi,
+    temp_dir: Path,
+    archive_id: int,
+    files: dict[str, dict],
+    results: list[dict],
+    files_lock: object | None = None,
+) -> int:
+    """Aggregate prepared results into the manifest and commit them to HF.
+
+    ``files_lock`` serializes access to the shared manifest dict when several
+    archives are processed in parallel (pipeline mode). The lock is released
+    before ``commit_archive`` so its pace sleep does not stall the next
+    archive's download/transform work.
+    """
+
+    def build() -> tuple[dict[str, dict], dict[str, dict], set[str]]:
+        updates: dict[str, dict] = {}
+        staged: dict[str, dict] = {}
+        created_paths: list[Path] = []
+        try:
+            for result in results:
+                if result["status"] not in ("changed", "unchanged"):
+                    continue
+                updates[result["url"]] = result["meta"]
+                output = result.get("output")
+                if output is None or result["status"] == "unchanged":
+                    continue
+                target = temp_dir / result["meta"]["path"]
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if not target.exists():
+                    shutil.move(str(output), str(target))
+                    created_paths.append(target)
+                staged[result["url"]] = result["meta"]
+        except Exception:
+            for target in created_paths:
+                target.unlink(missing_ok=True)
+            raise
+        files.update(updates)
+        referenced = {meta["path"] for meta in files.values()}
+        deletions = {result["old_path"] for result in results if result.get("old_path")} - referenced
+        return updates, staged, deletions
+
+    if files_lock is not None:
+        with files_lock:
+            updates, staged, deletions = build()
+    else:
+        updates, staged, deletions = build()
     if not updates and not deletions:
         print(f"archive{archive_id}: no file changed", flush=True)
         return 0
@@ -296,6 +319,21 @@ def optimize_archive(api: HfApi, temp_dir: Path, archive_id: int, files: dict[st
     commit_archive(api, archive_id, files, staged, deletions, temp_dir)
     cleanup_archive_dir(temp_dir, archive_id)
     return len(updates)
+
+
+def optimize_archive(api: HfApi, temp_dir: Path, archive_id: int, files: dict[str, dict]) -> int:
+    """Sequential single-archive path used by tests; pipeline main() splits this."""
+    entries = [
+        (url, meta)
+        for url, meta in files.items()
+        if meta.get("archive_id") == archive_id and not meta.get("optimized")
+    ]
+    total = sum(1 for meta in files.values() if meta.get("archive_id") == archive_id)
+    if not entries:
+        print(f"archive{archive_id}: {total} files already processed", flush=True)
+        return 0
+    results = prepare_archive(temp_dir, archive_id, entries)
+    return commit_archive_results(api, temp_dir, archive_id, files, results)
 
 
 def main() -> int:
@@ -310,14 +348,49 @@ def main() -> int:
         manifest = mirror.remote_manifest(api)
         files = manifest.setdefault("files", {})
         failures: list[str] = []
-        for archive_id in range(REPO_START, REPO_END + 1):
+        files_lock = threading.Lock()
+        ready: queue.Queue[tuple[int, list[dict]] | None] = queue.Queue(maxsize=1)
+
+        def producer() -> None:
+            """Prepare archives (download+transform) while the consumer commits
+            earlier ones; its pace sleep therefore overlaps real work."""
             try:
-                processed = optimize_archive(api, Path(temp_dir), archive_id, files)
-                print(f"archive{archive_id}: processed {processed} file(s)", flush=True)
+                for archive_id in range(REPO_START, REPO_END + 1):
+                    with files_lock:
+                        entries = [
+                            (url, meta)
+                            for url, meta in files.items()
+                            if meta.get("archive_id") == archive_id and not meta.get("optimized")
+                        ]
+                        total = sum(1 for meta in files.values() if meta.get("archive_id") == archive_id)
+                    if not entries:
+                        print(f"archive{archive_id}: {total} files already processed", flush=True)
+                        continue
+                    results = prepare_archive(Path(temp_dir), archive_id, entries)
+                    ready.put((archive_id, results))
             except Exception as exc:
-                failures.append(f"archive{archive_id}: {exc}")
-                print(f"archive{archive_id} failed: {exc}", flush=True)
-            cleanup_archive_dir(Path(temp_dir), archive_id)
+                failures.append(f"producer: {exc}")
+                print(f"producer failed: {exc}", flush=True)
+            finally:
+                ready.put(None)
+
+        producer_thread = threading.Thread(target=producer)
+        producer_thread.start()
+        try:
+            while True:
+                item = ready.get()
+                if item is None:
+                    break
+                archive_id, results = item
+                try:
+                    processed = commit_archive_results(api, Path(temp_dir), archive_id, files, results, files_lock)
+                    print(f"archive{archive_id}: processed {processed} file(s)", flush=True)
+                except Exception as exc:
+                    failures.append(f"archive{archive_id}: {exc}")
+                    print(f"archive{archive_id} failed: {exc}", flush=True)
+                    cleanup_archive_dir(Path(temp_dir), archive_id)
+        finally:
+            producer_thread.join()
         if failures:
             print("\n".join(failures))
             return 1
