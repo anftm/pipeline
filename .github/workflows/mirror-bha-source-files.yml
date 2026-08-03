@@ -22,16 +22,12 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
-      - name: Install Git LFS
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y git-lfs
-          git lfs version
+      - name: Install dependencies
+        run: pip install -r scripts/requirements.txt
       - name: Mirror source files
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          HF_USERNAME: vomebook
           HF_SOURCE_REPOSITORY: vomebook/BHA-Source-Files
           REPO_START: ${{ inputs.archive_id == 'all' && '0' || inputs.archive_id }}
           REPO_END: ${{ inputs.archive_id == 'all' && '31' || inputs.archive_id }}
