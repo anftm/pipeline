@@ -67,6 +67,12 @@ def download_to_path(url: str, target: Path) -> tuple[str, int]:
     return digest.hexdigest(), size
 
 
+def disk_report(path: str) -> str:
+    usage = shutil.disk_usage(path)
+    used = usage.total - usage.free
+    return f"disk used {used / 1024 ** 3:.2f} GiB / {usage.total / 1024 ** 3:.2f} GiB"
+
+
 def source_urls(archive_id: int) -> list[str]:
     repo = f"banned-historical-archives{archive_id}"
     urls: set[str] = set()
@@ -120,6 +126,110 @@ def ensure_hf_repo(repo_dir: str) -> None:
         raise RuntimeError(f"HF repository clone failed: {err or retry_err}")
 
 
+def commit_and_push_archive(repo_dir: str, archive_id: int, manifest_path: Path, temp_dir: str) -> None:
+    auth = {"GIT_LFS_SKIP_SMUDGE": "1"}
+    ret, _, err = run(["git", "lfs", "install", "--local", "--skip-smudge"], cwd=repo_dir, env=auth)
+    if ret != 0:
+        raise RuntimeError(f"git lfs install failed: {err}")
+    archive_dir = f"archives{archive_id}"
+    ret, _, err = run(
+        ["git", "lfs", "track", f"{archive_dir}/**", "*.pdf", "*.jpg", "*.jpeg", "*.png", "*.webp"],
+        cwd=repo_dir,
+        env=auth,
+    )
+    if ret != 0:
+        raise RuntimeError(f"git lfs track failed: {err}")
+    ret, _, err = run(["git", "add", manifest_path.name, ".gitattributes", archive_dir], cwd=repo_dir, env=auth)
+    if ret != 0:
+        raise RuntimeError(f"git add failed: {err}")
+    ret, _, err = run(
+        [
+            "git", "-c", "user.name=github-actions[bot]",
+            "-c", "user.email=github-actions[bot]@users.noreply.github.com",
+            "commit", "-m", f"Update BHA source files archive{archive_id}",
+        ],
+        cwd=repo_dir,
+        env=auth,
+    )
+    if ret != 0:
+        raise RuntimeError(f"git commit failed: {err}")
+    askpass = Path(temp_dir) / "hf-push-askpass.sh"
+    askpass.write_text(
+        "#!/bin/sh\n"
+        "case \"$1\" in *Username*) printf '%s\\n' \"$HF_USERNAME\" ;; *) printf '%s\\n' \"$HF_TOKEN\" ;; esac\n",
+        encoding="utf-8",
+    )
+    askpass.chmod(stat.S_IRWXU)
+    print(f"archive{archive_id}: pushing Git LFS objects", flush=True)
+    ret, _, err = run(
+        ["git", "push"],
+        cwd=repo_dir,
+        env={"GIT_ASKPASS": str(askpass), "GIT_TERMINAL_PROMPT": "0", "HF_USERNAME": HF_USERNAME},
+    )
+    if ret != 0:
+        raise RuntimeError(f"HF push failed: {err}")
+    print(f"archive{archive_id}: push complete ({disk_report(repo_dir)})", flush=True)
+
+
+def mirror_archive(repo_dir: str, temp_dir: str, archive_id: int, files: dict[str, dict]) -> int:
+    urls = source_urls(archive_id)
+    print(f"archive{archive_id}: {len(urls)} source URLs ({disk_report(repo_dir)})", flush=True)
+    updates: dict[str, dict] = {}
+    created_paths: list[Path] = []
+    try:
+        for index, url in enumerate(urls, 1):
+            old = files.get(url)
+            if old and (Path(repo_dir) / old["path"]).exists():
+                print(f"archive{archive_id}: [{index}/{len(urls)}] already mirrored", flush=True)
+                continue
+            with tempfile.NamedTemporaryFile(prefix="source-", dir=temp_dir, delete=False) as handle:
+                temporary = Path(handle.name)
+            try:
+                print(f"archive{archive_id}: [{index}/{len(urls)}] downloading {url}", flush=True)
+                digest, size = download_to_path(url, temporary)
+                path = mirror_path(archive_id, digest, url)
+                target = Path(repo_dir) / path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if not target.exists():
+                    shutil.move(str(temporary), str(target))
+                    created_paths.append(target)
+                else:
+                    temporary.unlink(missing_ok=True)
+                updates[url] = {"archive_id": archive_id, "path": path, "sha256": digest, "bytes": size}
+                print(f"archive{archive_id}: [{index}/{len(urls)}] downloaded {size / 1024 ** 2:.1f} MiB", flush=True)
+            except Exception:
+                temporary.unlink(missing_ok=True)
+                raise
+    except Exception:
+        for target in created_paths:
+            target.unlink(missing_ok=True)
+        directories: set[Path] = set()
+        for target in created_paths:
+            directory = target.parent
+            while directory != Path(repo_dir) and directory != directory.parent:
+                directories.add(directory)
+                directory = directory.parent
+        directories = sorted(directories, key=lambda item: len(item.parts), reverse=True)
+        for directory in directories:
+            try:
+                directory.rmdir()
+            except OSError:
+                pass
+        raise
+
+    if not updates:
+        print(f"archive{archive_id}: no new files", flush=True)
+        return 0
+    files.update(updates)
+    manifest_path = Path(repo_dir) / MANIFEST_NAME
+    manifest_path.write_text(
+        json.dumps({"version": 1, "files": dict(sorted(files.items()))}, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    commit_and_push_archive(repo_dir, archive_id, manifest_path, temp_dir)
+    return len(updates)
+
+
 def main() -> int:
     if not HF_TOKEN:
         raise RuntimeError("HF_TOKEN is required")
@@ -129,64 +239,14 @@ def main() -> int:
         manifest_path = Path(repo_dir) / MANIFEST_NAME
         manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {"version": 1, "files": {}}
         files = manifest.setdefault("files", {})
-        changed = 0
         failures: list[str] = []
         for archive_id in range(REPO_START, REPO_END + 1):
             try:
-                urls = source_urls(archive_id)
-                print(f"archive{archive_id}: {len(urls)} source URLs")
-                for url in urls:
-                    old = files.get(url)
-                    if old and (Path(repo_dir) / old["path"]).exists():
-                        continue
-                    with tempfile.NamedTemporaryFile(prefix="source-", dir=temp_dir, delete=False) as handle:
-                        temporary = Path(handle.name)
-                    try:
-                        digest, size = download_to_path(url, temporary)
-                    except Exception:
-                        temporary.unlink(missing_ok=True)
-                        raise
-                    path = mirror_path(archive_id, digest, url)
-                    target = Path(repo_dir) / path
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    if not target.exists():
-                        shutil.move(str(temporary), str(target))
-                    else:
-                        temporary.unlink(missing_ok=True)
-                    files[url] = {"archive_id": archive_id, "path": path, "sha256": digest, "bytes": size}
-                    changed += 1
-                print(f"archive{archive_id}: mirrored {changed} new files so far")
+                mirrored = mirror_archive(repo_dir, temp_dir, archive_id, files)
+                print(f"archive{archive_id}: mirrored {mirrored} new files", flush=True)
             except Exception as exc:
                 failures.append(f"archive{archive_id}: {exc}")
-                print(f"archive{archive_id} failed: {exc}")
-        manifest["files"] = dict(sorted(files.items()))
-        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        if changed:
-            auth = {"GIT_LFS_SKIP_SMUDGE": "1"}
-            ret, _, err = run(["git", "lfs", "install", "--local", "--skip-smudge"], cwd=repo_dir, env=auth)
-            if ret != 0:
-                raise RuntimeError(f"git lfs install failed: {err}")
-            archive_patterns = [f"archives{archive_id}/**" for archive_id in range(REPO_START, REPO_END + 1)]
-            ret, _, err = run(["git", "lfs", "track", *archive_patterns, "*.pdf", "*.jpg", "*.jpeg", "*.png", "*.webp"], cwd=repo_dir, env=auth)
-            if ret != 0:
-                raise RuntimeError(f"git lfs track failed: {err}")
-            archive_dirs = [f"archives{archive_id}" for archive_id in range(REPO_START, REPO_END + 1) if (Path(repo_dir) / f"archives{archive_id}").exists()]
-            ret, _, err = run(["git", "add", MANIFEST_NAME, ".gitattributes", *archive_dirs], cwd=repo_dir, env=auth)
-            if ret != 0:
-                raise RuntimeError(f"git add failed: {err}")
-            ret, _, err = run(["git", "-c", "user.name=github-actions[bot]", "-c", "user.email=github-actions[bot]@users.noreply.github.com", "commit", "-m", "Update BHA source files"], cwd=repo_dir, env=auth)
-            if ret != 0:
-                raise RuntimeError(f"git commit failed: {err}")
-            askpass = Path(temp_dir) / "hf-push-askpass.sh"
-            askpass.write_text(
-                "#!/bin/sh\n"
-                "case \"$1\" in *Username*) printf '%s\\n' \"$HF_USERNAME\" ;; *) printf '%s\\n' \"$HF_TOKEN\" ;; esac\n",
-                encoding="utf-8",
-            )
-            askpass.chmod(stat.S_IRWXU)
-            ret, _, err = run(["git", "push"], cwd=repo_dir, env={"GIT_ASKPASS": str(askpass), "GIT_TERMINAL_PROMPT": "0", "HF_USERNAME": HF_USERNAME})
-            if ret != 0:
-                raise RuntimeError(f"HF push failed: {err}")
+                print(f"archive{archive_id} failed: {exc}", flush=True)
         if failures:
             print("\n".join(failures))
             return 1
