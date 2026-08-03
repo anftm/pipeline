@@ -29,11 +29,15 @@ DOWNLOAD_CONCURRENCY = int(os.environ.get("MIRROR_DOWNLOAD_CONCURRENCY", "8"))
 
 
 def api_json(url: str, token: str = "") -> dict:
-    request = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json"})
+    request = urllib.request.Request(safe_url(url), headers={"Accept": "application/vnd.github+json"})
     if token:
         request.add_header("Authorization", f"Bearer {token}")
     with urllib.request.urlopen(request, timeout=60) as response:
         return json.loads(response.read())
+
+
+def safe_url(url: str) -> str:
+    return urllib.parse.quote(url, safe=":/?%#[]@!$&'()*+,;=~")
 
 
 def github_tree(repo: str) -> list[dict]:
@@ -69,13 +73,13 @@ def read_metadata(repo: str, path: str) -> dict:
 
 
 def download_bytes(url: str) -> bytes:
-    request = urllib.request.Request(url, headers={"User-Agent": "anftm-source-mirror/1.0"})
+    request = urllib.request.Request(safe_url(url), headers={"User-Agent": "anftm-source-mirror/1.0"})
     with urllib.request.urlopen(request, timeout=120) as response:
         return response.read(MAX_FILE_BYTES + 1)
 
 
 def download_to_path(url: str, target: Path) -> tuple[str, int]:
-    request = urllib.request.Request(url, headers={"User-Agent": "anftm-source-mirror/1.0"})
+    request = urllib.request.Request(safe_url(url), headers={"User-Agent": "anftm-source-mirror/1.0"})
     digest = hashlib.sha256()
     size = 0
     with urllib.request.urlopen(request, timeout=120) as response, target.open("wb") as output:
@@ -231,13 +235,7 @@ def upload_archive(api: HfApi, archive_id: int, files: dict[str, dict], updates:
 def mirror_archive(api: HfApi, temp_dir: str, archive_id: int, files: dict[str, dict]) -> int:
     urls = source_urls(archive_id)
     print(f"archive{archive_id}: {len(urls)} source URLs", flush=True)
-    pending = [
-        url for url in urls
-        if not (
-            files.get(url)
-            and api.file_exists(repo_id=HF_REPO, repo_type="dataset", filename=files[url]["path"])
-        )
-    ]
+    pending = [url for url in urls if url not in files]
     if not pending:
         print(f"archive{archive_id}: no new files", flush=True)
         return 0
