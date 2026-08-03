@@ -274,14 +274,64 @@ def _download_one(url: str, temp_dir: str) -> tuple[str, str, int, Path] | None:
         digest, size = download_to_path(url, temporary)
         return url, digest, size, temporary
     except urllib.error.HTTPError as exc:
+        if exc.code != 404:
+            temporary.unlink(missing_ok=True)
+            raise
+        try:
+            recovered = historical_url(url)
+        except Exception as recovery_exc:
+            print(f"history recovery failed for {url}: {recovery_exc}", flush=True)
+            recovered = None
+        if recovered is not None:
+            try:
+                digest, size = download_to_path(recovered, temporary)
+                print(f"recovered {url} from commit history", flush=True)
+                return url, digest, size, temporary
+            except urllib.error.HTTPError as retry_exc:
+                if retry_exc.code != 404:
+                    temporary.unlink(missing_ok=True)
+                    raise
+            except Exception:
+                temporary.unlink(missing_ok=True)
+                raise
         temporary.unlink(missing_ok=True)
-        if exc.code == 404:
-            print(f"missing upstream (404), skipped: {url}", flush=True)
-            return None
-        raise
+        print(f"missing upstream (404), skipped: {url}", flush=True)
+        return None
     except Exception:
         temporary.unlink(missing_ok=True)
         raise
+
+
+def historical_url(url: str) -> str | None:
+    parsed = urllib.parse.urlparse(url)
+    parts = parsed.path.split("/")
+    if parsed.netloc != "raw.githubusercontent.com" or len(parts) < 5:
+        return None
+    owner, repo, ref = parts[1], parts[2], parts[3]
+    relpath = "/".join(parts[4:])
+    token = os.environ.get("GH_PAT", "")
+    commits = api_json(
+        f"https://api.github.com/repos/{owner}/{repo}/commits"
+        f"?path={urllib.parse.quote(relpath, safe='/')}&sha={urllib.parse.quote(ref)}&per_page=5",
+        token,
+    )
+    if not isinstance(commits, list) or not commits:
+        return None
+    newest = commits[0].get("sha")
+    if not newest:
+        return None
+    detail = api_json(f"https://api.github.com/repos/{owner}/{repo}/commits/{newest}", token)
+    parents = detail.get("parents") or []
+    if not parents or not parents[0].get("sha"):
+        return None
+    parent = parents[0]["sha"]
+    entry = api_json(
+        f"https://api.github.com/repos/{owner}/{repo}/contents/{urllib.parse.quote(relpath, safe='/')}?ref={parent}",
+        token,
+    )
+    if not isinstance(entry, dict) or entry.get("type") != "file":
+        return None
+    return f"https://raw.githubusercontent.com/{owner}/{repo}/{parent}/{relpath}"
 
 
 def push_with_retry(repo_dir: str, askpass: Path) -> None:
