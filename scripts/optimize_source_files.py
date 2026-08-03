@@ -56,6 +56,9 @@ WEBP_MAX_DIMENSION = int(os.environ.get("WEBP_MAX_DIMENSION", "2400"))
 REOPTIMIZE_IMAGES = os.environ.get("REOPTIMIZE_IMAGES", "0").lower() in {"1", "true", "yes"}
 PDF_PREVIEW_DPI = int(os.environ.get("PDF_PREVIEW_DPI", "150"))
 PDF_PREVIEW_QUALITY = int(os.environ.get("PDF_PREVIEW_QUALITY", "85"))
+PDF_PREVIEW_JPEG_QUALITY = int(os.environ.get("PDF_PREVIEW_JPEG_QUALITY", "95"))
+PDF_PREVIEW_CONCURRENCY = int(os.environ.get("PDF_PREVIEW_CONCURRENCY", "2"))
+PDF_PREVIEW_PROFILE = f"pdftocairo-jpeg-{PDF_PREVIEW_DPI}-{PDF_PREVIEW_JPEG_QUALITY}-{PDF_PREVIEW_QUALITY}-{WEBP_MAX_DIMENSION}"
 CONCURRENCY = int(os.environ.get("OPTIMIZE_CONCURRENCY", "8"))
 PACE_OBJECTS_PER_MINUTE = float(os.environ.get("OPTIMIZE_PACE_OBJECTS_PER_MINUTE", "200"))
 PACE_MAX_SLEEP_SECONDS = int(os.environ.get("OPTIMIZE_PACE_MAX_SLEEP_SECONDS", "300"))
@@ -103,9 +106,10 @@ def needs_processing(url: str, meta: dict) -> bool:
     suffix = Path(urllib.parse.urlparse(url).path).suffix.lower()
     if suffix in RASTER_SUFFIXES and REOPTIMIZE_IMAGES:
         return meta.get("webp_max_dimension") != WEBP_MAX_DIMENSION
-    return (
-        suffix == PDF_SUFFIX
-        and "page_previews" not in meta
+    page_previews = meta.get("page_previews")
+    return suffix == PDF_SUFFIX and (
+        not isinstance(page_previews, dict)
+        or page_previews.get("profile") != PDF_PREVIEW_PROFILE
     )
 
 
@@ -227,31 +231,35 @@ def render_pdf_previews(source: Path, work: Path, archive_id: int) -> tuple[dict
     """Render a PDF into content-addressed WebP pages."""
     png_prefix = work / "page"
     returncode, _out, err = mirror.run(
-        ["pdftocairo", "-png", "-r", str(PDF_PREVIEW_DPI), str(source), str(png_prefix)]
+        ["pdftocairo", "-jpeg", "-jpegopt", f"quality={PDF_PREVIEW_JPEG_QUALITY}", "-r", str(PDF_PREVIEW_DPI), str(source), str(png_prefix)]
     )
     if returncode != 0:
         raise RuntimeError(f"pdftocairo failed: {err or 'unknown error'}")
-    pages = sorted(work.glob("page-*.png"), key=lambda path: int(path.stem.rsplit("-", 1)[1]))
+    pages = sorted(work.glob("page-*.jpg"), key=lambda path: int(path.stem.rsplit("-", 1)[1]))
     if not pages:
         raise RuntimeError("pdftocairo produced no page images")
 
     preview_outputs: dict[str, Path] = {}
     paths: list[str] = []
-    for index, png in enumerate(pages, start=1):
+    def convert_page(index_and_path: tuple[int, Path]) -> tuple[str, Path]:
+        index, image = index_and_path
         local_webp = work / f"preview-{index}.webp"
         returncode, _out, err = mirror.run(
-            ["cwebp", "-q", str(PDF_PREVIEW_QUALITY), str(png), "-o", str(local_webp)]
+            ["cwebp", "-q", str(PDF_PREVIEW_QUALITY), *resize_args(image), str(image), "-o", str(local_webp)]
         )
         if returncode != 0:
             raise RuntimeError(f"cwebp failed for PDF page {index}: {err or 'unknown error'}")
         if not looks_like_webp(local_webp):
             raise RuntimeError(f"PDF page {index} output is not valid WebP")
         digest, _size = sha256_of(local_webp)
-        path = optimized_path(archive_id, digest, ".webp")
-        paths.append(path)
-        preview_outputs[path] = local_webp
-        png.unlink(missing_ok=True)
-    return {"count": len(paths), "paths": paths}, preview_outputs
+        image.unlink(missing_ok=True)
+        return optimized_path(archive_id, digest, ".webp"), local_webp
+
+    with ThreadPoolExecutor(max_workers=max(1, PDF_PREVIEW_CONCURRENCY)) as pool:
+        for path, local_webp in pool.map(convert_page, enumerate(pages, start=1)):
+            paths.append(path)
+            preview_outputs[path] = local_webp
+    return {"count": len(paths), "paths": paths, "profile": PDF_PREVIEW_PROFILE}, preview_outputs
 
 
 def prepare_file(work: Path, url: str, meta: dict) -> dict:
