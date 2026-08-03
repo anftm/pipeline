@@ -4,9 +4,7 @@
 import hashlib
 import json
 import os
-import re
 import shutil
-import stat
 import subprocess
 import tempfile
 import time
@@ -16,21 +14,18 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+from huggingface_hub import CommitOperationAdd, HfApi
+
 UPSTREAM_OWNER = os.environ.get("BHA_ARCHIVE_OWNER", "banned-historical-archives")
 REPO_START = int(os.environ.get("REPO_START", "0"))
 REPO_END = int(os.environ.get("REPO_END", "31"))
-HF_USERNAME = os.environ.get("HF_USERNAME", "vomebook")
 HF_REPO = os.environ.get("HF_SOURCE_REPOSITORY", "vomebook/BHA-Source-Files")
 HF_TOKEN = os.environ.get("HF_TOKEN", "")
 MANIFEST_NAME = "manifest.json"
 MAX_FILE_BYTES = 2 * 1024 * 1024 * 1024
-PUSH_MAX_ATTEMPTS = int(os.environ.get("MIRROR_PUSH_MAX_ATTEMPTS", "10"))
-PUSH_BACKOFF_SECONDS = int(os.environ.get("MIRROR_PUSH_BACKOFF_SECONDS", "300"))
 PACE_OBJECTS_PER_MINUTE = float(os.environ.get("MIRROR_PACE_OBJECTS_PER_MINUTE", "120"))
 PACE_MAX_SLEEP_SECONDS = int(os.environ.get("MIRROR_PACE_MAX_SLEEP_SECONDS", "600"))
-LFS_MIN_BYTES = int(os.environ.get("MIRROR_LFS_MIN_BYTES", str(10 * 1024 * 1024)))
 DOWNLOAD_CONCURRENCY = int(os.environ.get("MIRROR_DOWNLOAD_CONCURRENCY", "8"))
-RATE_LIMIT_MARKERS = ("rate limit", "quota of", "429")
 
 
 def api_json(url: str, token: str = "") -> dict:
@@ -96,12 +91,6 @@ def download_to_path(url: str, target: Path) -> tuple[str, int]:
     return digest.hexdigest(), size
 
 
-def disk_report(path: str) -> str:
-    usage = shutil.disk_usage(path)
-    used = usage.total - usage.free
-    return f"disk used {used / 1024 ** 3:.2f} GiB / {usage.total / 1024 ** 3:.2f} GiB"
-
-
 def source_urls(archive_id: int) -> list[str]:
     repo = f"banned-historical-archives{archive_id}"
     urls: set[str] = set()
@@ -131,154 +120,11 @@ def run(args: list[str], cwd: str | None = None, env: dict | None = None) -> tup
     return result.returncode, result.stdout.strip(), result.stderr.strip()
 
 
-def is_rate_limited(output: str) -> bool:
-    lowered = output.lower()
-    return any(marker in lowered for marker in RATE_LIMIT_MARKERS)
-
-
-def rate_limit_reset_seconds(output: str) -> int | None:
-    for pattern in (
-        r"Retry-After:\s*(\d+)",
-        r"t=(\d+)",
-        r"retry in (\d+)",
-        r"in (\d+) second",
-    ):
-        match = re.search(pattern, output, re.IGNORECASE)
-        if match:
-            return int(match.group(1))
-    return None
-
-
 def pace_seconds(object_count: int) -> int:
     if object_count <= 0 or PACE_OBJECTS_PER_MINUTE <= 0:
         return 0
     expected = float(object_count) / (float(PACE_OBJECTS_PER_MINUTE) / 60.0)
     return min(int(expected), PACE_MAX_SLEEP_SECONDS)
-
-
-def lfs_object_count(updates: dict[str, dict]) -> int:
-    return sum(1 for value in updates.values() if value.get("bytes", 0) >= LFS_MIN_BYTES)
-
-
-def write_conditional_lfs_clean(config_dir: Path, min_bytes: int) -> Path:
-    script = config_dir / "lfs-clean-conditional.sh"
-    script.write_text(
-        "#!/bin/sh\n"
-        "path=\"$1\"\n"
-        "size=\"$(wc -c < \"$path\" 2>/dev/null || printf '0')\"\n"
-        f"if [ \"$size\" -ge {min_bytes} ]; then\n"
-        "    exec git lfs clean -- \"$path\"\n"
-        "fi\n"
-        "cat\n",
-        encoding="utf-8",
-    )
-    script.chmod(0o700)
-    return script
-
-
-def write_lfs_filter_process(config_dir: Path, min_bytes: int) -> Path:
-    script = config_dir / "lfs-filter-process.py"
-    script.write_text(
-        "#!/usr/bin/env python3\n"
-        '"""Size-gated Git LFS filter process (filter.lfs.process)."""\n'
-        "import os\n"
-        "import subprocess\n"
-        "import sys\n"
-        "import tempfile\n"
-        "MAX_PACKET = 65516\n"
-        f"MIN_BYTES = {min_bytes}\n"
-        "def read_pkt():\n"
-        "    header = sys.stdin.buffer.read(4)\n"
-        "    if not header:\n"
-        "        return None\n"
-        "    length = int(header, 16)\n"
-        "    if length == 0:\n"
-        "        return b''\n"
-        "    return sys.stdin.buffer.read(length - 4)\n"
-        "def read_txt():\n"
-        "    data = read_pkt()\n"
-        "    if data is None:\n"
-        "        return None\n"
-        "    return data[:-1] if data.endswith(b'\\n') else data\n"
-        "def write_pkt(data):\n"
-        "    sys.stdout.buffer.write(('%04x' % (len(data) + 4)).encode() + data)\n"
-        "    sys.stdout.buffer.flush()\n"
-        "def write_flush():\n"
-        "    sys.stdout.buffer.write(b'0000')\n"
-        "    sys.stdout.buffer.flush()\n"
-        "def main():\n"
-        "    if read_txt() != b'git-filter-client':\n"
-        "        return 1\n"
-        "    if read_txt() != b'version=2':\n"
-        "        return 1\n"
-        "    if read_pkt() != b'':\n"
-        "        return 1\n"
-        "    write_pkt(b'git-filter-server\\n')\n"
-        "    write_pkt(b'version=2\\n')\n"
-        "    write_flush()\n"
-        "    while True:\n"
-        "        line = read_txt()\n"
-        "        if line is None:\n"
-        "            return 1\n"
-        "        if line == b'':\n"
-        "            break\n"
-        "        if not line.startswith(b'capability='):\n"
-        "            return 1\n"
-        "    write_pkt(b'capability=clean\\n')\n"
-        "    write_flush()\n"
-        "    while True:\n"
-        "        command = pathname = None\n"
-        "        while True:\n"
-        "            line = read_txt()\n"
-        "            if line is None:\n"
-        "                return 0\n"
-        "            if line == b'':\n"
-        "                break\n"
-        "            if line.startswith(b'command='):\n"
-        "                command = line[len(b'command='):]\n"
-        "            elif line.startswith(b'pathname='):\n"
-        "                pathname = line[len(b'pathname='):]\n"
-        "        if command is None or pathname is None:\n"
-        "            return 1\n"
-        "        with tempfile.NamedTemporaryFile(prefix='lfs-filter-', delete=False) as tmp:\n"
-        "            temp_path = tmp.name\n"
-        "            while True:\n"
-        "                chunk = read_pkt()\n"
-        "                if chunk is None:\n"
-        "                    return 0\n"
-        "                if chunk == b'':\n"
-        "                    break\n"
-        "                tmp.write(chunk)\n"
-        "        try:\n"
-        "            size = os.path.getsize(temp_path)\n"
-        "            with open(temp_path, 'rb') as source:\n"
-        "                if command == b'clean' and size >= MIN_BYTES:\n"
-        "                    proc = subprocess.run(\n"
-        "                        ['git', 'lfs', 'clean', '--', pathname.decode('utf-8', 'replace')],\n"
-        "                        stdin=source, stdout=subprocess.PIPE,\n"
-        "                    )\n"
-        "                    if proc.returncode != 0:\n"
-        "                        write_pkt(b'status=error\\n')\n"
-        "                        write_flush()\n"
-        "                        continue\n"
-        "                    output = proc.stdout\n"
-        "                else:\n"
-        "                    output = source.read()\n"
-        "        finally:\n"
-        "            os.unlink(temp_path)\n"
-        "        write_pkt(b'status=success\\n')\n"
-        "        write_flush()\n"
-        "        while output:\n"
-        "            write_pkt(output[:MAX_PACKET])\n"
-        "            output = output[MAX_PACKET:]\n"
-        "        write_flush()\n"
-        "        write_flush()\n"
-        "if __name__ == '__main__':\n"
-        "    raise SystemExit(main())\n",
-        encoding="utf-8",
-    )
-    script.chmod(0o700)
-    return script
 
 
 def _download_one(url: str, temp_dir: str) -> tuple[str, str, int, Path] | None:
@@ -348,127 +194,49 @@ def historical_url(url: str) -> str | None:
     return f"https://raw.githubusercontent.com/{owner}/{repo}/{parent}/{relpath}"
 
 
-def push_with_retry(repo_dir: str, askpass: Path) -> None:
-    env = {"GIT_ASKPASS": str(askpass), "GIT_TERMINAL_PROMPT": "0", "HF_USERNAME": HF_USERNAME}
-    for attempt in range(1, PUSH_MAX_ATTEMPTS + 1):
-        ret, out, err = run(["git", "push"], cwd=repo_dir, env=env)
-        combined = f"{out}\n{err}"
-        if ret == 0:
-            return
-        if not is_rate_limited(combined):
-            raise RuntimeError(f"HF push failed: {combined.strip() or '(no output)'}")
-        if attempt >= PUSH_MAX_ATTEMPTS:
-            break
-        wait = rate_limit_reset_seconds(combined) or PUSH_BACKOFF_SECONDS
-        print(
-            f"HF push hit the request rate limit; waiting {wait}s before retry "
-            f"({attempt}/{PUSH_MAX_ATTEMPTS})",
-            flush=True,
-        )
-        print(f"  detail: {' '.join(combined.split())[:500]}", flush=True)
-        time.sleep(wait)
-    raise RuntimeError(
-        f"HF push kept hitting the request rate limit after {PUSH_MAX_ATTEMPTS} attempts; "
-        "wait 5 minutes and re-run (already-mirrored files are skipped)."
-    )
+def remote_manifest(api: HfApi) -> dict:
+    if not api.file_exists(repo_id=HF_REPO, repo_type="dataset", filename=MANIFEST_NAME):
+        return {"version": 1, "files": {}}
+    local_path = api.hf_hub_download(repo_id=HF_REPO, repo_type="dataset", filename=MANIFEST_NAME)
+    return json.loads(Path(local_path).read_text(encoding="utf-8"))
 
 
-def ensure_hf_repo(repo_dir: str) -> None:
-    clone_url = f"https://huggingface.co/datasets/{HF_REPO}"
-    askpass = Path(repo_dir).parent / "hf-askpass.sh"
-    askpass.write_text(
-        "#!/bin/sh\n"
-        "case \"$1\" in *Username*) printf '%s\\n' \"$HF_USERNAME\" ;; *) printf '%s\\n' \"$HF_TOKEN\" ;; esac\n",
-        encoding="utf-8",
-    )
-    askpass.chmod(0o700)
-    auth_env = {
-        "GIT_ASKPASS": str(askpass),
-        "GIT_TERMINAL_PROMPT": "0",
-        "HF_USERNAME": HF_USERNAME,
-        "GIT_LFS_SKIP_SMUDGE": "1",
-    }
-    ret, _, err = run(["git", "clone", "--depth", "1", clone_url, repo_dir], env=auth_env)
-    if ret == 0:
-        return
-    payload = json.dumps({"name": HF_REPO.split("/", 1)[1], "type": "dataset", "private": False, "organization": HF_REPO.split("/", 1)[0]}).encode()
-    request = urllib.request.Request("https://huggingface.co/api/repos/create", data=payload, method="POST")
-    request.add_header("Authorization", f"Bearer {HF_TOKEN}")
-    request.add_header("Content-Type", "application/json")
-    with urllib.request.urlopen(request, timeout=60):
-        pass
-    ret, _, retry_err = run(["git", "clone", "--depth", "1", clone_url, repo_dir], env=auth_env)
-    if ret != 0:
-        raise RuntimeError(f"HF repository clone failed: {err or retry_err}")
-
-
-def setup_lfs(repo_dir: str) -> None:
-    auth = {"GIT_LFS_SKIP_SMUDGE": "1"}
-    ret, out, err = run(["git", "lfs", "install", "--local", "--skip-smudge"], cwd=repo_dir, env=auth)
-    if ret != 0:
-        raise RuntimeError(f"git lfs install failed: {err or out}")
-    ret, out, err = run(["git", "lfs", "track", "archives*/**"], cwd=repo_dir, env=auth)
-    if ret != 0:
-        raise RuntimeError(f"git lfs track failed: {err or out}")
-    clean_script = write_conditional_lfs_clean(Path(repo_dir) / ".git", LFS_MIN_BYTES)
-    ret, out, err = run(["git", "config", "filter.lfs.clean", f"{clean_script} %f"], cwd=repo_dir, env=auth)
-    if ret != 0:
-        raise RuntimeError(f"git config failed (filter.lfs.clean): {err or out}")
-    process_script = write_lfs_filter_process(Path(repo_dir) / ".git", LFS_MIN_BYTES)
-    ret, out, err = run(["git", "config", "filter.lfs.process", str(process_script)], cwd=repo_dir, env=auth)
-    if ret != 0:
-        raise RuntimeError(f"git config failed (filter.lfs.process): {err or out}")
-    ret, out, err = run(["git", "config", "filter.lfs.required", "true"], cwd=repo_dir, env=auth)
-    if ret != 0:
-        raise RuntimeError(f"git config failed (filter.lfs.required): {err or out}")
-
-
-def commit_and_push_archive(repo_dir: str, archive_id: int, manifest_path: Path, temp_dir: str, object_count: int = 0) -> None:
-    auth = {"GIT_LFS_SKIP_SMUDGE": "1"}
-    archive_dir = f"archives{archive_id}"
-    ret, _, err = run(["git", "add", manifest_path.name, ".gitattributes", archive_dir], cwd=repo_dir, env=auth)
-    if ret != 0:
-        raise RuntimeError(f"git add failed: {err}")
-    ret, _, err = run(
-        [
-            "git", "-c", "user.name=github-actions[bot]",
-            "-c", "user.email=github-actions[bot]@users.noreply.github.com",
-            "commit", "-m", f"Update BHA source files archive{archive_id}",
-        ],
-        cwd=repo_dir,
-        env=auth,
-    )
-    if ret != 0:
-        raise RuntimeError(f"git commit failed: {err}")
-    askpass = Path(temp_dir) / "hf-push-askpass.sh"
-    askpass.write_text(
-        "#!/bin/sh\n"
-        "case \"$1\" in *Username*) printf '%s\\n' \"$HF_USERNAME\" ;; *) printf '%s\\n' \"$HF_TOKEN\" ;; esac\n",
-        encoding="utf-8",
-    )
-    askpass.chmod(stat.S_IRWXU)
-    wait = pace_seconds(object_count)
+def upload_archive(api: HfApi, archive_id: int, files: dict[str, dict], updates: dict[str, dict], temp_dir: str) -> None:
+    operations = [
+        CommitOperationAdd(path_in_repo=meta["path"], path_or_fileobj=str(Path(temp_dir) / meta["path"]))
+        for meta in updates.values()
+    ]
+    manifest_bytes = (
+        json.dumps({"version": 1, "files": dict(sorted(files.items()))}, ensure_ascii=False, indent=2) + "\n"
+    ).encode("utf-8")
+    operations.append(CommitOperationAdd(path_in_repo=MANIFEST_NAME, path_or_fileobj=manifest_bytes))
+    wait = pace_seconds(len(operations))
     if wait:
         print(
-            f"archive{archive_id}: pacing push by {wait}s for {object_count} new LFS object(s) "
-            f"below the HF quota",
+            f"archive{archive_id}: pacing upload by {wait}s for {len(operations)} new file(s) "
+            "below the HF rate limit",
             flush=True,
         )
         time.sleep(wait)
-    print(f"archive{archive_id}: pushing Git LFS objects", flush=True)
-    push_with_retry(repo_dir, askpass)
-    print(f"archive{archive_id}: push complete ({disk_report(repo_dir)})", flush=True)
-    run(["git", "lfs", "prune"], cwd=repo_dir, env=auth)
-    shutil.rmtree(Path(repo_dir) / archive_dir, ignore_errors=True)
-    print(f"archive{archive_id}: pruned LFS objects ({disk_report(repo_dir)})", flush=True)
+    print(f"archive{archive_id}: committing {len(operations)} file(s) to {HF_REPO} via Hub API", flush=True)
+    api.create_commit(
+        repo_id=HF_REPO,
+        repo_type="dataset",
+        operations=operations,
+        commit_message=f"Update BHA source files archive{archive_id}",
+    )
+    print(f"archive{archive_id}: commit complete", flush=True)
 
 
-def mirror_archive(repo_dir: str, temp_dir: str, archive_id: int, files: dict[str, dict]) -> int:
+def mirror_archive(api: HfApi, temp_dir: str, archive_id: int, files: dict[str, dict]) -> int:
     urls = source_urls(archive_id)
-    print(f"archive{archive_id}: {len(urls)} source URLs ({disk_report(repo_dir)})", flush=True)
+    print(f"archive{archive_id}: {len(urls)} source URLs", flush=True)
     pending = [
         url for url in urls
-        if not (files.get(url) and (Path(repo_dir) / files[url]["path"]).exists())
+        if not (
+            files.get(url)
+            and api.file_exists(repo_id=HF_REPO, repo_type="dataset", filename=files[url]["path"])
+        )
     ]
     if not pending:
         print(f"archive{archive_id}: no new files", flush=True)
@@ -497,7 +265,11 @@ def mirror_archive(repo_dir: str, temp_dir: str, archive_id: int, files: dict[st
 
     downloads = [item for item in downloads if item is not None]
     if not downloads:
-        print(f"archive{archive_id}: all {len(pending)} source file(s) missing upstream (404), nothing to mirror", flush=True)
+        print(
+            f"archive{archive_id}: all {len(pending)} source file(s) missing upstream (404), "
+            "nothing to mirror",
+            flush=True,
+        )
         return 0
 
     updates: dict[str, dict] = {}
@@ -505,7 +277,7 @@ def mirror_archive(repo_dir: str, temp_dir: str, archive_id: int, files: dict[st
     try:
         for url, digest, size, temporary in downloads:
             path = mirror_path(archive_id, digest, url)
-            target = Path(repo_dir) / path
+            target = Path(temp_dir) / path
             target.parent.mkdir(parents=True, exist_ok=True)
             if not target.exists():
                 shutil.move(str(temporary), str(target))
@@ -523,7 +295,7 @@ def mirror_archive(repo_dir: str, temp_dir: str, archive_id: int, files: dict[st
         directories: set[Path] = set()
         for target in created_paths:
             directory = target.parent
-            while directory != Path(repo_dir) and directory != directory.parent:
+            while directory != Path(temp_dir) and directory != directory.parent:
                 directories.add(directory)
                 directory = directory.parent
         directories = sorted(directories, key=lambda item: len(item.parts), reverse=True)
@@ -538,29 +310,21 @@ def mirror_archive(repo_dir: str, temp_dir: str, archive_id: int, files: dict[st
         print(f"archive{archive_id}: no new files", flush=True)
         return 0
     files.update(updates)
-    manifest_path = Path(repo_dir) / MANIFEST_NAME
-    manifest_path.write_text(
-        json.dumps({"version": 1, "files": dict(sorted(files.items()))}, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    commit_and_push_archive(repo_dir, archive_id, manifest_path, temp_dir, lfs_object_count(updates))
+    upload_archive(api, archive_id, files, updates, temp_dir)
     return len(updates)
 
 
 def main() -> int:
     if not HF_TOKEN:
         raise RuntimeError("HF_TOKEN is required")
+    api = HfApi(token=HF_TOKEN)
     with tempfile.TemporaryDirectory(prefix="bha-source-mirror-") as temp_dir:
-        repo_dir = os.path.join(temp_dir, "source-files")
-        ensure_hf_repo(repo_dir)
-        setup_lfs(repo_dir)
-        manifest_path = Path(repo_dir) / MANIFEST_NAME
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {"version": 1, "files": {}}
+        manifest = remote_manifest(api)
         files = manifest.setdefault("files", {})
         failures: list[str] = []
         for archive_id in range(REPO_START, REPO_END + 1):
             try:
-                mirrored = mirror_archive(repo_dir, temp_dir, archive_id, files)
+                mirrored = mirror_archive(api, temp_dir, archive_id, files)
                 print(f"archive{archive_id}: mirrored {mirrored} new files", flush=True)
             except Exception as exc:
                 failures.append(f"archive{archive_id}: {exc}")
