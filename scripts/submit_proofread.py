@@ -334,6 +334,127 @@ def md_text(value):
     text = str(value if value is not None else "")
     return text.replace("\\", "\\\\").replace("`", "\\`").replace("\r", " ").replace("\n", " ")
 
+def apply_text_delta(text, delta):
+    prefix = 0
+    removed = 0
+    inserted = ""
+    seen_insert = False
+    for token in delta.split("\t") if delta else []:
+        if not token:
+            continue
+        operation, value = token[0], token[1:]
+        if operation == "=" and not seen_insert and value.isdigit():
+            prefix = int(value)
+        elif operation == "-" and value.isdigit():
+            removed = int(value)
+        elif operation == "+":
+            seen_insert = True
+            inserted = urllib.parse.unquote_to_bytes(value.replace("+", "%2B")).decode("utf-8")
+    return text[:prefix] + inserted + text[prefix + removed:]
+
+
+def article_part_text(article, index):
+    parts = article.get("parts") if isinstance(article.get("parts"), list) else []
+    if index < 0 or index >= len(parts) or not isinstance(parts[index], dict):
+        fail("BHA preview contains an invalid part index")
+    values = list(str(parts[index].get("text") or ""))
+    pivots = article.get("comment_pivots") if isinstance(article.get("comment_pivots"), list) else []
+    selected = [item for item in pivots if isinstance(item, dict) and item.get("part_idx") == index]
+    for pivot in sorted(selected, key=lambda item: int(item.get("offset", 0)), reverse=True):
+        offset = int(pivot.get("offset", 0))
+        if offset < 0 or offset > len(values):
+            fail("BHA preview contains an invalid comment offset")
+        values.insert(offset, f"〔{pivot.get('index')}〕")
+    return "".join(values)
+
+
+def fetch_bha_changes(request):
+    if request.get("changed") and request.get("fulltext"):
+        return
+    doc_id = str(request.get("doc_id") or "")
+    if not doc_id:
+        return
+    bha_url = os.environ.get("BHA_PUBLIC_URL", "https://vomebook-bha-search.hf.space").rstrip("/")
+    preview_url = f"{bha_url}/api/preview/{urllib.parse.quote(doc_id, safe='')}"
+    preview_request = urllib.request.Request(preview_url, headers={"User-Agent": "anftm-pipeline-proofread/1.0"})
+    try:
+        with urllib.request.urlopen(preview_request, timeout=30) as response:
+            preview = json.loads(response.read())
+    except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
+        fail(f"cannot load BHA text for proofreading issue: {exc}")
+    article = preview.get("article") if isinstance(preview.get("article"), dict) else {}
+    comments = article.get("comments") if isinstance(article.get("comments"), list) else []
+    patch = request.get("patch") if isinstance(request.get("patch"), dict) else {}
+    original_parts = [article_part_text(article, index) for index in range(len(article.get("parts") or []))]
+    edited_parts = []
+    for index, original in enumerate(original_parts):
+        part_change = (patch.get("parts") or {}).get(str(index), {})
+        edited_parts.extend(str(part.get("text") or "") for part in part_change.get("insertBefore") or [])
+        if not part_change.get("delete"):
+            edited_parts.append(apply_text_delta(original, part_change["diff"]) if "diff" in part_change else original)
+        edited_parts.extend(str(part.get("text") or "") for part in part_change.get("insertAfter") or [])
+
+    edited_comments = []
+    for index, original_value in enumerate(comments, start=1):
+        original = str(original_value or "")
+        comment_change = (patch.get("comments") or {}).get(str(index), {})
+        edited_comments.extend(str(item.get("text") or "") for item in comment_change.get("insertBefore") or [])
+        if not comment_change.get("delete"):
+            edited_comments.append(apply_text_delta(original, comment_change["diff"]) if "diff" in comment_change else original)
+        edited_comments.extend(str(item.get("text") or "") for item in comment_change.get("insertAfter") or [])
+    edited_comments.extend(str(value) for value in patch.get("newComments") or [])
+
+    def fulltext(parts_text, comments_text):
+        body = "\n".join(parts_text)
+        if comments_text:
+            body += "\n\n" + "\n".join(f"〔{index}〕{text}" for index, text in enumerate(comments_text, start=1))
+        return body
+
+    request["fulltext"] = {
+        "original": fulltext(original_parts, [str(value or "") for value in comments]),
+        "edited": fulltext(edited_parts, edited_comments),
+    }
+    if request.get("changed"):
+        return
+    changes = []
+    for raw_index in sorted((patch.get("parts") or {}), key=int):
+        index = int(raw_index)
+        change = patch["parts"][raw_index]
+        original = article_part_text(article, index)
+        if "diff" in change:
+            changes.append({"kind": "part", "index": index + 1, "original": original, "edited": apply_text_delta(original, change["diff"])})
+        if change.get("delete"):
+            changes.append({"kind": "part", "index": index + 1, "delete": True, "original": original})
+        for key in ("insertBefore", "insertAfter"):
+            for part in change.get(key) or []:
+                changes.append({"kind": "part", "index": index + 1, "insert": key == "insertAfter", "text": part.get("text"), "part_type": part.get("type")})
+    for raw_index in sorted((patch.get("comments") or {}), key=int):
+        index = int(raw_index) - 1
+        change = patch["comments"][raw_index]
+        original = str(comments[index] or "") if 0 <= index < len(comments) else ""
+        if "diff" in change:
+            changes.append({"kind": "comment", "index": index + 1, "original": original, "edited": apply_text_delta(original, change["diff"])})
+        if change.get("delete"):
+            changes.append({"kind": "comment", "index": index + 1, "delete": True, "original": original})
+    if patch.get("description"):
+        original = str(article.get("description") or "")
+        changes.append({"kind": "description", "original": original, "edited": apply_text_delta(original, patch["description"])})
+    metadata = request.get("metadata") if isinstance(request.get("metadata"), dict) else {}
+    for field, new_value in (metadata.get("article") or {}).items():
+        if field in ("title", "authors", "dates", "tags"):
+            changes.append({"kind": "metadata", "field": field, "old": article.get(field), "new": new_value})
+    source_old = {
+        "name": preview.get("publication_name"),
+        "type": preview.get("publication_type"),
+        "files": [item.get("url") for item in preview.get("source_files") or [] if isinstance(item, dict)],
+    }
+    for field, new_value in (metadata.get("source") or {}).items():
+        changes.append({"kind": "metadata", "field": field, "old": source_old.get(field), "new": new_value})
+    if not changes:
+        fail("BHA preview did not contain the text needed for proofreading issue")
+    request["changed"] = changes
+
+
 def change_details(request):
     lines = []
     for change in request.get("changed") or []:
@@ -353,6 +474,22 @@ def change_details(request):
             label = METADATA_FIELD_LABELS.get(change.get("field"), change.get("field"))
             lines.append(f"- {label}：`{md_text(change.get('old'))}` → `{md_text(change.get('new'))}`")
     return lines
+
+
+def fenced_text(value):
+    text = str(value if value is not None else "")
+    longest = max((len(match.group(0)) for match in re.finditer(r"`+", text)), default=0)
+    fence = "`" * max(3, longest + 1)
+    return f"{fence}text\n{text}\n{fence}"
+
+
+def append_fulltext(lines, request):
+    fulltext = request.get("fulltext") if isinstance(request.get("fulltext"), dict) else {}
+    if "original" in fulltext and "edited" in fulltext:
+        lines.extend([
+            "", "## 原全文", "", fenced_text(fulltext["original"]),
+            "", "## 修改后全文", "", fenced_text(fulltext["edited"]),
+        ])
 
 
 def upsert_tracker_issue(token, correction_id, request, repo, article_id, pulls):
@@ -377,6 +514,7 @@ def upsert_tracker_issue(token, correction_id, request, repo, article_id, pulls)
     if details:
         lines.extend(["", "## 修改内容", ""])
         lines.extend(details)
+    append_fulltext(lines, request)
     if preview:
         lines.append(f"- BHA 预览：{preview}")
     if request.get("description"):
@@ -479,6 +617,7 @@ def notify_auto_merged(token, correction_id, request, repo, article_id, pulls):
     if details:
         lines.extend(["", "## 修改内容", ""])
         lines.extend(details)
+    append_fulltext(lines, request)
     if preview:
         lines.append(f"- BHA 预览：{preview}")
     for pull in pulls:
@@ -582,6 +721,7 @@ def main():
             fail("proofread requires patch or metadata")
         if patch is not None:
             validate_patch(patch)
+        fetch_bha_changes(request)
         correction_id = hashlib.sha256(json.dumps({
             "archive_id": archive_id, "kind": "proofread", "article_id": article_id,
             "publication_id": publication_id, "patch": patch, "metadata": metadata,
