@@ -212,8 +212,12 @@ def resize_args(path: Path) -> list[str]:
 def transform_file(kind: str, source: Path, target: Path) -> None:
     if kind == "pdf-linearize":
         returncode, _out, err = mirror.run(["qpdf", "--linearize", str(source), str(target)])
-        if returncode != 0:
+        # qpdf uses exit code 3 for a successful operation with warnings.
+        # The output is still accepted only after the PDF signature check below.
+        if returncode not in (0, 3):
             raise RuntimeError(f"qpdf failed: {err or 'unknown error'}")
+        if returncode == 3:
+            print(f"qpdf warning for {source}: {err or 'unspecified warning'}", flush=True)
         if not looks_like_pdf(target):
             raise RuntimeError("qpdf output is not a valid PDF")
     else:
