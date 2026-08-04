@@ -48,6 +48,23 @@ def repo_path(repo):
     return f"/repos/{urllib.parse.quote(OWNER)}/{urllib.parse.quote(repo)}"
 
 
+def payload_field(request, key, default=None):
+    body = request.get("body") if isinstance(request.get("body"), dict) else {}
+    if key in body:
+        return body[key]
+    if key in request:
+        return request.get(key)
+    return default
+
+
+def set_payload_field(request, key, value):
+    body = request.get("body") if isinstance(request.get("body"), dict) else None
+    if body is not None:
+        body[key] = value
+    else:
+        request[key] = value
+
+
 def full_repo_path(repository):
     owner, separator, repo = repository.partition("/")
     if not separator or not owner or not repo:
@@ -244,14 +261,14 @@ def find_tracker_issue(token, correction_id):
 
 def change_summary(request):
     changes = []
-    patch = request.get("patch") or {}
+    patch = payload_field(request, "patch") or {}
     if patch.get("parts"):
         changes.append(f"正文段落 {len(patch['parts'])} 处")
     if patch.get("comments") or patch.get("newComments"):
         changes.append("注释")
     if patch.get("description"):
         changes.append("描述")
-    metadata = request.get("metadata") or {}
+    metadata = payload_field(request, "metadata") or {}
     article = metadata.get("article") or {}
     source = metadata.get("source") or {}
     labels = {
@@ -384,7 +401,7 @@ def fetch_bha_changes(request):
         fail(f"cannot load BHA text for proofreading issue: {exc}")
     article = preview.get("article") if isinstance(preview.get("article"), dict) else {}
     comments = article.get("comments") if isinstance(article.get("comments"), list) else []
-    patch = request.get("patch") if isinstance(request.get("patch"), dict) else {}
+    patch = payload_field(request, "patch") if isinstance(payload_field(request, "patch"), dict) else {}
     original_parts = [article_part_text(article, index) for index in range(len(article.get("parts") or []))]
     edited_parts = []
     for index, original in enumerate(original_parts):
@@ -439,7 +456,7 @@ def fetch_bha_changes(request):
     if patch.get("description"):
         original = str(article.get("description") or "")
         changes.append({"kind": "description", "original": original, "edited": apply_text_delta(original, patch["description"])})
-    metadata = request.get("metadata") if isinstance(request.get("metadata"), dict) else {}
+    metadata = payload_field(request, "metadata") if isinstance(payload_field(request, "metadata"), dict) else {}
     for field, new_value in (metadata.get("article") or {}).items():
         if field in ("title", "authors", "dates", "tags"):
             changes.append({"kind": "metadata", "field": field, "old": article.get(field), "new": new_value})
@@ -517,8 +534,8 @@ def upsert_tracker_issue(token, correction_id, request, repo, article_id, pulls)
     append_fulltext(lines, request)
     if preview:
         lines.append(f"- BHA 预览：{preview}")
-    if request.get("description"):
-        lines.extend([f"- 说明：{request['description']}"])
+    if payload_field(request, "description"):
+        lines.extend([f"- 说明：{payload_field(request, 'description')}"])
     lines.extend([
         "",
         "## 审核方式",
@@ -642,8 +659,8 @@ def update_config(existing, request):
         input=json.dumps({
             "content": existing,
             "article_id": request.get("article_id"),
-            "locator": request.get("locator"),
-            "metadata": request["metadata"],
+            "locator": payload_field(request, "locator"),
+            "metadata": payload_field(request, "metadata"),
         }, ensure_ascii=False),
         text=True,
         capture_output=True,
@@ -697,15 +714,15 @@ def main():
     if kind == "proofread":
         article_id = str(request.get("article_id", ""))
         publication_id = str(request.get("publication_id", ""))
-        patch = request.get("patch", request.get("patch_json"))
-        metadata = request.get("metadata", request.get("metadata_json"))
+        patch = payload_field(request, "patch", payload_field(request, "patch_json"))
+        metadata = payload_field(request, "metadata", payload_field(request, "metadata_json"))
         if isinstance(patch, str):
             if patch.strip():
                 try:
                     patch = json.loads(patch)
                 except json.JSONDecodeError as exc:
                     fail(f"patch_json is invalid JSON: {exc}")
-                request["patch"] = patch
+                set_payload_field(request, "patch", patch)
             else:
                 patch = None
         if isinstance(metadata, str):
@@ -714,7 +731,7 @@ def main():
                     metadata = json.loads(metadata)
                 except json.JSONDecodeError as exc:
                     fail(f"metadata_json is invalid JSON: {exc}")
-                request["metadata"] = metadata
+                set_payload_field(request, "metadata", metadata)
             else:
                 metadata = None
         if patch is None and not isinstance(metadata, dict):
@@ -728,7 +745,7 @@ def main():
         }, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:12]
         patch_path(archive_id, article_id, publication_id)
         title = request.get("title") or f"校订 {article_id}"
-        description = request.get("description") or "由 BHA 校订后端提交。"
+        description = payload_field(request, "description") or "由 BHA 校订后端提交。"
         pull_requests = []
         new_article_id = article_id
         if isinstance(metadata, dict):
@@ -784,7 +801,7 @@ def main():
     base = kind
     if kind == "ocr_patch":
         path = patch_path(archive_id, request.get("article_id"), request.get("publication_id"))
-        patch_json = request.get("patch_json", request.get("patch"))
+        patch_json = payload_field(request, "patch_json", payload_field(request, "patch"))
         if isinstance(patch_json, str):
             try:
                 patch = json.loads(patch_json)
@@ -796,13 +813,13 @@ def main():
             fail("patch_json is required")
     else:
         publication_id = str(request.get("publication_id", ""))
-        metadata = request.get("metadata", request.get("metadata_json"))
+        metadata = payload_field(request, "metadata", payload_field(request, "metadata_json"))
         if isinstance(metadata, str):
             try:
                 metadata = json.loads(metadata)
             except json.JSONDecodeError as exc:
                 fail(f"metadata_json is invalid JSON: {exc}")
-            request["metadata"] = metadata
+            set_payload_field(request, "metadata", metadata)
         if publication_id and isinstance(metadata, dict):
             if not all(char.isalnum() or char in "._-" for char in publication_id):
                 fail("publication_id contains invalid characters")
@@ -817,14 +834,14 @@ def main():
     existing, _existing_sha = get_file(token, repo, base, path)
     if kind == "ocr_patch":
         content = append_patch(existing, patch)
-    elif isinstance(request.get("metadata"), dict):
+    elif isinstance(payload_field(request, "metadata"), dict):
         content, _new_article_id = update_config(existing, request)
     else:
         content = request["content"]
     title = request.get("title") or f"校订 {path}"
     pull = submit_file(
         token, repo, base, path, content, title,
-        request.get("description") or f"自动提交到 {repo}/{base}，合并后由仓库 workflow 生成后续数据。",
+        payload_field(request, "description") or f"自动提交到 {repo}/{base}，合并后由仓库 workflow 生成后续数据。",
         correction_id,
     )
     print(json.dumps({"repository": repo, "path": path, "pull_request": pull["url"]}, ensure_ascii=False))
