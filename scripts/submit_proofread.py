@@ -2,6 +2,7 @@
 """Submit one proofreading change to an anftm archive fork as a pull request."""
 
 import base64
+import ast
 import hashlib
 import json
 import os
@@ -347,10 +348,6 @@ METADATA_FIELD_LABELS = {
     "name": "来源名称", "author": "来源作者", "type": "来源类型", "files": "来源文件",
 }
 
-def md_text(value):
-    text = str(value if value is not None else "")
-    return text.replace("\\", "\\\\").replace("`", "\\`").replace("\r", " ").replace("\n", " ")
-
 def apply_text_delta(text, delta):
     prefix = 0
     removed = 0
@@ -445,6 +442,11 @@ def fetch_bha_changes(request):
         for key in ("insertBefore", "insertAfter"):
             for part in change.get(key) or []:
                 changes.append({"kind": "part", "index": index + 1, "insert": key == "insertAfter", "text": part.get("text"), "part_type": part.get("type")})
+        if "type" in change:
+            parts = article.get("parts") if isinstance(article.get("parts"), list) else []
+            old_type = parts[index].get("type") if index < len(parts) and isinstance(parts[index], dict) else None
+            if old_type != change["type"]:
+                changes.append({"kind": "part_type", "index": index + 1, "old": old_type, "new": change["type"]})
     for raw_index in sorted((patch.get("comments") or {}), key=int):
         index = int(raw_index) - 1
         change = patch["comments"][raw_index]
@@ -453,6 +455,8 @@ def fetch_bha_changes(request):
             changes.append({"kind": "comment", "index": index + 1, "original": original, "edited": apply_text_delta(original, change["diff"])})
         if change.get("delete"):
             changes.append({"kind": "comment", "index": index + 1, "delete": True, "original": original})
+    for offset, text in enumerate(patch.get("newComments") or [], start=1):
+        changes.append({"kind": "new_comment", "index": len(comments) + offset, "text": text})
     if patch.get("description"):
         original = str(article.get("description") or "")
         changes.append({"kind": "description", "original": original, "edited": apply_text_delta(original, patch["description"])})
@@ -472,24 +476,99 @@ def fetch_bha_changes(request):
     request["changed"] = changes
 
 
+def issue_value(value):
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False, indent=2)
+    return str(value if value is not None else "")
+
+
+def metadata_list(value):
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str) and value.strip().startswith("["):
+        for parser in (json.loads, ast.literal_eval):
+            try:
+                parsed = parser(value)
+                if isinstance(parsed, list):
+                    return parsed
+            except (ValueError, SyntaxError, json.JSONDecodeError):
+                pass
+    return None
+
+
+def metadata_item(field, value):
+    if field == "dates" and isinstance(value, dict):
+        parts = []
+        for key, suffix in (("year", "年"), ("month", "月"), ("day", "日")):
+            if value.get(key) is not None:
+                parts.append(f"{value[key]}{suffix}")
+        return "".join(parts) or issue_value(value)
+    if field == "tags" and isinstance(value, dict):
+        name = str(value.get("name") or "")
+        tag_type = str(value.get("type") or "")
+        return f"{name}（{tag_type}）" if tag_type else name
+    return issue_value(value)
+
+
+def metadata_list_details(label, field, old, new):
+    old_values = metadata_list(old)
+    new_values = metadata_list(new)
+    if old_values is None or new_values is None or old_values == new_values:
+        return []
+    key = lambda value: json.dumps(value, ensure_ascii=False, sort_keys=True)
+    old_keys = {key(value) for value in old_values}
+    new_keys = {key(value) for value in new_values}
+    removed = [metadata_item(field, value) for value in old_values if key(value) not in new_keys]
+    added = [metadata_item(field, value) for value in new_values if key(value) not in old_keys]
+    if not removed and not added:
+        return []
+    lines = [f"### {label}", ""]
+    lines.extend(f"- 删除：~~{value}~~" for value in removed)
+    lines.extend(f"- 新增：**{value}**" for value in added)
+    lines.append("")
+    return lines
+
+
 def change_details(request):
     lines = []
+
+    def changed_pair(label, old, new, noun="文"):
+        if old == new:
+            return
+        lines.extend([
+            f"### {label}", "",
+            f"**原{noun}**", "", fenced_text(issue_value(old)), "",
+            f"**新{noun}**", "", fenced_text(issue_value(new)), "",
+        ])
+
     for change in request.get("changed") or []:
         kind = change.get("kind")
         if kind in ("part", "comment"):
             label = f"段落 {change.get('index')}" if kind == "part" else f"注释 {change.get('index')}"
             if change.get("delete"):
-                lines.append(f"- {label}：删除「{md_text(change.get('original'))}」")
+                lines.extend([f"### {label}（删除）", "", "**原文**", "", fenced_text(issue_value(change.get("original"))), ""])
             elif change.get("text") is not None:
                 place = "后" if change.get("insert") else "前"
-                lines.append(f"- {label}：在{place}插入「{md_text(change.get('text'))}」")
+                lines.extend([f"### {label}{place}插入", "", "**新增文本**", "", fenced_text(issue_value(change.get("text"))), ""])
             else:
-                lines.append(f"- {label}：`{md_text(change.get('original'))}` → `{md_text(change.get('edited'))}`")
+                changed_pair(label, change.get("original"), change.get("edited"))
+        elif kind == "part_type":
+            changed_pair(f"段落 {change.get('index')}类型", change.get("old"), change.get("new"), "值")
+        elif kind == "new_comment":
+            lines.extend([f"### 新增注释 {change.get('index')}", "", "**新增文本**", "", fenced_text(issue_value(change.get("text"))), ""])
         elif kind == "description":
-            lines.append(f"- 描述：`{md_text(change.get('original'))}` → `{md_text(change.get('edited'))}`")
+            changed_pair("描述", change.get("original"), change.get("edited"))
         elif kind == "metadata":
-            label = METADATA_FIELD_LABELS.get(change.get("field"), change.get("field"))
-            lines.append(f"- {label}：`{md_text(change.get('old'))}` → `{md_text(change.get('new'))}`")
+            field = change.get("field")
+            label = METADATA_FIELD_LABELS.get(field, field)
+            if field in {"authors", "dates", "tags", "files"}:
+                list_details = metadata_list_details(label, field, change.get("old"), change.get("new"))
+                if list_details:
+                    lines.extend(list_details)
+                elif change.get("old") != change.get("new"):
+                    changed_pair(label, change.get("old"), change.get("new"), "值")
+            else:
+                changed_pair(label, change.get("old"), change.get("new"), "值")
     return lines
 
 
@@ -502,7 +581,7 @@ def fenced_text(value):
 
 def append_fulltext(lines, request):
     fulltext = request.get("fulltext") if isinstance(request.get("fulltext"), dict) else {}
-    if "original" in fulltext and "edited" in fulltext:
+    if "original" in fulltext and "edited" in fulltext and fulltext["original"] != fulltext["edited"]:
         lines.extend([
             "", "## 原全文", "", fenced_text(fulltext["original"]),
             "", "## 修改后全文", "", fenced_text(fulltext["edited"]),
