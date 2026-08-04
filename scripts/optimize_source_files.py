@@ -468,6 +468,22 @@ def commit_archive_results(
     archive's download/transform work.
     """
 
+    processing_failures = [
+        result for result in results
+        if result.get("status") not in ("changed", "unchanged", "pass-through")
+    ]
+    if processing_failures:
+        details = []
+        for result in processing_failures:
+            detail = f"{result.get('url')}: {result.get('status')}"
+            if result.get("error"):
+                detail += f" ({result['error']})"
+            details.append(detail)
+        raise RuntimeError(
+            f"archive{archive_id}: {len(processing_failures)} file(s) failed processing: "
+            + "; ".join(details)
+        )
+
     def build() -> tuple[dict[str, dict], dict[str, dict], dict[str, Path], set[str], dict[str, dict]]:
         updates: dict[str, dict] = {}
         staged: dict[str, dict] = {}
