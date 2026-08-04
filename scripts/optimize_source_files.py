@@ -34,6 +34,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from email.utils import parsedate_to_datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -62,6 +63,9 @@ PDF_PREVIEW_PROFILE = f"pdftocairo-jpeg-{PDF_PREVIEW_DPI}-{PDF_PREVIEW_JPEG_QUAL
 CONCURRENCY = int(os.environ.get("OPTIMIZE_CONCURRENCY", "8"))
 PACE_OBJECTS_PER_MINUTE = float(os.environ.get("OPTIMIZE_PACE_OBJECTS_PER_MINUTE", "200"))
 PACE_MAX_SLEEP_SECONDS = int(os.environ.get("OPTIMIZE_PACE_MAX_SLEEP_SECONDS", "300"))
+HF_COMMIT_MAX_RETRIES = int(os.environ.get("HF_COMMIT_MAX_RETRIES", "5"))
+HF_COMMIT_RETRY_BASE_SECONDS = int(os.environ.get("HF_COMMIT_RETRY_BASE_SECONDS", "30"))
+HF_COMMIT_RETRY_MAX_SECONDS = int(os.environ.get("HF_COMMIT_RETRY_MAX_SECONDS", "300"))
 PDF_SUFFIX = ".pdf"
 RASTER_SUFFIXES = {".jpg", ".jpeg", ".png"}
 LOSSLESS_SUFFIXES = {".png"}
@@ -327,6 +331,53 @@ def pace_seconds(operations: int) -> int:
     return min(int(expected), PACE_MAX_SLEEP_SECONDS)
 
 
+def hf_error_status(error: Exception) -> int | None:
+    response = getattr(error, "response", None)
+    status = getattr(response, "status_code", None)
+    if status is None:
+        status = getattr(error, "status_code", None)
+    return int(status) if isinstance(status, int) else None
+
+
+def hf_retry_delay(error: Exception, attempt: int) -> int:
+    response = getattr(error, "response", None)
+    retry_after = getattr(response, "headers", {}).get("retry-after") if response else None
+    if retry_after:
+        try:
+            return min(max(1, int(retry_after)), HF_COMMIT_RETRY_MAX_SECONDS)
+        except (TypeError, ValueError):
+            try:
+                retry_at = parsedate_to_datetime(retry_after).timestamp()
+                return min(max(1, int(retry_at - time.time())), HF_COMMIT_RETRY_MAX_SECONDS)
+            except (TypeError, ValueError, OverflowError, OSError):
+                pass
+    return min(HF_COMMIT_RETRY_BASE_SECONDS * (2 ** max(0, attempt - 1)), HF_COMMIT_RETRY_MAX_SECONDS)
+
+
+def create_hf_commit(api: HfApi, operations: list, archive_id: int) -> None:
+    for attempt in range(1, HF_COMMIT_MAX_RETRIES + 2):
+        try:
+            api.create_commit(
+                repo_id=HF_REPO,
+                repo_type="dataset",
+                operations=operations,
+                commit_message=f"Optimize BHA source files archive{archive_id}",
+            )
+            return
+        except Exception as exc:
+            status = hf_error_status(exc)
+            retryable = status == 429 or status in {500, 502, 503, 504}
+            if not retryable or attempt > HF_COMMIT_MAX_RETRIES:
+                raise
+            wait = hf_retry_delay(exc, attempt)
+            print(
+                f"archive{archive_id}: HF commit returned HTTP {status}; "
+                f"retry {attempt}/{HF_COMMIT_MAX_RETRIES} in {wait}s",
+                flush=True,
+            )
+            time.sleep(wait)
+
+
 def commit_archive(
     api: HfApi,
     archive_id: int,
@@ -358,12 +409,7 @@ def commit_archive(
         )
         time.sleep(wait)
     print(f"archive{archive_id}: committing {len(operations)} operation(s) to {HF_REPO} via Hub API", flush=True)
-    api.create_commit(
-        repo_id=HF_REPO,
-        repo_type="dataset",
-        operations=operations,
-        commit_message=f"Optimize BHA source files archive{archive_id}",
-    )
+    create_hf_commit(api, operations, archive_id)
     print(f"archive{archive_id}: commit complete", flush=True)
 
 
@@ -422,7 +468,7 @@ def commit_archive_results(
     archive's download/transform work.
     """
 
-    def build() -> tuple[dict[str, dict], dict[str, dict], dict[str, Path], set[str]]:
+    def build() -> tuple[dict[str, dict], dict[str, dict], dict[str, Path], set[str], dict[str, dict]]:
         updates: dict[str, dict] = {}
         staged: dict[str, dict] = {}
         staged_previews: dict[str, Path] = {}
@@ -453,11 +499,12 @@ def commit_archive_results(
             for target in created_paths:
                 target.unlink(missing_ok=True)
             raise
-        files.update(updates)
-        referenced = {meta["path"] for meta in files.values()}
+        candidate_files = dict(files)
+        candidate_files.update(updates)
+        referenced = {meta["path"] for meta in candidate_files.values()}
         referenced.update(
             path
-            for meta in files.values()
+            for meta in candidate_files.values()
             for path in meta.get("page_previews", {}).get("paths", [])
         )
         old_paths = {result["old_path"] for result in results if result.get("old_path")}
@@ -467,21 +514,28 @@ def commit_archive_results(
             for path in result.get("old_page_preview_paths", [])
         )
         deletions = old_paths - referenced
-        return updates, staged, staged_previews, deletions
+        return updates, staged, staged_previews, deletions, candidate_files
 
     if files_lock is not None:
         with files_lock:
-            updates, staged, staged_previews, deletions = build()
+            updates, staged, staged_previews, deletions, candidate_files = build()
     else:
-        updates, staged, staged_previews, deletions = build()
+        updates, staged, staged_previews, deletions, candidate_files = build()
     if not updates and not deletions:
         print(f"archive{archive_id}: no file changed", flush=True)
         return 0
 
     if staged_previews:
-        commit_archive(api, archive_id, files, staged, deletions, temp_dir, staged_previews)
+        commit_archive(api, archive_id, candidate_files, staged, deletions, temp_dir, staged_previews)
     else:
-        commit_archive(api, archive_id, files, staged, deletions, temp_dir)
+        commit_archive(api, archive_id, candidate_files, staged, deletions, temp_dir)
+    if files_lock is not None:
+        with files_lock:
+            files.clear()
+            files.update(candidate_files)
+    else:
+        files.clear()
+        files.update(candidate_files)
     cleanup_archive_dir(temp_dir, archive_id)
     return len(updates)
 
