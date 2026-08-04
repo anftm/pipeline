@@ -84,6 +84,7 @@ def main():
     if not issue_number:
         raise RuntimeError("review issue number is missing")
     results = []
+    all_resolved = True
     for pull in pulls:
         repo = str(pull.get("repo") or "")
         number = pull.get("number")
@@ -98,6 +99,7 @@ def main():
                 results.append(f"{repo}#{number}: merged")
             else:
                 results.append(f"{repo}#{number}: not mergeable")
+                all_resolved = False
         else:
             close_pull(archive_token, repo, number)
             results.append(f"{repo}#{number}: closed")
@@ -111,7 +113,15 @@ def main():
         tracker_token, "POST", f"{full_repo_path(TRACKER_REPOSITORY)}/issues/{issue_number}/comments", (201,),
         {"body": "\n".join(lines)},
     )
-    print(json.dumps({"command": "approve" if approve else "reject", "actor": actor, "results": results}, ensure_ascii=False))
+    if all_resolved:
+        response_or_fail(
+            tracker_token, "PATCH", f"{full_repo_path(TRACKER_REPOSITORY)}/issues/{issue_number}", (200,),
+            {"state": "closed", "state_reason": "completed"},
+        )
+    print(json.dumps({
+        "command": "approve" if approve else "reject", "actor": actor,
+        "results": results, "issue_closed": all_resolved,
+    }, ensure_ascii=False))
 
 
 if __name__ == "__main__":

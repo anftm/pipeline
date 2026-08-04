@@ -269,15 +269,20 @@ def change_summary(request):
         changes.append("注释")
     if patch.get("description"):
         changes.append("描述")
-    metadata = payload_field(request, "metadata") or {}
-    article = metadata.get("article") or {}
-    source = metadata.get("source") or {}
     labels = {
         "title": "标题", "authors": "作者", "dates": "日期", "tags": "标签",
         "name": "来源名称", "author": "来源作者", "type": "来源类型", "files": "来源文件",
     }
-    changes.extend(labels.get(key, key) for key in article)
-    changes.extend(labels.get(key, key) for key in source)
+    changed_metadata = [
+        item.get("field") for item in request.get("changed") or []
+        if item.get("kind") == "metadata" and item.get("old") != item.get("new")
+    ]
+    if isinstance(request.get("changed"), list):
+        changes.extend(labels.get(key, key) for key in changed_metadata)
+    else:
+        metadata = payload_field(request, "metadata") or {}
+        changes.extend(labels.get(key, key) for key in (metadata.get("article") or {}))
+        changes.extend(labels.get(key, key) for key in (metadata.get("source") or {}))
     return changes or ["校订"]
 
 
@@ -529,6 +534,32 @@ def metadata_list_details(label, field, old, new):
     return lines
 
 
+def metadata_display(field, value):
+    values = metadata_list(value) if field in {"authors", "dates", "tags", "files"} else None
+    if values is not None:
+        if not values:
+            return "（空）"
+        return "<br>".join(metadata_item(field, item) for item in values)
+    text = issue_value(value)
+    return text if text else "（空）"
+
+
+def append_metadata_comparison(lines, request):
+    changes = [
+        item for item in request.get("changed") or []
+        if item.get("kind") == "metadata" and item.get("old") != item.get("new")
+    ]
+    if not changes:
+        return
+    lines.extend(["", "## 元数据对照", "", "| 字段 | 原元数据 | 修改后元数据 |", "| --- | --- | --- |"])
+    for change in changes:
+        field = change.get("field")
+        label = METADATA_FIELD_LABELS.get(field, field)
+        old = metadata_display(field, change.get("old")).replace("|", "\\|").replace("\n", "<br>")
+        new = metadata_display(field, change.get("new")).replace("|", "\\|").replace("\n", "<br>")
+        lines.append(f"| {label} | {old} | {new} |")
+
+
 def change_details(request):
     lines = []
 
@@ -610,6 +641,7 @@ def upsert_tracker_issue(token, correction_id, request, repo, article_id, pulls)
     if details:
         lines.extend(["", "## 修改内容", ""])
         lines.extend(details)
+    append_metadata_comparison(lines, request)
     append_fulltext(lines, request)
     if preview:
         lines.append(f"- BHA 预览：{preview}")
@@ -714,6 +746,7 @@ def notify_auto_merged(token, correction_id, request, repo, article_id, pulls):
     if details:
         lines.extend(["", "## 修改内容", ""])
         lines.extend(details)
+    append_metadata_comparison(lines, request)
     append_fulltext(lines, request)
     if preview:
         lines.append(f"- BHA 预览：{preview}")
@@ -838,20 +871,28 @@ def main():
                 token, repo, "config", config_path, updated_config,
                 title, description, correction_id,
             ))
-        if patch is not None or new_article_id != article_id:
+        if patch is not None:
             target_path = patch_path(archive_id, new_article_id, publication_id)
             target_content, _sha = get_file(token, repo, "ocr_patch", target_path)
             if not target_content and new_article_id != article_id:
                 old_path = patch_path(archive_id, article_id, publication_id)
                 target_content, _sha = get_file(token, repo, "ocr_patch", old_path)
-            if patch is not None:
-                target_content = append_patch(target_content, patch)
-            elif not target_content:
-                target_content = "export default [\n];"
+            target_content = append_patch(target_content, patch)
             pull_requests.append(submit_file(
                 token, repo, "ocr_patch", target_path, target_content,
                 title, description, correction_id,
             ))
+        elif new_article_id != article_id:
+            target_path = patch_path(archive_id, new_article_id, publication_id)
+            target_content, _sha = get_file(token, repo, "ocr_patch", target_path)
+            if not target_content:
+                old_path = patch_path(archive_id, article_id, publication_id)
+                old_content, _sha = get_file(token, repo, "ocr_patch", old_path)
+                if old_content:
+                    pull_requests.append(submit_file(
+                        token, repo, "ocr_patch", target_path, old_content,
+                        title, description, correction_id,
+                    ))
         auto_merged = []
         if request.get("auto_merge") is True and auto_merge_allowed(kind, patch, metadata):
             auto_merged = [pull["url"] for pull in pull_requests if merge_pull(token, repo, pull)]
