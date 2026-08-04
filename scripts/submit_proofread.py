@@ -386,9 +386,10 @@ def upsert_tracker_issue(token, correction_id, request, repo, article_id, pulls)
         "## 审核方式",
         "",
         "1. 打开上方 BHA 预览链接，对照原文件核对修改",
-        "2. 检查各 Pull Request 的 diff",
-        "3. 同意：直接合并 PR；不同意：在 PR 中评论原因并关闭 PR",
-        "4. PR 合并或关闭后，本 Issue 会自动关闭",
+        "2. 查看下方“修改内容”与各 Pull Request 的 diff",
+        "3. 同意：在本 Issue 评论 `/approve`（自动合并 PR）",
+        "4. 拒绝：评论 `/reject 原因`（关闭 PR 并记录原因）",
+        "5. PR 合并或关闭后，本 Issue 会自动关闭",
         "",
         "## Pull Requests",
         "",
@@ -474,6 +475,10 @@ def notify_auto_merged(token, correction_id, request, repo, article_id, pulls):
         f"- Archive：`{repo}`",
         f"- Article ID：`{article_id}`",
     ]
+    details = change_details(request)
+    if details:
+        lines.extend(["", "## 修改内容", ""])
+        lines.extend(details)
     if preview:
         lines.append(f"- BHA 预览：{preview}")
     for pull in pulls:
