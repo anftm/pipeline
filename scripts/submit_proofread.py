@@ -325,9 +325,39 @@ def auto_merge_allowed(kind, patch, metadata):
     return cost <= 20
 
 
+METADATA_FIELD_LABELS = {
+    "title": "标题", "authors": "作者", "dates": "日期", "tags": "标签",
+    "name": "来源名称", "author": "来源作者", "type": "来源类型", "files": "来源文件",
+}
+
+def md_text(value):
+    text = str(value if value is not None else "")
+    return text.replace("\\", "\\\\").replace("`", "\\`").replace("\r", " ").replace("\n", " ")
+
+def change_details(request):
+    lines = []
+    for change in request.get("changed") or []:
+        kind = change.get("kind")
+        if kind in ("part", "comment"):
+            label = f"段落 {change.get('index')}" if kind == "part" else f"注释 {change.get('index')}"
+            if change.get("delete"):
+                lines.append(f"- {label}：删除「{md_text(change.get('original'))}」")
+            elif change.get("text") is not None:
+                place = "后" if change.get("insert") else "前"
+                lines.append(f"- {label}：在{place}插入「{md_text(change.get('text'))}」")
+            else:
+                lines.append(f"- {label}：`{md_text(change.get('original'))}` → `{md_text(change.get('edited'))}`")
+        elif kind == "description":
+            lines.append(f"- 描述：`{md_text(change.get('original'))}` → `{md_text(change.get('edited'))}`")
+        elif kind == "metadata":
+            label = METADATA_FIELD_LABELS.get(change.get("field"), change.get("field"))
+            lines.append(f"- {label}：`{md_text(change.get('old'))}` → `{md_text(change.get('new'))}`")
+    return lines
+
+
 def upsert_tracker_issue(token, correction_id, request, repo, article_id, pulls):
     ensure_tracker_label(token)
-    title_text = " ".join(str(request.get("title") or article_id).split())[:100]
+    title_text = re.sub(r"^(?:校订审核：|校订\s*)+", "", str(request.get("title") or article_id).strip())[:100]
     pull_state = [{"repo": repo, "number": pull["number"], "url": pull["url"]} for pull in pulls]
     marker = json.dumps(pull_state, ensure_ascii=False, separators=(",", ":"))
     doc_id = str(request.get("doc_id") or "")
@@ -340,13 +370,29 @@ def upsert_tracker_issue(token, correction_id, request, repo, article_id, pulls)
         "",
         f"- Archive：`{repo}`",
         f"- Article ID：`{article_id}`",
+        f"- 文章：{title_text}",
         f"- 修改：{'、'.join(change_summary(request))}",
     ]
+    details = change_details(request)
+    if details:
+        lines.extend(["", "## 修改内容", ""])
+        lines.extend(details)
     if preview:
         lines.append(f"- BHA 预览：{preview}")
     if request.get("description"):
         lines.extend([f"- 说明：{request['description']}"])
-    lines.extend(["", "## Pull Requests", ""])
+    lines.extend([
+        "",
+        "## 审核方式",
+        "",
+        "1. 打开上方 BHA 预览链接，对照原文件核对修改",
+        "2. 检查各 Pull Request 的 diff",
+        "3. 同意：直接合并 PR；不同意：在 PR 中评论原因并关闭 PR",
+        "4. PR 合并或关闭后，本 Issue 会自动关闭",
+        "",
+        "## Pull Requests",
+        "",
+    ])
     lines.extend(f"- [ ] [{repo}#{pull['number']}]({pull['url']})" for pull in pulls)
     body = "\n".join(lines)
     existing = find_tracker_issue(token, correction_id)
