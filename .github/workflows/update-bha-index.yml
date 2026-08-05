@@ -33,6 +33,25 @@ jobs:
           GH_PAT: ${{ secrets.GH_PAT }}
           ARCHIVE_ID: ${{ inputs.archive_id || 'all' }}
         run: python3 scripts/build_fork_parsed.py
+      - name: Record parsed input state
+        if: steps.parsed.outputs.state_changed == 'true'
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          git pull --rebase origin "${DEFAULT_BRANCH}"
+          mv /tmp/bha-parsed-inputs.json state/bha-parsed-inputs.json
+          git add state/bha-parsed-inputs.json
+          git diff --cached --quiet && exit 0
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git commit -m "Update BHA parsed input state"
+          git push origin "HEAD:${DEFAULT_BRANCH}" || {
+            git pull --rebase origin "${DEFAULT_BRANCH}"
+            git push origin "HEAD:${DEFAULT_BRANCH}"
+          }
+      - name: Allow parsed refs to propagate
+        if: steps.parsed.outputs.built_archives != ''
+        run: sleep 300
       - name: Check parsed revisions
         id: revisions
         env:
@@ -79,6 +98,10 @@ jobs:
               "index_status": actual.get("index_status"),
               "progress": actual.get("progress"),
               "differing_archives": differing,
+              "revision_differences": {
+                  key: {"expected": expected.get(key), "actual": revisions.get(key)}
+                  for key in differing
+              },
           }, ensure_ascii=False))
           if int(sys.argv[1]) >= 10 and actual.get("index_status") == "ready":
               raise SystemExit(2)
@@ -93,14 +116,13 @@ jobs:
           done
           exit 1
       - name: Record accepted revisions
-        if: steps.parsed.outputs.state_changed == 'true' || steps.revisions.outputs.baseline == 'true' || steps.revisions.outputs.changed == 'true'
+        if: steps.revisions.outputs.baseline == 'true' || steps.revisions.outputs.changed == 'true'
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           git pull --rebase origin "${DEFAULT_BRANCH}"
-          test ! -f /tmp/bha-parsed-inputs.json || mv /tmp/bha-parsed-inputs.json state/bha-parsed-inputs.json
           test ! -f /tmp/bha-parsed-revisions.json || mv /tmp/bha-parsed-revisions.json state/bha-parsed-revisions.json
-          git add state/bha-parsed-inputs.json state/bha-parsed-revisions.json
+          git add state/bha-parsed-revisions.json
           git diff --cached --quiet && exit 0
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
