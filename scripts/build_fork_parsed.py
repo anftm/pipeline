@@ -23,6 +23,7 @@ CANDIDATE_PATH = Path(os.environ.get("BHA_PARSED_INPUT_CANDIDATE", "/tmp/bha-par
 ARCHIVE_ID = os.environ.get("ARCHIVE_ID", "all")
 INPUT_BRANCHES = ("main", "config", "ocr_cache", "ocr_patch")
 PARSED_BRANCH = "parsed"
+PATCH_LAYOUT_VERSION = 2
 
 
 def api_request(token: str, method: str, path: str, payload: dict | None = None):
@@ -98,7 +99,11 @@ def load_state() -> dict:
 
 
 def source_snapshot(revisions: dict[str, str], helper_revision: str) -> dict[str, str]:
-    return {**{branch: revisions[branch] for branch in INPUT_BRANCHES}, "helper": helper_revision}
+    return {
+        **{branch: revisions[branch] for branch in INPUT_BRANCHES},
+        "helper": helper_revision,
+        "patch_layout": str(PATCH_LAYOUT_VERSION),
+    }
 
 
 def needs_local_build(mirror: dict[str, str], upstream: dict[str, str]) -> bool:
@@ -171,6 +176,23 @@ def sanitize_repository(repository: Path) -> None:
     hooks.mkdir()
 
 
+def prepare_patch_input(source: Path, target: Path, archive_id: int) -> Path:
+    shutil.copytree(source, target, ignore=shutil.ignore_patterns(".git"))
+    legacy = target / f"archives{archive_id}"
+    if not legacy.exists():
+        return target
+    for path in legacy.iterdir():
+        if not path.is_file() or path.suffix != ".ts":
+            raise RuntimeError(f"unexpected legacy OCR patch path: {path}")
+        destination = target / path.name
+        if destination.exists() and destination.read_bytes() != path.read_bytes():
+            raise RuntimeError(f"legacy OCR patch conflicts with root patch: {path.name}")
+        if not destination.exists():
+            shutil.copy2(path, destination)
+    shutil.rmtree(legacy)
+    return target
+
+
 def build_archive(token: str, helper: Path, root: Path, archive_id: int, revisions: dict[str, str]) -> None:
     repo = f"{REPOSITORY_PREFIX}{archive_id}"
     repo_url = f"https://github.com/{MIRROR_OWNER}/{repo}.git"
@@ -184,11 +206,12 @@ def build_archive(token: str, helper: Path, root: Path, archive_id: int, revisio
         paths[branch] = path
 
     parsed = paths[PARSED_BRANCH]
+    patch_input = prepare_patch_input(paths["ocr_patch"], archive_root / "ocr_patch-input", archive_id)
     run(["git", "checkout", "--orphan", "parsed-build"], cwd=parsed, env=env)
     run(["git", "reset", "--hard"], cwd=parsed, env=env)
     run_in_container(root, helper, [
         "npm", "run", "build_parsed", "--",
-        str(paths["config"]), str(paths["ocr_cache"]), str(paths["ocr_patch"]),
+        str(paths["config"]), str(paths["ocr_cache"]), str(patch_input),
         str(parsed), str(paths["main"]),
     ])
     sanitize_repository(parsed)

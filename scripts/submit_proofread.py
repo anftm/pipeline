@@ -115,7 +115,7 @@ def patch_path(archive_id, article_id, publication_id):
     for value in (article_id, publication_id):
         if not value or not all(char.isalnum() or char in "._-" for char in value):
             fail("article_id and publication_id contain invalid characters")
-    return f"archives{archive_id}/[{article_id}][{publication_id}].ts"
+    return f"[{article_id}][{publication_id}].ts"
 
 
 def append_patch(existing, patch):

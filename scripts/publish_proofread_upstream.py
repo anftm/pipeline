@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Publish merged fork proofreading pull requests as batch pull requests."""
 
+import base64
+import hashlib
 import json
 import os
 import re
@@ -72,6 +74,52 @@ def branch_sha(token, owner, repo, branch):
     return data.get("object", {}).get("sha")
 
 
+def get_file(token, owner, repo, ref, path):
+    encoded = urllib.parse.quote(path, safe="")
+    status, data = api_request(
+        token, "GET", f"{repo_path(owner, repo)}/contents/{encoded}?ref={urllib.parse.quote(ref, safe='')}"
+    )
+    if status == 404:
+        return "", None
+    if status != 200 or data.get("encoding") != "base64" or not data.get("content"):
+        fail(f"cannot read {owner}/{repo}/{ref}/{path}: {data}")
+    return base64.b64decode(data["content"].replace("\n", "")).decode("utf-8"), data.get("sha")
+
+
+def put_file(token, owner, repo, branch, path, content, sha, message):
+    payload = {
+        "branch": branch, "message": message,
+        "content": base64.b64encode(content.encode("utf-8")).decode("ascii"),
+    }
+    if sha:
+        payload["sha"] = sha
+    return response_or_fail(
+        token, "PUT", f"{repo_path(owner, repo)}/contents/{urllib.parse.quote(path, safe='')}", (200, 201), payload,
+    )
+
+
+def delete_file(token, owner, repo, branch, path, sha, message):
+    return response_or_fail(
+        token, "DELETE", f"{repo_path(owner, repo)}/contents/{urllib.parse.quote(path, safe='')}", (200,),
+        {"branch": branch, "message": message, "sha": sha},
+    )
+
+
+def delete_branch(token, owner, repo, branch):
+    status, _data = api_request(token, "DELETE", ref_path(owner, repo, branch))
+    if status not in {204, 404}:
+        fail(f"cannot delete {owner}/{repo}:{branch}: HTTP {status}")
+
+
+def pull_files(token, repo, number):
+    status, data = api_request(token, "GET", f"{repo_path(MIRROR_OWNER, repo)}/pulls/{number}/files?per_page=100")
+    if status != 200 or not isinstance(data, list):
+        fail(f"cannot read files for {repo}#{number}: HTTP {status}")
+    if len(data) != 1:
+        fail(f"{repo}#{number} must contain exactly one changed file")
+    return str(data[0].get("filename") or "")
+
+
 def list_closed_pulls(token, repo):
     result = []
     for page in range(1, 21):
@@ -139,9 +187,9 @@ def pull_comment(token, repo, number, body):
     )
 
 
-def open_upstream_pull(token, repo, base):
+def open_upstream_pull(token, repo, branch, base):
     query = urllib.parse.urlencode({
-        "state": "open", "head": f"{MIRROR_OWNER}:{base}", "base": base, "per_page": 100,
+        "state": "open", "head": f"{MIRROR_OWNER}:{branch}", "base": base, "per_page": 100,
     })
     status, data = api_request(token, "GET", f"{repo_path(UPSTREAM_OWNER, repo)}/pulls?{query}")
     if status != 200 or not isinstance(data, list):
@@ -151,6 +199,11 @@ def open_upstream_pull(token, repo, base):
 
 def source_key(repo, number):
     return f"{repo}#{number}"
+
+
+def upstream_path(repo, path):
+    prefix = f"archives{repo.removeprefix(REPOSITORY_PREFIX)}/"
+    return path[len(prefix):] if path.startswith(prefix) else path
 
 
 def load_state():
@@ -248,14 +301,20 @@ def refresh_claims(token, state):
         if status == 200 and data.get("merged"):
             state["baseline"] = sorted(set(state["baseline"]) | set(keys))
             state["published"] = sorted(set(state["published"]) | set(keys))
+            branch = str(state["claimed"].get(keys[0], {}).get("branch") or "") if keys else ""
             for key in keys:
                 state["claimed"].pop(key, None)
+            if branch.startswith("proofread-upstream-"):
+                delete_branch(token, MIRROR_OWNER, source_repo, branch)
             changed = True
         elif status == 200 and data.get("state") == "open":
             continue
         elif status == 404 or (status == 200 and data.get("state") == "closed"):
+            branch = str(state["claimed"].get(keys[0], {}).get("branch") or "") if keys else ""
             for key in keys:
                 state["claimed"].pop(key, None)
+            if branch.startswith("proofread-upstream-"):
+                delete_branch(token, MIRROR_OWNER, source_repo, branch)
             changed = True
         else:
             fail(f"cannot refresh upstream pull request {UPSTREAM_OWNER}/{source_repo}#{number}: HTTP {status}")
@@ -407,29 +466,58 @@ def publish_group(token, repo, base, pulls):
         fail(f"upstream branch does not exist: {UPSTREAM_OWNER}/{repo}/{base}")
     if not mirror_sha:
         fail(f"mirror branch does not exist: {MIRROR_OWNER}/{repo}/{base}")
-    existing = open_upstream_pull(token, repo, base)
-    if upstream_sha == mirror_sha and not existing:
-        return None, f"{MIRROR_OWNER}:{base}"
-
-    all_pulls = combined_source_pulls(token, repo, existing, pulls)
-    details = [pull_change_details(token, repo, pull) for pull in all_pulls]
-    body, overflow = split_batch_body(repo, base, all_pulls, details)
-    payload = {
-        "title": f"BHA proofreading batch: {repo}:{base}",
-        "head": f"{MIRROR_OWNER}:{base}", "base": base, "body": body,
-    }
-    if existing:
-        pull = response_or_fail(
-            token, "PATCH", f"{repo_path(UPSTREAM_OWNER, repo)}/pulls/{existing['number']}", (200,),
-            {"title": payload["title"], "body": body},
+    digest = hashlib.sha256(
+        ",".join(source_key(repo, pull["number"]) for pull in pulls).encode("utf-8")
+    ).hexdigest()[:10]
+    branch = f"proofread-upstream-{repo}-{base}-{digest}"
+    batch_sha = branch_sha(token, MIRROR_OWNER, repo, branch)
+    if batch_sha is None:
+        response_or_fail(
+            token, "POST", f"{repo_path(MIRROR_OWNER, repo)}/git/refs", (201,),
+            {"ref": f"refs/heads/{branch}", "sha": upstream_sha},
         )
-    else:
+    existing = open_upstream_pull(token, repo, branch, base)
+    if existing:
+        return existing, branch
+
+    try:
+        paths = {}
+        for source_pull_item in pulls:
+            source_path = pull_files(token, repo, source_pull_item["number"])
+            target_path = upstream_path(repo, source_path)
+            if not source_path or not target_path:
+                fail(f"{repo}#{source_pull_item['number']} has an invalid target path")
+            previous = paths.get(target_path)
+            if previous and previous != source_path:
+                fail(f"multiple OCR patch paths map to {target_path}")
+            paths[target_path] = source_path
+        for target_path, source_path in sorted(paths.items()):
+            desired, _ = get_file(token, MIRROR_OWNER, repo, base, source_path)
+            current, current_sha = get_file(token, MIRROR_OWNER, repo, branch, target_path)
+            if desired and desired != current:
+                put_file(token, MIRROR_OWNER, repo, branch, target_path, desired, current_sha, f"Publish proofreading to {target_path}")
+            elif not desired and current_sha:
+                delete_file(token, MIRROR_OWNER, repo, branch, target_path, current_sha, f"Revert proofreading from {target_path}")
+
+        details = [pull_change_details(token, repo, pull) for pull in pulls]
+        body, overflow = split_batch_body(repo, base, pulls, details)
+        payload = {
+            "title": f"BHA proofreading batch: {repo}:{base}",
+            "head": f"{MIRROR_OWNER}:{branch}", "base": base, "body": body,
+        }
         pull = response_or_fail(
             token, "POST", f"{repo_path(UPSTREAM_OWNER, repo)}/pulls", (201,), payload,
         )
-    if overflow:
-        post_batch_comments(token, UPSTREAM_OWNER, repo, pull.get("number"), overflow)
-    return pull, f"{MIRROR_OWNER}:{base}"
+        if overflow:
+            post_batch_comments(token, UPSTREAM_OWNER, repo, pull.get("number"), overflow)
+        return pull, branch
+    except Exception:
+        try:
+            if not open_upstream_pull(token, repo, branch, base):
+                delete_branch(token, MIRROR_OWNER, repo, branch)
+        except Exception:
+            pass
+        raise
 
 
 def main():
