@@ -1,5 +1,18 @@
 {
   "baseline": [],
-  "claimed": {},
+  "claimed": {
+    "banned-historical-archives0#15": {
+      "branch": "proofread-upstream-banned-historical-archives0-ocr_patch-05bbd9cfb9",
+      "upstream_number": 14,
+      "upstream_repo": "banned-historical-archives0",
+      "upstream_url": "https://github.com/anftm/pipeline/pull/14"
+    },
+    "banned-historical-archives0#17": {
+      "branch": "proofread-upstream-banned-historical-archives0-ocr_patch-05bbd9cfb9",
+      "upstream_number": 14,
+      "upstream_repo": "banned-historical-archives0",
+      "upstream_url": "https://github.com/anftm/pipeline/pull/14"
+    }
+  },
   "version": 1
 }
