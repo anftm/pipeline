@@ -355,10 +355,12 @@ def auto_merge_allowed(kind, patch, metadata):
         if set(change) - {"diff", "type", "insertBefore", "insertAfter", "delete"}:
             return False
         if "diff" not in change:
-            if set(change) != {"delete"} or not isinstance(change["delete"], bool):
-                return False
-            delta -= 1
-            continue
+            if set(change) == {"delete"} and isinstance(change["delete"], bool):
+                delta -= 1
+                continue
+            if set(change) == {"type"} and isinstance(change["type"], str):
+                continue
+            return False
         if not isinstance(change["diff"], str):
             return False
         if change.get("delete"):
