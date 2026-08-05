@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """Publish merged fork proofreading pull requests as batch pull requests."""
 
-import base64
-import hashlib
 import json
 import os
 import re
@@ -14,23 +12,13 @@ import urllib.request
 
 GITHUB_API = "https://api.github.com"
 MIRROR_OWNER = os.environ.get("MIRROR_OWNER", "anftm")
+UPSTREAM_OWNER = os.environ.get("UPSTREAM_OWNER", "banned-historical-archives")
 REPOSITORY_PREFIX = os.environ.get("PROOFREAD_REPOSITORY_PREFIX", "banned-historical-archives")
 STATE_PATH = os.environ.get("PROOFREAD_UPSTREAM_STATE", "state/proofread-upstream.json")
-TARGET_REPOSITORY = os.environ.get(
-    "PROOFREAD_TARGET_REPOSITORY", os.environ.get("GITHUB_REPOSITORY", f"{MIRROR_OWNER}/pipeline")
-)
-TARGET_BASE_BRANCH = os.environ.get("PROOFREAD_TARGET_BASE_BRANCH", "main")
 TRACKER_REPOSITORY = os.environ.get(
     "PROOFREAD_TRACKER_REPOSITORY", os.environ.get("GITHUB_REPOSITORY", f"{MIRROR_OWNER}/pipeline")
 )
 PRS_RE = re.compile(r"<!-- proofreading-prs:(\[.*?\]) -->")
-
-
-def split_repository(value):
-    owner, _, name = value.partition("/")
-    if not owner or not name:
-        fail(f"invalid target repository: {value}")
-    return owner, name
 
 
 def api_request(token, method, path, payload=None):
@@ -84,35 +72,6 @@ def branch_sha(token, owner, repo, branch):
     return data.get("object", {}).get("sha")
 
 
-def get_file(token, owner, repo, ref, path):
-    encoded = urllib.parse.quote(path, safe="")
-    status, data = api_request(
-        token, "GET", f"{repo_path(owner, repo)}/contents/{encoded}?ref={urllib.parse.quote(ref, safe='')}"
-    )
-    if status == 404:
-        return "", None
-    if status != 200 or data.get("encoding") != "base64" or not data.get("content"):
-        fail(f"cannot read {owner}/{repo}/{ref}/{path}: {data}")
-    return base64.b64decode(data["content"].replace("\n", "")).decode("utf-8"), data.get("sha")
-
-
-def put_file(token, owner, repo, branch, path, content, sha, message):
-    payload = {
-        "branch": branch,
-        "message": message,
-        "content": base64.b64encode(content.encode("utf-8")).decode("ascii"),
-    }
-    if sha:
-        payload["sha"] = sha
-    return response_or_fail(
-        token, "PUT", f"{repo_path(owner, repo)}/contents/{urllib.parse.quote(path, safe='')}", (200, 201), payload
-    )
-
-
-def delete_branch(token, owner, repo, branch):
-    response_or_fail(token, "DELETE", ref_path(owner, repo, branch), (204,))
-
-
 def list_closed_pulls(token, repo):
     result = []
     for page in range(1, 21):
@@ -133,10 +92,14 @@ def proofreading_pulls(token, repo):
         head = pull.get("head") or {}
         if not pull.get("merged_at") or head.get("repo", {}).get("full_name") != f"{MIRROR_OWNER}/{repo}":
             continue
-        if not str(head.get("ref") or "").startswith("proofread/"):
+        head_ref = str(head.get("ref") or "")
+        revert = re.match(r"^revert-([0-9]+)-", head_ref)
+        if not head_ref.startswith("proofread/") and not revert:
             continue
         if pull.get("base", {}).get("ref") not in {"config", "ocr_patch"}:
             continue
+        if revert:
+            pull["reverts"] = int(revert.group(1))
         result.append(pull)
     return result
 
@@ -152,7 +115,8 @@ def merged_reverted_numbers(token, repo):
     return reverted
 
 
-def filter_reverted_candidates(token, candidates):
+def filter_reverted_candidates(token, candidates, known=None):
+    known = set(known or ())
     reverted_by_repo = {}
     kept = []
     skipped = []
@@ -160,20 +124,13 @@ def filter_reverted_candidates(token, candidates):
         repo = pull["repo"]
         if repo not in reverted_by_repo:
             reverted_by_repo[repo] = merged_reverted_numbers(token, repo)
-        if pull["number"] in reverted_by_repo[repo]:
+        if pull.get("reverts") and source_key(repo, pull["reverts"]) not in known:
+            skipped.append(source_key(repo, pull["number"]))
+        elif pull["number"] in reverted_by_repo[repo]:
             skipped.append(source_key(repo, pull["number"]))
         else:
             kept.append(pull)
     return kept, skipped
-
-
-def pull_files(token, repo, number):
-    status, data = api_request(token, "GET", f"{repo_path(MIRROR_OWNER, repo)}/pulls/{number}/files?per_page=100")
-    if status != 200 or not isinstance(data, list):
-        fail(f"cannot read files for {repo}#{number}: HTTP {status}")
-    if len(data) != 1 or data[0].get("status") not in {"added", "modified"}:
-        fail(f"{repo}#{number} must contain exactly one added or modified file")
-    return data[0].get("filename")
 
 
 def pull_comment(token, repo, number, body):
@@ -182,12 +139,13 @@ def pull_comment(token, repo, number, body):
     )
 
 
-def open_upstream_pull(token, repo, branch, base):
-    target_owner, target_repo = split_repository(TARGET_REPOSITORY)
-    query = urllib.parse.urlencode({"state": "open", "head": branch, "per_page": 100})
-    status, data = api_request(token, "GET", f"{repo_path(target_owner, target_repo)}/pulls?{query}")
+def open_upstream_pull(token, repo, base):
+    query = urllib.parse.urlencode({
+        "state": "open", "head": f"{MIRROR_OWNER}:{base}", "base": base, "per_page": 100,
+    })
+    status, data = api_request(token, "GET", f"{repo_path(UPSTREAM_OWNER, repo)}/pulls?{query}")
     if status != 200 or not isinstance(data, list):
-        fail(f"cannot list target pull requests for {TARGET_REPOSITORY}: HTTP {status}")
+        fail(f"cannot list upstream pull requests for {UPSTREAM_OWNER}/{repo}: HTTP {status}")
     return next((pull for pull in data if pull.get("base", {}).get("ref") == base), None)
 
 
@@ -203,6 +161,7 @@ def load_state():
     if not isinstance(state, dict) or state.get("version") != 1:
         fail("invalid proofreading upstream state")
     state.setdefault("baseline", [])
+    state.setdefault("published", [])
     state.setdefault("claimed", {})
     return state
 
@@ -228,26 +187,78 @@ def current_pulls(token):
     return result
 
 
+def claim_repository(claim):
+    repository = str(claim.get("upstream_repository") or "")
+    if repository:
+        return repository
+    match = re.match(r"^https://github\.com/([^/]+/[^/]+)/pull/[0-9]+", str(claim.get("upstream_url") or ""))
+    return match.group(1) if match else ""
+
+
 def refresh_claims(token, state):
-    target_owner, target_repo = split_repository(TARGET_REPOSITORY)
+    state.setdefault("published", [])
     changed = False
+    groups = {}
     for key, claim in list(state["claimed"].items()):
+        source_repo = key.rsplit("#", 1)[0]
+        if claim_repository(claim) != f"{UPSTREAM_OWNER}/{source_repo}":
+            state["claimed"].pop(key, None)
+            changed = True
+            continue
         number = claim.get("upstream_number")
         if not number:
             state["claimed"].pop(key, None)
             changed = True
             continue
-        status, data = api_request(token, "GET", f"{repo_path(target_owner, target_repo)}/pulls/{number}")
-        if status == 200 and (data.get("state") == "open" or data.get("merged")):
-            continue
-        if status == 404 or (status == 200 and data.get("state") == "closed"):
-            state["claimed"].pop(key, None)
+        groups.setdefault((source_repo, number), []).append(key)
+    for (source_repo, number), keys in groups.items():
+        status, data = api_request(token, "GET", f"{repo_path(UPSTREAM_OWNER, source_repo)}/pulls/{number}")
+        if status == 200 and data.get("merged"):
+            state["baseline"] = sorted(set(state["baseline"]) | set(keys))
+            state["published"] = sorted(set(state["published"]) | set(keys))
+            for key in keys:
+                state["claimed"].pop(key, None)
             changed = True
+        elif status == 200 and data.get("state") == "open":
+            continue
+        elif status == 404 or (status == 200 and data.get("state") == "closed"):
+            for key in keys:
+                state["claimed"].pop(key, None)
+            changed = True
+        else:
+            fail(f"cannot refresh upstream pull request {UPSTREAM_OWNER}/{source_repo}#{number}: HTTP {status}")
     return changed
 
 
 def pull_source_url(repo, pull):
     return pull.get("html_url") or f"https://github.com/{MIRROR_OWNER}/{repo}/pull/{pull['number']}"
+
+
+def pull_references(body, repo):
+    match = PRS_RE.search(str(body or ""))
+    if not match:
+        return []
+    try:
+        marker = json.loads(match.group(1))
+    except json.JSONDecodeError:
+        return []
+    return [int(item["number"]) for item in marker if str(item.get("repo")) == repo and item.get("number")]
+
+
+def source_pull(token, repo, number):
+    status, pull = api_request(token, "GET", f"{repo_path(MIRROR_OWNER, repo)}/pulls/{number}")
+    if status != 200 or not isinstance(pull, dict):
+        fail(f"cannot read source pull request {repo}#{number}: HTTP {status}")
+    pull["repo"] = repo
+    return pull
+
+
+def combined_source_pulls(token, repo, existing, pulls):
+    result = {pull["number"]: pull for pull in pulls}
+    for number in pull_references((existing or {}).get("body"), repo):
+        if number not in result:
+            result[number] = source_pull(token, repo, number)
+    return sorted(result.values(), key=lambda pull: pull.get("merged_at") or pull.get("number"))
 
 
 def readable_details(body):
@@ -323,10 +334,10 @@ def split_batch_body(repo, base, pulls, details, limit=60000):
         "来源校订 PR：",
         links,
         "",
-        f"目标仓库：`{TARGET_REPOSITORY}`",
-        f"目标分支：`{TARGET_BASE_BRANCH}`",
+        f"目标仓库：`{UPSTREAM_OWNER}/{repo}`",
+        f"目标分支：`{base}`",
         "",
-        "请在目标仓库审核后合并。",
+        "请在目标仓库审核后使用 merge commit 合并；不要使用 squash 或 rebase，以便 fork 后续安全快进同步。",
     ]
     body = "\n".join(core)
     sections = []
@@ -346,21 +357,7 @@ def split_batch_body(repo, base, pulls, details, limit=60000):
 
 
 def chunk_lines(text, limit):
-    if len(text) <= limit:
-        return [text]
-    chunks = []
-    current = ""
-    for line in text.split("\n"):
-        candidate = f"{current}\n{line}" if current else line
-        if len(candidate) <= limit:
-            current = candidate
-        else:
-            if current:
-                chunks.append(current + "\n")
-            current = line
-    if current:
-        chunks.append(current)
-    return chunks
+    return [text[index:index + limit] for index in range(0, len(text), limit)] or [""]
 
 
 def post_batch_comments(token, owner, repo, number, sections):
@@ -372,60 +369,35 @@ def post_batch_comments(token, owner, repo, number, sections):
 
 
 def publish_group(token, repo, base, pulls):
-    target_owner, target_repo = split_repository(TARGET_REPOSITORY)
-    base_sha = branch_sha(token, target_owner, target_repo, TARGET_BASE_BRANCH)
-    if not base_sha:
-        fail(f"target branch does not exist: {TARGET_REPOSITORY}/{TARGET_BASE_BRANCH}")
-    digest = hashlib.sha256(
-        ",".join(source_key(repo, pull["number"]) for pull in pulls).encode("utf-8")
-    ).hexdigest()[:10]
-    branch = f"proofread-upstream-{repo}-{base}-{digest}"
-    batch_sha = branch_sha(token, target_owner, target_repo, branch)
-    if batch_sha is None:
-        response_or_fail(
-            token, "POST", f"{repo_path(target_owner, target_repo)}/git/refs", (201,),
-            {"ref": f"refs/heads/{branch}", "sha": base_sha},
-        )
-    existing = open_upstream_pull(token, repo, branch, TARGET_BASE_BRANCH)
+    upstream_sha = branch_sha(token, UPSTREAM_OWNER, repo, base)
+    mirror_sha = branch_sha(token, MIRROR_OWNER, repo, base)
+    if not upstream_sha:
+        fail(f"upstream branch does not exist: {UPSTREAM_OWNER}/{repo}/{base}")
+    if not mirror_sha:
+        fail(f"mirror branch does not exist: {MIRROR_OWNER}/{repo}/{base}")
+    existing = open_upstream_pull(token, repo, base)
+    if upstream_sha == mirror_sha and not existing:
+        return None, f"{MIRROR_OWNER}:{base}"
+
+    all_pulls = combined_source_pulls(token, repo, existing, pulls)
+    details = [pull_change_details(token, repo, pull) for pull in all_pulls]
+    body, overflow = split_batch_body(repo, base, all_pulls, details)
+    payload = {
+        "title": f"BHA proofreading batch: {repo}:{base}",
+        "head": f"{MIRROR_OWNER}:{base}", "base": base, "body": body,
+    }
     if existing:
-        return existing, branch
-    if batch_sha is not None and batch_sha != base_sha:
-        fail(f"batch branch already exists with an unexpected revision: {TARGET_REPOSITORY}/{branch}")
-
-    try:
-        for pull in sorted(pulls, key=lambda item: item.get("merged_at") or item.get("number")):
-            path = pull_files(token, repo, pull["number"])
-            if not path:
-                fail(f"{repo}#{pull['number']} has an invalid target file")
-            base_ref = pull.get("base", {}).get("sha")
-            merge_ref = pull.get("merge_commit_sha")
-            if not base_ref or not merge_ref:
-                fail(f"{repo}#{pull['number']} is missing base or merge revision")
-            source_base, _ = get_file(token, MIRROR_OWNER, repo, base_ref, path)
-            batch_content, batch_file_sha = get_file(token, target_owner, target_repo, branch, path)
-            if batch_file_sha is not None and batch_content != source_base:
-                fail(f"conflict while applying {repo}#{pull['number']} to {TARGET_BASE_BRANCH}/{path}")
-            desired, _ = get_file(token, MIRROR_OWNER, repo, merge_ref, path)
-            if not desired:
-                fail(f"merged pull {repo}#{pull['number']} has no readable file content")
-            put_file(token, target_owner, target_repo, branch, path, desired, batch_file_sha, f"Apply proofreading {repo}#{pull['number']}")
-    except Exception:
-        try:
-            if not open_upstream_pull(token, repo, branch, TARGET_BASE_BRANCH):
-                delete_branch(token, target_owner, target_repo, branch)
-        except Exception:
-            pass
-        raise
-
-    details = [pull_change_details(token, repo, pull) for pull in pulls]
-    body, overflow = split_batch_body(repo, base, pulls, details)
-    pull = response_or_fail(
-        token, "POST", f"{repo_path(target_owner, target_repo)}/pulls", (201,),
-        {"title": f"BHA proofreading batch: {repo}:{base}", "head": branch, "base": TARGET_BASE_BRANCH, "body": body},
-    )
+        pull = response_or_fail(
+            token, "PATCH", f"{repo_path(UPSTREAM_OWNER, repo)}/pulls/{existing['number']}", (200,),
+            {"title": payload["title"], "body": body},
+        )
+    else:
+        pull = response_or_fail(
+            token, "POST", f"{repo_path(UPSTREAM_OWNER, repo)}/pulls", (201,), payload,
+        )
     if overflow:
-        post_batch_comments(token, target_owner, target_repo, pull.get("number"), overflow)
-    return pull, branch
+        post_batch_comments(token, UPSTREAM_OWNER, repo, pull.get("number"), overflow)
+    return pull, f"{MIRROR_OWNER}:{base}"
 
 
 def main():
@@ -437,15 +409,21 @@ def main():
     if state is None:
         if os.environ.get("PROOFREAD_BOOTSTRAP", "false").lower() != "true":
             fail("state is missing; run once with PROOFREAD_BOOTSTRAP=true to establish a baseline")
-        state = {"version": 1, "baseline": sorted(source_key(p["repo"], p["number"]) for p in pulls), "claimed": {}}
+        state = {
+            "version": 1,
+            "baseline": sorted(source_key(p["repo"], p["number"]) for p in pulls),
+            "published": [],
+            "claimed": {},
+        }
         save_state(state)
         print(json.dumps({"mode": "baseline", "count": len(pulls)}, ensure_ascii=False))
         return
 
     refresh_claims(token, state)
     known = set(state["baseline"]) | set(state["claimed"])
+    published_or_claimed = set(state["published"]) | set(state["claimed"])
     candidates = [p for p in pulls if source_key(p["repo"], p["number"]) not in known]
-    candidates, skipped = filter_reverted_candidates(token, candidates)
+    candidates, skipped = filter_reverted_candidates(token, candidates, published_or_claimed)
     if skipped:
         state["baseline"] = sorted(set(state["baseline"]) | set(skipped))
     groups = {}
@@ -456,11 +434,20 @@ def main():
     for (repo, base), group in sorted(groups.items()):
         try:
             upstream, branch = publish_group(token, repo, base, group)
+            if upstream is None:
+                state["baseline"] = sorted(
+                    set(state["baseline"]) | {source_key(repo, pull["number"]) for pull in group}
+                )
+                state["published"] = sorted(
+                    set(state["published"]) | {source_key(repo, pull["number"]) for pull in group}
+                )
+                continue
             marker = f"<!-- proofreading-upstream:{repo}#{upstream['number']} -->"
             for pull in group:
                 pull_comment(token, repo, pull["number"], marker)
                 state["claimed"][source_key(repo, pull["number"])] = {
                     "upstream_repo": repo,
+                    "upstream_repository": f"{UPSTREAM_OWNER}/{repo}",
                     "upstream_number": upstream["number"],
                     "upstream_url": upstream.get("html_url"),
                     "branch": branch,

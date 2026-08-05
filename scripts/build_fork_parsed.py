@@ -5,6 +5,7 @@ import base64
 import json
 import os
 import subprocess
+import shutil
 import sys
 import tempfile
 import urllib.error
@@ -65,6 +66,15 @@ def branch_revisions(token: str, owner: str, repo: str) -> dict[str, str]:
     return {branch: revisions[branch] for branch in required}
 
 
+def ref_revision(token: str, owner: str, repo: str, branch: str) -> str:
+    path = f"{repo_path(owner, repo)}/git/ref/heads/{urllib.parse.quote(branch, safe='')}"
+    status, data = api_request(token, "GET", path)
+    revision = str(data.get("object", {}).get("sha") or "") if isinstance(data, dict) else ""
+    if status != 200 or not revision:
+        raise RuntimeError(f"cannot read {owner}/{repo}:{branch}: HTTP {status}")
+    return revision
+
+
 def selected_archive_ids() -> list[int]:
     if ARCHIVE_ID == "all":
         return list(range(32))
@@ -87,22 +97,12 @@ def load_state() -> dict:
     return state
 
 
-def source_snapshot(revisions: dict[str, str]) -> dict[str, str]:
-    return {branch: revisions[branch] for branch in INPUT_BRANCHES}
+def source_snapshot(revisions: dict[str, str], helper_revision: str) -> dict[str, str]:
+    return {**{branch: revisions[branch] for branch in INPUT_BRANCHES}, "helper": helper_revision}
 
 
 def needs_local_build(mirror: dict[str, str], upstream: dict[str, str]) -> bool:
     return any(mirror[branch] != upstream[branch] for branch in INPUT_BRANCHES)
-
-
-def sync_parsed(token: str, repo: str, mirror_sha: str, upstream_sha: str) -> bool:
-    if mirror_sha == upstream_sha:
-        return False
-    path = f"{repo_path(MIRROR_OWNER, repo)}/git/refs/heads/{urllib.parse.quote(PARSED_BRANCH, safe='')}"
-    status, _data = api_request(token, "PATCH", path, {"sha": upstream_sha, "force": True})
-    if status != 200:
-        raise RuntimeError(f"cannot sync {MIRROR_OWNER}/{repo}:{PARSED_BRANCH}: HTTP {status}")
-    return True
 
 
 def git_environment(token: str) -> dict[str, str]:
@@ -117,22 +117,61 @@ def git_environment(token: str) -> dict[str, str]:
     return env
 
 
+def clean_environment() -> dict[str, str]:
+    env = os.environ.copy()
+    for key in ("GH_PAT", "GITHUB_TOKEN", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"):
+        env.pop(key, None)
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    return env
+
+
+def push_environment(token: str, home: Path) -> dict[str, str]:
+    env = git_environment(token)
+    env["HOME"] = str(home)
+    return env
+
+
 def run(command: list[str], cwd: Path | None = None, env: dict[str, str] | None = None) -> None:
     subprocess.run(command, cwd=str(cwd) if cwd else None, env=env, check=True)
 
 
-def clone_branch(repo_url: str, branch: str, target: Path, env: dict[str, str]) -> None:
+def clone_branch(repo_url: str, branch: str, target: Path, env: dict[str, str], expected_sha: str) -> None:
     run(["git", "clone", "--depth", "1", "--single-branch", "--branch", branch, repo_url, str(target)], env=env)
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=str(target), env=env, check=True, capture_output=True, text=True,
+    )
+    if result.stdout.strip() != expected_sha:
+        raise RuntimeError(f"{repo_url}:{branch} changed while preparing parsed data; retry the workflow")
 
 
-def prepare_helper(root: Path, env: dict[str, str]) -> Path:
+def run_in_container(root: Path, cwd: Path, command: list[str]) -> None:
+    run([
+        "docker", "run", "--rm", "--volume", f"{root}:{root}", "--workdir", str(cwd),
+        "node:18", *command,
+    ], env=clean_environment())
+
+
+def prepare_helper(root: Path, env: dict[str, str], revision: str) -> Path:
     helper = root / "ocr_helper"
-    clone_branch("https://github.com/banned-historical-archives/ocr_helper.git", "main", helper, env)
-    run(["npm", "install"], cwd=helper, env=env)
+    clone_branch("https://github.com/banned-historical-archives/ocr_helper.git", "main", helper, env, revision)
+    run_in_container(root, helper, ["npm", "install"])
     return helper
 
 
-def build_archive(token: str, helper: Path, root: Path, archive_id: int) -> None:
+def sanitize_repository(repository: Path) -> None:
+    git_dir = repository / ".git"
+    if not git_dir.is_dir() or git_dir.is_symlink():
+        raise RuntimeError("parsed repository metadata was replaced during generation")
+    config = git_dir / "config"
+    config.unlink(missing_ok=True)
+    config.write_text("[core]\n\trepositoryformatversion = 0\n\tbare = false\n", encoding="utf-8")
+    hooks = git_dir / "hooks"
+    if hooks.exists():
+        shutil.rmtree(hooks)
+    hooks.mkdir()
+
+
+def build_archive(token: str, helper: Path, root: Path, archive_id: int, revisions: dict[str, str]) -> None:
     repo = f"{REPOSITORY_PREFIX}{archive_id}"
     repo_url = f"https://github.com/{MIRROR_OWNER}/{repo}.git"
     archive_root = root / repo
@@ -141,22 +180,53 @@ def build_archive(token: str, helper: Path, root: Path, archive_id: int) -> None
     paths = {}
     for branch in (*INPUT_BRANCHES, PARSED_BRANCH):
         path = archive_root / branch
-        clone_branch(repo_url, branch, path, env)
+        clone_branch(repo_url, branch, path, env, revisions[branch])
         paths[branch] = path
 
     parsed = paths[PARSED_BRANCH]
     run(["git", "checkout", "--orphan", "parsed-build"], cwd=parsed, env=env)
     run(["git", "reset", "--hard"], cwd=parsed, env=env)
-    run([
+    run_in_container(root, helper, [
         "npm", "run", "build_parsed", "--",
         str(paths["config"]), str(paths["ocr_cache"]), str(paths["ocr_patch"]),
         str(parsed), str(paths["main"]),
-    ], cwd=helper, env=env)
-    run(["git", "config", "user.name", "github-actions[bot]"], cwd=parsed, env=env)
-    run(["git", "config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com"], cwd=parsed, env=env)
-    run(["git", "add", "-A"], cwd=parsed, env=env)
-    run(["git", "commit", "-m", "Rebuild parsed data from anftm corrections"], cwd=parsed, env=env)
-    run(["git", "push", "origin", "HEAD:parsed", "--force"], cwd=parsed, env=env)
+    ])
+    sanitize_repository(parsed)
+    secure_home = archive_root / "push-home"
+    secure_home.mkdir()
+    safe_env = clean_environment()
+    safe_env["HOME"] = str(secure_home)
+    run(["git", "config", "user.name", "github-actions[bot]"], cwd=parsed, env=safe_env)
+    run(["git", "config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com"], cwd=parsed, env=safe_env)
+    run(["git", "add", "-A"], cwd=parsed, env=safe_env)
+    run(["git", "commit", "-m", "Rebuild parsed data from anftm corrections"], cwd=parsed, env=safe_env)
+    run([
+        "git", "-c", "core.hooksPath=/dev/null", "-c", "credential.helper=", "-c", "http.proxy=",
+        "push", repo_url, "HEAD:parsed",
+        f"--force-with-lease=refs/heads/parsed:{revisions[PARSED_BRANCH]}",
+    ], cwd=parsed, env=push_environment(token, secure_home))
+
+
+def sync_parsed(token: str, root: Path, archive_id: int, mirror: dict[str, str], upstream: dict[str, str]) -> None:
+    repo = f"{REPOSITORY_PREFIX}{archive_id}"
+    mirror_url = f"https://github.com/{MIRROR_OWNER}/{repo}.git"
+    upstream_url = f"https://github.com/{UPSTREAM_OWNER}/{repo}.git"
+    target = root / f"{repo}-parsed-sync"
+    env = git_environment(token)
+    clone_branch(mirror_url, PARSED_BRANCH, target, env, mirror[PARSED_BRANCH])
+    run(["git", "fetch", "--depth", "1", upstream_url, PARSED_BRANCH], cwd=target, env=env)
+    fetched = subprocess.run(
+        ["git", "rev-parse", "FETCH_HEAD"], cwd=str(target), env=env, check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    if fetched != upstream[PARSED_BRANCH]:
+        raise RuntimeError(f"{UPSTREAM_OWNER}/{repo}:parsed changed while synchronizing; retry the workflow")
+    secure_home = root / f"{repo}-sync-home"
+    secure_home.mkdir()
+    run([
+        "git", "-c", "core.hooksPath=/dev/null", "-c", "credential.helper=", "-c", "http.proxy=",
+        "push", mirror_url, "FETCH_HEAD:parsed",
+        f"--force-with-lease=refs/heads/parsed:{mirror[PARSED_BRANCH]}",
+    ], cwd=target, env=push_environment(token, secure_home))
 
 
 def output(name: str, value: str) -> None:
@@ -173,13 +243,17 @@ def main() -> None:
         raise RuntimeError("GH_PAT is required")
     state = load_state()
     archives = dict(state["archives"])
+    helper_revision = ref_revision(token, "banned-historical-archives", "ocr_helper", "main")
     selected = selected_archive_ids()
     current = {}
     for archive_id in selected:
         repo = f"{REPOSITORY_PREFIX}{archive_id}"
         current[archive_id] = branch_revisions(token, MIRROR_OWNER, repo)
 
-    changed = [archive_id for archive_id in selected if archives.get(str(archive_id)) != source_snapshot(current[archive_id])]
+    changed = [
+        archive_id for archive_id in selected
+        if archives.get(str(archive_id)) != source_snapshot(current[archive_id], helper_revision)
+    ]
     built = []
     synced = []
     if changed:
@@ -190,12 +264,16 @@ def main() -> None:
                 repo = f"{REPOSITORY_PREFIX}{archive_id}"
                 upstream = branch_revisions(token, UPSTREAM_OWNER, repo)
                 if needs_local_build(current[archive_id], upstream):
-                    helper = helper or prepare_helper(root, git_environment(token))
-                    build_archive(token, helper, root, archive_id)
+                    helper = helper or prepare_helper(root, git_environment(token), helper_revision)
+                    build_archive(token, helper, root, archive_id, current[archive_id])
                     built.append(archive_id)
-                elif sync_parsed(token, repo, current[archive_id][PARSED_BRANCH], upstream[PARSED_BRANCH]):
+                elif current[archive_id][PARSED_BRANCH] != upstream[PARSED_BRANCH]:
+                    latest = branch_revisions(token, MIRROR_OWNER, repo)
+                    if latest != current[archive_id]:
+                        raise RuntimeError(f"{MIRROR_OWNER}/{repo} changed before parsed synchronization; retry the workflow")
+                    sync_parsed(token, root, archive_id, current[archive_id], upstream)
                     synced.append(archive_id)
-                archives[str(archive_id)] = source_snapshot(current[archive_id])
+                archives[str(archive_id)] = source_snapshot(current[archive_id], helper_revision)
 
     candidate = {"version": 1, "archives": archives}
     CANDIDATE_PATH.parent.mkdir(parents=True, exist_ok=True)
