@@ -664,12 +664,10 @@ def upsert_tracker_issue(token, correction_id, request, repo, article_id, pulls)
     lines.extend(f"- [ ] [{repo}#{pull['number']}]({pull['url']})" for pull in pulls)
     body = "\n".join(lines)
     existing = find_tracker_issue(token, correction_id)
-    assignee = os.environ.get("PROOFREAD_TRACKER_ASSIGNEE", "").strip()
     payload = {
         "title": f"校订审核：{title_text}",
         "body": body,
         "labels": ["proofreading-review"],
-        **({"assignees": [assignee]} if assignee else {}),
     }
     if existing:
         payload["state"] = "open"
@@ -702,12 +700,10 @@ def ensure_auto_merge_log(token):
     issue = find_auto_merge_log(token)
     if issue:
         return issue
-    assignee = os.environ.get("PROOFREAD_TRACKER_ASSIGNEE", "").strip()
     payload = {
         "title": "校订自动合并记录",
         "body": "<!-- proofreading-auto-merge-log -->\n自动合并的低风险正文校订会记录在此 Issue 的评论中。",
         "labels": ["proofreading-auto-merged"],
-        **({"assignees": [assignee]} if assignee else {}),
     }
     return response_or_fail(token, "POST", f"{full_repo_path(TRACKER_REPOSITORY)}/issues", (201,), payload)
 
