@@ -53,14 +53,22 @@ def repo_path(owner: str, repo: str) -> str:
 
 
 def branch_revisions(token: str, owner: str, repo: str) -> dict[str, str]:
-    status, data = api_request(token, "GET", f"{repo_path(owner, repo)}/branches?per_page=100")
-    if status != 200 or not isinstance(data, list):
-        raise RuntimeError(f"cannot list {owner}/{repo} branches: HTTP {status}")
-    revisions = {
-        str(item.get("name")): str(item.get("commit", {}).get("sha") or "")
-        for item in data if isinstance(item, dict)
-    }
     required = (*INPUT_BRANCHES, PARSED_BRANCH)
+    revisions = {}
+    page = 1
+    while True:
+        status, data = api_request(
+            token, "GET", f"{repo_path(owner, repo)}/branches?per_page=100&page={page}",
+        )
+        if status != 200 or not isinstance(data, list):
+            raise RuntimeError(f"cannot list {owner}/{repo} branches: HTTP {status}")
+        revisions.update({
+            str(item.get("name")): str(item.get("commit", {}).get("sha") or "")
+            for item in data if isinstance(item, dict)
+        })
+        if all(revisions.get(branch) for branch in required) or len(data) < 100:
+            break
+        page += 1
     missing = [branch for branch in required if not revisions.get(branch)]
     if missing:
         raise RuntimeError(f"{owner}/{repo} is missing branches: {', '.join(missing)}")
@@ -152,7 +160,7 @@ def clone_branch(repo_url: str, branch: str, target: Path, env: dict[str, str], 
 def run_in_container(root: Path, cwd: Path, command: list[str]) -> None:
     run([
         "docker", "run", "--rm", "--volume", f"{root}:{root}", "--workdir", str(cwd),
-        "node:18", *command,
+        "node:24", *command,
     ], env=clean_environment())
 
 
