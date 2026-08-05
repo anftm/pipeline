@@ -49,9 +49,6 @@ jobs:
             git pull --rebase origin "${DEFAULT_BRANCH}"
             git push origin "HEAD:${DEFAULT_BRANCH}"
           }
-      - name: Allow parsed refs to propagate
-        if: steps.parsed.outputs.built_archives != ''
-        run: sleep 300
       - name: Check parsed revisions
         id: revisions
         env:
