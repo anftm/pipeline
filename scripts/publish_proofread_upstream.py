@@ -5,6 +5,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.parse
@@ -19,6 +20,10 @@ TARGET_REPOSITORY = os.environ.get(
     "PROOFREAD_TARGET_REPOSITORY", os.environ.get("GITHUB_REPOSITORY", f"{MIRROR_OWNER}/pipeline")
 )
 TARGET_BASE_BRANCH = os.environ.get("PROOFREAD_TARGET_BASE_BRANCH", "main")
+TRACKER_REPOSITORY = os.environ.get(
+    "PROOFREAD_TRACKER_REPOSITORY", os.environ.get("GITHUB_REPOSITORY", f"{MIRROR_OWNER}/pipeline")
+)
+PRS_RE = re.compile(r"<!-- proofreading-prs:(\[.*?\]) -->")
 
 
 def split_repository(value):
@@ -219,7 +224,62 @@ def pull_source_url(repo, pull):
     return pull.get("html_url") or f"https://github.com/{MIRROR_OWNER}/{repo}/pull/{pull['number']}"
 
 
-def batch_body(repo, base, pulls):
+def readable_details(body):
+    if not body or "## 修改内容" not in body:
+        return None
+    lines = body.split("\n")
+    start = next((index for index, line in enumerate(lines) if line.startswith("## ")), None)
+    if start is None:
+        return None
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        if lines[index].startswith("## ") and lines[index].startswith(("## 审核方式", "## Pull Requests")):
+            end = index
+            break
+    return "\n".join(lines[start:end]).strip() or None
+
+
+def tracker_path():
+    owner, _, repo = TRACKER_REPOSITORY.partition("/")
+    if not owner or not repo:
+        fail(f"invalid tracker repository: {TRACKER_REPOSITORY}")
+    return f"/repos/{urllib.parse.quote(owner)}/{urllib.parse.quote(repo)}"
+
+
+def tracker_issue_body(token, repo, pull):
+    for page in range(1, 21):
+        status, issues = api_request(
+            token, "GET", f"{tracker_path()}/issues?state=all&labels=proofreading-review&per_page=100&page={page}"
+        )
+        if status != 200 or not isinstance(issues, list):
+            fail(f"cannot list tracker issues: HTTP {status}")
+        for issue in issues:
+            match = PRS_RE.search(str(issue.get("body") or ""))
+            if not match:
+                continue
+            try:
+                marker = json.loads(match.group(1))
+            except json.JSONDecodeError:
+                continue
+            if any(str(item.get("repo")) == repo and item.get("number") == pull["number"] for item in marker):
+                return issue.get("body") or ""
+        if len(issues) < 100:
+            return None
+    return None
+
+
+def pull_change_details(token, repo, pull):
+    section = readable_details(pull.get("body") or "")
+    if section:
+        return section
+    try:
+        tracker_body = tracker_issue_body(token, repo, pull)
+    except Exception:
+        return None
+    return readable_details(tracker_body) if tracker_body else None
+
+
+def split_batch_body(repo, base, pulls, details, limit=60000):
     marker = json.dumps([
         {"repo": repo, "number": pull["number"], "url": pull_source_url(repo, pull)}
         for pull in pulls
@@ -228,7 +288,7 @@ def batch_body(repo, base, pulls):
         f"- [x] [{repo}#{pull['number']}]({pull_source_url(repo, pull)})"
         for pull in pulls
     )
-    return "\n".join([
+    core = [
         "<!-- proofreading-upstream-batch -->",
         f"<!-- proofreading-prs:{marker} -->",
         "此 PR 汇总已在 anftm fork 审核并合并的 BHA 校订。",
@@ -240,7 +300,48 @@ def batch_body(repo, base, pulls):
         f"目标分支：`{TARGET_BASE_BRANCH}`",
         "",
         "请在目标仓库审核后合并。",
-    ])
+    ]
+    body = "\n".join(core)
+    sections = []
+    for pull, detail in zip(pulls, details):
+        if not detail:
+            continue
+        sections.append(f"## 来源 PR：[{repo}#{pull['number']}]({pull_source_url(repo, pull)})\n\n{detail}")
+    overflow = []
+    for section in sections:
+        if len(body) + len(section) + 2 <= limit:
+            body += "\n\n" + section
+        else:
+            overflow.append(section)
+    if overflow:
+        body += "\n\n其余校订明细见下方评论。"
+    return body, overflow
+
+
+def chunk_lines(text, limit):
+    if len(text) <= limit:
+        return [text]
+    chunks = []
+    current = ""
+    for line in text.split("\n"):
+        candidate = f"{current}\n{line}" if current else line
+        if len(candidate) <= limit:
+            current = candidate
+        else:
+            if current:
+                chunks.append(current + "\n")
+            current = line
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def post_batch_comments(token, owner, repo, number, sections):
+    for section in sections:
+        for comment in chunk_lines(section, 60000):
+            response_or_fail(
+                token, "POST", f"{repo_path(owner, repo)}/issues/{number}/comments", (201,), {"body": comment}
+            )
 
 
 def publish_group(token, repo, base, pulls):
@@ -289,11 +390,14 @@ def publish_group(token, repo, base, pulls):
             pass
         raise
 
-    body = batch_body(repo, base, pulls)
+    details = [pull_change_details(token, repo, pull) for pull in pulls]
+    body, overflow = split_batch_body(repo, base, pulls, details)
     pull = response_or_fail(
         token, "POST", f"{repo_path(target_owner, target_repo)}/pulls", (201,),
         {"title": f"BHA proofreading batch: {repo}:{base}", "head": branch, "base": TARGET_BASE_BRANCH, "body": body},
     )
+    if overflow:
+        post_batch_comments(token, target_owner, target_repo, pull.get("number"), overflow)
     return pull, branch
 
 

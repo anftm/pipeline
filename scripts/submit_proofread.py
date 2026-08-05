@@ -619,6 +619,45 @@ def append_fulltext(lines, request):
         ])
 
 
+def proofread_pr_body(request, repo, article_id, correction_id):
+    title_text = re.sub(r"^(?:校订审核：|校订\s*)+", "", str(request.get("title") or article_id).strip())[:100]
+    doc_id = str(request.get("doc_id") or "")
+    bha_url = os.environ.get("BHA_PUBLIC_URL", "https://vomebook-bha-search.hf.space").rstrip("/")
+    preview = f"{bha_url}/?preview={urllib.parse.quote(doc_id)}" if doc_id else ""
+    summary = "、".join(change_summary(request))
+    details = change_details(request)
+    description = payload_field(request, "description")
+
+    def compose(include_fulltext):
+        lines = [
+            f"<!-- proofreading:{correction_id} -->",
+            "## 校订",
+            "",
+            f"- Archive：`{repo}`",
+            f"- Article ID：`{article_id}`",
+            f"- 文章：{title_text}",
+            f"- 修改：{summary}",
+        ]
+        if details:
+            lines.extend(["", "## 修改内容", ""])
+            lines.extend(details)
+        append_metadata_comparison(lines, request)
+        if include_fulltext:
+            append_fulltext(lines, request)
+        if preview:
+            lines.append(f"- BHA 预览：{preview}")
+        if description:
+            lines.append(f"- 说明：{description}")
+        if not include_fulltext:
+            lines.extend(["", "全文对照较长，请在 tracker issue 或 PR 文件 diff 中查看。"])
+        return "\n".join(lines)
+
+    body = compose(True)
+    if len(body) > 60000:
+        return compose(False)
+    return body
+
+
 def upsert_tracker_issue(token, correction_id, request, repo, article_id, pulls):
     ensure_tracker_label(token)
     title_text = re.sub(r"^(?:校订审核：|校订\s*)+", "", str(request.get("title") or article_id).strip())[:100]
@@ -854,7 +893,6 @@ def main():
         }, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:12]
         patch_path(archive_id, article_id, publication_id)
         title = request.get("title") or f"校订 {article_id}"
-        description = payload_field(request, "description") or "由 BHA 校订后端提交。"
         pull_requests = []
         new_article_id = article_id
         if isinstance(metadata, dict):
@@ -865,7 +903,7 @@ def main():
             updated_config, new_article_id = update_config(config_content, request)
             pull_requests.append(submit_file(
                 token, repo, "config", config_path, updated_config,
-                title, description, correction_id,
+                title, proofread_pr_body(request, repo, new_article_id, correction_id), correction_id,
             ))
         if patch is not None:
             target_path = patch_path(archive_id, new_article_id, publication_id)
@@ -876,7 +914,7 @@ def main():
             target_content = append_patch(target_content, patch)
             pull_requests.append(submit_file(
                 token, repo, "ocr_patch", target_path, target_content,
-                title, description, correction_id,
+                title, proofread_pr_body(request, repo, new_article_id, correction_id), correction_id,
             ))
         elif new_article_id != article_id:
             target_path = patch_path(archive_id, new_article_id, publication_id)
@@ -887,7 +925,7 @@ def main():
                 if old_content:
                     pull_requests.append(submit_file(
                         token, repo, "ocr_patch", target_path, old_content,
-                        title, description, correction_id,
+                        title, proofread_pr_body(request, repo, new_article_id, correction_id), correction_id,
                     ))
         auto_merged = []
         if request.get("auto_merge") is True and auto_merge_allowed(kind, patch, metadata):
