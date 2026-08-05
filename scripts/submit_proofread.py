@@ -527,11 +527,12 @@ def metadata_list_details(label, field, old, new):
     added = [metadata_item(field, value) for value in new_values if key(value) not in old_keys]
     if not removed and not added:
         return []
-    lines = [f"### {label}", ""]
-    lines.extend(f"- 删除：~~{value}~~" for value in removed)
-    lines.extend(f"- 新增：**{value}**" for value in added)
-    lines.append("")
-    return lines
+    parts = []
+    if removed:
+        parts.append("删除 " + "、".join(f"~~{value}~~" for value in removed))
+    if added:
+        parts.append("新增 " + "、".join(f"**{value}**" for value in added))
+    return [f"- {label}：{'；'.join(parts)}"]
 
 
 def metadata_display(field, value):
@@ -562,44 +563,30 @@ def append_metadata_comparison(lines, request):
 
 def change_details(request):
     lines = []
-
-    def changed_pair(label, old, new, noun="文"):
-        if old == new:
-            return
-        lines.extend([
-            f"### {label}", "",
-            f"**原{noun}**", "", fenced_text(issue_value(old)), "",
-            f"**新{noun}**", "", fenced_text(issue_value(new)), "",
-        ])
-
     for change in request.get("changed") or []:
         kind = change.get("kind")
         if kind in ("part", "comment"):
             label = f"段落 {change.get('index')}" if kind == "part" else f"注释 {change.get('index')}"
             if change.get("delete"):
-                lines.extend([f"### {label}（删除）", "", "**原文**", "", fenced_text(issue_value(change.get("original"))), ""])
+                lines.append(f"- {label}（删除）：{issue_value(change.get('original'))}")
             elif change.get("text") is not None:
                 place = "后" if change.get("insert") else "前"
-                lines.extend([f"### {label}{place}插入", "", "**新增文本**", "", fenced_text(issue_value(change.get("text"))), ""])
+                lines.append(f"- {label}{place}插入：{issue_value(change.get('text'))}")
             else:
-                changed_pair(label, change.get("original"), change.get("edited"))
+                lines.append(f"- {label}：{issue_value(change.get('original'))} → {issue_value(change.get('edited'))}")
         elif kind == "part_type":
-            changed_pair(f"段落 {change.get('index')}类型", change.get("old"), change.get("new"), "值")
+            lines.append(f"- 段落 {change.get('index')}：类型 {issue_value(change.get('old'))} → {issue_value(change.get('new'))}")
         elif kind == "new_comment":
-            lines.extend([f"### 新增注释 {change.get('index')}", "", "**新增文本**", "", fenced_text(issue_value(change.get("text"))), ""])
+            lines.append(f"- 新增注释 {change.get('index')}：{issue_value(change.get('text'))}")
         elif kind == "description":
-            changed_pair("描述", change.get("original"), change.get("edited"))
+            lines.append(f"- 描述：{issue_value(change.get('original'))} → {issue_value(change.get('edited'))}")
         elif kind == "metadata":
             field = change.get("field")
             label = METADATA_FIELD_LABELS.get(field, field)
             if field in {"authors", "dates", "tags", "files"}:
-                list_details = metadata_list_details(label, field, change.get("old"), change.get("new"))
-                if list_details:
-                    lines.extend(list_details)
-                elif change.get("old") != change.get("new"):
-                    changed_pair(label, change.get("old"), change.get("new"), "值")
-            else:
-                changed_pair(label, change.get("old"), change.get("new"), "值")
+                lines.extend(metadata_list_details(label, field, change.get("old"), change.get("new")))
+            elif change.get("old") != change.get("new"):
+                lines.append(f"- {label}：{issue_value(change.get('old'))} → {issue_value(change.get('new'))}")
     return lines
 
 

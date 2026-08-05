@@ -232,8 +232,9 @@ def readable_details(body):
     if start is None:
         return None
     end = len(lines)
+    stop = ("## 审核方式", "## Pull Requests", "## 原全文")
     for index in range(start + 1, len(lines)):
-        if lines[index].startswith("## ") and lines[index].startswith(("## 审核方式", "## Pull Requests")):
+        if lines[index].startswith("## ") and lines[index].startswith(stop):
             end = index
             break
     return "\n".join(lines[start:end]).strip() or None
