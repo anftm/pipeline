@@ -195,13 +195,45 @@ def claim_repository(claim):
     return match.group(1) if match else ""
 
 
+def cleanup_legacy_claim(token, claim):
+    repository = claim_repository(claim)
+    number = claim.get("upstream_number")
+    if repository != f"{MIRROR_OWNER}/pipeline" or not number:
+        return False
+    owner, repo = repository.split("/", 1)
+    status, pull = api_request(token, "GET", f"{repo_path(owner, repo)}/pulls/{number}")
+    if status == 404:
+        return False
+    if status != 200 or not isinstance(pull, dict):
+        fail(f"cannot inspect legacy proofreading pull request {repository}#{number}: HTTP {status}")
+    head = pull.get("head") or {}
+    branch = str(head.get("ref") or "")
+    if (
+        "<!-- proofreading-upstream-batch -->" not in str(pull.get("body") or "")
+        or (head.get("repo") or {}).get("full_name") != repository
+        or not branch.startswith("proofread-upstream-")
+    ):
+        fail(f"refusing to clean unrecognized legacy pull request {repository}#{number}")
+    if pull.get("state") == "open":
+        response_or_fail(token, "PATCH", f"{repo_path(owner, repo)}/pulls/{number}", (200,), {"state": "closed"})
+    status, _data = api_request(token, "DELETE", ref_path(owner, repo, branch))
+    if status not in {204, 404}:
+        fail(f"cannot delete legacy proofreading branch {repository}:{branch}: HTTP {status}")
+    return True
+
+
 def refresh_claims(token, state):
     state.setdefault("published", [])
     changed = False
     groups = {}
+    cleaned_legacy = set()
     for key, claim in list(state["claimed"].items()):
         source_repo = key.rsplit("#", 1)[0]
         if claim_repository(claim) != f"{UPSTREAM_OWNER}/{source_repo}":
+            legacy = (claim_repository(claim), claim.get("upstream_number"))
+            if legacy not in cleaned_legacy:
+                cleanup_legacy_claim(token, claim)
+                cleaned_legacy.add(legacy)
             state["claimed"].pop(key, None)
             changed = True
             continue
