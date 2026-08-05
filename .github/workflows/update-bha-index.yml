@@ -89,7 +89,7 @@ jobs:
           BHA_BASE_URL: ${{ vars.BHA_BASE_URL || 'https://vomebook-bha-search.hf.space' }}
           BHA_REINDEX_TOKEN: ${{ secrets.BHA_REINDEX_TOKEN }}
         run: |
-          for attempt in $(seq 1 180); do
+          for attempt in $(seq 1 1080); do
             status=$(curl --silent --show-error --output /tmp/bha-reindex-status.json --write-out '%{http_code}' \
               --header "Authorization: Bearer ${BHA_REINDEX_TOKEN}" \
               "${BHA_BASE_URL%/}/api/reindex/status" || true)
@@ -114,7 +114,7 @@ jobs:
                   for key in differing
               },
           }, ensure_ascii=False))
-          if int(sys.argv[1]) >= 10 and actual.get("index_status") == "ready":
+          if int(sys.argv[1]) >= 60 and actual.get("index_status") == "ready":
               raise SystemExit(2)
           raise SystemExit(1)
           PY
@@ -123,7 +123,7 @@ jobs:
             elif test "$?" = "2"; then
               exit 1
             fi
-            sleep 30
+            sleep 5
           done
           exit 1
       - name: Record accepted revisions
