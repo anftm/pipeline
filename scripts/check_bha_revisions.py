@@ -9,6 +9,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 
@@ -21,6 +22,7 @@ COMMIT_CANDIDATE_PATH = Path(os.environ.get("BHA_COMMIT_CANDIDATE", "/tmp/bha-pa
 GITHUB_OUTPUT = os.environ.get("GITHUB_OUTPUT")
 GIT_PROPAGATION_TIMEOUT_SECONDS = int(os.environ.get("BHA_GIT_PROPAGATION_TIMEOUT", "600"))
 GIT_PROPAGATION_POLL_SECONDS = int(os.environ.get("BHA_GIT_PROPAGATION_POLL", "10"))
+REVISION_WORKERS = int(os.environ.get("BHA_REVISION_WORKERS", "8"))
 
 
 def revision(token: str, archive_id: int) -> str:
@@ -65,6 +67,11 @@ def tree_revision(token: str, archive_id: int, commit: str) -> str:
     return value
 
 
+def archive_identity(token: str, archive_id: int) -> tuple[str, str, str]:
+    commit = revision(token, archive_id)
+    return str(archive_id), commit, tree_revision(token, archive_id, commit)
+
+
 def git_revision(archive_id: int) -> str:
     repo = f"banned-historical-archives{archive_id}"
     result = subprocess.run(
@@ -101,14 +108,11 @@ def output(name: str, value: str) -> None:
 
 def main() -> None:
     token = os.environ.get("GH_PAT") or os.environ.get("GITHUB_TOKEN", "")
-    commits = {
-        str(archive_id): revision(token, archive_id)
-        for archive_id in range(REPO_START, REPO_END + 1)
-    }
-    current = {
-        archive_id: tree_revision(token, int(archive_id), commit)
-        for archive_id, commit in commits.items()
-    }
+    archive_ids = range(REPO_START, REPO_END + 1)
+    with ThreadPoolExecutor(max_workers=REVISION_WORKERS) as executor:
+        identities = list(executor.map(lambda archive_id: archive_identity(token, archive_id), archive_ids))
+    commits = {archive_id: commit for archive_id, commit, _ in identities}
+    current = {archive_id: tree for archive_id, _, tree in identities}
     try:
         previous = json.loads(STATE_PATH.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
