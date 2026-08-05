@@ -69,5 +69,4 @@ jobs:
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
           TRACKER_TOKEN: ${{ github.token }}
-          PROOFREAD_TRACKER_ASSIGNEE: ${{ github.repository_owner }}
         run: python3 scripts/submit_proofread.py
