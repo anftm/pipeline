@@ -148,12 +148,16 @@ def run(command: list[str], cwd: Path | None = None, env: dict[str, str] | None 
     subprocess.run(command, cwd=str(cwd) if cwd else None, env=env, check=True)
 
 
+def run_output(command: list[str], cwd: Path | None = None, env: dict[str, str] | None = None) -> str:
+    return subprocess.run(
+        command, cwd=str(cwd) if cwd else None, env=env,
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+
+
 def clone_branch(repo_url: str, branch: str, target: Path, env: dict[str, str], expected_sha: str) -> None:
     run(["git", "clone", "--depth", "1", "--single-branch", "--branch", branch, repo_url, str(target)], env=env)
-    result = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=str(target), env=env, check=True, capture_output=True, text=True,
-    )
-    if result.stdout.strip() != expected_sha:
+    if run_output(["git", "rev-parse", "HEAD"], cwd=target, env=env) != expected_sha:
         raise RuntimeError(f"{repo_url}:{branch} changed while preparing parsed data; retry the workflow")
 
 
@@ -202,7 +206,13 @@ def prepare_patch_input(source: Path, target: Path, archive_id: int) -> Path:
     return target
 
 
-def build_archive(token: str, helper: Path, root: Path, archive_id: int, revisions: dict[str, str]) -> None:
+def parsed_tree_changed(parsed: Path, current_commit: str, env: dict[str, str]) -> bool:
+    generated_tree = run_output(["git", "write-tree"], cwd=parsed, env=env)
+    current_tree = run_output(["git", "rev-parse", f"{current_commit}^{{tree}}"], cwd=parsed, env=env)
+    return generated_tree != current_tree
+
+
+def build_archive(token: str, helper: Path, root: Path, archive_id: int, revisions: dict[str, str]) -> bool:
     repo = f"{REPOSITORY_PREFIX}{archive_id}"
     repo_url = f"https://github.com/{MIRROR_OWNER}/{repo}.git"
     archive_root = root / repo
@@ -228,15 +238,20 @@ def build_archive(token: str, helper: Path, root: Path, archive_id: int, revisio
     secure_home.mkdir()
     safe_env = clean_environment()
     safe_env["HOME"] = str(secure_home)
+    run(["git", "add", "-A"], cwd=parsed, env=safe_env)
+    if not parsed_tree_changed(parsed, revisions[PARSED_BRANCH], safe_env):
+        if ref_revision(token, MIRROR_OWNER, repo, PARSED_BRANCH) != revisions[PARSED_BRANCH]:
+            raise RuntimeError(f"{MIRROR_OWNER}/{repo}:parsed changed during no-op generation; retry the workflow")
+        return False
     run(["git", "config", "user.name", "github-actions[bot]"], cwd=parsed, env=safe_env)
     run(["git", "config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com"], cwd=parsed, env=safe_env)
-    run(["git", "add", "-A"], cwd=parsed, env=safe_env)
     run(["git", "commit", "-m", "Rebuild parsed data from anftm corrections"], cwd=parsed, env=safe_env)
     run([
         "git", "-c", "core.hooksPath=/dev/null", "-c", "credential.helper=", "-c", "http.proxy=",
         "push", repo_url, "HEAD:parsed",
         f"--force-with-lease=refs/heads/parsed:{revisions[PARSED_BRANCH]}",
     ], cwd=parsed, env=push_environment(token, secure_home))
+    return True
 
 
 def sync_parsed(token: str, root: Path, archive_id: int, mirror: dict[str, str], upstream: dict[str, str]) -> None:

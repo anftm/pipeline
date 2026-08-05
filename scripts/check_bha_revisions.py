@@ -17,6 +17,7 @@ REPO_START = int(os.environ.get("REPO_START", "0"))
 REPO_END = int(os.environ.get("REPO_END", "31"))
 STATE_PATH = Path(os.environ.get("BHA_REVISION_STATE", "state/bha-parsed-revisions.json"))
 CANDIDATE_PATH = Path(os.environ.get("BHA_REVISION_CANDIDATE", "/tmp/bha-parsed-revisions.json"))
+COMMIT_CANDIDATE_PATH = Path(os.environ.get("BHA_COMMIT_CANDIDATE", "/tmp/bha-parsed-commits.json"))
 GITHUB_OUTPUT = os.environ.get("GITHUB_OUTPUT")
 GIT_PROPAGATION_TIMEOUT_SECONDS = int(os.environ.get("BHA_GIT_PROPAGATION_TIMEOUT", "600"))
 GIT_PROPAGATION_POLL_SECONDS = int(os.environ.get("BHA_GIT_PROPAGATION_POLL", "10"))
@@ -40,6 +41,27 @@ def revision(token: str, archive_id: int) -> str:
     value = str(data.get("object", {}).get("sha") or "")
     if len(value) != 40 or any(char not in "0123456789abcdef" for char in value):
         raise RuntimeError(f"{repo}/parsed returned an invalid revision")
+    return value
+
+
+def tree_revision(token: str, archive_id: int, commit: str) -> str:
+    repo = f"banned-historical-archives{archive_id}"
+    owner = urllib.parse.quote(OWNER)
+    url = f"https://api.github.com/repos/{owner}/{urllib.parse.quote(repo)}/git/commits/{commit}"
+    request = urllib.request.Request(url)
+    request.add_header("Accept", "application/vnd.github+json")
+    request.add_header("X-GitHub-Api-Version", "2022-11-28")
+    request.add_header("User-Agent", "anftm-pipeline-bha-revisions/1.0")
+    if token:
+        request.add_header("Authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            data = json.load(response)
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(f"{repo}/parsed commit lookup failed with HTTP {exc.code}") from exc
+    value = str(data.get("tree", {}).get("sha") or "")
+    if len(value) != 40 or any(char not in "0123456789abcdef" for char in value):
+        raise RuntimeError(f"{repo}/parsed returned an invalid tree revision")
     return value
 
 
@@ -79,9 +101,13 @@ def output(name: str, value: str) -> None:
 
 def main() -> None:
     token = os.environ.get("GH_PAT") or os.environ.get("GITHUB_TOKEN", "")
-    current = {
+    commits = {
         str(archive_id): revision(token, archive_id)
         for archive_id in range(REPO_START, REPO_END + 1)
+    }
+    current = {
+        archive_id: tree_revision(token, int(archive_id), commit)
+        for archive_id, commit in commits.items()
     }
     try:
         previous = json.loads(STATE_PATH.read_text(encoding="utf-8"))
@@ -89,9 +115,10 @@ def main() -> None:
         previous = None
     baseline = not isinstance(previous, dict)
     changed_ids = [key for key in current if isinstance(previous, dict) and previous.get(key) != current[key]]
-    wait_for_git_revisions(current, list(current) if baseline else changed_ids)
+    wait_for_git_revisions(commits, list(commits) if baseline else changed_ids)
     CANDIDATE_PATH.parent.mkdir(parents=True, exist_ok=True)
     CANDIDATE_PATH.write_text(json.dumps(current, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    COMMIT_CANDIDATE_PATH.write_text(json.dumps(commits, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     output("baseline", str(baseline).lower())
     output("changed", str(bool(changed_ids) or baseline).lower())
     output("changed_archives", ",".join(changed_ids))
