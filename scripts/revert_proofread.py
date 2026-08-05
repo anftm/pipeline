@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create human-reviewed revert PRs for an automatically merged correction."""
+"""Create and auto-merge revert PRs for an automatically merged correction."""
 
 import json
 import os
@@ -128,13 +128,23 @@ def main():
             body = f"{item_marker}\n撤回 PR 创建失败：{repo}#{number} HTTP {status}。请人工处理。"
             response_or_fail(tracker_token, "POST", f"{full_repo_path(TRACKER_REPOSITORY)}/issues/{issue['number']}/comments", (201,), {"body": body})
             continue
+        revert_url = revert.get("html_url", "unknown")
+        merge_status, _ = api_request(
+            archive_token, "PUT", f"{repo_path(repo)}/pulls/{revert.get('number')}/merge", {"merge_method": "merge"}
+        )
+        if merge_status != 200:
+            body = (
+                f"{item_marker}\n撤回 PR [{revert_url}]({revert_url}) 已创建但自动合并失败"
+                f"（HTTP {merge_status}）。请人工合并。"
+            )
+            response_or_fail(tracker_token, "POST", f"{full_repo_path(TRACKER_REPOSITORY)}/issues/{issue['number']}/comments", (201,), {"body": body})
+            continue
         body = (
-            f"{item_marker}\n已为原 PR [{repo}#{number}]({url}) 创建撤回 PR "
-            f"[{revert.get('html_url', 'unknown')}]({revert.get('html_url', 'unknown')})。"
-            "撤回 PR 需要人工审核和合并。"
+            f"{item_marker}\n已为原 PR [{repo}#{number}]({url}) 创建并自动合并撤回 PR "
+            f"[{revert_url}]({revert_url})。"
         )
         response_or_fail(tracker_token, "POST", f"{full_repo_path(TRACKER_REPOSITORY)}/issues/{issue['number']}/comments", (201,), {"body": body})
-        output.append(f"{repo}#{number}: revert PR created")
+        output.append(f"{repo}#{number}: revert PR created and merged")
     print(json.dumps({"correction_id": correction_id, "results": output}, ensure_ascii=False))
 
 

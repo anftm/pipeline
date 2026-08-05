@@ -778,7 +778,7 @@ def notify_auto_merged(token, correction_id, request, repo, article_id, pulls):
     lines.extend([
         "",
         f"如需撤回，请在本 Issue 评论：`/proofread-revert {correction_id} CONFIRM`。",
-        "撤回操作只会创建人工审核的 revert PR，不会直接修改仓库。",
+        "撤回命令会创建撤回 PR 并自动合并，直接撤销该次自动合并。",
     ])
     response_or_fail(
         token, "POST", f"{full_repo_path(TRACKER_REPOSITORY)}/issues/{issue['number']}/comments", (201,),

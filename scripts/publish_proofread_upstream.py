@@ -141,6 +141,32 @@ def proofreading_pulls(token, repo):
     return result
 
 
+def merged_reverted_numbers(token, repo):
+    reverted = set()
+    for pull in list_closed_pulls(token, repo):
+        if not pull.get("merged_at"):
+            continue
+        match = re.match(r"^revert-([0-9]+)-", str((pull.get("head") or {}).get("ref") or ""))
+        if match:
+            reverted.add(int(match.group(1)))
+    return reverted
+
+
+def filter_reverted_candidates(token, candidates):
+    reverted_by_repo = {}
+    kept = []
+    skipped = []
+    for pull in candidates:
+        repo = pull["repo"]
+        if repo not in reverted_by_repo:
+            reverted_by_repo[repo] = merged_reverted_numbers(token, repo)
+        if pull["number"] in reverted_by_repo[repo]:
+            skipped.append(source_key(repo, pull["number"]))
+        else:
+            kept.append(pull)
+    return kept, skipped
+
+
 def pull_files(token, repo, number):
     status, data = api_request(token, "GET", f"{repo_path(MIRROR_OWNER, repo)}/pulls/{number}/files?per_page=100")
     if status != 200 or not isinstance(data, list):
@@ -419,6 +445,9 @@ def main():
     refresh_claims(token, state)
     known = set(state["baseline"]) | set(state["claimed"])
     candidates = [p for p in pulls if source_key(p["repo"], p["number"]) not in known]
+    candidates, skipped = filter_reverted_candidates(token, candidates)
+    if skipped:
+        state["baseline"] = sorted(set(state["baseline"]) | set(skipped))
     groups = {}
     for pull in candidates:
         groups.setdefault((pull["repo"], pull["base"]["ref"]), []).append(pull)
@@ -440,7 +469,7 @@ def main():
         except Exception as exc:
             failures.append(f"{repo}/{base}: {exc}")
     save_state(state)
-    print(json.dumps({"mode": "publish", "candidates": len(candidates), "published": published, "failures": failures}, ensure_ascii=False))
+    print(json.dumps({"mode": "publish", "candidates": len(candidates), "skipped_reverted": skipped, "published": published, "failures": failures}, ensure_ascii=False))
     if failures:
         raise RuntimeError("; ".join(failures))
 
