@@ -4,6 +4,12 @@ on:
   schedule:
     - cron: "*/15 * * * *"
   workflow_dispatch:
+    inputs:
+      archive_id:
+        description: Archive number 0-31, or all
+        required: false
+        default: all
+        type: string
 
 concurrency:
   group: update-bha-index
@@ -16,15 +22,25 @@ permissions:
 jobs:
   update:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v5
         with:
           ref: ${{ github.ref_name }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+      - name: Build changed anftm parsed branches
+        id: parsed
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+          ARCHIVE_ID: ${{ inputs.archive_id || 'all' }}
+        run: python3 scripts/build_fork_parsed.py
       - name: Check parsed revisions
         id: revisions
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
+          BHA_ARCHIVE_OWNER: anftm
         run: python3 scripts/check_bha_revisions.py
       - name: Refresh proofreading review queue
         env:
@@ -65,11 +81,12 @@ jobs:
           done
           exit 1
       - name: Record accepted revisions
-        if: steps.revisions.outputs.baseline == 'true' || steps.revisions.outputs.changed == 'true'
+        if: steps.parsed.outputs.state_changed == 'true' || steps.revisions.outputs.baseline == 'true' || steps.revisions.outputs.changed == 'true'
         run: |
           git pull --rebase origin "${GITHUB_REF_NAME}"
-          mv /tmp/bha-parsed-revisions.json state/bha-parsed-revisions.json
-          git add state/bha-parsed-revisions.json
+          test ! -f /tmp/bha-parsed-inputs.json || mv /tmp/bha-parsed-inputs.json state/bha-parsed-inputs.json
+          test ! -f /tmp/bha-parsed-revisions.json || mv /tmp/bha-parsed-revisions.json state/bha-parsed-revisions.json
+          git add state/bha-parsed-inputs.json state/bha-parsed-revisions.json
           git diff --cached --quiet && exit 0
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
