@@ -318,34 +318,70 @@ def validate_patch(patch):
         fail("patch contains no changes")
 
 
+def diff_cost(diff):
+    total = 0
+    for token in diff.split("\t"):
+        if not token or token[0] not in {"=", "-", "+"}:
+            return None
+        if token[0] in {"=", "-"}:
+            if not token[1:].isdigit():
+                return None
+            if token[0] == "-":
+                total += int(token[1:])
+        else:
+            try:
+                total += len(urllib.parse.unquote_to_bytes(token[1:].replace("+", "%2B")).decode("utf-8").encode("utf-16-le")) // 2
+            except (UnicodeDecodeError, ValueError):
+                return None
+    return total
+
+
 def auto_merge_allowed(kind, patch, metadata):
     if kind != "proofread" or not isinstance(patch, dict) or isinstance(metadata, dict):
         return False
     if patch.get("newComments") or patch.get("description"):
         return False
-    if not patch.get("parts") and not patch.get("comments"):
+    parts = patch.get("parts") or {}
+    comments = patch.get("comments") or {}
+    if not isinstance(parts, dict) or not isinstance(comments, dict):
         return False
-    changes = [*patch.get("parts", {}).values(), *patch.get("comments", {}).values()]
-    if not changes or len(changes) > 3:
+    if not parts and not comments:
         return False
+    delta = 0
     cost = 0
-    for change in changes:
-        if not isinstance(change, dict) or set(change) != {"diff"} or not isinstance(change["diff"], str):
+    for change in parts.values():
+        if not isinstance(change, dict) or not change:
             return False
-        for token in change["diff"].split("\t"):
-            if not token or token[0] not in {"=", "-", "+"}:
+        if set(change) - {"diff", "type", "insertBefore", "insertAfter", "delete"}:
+            return False
+        if "diff" not in change:
+            if set(change) != {"delete"} or not isinstance(change["delete"], bool):
                 return False
-            if token[0] in {"=", "-"}:
-                if not token[1:].isdigit():
+            delta -= 1
+            continue
+        if not isinstance(change["diff"], str):
+            return False
+        if change.get("delete"):
+            delta -= 1
+        for key in ("insertBefore", "insertAfter"):
+            if key in change:
+                if not isinstance(change[key], list):
                     return False
-                if token[0] == "-":
-                    cost += int(token[1:])
-            else:
-                try:
-                    cost += len(urllib.parse.unquote_to_bytes(token[1:].replace("+", "%2B")).decode("utf-8").encode("utf-16-le")) // 2
-                except (UnicodeDecodeError, ValueError):
-                    return False
-    return cost <= 20
+                delta += len(change[key])
+        partial = diff_cost(change["diff"])
+        if partial is None:
+            return False
+        cost += partial
+    for change in comments.values():
+        if not isinstance(change, dict) or set(change) != {"diff"} or not isinstance(change.get("diff"), str):
+            return False
+        partial = diff_cost(change["diff"])
+        if partial is None:
+            return False
+        cost += partial
+    if not -3 <= delta <= 3:
+        return False
+    return cost <= 200
 
 
 METADATA_FIELD_LABELS = {
