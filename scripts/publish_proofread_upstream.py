@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Publish merged fork proofreading pull requests as upstream pull requests."""
+"""Publish merged fork proofreading pull requests as batch pull requests."""
 
 import base64
 import hashlib
@@ -12,10 +12,20 @@ import urllib.request
 
 
 GITHUB_API = "https://api.github.com"
-UPSTREAM_OWNER = os.environ.get("UPSTREAM_OWNER", "banned-historical-archives")
 MIRROR_OWNER = os.environ.get("MIRROR_OWNER", "anftm")
 REPOSITORY_PREFIX = os.environ.get("PROOFREAD_REPOSITORY_PREFIX", "banned-historical-archives")
 STATE_PATH = os.environ.get("PROOFREAD_UPSTREAM_STATE", "state/proofread-upstream.json")
+TARGET_REPOSITORY = os.environ.get(
+    "PROOFREAD_TARGET_REPOSITORY", os.environ.get("GITHUB_REPOSITORY", f"{MIRROR_OWNER}/pipeline")
+)
+TARGET_BASE_BRANCH = os.environ.get("PROOFREAD_TARGET_BASE_BRANCH", "main")
+
+
+def split_repository(value):
+    owner, _, name = value.partition("/")
+    if not owner or not name:
+        fail(f"invalid target repository: {value}")
+    return owner, name
 
 
 def api_request(token, method, path, payload=None):
@@ -142,10 +152,11 @@ def pull_comment(token, repo, number, body):
 
 
 def open_upstream_pull(token, repo, branch, base):
-    query = urllib.parse.urlencode({"state": "open", "head": f"{MIRROR_OWNER}:{branch}", "per_page": 100})
-    status, data = api_request(token, "GET", f"{repo_path(UPSTREAM_OWNER, repo)}/pulls?{query}")
+    target_owner, target_repo = split_repository(TARGET_REPOSITORY)
+    query = urllib.parse.urlencode({"state": "open", "head": branch, "per_page": 100})
+    status, data = api_request(token, "GET", f"{repo_path(target_owner, target_repo)}/pulls?{query}")
     if status != 200 or not isinstance(data, list):
-        fail(f"cannot list upstream pull requests for {repo}: HTTP {status}")
+        fail(f"cannot list target pull requests for {TARGET_REPOSITORY}: HTTP {status}")
     return next((pull for pull in data if pull.get("base", {}).get("ref") == base), None)
 
 
@@ -187,15 +198,15 @@ def current_pulls(token):
 
 
 def refresh_claims(token, state):
+    target_owner, target_repo = split_repository(TARGET_REPOSITORY)
     changed = False
     for key, claim in list(state["claimed"].items()):
-        repo = claim.get("upstream_repo")
         number = claim.get("upstream_number")
-        if not repo or not number:
+        if not number:
             state["claimed"].pop(key, None)
             changed = True
             continue
-        status, data = api_request(token, "GET", f"{repo_path(UPSTREAM_OWNER, repo)}/pulls/{number}")
+        status, data = api_request(token, "GET", f"{repo_path(target_owner, target_repo)}/pulls/{number}")
         if status == 200 and (data.get("state") == "open" or data.get("merged")):
             continue
         if status == 404 or (status == 200 and data.get("state") == "closed"):
@@ -204,25 +215,54 @@ def refresh_claims(token, state):
     return changed
 
 
+def pull_source_url(repo, pull):
+    return pull.get("html_url") or f"https://github.com/{MIRROR_OWNER}/{repo}/pull/{pull['number']}"
+
+
+def batch_body(repo, base, pulls):
+    marker = json.dumps([
+        {"repo": repo, "number": pull["number"], "url": pull_source_url(repo, pull)}
+        for pull in pulls
+    ], ensure_ascii=False, separators=(",", ":"))
+    links = "\n".join(
+        f"- [x] [{repo}#{pull['number']}]({pull_source_url(repo, pull)})"
+        for pull in pulls
+    )
+    return "\n".join([
+        "<!-- proofreading-upstream-batch -->",
+        f"<!-- proofreading-prs:{marker} -->",
+        "此 PR 汇总已在 anftm fork 审核并合并的 BHA 校订。",
+        "",
+        "来源校订 PR：",
+        links,
+        "",
+        f"目标仓库：`{TARGET_REPOSITORY}`",
+        f"目标分支：`{TARGET_BASE_BRANCH}`",
+        "",
+        "请在目标仓库审核后合并。",
+    ])
+
+
 def publish_group(token, repo, base, pulls):
-    upstream_sha = branch_sha(token, UPSTREAM_OWNER, repo, base)
-    if not upstream_sha:
-        fail(f"upstream branch does not exist: {repo}/{base}")
+    target_owner, target_repo = split_repository(TARGET_REPOSITORY)
+    base_sha = branch_sha(token, target_owner, target_repo, TARGET_BASE_BRANCH)
+    if not base_sha:
+        fail(f"target branch does not exist: {TARGET_REPOSITORY}/{TARGET_BASE_BRANCH}")
     digest = hashlib.sha256(
         ",".join(source_key(repo, pull["number"]) for pull in pulls).encode("utf-8")
     ).hexdigest()[:10]
-    branch = f"proofread-upstream-{base}-{digest}"
-    mirror_sha = branch_sha(token, MIRROR_OWNER, repo, branch)
-    if mirror_sha is None:
+    branch = f"proofread-upstream-{repo}-{base}-{digest}"
+    batch_sha = branch_sha(token, target_owner, target_repo, branch)
+    if batch_sha is None:
         response_or_fail(
-            token, "POST", f"{repo_path(MIRROR_OWNER, repo)}/git/refs", (201,),
-            {"ref": f"refs/heads/{branch}", "sha": upstream_sha},
+            token, "POST", f"{repo_path(target_owner, target_repo)}/git/refs", (201,),
+            {"ref": f"refs/heads/{branch}", "sha": base_sha},
         )
-    existing = open_upstream_pull(token, repo, branch, base)
+    existing = open_upstream_pull(token, repo, branch, TARGET_BASE_BRANCH)
     if existing:
         return existing, branch
-    if mirror_sha is not None and mirror_sha != upstream_sha:
-        fail(f"batch branch already exists with an unexpected revision: {repo}/{branch}")
+    if batch_sha is not None and batch_sha != base_sha:
+        fail(f"batch branch already exists with an unexpected revision: {TARGET_REPOSITORY}/{branch}")
 
     try:
         for pull in sorted(pulls, key=lambda item: item.get("merged_at") or item.get("number")):
@@ -234,33 +274,25 @@ def publish_group(token, repo, base, pulls):
             if not base_ref or not merge_ref:
                 fail(f"{repo}#{pull['number']} is missing base or merge revision")
             source_base, _ = get_file(token, MIRROR_OWNER, repo, base_ref, path)
-            batch_content, batch_sha = get_file(token, MIRROR_OWNER, repo, branch, path)
-            if batch_content != source_base:
-                fail(f"conflict while applying {repo}#{pull['number']} to {base}/{path}")
+            batch_content, batch_file_sha = get_file(token, target_owner, target_repo, branch, path)
+            if batch_file_sha is not None and batch_content != source_base:
+                fail(f"conflict while applying {repo}#{pull['number']} to {TARGET_BASE_BRANCH}/{path}")
             desired, _ = get_file(token, MIRROR_OWNER, repo, merge_ref, path)
             if not desired:
                 fail(f"merged pull {repo}#{pull['number']} has no readable file content")
-            put_file(token, MIRROR_OWNER, repo, branch, path, desired, batch_sha, f"Apply proofreading {repo}#{pull['number']}")
+            put_file(token, target_owner, target_repo, branch, path, desired, batch_file_sha, f"Apply proofreading {repo}#{pull['number']}")
     except Exception:
         try:
-            if not open_upstream_pull(token, repo, branch, base):
-                delete_branch(token, MIRROR_OWNER, repo, branch)
+            if not open_upstream_pull(token, repo, branch, TARGET_BASE_BRANCH):
+                delete_branch(token, target_owner, target_repo, branch)
         except Exception:
             pass
         raise
 
-    sources = ", ".join(f"{repo}#{pull['number']}" for pull in pulls)
-    body = "\n".join([
-        "<!-- proofreading-upstream-batch -->",
-        "此 PR 汇总已在 anftm fork 审核并合并的 BHA 校订。",
-        "",
-        f"来源校订 PR：{sources}",
-        "",
-        "请在原仓库审核后合并。",
-    ])
+    body = batch_body(repo, base, pulls)
     pull = response_or_fail(
-        token, "POST", f"{repo_path(UPSTREAM_OWNER, repo)}/pulls", (201,),
-        {"title": f"BHA proofreading batch: {base}", "head": f"{MIRROR_OWNER}:{branch}", "base": base, "body": body},
+        token, "POST", f"{repo_path(target_owner, target_repo)}/pulls", (201,),
+        {"title": f"BHA proofreading batch: {repo}:{base}", "head": branch, "base": TARGET_BASE_BRANCH, "body": body},
     )
     return pull, branch
 
