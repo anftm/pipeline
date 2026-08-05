@@ -131,7 +131,7 @@ def proofreading_pulls(token, repo):
     result = []
     for pull in list_closed_pulls(token, repo):
         head = pull.get("head") or {}
-        if not pull.get("merged") or head.get("repo", {}).get("full_name") != f"{MIRROR_OWNER}/{repo}":
+        if not pull.get("merged_at") or head.get("repo", {}).get("full_name") != f"{MIRROR_OWNER}/{repo}":
             continue
         if not str(head.get("ref") or "").startswith("proofread/"):
             continue
@@ -232,7 +232,7 @@ def readable_details(body):
     if start is None:
         return None
     end = len(lines)
-    stop = ("## 审核方式", "## Pull Requests", "## 原全文")
+    stop = ("## 审核方式", "## Pull Requests")
     for index in range(start + 1, len(lines)):
         if lines[index].startswith("## ") and lines[index].startswith(stop):
             end = index
