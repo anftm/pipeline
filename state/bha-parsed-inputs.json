@@ -1,0 +1,261 @@
+{
+  "archives": {
+    "0": {
+      "config": "11360d3698885c9aaa2a0605850c516862c1aebc",
+      "helper": "50ba1b1703a224e9e64961ae6e555d9a32517b33",
+      "main": "d302baa71d80d9996be6b0af324b886b8fe8d8f0",
+      "ocr_cache": "5b0f4565c959ba5b594037b8f8d0bbc62018e06d",
+      "ocr_patch": "4244e1934fe8723962b6d2484cf9a8ea8264b15f",
+      "patch_layout": "2"
+    },
+    "1": {
+      "config": "edf8014ac002d031dfbbe703a93ac1551ddd1934",
+      "helper": "50ba1b1703a224e9e64961ae6e555d9a32517b33",
+      "main": "c1b07fd388811b61199f8d4c519b07029083f973",
+      "ocr_cache": "0b4546cc44bf485245040fc941072f1d98e4ac3d",
+      "ocr_patch": "feae9dd4de1f57d5aae29ace84f6b45f4daf6dbe",
+      "patch_layout": "2"
+    },
+    "10": {
+      "config": "8fb86d4a7bd31410d1a46a199c78449d44d3866c",
+      "helper": "50ba1b1703a224e9e64961ae6e555d9a32517b33",
+      "main": "24994fba1b3189762d270e0236bc76d0e61b4d71",
+      "ocr_cache": "6a724677c5afdeb9f226980904db700955548a76",
+      "ocr_patch": "1ca63e747ef78eb6f61e5b55afe4866969c826f5",
+      "patch_layout": "2"
+    },
+    "11": {
+      "config": "47b41423d4671cc5a6874620d6b486ea4aaf1b88",
+      "helper": "50ba1b1703a224e9e64961ae6e555d9a32517b33",
+      "main": "d6ceba93cfe65deb937c7fa98831d9b568feb12a",
+      "ocr_cache": "ab21f7b6b84f4f0a46d02cf4588b92a82b848665",
+      "ocr_patch": "8a8aa5ccb088926fe2ca070a5f7882e8f7b73f1f",
+      "patch_layout": "2"
+    },
+    "12": {
+      "config": "26e3a7d832d5936ccb53c4b925a63108b36f900c",
+      "helper": "50ba1b1703a224e9e64961ae6e555d9a32517b33",
+      "main": "5efb3a4470ce8ab3188e8a27d840f89b0a066225",
+      "ocr_cache": "c3b781657673d5db5445f4b040c168f2994f9eae",
+      "ocr_patch": "2e2a8b6bf0295f7ed374736a20ad11a88700b7c3",
+      "patch_layout": "2"
+    },
+    "13": {
+      "config": "6f94e4427bbbdb4169fc3f74e964d8c35c48282c",
+      "helper": "50ba1b1703a224e9e64961ae6e555d9a32517b33",
+      "main": "b2905e221a9ddbe5ea2b8cb271bb173b8e4dfd51",
+      "ocr_cache": "5bfc469448a98218746d491e9bc7852d7cb3a624",
+      "ocr_patch": "4032f01fc4157182a06d952a2e42a4e97fa1d39d",
+      "patch_layout": "2"
+    },
+    "14": {
+      "config": "99e3db04a9a2c136169f12646dedd9f10d1c4612",
+      "helper": "50ba1b1703a224e9e64961ae6e555d9a32517b33",
+      "main": "31f5855736e116227a4f03f58231c4cb5c46e1ae",
+      "ocr_cache": "f4c95f6b87913a71efd80492bdeffd5981f4269d",
+      "ocr_patch": "a55de012b474dd53095b3b172cd6a6afefa2208b",
+      "patch_layout": "2"
+    },
+    "15": {
+      "config": "d59432010524106f832e450d99dc8063c851c1f1",
+      "helper": "50ba1b1703a224e9e64961ae6e555d9a32517b33",
+      "main": "c1efa6f5ad535c9e815ece37de6f34bffff7889c",
+      "ocr_cache": "151a933bb518416f37c731329e1f6043b0a8409d",
+      "ocr_patch": "7e48a159c97fc07680f84be66f5deb77ac3721a7",
+      "patch_layout": "2"
+    },
+    "16": {
+      "config": "d1ba0ada34931cb7420b2a7ed96e9ddfcf9d5501",
+      "helper": "50ba1b1703a224e9e64961ae6e555d9a32517b33",
+      "main": "7a42b2afe0b38547906469e6fd0d951a4ac6352f",
+      "ocr_cache": "26bbb7dc01d9a5124fef3ce341e6b5e2a80a91b3",
+      "ocr_patch": "3bbf62060969e2a960d068e7e14fa9ce46207f6a",
+      "patch_layout": "2"
+    },
+    "17": {
+      "config": "e874e4f254f58296571030f57ef23c7c51fe6dbd",
+      "helper": "50ba1b1703a224e9e64961ae6e555d9a32517b33",
+      "main": "2542e3a0be4e81f4c3fc62f46f00fd064f606c64",
+      "ocr_cache": "09f4557261d6fde2f1281b40dace204f32b6de0a",
+      "ocr_patch": "81d606aeb11f35ff785d5d1405c7faeebbd53e0b",
+      "patch_layout": "2"
+    },
+    "18": {
+      "config": "28441615770ebb446141e4479bc3839371cba885",
+      "helper": "50ba1b1703a224e9e64961ae6e555d9a32517b33",
+      "main": "3b62d81939f5c1fab84fb3b1fba22baf659fcfc8",
+      "ocr_cache": "38ab6fa1cd5a22bfab3a875d6e1877a08c814669",
+      "ocr_patch": "a808fea3eaaa17141f9b538f67fe50b6885a9bdc",
+      "patch_layout": "2"
+    },
+    "19": {
+      "config": "4e83d26eabbf8c4f71cbd4c12bfe8bac40b96caf",
+      "helper": "50ba1b1703a224e9e64961ae6e555d9a32517b33",
+      "main": "631deaed6a5be7eaab942cc51773250c3d84128b",
+      "ocr_cache": "df9e9dc8f676862b1104700c2f1d10409ef3a9f0",
+      "ocr_patch": "ce35298e6c1e2be82ee15ad320490dadbfb1a318",
+      "patch_layout": "2"
+    },
+    "2": {
+      "config": "27b6f3c3a83c81658696af3f7f91b790d4885d83",
+      "helper": "50ba1b1703a224e9e64961ae6e555d9a32517b33",
+      "main": "bdbc0b1fbf906f03dc6f94b792d79155e36a2ed4",
+      "ocr_cache": "07e210d5332c776352cceb07d23d0deeba5c876f",
+      "ocr_patch": "60460719920074670dcb464e4a378b532f123401",
+      "patch_layout": "2"
+    },
+    "20": {
+      "config": "268e0c095fae9b2c4621a245b9bf9b16833eb550",
+      "helper": "50ba1b1703a224e9e64961ae6e555d9a32517b33",
+      "main": "595d203a957dd97750b6dd4d9fb538989c8d2ddc",
+      "ocr_cache": "c89a4a8cd2b31da7ab3c63d48a2078928747b29e",
+      "ocr_patch": "7c3dceab00c3afbb4779d3d67b56be0fa1901559",
+      "patch_layout": "2"
+    },
+    "21": {
+      "config": "2367f414c92ed8c0ed12ea3ca1e27d75f6ef737f",
+      "helper": "50ba1b1703a224e9e64961ae6e555d9a32517b33",
+      "main": "6ff12ae10f50341068cce5ca761501c0518b0388",
+      "ocr_cache": "4d95ab14011de815970a95f25c042fd605b7e4f7",
+      "ocr_patch": "2e63e7bf3a046ee45f02164607783e2e6a736b26",
+      "patch_layout": "2"
+    },
+    "22": {
+      "config": "c489a2adff1b116915a941b7e832e3be9f9595d7",
+      "helper": "50ba1b1703a224e9e64961ae6e555d9a32517b33",
+      "main": "3c07c6c34a3a3bd1bd48556053e286cb9bc8f975",
+      "ocr_cache": "926cf61f67cb5ea324ab95f0208f6dce675183b5",
+      "ocr_patch": "134a982b2e6dd0fd3545a39ce69fbbb885725bd6",
+      "patch_layout": "2"
+    },
+    "23": {
+      "config": "b00b5156aaeabdfeda1cee40671fdf665d51f278",
+      "helper": "50ba1b1703a224e9e64961ae6e555d9a32517b33",
+      "main": "f96833d2afab4cb52c8d79ed03ae8339b972bcc1",
+      "ocr_cache": "419a45cc65d57e4a6c347ca331600ef851c32940",
+      "ocr_patch": "b8402e26fbc5adaf4cde74e2741a19b88a77c8bf",
+      "patch_layout": "2"
+    },
+    "24": {
+      "config": "a43fb8e4251f4bda8b0721b1695e83ad56692409",
+      "helper": "50ba1b1703a224e9e64961ae6e555d9a32517b33",
+      "main": "0d257efb9f38995261ff161886f185b22de33261",
+      "ocr_cache": "3fedbe8c623f50e4ee0a69a923f6a6e31388dfc4",
+      "ocr_patch": "48826423f6f10cbdcdc2ce41d27671141a0019dd",
+      "patch_layout": "2"
+    },
+    "25": {
+      "config": "78181986f359c4938bf7880c7da79db539f1ea9b",
+      "helper": "50ba1b1703a224e9e64961ae6e555d9a32517b33",
+      "main": "9beb6e4b45a2b5ee153b681ecbec55ce4bdd1788",
+      "ocr_cache": "4c7cd9c2a87f1cf78e3ed21ece41bb8c4686dc5e",
+      "ocr_patch": "d2551bc78473f9f8b1f0bb8118a95a138ca13d96",
+      "patch_layout": "2"
+    },
+    "26": {
+      "config": "771d2b0c2ef6480b92f8e1ec92838e23d83ebddc",
+      "helper": "50ba1b1703a224e9e64961ae6e555d9a32517b33",
+      "main": "9b0a788b016e066d2449e423616e0c1991078e24",
+      "ocr_cache": "9ffe71983a46ebffcb3a8d66dd5149f4756036cc",
+      "ocr_patch": "b66f0cec876f3031788772e193e4bc1a05e00c09",
+      "patch_layout": "2"
+    },
+    "27": {
+      "config": "04670a0a578414a3a216bbd543e505daabdb00c2",
+      "helper": "50ba1b1703a224e9e64961ae6e555d9a32517b33",
+      "main": "c1817e434de8504bcb0ed0f2deca9971df9f5f3d",
+      "ocr_cache": "09b814ddf9996278a861d70671887a9b5602e826",
+      "ocr_patch": "38ce80bc741dc2a675d36c7d6f3d1bdb23f2bfb1",
+      "patch_layout": "2"
+    },
+    "28": {
+      "config": "1b73312b35892bf01b0f305c8c92d393837cbc6d",
+      "helper": "50ba1b1703a224e9e64961ae6e555d9a32517b33",
+      "main": "9108d94f36b2dc581be9cee5372236811b6c1dc0",
+      "ocr_cache": "39dc4891be2d852318b928fa00e401054654a65d",
+      "ocr_patch": "90eab111094ca2c72985fe85480da3c0bb9f47e2",
+      "patch_layout": "2"
+    },
+    "29": {
+      "config": "5c86802dcc11a487ba221b3ef06b0e18ea1b15da",
+      "helper": "50ba1b1703a224e9e64961ae6e555d9a32517b33",
+      "main": "67c193a2223f3c9dcda0fd668e8ffdc8b7045285",
+      "ocr_cache": "f85707457034b4691d41e411d811f5e04efd814d",
+      "ocr_patch": "01ce20197ad31609354cbd4dacd09f19d68f541c",
+      "patch_layout": "2"
+    },
+    "3": {
+      "config": "66a753e4a94701e9fe189c68db3af8f64ef86967",
+      "helper": "50ba1b1703a224e9e64961ae6e555d9a32517b33",
+      "main": "57878df48033268ee699c85a2173946e92a4668b",
+      "ocr_cache": "0c4f2c0bd2961a9e08466207469dc6593a0d8dce",
+      "ocr_patch": "12d86c6c86b269f698367c24e896c5d2306f3fb7",
+      "patch_layout": "2"
+    },
+    "30": {
+      "config": "98a8b8d21d51af9294e8c9622023fb55a62a0967",
+      "helper": "50ba1b1703a224e9e64961ae6e555d9a32517b33",
+      "main": "8f2c431e38a6be4321bfbbcdc8d43d1885cd8223",
+      "ocr_cache": "ff62924ffb122226861e9cb3a25178e2120bc2d7",
+      "ocr_patch": "82e4cc18197af45f0c3318141744d03979903d83",
+      "patch_layout": "2"
+    },
+    "31": {
+      "config": "13490860041af22a0d686540c27dd6d89cb43f06",
+      "helper": "50ba1b1703a224e9e64961ae6e555d9a32517b33",
+      "main": "391a2e0f90568577883f98b7fb33ffd11691658e",
+      "ocr_cache": "ccc0cb949d1bc8191602264519eb89ceaec6368e",
+      "ocr_patch": "7a2ba9fc86cb613487d5fca5c84ae098b62496b7",
+      "patch_layout": "2"
+    },
+    "4": {
+      "config": "c375ad1e94ef6c5a555d6c46d7ec9f1025d91196",
+      "helper": "50ba1b1703a224e9e64961ae6e555d9a32517b33",
+      "main": "9682d9e678f48ca2290e724b41da9f84a77ca823",
+      "ocr_cache": "b74ed5344af3d7fb05e0602111df02f7456edcff",
+      "ocr_patch": "9fd93dd2f44de4cd52d1ba5fdf4d13f80a7ad913",
+      "patch_layout": "2"
+    },
+    "5": {
+      "config": "fed737eb2d491842b5afac66bb467acdfae47a7f",
+      "helper": "50ba1b1703a224e9e64961ae6e555d9a32517b33",
+      "main": "84ae8c8e3a713bbd454d97c4af41e9e03b38373c",
+      "ocr_cache": "2acec60b60d9a37f0f3689d81310bf75282daedb",
+      "ocr_patch": "64fc684481e7ffe9ae402e7e11ce416b1d7aad0c",
+      "patch_layout": "2"
+    },
+    "6": {
+      "config": "e629127cfc5dfa01d8ca9e3b712da94f732c062f",
+      "helper": "50ba1b1703a224e9e64961ae6e555d9a32517b33",
+      "main": "b737cea36cb1185a975788125077e69564aea83e",
+      "ocr_cache": "50a58d82f1e05bf586aa44144bbbead4a0574cee",
+      "ocr_patch": "2e66980023f6e63df46138bd407036f7e289293a",
+      "patch_layout": "2"
+    },
+    "7": {
+      "config": "1d63030875509a2968dbbf0064eccab658ef9cc2",
+      "helper": "50ba1b1703a224e9e64961ae6e555d9a32517b33",
+      "main": "56935d0773fef83014b758aec82ad69cb732d8ad",
+      "ocr_cache": "284d636707ec0f9953cbb8a6325d5626df772995",
+      "ocr_patch": "acecec3a0223f2482b88ce060e97a2e9a1c5f2e4",
+      "patch_layout": "2"
+    },
+    "8": {
+      "config": "6a732ae199ea7d7f58cb534f9eaffb17bf26a900",
+      "helper": "50ba1b1703a224e9e64961ae6e555d9a32517b33",
+      "main": "677db42e8fe6b278cb7296c56394de60e1ffa802",
+      "ocr_cache": "c2d04e05df88d52155408d59f93b9a0b92a5978f",
+      "ocr_patch": "88a0cf41fdb135a020507ab16d61f835fdb34317",
+      "patch_layout": "2"
+    },
+    "9": {
+      "config": "2031494693a1e6839e3afe58873cda55a89633d2",
+      "helper": "50ba1b1703a224e9e64961ae6e555d9a32517b33",
+      "main": "8db142ee3b142ecd8013614183da6cfac6ab86e3",
+      "ocr_cache": "08fec568f30c4de889051e1e9194cdabaef63eee",
+      "ocr_patch": "d9f18339125671da251f72a346c5753e1d35744b",
+      "patch_layout": "2"
+    }
+  },
+  "version": 1
+}
