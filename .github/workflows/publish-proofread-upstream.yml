@@ -28,6 +28,8 @@ jobs:
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
           PROOFREAD_BOOTSTRAP: ${{ inputs.bootstrap || 'false' }}
+          PROOFREAD_TARGET_REPOSITORY: ${{ github.repository }}
+          PROOFREAD_TARGET_BASE_BRANCH: main
         run: python3 scripts/publish_proofread_upstream.py
       - name: Commit publishing state
         run: |
