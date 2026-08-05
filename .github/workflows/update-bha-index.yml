@@ -65,8 +65,22 @@ jobs:
           BHA_BASE_URL: ${{ vars.BHA_BASE_URL || 'https://vomebook-bha-search.hf.space' }}
           BHA_REINDEX_TOKEN: ${{ secrets.BHA_REINDEX_TOKEN }}
         run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          payload = {
+              "archive_commits": json.loads(Path("/tmp/bha-parsed-commits.json").read_text()),
+              "archive_revisions": json.loads(Path("/tmp/bha-parsed-revisions.json").read_text()),
+              "changed_archives": [
+                  int(value) for value in "${{ steps.revisions.outputs.changed_archives }}".split(",") if value
+              ],
+          }
+          Path("/tmp/bha-reindex-request.json").write_text(json.dumps(payload))
+          PY
           status=$(curl --silent --show-error --output /tmp/bha-reindex-response.json --write-out '%{http_code}' \
             --request POST --header "Authorization: Bearer ${BHA_REINDEX_TOKEN}" \
+            --header "Content-Type: application/json" --data-binary @/tmp/bha-reindex-request.json \
             "${BHA_BASE_URL%/}/api/reindex")
           test "$status" = "202"
       - name: Wait for accepted revisions
