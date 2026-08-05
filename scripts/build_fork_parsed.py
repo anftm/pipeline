@@ -159,7 +159,8 @@ def clone_branch(repo_url: str, branch: str, target: Path, env: dict[str, str], 
 
 def run_in_container(root: Path, cwd: Path, command: list[str]) -> None:
     run([
-        "docker", "run", "--rm", "--volume", f"{root}:{root}", "--workdir", str(cwd),
+        "docker", "run", "--rm", "--user", f"{os.getuid()}:{os.getgid()}", "--env", "HOME=/tmp",
+        "--volume", f"{root}:{root}", "--workdir", str(cwd),
         "node:24", *command,
     ], env=clean_environment())
 
