@@ -35,6 +35,9 @@ class AuditBhaParsedTests(unittest.TestCase):
         findings = audit_bha_parsed.Findings(5)
         audit_bha_parsed.audit_text({"text": "图片〖ZQ/总期"}, "article.json", findings)
         self.assertEqual(findings.counts["ocr_markup_unclosed"], 1)
+        findings = audit_bha_parsed.Findings(5)
+        audit_bha_parsed.audit_text({"text": "12968〖-ZQ/总期〗〖JZ；加重〗"}, "article.json", findings)
+        self.assertEqual(findings.counts["ocr_markup"], 1)
 
     def test_request_json_retries_transient_network_errors(self):
         response = MagicMock()

@@ -140,8 +140,11 @@ class BuildForkParsedTests(unittest.TestCase):
 
     def test_archive_24_cleanup_removes_ocr_layout_markers(self):
         cleaned = build_fork_parsed.clean_legacy_image_markup({
-            "authors": ["孙学贵〖HH/换行〗DW：某部队"],
-            "parts": [{"text": "正文〖JZ/加重〗后缀〖ZQ/总期"}],
+            "authors": [
+                "孙学贵〖HH/换行〗DW：某部队", "DW：",
+                "12968〖-ZQ/总期〗19930713〖-RQ/日期〗标题〖-BT/标题〗",
+            ],
+            "parts": [{"text": "正文〖JZ/加重〗后缀〖JZ；加重〗〖-ZI/字符〗〖ZQ/总期"}],
         })
         self.assertEqual(cleaned["authors"], ["孙学贵"])
         self.assertEqual(cleaned["parts"][0]["text"], "正文后缀")

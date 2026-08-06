@@ -29,8 +29,8 @@ CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 MOJIBAKE_RE = re.compile(r"(?:锟斤拷|烫烫烫|Ã[\x80-\u00bf]|Â[\x80-\u00bf]|â(?:€|€™|€œ|€œ|€“|€”|€¦)|ðŸ)")
 WRAPPED_AUTHOR_RE = re.compile(r"^\s*(?:\(.+\)|（.+）)\s*$")
 AUTHOR_IMAGE_RE = re.compile(r"^\s*(?:<\s*[,，]?\s*)?img\s*=\s*[0-9a-z]+>?\s*$", re.IGNORECASE)
-OCR_MARKUP_RE = re.compile(r"〖[A-Za-z]{2}/[^〗]{1,80}〗")
-OCR_MARKUP_UNCLOSED_RE = re.compile(r"〖[A-Za-z]{2}/[^〗\r\n]{1,80}$")
+OCR_MARKUP_RE = re.compile(r"〖-?[A-Za-z]{2}[/；;][^〗]{1,80}〗")
+OCR_MARKUP_UNCLOSED_RE = re.compile(r"〖-?[A-Za-z]{2}[/；;][^〗\r\n]{1,80}$")
 TEXT_RULES = {
     "html_tag": HTML_TAG_RE,
     "html_entity": HTML_ENTITY_RE,
