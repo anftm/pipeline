@@ -4,6 +4,7 @@
 import base64
 import json
 import os
+import re
 import subprocess
 import shutil
 import sys
@@ -24,6 +25,8 @@ ARCHIVE_ID = os.environ.get("ARCHIVE_ID", "all")
 INPUT_BRANCHES = ("main", "config", "ocr_cache", "ocr_patch")
 PARSED_BRANCH = "parsed"
 PATCH_LAYOUT_VERSION = 2
+LEGACY_IMAGE_TAG_RE = re.compile(r"<img\b[^>]*>", re.IGNORECASE)
+LEGACY_FONT_TAG_RE = re.compile(r"</?font\b[^>]*>", re.IGNORECASE)
 
 
 def api_request(token: str, method: str, path: str, payload: dict | None = None):
@@ -189,6 +192,28 @@ def sanitize_repository(repository: Path) -> None:
     hooks.mkdir()
 
 
+def clean_legacy_image_markup(value):
+    if isinstance(value, str):
+        return LEGACY_FONT_TAG_RE.sub("", LEGACY_IMAGE_TAG_RE.sub("", value))
+    if isinstance(value, list):
+        return [clean_legacy_image_markup(item) for item in value]
+    if isinstance(value, dict):
+        return {key: clean_legacy_image_markup(item) for key, item in value.items()}
+    return value
+
+
+def clean_archive_20_parsed(parsed: Path, archive_id: int) -> None:
+    if archive_id != 20:
+        return
+    for article_path in parsed.rglob("*.json"):
+        article = json.loads(article_path.read_text(encoding="utf-8"))
+        cleaned = clean_legacy_image_markup(article)
+        article_path.write_text(
+            json.dumps(cleaned, ensure_ascii=False, separators=(",", ":")),
+            encoding="utf-8",
+        )
+
+
 def prepare_patch_input(source: Path, target: Path, archive_id: int) -> Path:
     shutil.copytree(source, target, ignore=shutil.ignore_patterns(".git"))
     legacy = target / f"archives{archive_id}"
@@ -233,6 +258,7 @@ def build_archive(token: str, helper: Path, root: Path, archive_id: int, revisio
         str(paths["config"]), str(paths["ocr_cache"]), str(patch_input),
         str(parsed), str(paths["main"]),
     ])
+    clean_archive_20_parsed(parsed, archive_id)
     sanitize_repository(parsed)
     secure_home = archive_root / "push-home"
     secure_home.mkdir()
