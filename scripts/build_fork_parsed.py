@@ -22,6 +22,7 @@ REPOSITORY_PREFIX = os.environ.get("BHA_REPOSITORY_PREFIX", "banned-historical-a
 STATE_PATH = Path(os.environ.get("BHA_PARSED_INPUT_STATE", "state/bha-parsed-inputs.json"))
 CANDIDATE_PATH = Path(os.environ.get("BHA_PARSED_INPUT_CANDIDATE", "/tmp/bha-parsed-inputs.json"))
 ARCHIVE_ID = os.environ.get("ARCHIVE_ID", "all")
+FORCE_REBUILD = os.environ.get("FORCE_REBUILD", "false").lower() == "true"
 INPUT_BRANCHES = ("main", "config", "ocr_cache", "ocr_patch")
 PARSED_BRANCH = "parsed"
 PATCH_LAYOUT_VERSION = 2
@@ -325,7 +326,7 @@ def main() -> None:
 
     changed = [
         archive_id for archive_id in selected
-        if archives.get(str(archive_id)) != source_snapshot(current[archive_id], helper_revision)
+        if FORCE_REBUILD or archives.get(str(archive_id)) != source_snapshot(current[archive_id], helper_revision)
     ]
     built = []
     synced = []
@@ -336,7 +337,7 @@ def main() -> None:
             for archive_id in changed:
                 repo = f"{REPOSITORY_PREFIX}{archive_id}"
                 upstream = branch_revisions(token, UPSTREAM_OWNER, repo)
-                if needs_local_build(current[archive_id], upstream):
+                if FORCE_REBUILD or needs_local_build(current[archive_id], upstream):
                     helper = helper or prepare_helper(root, git_environment(token), helper_revision)
                     build_archive(token, helper, root, archive_id, current[archive_id])
                     built.append(archive_id)
