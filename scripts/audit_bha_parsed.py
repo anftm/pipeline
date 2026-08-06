@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import http.client
 import os
 import re
 import shutil
@@ -75,7 +76,7 @@ def request_json(url: str, token: str = "") -> dict[str, Any]:
         except urllib.error.HTTPError as exc:
             if exc.code not in {429, 500, 502, 503, 504} or attempt == 3:
                 raise
-        except (urllib.error.URLError, TimeoutError):
+        except (urllib.error.URLError, http.client.IncompleteRead, TimeoutError):
             if attempt == 3:
                 raise
         time.sleep(2 ** attempt)
@@ -140,7 +141,7 @@ def download_snapshot(owner: str, archive_id: int, commit: str, cache_dir: Path 
                 if cache_dir is None:
                     target.unlink(missing_ok=True)
                 raise
-        except (urllib.error.URLError, TimeoutError):
+        except (urllib.error.URLError, http.client.IncompleteRead, TimeoutError):
             temporary.unlink(missing_ok=True)
             if attempt == 3:
                 if cache_dir is None:

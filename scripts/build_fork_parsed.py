@@ -37,6 +37,7 @@ ZERO_WIDTH_RE = re.compile(r"[\u200b-\u200f\u202a-\u202e\ufeff]")
 CONTROL_CHARACTER_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 WRAPPED_AUTHOR_RE = re.compile(r"^\s*(?:\((.*)\)|（(.*)）)\s*$", re.DOTALL)
 AUTHOR_IMAGE_RE = re.compile(r"^\s*(?:<\s*[,，]?\s*)?img\s*=\s*[0-9a-z]+>?\s*$", re.IGNORECASE)
+AUTHOR_IMAGE_FRAGMENT_RE = re.compile(r"<?\s*img\s*=\s*[0-9a-z]+>?", re.IGNORECASE)
 NON_AUTHOR_BRACKET_SEGMENT_RE = re.compile(
     r"\s*[；;、,，]?\s*[\[［]\s*(?:机密|绝密|收时\s*\d+|\d+)\s*[\]］]",
     re.IGNORECASE,
@@ -240,6 +241,7 @@ def clean_legacy_image_markup(value):
                         or AUTHOR_ANGLE_RESIDUE_RE.fullmatch(author)):
                     continue
                 author = AUTHOR_LAYOUT_MARK_RE.sub("", author).strip()
+                author = AUTHOR_IMAGE_FRAGMENT_RE.sub("", author).strip()
                 author = clean_legacy_image_markup(author)
                 author = AUTHOR_ANGLE_NOTE_RE.sub(r"\1", author).strip(" <>\t\r\n")
                 if NON_AUTHOR_ANGLE_NOTE_RE.fullmatch(author):
