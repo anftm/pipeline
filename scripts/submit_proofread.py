@@ -318,6 +318,9 @@ def validate_patch(patch):
         fail("patch contains no changes")
 
 
+AUTO_MERGE_MAX_DIFF_COST = 500
+
+
 def diff_cost(diff):
     total = 0
     for token in diff.split("\t"):
@@ -383,7 +386,7 @@ def auto_merge_allowed(kind, patch, metadata):
         cost += partial
     if not -3 <= delta <= 3:
         return False
-    return cost <= 200
+    return cost <= AUTO_MERGE_MAX_DIFF_COST
 
 
 METADATA_FIELD_LABELS = {
