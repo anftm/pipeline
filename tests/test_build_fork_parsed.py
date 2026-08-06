@@ -175,6 +175,20 @@ class BuildForkParsedTests(unittest.TestCase):
             "《红旗》杂志", "甲/乙/丙",
         ])
 
+    def test_archive_9_cleanup_applies_reviewed_author_separators(self):
+        with tempfile.TemporaryDirectory() as directory:
+            article = Path(directory) / "article.json"
+            article.write_text(__import__("json").dumps({"authors": [
+                "甲/乙；丙", "贵州省委工作组?", "××", "—毛远新给毛泽东的报告",
+                build_fork_parsed.ARCHIVE9_JOINED_CREDIT,
+            ]}, ensure_ascii=False), encoding="utf-8")
+            build_fork_parsed.clean_selected_archive_parsed(Path(directory), 9)
+            cleaned = __import__("json").loads(article.read_text(encoding="utf-8"))
+        self.assertEqual(cleaned["authors"], [
+            "甲", "乙", "丙", "贵州省委工作组", "毛远新给毛泽东的报告",
+            "王性尧、胡子婴、胡厥文、郭棣活、盛丕华、汤蒂因、荣毅仁、刘靖基、魏如代表的联合发言",
+        ])
+
     def test_archive_cleanup_does_not_change_other_archives(self):
         with tempfile.TemporaryDirectory() as directory:
             article = Path(directory) / "article.json"

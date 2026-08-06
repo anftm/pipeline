@@ -64,6 +64,7 @@ AUTHOR_PUBLISHER_CREDIT_RE = re.compile(r"^军事译文出版社出版）（([^�
 AUTHOR_REVIEW_NOTE_RE = re.compile(r"；阅办文件；?$")
 AUTHOR_MISPARSED_PROSE_RE = re.compile(r"(?:^事由：|简介：.*简介：|图为.+[。！？])")
 AUTHOR_DELIMITER_PAIRS = (("《", "》"), ("【", "】"), ("『", "』"), ("「", "」"), ("“", "”"))
+ARCHIVE9_JOINED_CREDIT = "王性尧/胡子婴/胡厥文/郭棣活/盛丕华/汤蒂因/荣毅仁/刘靖基/魏如代表的联合发言"
 CLEANUP_ARCHIVE_IDS = {3, 9, 10, 12, 14, 20, 24, 31}
 
 
@@ -306,6 +307,20 @@ def clean_selected_archive_parsed(parsed: Path, archive_id: int) -> None:
     for article_path in parsed.rglob("*.json"):
         article = json.loads(article_path.read_text(encoding="utf-8"))
         cleaned = clean_legacy_image_markup(article)
+        if archive_id == 9 and isinstance(cleaned, dict) and isinstance(cleaned.get("authors"), list):
+            authors = []
+            for author in cleaned["authors"]:
+                if author == "××":
+                    continue
+                if author == "贵州省委工作组?":
+                    author = "贵州省委工作组"
+                if author == "—毛远新给毛泽东的报告":
+                    author = "毛远新给毛泽东的报告"
+                if author == ARCHIVE9_JOINED_CREDIT:
+                    authors.append(author.replace("/", "、"))
+                    continue
+                authors.extend(part.strip() for part in re.split(r"[/；;]", author) if part.strip())
+            cleaned["authors"] = authors
         article_path.write_text(
             json.dumps(cleaned, ensure_ascii=False, separators=(",", ":")),
             encoding="utf-8",
