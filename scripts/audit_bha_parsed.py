@@ -233,6 +233,9 @@ def audit_article(article: Any, path: str, findings: Findings) -> None:
             if "square_bracket_author" not in author_issues and any(char in author for char in "[]［］"):
                 findings.add("square_bracket_author", path, f"$.authors[{index}]", author)
                 author_issues.add("square_bracket_author")
+            if "angle_bracket_author" not in author_issues and any(char in author for char in "<>"):
+                findings.add("angle_bracket_author", path, f"$.authors[{index}]", author)
+                author_issues.add("angle_bracket_author")
             if "wrapped_author" not in author_issues and WRAPPED_AUTHOR_RE.fullmatch(author):
                 findings.add("wrapped_author", path, f"$.authors[{index}]", author)
                 author_issues.add("wrapped_author")

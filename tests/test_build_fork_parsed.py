@@ -143,10 +143,13 @@ class BuildForkParsedTests(unittest.TestCase):
             "authors": [
                 "孙学贵〖HH/换行〗DW：某部队", "DW：",
                 "12968〖-ZQ/总期〗19930713〖-RQ/日期〗标题〖-BT/标题〗",
+                "<传达记录要点>", "工代会房修一公司<红旗造反团>", "孙俊<", "/ct>",
             ],
             "parts": [{"text": "正文〖JZ/加重〗后缀〖JZ；加重〗〖-ZI/字符〗〖ZQ/总期"}],
         })
-        self.assertEqual(cleaned["authors"], ["孙学贵"])
+        self.assertEqual(cleaned["authors"], [
+            "孙学贵", "工代会房修一公司红旗造反团", "孙俊",
+        ])
         self.assertEqual(cleaned["parts"][0]["text"], "正文后缀")
 
     def test_archive_cleanup_does_not_change_other_archives(self):

@@ -48,6 +48,9 @@ OCR_MARKUP_UNCLOSED_RE = re.compile(r"〖-?[A-Za-z]{2}[/；;][^〗\r\n]{1,80}$")
 AUTHOR_LAYOUT_MARK_RE = re.compile(r"〖HH/换行〗\s*DW：.*$", re.IGNORECASE)
 AUTHOR_LAYOUT_RESIDUE_RE = re.compile(r"^\s*DW\s*[:：]?\s*$", re.IGNORECASE)
 RAW_RECORD_AUTHOR_RE = re.compile(r"〖-(?:ZQ|RQ|BH|TH|BT|FT|YT)/", re.IGNORECASE)
+AUTHOR_ANGLE_NOTE_RE = re.compile(r"<([^<>]{1,80})>")
+AUTHOR_ANGLE_RESIDUE_RE = re.compile(r"^\s*(?:/ct|ct)?\s*[<>]+\s*$", re.IGNORECASE)
+NON_AUTHOR_ANGLE_NOTE_RE = re.compile(r"^\s*传达记录要点\s*$")
 CLEANUP_ARCHIVE_IDS = {9, 12, 14, 20, 24, 31}
 
 
@@ -233,10 +236,14 @@ def clean_legacy_image_markup(value):
             normalized = []
             for author in authors:
                 if (not isinstance(author, str) or AUTHOR_IMAGE_RE.fullmatch(author)
-                        or AUTHOR_LAYOUT_RESIDUE_RE.fullmatch(author) or RAW_RECORD_AUTHOR_RE.search(author)):
+                        or AUTHOR_LAYOUT_RESIDUE_RE.fullmatch(author) or RAW_RECORD_AUTHOR_RE.search(author)
+                        or AUTHOR_ANGLE_RESIDUE_RE.fullmatch(author)):
                     continue
                 author = AUTHOR_LAYOUT_MARK_RE.sub("", author).strip()
                 author = clean_legacy_image_markup(author)
+                author = AUTHOR_ANGLE_NOTE_RE.sub(r"\1", author).strip(" <>\t\r\n")
+                if NON_AUTHOR_ANGLE_NOTE_RE.fullmatch(author):
+                    continue
                 author = NON_AUTHOR_BRACKET_SEGMENT_RE.sub("", author)
                 author = SQUARE_BRACKET_RE.sub("", author).strip()
                 author = TRUNCATED_LATIN_ANNOTATION_RE.sub("", author).strip()
