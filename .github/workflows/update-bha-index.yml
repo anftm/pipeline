@@ -10,6 +10,11 @@ on:
         required: false
         default: all
         type: string
+      force_rebuild:
+        description: Force regeneration of the selected parsed archive
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: update-bha-index
@@ -32,6 +37,7 @@ jobs:
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
           ARCHIVE_ID: ${{ inputs.archive_id || 'all' }}
+          FORCE_REBUILD: ${{ inputs.force_rebuild || 'false' }}
         run: python3 scripts/build_fork_parsed.py
       - name: Record parsed input state
         if: steps.parsed.outputs.state_changed == 'true'
