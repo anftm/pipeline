@@ -37,6 +37,11 @@ AUTHOR_DATE_STATEMENT_RE = re.compile(
     r"^(?:19\d{2}年.+(?:批准|公布|通过|起草)|[—─]{2,}一九\S+年)"
 )
 AUTHOR_PURE_NOISE_RE = re.compile(r"^(?:\d|[^\w\u3400-\u4dbf\u4e00-\u9fff]{1,3})$")
+AUTHOR_SENTENCE_PUNCTUATION_RE = re.compile(r"[。！？；：]")
+AUTHOR_PROSE_CUE_RE = re.compile(
+    r"(?:文章|本文|作者|写道|指出|认为|他说|她说|叙述|论述|通过.+(?:表现|说明|揭示))"
+)
+AUTHOR_ODD_EDGE_RE = re.compile(r"^[、，。；：/）】』》”]|[、，；：/（【『《“]$")
 AUTHOR_DELIMITER_PAIRS = (
     ("(", ")"), ("（", "）"), ("[", "]"), ("［", "］"), ("<", ">"),
     ("《", "》"), ("【", "】"), ("『", "』"), ("「", "」"), ("“", "”"),
@@ -270,6 +275,20 @@ def audit_article(article: Any, path: str, findings: Findings) -> None:
             if "very_long_author" not in author_issues and len(author) > 80:
                 findings.add("very_long_author", path, f"$.authors[{index}]", author)
                 author_issues.add("very_long_author")
+            review_rules = {
+                "author_ascii_question": "?" in author,
+                "author_odd_edge": bool(AUTHOR_ODD_EDGE_RE.search(author)),
+                "author_sentence_punctuation": (
+                    len(author) >= 12 and bool(AUTHOR_SENTENCE_PUNCTUATION_RE.search(author))
+                ),
+                "author_prose_cue": len(author) >= 18 and bool(AUTHOR_PROSE_CUE_RE.search(author)),
+                "author_many_slashes": author.count("/") >= 3,
+                "author_review_length": 40 < len(author) <= 80,
+            }
+            for issue, matched in review_rules.items():
+                if issue not in author_issues and matched:
+                    findings.add(issue, path, f"$.authors[{index}]", author)
+                    author_issues.add(issue)
     dates = article.get("dates")
     if dates is not None and not isinstance(dates, list):
         findings.add("dates_not_list", path, "$.dates", str(dates))

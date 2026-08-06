@@ -65,7 +65,8 @@ class AuditBhaParsedTests(unittest.TestCase):
                     "title": "One", "authors": [
                         "(Author)", "img=504n0101aa>", "[Office]", "(Name", "Author<", "/ct",
                         "——副标题", "1952年3月8日会议批准", "□伟", "1", "《报纸",
-                        "正文" * 41,
+                        "正文" * 41, "这是一段文章说明：作者认为内容有问题?",
+                        "甲/乙/丙/丁", "这是一个需要复核的较长作者值" * 4, "作者；",
                     ],
                     "parts": [{"text": "&lt;span&gt;body&lt;/span&gt;"}],
                 },
@@ -94,6 +95,12 @@ class AuditBhaParsedTests(unittest.TestCase):
         self.assertEqual(report["findings"]["author_pure_noise"], 1)
         self.assertEqual(report["findings"]["unbalanced_author_delimiter"], 1)
         self.assertEqual(report["findings"]["very_long_author"], 1)
+        self.assertEqual(report["findings"]["author_ascii_question"], 1)
+        self.assertEqual(report["findings"]["author_sentence_punctuation"], 1)
+        self.assertEqual(report["findings"]["author_prose_cue"], 1)
+        self.assertEqual(report["findings"]["author_many_slashes"], 1)
+        self.assertEqual(report["findings"]["author_review_length"], 1)
+        self.assertEqual(report["findings"]["author_odd_edge"], 1)
         self.assertEqual(report["findings"]["html_entity"], 1)
         self.assertEqual(report["findings"]["zero_width"], 1)
         self.assertEqual(report["findings"]["empty_content"], 1)

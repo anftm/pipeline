@@ -61,6 +61,8 @@ AUTHOR_PURE_NOISE_RE = re.compile(r"^(?:\d|[《？])$")
 AUTHOR_OCR_RESIDUE_RE = re.compile(r"^\s*/?ct\s*$", re.IGNORECASE)
 AUTHOR_MISSING_BOOK_OPEN_RE = re.compile(r"^(人民日报|解放军报)》(.*)$")
 AUTHOR_PUBLISHER_CREDIT_RE = re.compile(r"^军事译文出版社出版）（([^（）]+)）$")
+AUTHOR_REVIEW_NOTE_RE = re.compile(r"；阅办文件；?$")
+AUTHOR_MISPARSED_PROSE_RE = re.compile(r"(?:^事由：|简介：.*简介：|图为.+[。！？])")
 AUTHOR_DELIMITER_PAIRS = (("《", "》"), ("【", "】"), ("『", "』"), ("「", "」"), ("“", "”"))
 CLEANUP_ARCHIVE_IDS = {3, 9, 10, 12, 14, 20, 24, 31}
 
@@ -280,11 +282,14 @@ def clean_legacy_image_markup(value):
                 match = AUTHOR_PUBLISHER_CREDIT_RE.fullmatch(author)
                 if match:
                     author = match.group(1).strip()
+                author = AUTHOR_REVIEW_NOTE_RE.sub("", author)
+                author = author.replace("？", "/").rstrip("、，；：/").strip()
                 if (len(author) > 80 or AUTHOR_PLACEHOLDER_RE.search(author)
                         or AUTHOR_TITLE_PREFIX_RE.search(author)
                         or AUTHOR_DATE_STATEMENT_RE.search(author)
                         or AUTHOR_PURE_NOISE_RE.fullmatch(author)
                         or AUTHOR_OCR_RESIDUE_RE.fullmatch(author)
+                        or AUTHOR_MISPARSED_PROSE_RE.search(author)
                         or any(author.count(opening) != author.count(closing)
                                for opening, closing in AUTHOR_DELIMITER_PAIRS)):
                     continue
