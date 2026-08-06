@@ -2,6 +2,7 @@
 """Build parsed branches for anftm archives whose source branches changed."""
 
 import base64
+import html
 import json
 import os
 import re
@@ -28,6 +29,11 @@ PARSED_BRANCH = "parsed"
 PATCH_LAYOUT_VERSION = 2
 LEGACY_IMAGE_TAG_RE = re.compile(r"<img\b[^>]*>", re.IGNORECASE)
 LEGACY_FONT_TAG_RE = re.compile(r"</?font\b[^>]*>", re.IGNORECASE)
+LEGACY_HTML_TAG_RE = re.compile(
+    r"</?(?:img|font|br|span|b|strong|em|p|div|a|sup|sub|hr|table|tbody|tr|td|th)\b[^>]*>",
+    re.IGNORECASE,
+)
+ZERO_WIDTH_RE = re.compile(r"[\u200b-\u200f\u202a-\u202e\ufeff]")
 
 
 def api_request(token: str, method: str, path: str, payload: dict | None = None):
@@ -195,16 +201,27 @@ def sanitize_repository(repository: Path) -> None:
 
 def clean_legacy_image_markup(value):
     if isinstance(value, str):
-        return LEGACY_FONT_TAG_RE.sub("", LEGACY_IMAGE_TAG_RE.sub("", value))
+        cleaned = value
+        for _ in range(2):
+            cleaned = html.unescape(cleaned)
+        cleaned = LEGACY_HTML_TAG_RE.sub("", cleaned)
+        return ZERO_WIDTH_RE.sub("", cleaned)
     if isinstance(value, list):
         return [clean_legacy_image_markup(item) for item in value]
     if isinstance(value, dict):
-        return {key: clean_legacy_image_markup(item) for key, item in value.items()}
+        cleaned = {key: clean_legacy_image_markup(item) for key, item in value.items()}
+        authors = cleaned.get("authors")
+        if isinstance(authors, list):
+            cleaned["authors"] = [
+                author[1:-1].strip() if isinstance(author, str) and author.startswith("(") and author.endswith(")") else author
+                for author in authors
+            ]
+        return cleaned
     return value
 
 
-def clean_archive_20_parsed(parsed: Path, archive_id: int) -> None:
-    if archive_id != 20:
+def clean_selected_archive_parsed(parsed: Path, archive_id: int) -> None:
+    if archive_id not in {9, 20, 31}:
         return
     for article_path in parsed.rglob("*.json"):
         article = json.loads(article_path.read_text(encoding="utf-8"))
@@ -259,7 +276,7 @@ def build_archive(token: str, helper: Path, root: Path, archive_id: int, revisio
         str(paths["config"]), str(paths["ocr_cache"]), str(patch_input),
         str(parsed), str(paths["main"]),
     ])
-    clean_archive_20_parsed(parsed, archive_id)
+    clean_selected_archive_parsed(parsed, archive_id)
     sanitize_repository(parsed)
     secure_home = archive_root / "push-home"
     secure_home.mkdir()
