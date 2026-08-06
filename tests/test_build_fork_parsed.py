@@ -82,17 +82,52 @@ class BuildForkParsedTests(unittest.TestCase):
                 "title": "题<IMG alt=请插入3号盘！ src=\"D:\\inset\\x.JPG\">目",
                 "parts": [{"text": "<FONT class=imgsm>图片说明</FONT>正文"}],
             }), encoding="utf-8")
-            build_fork_parsed.clean_archive_20_parsed(parsed, 20)
+            build_fork_parsed.clean_selected_archive_parsed(parsed, 20)
             cleaned = __import__("json").loads(article.read_text(encoding="utf-8"))
             self.assertEqual(cleaned["title"], "题目")
             self.assertEqual(cleaned["parts"][0]["text"], "图片说明正文")
+
+    def test_cleanup_decodes_epub_markup_and_normalizes_author_wrappers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            parsed = Path(directory)
+            article = parsed / "article.json"
+            article.write_text(__import__("json").dumps({
+                "authors": ["(张文藻)", "（艾青）", "&#8203;小鹰"],
+                "parts": [{"text": "&lt;span class=\"calibre10\"&gt;正文&lt;/span&gt;"}],
+            }), encoding="utf-8")
+            build_fork_parsed.clean_selected_archive_parsed(parsed, 31)
+            cleaned = __import__("json").loads(article.read_text(encoding="utf-8"))
+            self.assertEqual(cleaned["authors"], ["张文藻", "艾青", "小鹰"])
+            self.assertEqual(cleaned["parts"][0]["text"], "正文")
+
+    def test_archive_12_cleanup_removes_document_markup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            parsed = Path(directory)
+            article = parsed / "article.json"
+            article.write_text(__import__("json").dumps({
+                "parts": [{"text": "&lt;html&gt;&lt;pre&gt;正文&amp;注释&lt;/pre&gt;&lt;/html&gt;"}],
+            }), encoding="utf-8")
+            build_fork_parsed.clean_selected_archive_parsed(parsed, 12)
+            cleaned = __import__("json").loads(article.read_text(encoding="utf-8"))
+            self.assertEqual(cleaned["parts"][0]["text"], "正文&注释")
+
+    def test_archive_14_cleanup_removes_invisible_and_control_characters(self):
+        with tempfile.TemporaryDirectory() as directory:
+            parsed = Path(directory)
+            article = parsed / "article.json"
+            article.write_text(__import__("json").dumps({
+                "parts": [{"text": "准\u200b备\u0001正文"}],
+            }), encoding="utf-8")
+            build_fork_parsed.clean_selected_archive_parsed(parsed, 14)
+            cleaned = __import__("json").loads(article.read_text(encoding="utf-8"))
+            self.assertEqual(cleaned["parts"][0]["text"], "准备正文")
 
     def test_archive_cleanup_does_not_change_other_archives(self):
         with tempfile.TemporaryDirectory() as directory:
             article = Path(directory) / "article.json"
             original = {"text": "<IMG alt=请插入3号盘！>"}
             article.write_text(__import__("json").dumps(original), encoding="utf-8")
-            build_fork_parsed.clean_archive_20_parsed(Path(directory), 19)
+            build_fork_parsed.clean_selected_archive_parsed(Path(directory), 19)
             self.assertEqual(__import__("json").loads(article.read_text(encoding="utf-8")), original)
 
     def test_main_builds_diverged_archives_and_records_input_state(self):

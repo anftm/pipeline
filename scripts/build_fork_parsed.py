@@ -30,10 +30,13 @@ PATCH_LAYOUT_VERSION = 2
 LEGACY_IMAGE_TAG_RE = re.compile(r"<img\b[^>]*>", re.IGNORECASE)
 LEGACY_FONT_TAG_RE = re.compile(r"</?font\b[^>]*>", re.IGNORECASE)
 LEGACY_HTML_TAG_RE = re.compile(
-    r"</?(?:img|font|br|span|b|strong|em|p|div|a|sup|sub|hr|table|tbody|tr|td|th)\b[^>]*>",
+    r"</?(?:html|head|body|title|img|font|br|span|b|strong|em|i|u|p|pre|div|a|sup|sub|hr|blockquote|h[1-6]|ul|ol|li|table|thead|tbody|tr|td|th)\b[^>]*>",
     re.IGNORECASE,
 )
 ZERO_WIDTH_RE = re.compile(r"[\u200b-\u200f\u202a-\u202e\ufeff]")
+CONTROL_CHARACTER_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+WRAPPED_AUTHOR_RE = re.compile(r"^\s*(?:\((.*)\)|（(.*)）)\s*$", re.DOTALL)
+CLEANUP_ARCHIVE_IDS = {9, 12, 14, 20, 31}
 
 
 def api_request(token: str, method: str, path: str, payload: dict | None = None):
@@ -205,23 +208,26 @@ def clean_legacy_image_markup(value):
         for _ in range(2):
             cleaned = html.unescape(cleaned)
         cleaned = LEGACY_HTML_TAG_RE.sub("", cleaned)
-        return ZERO_WIDTH_RE.sub("", cleaned)
+        cleaned = ZERO_WIDTH_RE.sub("", cleaned)
+        return CONTROL_CHARACTER_RE.sub("", cleaned)
     if isinstance(value, list):
         return [clean_legacy_image_markup(item) for item in value]
     if isinstance(value, dict):
         cleaned = {key: clean_legacy_image_markup(item) for key, item in value.items()}
         authors = cleaned.get("authors")
         if isinstance(authors, list):
-            cleaned["authors"] = [
-                author[1:-1].strip() if isinstance(author, str) and author.startswith("(") and author.endswith(")") else author
-                for author in authors
-            ]
+            normalized = []
+            for author in authors:
+                match = WRAPPED_AUTHOR_RE.fullmatch(author) if isinstance(author, str) else None
+                value = next((group for group in match.groups() if group is not None), None) if match else None
+                normalized.append(value.strip() if value is not None else author)
+            cleaned["authors"] = normalized
         return cleaned
     return value
 
 
 def clean_selected_archive_parsed(parsed: Path, archive_id: int) -> None:
-    if archive_id not in {9, 20, 31}:
+    if archive_id not in CLEANUP_ARCHIVE_IDS:
         return
     for article_path in parsed.rglob("*.json"):
         article = json.loads(article_path.read_text(encoding="utf-8"))
