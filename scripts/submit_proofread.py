@@ -319,6 +319,11 @@ def validate_patch(patch):
 
 
 AUTO_MERGE_MAX_DIFF_COST = 500
+AUTO_MERGE_MAX_NET_PARAGRAPH_DELTA = 3
+AUTO_MERGE_POLICY = {
+    "max_diff_cost": AUTO_MERGE_MAX_DIFF_COST,
+    "max_net_paragraph_delta": AUTO_MERGE_MAX_NET_PARAGRAPH_DELTA,
+}
 
 
 def diff_cost(diff):
@@ -918,6 +923,7 @@ def main():
         correction_id = hashlib.sha256(json.dumps({
             "archive_id": archive_id, "kind": "proofread", "article_id": article_id,
             "publication_id": publication_id, "patch": patch, "metadata": metadata,
+            "request_id": request.get("request_id"),
         }, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:12]
         patch_path(archive_id, article_id, publication_id)
         title = request.get("title") or f"校订 {article_id}"
@@ -956,7 +962,11 @@ def main():
                         title, proofread_pr_body(request, repo, new_article_id, correction_id), correction_id,
                     ))
         auto_merged = []
-        if request.get("auto_merge") is True and auto_merge_allowed(kind, patch, metadata):
+        if (
+            request.get("auto_merge") is True
+            and request.get("auto_merge_policy") == AUTO_MERGE_POLICY
+            and auto_merge_allowed(kind, patch, metadata)
+        ):
             auto_merged = [pull["url"] for pull in pull_requests if merge_pull(token, repo, pull)]
         auto_merged_urls = set(auto_merged)
         pending_pulls = [pull for pull in pull_requests if pull["url"] not in auto_merged_urls]
