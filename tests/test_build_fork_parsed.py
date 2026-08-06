@@ -138,6 +138,14 @@ class BuildForkParsedTests(unittest.TestCase):
             cleaned = __import__("json").loads(article.read_text(encoding="utf-8"))
             self.assertEqual(cleaned["parts"][0]["text"], "准备正文")
 
+    def test_archive_24_cleanup_removes_ocr_layout_markers(self):
+        cleaned = build_fork_parsed.clean_legacy_image_markup({
+            "authors": ["孙学贵〖HH/换行〗DW：某部队"],
+            "parts": [{"text": "正文〖JZ/加重〗后缀〖ZQ/总期"}],
+        })
+        self.assertEqual(cleaned["authors"], ["孙学贵"])
+        self.assertEqual(cleaned["parts"][0]["text"], "正文后缀")
+
     def test_archive_cleanup_does_not_change_other_archives(self):
         with tempfile.TemporaryDirectory() as directory:
             article = Path(directory) / "article.json"

@@ -43,7 +43,10 @@ NON_AUTHOR_BRACKET_SEGMENT_RE = re.compile(
 )
 SQUARE_BRACKET_RE = re.compile(r"[\[\]［］]")
 TRUNCATED_LATIN_ANNOTATION_RE = re.compile(r"\s*[（(][A-Za-z][^）)]*$")
-CLEANUP_ARCHIVE_IDS = {9, 12, 14, 20, 31}
+OCR_MARKUP_RE = re.compile(r"〖[A-Za-z]{2}/[^〗]{1,80}〗")
+OCR_MARKUP_UNCLOSED_RE = re.compile(r"〖[A-Za-z]{2}/[^〗\r\n]{1,80}$")
+AUTHOR_LAYOUT_MARK_RE = re.compile(r"〖HH/换行〗\s*DW：.*$", re.IGNORECASE)
+CLEANUP_ARCHIVE_IDS = {9, 12, 14, 20, 24, 31}
 
 
 def api_request(token: str, method: str, path: str, payload: dict | None = None):
@@ -216,17 +219,21 @@ def clean_legacy_image_markup(value):
             cleaned = html.unescape(cleaned)
         cleaned = LEGACY_HTML_TAG_RE.sub("", cleaned)
         cleaned = ZERO_WIDTH_RE.sub("", cleaned)
-        return CONTROL_CHARACTER_RE.sub("", cleaned)
+        cleaned = CONTROL_CHARACTER_RE.sub("", cleaned)
+        cleaned = OCR_MARKUP_RE.sub("", cleaned)
+        return OCR_MARKUP_UNCLOSED_RE.sub("", cleaned)
     if isinstance(value, list):
         return [clean_legacy_image_markup(item) for item in value]
     if isinstance(value, dict):
         cleaned = {key: clean_legacy_image_markup(item) for key, item in value.items()}
-        authors = cleaned.get("authors")
+        authors = value.get("authors")
         if isinstance(authors, list):
             normalized = []
             for author in authors:
                 if not isinstance(author, str) or AUTHOR_IMAGE_RE.fullmatch(author):
                     continue
+                author = AUTHOR_LAYOUT_MARK_RE.sub("", author).strip()
+                author = clean_legacy_image_markup(author)
                 author = NON_AUTHOR_BRACKET_SEGMENT_RE.sub("", author)
                 author = SQUARE_BRACKET_RE.sub("", author).strip()
                 author = TRUNCATED_LATIN_ANNOTATION_RE.sub("", author).strip()

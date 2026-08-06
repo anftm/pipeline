@@ -28,6 +28,14 @@ class AuditBhaParsedTests(unittest.TestCase):
         self.assertIsNone(audit_bha_parsed.MOJIBAKE_RE.search("écrasez l’infâme"))
         self.assertIsNotNone(audit_bha_parsed.MOJIBAKE_RE.search("cafÃ©"))
 
+    def test_audit_detects_complete_and_unclosed_ocr_markup(self):
+        findings = audit_bha_parsed.Findings(5)
+        audit_bha_parsed.audit_text({"text": "作者〖HH/换行〗DW：单位"}, "article.json", findings)
+        self.assertEqual(findings.counts["ocr_markup"], 1)
+        findings = audit_bha_parsed.Findings(5)
+        audit_bha_parsed.audit_text({"text": "图片〖ZQ/总期"}, "article.json", findings)
+        self.assertEqual(findings.counts["ocr_markup_unclosed"], 1)
+
     def test_request_json_retries_transient_network_errors(self):
         response = MagicMock()
         response.__enter__.return_value = io.BytesIO(b'{"ok": true}')
