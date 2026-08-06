@@ -51,7 +51,7 @@ class AuditBhaParsedTests(unittest.TestCase):
             snapshot = self.make_snapshot(Path(directory), {
                 "collection/book/book.metadata": {"name": "Book"},
                 "collection/book/aaa/same.json": {
-                    "title": "One", "authors": ["(Author)"],
+                    "title": "One", "authors": ["(Author)", "img=504n0101aa>", "[Office]", "(Name"],
                     "parts": [{"text": "&lt;span&gt;body&lt;/span&gt;"}],
                 },
                 "collection/book/bbb/same.json": {
@@ -68,6 +68,9 @@ class AuditBhaParsedTests(unittest.TestCase):
         self.assertEqual(report["findings"]["duplicate_doc_id"], 1)
         self.assertEqual(report["findings"]["orphan_article"], 1)
         self.assertEqual(report["findings"]["wrapped_author"], 1)
+        self.assertEqual(report["findings"]["author_image_placeholder"], 1)
+        self.assertEqual(report["findings"]["square_bracket_author"], 1)
+        self.assertEqual(report["findings"]["unbalanced_author_parenthesis"], 1)
         self.assertEqual(report["findings"]["html_entity"], 1)
         self.assertEqual(report["findings"]["zero_width"], 1)
         self.assertEqual(report["findings"]["empty_content"], 1)

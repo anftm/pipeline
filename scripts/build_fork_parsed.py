@@ -36,6 +36,13 @@ LEGACY_HTML_TAG_RE = re.compile(
 ZERO_WIDTH_RE = re.compile(r"[\u200b-\u200f\u202a-\u202e\ufeff]")
 CONTROL_CHARACTER_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 WRAPPED_AUTHOR_RE = re.compile(r"^\s*(?:\((.*)\)|（(.*)）)\s*$", re.DOTALL)
+AUTHOR_IMAGE_RE = re.compile(r"^\s*(?:<\s*[,，]?\s*)?img\s*=\s*[0-9a-z]+>?\s*$", re.IGNORECASE)
+NON_AUTHOR_BRACKET_SEGMENT_RE = re.compile(
+    r"\s*[；;、,，]?\s*[\[［]\s*(?:机密|绝密|收时\s*\d+|\d+)\s*[\]］]",
+    re.IGNORECASE,
+)
+SQUARE_BRACKET_RE = re.compile(r"[\[\]［］]")
+TRUNCATED_LATIN_ANNOTATION_RE = re.compile(r"\s*[（(][A-Za-z][^）)]*$")
 CLEANUP_ARCHIVE_IDS = {9, 12, 14, 20, 31}
 
 
@@ -218,9 +225,24 @@ def clean_legacy_image_markup(value):
         if isinstance(authors, list):
             normalized = []
             for author in authors:
-                match = WRAPPED_AUTHOR_RE.fullmatch(author) if isinstance(author, str) else None
+                if not isinstance(author, str) or AUTHOR_IMAGE_RE.fullmatch(author):
+                    continue
+                author = NON_AUTHOR_BRACKET_SEGMENT_RE.sub("", author)
+                author = SQUARE_BRACKET_RE.sub("", author).strip()
+                author = TRUNCATED_LATIN_ANNOTATION_RE.sub("", author).strip()
+                if author.startswith("(") and ")" not in author:
+                    author = author[1:].strip()
+                elif author.endswith(")") and "(" not in author:
+                    author = author[:-1].strip()
+                if author.startswith("（") and "）" not in author:
+                    author = author[1:].strip()
+                elif author.endswith("）") and "（" not in author:
+                    author = author[:-1].strip()
+                match = WRAPPED_AUTHOR_RE.fullmatch(author)
                 value = next((group for group in match.groups() if group is not None), None) if match else None
-                normalized.append(value.strip() if value is not None else author)
+                author = value.strip() if value is not None else author
+                if author:
+                    normalized.append(author)
             cleaned["authors"] = normalized
         return cleaned
     return value

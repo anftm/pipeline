@@ -92,13 +92,24 @@ class BuildForkParsedTests(unittest.TestCase):
             parsed = Path(directory)
             article = parsed / "article.json"
             article.write_text(__import__("json").dumps({
-                "authors": ["(张文藻)", "（艾青）", "&#8203;小鹰"],
+                "authors": [
+                    "(张文藻)", "（艾青）", "&#8203;小鹰", "[中共中央]办公室",
+                    "[绝密]", "img=504n0101aa>", "(孙作宾", "新华社记者］",
+                ],
                 "parts": [{"text": "&lt;span class=\"calibre10\"&gt;正文&lt;/span&gt;"}],
             }), encoding="utf-8")
             build_fork_parsed.clean_selected_archive_parsed(parsed, 31)
             cleaned = __import__("json").loads(article.read_text(encoding="utf-8"))
-            self.assertEqual(cleaned["authors"], ["张文藻", "艾青", "小鹰"])
+            self.assertEqual(cleaned["authors"], [
+                "张文藻", "艾青", "小鹰", "中共中央办公室", "孙作宾", "新华社记者",
+            ])
             self.assertEqual(cleaned["parts"][0]["text"], "正文")
+
+    def test_cleanup_truncates_incomplete_latin_author_annotation(self):
+        cleaned = build_fork_parsed.clean_legacy_image_markup({
+            "authors": ["魏格林（Susanne", "艾恺（Guy", "万一(万家骏)"],
+        })
+        self.assertEqual(cleaned["authors"], ["魏格林", "艾恺", "万一(万家骏)"])
 
     def test_archive_12_cleanup_removes_document_markup(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -28,6 +28,7 @@ ZERO_WIDTH_RE = re.compile(r"[\u200b-\u200f\u202a-\u202e\ufeff]")
 CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 MOJIBAKE_RE = re.compile(r"(?:锟斤拷|烫烫烫|Ã[\x80-\u00bf]|Â[\x80-\u00bf]|â(?:€|€™|€œ|€œ|€“|€”|€¦)|ðŸ)")
 WRAPPED_AUTHOR_RE = re.compile(r"^\s*(?:\(.+\)|（.+）)\s*$")
+AUTHOR_IMAGE_RE = re.compile(r"^\s*(?:<\s*[,，]?\s*)?img\s*=\s*[0-9a-z]+>?\s*$", re.IGNORECASE)
 TEXT_RULES = {
     "html_tag": HTML_TAG_RE,
     "html_entity": HTML_ENTITY_RE,
@@ -214,10 +215,23 @@ def audit_article(article: Any, path: str, findings: Findings) -> None:
     if authors is not None and not isinstance(authors, list):
         findings.add("authors_not_list", path, "$.authors", str(authors))
     elif isinstance(authors, list):
+        author_issues: set[str] = set()
         for index, author in enumerate(authors):
-            if isinstance(author, str) and WRAPPED_AUTHOR_RE.fullmatch(author):
+            if not isinstance(author, str):
+                continue
+            if "author_image_placeholder" not in author_issues and AUTHOR_IMAGE_RE.fullmatch(author):
+                findings.add("author_image_placeholder", path, f"$.authors[{index}]", author)
+                author_issues.add("author_image_placeholder")
+            if "unbalanced_author_parenthesis" not in author_issues and (
+                    author.count("(") != author.count(")") or author.count("（") != author.count("）")):
+                findings.add("unbalanced_author_parenthesis", path, f"$.authors[{index}]", author)
+                author_issues.add("unbalanced_author_parenthesis")
+            if "square_bracket_author" not in author_issues and any(char in author for char in "[]［］"):
+                findings.add("square_bracket_author", path, f"$.authors[{index}]", author)
+                author_issues.add("square_bracket_author")
+            if "wrapped_author" not in author_issues and WRAPPED_AUTHOR_RE.fullmatch(author):
                 findings.add("wrapped_author", path, f"$.authors[{index}]", author)
-                break
+                author_issues.add("wrapped_author")
     dates = article.get("dates")
     if dates is not None and not isinstance(dates, list):
         findings.add("dates_not_list", path, "$.dates", str(dates))
