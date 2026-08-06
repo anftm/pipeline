@@ -230,6 +230,10 @@ def clean_legacy_image_markup(value):
                 author = NON_AUTHOR_BRACKET_SEGMENT_RE.sub("", author)
                 author = SQUARE_BRACKET_RE.sub("", author).strip()
                 author = TRUNCATED_LATIN_ANNOTATION_RE.sub("", author).strip()
+                if author.count("(") > author.count(")") and author.rfind("(") > 0:
+                    author = author[:author.rfind("(")].strip()
+                if author.count("（") > author.count("）") and author.rfind("（") > 0:
+                    author = author[:author.rfind("（")].strip()
                 if author.startswith("(") and ")" not in author:
                     author = author[1:].strip()
                 elif author.endswith(")") and "(" not in author:

@@ -107,9 +107,14 @@ class BuildForkParsedTests(unittest.TestCase):
 
     def test_cleanup_truncates_incomplete_latin_author_annotation(self):
         cleaned = build_fork_parsed.clean_legacy_image_markup({
-            "authors": ["魏格林（Susanne", "艾恺（Guy", "万一(万家骏)"],
+            "authors": [
+                "魏格林（Susanne", "艾恺（Guy", "鸣不平（王应素",
+                "朱裕璧（文汇报记者", "万一(万家骏)",
+            ],
         })
-        self.assertEqual(cleaned["authors"], ["魏格林", "艾恺", "万一(万家骏)"])
+        self.assertEqual(cleaned["authors"], [
+            "魏格林", "艾恺", "鸣不平", "朱裕璧", "万一(万家骏)",
+        ])
 
     def test_archive_12_cleanup_removes_document_markup(self):
         with tempfile.TemporaryDirectory() as directory:
