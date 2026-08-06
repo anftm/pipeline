@@ -104,7 +104,7 @@ jobs:
           if actual.get("index_status") == "ready" and revisions == expected:
               raise SystemExit(0)
           differing = [key for key in sorted(set(expected) | set(revisions), key=lambda value: int(value)) if expected.get(key) != revisions.get(key)]
-          print(json.dumps({
+           print(json.dumps({
               "attempt": int(sys.argv[1]),
               "index_status": actual.get("index_status"),
               "progress": actual.get("progress"),
@@ -113,8 +113,10 @@ jobs:
                   key: {"expected": expected.get(key), "actual": revisions.get(key)}
                   for key in differing
               },
-          }, ensure_ascii=False))
-          if int(sys.argv[1]) >= 60 and actual.get("index_status") == "ready":
+           }, ensure_ascii=False))
+          if actual.get("index_status") == "failed":
+              raise SystemExit(2)
+           if int(sys.argv[1]) >= 60 and actual.get("index_status") == "ready":
               raise SystemExit(2)
           raise SystemExit(1)
           PY
