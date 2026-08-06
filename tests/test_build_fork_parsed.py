@@ -153,6 +153,20 @@ class BuildForkParsedTests(unittest.TestCase):
         ])
         self.assertEqual(cleaned["parts"][0]["text"], "正文后缀")
 
+    def test_cleanup_removes_misparsed_author_metadata_without_guessing_names(self):
+        cleaned = build_fork_parsed.clean_legacy_image_markup({
+            "authors": [
+                "/ct", "1", "《", "？", "□伟", "?夫",
+                "1952年3月8日政务院会议批准", "——文章副标题", "《人民日报",
+                "人民日报》社论", "解放军报》社论", "军事译文出版社出版）（翟席）",
+                "正文" * 41, "合法的长机构署名编辑部", "××",
+            ],
+        })
+        self.assertEqual(cleaned["authors"], [
+            "《人民日报》社论", "《解放军报》社论", "翟席",
+            "合法的长机构署名编辑部", "××",
+        ])
+
     def test_archive_cleanup_does_not_change_other_archives(self):
         with tempfile.TemporaryDirectory() as directory:
             article = Path(directory) / "article.json"

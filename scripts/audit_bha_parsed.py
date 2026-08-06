@@ -30,6 +30,17 @@ CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 MOJIBAKE_RE = re.compile(r"(?:锟斤拷|烫烫烫|Ã[\x80-\u00bf]|Â[\x80-\u00bf]|â(?:€|€™|€œ|€œ|€“|€”|€¦)|ðŸ)")
 WRAPPED_AUTHOR_RE = re.compile(r"^\s*(?:\(.+\)|（.+）)\s*$")
 AUTHOR_IMAGE_RE = re.compile(r"^\s*(?:<\s*[,，]?\s*)?img\s*=\s*[0-9a-z]+>?\s*$", re.IGNORECASE)
+AUTHOR_OCR_RESIDUE_RE = re.compile(r"(?:img\s*=|〖|〗|\bDW\s*[:：]|/?ct\b)", re.IGNORECASE)
+AUTHOR_PLACEHOLDER_RE = re.compile(r"[�□]|^\?|(?:锟斤拷|烫烫烫|Ã.|Â.)")
+AUTHOR_TITLE_PREFIX_RE = re.compile(r"^[—─━-]{2,}")
+AUTHOR_DATE_STATEMENT_RE = re.compile(
+    r"^(?:19\d{2}年.+(?:批准|公布|通过|起草)|[—─]{2,}一九\S+年)"
+)
+AUTHOR_PURE_NOISE_RE = re.compile(r"^(?:\d|[^\w\u3400-\u4dbf\u4e00-\u9fff]{1,3})$")
+AUTHOR_DELIMITER_PAIRS = (
+    ("(", ")"), ("（", "）"), ("[", "]"), ("［", "］"), ("<", ">"),
+    ("《", "》"), ("【", "】"), ("『", "』"), ("「", "」"), ("“", "”"),
+)
 OCR_MARKUP_RE = re.compile(r"〖-?[A-Za-z]{2}[/；;][^〗]{1,80}〗")
 OCR_MARKUP_UNCLOSED_RE = re.compile(r"〖-?[A-Za-z]{2}[/；;][^〗\r\n]{1,80}$")
 TEXT_RULES = {
@@ -240,6 +251,25 @@ def audit_article(article: Any, path: str, findings: Findings) -> None:
             if "wrapped_author" not in author_issues and WRAPPED_AUTHOR_RE.fullmatch(author):
                 findings.add("wrapped_author", path, f"$.authors[{index}]", author)
                 author_issues.add("wrapped_author")
+            author_rules = {
+                "author_ocr_residue": AUTHOR_OCR_RESIDUE_RE,
+                "author_placeholder": AUTHOR_PLACEHOLDER_RE,
+                "author_title_prefix": AUTHOR_TITLE_PREFIX_RE,
+                "author_date_statement": AUTHOR_DATE_STATEMENT_RE,
+                "author_pure_noise": AUTHOR_PURE_NOISE_RE,
+            }
+            for issue, pattern in author_rules.items():
+                if issue not in author_issues and pattern.search(author):
+                    findings.add(issue, path, f"$.authors[{index}]", author)
+                    author_issues.add(issue)
+            if "unbalanced_author_delimiter" not in author_issues and any(
+                    author.count(opening) != author.count(closing)
+                    for opening, closing in AUTHOR_DELIMITER_PAIRS):
+                findings.add("unbalanced_author_delimiter", path, f"$.authors[{index}]", author)
+                author_issues.add("unbalanced_author_delimiter")
+            if "very_long_author" not in author_issues and len(author) > 80:
+                findings.add("very_long_author", path, f"$.authors[{index}]", author)
+                author_issues.add("very_long_author")
     dates = article.get("dates")
     if dates is not None and not isinstance(dates, list):
         findings.add("dates_not_list", path, "$.dates", str(dates))

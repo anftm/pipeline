@@ -63,7 +63,9 @@ class AuditBhaParsedTests(unittest.TestCase):
                 "collection/book/book.metadata": {"name": "Book"},
                 "collection/book/aaa/same.json": {
                     "title": "One", "authors": [
-                        "(Author)", "img=504n0101aa>", "[Office]", "(Name", "Author<",
+                        "(Author)", "img=504n0101aa>", "[Office]", "(Name", "Author<", "/ct",
+                        "——副标题", "1952年3月8日会议批准", "□伟", "1", "《报纸",
+                        "正文" * 41,
                     ],
                     "parts": [{"text": "&lt;span&gt;body&lt;/span&gt;"}],
                 },
@@ -85,6 +87,13 @@ class AuditBhaParsedTests(unittest.TestCase):
         self.assertEqual(report["findings"]["square_bracket_author"], 1)
         self.assertEqual(report["findings"]["unbalanced_author_parenthesis"], 1)
         self.assertEqual(report["findings"]["angle_bracket_author"], 1)
+        self.assertEqual(report["findings"]["author_ocr_residue"], 1)
+        self.assertEqual(report["findings"]["author_title_prefix"], 1)
+        self.assertEqual(report["findings"]["author_date_statement"], 1)
+        self.assertEqual(report["findings"]["author_placeholder"], 1)
+        self.assertEqual(report["findings"]["author_pure_noise"], 1)
+        self.assertEqual(report["findings"]["unbalanced_author_delimiter"], 1)
+        self.assertEqual(report["findings"]["very_long_author"], 1)
         self.assertEqual(report["findings"]["html_entity"], 1)
         self.assertEqual(report["findings"]["zero_width"], 1)
         self.assertEqual(report["findings"]["empty_content"], 1)

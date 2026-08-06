@@ -52,7 +52,17 @@ RAW_RECORD_AUTHOR_RE = re.compile(r"〖-(?:ZQ|RQ|BH|TH|BT|FT|YT)/", re.IGNORECAS
 AUTHOR_ANGLE_NOTE_RE = re.compile(r"<([^<>]{1,80})>")
 AUTHOR_ANGLE_RESIDUE_RE = re.compile(r"^\s*(?:/ct|ct)?\s*[<>]+\s*$", re.IGNORECASE)
 NON_AUTHOR_ANGLE_NOTE_RE = re.compile(r"^\s*传达记录要点\s*$")
-CLEANUP_ARCHIVE_IDS = {9, 12, 14, 20, 24, 31}
+AUTHOR_PLACEHOLDER_RE = re.compile(r"[�□]|^\?|(?:锟斤拷|烫烫烫|Ã.|Â.)")
+AUTHOR_TITLE_PREFIX_RE = re.compile(r"^[—─━-]{2,}")
+AUTHOR_DATE_STATEMENT_RE = re.compile(
+    r"^(?:19\d{2}年.+(?:批准|公布|通过|起草)|[—─]{2,}一九\S+年)"
+)
+AUTHOR_PURE_NOISE_RE = re.compile(r"^(?:\d|[《？])$")
+AUTHOR_OCR_RESIDUE_RE = re.compile(r"^\s*/?ct\s*$", re.IGNORECASE)
+AUTHOR_MISSING_BOOK_OPEN_RE = re.compile(r"^(人民日报|解放军报)》(.*)$")
+AUTHOR_PUBLISHER_CREDIT_RE = re.compile(r"^军事译文出版社出版）（([^（）]+)）$")
+AUTHOR_DELIMITER_PAIRS = (("《", "》"), ("【", "】"), ("『", "』"), ("「", "」"), ("“", "”"))
+CLEANUP_ARCHIVE_IDS = {3, 9, 10, 12, 14, 20, 24, 31}
 
 
 def api_request(token: str, method: str, path: str, payload: dict | None = None):
@@ -264,6 +274,20 @@ def clean_legacy_image_markup(value):
                 match = WRAPPED_AUTHOR_RE.fullmatch(author)
                 value = next((group for group in match.groups() if group is not None), None) if match else None
                 author = value.strip() if value is not None else author
+                match = AUTHOR_MISSING_BOOK_OPEN_RE.fullmatch(author)
+                if match:
+                    author = f"《{match.group(1)}》{match.group(2)}"
+                match = AUTHOR_PUBLISHER_CREDIT_RE.fullmatch(author)
+                if match:
+                    author = match.group(1).strip()
+                if (len(author) > 80 or AUTHOR_PLACEHOLDER_RE.search(author)
+                        or AUTHOR_TITLE_PREFIX_RE.search(author)
+                        or AUTHOR_DATE_STATEMENT_RE.search(author)
+                        or AUTHOR_PURE_NOISE_RE.fullmatch(author)
+                        or AUTHOR_OCR_RESIDUE_RE.fullmatch(author)
+                        or any(author.count(opening) != author.count(closing)
+                               for opening, closing in AUTHOR_DELIMITER_PAIRS)):
+                    continue
                 if author:
                     normalized.append(author)
             cleaned["authors"] = normalized
