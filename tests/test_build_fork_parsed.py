@@ -157,6 +157,16 @@ class BuildForkParsedTests(unittest.TestCase):
         ])
         self.assertEqual(cleaned["parts"][0]["text"], "正文后缀")
 
+    def test_archive_24_cleanup_splits_slash_separated_authors(self):
+        with tempfile.TemporaryDirectory() as directory:
+            article = Path(directory) / "article.json"
+            article.write_text(__import__("json").dumps({
+                "authors": ["甲/乙/某机构", "保留；分号"],
+            }, ensure_ascii=False), encoding="utf-8")
+            build_fork_parsed.clean_selected_archive_parsed(Path(directory), 24)
+            cleaned = __import__("json").loads(article.read_text(encoding="utf-8"))
+        self.assertEqual(cleaned["authors"], ["甲", "乙", "某机构", "保留；分号"])
+
     def test_cleanup_removes_misparsed_author_metadata_without_guessing_names(self):
         cleaned = build_fork_parsed.clean_legacy_image_markup({
             "authors": [

@@ -321,6 +321,13 @@ def clean_selected_archive_parsed(parsed: Path, archive_id: int) -> None:
                     continue
                 authors.extend(part.strip() for part in re.split(r"[/；;]", author) if part.strip())
             cleaned["authors"] = authors
+        elif archive_id == 24 and isinstance(cleaned, dict) and isinstance(cleaned.get("authors"), list):
+            cleaned["authors"] = [
+                part.strip()
+                for author in cleaned["authors"]
+                for part in author.split("/")
+                if part.strip()
+            ]
         article_path.write_text(
             json.dumps(cleaned, ensure_ascii=False, separators=(",", ":")),
             encoding="utf-8",
