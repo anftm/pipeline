@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       archive_id:
-        description: Archive number 0-31, or all
+        description: Archive numbers 0-31 (comma-separated), or all
         required: false
         default: all
         type: string

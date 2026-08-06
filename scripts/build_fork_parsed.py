@@ -127,12 +127,12 @@ def selected_archive_ids() -> list[int]:
     if ARCHIVE_ID == "all":
         return list(range(32))
     try:
-        archive_id = int(ARCHIVE_ID)
+        archive_ids = sorted({int(value.strip()) for value in ARCHIVE_ID.split(",") if value.strip()})
     except ValueError as exc:
-        raise RuntimeError("ARCHIVE_ID must be all or an integer from 0 through 31") from exc
-    if archive_id < 0 or archive_id > 31:
-        raise RuntimeError("ARCHIVE_ID must be all or an integer from 0 through 31")
-    return [archive_id]
+        raise RuntimeError("ARCHIVE_ID must be all or comma-separated integers from 0 through 31") from exc
+    if not archive_ids or archive_ids[0] < 0 or archive_ids[-1] > 31:
+        raise RuntimeError("ARCHIVE_ID must be all or comma-separated integers from 0 through 31")
+    return archive_ids
 
 
 def load_state() -> dict:

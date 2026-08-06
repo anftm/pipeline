@@ -8,6 +8,10 @@ from scripts import build_fork_parsed
 
 
 class BuildForkParsedTests(unittest.TestCase):
+    def test_selected_archive_ids_supports_a_comma_separated_batch(self):
+        with patch.object(build_fork_parsed, "ARCHIVE_ID", "3,9,10,20,24,9"):
+            self.assertEqual(build_fork_parsed.selected_archive_ids(), [3, 9, 10, 20, 24])
+
     def revisions(self, **changes):
         values = {
             "main": "main-sha", "config": "config-sha", "ocr_cache": "cache-sha",
