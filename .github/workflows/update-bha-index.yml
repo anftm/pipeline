@@ -84,11 +84,29 @@ jobs:
           }
           Path("/tmp/bha-reindex-request.json").write_text(json.dumps(payload))
           PY
-          status=$(curl --silent --show-error --output /tmp/bha-reindex-response.json --write-out '%{http_code}' \
-            --request POST --header "Authorization: Bearer ${BHA_REINDEX_TOKEN}" \
-            --header "Content-Type: application/json" --data-binary @/tmp/bha-reindex-request.json \
-            "${BHA_BASE_URL%/}/api/reindex")
-          test "$status" = "202"
+          accepted=false
+          for attempt in $(seq 1 180); do
+            status=$(curl --silent --show-error --output /tmp/bha-reindex-response.json --write-out '%{http_code}' \
+              --request POST --header "Authorization: Bearer ${BHA_REINDEX_TOKEN}" \
+              --header "Content-Type: application/json" --data-binary @/tmp/bha-reindex-request.json \
+              "${BHA_BASE_URL%/}/api/reindex" || true)
+            if test "$status" = "202"; then
+              accepted=true
+              break
+            fi
+            python3 - "$attempt" "$status" <<'PY'
+          import sys
+          from pathlib import Path
+
+          print(f"reindex attempt {sys.argv[1]} returned HTTP {sys.argv[2]}")
+          print(Path("/tmp/bha-reindex-response.json").read_text(encoding="utf-8", errors="replace"))
+          PY
+            case "$status" in
+              409|429) sleep 10 ;;
+              *) exit 1 ;;
+            esac
+          done
+          test "$accepted" = "true"
       - name: Wait for accepted revisions
         if: steps.revisions.outputs.changed == 'true'
         env:
