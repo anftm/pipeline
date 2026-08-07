@@ -317,9 +317,18 @@ def audit_article(article: Any, path: str, findings: Findings) -> None:
     if dates is not None and not isinstance(dates, list):
         findings.add("dates_not_list", path, "$.dates", str(dates))
     elif isinstance(dates, list):
+        reported_invalid = False
+        reported_non_four_digit_year = False
         for index, date in enumerate(dates):
-            if not valid_date(date):
+            year = date.get("year") if isinstance(date, dict) else None
+            if (not reported_non_four_digit_year and isinstance(year, int)
+                    and not isinstance(year, bool) and not 1000 <= year <= 9999):
+                findings.add("non_four_digit_year", path, f"$.dates[{index}]", str(date))
+                reported_non_four_digit_year = True
+            if not reported_invalid and not valid_date(date):
                 findings.add("invalid_date", path, f"$.dates[{index}]", str(date))
+                reported_invalid = True
+            if reported_invalid and reported_non_four_digit_year:
                 break
 
 

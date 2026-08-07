@@ -146,6 +146,16 @@ class AuditBhaParsedTests(unittest.TestCase):
         }, "article.json", findings)
         self.assertNotIn("author_review_length", findings.counts)
 
+    def test_audit_reports_non_four_digit_year_separately(self):
+        findings = audit_bha_parsed.Findings(sample_limit=5)
+        audit_bha_parsed.audit_article({
+            "title": "日期检查",
+            "dates": [{"year": 16}, {"year": 29, "month": 29, "day": 29}],
+            "parts": [{"text": "正文"}],
+        }, "article.json", findings)
+        self.assertEqual(findings.counts["non_four_digit_year"], 1)
+        self.assertEqual(findings.counts["invalid_date"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()
