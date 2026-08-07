@@ -162,10 +162,45 @@ class BuildForkParsedTests(unittest.TestCase):
             article = Path(directory) / "article.json"
             article.write_text(__import__("json").dumps({
                 "authors": ["甲/乙/某机构", "保留；分号"],
+                "parts": [{"text": "正文"}],
             }, ensure_ascii=False), encoding="utf-8")
             build_fork_parsed.clean_selected_archive_parsed(Path(directory), 24)
             cleaned = __import__("json").loads(article.read_text(encoding="utf-8"))
         self.assertEqual(cleaned["authors"], ["甲", "乙", "某机构", "保留；分号"])
+
+    def test_selected_archives_remove_empty_content_articles_and_tags(self):
+        for archive_id in (10, 20, 24):
+            with self.subTest(archive_id=archive_id), tempfile.TemporaryDirectory() as directory:
+                article = Path(directory) / "article.json"
+                tags = article.with_suffix(".tags")
+                article.write_text(__import__("json").dumps({
+                    "title": "只有标题",
+                    "description": " ",
+                    "comments": ["", None],
+                    "parts": [{"text": "\n"}],
+                }, ensure_ascii=False), encoding="utf-8")
+                tags.write_text("[]", encoding="utf-8")
+                build_fork_parsed.clean_selected_archive_parsed(Path(directory), archive_id)
+                self.assertFalse(article.exists())
+                self.assertFalse(tags.exists())
+
+    def test_selected_archives_keep_any_article_content(self):
+        variants = [
+            {"description": "摘要"},
+            {"comments": ["注释"]},
+            {"parts": [{"text": "正文"}]},
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            parsed = Path(directory)
+            for index, value in enumerate(variants):
+                (parsed / f"article-{index}.json").write_text(
+                    __import__("json").dumps(value, ensure_ascii=False), encoding="utf-8",
+                )
+            build_fork_parsed.clean_selected_archive_parsed(parsed, 24)
+            self.assertEqual(
+                sorted(path.name for path in parsed.glob("*.json")),
+                ["article-0.json", "article-1.json", "article-2.json"],
+            )
 
     def test_cleanup_removes_misparsed_author_metadata_without_guessing_names(self):
         cleaned = build_fork_parsed.clean_legacy_image_markup({

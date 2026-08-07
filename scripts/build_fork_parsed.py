@@ -66,6 +66,7 @@ AUTHOR_MISPARSED_PROSE_RE = re.compile(r"(?:^事由：|简介：.*简介：|图�
 AUTHOR_DELIMITER_PAIRS = (("《", "》"), ("【", "】"), ("『", "』"), ("「", "」"), ("“", "”"))
 ARCHIVE9_JOINED_CREDIT = "王性尧/胡子婴/胡厥文/郭棣活/盛丕华/汤蒂因/荣毅仁/刘靖基/魏如代表的联合发言"
 CLEANUP_ARCHIVE_IDS = {3, 9, 10, 12, 14, 20, 24, 31}
+DROP_EMPTY_CONTENT_ARCHIVE_IDS = {10, 20, 24}
 
 
 def api_request(token: str, method: str, path: str, payload: dict | None = None):
@@ -301,12 +302,31 @@ def clean_legacy_image_markup(value):
     return value
 
 
+def has_article_content(article) -> bool:
+    if not isinstance(article, dict):
+        return False
+    if str(article.get("description") or "").strip():
+        return True
+    comments = article.get("comments")
+    if isinstance(comments, list) and any(str(value or "").strip() for value in comments):
+        return True
+    parts = article.get("parts")
+    return isinstance(parts, list) and any(
+        isinstance(part, dict) and str(part.get("text") or "").strip()
+        for part in parts
+    )
+
+
 def clean_selected_archive_parsed(parsed: Path, archive_id: int) -> None:
     if archive_id not in CLEANUP_ARCHIVE_IDS:
         return
     for article_path in parsed.rglob("*.json"):
         article = json.loads(article_path.read_text(encoding="utf-8"))
         cleaned = clean_legacy_image_markup(article)
+        if archive_id in DROP_EMPTY_CONTENT_ARCHIVE_IDS and not has_article_content(cleaned):
+            article_path.unlink()
+            article_path.with_suffix(".tags").unlink(missing_ok=True)
+            continue
         if archive_id == 9 and isinstance(cleaned, dict) and isinstance(cleaned.get("authors"), list):
             authors = []
             for author in cleaned["authors"]:
