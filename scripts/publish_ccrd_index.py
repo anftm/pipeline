@@ -180,11 +180,14 @@ def main() -> int:
         manifest_path = workdir / "current.json"
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
 
-        read_current(workdir, token)
+        previous_manifest = read_current(workdir, token)
         print(f"Uploading completed generation {generation}", flush=True)
         batch_bucket_files(
             BUCKET,
-            add=[(str(path), f"{prefix}/{source}.sqlite3") for source, path in files.items()],
+            add=[
+                *[(str(path), f"{prefix}/{source}.sqlite3") for source, path in files.items()],
+                (str(manifest_path), f"{prefix}/manifest.json"),
+            ],
             token=token,
         )
         # Publish the pointer only after both immutable database files are present.
@@ -193,10 +196,18 @@ def main() -> int:
         batch_bucket_files(BUCKET, delete=[CURRENT_PATH], token=token)
         batch_bucket_files(BUCKET, add=[(str(manifest_path), CURRENT_PATH)], token=token)
 
+        retained_prefixes = {prefix + "/"}
+        if isinstance(previous_manifest, dict):
+            for details in previous_manifest.get("databases", {}).values():
+                if not isinstance(details, dict):
+                    continue
+                previous_path = details.get("path")
+                if isinstance(previous_path, str) and previous_path.startswith("generations/"):
+                    retained_prefixes.add(previous_path.rsplit("/", 1)[0] + "/")
         stale_paths = sorted(
             item.path
             for item in list_bucket_tree(BUCKET, prefix="generations", recursive=True, token=token)
-            if item.type == "file" and not item.path.startswith(prefix + "/")
+            if item.type == "file" and not any(item.path.startswith(retained) for retained in retained_prefixes)
         )
         if stale_paths:
             batch_bucket_files(BUCKET, delete=stale_paths, token=token)
