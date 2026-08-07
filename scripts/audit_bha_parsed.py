@@ -2,6 +2,7 @@
 """Audit BHA parsed branches without extracting their many small files."""
 
 import argparse
+import calendar
 import json
 import http.client
 import os
@@ -46,6 +47,9 @@ AUTHOR_DELIMITER_PAIRS = (
     ("(", ")"), ("（", "）"), ("[", "]"), ("［", "］"), ("<", ">"),
     ("《", "》"), ("【", "】"), ("『", "』"), ("「", "」"), ("“", "”"),
 )
+REVIEWED_LONG_AUTHORS = {
+    "王性尧、胡子婴、胡厥文、郭棣活、盛丕华、汤蒂因、荣毅仁、刘靖基、魏如代表的联合发言",
+}
 OCR_MARKUP_RE = re.compile(r"〖-?[A-Za-z]{2}[/；;][^〗]{1,80}〗")
 OCR_MARKUP_UNCLOSED_RE = re.compile(r"〖-?[A-Za-z]{2}[/；;][^〗\r\n]{1,80}$")
 TEXT_RULES = {
@@ -223,6 +227,26 @@ def valid_content(article: dict[str, Any]) -> bool:
     )
 
 
+def valid_date(date: Any) -> bool:
+    if not isinstance(date, dict) or not date or set(date) - {"year", "month", "day"}:
+        return False
+    values = [date.get(key) for key in ("year", "month", "day")]
+    if not any(value is not None for value in values):
+        return False
+    if any(value is not None and (not isinstance(value, int) or isinstance(value, bool)) for value in values):
+        return False
+    year, month, day = values
+    if month is not None and not 1 <= month <= 12:
+        return False
+    if day is not None and not 1 <= day <= 31:
+        return False
+    if month is not None and day is not None:
+        reference_year = year if year is not None else 2000
+        if day > calendar.monthrange(reference_year, month)[1]:
+            return False
+    return True
+
+
 def audit_article(article: Any, path: str, findings: Findings) -> None:
     if not isinstance(article, dict):
         findings.add("article_not_object", path)
@@ -283,7 +307,7 @@ def audit_article(article: Any, path: str, findings: Findings) -> None:
                 ),
                 "author_prose_cue": len(author) >= 18 and bool(AUTHOR_PROSE_CUE_RE.search(author)),
                 "author_many_slashes": author.count("/") >= 3,
-                "author_review_length": 40 < len(author) <= 80,
+                "author_review_length": 40 < len(author) <= 80 and author not in REVIEWED_LONG_AUTHORS,
             }
             for issue, matched in review_rules.items():
                 if issue not in author_issues and matched:
@@ -294,13 +318,7 @@ def audit_article(article: Any, path: str, findings: Findings) -> None:
         findings.add("dates_not_list", path, "$.dates", str(dates))
     elif isinstance(dates, list):
         for index, date in enumerate(dates):
-            if not isinstance(date, dict):
-                findings.add("invalid_date", path, f"$.dates[{index}]", str(date))
-                break
-            year, month, day = date.get("year"), date.get("month"), date.get("day")
-            if ((year is not None and not isinstance(year, int))
-                    or (month is not None and (not isinstance(month, int) or not 1 <= month <= 12))
-                    or (day is not None and (not isinstance(day, int) or not 1 <= day <= 31))):
+            if not valid_date(date):
                 findings.add("invalid_date", path, f"$.dates[{index}]", str(date))
                 break
 

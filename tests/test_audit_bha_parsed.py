@@ -120,6 +120,32 @@ class AuditBhaParsedTests(unittest.TestCase):
         self.assertEqual(report["findings"]["orphan_article"], 1)
         self.assertEqual(report["findings"]["invalid_date"], 1)
 
+    def test_valid_date_checks_shape_types_and_calendar_days(self):
+        valid = [
+            {"year": 16}, {"month": 2}, {"day": 31}, {"month": 2, "day": 29},
+            {"year": 2000, "month": 2, "day": 29},
+        ]
+        invalid = [
+            {}, {"year": None}, {"year": True}, {"month": 0}, {"day": 0},
+            {"year": 1900, "month": 2, "day": 29}, {"month": 4, "day": 31},
+            {"year": 1966, "season": 1}, "1966-05-16",
+        ]
+        for value in valid:
+            with self.subTest(value=value):
+                self.assertTrue(audit_bha_parsed.valid_date(value))
+        for value in invalid:
+            with self.subTest(value=value):
+                self.assertFalse(audit_bha_parsed.valid_date(value))
+
+    def test_reviewed_long_author_is_not_reopened(self):
+        findings = audit_bha_parsed.Findings(sample_limit=5)
+        audit_bha_parsed.audit_article({
+            "title": "联合发言",
+            "authors": list(audit_bha_parsed.REVIEWED_LONG_AUTHORS),
+            "parts": [{"text": "正文"}],
+        }, "article.json", findings)
+        self.assertNotIn("author_review_length", findings.counts)
+
 
 if __name__ == "__main__":
     unittest.main()
