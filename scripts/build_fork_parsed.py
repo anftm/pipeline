@@ -22,8 +22,10 @@ UPSTREAM_OWNER = os.environ.get("UPSTREAM_OWNER", "banned-historical-archives")
 REPOSITORY_PREFIX = os.environ.get("BHA_REPOSITORY_PREFIX", "banned-historical-archives")
 STATE_PATH = Path(os.environ.get("BHA_PARSED_INPUT_STATE", "state/bha-parsed-inputs.json"))
 CANDIDATE_PATH = Path(os.environ.get("BHA_PARSED_INPUT_CANDIDATE", "/tmp/bha-parsed-inputs.json"))
+OCR_CONFLICT_PATH = Path(os.environ.get("BHA_OCR_CONFLICT_REPORT", "/tmp/bha-ocr-patch-conflicts.json"))
 ARCHIVE_ID = os.environ.get("ARCHIVE_ID", "all")
 FORCE_REBUILD = os.environ.get("FORCE_REBUILD", "false").lower() == "true"
+ALLOW_OCR_PATCH_REBASE = os.environ.get("ALLOW_OCR_PATCH_REBASE", "false").lower() == "true"
 INPUT_BRANCHES = ("main", "config", "ocr_cache", "ocr_patch")
 PARSED_BRANCH = "parsed"
 PATCH_LAYOUT_VERSION = 2
@@ -127,6 +129,36 @@ def ref_revision(token: str, owner: str, repo: str, branch: str) -> str:
     return revision
 
 
+def commit_tree_revision(token: str, owner: str, repo: str, revision: str) -> str:
+    status, data = api_request(
+        token, "GET", f"{repo_path(owner, repo)}/git/commits/{urllib.parse.quote(revision, safe='')}",
+    )
+    tree = str(data.get("tree", {}).get("sha") or "") if isinstance(data, dict) else ""
+    if status != 200 or not tree:
+        raise RuntimeError(f"cannot read {owner}/{repo} commit tree {revision}: HTTP {status}")
+    return tree
+
+
+def ocr_patch_files(token: str, owner: str, repo: str, revision: str) -> dict[str, str]:
+    tree = commit_tree_revision(token, owner, repo, revision)
+    status, data = api_request(
+        token, "GET", f"{repo_path(owner, repo)}/git/trees/{tree}?recursive=1",
+    )
+    if status != 200 or not isinstance(data, dict):
+        raise RuntimeError(f"cannot read {owner}/{repo} OCR patch tree: HTTP {status}")
+    if data.get("truncated"):
+        raise RuntimeError(f"{owner}/{repo} OCR patch tree is truncated")
+    items = data.get("tree")
+    if not isinstance(items, list):
+        raise RuntimeError(f"{owner}/{repo} OCR patch tree is invalid")
+    return {
+        str(item["path"]): str(item["sha"])
+        for item in items
+        if isinstance(item, dict) and item.get("type") == "blob"
+        and str(item.get("path") or "").endswith(".ts") and item.get("sha")
+    }
+
+
 def selected_archive_ids() -> list[int]:
     if ARCHIVE_ID == "all":
         return list(range(32))
@@ -159,6 +191,144 @@ def source_snapshot(revisions: dict[str, str], helper_revision: str) -> dict[str
 
 def needs_local_build(mirror: dict[str, str], upstream: dict[str, str]) -> bool:
     return any(mirror[branch] != upstream[branch] for branch in INPUT_BRANCHES)
+
+
+def ocr_patch_rebase_conflict(
+    token: str,
+    archive_id: int,
+    previous: dict | None,
+    mirror: dict[str, str],
+    upstream: dict[str, str],
+) -> dict | None:
+    if not previous or previous.get("ocr_cache") == mirror["ocr_cache"]:
+        return None
+    repo = f"{REPOSITORY_PREFIX}{archive_id}"
+    mirror_files = ocr_patch_files(token, MIRROR_OWNER, repo, mirror["ocr_patch"])
+    upstream_files = ocr_patch_files(token, UPSTREAM_OWNER, repo, upstream["ocr_patch"])
+    changed_paths = sorted(
+        path for path, blob in mirror_files.items()
+        if upstream_files.get(path) != blob
+    )
+    if not changed_paths:
+        return None
+    if ALLOW_OCR_PATCH_REBASE:
+        print(
+            f"archive {archive_id}: accepting reviewed OCR baseline change "
+            f"{previous.get('ocr_cache')} -> {mirror['ocr_cache']}",
+        )
+        return None
+    articles = []
+    for path in changed_paths:
+        match = re.fullmatch(r"(?:archives\d+/)?\[([^][]+)]\[([^][]+)]\.ts", path)
+        article_id, publication_id = match.groups() if match else (None, None)
+        articles.append({
+            "path": path,
+            "article_id": article_id,
+            "publication_id": publication_id,
+            "doc_id": (
+                f"{archive_id}:{len(article_id)}:{article_id}:{publication_id}"
+                if article_id is not None and publication_id is not None else None
+            ),
+        })
+    return {
+        "archive_id": archive_id,
+        "repository": repo,
+        "old_ocr_cache": previous.get("ocr_cache"),
+        "new_ocr_cache": mirror["ocr_cache"],
+        "mirror_ocr_patch": mirror["ocr_patch"],
+        "upstream_ocr_patch": upstream["ocr_patch"],
+        "articles": articles,
+    }
+
+
+def write_ocr_conflicts(conflicts: list[dict]) -> None:
+    OCR_CONFLICT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    OCR_CONFLICT_PATH.write_text(
+        json.dumps({"version": 1, "conflicts": conflicts}, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def article_text(article: dict) -> str:
+    values = []
+    if article.get("description"):
+        values.append(str(article["description"]))
+    for part in article.get("parts") or []:
+        if isinstance(part, dict) and part.get("text"):
+            values.append(str(part["text"]))
+    values.extend(str(comment) for comment in article.get("comments") or [] if comment)
+    return "\n".join(values)
+
+
+def parsed_article(parsed: Path, article_id: str, publication_id: str) -> dict | None:
+    matches = []
+    for metadata_path in parsed.glob("*/*/*.metadata"):
+        if metadata_path.stem == publication_id:
+            matches.extend(metadata_path.parent.glob(f"*/{article_id}.json"))
+    if len(matches) > 1:
+        raise RuntimeError(f"multiple parsed articles match {article_id}/{publication_id}")
+    if not matches:
+        return None
+    article = json.loads(matches[0].read_text(encoding="utf-8"))
+    if not isinstance(article, dict):
+        raise RuntimeError(f"parsed article is not an object: {matches[0]}")
+    return {"title": str(article.get("title") or article_id), "content": article_text(article)}
+
+
+def build_ocr_conflict_previews(
+    token: str,
+    helper: Path,
+    root: Path,
+    conflict: dict,
+    mirror: dict[str, str],
+    upstream: dict[str, str],
+) -> None:
+    archive_id = int(conflict["archive_id"])
+    repo = str(conflict["repository"])
+    mirror_url = f"https://github.com/{MIRROR_OWNER}/{repo}.git"
+    upstream_url = f"https://github.com/{UPSTREAM_OWNER}/{repo}.git"
+    env = git_environment(token)
+    inputs = {}
+    for branch in ("main", "config", "ocr_cache"):
+        target = root / f"{repo}-conflict-{branch}"
+        clone_branch(mirror_url, branch, target, env, mirror[branch])
+        inputs[branch] = target
+    local_patch = root / f"{repo}-conflict-local-patch"
+    upstream_patch = root / f"{repo}-conflict-upstream-patch"
+    clone_branch(mirror_url, "ocr_patch", local_patch, env, mirror["ocr_patch"])
+    clone_branch(upstream_url, "ocr_patch", upstream_patch, env, upstream["ocr_patch"])
+    variants = (
+        ("new_ocr", upstream_patch),
+        ("patched_candidate", local_patch),
+    )
+    outputs = {}
+    for key, patch_source in variants:
+        patch_input = prepare_patch_input(
+            patch_source, root / f"{repo}-conflict-{key}-patch-input", archive_id,
+        )
+        output_root = root / f"{repo}-conflict-{key}-parsed"
+        output_root.mkdir()
+        try:
+            run_in_container(root, helper, [
+                "npm", "run", "build_parsed", "--",
+                str(inputs["config"]), str(inputs["ocr_cache"]), str(patch_input),
+                str(output_root), str(inputs["main"]),
+            ])
+            clean_selected_archive_parsed(output_root, archive_id)
+            outputs[key] = output_root
+        except (OSError, subprocess.CalledProcessError, RuntimeError) as exc:
+            conflict[f"{key}_error"] = str(exc)
+    for article in conflict.get("articles") or []:
+        article_id = article.get("article_id")
+        publication_id = article.get("publication_id")
+        if not article_id or not publication_id:
+            continue
+        for key, output_root in outputs.items():
+            value = parsed_article(output_root, article_id, publication_id)
+            if value is not None:
+                article[key] = value
+            else:
+                article[f"{key}_error"] = "article was not generated"
 
 
 def git_environment(token: str) -> dict[str, str]:
@@ -470,12 +640,39 @@ def main() -> None:
     built = []
     synced = []
     if changed:
+        upstreams = {}
+        conflicts = []
+        for archive_id in changed:
+            repo = f"{REPOSITORY_PREFIX}{archive_id}"
+            upstream = branch_revisions(token, UPSTREAM_OWNER, repo)
+            upstreams[archive_id] = upstream
+            if FORCE_REBUILD or needs_local_build(current[archive_id], upstream):
+                conflict = ocr_patch_rebase_conflict(
+                    token, archive_id, archives.get(str(archive_id)), current[archive_id], upstream,
+                )
+                if conflict:
+                    conflicts.append(conflict)
+        if conflicts:
+            with tempfile.TemporaryDirectory(prefix="bha-ocr-conflicts-") as temporary:
+                root = Path(temporary)
+                helper = prepare_helper(root, git_environment(token), helper_revision)
+                for conflict in conflicts:
+                    archive_id = int(conflict["archive_id"])
+                    build_ocr_conflict_previews(
+                        token, helper, root, conflict, current[archive_id], upstreams[archive_id],
+                    )
+            write_ocr_conflicts(conflicts)
+            archive_list = ", ".join(str(item["archive_id"]) for item in conflicts)
+            raise RuntimeError(
+                f"OCR baseline update conflicts with local proofreading in archives {archive_list}; "
+                f"see {OCR_CONFLICT_PATH}, then rerun reviewed archives with ALLOW_OCR_PATCH_REBASE=true"
+            )
         with tempfile.TemporaryDirectory(prefix="bha-parsed-") as temporary:
             root = Path(temporary)
             helper = None
             for archive_id in changed:
                 repo = f"{REPOSITORY_PREFIX}{archive_id}"
-                upstream = branch_revisions(token, UPSTREAM_OWNER, repo)
+                upstream = upstreams[archive_id]
                 if FORCE_REBUILD or needs_local_build(current[archive_id], upstream):
                     helper = helper or prepare_helper(root, git_environment(token), helper_revision)
                     build_archive(token, helper, root, archive_id, current[archive_id])

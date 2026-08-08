@@ -3,6 +3,8 @@ name: Update BHA index
 on:
   schedule:
     - cron: "*/15 * * * *"
+  repository_dispatch:
+    types: [ocr-rebase-reviewed]
   workflow_dispatch:
     inputs:
       archive_id:
@@ -12,6 +14,11 @@ on:
         type: string
       force_rebuild:
         description: Force regeneration of the selected parsed archive
+        required: false
+        default: false
+        type: boolean
+      allow_ocr_patch_rebase:
+        description: Accept a reviewed OCR baseline update for selected archives with local patches
         required: false
         default: false
         type: boolean
@@ -36,9 +43,18 @@ jobs:
         id: parsed
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
-          ARCHIVE_ID: ${{ inputs.archive_id || 'all' }}
+          ARCHIVE_ID: ${{ github.event.client_payload.archive_id || inputs.archive_id || 'all' }}
           FORCE_REBUILD: ${{ inputs.force_rebuild || 'false' }}
+          ALLOW_OCR_PATCH_REBASE: ${{ github.event.client_payload.allow_ocr_patch_rebase || inputs.allow_ocr_patch_rebase || 'false' }}
         run: python3 scripts/build_fork_parsed.py
+      - name: Maintain OCR conflict issues
+        if: always()
+        env:
+          TRACKER_TOKEN: ${{ github.token }}
+          BUILD_OUTCOME: ${{ steps.parsed.outcome }}
+          ARCHIVE_ID: ${{ github.event.client_payload.archive_id || inputs.archive_id || 'all' }}
+          BHA_BASE_URL: ${{ vars.BHA_BASE_URL || 'https://vomebook-bha-search.hf.space' }}
+        run: python3 scripts/report_ocr_patch_conflicts.py
       - name: Record parsed input state
         if: steps.parsed.outputs.state_changed == 'true'
         env:

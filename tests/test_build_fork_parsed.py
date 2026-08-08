@@ -66,6 +66,93 @@ class BuildForkParsedTests(unittest.TestCase):
         self.assertEqual(request.call_args_list[0].args[2], "/repos/owner/repo/branches?per_page=100&page=1")
         self.assertEqual(request.call_args_list[1].args[2], "/repos/owner/repo/branches?per_page=100&page=2")
 
+    def test_commit_tree_revision_reads_tree_identity(self):
+        with patch.object(build_fork_parsed, "api_request", return_value=(200, {"tree": {"sha": "tree-sha"}})) as request:
+            tree = build_fork_parsed.commit_tree_revision("token", "owner", "repo", "commit/sh a")
+        self.assertEqual(tree, "tree-sha")
+        self.assertEqual(request.call_args.args[2], "/repos/owner/repo/git/commits/commit%2Fsh%20a")
+
+    def test_ocr_rebase_guard_ignores_unchanged_ocr_cache(self):
+        current = self.revisions()
+        with patch.object(build_fork_parsed, "ocr_patch_files") as files:
+            conflict = build_fork_parsed.ocr_patch_rebase_conflict(
+                "token", 3, {"ocr_cache": current["ocr_cache"]}, current, self.revisions(ocr_patch="upstream-patch"),
+            )
+        self.assertIsNone(conflict)
+        files.assert_not_called()
+
+    def test_ocr_rebase_guard_allows_identical_patch_trees(self):
+        current = self.revisions(ocr_cache="new-cache", ocr_patch="fork-patch")
+        upstream = self.revisions(ocr_cache="new-cache", ocr_patch="upstream-patch")
+        files = {"[article][publication].ts": "same-blob"}
+        with patch.object(build_fork_parsed, "ocr_patch_files", side_effect=[files, files]):
+            conflict = build_fork_parsed.ocr_patch_rebase_conflict(
+                "token", 3, {"ocr_cache": "old-cache"}, current, upstream,
+            )
+        self.assertIsNone(conflict)
+
+    def test_ocr_rebase_guard_blocks_local_patches_on_new_ocr(self):
+        current = self.revisions(ocr_cache="new-cache", ocr_patch="fork-patch")
+        upstream = self.revisions(ocr_cache="new-cache", ocr_patch="upstream-patch")
+        with patch.object(build_fork_parsed, "ocr_patch_files", side_effect=[
+                    {"[article][publication].ts": "fork-blob"},
+                    {"[article][publication].ts": "upstream-blob"},
+                ]), \
+                patch.object(build_fork_parsed, "ALLOW_OCR_PATCH_REBASE", False):
+            conflict = build_fork_parsed.ocr_patch_rebase_conflict(
+                "token", 3, {"ocr_cache": "old-cache"}, current, upstream,
+            )
+        self.assertEqual(conflict["articles"], [{
+            "path": "[article][publication].ts",
+            "article_id": "article",
+            "publication_id": "publication",
+            "doc_id": "3:7:article:publication",
+        }])
+
+    def test_ocr_rebase_guard_requires_dedicated_override(self):
+        current = self.revisions(ocr_cache="new-cache", ocr_patch="fork-patch")
+        upstream = self.revisions(ocr_cache="new-cache", ocr_patch="upstream-patch")
+        with patch.object(build_fork_parsed, "ocr_patch_files", side_effect=[
+                    {"[article][publication].ts": "fork-blob"},
+                    {"[article][publication].ts": "upstream-blob"},
+                ]), \
+                patch.object(build_fork_parsed, "ALLOW_OCR_PATCH_REBASE", True):
+            conflict = build_fork_parsed.ocr_patch_rebase_conflict(
+                "token", 3, {"ocr_cache": "old-cache"}, current, upstream,
+            )
+        self.assertIsNone(conflict)
+
+    def test_ocr_patch_files_reads_only_typescript_blobs(self):
+        tree = {
+            "tree": [
+                {"path": "[a][p].ts", "type": "blob", "sha": "patch"},
+                {"path": "README.md", "type": "blob", "sha": "readme"},
+                {"path": "nested", "type": "tree", "sha": "directory"},
+            ],
+            "truncated": False,
+        }
+        with patch.object(build_fork_parsed, "commit_tree_revision", return_value="tree-sha"), \
+                patch.object(build_fork_parsed, "api_request", return_value=(200, tree)):
+            files = build_fork_parsed.ocr_patch_files("token", "owner", "repo", "revision")
+        self.assertEqual(files, {"[a][p].ts": "patch"})
+
+    def test_parsed_article_finds_publication_and_renders_complete_text(self):
+        with tempfile.TemporaryDirectory() as directory:
+            parsed = Path(directory)
+            book = parsed / "pub" / "publication"
+            article_root = book / "art"
+            article_root.mkdir(parents=True)
+            (book / "publication.metadata").write_text("{}", encoding="utf-8")
+            (article_root / "article.json").write_text(__import__("json").dumps({
+                "title": "文章标题", "description": "说明",
+                "parts": [{"text": "第一段"}, {"text": "第二段"}],
+                "comments": ["注释"],
+            }, ensure_ascii=False), encoding="utf-8")
+            article = build_fork_parsed.parsed_article(parsed, "article", "publication")
+        self.assertEqual(article, {
+            "title": "文章标题", "content": "说明\n第一段\n第二段\n注释",
+        })
+
     def test_prepare_patch_input_maps_legacy_archive_directory_to_root(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "source"
