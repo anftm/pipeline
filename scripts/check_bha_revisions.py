@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Compare anftm parsed branch revisions and write a candidate state file."""
 
+import http.client
 import json
 import os
 import subprocess
@@ -23,6 +24,33 @@ GITHUB_OUTPUT = os.environ.get("GITHUB_OUTPUT")
 GIT_PROPAGATION_TIMEOUT_SECONDS = int(os.environ.get("BHA_GIT_PROPAGATION_TIMEOUT", "600"))
 GIT_PROPAGATION_POLL_SECONDS = int(os.environ.get("BHA_GIT_PROPAGATION_POLL", "10"))
 REVISION_WORKERS = int(os.environ.get("BHA_REVISION_WORKERS", "8"))
+GITHUB_API_ATTEMPTS = int(os.environ.get("BHA_GITHUB_API_ATTEMPTS", "4"))
+GITHUB_API_RETRY_SECONDS = float(os.environ.get("BHA_GITHUB_API_RETRY_SECONDS", "1"))
+RETRYABLE_HTTP_STATUSES = {429, 500, 502, 503, 504}
+
+
+def github_json(request: urllib.request.Request, label: str) -> dict:
+    for attempt in range(GITHUB_API_ATTEMPTS):
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                return json.load(response)
+        except urllib.error.HTTPError as exc:
+            if exc.code not in RETRYABLE_HTTP_STATUSES:
+                raise RuntimeError(f"{label} failed with HTTP {exc.code}") from exc
+            error: Exception = exc
+        except (
+            urllib.error.URLError,
+            http.client.RemoteDisconnected,
+            http.client.IncompleteRead,
+            ConnectionError,
+            TimeoutError,
+            json.JSONDecodeError,
+        ) as exc:
+            error = exc
+        if attempt + 1 == GITHUB_API_ATTEMPTS:
+            raise RuntimeError(f"{label} failed after {GITHUB_API_ATTEMPTS} attempts: {error}") from error
+        time.sleep(GITHUB_API_RETRY_SECONDS * (2 ** attempt))
+    raise AssertionError("unreachable")
 
 
 def revision(token: str, archive_id: int) -> str:
@@ -35,11 +63,7 @@ def revision(token: str, archive_id: int) -> str:
     request.add_header("User-Agent", "anftm-pipeline-bha-revisions/1.0")
     if token:
         request.add_header("Authorization", f"Bearer {token}")
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            data = json.load(response)
-    except urllib.error.HTTPError as exc:
-        raise RuntimeError(f"{repo}/parsed lookup failed with HTTP {exc.code}") from exc
+    data = github_json(request, f"{repo}/parsed lookup")
     value = str(data.get("object", {}).get("sha") or "")
     if len(value) != 40 or any(char not in "0123456789abcdef" for char in value):
         raise RuntimeError(f"{repo}/parsed returned an invalid revision")
@@ -56,11 +80,7 @@ def tree_revision(token: str, archive_id: int, commit: str) -> str:
     request.add_header("User-Agent", "anftm-pipeline-bha-revisions/1.0")
     if token:
         request.add_header("Authorization", f"Bearer {token}")
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            data = json.load(response)
-    except urllib.error.HTTPError as exc:
-        raise RuntimeError(f"{repo}/parsed commit lookup failed with HTTP {exc.code}") from exc
+    data = github_json(request, f"{repo}/parsed commit lookup")
     value = str(data.get("tree", {}).get("sha") or "")
     if len(value) != 40 or any(char not in "0123456789abcdef" for char in value):
         raise RuntimeError(f"{repo}/parsed returned an invalid tree revision")
