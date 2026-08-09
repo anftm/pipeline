@@ -1,11 +1,11 @@
 {
   "archives": {
     "0": {
-      "config": "11360d3698885c9aaa2a0605850c516862c1aebc",
+      "config": "2c0fc28f317170b8c77c7496abe41e0aa37174d5",
       "helper": "50ba1b1703a224e9e64961ae6e555d9a32517b33",
       "main": "d302baa71d80d9996be6b0af324b886b8fe8d8f0",
       "ocr_cache": "5b0f4565c959ba5b594037b8f8d0bbc62018e06d",
-      "ocr_patch": "0814bf868e57429cb49ad502866c1b525a3a3db1",
+      "ocr_patch": "58aa4113e498883cf413342d60dc03183292bff6",
       "patch_layout": "2"
     },
     "1": {
