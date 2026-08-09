@@ -21,6 +21,8 @@ REPOSITORY_PREFIX = os.environ.get(
     "PROOFREAD_REPOSITORY_PREFIX", "banned-historical-archives"
 )
 TRACKER_REPOSITORY = os.environ.get("PROOFREAD_TRACKER_REPOSITORY") or os.environ.get("GITHUB_REPOSITORY", "anftm/pipeline")
+MAX_SEGMENTED_PAYLOAD_CHARACTERS = 2_000_000
+MAX_SEGMENTED_PAYLOAD_BLOBS = 64
 
 
 def api_request(token, method, path, payload=None):
@@ -400,22 +402,25 @@ METADATA_FIELD_LABELS = {
 }
 
 def apply_text_delta(text, delta):
-    prefix = 0
-    removed = 0
-    inserted = ""
-    seen_insert = False
+    source = text.encode("utf-16-le")
+    cursor = 0
+    output = bytearray()
     for token in delta.split("\t") if delta else []:
         if not token:
             continue
         operation, value = token[0], token[1:]
-        if operation == "=" and not seen_insert and value.isdigit():
-            prefix = int(value)
+        if operation == "=" and value.isdigit():
+            size = int(value) * 2
+            output.extend(source[cursor:cursor + size])
+            cursor += size
         elif operation == "-" and value.isdigit():
-            removed = int(value)
+            cursor += int(value) * 2
         elif operation == "+":
-            seen_insert = True
             inserted = urllib.parse.unquote_to_bytes(value.replace("+", "%2B")).decode("utf-8")
-    return text[:prefix] + inserted + text[prefix + removed:]
+            output.extend(inserted.encode("utf-16-le"))
+    if cursor != len(source):
+        fail("delta length does not match source text")
+    return output.decode("utf-16-le")
 
 
 def article_part_text(article, index):
@@ -861,6 +866,53 @@ def update_config(existing, request):
     return result["content"], result["article_id"]
 
 
+def segmented_request(request):
+    blobs = request.get("payload_blobs")
+    if blobs is None:
+        return request
+    if set(request) - {"payload_blobs", "payload_sha256", "payload_characters", "request_id"}:
+        fail("segmented workflow payload has unexpected fields")
+    if not isinstance(blobs, list) or not 1 <= len(blobs) <= MAX_SEGMENTED_PAYLOAD_BLOBS:
+        fail("segmented workflow payload has an invalid blob list")
+    expected_hash = request.get("payload_sha256")
+    expected_characters = request.get("payload_characters")
+    if not isinstance(expected_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_hash):
+        fail("segmented workflow payload has an invalid hash")
+    if not isinstance(expected_characters, int) or not 1 <= expected_characters <= MAX_SEGMENTED_PAYLOAD_CHARACTERS:
+        fail("segmented workflow payload has an invalid character count")
+    token = os.environ.get("TRACKER_TOKEN", "")
+    if not token:
+        fail("TRACKER_TOKEN is required for segmented workflow payloads")
+    chunks = []
+    for sha in blobs:
+        if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40,64}", sha):
+            fail("segmented workflow payload has an invalid blob SHA")
+        data = response_or_fail(
+            token, "GET", f"{full_repo_path(TRACKER_REPOSITORY)}/git/blobs/{sha}", (200,),
+        )
+        if data.get("encoding") != "base64" or not isinstance(data.get("content"), str):
+            fail("segmented workflow payload blob is invalid")
+        try:
+            encoded = "".join(data["content"].split())
+            chunks.append(base64.b64decode(encoded, validate=True).decode("utf-8"))
+        except (ValueError, UnicodeDecodeError) as exc:
+            fail(f"segmented workflow payload blob cannot be decoded: {exc}")
+    serialized = "".join(chunks)
+    if len(serialized) != expected_characters:
+        fail("segmented workflow payload character count does not match")
+    if hashlib.sha256(serialized.encode("utf-8")).hexdigest() != expected_hash:
+        fail("segmented workflow payload hash does not match")
+    try:
+        restored = json.loads(serialized)
+    except json.JSONDecodeError as exc:
+        fail(f"segmented workflow payload is invalid JSON: {exc}")
+    if not isinstance(restored, dict):
+        fail("segmented workflow payload must restore an object")
+    if request.get("request_id") != restored.get("request_id"):
+        fail("segmented workflow payload request ID does not match")
+    return restored
+
+
 def load_request():
     event_path = os.environ.get("GITHUB_EVENT_PATH")
     if not event_path:
@@ -870,7 +922,7 @@ def load_request():
     request = event.get("inputs") or event.get("client_payload") or {}
     if not isinstance(request, dict):
         fail("workflow payload must be an object")
-    return request
+    return segmented_request(request)
 
 
 def main():
