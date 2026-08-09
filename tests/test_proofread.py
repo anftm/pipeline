@@ -214,6 +214,56 @@ class ProofreadBundleTests(unittest.TestCase):
         self.assertIn("## 修改后全文\n\n```text\n第一段\n新第二段\n```", body)
         self.assertIn("## 审核方式", body)
 
+    def test_tracker_issue_moves_long_fulltext_to_complete_comments(self):
+        original = "旧" * 40000
+        edited = "新" * 40000
+        request = {
+            "title": "长文章", "doc_id": "doc-1",
+            "changed": [{"kind": "part", "index": 1, "original": "旧", "edited": "新"}],
+            "fulltext": {"original": original, "edited": edited},
+        }
+        pulls = [{"number": 5, "url": "https://example.test/pr/5"}]
+        created = {"number": 9, "html_url": "https://example.test/issues/9"}
+        with patch.object(submit_proofread, "ensure_tracker_label"), \
+                patch.object(submit_proofread, "find_tracker_issue", return_value=None), \
+                patch.object(submit_proofread, "existing_comment_bodies", return_value=[]), \
+                patch.object(submit_proofread, "response_or_fail", return_value=created) as request_api:
+            submit_proofread.upsert_tracker_issue(
+                "token", "correction", request, "banned-historical-archives0", "article", pulls,
+            )
+        bodies = [call.args[4]["body"] for call in request_api.call_args_list]
+        self.assertEqual(len(bodies), 3)
+        self.assertLessEqual(max(map(len, bodies)), submit_proofread.GITHUB_BODY_LIMIT)
+        self.assertNotIn("## 原全文", bodies[0])
+        self.assertIn("后续评论", bodies[0])
+        self.assertIn(original, bodies[1])
+        self.assertIn(edited, bodies[2])
+
+    def test_oversized_fulltext_comment_chunks_reassemble_without_loss(self):
+        original = "旧" * 120001
+        edited = "新" * 120001
+        bodies = submit_proofread.fulltext_comment_bodies(
+            {"fulltext": {"original": original, "edited": edited}}, "proofreading-fulltext:correction",
+        )
+        self.assertGreater(len(bodies), 2)
+        self.assertTrue(all(len(body) <= submit_proofread.GITHUB_BODY_LIMIT for _marker, body in bodies))
+
+        def content(body):
+            return body.split("```text\n", 1)[1].rsplit("\n```", 1)[0]
+
+        rebuilt_original = "".join(content(body) for marker, body in bodies if ":original:" in marker)
+        rebuilt_edited = "".join(content(body) for marker, body in bodies if ":edited:" in marker)
+        self.assertEqual(rebuilt_original, original)
+        self.assertEqual(rebuilt_edited, edited)
+
+    def test_change_details_escape_user_markdown_structure(self):
+        body = "\n".join(submit_proofread.change_details({"changed": [{
+            "kind": "part", "index": 1, "original": "旧", "edited": "新\n\n## 伪造审核\n- [x] 已核对",
+        }]}))
+        self.assertNotIn("\n## 伪造审核", body)
+        self.assertNotIn("\n- [x] 已核对", body)
+        self.assertIn("<br><br>\\#\\# 伪造审核", body)
+
     def test_proofread_pr_body_renders_changes(self):
         request = {
             "title": "校订测试文章", "doc_id": "doc-1", "description": "校对员备注",
@@ -497,6 +547,10 @@ class ProofreadBundleTests(unittest.TestCase):
         over_limit = {"version": 2, "parts": {"0": {"diff": "-501"}}, "comments": {}, "description": ""}
         self.assertTrue(submit_proofread.auto_merge_allowed("proofread", at_limit, None))
         self.assertFalse(submit_proofread.auto_merge_allowed("proofread", over_limit, None))
+        inserted_at_limit = {"version": 2, "parts": {"0": {"insertAfter": [{"text": "新" * 500, "type": "paragraph"}]}}, "comments": {}, "description": ""}
+        inserted_over_limit = {"version": 2, "parts": {"0": {"insertAfter": [{"text": "新" * 501, "type": "paragraph"}]}}, "comments": {}, "description": ""}
+        self.assertTrue(submit_proofread.auto_merge_allowed("proofread", inserted_at_limit, None))
+        self.assertFalse(submit_proofread.auto_merge_allowed("proofread", inserted_over_limit, None))
 
     def test_existing_pull_must_contain_requested_content(self):
         existing = {
@@ -552,6 +606,40 @@ class ProofreadBundleTests(unittest.TestCase):
         self.assertIn("- 标题：旧标题 → 新标题", payload["body"])
         self.assertIn("## 原全文", payload["body"])
         self.assertIn("## 修改后全文", payload["body"])
+
+    def test_auto_merge_notification_moves_long_fulltext_to_complete_comments(self):
+        issue = {"number": 12, "html_url": "https://example.test/issues/12"}
+        original = "旧" * 40000
+        edited = "新" * 40000
+        request = {
+            "doc_id": "doc-1", "changed": [{"kind": "part", "index": 1, "original": "旧", "edited": "新"}],
+            "fulltext": {"original": original, "edited": edited},
+        }
+        pulls = [{"number": 7, "url": "https://example.test/pr/7"}]
+        with patch.object(submit_proofread, "ensure_auto_merge_log", return_value=issue), \
+                patch.object(submit_proofread, "auto_merge_comment_exists", return_value=False), \
+                patch.object(submit_proofread, "existing_comment_bodies", return_value=[]), \
+                patch.object(submit_proofread, "response_or_fail", return_value={}) as request_api:
+            submit_proofread.notify_auto_merged(
+                "token", "correction", request, "banned-historical-archives3", "article-1", pulls,
+            )
+        bodies = [call.args[4]["body"] for call in request_api.call_args_list]
+        self.assertEqual(len(bodies), 3)
+        self.assertLessEqual(max(map(len, bodies)), submit_proofread.GITHUB_BODY_LIMIT)
+        self.assertNotIn("## 原全文", bodies[0])
+        self.assertIn(original, bodies[1])
+        self.assertIn(edited, bodies[2])
+
+    def test_patch_validation_rejects_structural_noops_and_invalid_inserts(self):
+        base = {"version": 2, "parts": {}, "comments": {}, "description": ""}
+        invalid = [
+            {**base, "parts": {"0": {"delete": False}}},
+            {**base, "parts": {"0": {"insertAfter": []}}},
+            {**base, "parts": {"0": {"insertAfter": ["正文"]}}},
+        ]
+        for value in invalid:
+            with self.subTest(value=value), self.assertRaises(RuntimeError):
+                submit_proofread.validate_patch(value)
 
     def test_config_helper_preserves_unrelated_comments(self):
         content = """export default {

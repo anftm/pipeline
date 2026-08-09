@@ -23,6 +23,7 @@ REPOSITORY_PREFIX = os.environ.get(
 TRACKER_REPOSITORY = os.environ.get("PROOFREAD_TRACKER_REPOSITORY") or os.environ.get("GITHUB_REPOSITORY", "anftm/pipeline")
 MAX_SEGMENTED_PAYLOAD_CHARACTERS = 2_000_000
 MAX_SEGMENTED_PAYLOAD_BLOBS = 64
+GITHUB_BODY_LIMIT = 60_000
 
 
 def api_request(token, method, path, payload=None):
@@ -311,11 +312,28 @@ def validate_patch(patch):
                 fail("patch operation is invalid")
             if "delete" in change and not isinstance(change["delete"], bool):
                 fail("patch delete must be boolean")
+            if change.get("delete") is False:
+                fail("patch delete must describe a deletion")
+            if collection is patch["parts"] and change.get("delete") and any(key in change for key in ("diff", "type")):
+                fail("deleted part cannot also be changed")
             if "diff" in change and not isinstance(change["diff"], str):
                 fail("patch diff must be a string")
+            if "type" in change and not isinstance(change["type"], str):
+                fail("patch type must be a string")
             for key in ("insertBefore", "insertAfter"):
-                if key in change and not isinstance(change[key], list):
-                    fail("patch insert operation must be a list")
+                if key not in change:
+                    continue
+                if not isinstance(change[key], list) or not change[key]:
+                    fail("patch insert operation must be a non-empty list")
+                for value in change[key]:
+                    allowed_insert = {"text", "type"} if collection is patch["parts"] else {"id", "text"}
+                    if (
+                        not isinstance(value, dict)
+                        or set(value) - allowed_insert
+                        or not isinstance(value.get("text"), str)
+                        or (collection is patch["parts"] and not isinstance(value.get("type"), str))
+                    ):
+                        fail("patch insert item is invalid")
     if not patch["parts"] and not patch["comments"] and not patch.get("description") and "newComments" not in patch:
         fail("patch contains no changes")
 
@@ -346,6 +364,10 @@ def diff_cost(diff):
     return total
 
 
+def utf16_length(value):
+    return len(value.encode("utf-16-le")) // 2
+
+
 def auto_merge_allowed(kind, patch, metadata):
     if kind != "proofread" or not isinstance(patch, dict) or isinstance(metadata, dict):
         return False
@@ -364,26 +386,26 @@ def auto_merge_allowed(kind, patch, metadata):
             return False
         if set(change) - {"diff", "type", "insertBefore", "insertAfter", "delete"}:
             return False
-        if "diff" not in change:
-            if set(change) == {"delete"} and isinstance(change["delete"], bool):
-                delta -= 1
-                continue
-            if set(change) == {"type"} and isinstance(change["type"], str):
-                continue
-            return False
-        if not isinstance(change["diff"], str):
+        if "delete" in change and change["delete"] is not True:
             return False
         if change.get("delete"):
             delta -= 1
         for key in ("insertBefore", "insertAfter"):
             if key in change:
-                if not isinstance(change[key], list):
+                if not isinstance(change[key], list) or not change[key]:
                     return False
                 delta += len(change[key])
-        partial = diff_cost(change["diff"])
-        if partial is None:
-            return False
-        cost += partial
+                for part in change[key]:
+                    if not isinstance(part, dict) or not isinstance(part.get("text"), str):
+                        return False
+                    cost += utf16_length(part["text"])
+        if "diff" in change:
+            if not isinstance(change["diff"], str):
+                return False
+            partial = diff_cost(change["diff"])
+            if partial is None:
+                return False
+            cost += partial
     for change in comments.values():
         if not isinstance(change, dict) or set(change) != {"diff"} or not isinstance(change.get("diff"), str):
             return False
@@ -492,7 +514,9 @@ def fetch_bha_changes(request):
         change = patch["parts"][raw_index]
         original = article_part_text(article, index)
         if "diff" in change:
-            changes.append({"kind": "part", "index": index + 1, "original": original, "edited": apply_text_delta(original, change["diff"])})
+            edited = apply_text_delta(original, change["diff"])
+            if edited != original:
+                changes.append({"kind": "part", "index": index + 1, "original": original, "edited": edited})
         if change.get("delete"):
             changes.append({"kind": "part", "index": index + 1, "delete": True, "original": original})
         for key in ("insertBefore", "insertAfter"):
@@ -508,25 +532,31 @@ def fetch_bha_changes(request):
         change = patch["comments"][raw_index]
         original = str(comments[index] or "") if 0 <= index < len(comments) else ""
         if "diff" in change:
-            changes.append({"kind": "comment", "index": index + 1, "original": original, "edited": apply_text_delta(original, change["diff"])})
+            edited = apply_text_delta(original, change["diff"])
+            if edited != original:
+                changes.append({"kind": "comment", "index": index + 1, "original": original, "edited": edited})
         if change.get("delete"):
             changes.append({"kind": "comment", "index": index + 1, "delete": True, "original": original})
     for offset, text in enumerate(patch.get("newComments") or [], start=1):
         changes.append({"kind": "new_comment", "index": len(comments) + offset, "text": text})
     if patch.get("description"):
         original = str(article.get("description") or "")
-        changes.append({"kind": "description", "original": original, "edited": apply_text_delta(original, patch["description"])})
+        edited = apply_text_delta(original, patch["description"])
+        if edited != original:
+            changes.append({"kind": "description", "original": original, "edited": edited})
     metadata = payload_field(request, "metadata") if isinstance(payload_field(request, "metadata"), dict) else {}
     for field, new_value in (metadata.get("article") or {}).items():
-        if field in ("title", "authors", "dates", "tags"):
+        if field in ("title", "authors", "dates", "tags") and article.get(field) != new_value:
             changes.append({"kind": "metadata", "field": field, "old": article.get(field), "new": new_value})
     source_old = {
         "name": preview.get("publication_name"),
+        "author": preview.get("publication_author"),
         "type": preview.get("publication_type"),
         "files": [item.get("url") for item in preview.get("source_files") or [] if isinstance(item, dict)],
     }
     for field, new_value in (metadata.get("source") or {}).items():
-        changes.append({"kind": "metadata", "field": field, "old": source_old.get(field), "new": new_value})
+        if source_old.get(field) != new_value:
+            changes.append({"kind": "metadata", "field": field, "old": source_old.get(field), "new": new_value})
     if not changes:
         fail("BHA preview did not contain the text needed for proofreading issue")
     request["changed"] = changes
@@ -536,6 +566,14 @@ def issue_value(value):
     if isinstance(value, (dict, list)):
         return json.dumps(value, ensure_ascii=False, indent=2)
     return str(value if value is not None else "")
+
+
+def markdown_value(value):
+    text = issue_value(value).replace("\\", "\\\\")
+    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    for character in "`*_[]()#+-!|~":
+        text = text.replace(character, f"\\{character}")
+    return text.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "<br>")
 
 
 def metadata_list(value):
@@ -574,8 +612,8 @@ def metadata_list_details(label, field, old, new):
     key = lambda value: json.dumps(value, ensure_ascii=False, sort_keys=True)
     old_keys = {key(value) for value in old_values}
     new_keys = {key(value) for value in new_values}
-    removed = [metadata_item(field, value) for value in old_values if key(value) not in new_keys]
-    added = [metadata_item(field, value) for value in new_values if key(value) not in old_keys]
+    removed = [markdown_value(metadata_item(field, value)) for value in old_values if key(value) not in new_keys]
+    added = [markdown_value(metadata_item(field, value)) for value in new_values if key(value) not in old_keys]
     if not removed and not added:
         return []
     parts = []
@@ -591,9 +629,9 @@ def metadata_display(field, value):
     if values is not None:
         if not values:
             return "（空）"
-        return "<br>".join(metadata_item(field, item) for item in values)
+        return "<br>".join(markdown_value(metadata_item(field, item)) for item in values)
     text = issue_value(value)
-    return text if text else "（空）"
+    return markdown_value(text) if text else "（空）"
 
 
 def append_metadata_comparison(lines, request):
@@ -607,8 +645,8 @@ def append_metadata_comparison(lines, request):
     for change in changes:
         field = change.get("field")
         label = METADATA_FIELD_LABELS.get(field, field)
-        old = metadata_display(field, change.get("old")).replace("|", "\\|").replace("\n", "<br>")
-        new = metadata_display(field, change.get("new")).replace("|", "\\|").replace("\n", "<br>")
+        old = metadata_display(field, change.get("old"))
+        new = metadata_display(field, change.get("new"))
         lines.append(f"| {label} | {old} | {new} |")
 
 
@@ -619,25 +657,25 @@ def change_details(request):
         if kind in ("part", "comment"):
             label = f"段落 {change.get('index')}" if kind == "part" else f"注释 {change.get('index')}"
             if change.get("delete"):
-                lines.append(f"- {label}（删除）：{issue_value(change.get('original'))}")
+                lines.append(f"- {label}（删除）：{markdown_value(change.get('original'))}")
             elif change.get("text") is not None:
                 place = "后" if change.get("insert") else "前"
-                lines.append(f"- {label}{place}插入：{issue_value(change.get('text'))}")
+                lines.append(f"- {label}{place}插入：{markdown_value(change.get('text'))}")
             else:
-                lines.append(f"- {label}：{issue_value(change.get('original'))} → {issue_value(change.get('edited'))}")
+                lines.append(f"- {label}：{markdown_value(change.get('original'))} → {markdown_value(change.get('edited'))}")
         elif kind == "part_type":
-            lines.append(f"- 段落 {change.get('index')}：类型 {issue_value(change.get('old'))} → {issue_value(change.get('new'))}")
+            lines.append(f"- 段落 {change.get('index')}：类型 {markdown_value(change.get('old'))} → {markdown_value(change.get('new'))}")
         elif kind == "new_comment":
-            lines.append(f"- 新增注释 {change.get('index')}：{issue_value(change.get('text'))}")
+            lines.append(f"- 新增注释 {change.get('index')}：{markdown_value(change.get('text'))}")
         elif kind == "description":
-            lines.append(f"- 描述：{issue_value(change.get('original'))} → {issue_value(change.get('edited'))}")
+            lines.append(f"- 描述：{markdown_value(change.get('original'))} → {markdown_value(change.get('edited'))}")
         elif kind == "metadata":
             field = change.get("field")
             label = METADATA_FIELD_LABELS.get(field, field)
             if field in {"authors", "dates", "tags", "files"}:
                 lines.extend(metadata_list_details(label, field, change.get("old"), change.get("new")))
             elif change.get("old") != change.get("new"):
-                lines.append(f"- {label}：{issue_value(change.get('old'))} → {issue_value(change.get('new'))}")
+                lines.append(f"- {label}：{markdown_value(change.get('old'))} → {markdown_value(change.get('new'))}")
     return lines
 
 
@@ -657,6 +695,67 @@ def append_fulltext(lines, request):
         ])
 
 
+def fulltext_comment_bodies(request, marker_prefix):
+    fulltext = request.get("fulltext") if isinstance(request.get("fulltext"), dict) else {}
+    if "original" not in fulltext or "edited" not in fulltext or fulltext["original"] == fulltext["edited"]:
+        return []
+    bodies = []
+    for key, label in (("original", "原全文"), ("edited", "修改后全文")):
+        text = str(fulltext[key] if fulltext[key] is not None else "")
+        chunks = []
+        cursor = 0
+        if not text:
+            chunks.append("")
+        while cursor < len(text):
+            size = min(55_000, len(text) - cursor)
+            while size > 0 and len(fenced_text(text[cursor:cursor + size])) + 500 > GITHUB_BODY_LIMIT:
+                size //= 2
+            if size <= 0:
+                fail("cannot split proofreading full text for GitHub comments")
+            chunks.append(text[cursor:cursor + size])
+            cursor += size
+        total = len(chunks)
+        for index, chunk in enumerate(chunks, start=1):
+            marker = f"<!-- {marker_prefix}:{key}:{index}:{total} -->"
+            suffix = f"（第 {index}/{total} 部分）" if total > 1 else ""
+            body = f"{marker}\n## {label}{suffix}\n\n{fenced_text(chunk)}"
+            if len(body) > GITHUB_BODY_LIMIT:
+                fail("proofreading full-text comment exceeds GitHub limit")
+            bodies.append((marker, body))
+    return bodies
+
+
+def existing_comment_bodies(token, issue_number):
+    bodies = []
+    for page in range(1, 11):
+        status, comments = api_request(
+            token, "GET",
+            f"{full_repo_path(TRACKER_REPOSITORY)}/issues/{issue_number}/comments?per_page=100&page={page}",
+        )
+        if status != 200 or not isinstance(comments, list):
+            fail(f"tracker comment listing failed with HTTP {status}")
+        bodies.extend(str(comment.get("body") or "") for comment in comments)
+        if len(comments) < 100:
+            break
+    return bodies
+
+
+def comment_marker_exists(token, issue_number, marker):
+    return any(marker in body for body in existing_comment_bodies(token, issue_number))
+
+
+def post_fulltext_comments(token, issue_number, request, marker_prefix):
+    existing = existing_comment_bodies(token, issue_number)
+    for marker, body in fulltext_comment_bodies(request, marker_prefix):
+        if any(marker in current for current in existing):
+            continue
+        response_or_fail(
+            token, "POST", f"{full_repo_path(TRACKER_REPOSITORY)}/issues/{issue_number}/comments", (201,),
+            {"body": body},
+        )
+        existing.append(body)
+
+
 def proofread_pr_body(request, repo, article_id, correction_id):
     title_text = re.sub(r"^(?:校订审核：|校订\s*)+", "", str(request.get("title") or article_id).strip())[:100]
     doc_id = str(request.get("doc_id") or "")
@@ -673,7 +772,7 @@ def proofread_pr_body(request, repo, article_id, correction_id):
             "",
             f"- Archive：`{repo}`",
             f"- Article ID：`{article_id}`",
-            f"- 文章：{title_text}",
+            f"- 文章：{markdown_value(title_text)}",
             f"- 修改：{summary}",
         ]
         if details:
@@ -685,13 +784,13 @@ def proofread_pr_body(request, repo, article_id, correction_id):
         if preview:
             lines.append(f"- BHA 预览：{preview}")
         if description:
-            lines.append(f"- 说明：{description}")
+            lines.append(f"- 说明：{markdown_value(description)}")
         if not include_fulltext:
             lines.extend(["", "全文对照较长，请在 tracker issue 或 PR 文件 diff 中查看。"])
         return "\n".join(lines)
 
     body = compose(True)
-    if len(body) > 60000:
+    if len(body) > GITHUB_BODY_LIMIT:
         return compose(False)
     return body
 
@@ -704,42 +803,49 @@ def upsert_tracker_issue(token, correction_id, request, repo, article_id, pulls)
     doc_id = str(request.get("doc_id") or "")
     bha_url = os.environ.get("BHA_PUBLIC_URL", "https://vomebook-bha-search.hf.space").rstrip("/")
     preview = f"{bha_url}/?preview={urllib.parse.quote(doc_id)}" if doc_id else ""
-    lines = [
-        f"<!-- proofreading:{correction_id} -->",
-        f"<!-- proofreading-prs:{marker} -->",
-        "## 校订审核",
-        "",
-        f"- Archive：`{repo}`",
-        f"- Article ID：`{article_id}`",
-        f"- 文章：{title_text}",
-        f"- 修改：{'、'.join(change_summary(request))}",
-    ]
-    details = change_details(request)
-    if details:
-        lines.extend(["", "## 修改内容", ""])
-        lines.extend(details)
-    append_metadata_comparison(lines, request)
-    append_fulltext(lines, request)
-    if preview:
-        lines.append(f"- BHA 预览：{preview}")
-    if payload_field(request, "description"):
-        lines.extend([f"- 说明：{payload_field(request, 'description')}"])
-    lines.extend([
-        "",
-        "## 审核方式",
-        "",
-        "1. 审核上方“修改内容”：正文核对原文与新文；元数据核对新增、删除或原值与新值",
-        "2. 有正文修改时，对照“原全文”与“修改后全文”；需要核对扫描件时再打开 BHA 预览",
-        "3. 如需确认实际提交文件，打开下方 Pull Request 查看 diff；正文与元数据可能对应不同 PR",
-        "4. 全部同意：在本 Issue 评论 `/approve`（合并本 Issue 关联的全部 PR）",
-        "5. 拒绝：评论 `/reject 原因`（关闭本 Issue 关联的全部 PR，并记录原因）",
-        "6. 所有关联 PR 合并或关闭后，本 Issue 会自动关闭",
-        "",
-        "## Pull Requests",
-        "",
-    ])
-    lines.extend(f"- [ ] [{repo}#{pull['number']}]({pull['url']})" for pull in pulls)
-    body = "\n".join(lines)
+    def compose(include_fulltext):
+        lines = [
+            f"<!-- proofreading:{correction_id} -->",
+            f"<!-- proofreading-prs:{marker} -->",
+            "## 校订审核",
+            "",
+            f"- Archive：`{repo}`",
+            f"- Article ID：`{article_id}`",
+            f"- 文章：{markdown_value(title_text)}",
+            f"- 修改：{'、'.join(change_summary(request))}",
+        ]
+        details = change_details(request)
+        if details:
+            lines.extend(["", "## 修改内容", ""])
+            lines.extend(details)
+        append_metadata_comparison(lines, request)
+        if include_fulltext:
+            append_fulltext(lines, request)
+        else:
+            lines.extend(["", "原全文和修改后全文完整保存在本 Issue 的后续评论中。"])
+        if preview:
+            lines.append(f"- BHA 预览：{preview}")
+        if payload_field(request, "description"):
+            lines.append(f"- 说明：{markdown_value(payload_field(request, 'description'))}")
+        lines.extend([
+            "", "## 审核方式", "",
+            "1. 审核上方“修改内容”：正文核对原文与新文；元数据核对新增、删除或原值与新值",
+            "2. 有正文修改时，对照“原全文”与“修改后全文”；需要核对扫描件时再打开 BHA 预览",
+            "3. 如需确认实际提交文件，打开下方 Pull Request 查看 diff；正文与元数据可能对应不同 PR",
+            "4. 全部同意：在本 Issue 评论 `/approve`（合并本 Issue 关联的全部 PR）",
+            "5. 拒绝：评论 `/reject 原因`（关闭本 Issue 关联的全部 PR，并记录原因）",
+            "6. 所有关联 PR 合并或关闭后，本 Issue 会自动关闭",
+            "", "## Pull Requests", "",
+        ])
+        lines.extend(f"- [ ] [{repo}#{pull['number']}]({pull['url']})" for pull in pulls)
+        return "\n".join(lines)
+
+    body = compose(True)
+    fulltext_in_comments = len(body) > GITHUB_BODY_LIMIT
+    if fulltext_in_comments:
+        body = compose(False)
+    if len(body) > GITHUB_BODY_LIMIT:
+        body = body[:GITHUB_BODY_LIMIT - 80] + "\n\n（审核摘要过长，已截断；完整改动请查看关联 PR。）"
     existing = find_tracker_issue(token, correction_id)
     payload = {
         "title": f"校订审核：{title_text}",
@@ -755,6 +861,8 @@ def upsert_tracker_issue(token, correction_id, request, repo, article_id, pulls)
         issue = response_or_fail(
             token, "POST", f"{full_repo_path(TRACKER_REPOSITORY)}/issues", (201,), payload,
         )
+    if fulltext_in_comments:
+        post_fulltext_comments(token, issue["number"], request, f"proofreading-fulltext:{correction_id}")
     return issue.get("html_url")
 
 
@@ -803,38 +911,46 @@ def auto_merge_comment_exists(token, issue_number, correction_id):
 
 def notify_auto_merged(token, correction_id, request, repo, article_id, pulls):
     issue = ensure_auto_merge_log(token)
-    if auto_merge_comment_exists(token, issue["number"], correction_id):
-        return issue.get("html_url")
     doc_id = str(request.get("doc_id") or "")
     bha_url = os.environ.get("BHA_PUBLIC_URL", "https://vomebook-bha-search.hf.space").rstrip("/")
     preview = f"{bha_url}/?preview={urllib.parse.quote(doc_id)}" if doc_id else ""
-    lines = [
-        f"<!-- auto-merged:{correction_id} -->",
-        f"**已自动合并：{'、'.join(change_summary(request))}**",
-        "",
-        f"- Archive：`{repo}`",
-        f"- Article ID：`{article_id}`",
-    ]
-    details = change_details(request)
-    if details:
-        lines.extend(["", "## 修改内容", ""])
-        lines.extend(details)
-    append_metadata_comparison(lines, request)
-    append_fulltext(lines, request)
-    if preview:
-        lines.append(f"- BHA 预览：{preview}")
-    for pull in pulls:
-        lines.append(f"- 已合并 PR：[{repo}#{pull['number']}]({pull['url']})")
-        lines.append(f"  - 来源分支：`{pull.get('head', 'proofread')}`；目标分支：`{pull.get('base', 'ocr_patch')}`；合并提交：`{pull.get('merge_commit_sha') or '待查询'}`")
-    lines.extend([
-        "",
-        f"如需撤回，请在本 Issue 评论：`/proofread-revert {correction_id} CONFIRM`。",
-        "撤回命令会创建撤回 PR 并自动合并，直接撤销该次自动合并。",
-    ])
-    response_or_fail(
-        token, "POST", f"{full_repo_path(TRACKER_REPOSITORY)}/issues/{issue['number']}/comments", (201,),
-        {"body": "\n".join(lines)},
-    )
+    def compose(include_fulltext):
+        lines = [
+            f"<!-- auto-merged:{correction_id} -->",
+            f"**已自动合并：{'、'.join(change_summary(request))}**",
+            "", f"- Archive：`{repo}`", f"- Article ID：`{article_id}`",
+        ]
+        details = change_details(request)
+        if details:
+            lines.extend(["", "## 修改内容", ""])
+            lines.extend(details)
+        append_metadata_comparison(lines, request)
+        if include_fulltext:
+            append_fulltext(lines, request)
+        else:
+            lines.extend(["", "原全文和修改后全文完整保存在后续评论中。"])
+        if preview:
+            lines.append(f"- BHA 预览：{preview}")
+        for pull in pulls:
+            lines.append(f"- 已合并 PR：[{repo}#{pull['number']}]({pull['url']})")
+            lines.append(f"  - 来源分支：`{pull.get('head', 'proofread')}`；目标分支：`{pull.get('base', 'ocr_patch')}`；合并提交：`{pull.get('merge_commit_sha') or '待查询'}`")
+        lines.extend([
+            "", f"如需撤回，请在本 Issue 评论：`/proofread-revert {correction_id} CONFIRM`。",
+            "撤回命令会创建撤回 PR 并自动合并，直接撤销该次自动合并。",
+        ])
+        return "\n".join(lines)
+
+    body = compose(True)
+    fulltext_in_comments = len(body) > GITHUB_BODY_LIMIT
+    if fulltext_in_comments:
+        body = compose(False)
+    if not auto_merge_comment_exists(token, issue["number"], correction_id):
+        response_or_fail(
+            token, "POST", f"{full_repo_path(TRACKER_REPOSITORY)}/issues/{issue['number']}/comments", (201,),
+            {"body": body},
+        )
+    if fulltext_in_comments:
+        post_fulltext_comments(token, issue["number"], request, f"auto-merged-fulltext:{correction_id}")
     return issue.get("html_url")
 
 
