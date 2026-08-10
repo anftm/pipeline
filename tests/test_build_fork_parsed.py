@@ -255,6 +255,37 @@ class BuildForkParsedTests(unittest.TestCase):
             cleaned = __import__("json").loads(article.read_text(encoding="utf-8"))
         self.assertEqual(cleaned["authors"], ["甲", "乙", "某机构", "保留；分号"])
 
+    def test_archive_24_cleanup_removes_replacement_character_content_and_tags(self):
+        with tempfile.TemporaryDirectory() as directory:
+            parsed = Path(directory)
+            corrupt = parsed / "corrupt.json"
+            corrupt_tags = corrupt.with_suffix(".tags")
+            clean = parsed / "clean.json"
+            corrupt.write_text(__import__("json").dumps({
+                "title": "乱码文章", "parts": [{"text": "正文含�乱码"}],
+            }, ensure_ascii=False), encoding="utf-8")
+            corrupt_tags.write_text("[]", encoding="utf-8")
+            clean.write_text(__import__("json").dumps({
+                "title": "正常文章", "parts": [{"text": "正常正文"}],
+            }, ensure_ascii=False), encoding="utf-8")
+
+            build_fork_parsed.clean_selected_archive_parsed(parsed, 24)
+
+            self.assertFalse(corrupt.exists())
+            self.assertFalse(corrupt_tags.exists())
+            self.assertTrue(clean.exists())
+
+    def test_replacement_character_content_is_not_dropped_from_other_archives(self):
+        with tempfile.TemporaryDirectory() as directory:
+            article = Path(directory) / "article.json"
+            article.write_text(__import__("json").dumps({
+                "parts": [{"text": "正文含�乱码"}],
+            }, ensure_ascii=False), encoding="utf-8")
+
+            build_fork_parsed.clean_selected_archive_parsed(Path(directory), 20)
+
+            self.assertTrue(article.exists())
+
     def test_selected_archives_remove_empty_content_articles_and_tags(self):
         for archive_id in (10, 20, 24):
             with self.subTest(archive_id=archive_id), tempfile.TemporaryDirectory() as directory:
