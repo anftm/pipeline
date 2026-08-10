@@ -172,6 +172,30 @@ function fieldReplacements(source, objectStart, objectEnd, values) {
 
 const articles = config.parser_option && config.parser_option.articles;
 if (!Array.isArray(articles)) throw new Error("config does not contain parser_option.articles");
+
+if (Array.isArray(payload.replace_articles)) {
+  const locator = payload.locator || {};
+  const matches = articles.filter((article) =>
+    typeof article.title === "string"
+    && article.title.startsWith("【文章待拆分】")
+    && article.title === locator.title
+    && article.page_start === locator.page_start
+    && article.page_end === locator.page_end
+  );
+  if (matches.length !== 1) throw new Error("expected one unresolved placeholder article");
+  const rootStart = original.indexOf("{");
+  const rootEnd = matching(original, rootStart, "{", "}") + 1;
+  const parserRange = propertyRange(original, "parser_option", rootStart, rootEnd);
+  if (!parserRange || original[parserRange.start] !== "{") throw new Error("config parser_option is not an object literal");
+  const articlesRange = propertyRange(original, "articles", parserRange.start, parserRange.end);
+  if (!articlesRange || original[articlesRange.start] !== "[") throw new Error("config articles is not an array literal");
+  const content = original.slice(0, articlesRange.start)
+    + formattedReplacement(original, articlesRange.start, payload.replace_articles)
+    + original.slice(articlesRange.end);
+  process.stdout.write(JSON.stringify({ content, article_id: "" }));
+  process.exit(0);
+}
+
 let articleIndex = articles.findIndex((article) => articleId(article) === payload.article_id);
 if (articleIndex < 0 && payload.locator) {
   const matches = articles.map((article, index) => ({ article, index })).filter(({ article }) =>

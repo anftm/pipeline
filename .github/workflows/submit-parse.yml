@@ -1,0 +1,26 @@
+name: Submit parsing
+
+on:
+  repository_dispatch:
+    types: [submit-parse]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: submit-parse
+  cancel-in-progress: false
+
+jobs:
+  submit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - name: Create parsing pull request
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: python3 scripts/submit_proofread.py

@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       kind:
-        description: proofread, ocr_patch, or config
+        description: proofread, ocr_patch, config, or parse
         required: true
         default: proofread
         type: string

@@ -200,6 +200,61 @@ def submit_file(token, repo, base, path, content, title, description, correction
     }
 
 
+def submit_files(token, repo, base, contents, title, description, correction_id):
+    if not contents:
+        fail("batch submission requires at least one file")
+    branch = f"proofread/{correction_id}-{base}"
+    existing_pull = open_pull_request(token, repo, branch)
+    if existing_pull:
+        if existing_pull.get("base") != base or existing_pull.get("head") != branch:
+            fail(f"existing proofreading PR has an unexpected branch target: {existing_pull}")
+        for path, content in contents.items():
+            branch_content, _branch_file_sha = get_file(token, repo, branch, path)
+            if branch_content != content:
+                fail("existing proofreading PR branch does not contain the requested batch content")
+        filenames = set()
+        for page in range(1, 4):
+            status, files = api_request(
+                token, "GET", f"{repo_path(repo)}/pulls/{existing_pull['number']}/files?per_page=100&page={page}",
+            )
+            if status != 200 or not isinstance(files, list):
+                fail("cannot verify existing proofreading PR files")
+            filenames.update(item.get("filename") for item in files)
+            if len(files) < 100:
+                break
+        if filenames != set(contents):
+            fail("existing proofreading PR contains unexpected files")
+        return existing_pull
+    if branch_sha(token, repo, branch) is None:
+        base_revision = response_or_fail(token, "GET", ref_path(repo, base), (200,))["object"]["sha"]
+        response_or_fail(
+            token, "POST", f"{repo_path(repo)}/git/refs", (201,),
+            {"ref": f"refs/heads/{branch}", "sha": base_revision},
+        )
+    for path, content in contents.items():
+        _base_content, base_file_sha = get_file(token, repo, base, path)
+        branch_content, branch_file_sha = get_file(token, repo, branch, path)
+        if branch_content == content:
+            continue
+        response_or_fail(
+            token, "PUT", f"{repo_path(repo)}/contents/{urllib.parse.quote(path, safe='')}", (200, 201),
+            {
+                "branch": branch,
+                "message": title,
+                "content": base64.b64encode(content.encode("utf-8")).decode("ascii"),
+                **({"sha": branch_file_sha or base_file_sha} if branch_file_sha or base_file_sha else {}),
+            },
+        )
+    pull = response_or_fail(
+        token, "POST", f"{repo_path(repo)}/pulls", (201,),
+        {"title": title, "head": branch, "base": base, "body": description},
+    )
+    return {
+        "number": pull.get("number"), "url": pull.get("html_url"),
+        "sha": pull.get("head", {}).get("sha"), "base": base, "head": branch,
+    }
+
+
 def merge_pull(token, repo, pull):
     number = pull.get("number")
     if not number:
@@ -982,6 +1037,148 @@ def update_config(existing, request):
     return result["content"], result["article_id"]
 
 
+def replace_config_articles(existing, request):
+    helper = os.path.join(os.path.dirname(__file__), "update_archive_config.mjs")
+    articles = payload_field(request, "articles") or []
+    config_articles = [
+        {key: value for key, value in article.items() if key not in {"content", "base_part_count"}}
+        for article in articles
+    ]
+    process = subprocess.run(
+        ["node", helper],
+        input=json.dumps({
+            "content": existing,
+            "locator": payload_field(request, "locator"),
+            "replace_articles": config_articles,
+        }, ensure_ascii=False),
+        text=True,
+        capture_output=True,
+        check=False,
+        env={"PATH": os.environ.get("PATH", "")},
+    )
+    if process.returncode != 0:
+        fail(f"config article replacement failed: {process.stderr.strip()}")
+    try:
+        result = json.loads(process.stdout)
+    except json.JSONDecodeError as exc:
+        fail(f"config article replacement returned invalid JSON: {exc}")
+    if not isinstance(result.get("content"), str):
+        fail("config article replacement returned invalid content")
+    return result["content"]
+
+
+def validate_parse_request(request, archive_id):
+    if archive_id != 25:
+        fail("parse is currently limited to archive 25")
+    locator = payload_field(request, "locator")
+    articles = payload_field(request, "articles")
+    if not isinstance(locator, dict) or not isinstance(articles, list) or not 1 <= len(articles) <= 200:
+        fail("parse requires a locator and 1-200 articles")
+    try:
+        source_start = int(locator["page_start"])
+        source_end = int(locator["page_end"])
+    except (KeyError, TypeError, ValueError):
+        fail("parse locator has invalid page range")
+    allowed = {"title", "authors", "dates", "is_range_date", "page_start", "page_end", "content", "base_part_count", "ocr", "ocr_exceptions"}
+    covered = set()
+    article_ids = set()
+    for article in articles:
+        if not isinstance(article, dict) or set(article) - allowed:
+            fail("parse article contains unsupported fields")
+        title = article.get("title")
+        if not isinstance(title, str) or not title.strip() or title.startswith("【文章待拆分】"):
+            fail("parse article has an invalid title")
+        content = article.get("content")
+        if not isinstance(content, str) or not content.strip() or len(content) > 200000:
+            fail("parse article has invalid content")
+        base_part_count = article.get("base_part_count")
+        if not isinstance(base_part_count, int) or not 1 <= base_part_count <= 15000:
+            fail("parse article has invalid OCR baseline size")
+        try:
+            start = int(article["page_start"])
+            end = int(article["page_end"])
+        except (KeyError, TypeError, ValueError):
+            fail("parse article has an invalid page range")
+        if start < source_start or end > source_end or start > end:
+            fail("parse article page range is outside the source range")
+        covered.update(range(start, end + 1))
+        authors = article.get("authors", [])
+        if not isinstance(authors, list) or any(not isinstance(value, str) or not value.strip() for value in authors):
+            fail("parse article authors are invalid")
+        dates = article.get("dates", [])
+        if not isinstance(dates, list):
+            fail("parse article dates are invalid")
+        for date in dates:
+            if not isinstance(date, dict) or set(date) - {"year", "month", "day"}:
+                fail("parse article date is invalid")
+            if not any(key in date for key in ("year", "month", "day")):
+                fail("parse article date is empty")
+            if "year" in date and (not isinstance(date["year"], int) or not 1 <= date["year"] <= 9999):
+                fail("parse article year is invalid")
+            if "month" in date and (not isinstance(date["month"], int) or not 1 <= date["month"] <= 12):
+                fail("parse article month is invalid")
+            if "day" in date and (not isinstance(date["day"], int) or not 1 <= date["day"] <= 31):
+                fail("parse article day is invalid")
+        exceptions = article.get("ocr_exceptions") or {}
+        if not isinstance(exceptions, dict):
+            fail("parse OCR exceptions are invalid")
+        ocr_values = [article.get("ocr") or {}, *exceptions.values()]
+        for value in ocr_values:
+            if not isinstance(value, dict) or set(value) - {"content_thresholds", "auto_vsplit", "vsplit"}:
+                fail("parse OCR options contain unsupported fields")
+            thresholds = value.get("content_thresholds")
+            if thresholds is not None and (
+                not isinstance(thresholds, list) or len(thresholds) != 4
+                or any(not isinstance(number, (int, float)) or number < 0 or number > 1 for number in thresholds)
+                or thresholds[0] + thresholds[1] >= 1 or thresholds[2] + thresholds[3] >= 1
+            ):
+                fail("parse OCR crop is invalid")
+            if "auto_vsplit" in value and not isinstance(value["auto_vsplit"], bool):
+                fail("parse OCR auto split is invalid")
+            if "vsplit" in value and (
+                not isinstance(value["vsplit"], (int, float)) or not 0 <= value["vsplit"] <= 1
+            ):
+                fail("parse OCR split is invalid")
+        for key in exceptions:
+            if not re.fullmatch(r"[1-9][0-9]*", str(key)) or not start <= int(key) <= end:
+                fail("parse OCR exception page is invalid")
+        normalized_dates = sorted(
+            f"{date.get('year') or '0000'}-{int(date.get('month') or 0):02d}-{int(date.get('day') or 0):02d}"
+            for date in dates
+        )
+        article_id = hashlib.md5(json.dumps([
+            title.strip(), normalized_dates, bool(article.get("is_range_date")),
+            sorted(value.strip() for value in authors), "",
+        ], ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()[:10]
+        if article_id in article_ids:
+            fail("parse articles would generate duplicate article IDs")
+        article_ids.add(article_id)
+    if covered != set(range(source_start, source_end + 1)):
+        fail("parse article ranges do not cover the source pages")
+
+
+def parse_article_id(article):
+    dates = sorted(
+        f"{date.get('year') or '0000'}-{int(date.get('month') or 0):02d}-{int(date.get('day') or 0):02d}"
+        for date in article.get("dates", [])
+    )
+    return hashlib.md5(json.dumps([
+        article["title"].strip(), dates, bool(article.get("is_range_date")),
+        sorted(value.strip() for value in article.get("authors", [])), "",
+    ], ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()[:10]
+
+
+def manual_content_patch(article):
+    paragraphs = [value for value in article["content"].splitlines() if value.strip()]
+    if not paragraphs:
+        paragraphs = [article["content"]]
+    parts = {str(index): {"delete": True} for index in range(article["base_part_count"])}
+    parts["0"]["insertBefore"] = [
+        {"type": "paragraph", "text": paragraph} for paragraph in paragraphs
+    ]
+    return {"version": 2, "parts": parts, "comments": {}, "description": ""}
+
+
 def segmented_request(request):
     blobs = request.get("payload_blobs")
     if blobs is None:
@@ -1054,12 +1251,43 @@ def main():
         fail("archive_id must be between 0 and 31")
 
     kind = request.get("kind", "ocr_patch")
-    if kind not in ("proofread", "ocr_patch", "config"):
-        fail("kind must be proofread, ocr_patch, or config")
+    if kind not in ("proofread", "ocr_patch", "config", "parse"):
+        fail("kind must be proofread, ocr_patch, config, or parse")
     repo = f"{REPOSITORY_PREFIX}{archive_id}"
     correction_id = hashlib.sha256(
         json.dumps(request, ensure_ascii=False, sort_keys=True).encode("utf-8")
     ).hexdigest()[:12]
+    if kind == "parse":
+        validate_parse_request(request, archive_id)
+        publication_id = str(request.get("publication_id", ""))
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", publication_id):
+            fail("publication_id is invalid")
+        path = f"{publication_id}.ts"
+        existing, _existing_sha = get_file(token, repo, "config", path)
+        if not existing:
+            fail(f"config file does not exist: {path}")
+        content = replace_config_articles(existing, request)
+        title = request.get("title") or f"解析 {publication_id}"
+        description = payload_field(request, "description") or (
+            f"将 {publication_id} 的待拆分占位文章替换为结构化文章。"
+            "对应正文保存在同批 OCR patch PR；两个 PR 都合并后由仓库 workflow 重建 parsed 数据。"
+        )
+        config_pull = submit_file(token, repo, "config", path, content, title, description, correction_id)
+        patch_contents = {}
+        for article in payload_field(request, "articles"):
+            article_id = parse_article_id(article)
+            target_path = patch_path(archive_id, article_id, publication_id)
+            existing_patch, _existing_patch_sha = get_file(token, repo, "ocr_patch", target_path)
+            patch_contents[target_path] = append_patch(existing_patch, manual_content_patch(article))
+        patch_pull = submit_files(
+            token, repo, "ocr_patch", patch_contents, title, description, correction_id,
+        )
+        print(json.dumps({
+            "repository": repo,
+            "path": path,
+            "pull_requests": [config_pull["url"], patch_pull["url"]],
+        }, ensure_ascii=False))
+        return
     if kind == "proofread":
         article_id = str(request.get("article_id", ""))
         publication_id = str(request.get("publication_id", ""))

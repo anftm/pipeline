@@ -565,6 +565,26 @@ class ProofreadBundleTests(unittest.TestCase):
                     "title", "description", "correction",
                 )
 
+    def test_existing_batch_pull_must_match_all_requested_files(self):
+        existing = {
+            "number": 8, "url": "https://example.test/pr/8", "base": "ocr_patch",
+            "head": "proofread/correction-ocr_patch",
+        }
+        contents = {"[a][p].ts": "one", "[b][p].ts": "two"}
+
+        def get_file(_token, _repo, _branch, path):
+            return contents[path], "sha"
+
+        with patch.object(submit_proofread, "open_pull_request", return_value=existing), \
+                patch.object(submit_proofread, "get_file", side_effect=get_file), \
+                patch.object(submit_proofread, "api_request", return_value=(200, [
+                    {"filename": "[a][p].ts"}, {"filename": "[b][p].ts"},
+                ])):
+            result = submit_proofread.submit_files(
+                "token", "repo", "ocr_patch", contents, "title", "description", "correction",
+            )
+        self.assertEqual(result, existing)
+
     def test_auto_merge_notification_is_idempotent(self):
         issue = {"number": 12, "html_url": "https://example.test/issues/12"}
         request = {"doc_id": "doc-1", "patch": {"parts": {"0": {"diff": "-旧\t+新"}}}}
@@ -678,6 +698,94 @@ class ProofreadBundleTests(unittest.TestCase):
             }), text=True, capture_output=True, check=True,
         )
         self.assertEqual(json.loads(verify.stdout)["article_id"], result["article_id"])
+
+    def test_parse_helper_replaces_one_placeholder_article(self):
+        existing = '''export default {
+  "entity": {"id": "publication"},
+  "parser_option": {
+    "articles": [{
+      "title": "【文章待拆分】小报",
+      "authors": [],
+      "page_start": 1,
+      "page_end": 2,
+      "dates": [{"year": 1967}]
+    }],
+    "ocr": {"use_onnx": true}
+  }
+};'''
+        request = {
+            "locator": {"title": "【文章待拆分】小报", "page_start": 1, "page_end": 2},
+            "articles": [
+                {"title": "第一篇", "authors": [], "dates": [{"year": 1967}], "page_start": 1, "page_end": 1, "content": "第一篇正文", "base_part_count": 2},
+                {"title": "第二篇", "authors": [], "dates": [{"year": 1967}], "page_start": 2, "page_end": 2, "content": "第二篇正文", "base_part_count": 3},
+            ],
+        }
+        content = submit_proofread.replace_config_articles(existing, request)
+        self.assertNotIn("【文章待拆分】", content)
+        self.assertIn('"title": "第一篇"', content)
+        self.assertIn('"title": "第二篇"', content)
+        self.assertIn('"ocr": {"use_onnx": true}', content)
+        self.assertNotIn("base_part_count", content)
+        self.assertNotIn("第一篇正文", content)
+
+    def test_parse_validation_rejects_missing_pages_and_duplicate_ids(self):
+        request = {
+            "locator": {"title": "【文章待拆分】小报", "page_start": 1, "page_end": 2},
+            "articles": [{"title": "第一篇", "authors": [], "dates": [], "page_start": 1, "page_end": 1, "content": "正文", "base_part_count": 1}],
+        }
+        with self.assertRaisesRegex(RuntimeError, "do not cover"):
+            submit_proofread.validate_parse_request(request, 25)
+        request["articles"] = [
+            {"title": "同题", "authors": [], "dates": [], "page_start": 1, "page_end": 1, "content": "正文一", "base_part_count": 1},
+            {"title": "同题", "authors": [], "dates": [], "page_start": 2, "page_end": 2, "content": "正文二", "base_part_count": 1},
+        ]
+        with self.assertRaisesRegex(RuntimeError, "duplicate article IDs"):
+            submit_proofread.validate_parse_request(request, 25)
+
+    def test_manual_parse_content_patch_replaces_every_generated_part(self):
+        patch_value = submit_proofread.manual_content_patch({
+            "content": "第一段\n第二段", "base_part_count": 3,
+        })
+        self.assertEqual(patch_value["version"], 2)
+        self.assertEqual(set(patch_value["parts"]), {"0", "1", "2"})
+        self.assertTrue(all(value["delete"] for value in patch_value["parts"].values()))
+        self.assertEqual(patch_value["parts"]["0"]["insertBefore"], [
+            {"type": "paragraph", "text": "第一段"},
+            {"type": "paragraph", "text": "第二段"},
+        ])
+
+    def test_parse_submission_creates_config_and_batch_ocr_patch_pulls(self):
+        publication_id = "052417de-42fb-4781-9885-af4fb006e9b6"
+        request = {
+            "kind": "parse", "archive_id": 25, "publication_id": publication_id,
+            "locator": {"title": "【文章待拆分】小报", "page_start": 1, "page_end": 2},
+            "articles": [
+                {"title": "第一篇", "authors": [], "dates": [{"year": 1967}], "page_start": 1, "page_end": 1, "content": "第一篇正文", "base_part_count": 2},
+                {"title": "第二篇", "authors": [], "dates": [{"year": 1967}], "page_start": 2, "page_end": 2, "content": "第二篇正文", "base_part_count": 3},
+            ],
+        }
+
+        def get_file(_token, _repo, branch, _path):
+            if branch == "config":
+                return "existing config", "config-sha"
+            return "", None
+
+        with patch.dict(os.environ, {"GH_PAT": "token"}), \
+                patch.object(submit_proofread, "load_request", return_value=request), \
+                patch.object(submit_proofread, "get_file", side_effect=get_file), \
+                patch.object(submit_proofread, "replace_config_articles", return_value="updated config"), \
+                patch.object(submit_proofread, "submit_file", return_value={"url": "https://example/config"}) as config_submit, \
+                patch.object(submit_proofread, "submit_files", return_value={"url": "https://example/patch"}) as patch_submit, \
+                redirect_stdout(io.StringIO()) as output:
+            submit_proofread.main()
+        config_submit.assert_called_once()
+        contents = patch_submit.call_args.args[3]
+        self.assertEqual(len(contents), 2)
+        self.assertTrue(all(path.endswith(f"][{publication_id}].ts") for path in contents))
+        self.assertTrue(any("第一篇正文" in content for content in contents.values()))
+        self.assertEqual(json.loads(output.getvalue())["pull_requests"], [
+            "https://example/config", "https://example/patch",
+        ])
 
     def test_identity_change_copies_existing_patch_to_new_article_id(self):
         request = {
