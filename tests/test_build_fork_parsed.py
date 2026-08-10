@@ -275,6 +275,17 @@ class BuildForkParsedTests(unittest.TestCase):
             self.assertFalse(corrupt_tags.exists())
             self.assertTrue(clean.exists())
 
+    def test_archive_24_cleanup_removes_replacement_character_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            article = Path(directory) / "article.json"
+            article.write_text(__import__("json").dumps({
+                "title": "乱码�标题", "parts": [{"text": "正常正文"}],
+            }, ensure_ascii=False), encoding="utf-8")
+
+            build_fork_parsed.clean_selected_archive_parsed(Path(directory), 24)
+
+            self.assertFalse(article.exists())
+
     def test_replacement_character_content_is_not_dropped_from_other_archives(self):
         with tempfile.TemporaryDirectory() as directory:
             article = Path(directory) / "article.json"

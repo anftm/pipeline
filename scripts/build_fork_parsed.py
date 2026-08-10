@@ -487,6 +487,16 @@ def has_article_content(article) -> bool:
     )
 
 
+def has_replacement_character(value) -> bool:
+    if isinstance(value, str):
+        return "\ufffd" in value
+    if isinstance(value, list):
+        return any(has_replacement_character(item) for item in value)
+    if isinstance(value, dict):
+        return any(has_replacement_character(item) for item in value.values())
+    return False
+
+
 def clean_selected_archive_parsed(parsed: Path, archive_id: int) -> None:
     if archive_id not in CLEANUP_ARCHIVE_IDS:
         return
@@ -494,7 +504,7 @@ def clean_selected_archive_parsed(parsed: Path, archive_id: int) -> None:
     for article_path in parsed.rglob("*.json"):
         article = json.loads(article_path.read_text(encoding="utf-8"))
         cleaned = clean_legacy_image_markup(article)
-        if archive_id == 24 and "\ufffd" in article_text(cleaned):
+        if archive_id == 24 and has_replacement_character(cleaned):
             article_path.unlink()
             article_path.with_suffix(".tags").unlink(missing_ok=True)
             corrupt_articles_removed += 1
@@ -529,7 +539,7 @@ def clean_selected_archive_parsed(parsed: Path, archive_id: int) -> None:
             encoding="utf-8",
         )
     if corrupt_articles_removed:
-        print(f"archive {archive_id}: removed {corrupt_articles_removed} articles containing U+FFFD in content")
+        print(f"archive {archive_id}: removed {corrupt_articles_removed} articles containing U+FFFD text")
 
 
 def prepare_patch_input(source: Path, target: Path, archive_id: int) -> Path:
