@@ -22,6 +22,7 @@ REPO_END = int(os.environ.get("REPO_END", "31"))
 GITHUB_API = "https://api.github.com"
 DEFAULT_BRANCH = "main"
 FORK_WAIT_SECONDS = 120
+GENERATED_BRANCHES = {"parsed"}
 
 
 def api_request(token: str, method: str, path: str, payload: dict | None = None):
@@ -190,6 +191,9 @@ def main() -> int:
         try:
             ensure_fork(token, repo)
             for data_branch in list_branches(token, UPSTREAM_OWNER, repo):
+                if data_branch in GENERATED_BRANCHES:
+                    print(f"[{repo}/{data_branch}] generated branch managed separately, skipped")
+                    continue
                 sync_branch(token, repo, data_branch)
         except Exception as exc:
             print(str(exc), file=sys.stderr)
