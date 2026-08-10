@@ -49,6 +49,41 @@
       "upstream_repo": "banned-historical-archives0",
       "upstream_repository": "banned-historical-archives/banned-historical-archives0",
       "upstream_url": "https://github.com/banned-historical-archives/banned-historical-archives0/pull/14"
+    },
+    "banned-historical-archives0#23": {
+      "branch": "proofread-upstream-banned-historical-archives0-config-ab60fbdd8a",
+      "upstream_number": 15,
+      "upstream_repo": "banned-historical-archives0",
+      "upstream_repository": "banned-historical-archives/banned-historical-archives0",
+      "upstream_url": "https://github.com/banned-historical-archives/banned-historical-archives0/pull/15"
+    },
+    "banned-historical-archives0#24": {
+      "branch": "proofread-upstream-banned-historical-archives0-config-ab60fbdd8a",
+      "upstream_number": 15,
+      "upstream_repo": "banned-historical-archives0",
+      "upstream_repository": "banned-historical-archives/banned-historical-archives0",
+      "upstream_url": "https://github.com/banned-historical-archives/banned-historical-archives0/pull/15"
+    },
+    "banned-historical-archives0#25": {
+      "branch": "proofread-upstream-banned-historical-archives0-ocr_patch-568d2ffd5e",
+      "upstream_number": 16,
+      "upstream_repo": "banned-historical-archives0",
+      "upstream_repository": "banned-historical-archives/banned-historical-archives0",
+      "upstream_url": "https://github.com/banned-historical-archives/banned-historical-archives0/pull/16"
+    },
+    "banned-historical-archives0#26": {
+      "branch": "proofread-upstream-banned-historical-archives0-config-ab60fbdd8a",
+      "upstream_number": 15,
+      "upstream_repo": "banned-historical-archives0",
+      "upstream_repository": "banned-historical-archives/banned-historical-archives0",
+      "upstream_url": "https://github.com/banned-historical-archives/banned-historical-archives0/pull/15"
+    },
+    "banned-historical-archives0#27": {
+      "branch": "proofread-upstream-banned-historical-archives0-ocr_patch-568d2ffd5e",
+      "upstream_number": 16,
+      "upstream_repo": "banned-historical-archives0",
+      "upstream_repository": "banned-historical-archives/banned-historical-archives0",
+      "upstream_url": "https://github.com/banned-historical-archives/banned-historical-archives0/pull/16"
     }
   },
   "published": [],
