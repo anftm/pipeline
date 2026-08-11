@@ -789,6 +789,8 @@ class ProofreadBundleTests(unittest.TestCase):
         self.assertTrue(all(path.endswith(f"][{publication_id}].ts") for path in contents))
         self.assertTrue(any("第一篇正文" in content for content in contents.values()))
         self.assertIn("OCR 裁剪原图", config_submit.call_args.args[6])
+        self.assertIn("第一篇正文", config_submit.call_args.args[6])
+        self.assertIn("第二篇正文", patch_submit.call_args.args[5])
         self.assertIn("https://example/crop.webp", patch_submit.call_args.args[5])
         tracker.assert_called_once()
         result = json.loads(output.getvalue())
@@ -796,6 +798,21 @@ class ProofreadBundleTests(unittest.TestCase):
             "https://example/config", "https://example/patch",
         ])
         self.assertEqual(result["tracker_issue"], "https://example/issue")
+
+    def test_parse_review_body_moves_oversized_fulltext_to_pull_comments(self):
+        request = {
+            "locator": {"title": "【文章待拆分】小报", "page_start": 1, "page_end": 1},
+            "articles": [{
+                "title": "第一篇", "authors": [], "dates": [], "page_start": 1, "page_end": 1,
+                "content": "正文" * 40_000, "base_part_count": 1,
+            }],
+        }
+        body = submit_proofread.parse_review_body(
+            request, "banned-historical-archives25", "publication", "correction", [],
+        )
+        self.assertNotIn("<!-- parse-fulltext:embedded -->", body)
+        self.assertIn("已按文章分段保存在本 PR 评论中", body)
+        self.assertLessEqual(len(body), submit_proofread.GITHUB_BODY_LIMIT)
 
     def test_parse_tracker_issue_links_both_pulls_and_posts_complete_body(self):
         request = {

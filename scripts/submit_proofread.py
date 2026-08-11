@@ -149,6 +149,7 @@ def open_pull_request(token, repo, branch):
                 return {
                     "number": pull.get("number"),
                     "url": pull.get("html_url"),
+                    "body": pull.get("body") or "",
                     "sha": pull.get("head", {}).get("sha"),
                     "base": pull.get("base", {}).get("ref"),
                     "head": pull.get("head", {}).get("ref") or branch,
@@ -170,6 +171,11 @@ def submit_file(token, repo, base, path, content, title, description, correction
         status, files = api_request(token, "GET", f"{repo_path(repo)}/pulls/{existing_pull['number']}/files?per_page=100")
         if status != 200 or not isinstance(files, list) or {item.get("filename") for item in files} != {path}:
             fail("existing proofreading PR contains unexpected files")
+        if existing_pull.get("body") != description:
+            response_or_fail(
+                token, "PATCH", f"{repo_path(repo)}/pulls/{existing_pull['number']}", (200,),
+                {"body": description},
+            )
         return existing_pull
     branch_revision = branch_sha(token, repo, branch)
     if branch_revision is None:
@@ -229,6 +235,11 @@ def submit_files(token, repo, base, contents, title, description, correction_id)
                 break
         if filenames != set(contents):
             fail("existing proofreading PR contains unexpected files")
+        if existing_pull.get("body") != description:
+            response_or_fail(
+                token, "PATCH", f"{repo_path(repo)}/pulls/{existing_pull['number']}", (200,),
+                {"body": description},
+            )
         return existing_pull
     if branch_sha(token, repo, branch) is None:
         base_revision = response_or_fail(token, "GET", ref_path(repo, base), (200,))["object"]["sha"]
@@ -895,7 +906,7 @@ def parse_article_summary(article, index):
     return lines
 
 
-def parse_review_body(request, repo, publication_id, correction_id, crop_assets):
+def parse_review_body(request, repo, publication_id, correction_id, crop_assets, include_fulltext=True):
     locator = payload_field(request, "locator") or {}
     articles = payload_field(request, "articles") or []
     lines = [
@@ -918,9 +929,21 @@ def parse_review_body(request, repo, publication_id, correction_id, crop_assets)
     description = payload_field(request, "description")
     if description:
         lines.extend(["", f"- 说明：{markdown_value(description)}"])
-    lines.extend(["", "完整正文保存在解析审核 Issue 的逐篇评论及 OCR patch PR 文件 diff 中。"])
+    if include_fulltext:
+        lines.extend(["", "## 文章正文", "", "<!-- parse-fulltext:embedded -->"])
+        for index, article in enumerate(articles):
+            lines.extend([
+                "", f"### 文章 {index + 1}：{markdown_value(article['title'])}", "",
+                fenced_text(article.get("content") or ""),
+            ])
+    else:
+        lines.extend(["", "完整正文超过 PR 描述上限，已按文章分段保存在本 PR 评论中。"])
     body = "\n".join(lines)
     if len(body) > GITHUB_BODY_LIMIT:
+        if include_fulltext:
+            return parse_review_body(
+                request, repo, publication_id, correction_id, crop_assets, include_fulltext=False,
+            )
         fail("parse review body exceeds the GitHub limit")
     return body
 
@@ -943,6 +966,26 @@ def parse_article_comment_bodies(request, correction_id, crop_assets):
                 fail("parse article review comment exceeds the GitHub limit")
             bodies.append((marker, body))
     return bodies
+
+
+def post_parse_pull_comments(token, repo, pull_number, request, correction_id, crop_assets):
+    existing = []
+    for page in range(1, 11):
+        status, comments = api_request(
+            token, "GET", f"{repo_path(repo)}/issues/{pull_number}/comments?per_page=100&page={page}",
+        )
+        if status != 200 or not isinstance(comments, list):
+            fail(f"parse pull comment listing failed with HTTP {status}")
+        existing.extend(str(comment.get("body") or "") for comment in comments)
+        if len(comments) < 100:
+            break
+    for marker, body in parse_article_comment_bodies(request, correction_id, crop_assets):
+        if any(marker in value for value in existing):
+            continue
+        response_or_fail(
+            token, "POST", f"{repo_path(repo)}/issues/{pull_number}/comments", (201,), {"body": body},
+        )
+        existing.append(body)
 
 
 def upsert_parse_tracker_issue(token, correction_id, request, repo, publication_id, pulls, crop_assets):
@@ -1426,6 +1469,11 @@ def main():
         patch_pull = submit_files(
             token, repo, "ocr_patch", patch_contents, title, description, correction_id,
         )
+        if "<!-- parse-fulltext:embedded -->" not in description:
+            for pull in (config_pull, patch_pull):
+                post_parse_pull_comments(
+                    token, repo, pull["number"], request, correction_id, crop_assets,
+                )
         tracker_issue = upsert_parse_tracker_issue(
             tracker_token, correction_id, request, repo, publication_id, [config_pull, patch_pull], crop_assets,
         )
