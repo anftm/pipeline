@@ -112,12 +112,19 @@ def delete_branch(token, owner, repo, branch):
 
 
 def pull_files(token, repo, number):
-    status, data = api_request(token, "GET", f"{repo_path(MIRROR_OWNER, repo)}/pulls/{number}/files?per_page=100")
-    if status != 200 or not isinstance(data, list):
-        fail(f"cannot read files for {repo}#{number}: HTTP {status}")
-    if len(data) != 1:
-        fail(f"{repo}#{number} must contain exactly one changed file")
-    return str(data[0].get("filename") or "")
+    paths = []
+    for page in range(1, 4):
+        status, data = api_request(
+            token, "GET", f"{repo_path(MIRROR_OWNER, repo)}/pulls/{number}/files?per_page=100&page={page}",
+        )
+        if status != 200 or not isinstance(data, list):
+            fail(f"cannot read files for {repo}#{number}: HTTP {status}")
+        paths.extend(str(item.get("filename") or "") for item in data)
+        if len(data) < 100:
+            break
+    if not paths or any(not path for path in paths) or len(paths) > 200:
+        fail(f"{repo}#{number} has an invalid changed-file set")
+    return paths
 
 
 def list_closed_pulls(token, repo):
@@ -483,16 +490,19 @@ def publish_group(token, repo, base, pulls):
     try:
         paths = {}
         for source_pull_item in pulls:
-            source_path = pull_files(token, repo, source_pull_item["number"])
-            target_path = upstream_path(repo, source_path)
-            if not source_path or not target_path:
-                fail(f"{repo}#{source_pull_item['number']} has an invalid target path")
-            previous = paths.get(target_path)
-            if previous and previous != source_path:
-                fail(f"multiple OCR patch paths map to {target_path}")
-            paths[target_path] = source_path
-        for target_path, source_path in sorted(paths.items()):
-            desired, _ = get_file(token, MIRROR_OWNER, repo, base, source_path)
+            for source_path in pull_files(token, repo, source_pull_item["number"]):
+                target_path = upstream_path(repo, source_path)
+                if not source_path or not target_path:
+                    fail(f"{repo}#{source_pull_item['number']} has an invalid target path")
+                previous = paths.get(target_path)
+                if previous and previous[0] != source_path:
+                    fail(f"multiple OCR patch paths map to {target_path}")
+                source_revision = source_pull_item.get("merge_commit_sha")
+                if not source_revision:
+                    fail(f"{repo}#{source_pull_item['number']} is missing its merge commit")
+                paths[target_path] = (source_path, source_revision)
+        for target_path, (source_path, source_revision) in sorted(paths.items()):
+            desired, _ = get_file(token, MIRROR_OWNER, repo, source_revision, source_path)
             current, current_sha = get_file(token, MIRROR_OWNER, repo, branch, target_path)
             if desired and desired != current:
                 put_file(token, MIRROR_OWNER, repo, branch, target_path, desired, current_sha, f"Publish proofreading to {target_path}")

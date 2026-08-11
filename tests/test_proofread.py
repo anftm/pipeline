@@ -731,6 +731,7 @@ class ProofreadBundleTests(unittest.TestCase):
     def test_parse_validation_rejects_missing_pages_and_duplicate_ids(self):
         request = {
             "locator": {"title": "【文章待拆分】小报", "page_start": 1, "page_end": 2},
+            "source_files": ["one", "two"],
             "articles": [{"title": "第一篇", "authors": [], "dates": [], "page_start": 1, "page_end": 1, "content": "正文", "base_part_count": 1}],
         }
         with self.assertRaisesRegex(RuntimeError, "do not cover"):
@@ -759,8 +760,9 @@ class ProofreadBundleTests(unittest.TestCase):
         request = {
             "kind": "parse", "archive_id": 25, "publication_id": publication_id,
             "locator": {"title": "【文章待拆分】小报", "page_start": 1, "page_end": 2},
+            "source_files": ["one", "two"],
             "articles": [
-                {"title": "第一篇", "authors": [], "dates": [{"year": 1967}], "page_start": 1, "page_end": 1, "content": "第一篇正文", "base_part_count": 2},
+                {"title": "第一篇", "authors": [], "dates": [{"year": 1967}], "page_start": 1, "page_end": 1, "content": "第一篇正文", "base_part_count": 2, "ocr": {"content_thresholds": [0.1, 0.1, 0.1, 0.1]}},
                 {"title": "第二篇", "authors": [], "dates": [{"year": 1967}], "page_start": 2, "page_end": 2, "content": "第二篇正文", "base_part_count": 3},
             ],
         }
@@ -774,8 +776,11 @@ class ProofreadBundleTests(unittest.TestCase):
                 patch.object(submit_proofread, "load_request", return_value=request), \
                 patch.object(submit_proofread, "get_file", side_effect=get_file), \
                 patch.object(submit_proofread, "replace_config_articles", return_value="updated config"), \
-                patch.object(submit_proofread, "submit_file", return_value={"url": "https://example/config"}) as config_submit, \
-                patch.object(submit_proofread, "submit_files", return_value={"url": "https://example/patch"}) as patch_submit, \
+                patch.object(submit_proofread, "build_review_crops", return_value=[{"article_index": 0, "title": "第一篇", "pages": [1], "url": "https://example/crop.webp"}]), \
+                patch.object(submit_proofread, "submit_file", return_value={"number": 1, "url": "https://example/config"}) as config_submit, \
+                patch.object(submit_proofread, "submit_files", return_value={"number": 2, "url": "https://example/patch"}) as patch_submit, \
+                patch.object(submit_proofread, "upsert_parse_tracker_issue", return_value="https://example/issue") as tracker, \
+                patch.dict(os.environ, {"TRACKER_TOKEN": "tracker"}), \
                 redirect_stdout(io.StringIO()) as output:
             submit_proofread.main()
         config_submit.assert_called_once()
@@ -783,9 +788,48 @@ class ProofreadBundleTests(unittest.TestCase):
         self.assertEqual(len(contents), 2)
         self.assertTrue(all(path.endswith(f"][{publication_id}].ts") for path in contents))
         self.assertTrue(any("第一篇正文" in content for content in contents.values()))
-        self.assertEqual(json.loads(output.getvalue())["pull_requests"], [
+        self.assertIn("OCR 裁剪原图", config_submit.call_args.args[6])
+        self.assertIn("https://example/crop.webp", patch_submit.call_args.args[5])
+        tracker.assert_called_once()
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["pull_requests"], [
             "https://example/config", "https://example/patch",
         ])
+        self.assertEqual(result["tracker_issue"], "https://example/issue")
+
+    def test_parse_tracker_issue_links_both_pulls_and_posts_complete_body(self):
+        request = {
+            "locator": {"title": "【文章待拆分】小报", "page_start": 1, "page_end": 1},
+            "source_files": ["one"],
+            "articles": [{
+                "title": "第一篇", "authors": ["作者甲"], "dates": [{"year": 1967}],
+                "page_start": 1, "page_end": 1, "content": "完整正文", "base_part_count": 2,
+                "ocr": {"content_thresholds": [0.1, 0.1, 0.1, 0.1]},
+            }],
+        }
+        pulls = [{"number": 1, "url": "https://example/config"}, {"number": 2, "url": "https://example/patch"}]
+        assets = [{"article_index": 0, "title": "第一篇", "pages": [1], "url": "https://example/crop.webp"}]
+
+        def response(_token, method, path, _expected, payload=None):
+            if method == "POST" and path.endswith("/issues"):
+                self.assertIn("banned-historical-archives25#1", payload["body"])
+                self.assertIn("banned-historical-archives25#2", payload["body"])
+                self.assertIn("https://example/crop.webp", payload["body"])
+                return {"number": 9, "html_url": "https://example/issue"}
+            if method == "POST" and path.endswith("/comments"):
+                self.assertIn("完整正文", payload["body"])
+                self.assertIn("https://example/crop.webp", payload["body"])
+                return {"id": 1}
+            return {}
+
+        with patch.object(submit_proofread, "ensure_tracker_label"), \
+                patch.object(submit_proofread, "find_tracker_issue", return_value=None), \
+                patch.object(submit_proofread, "existing_comment_bodies", return_value=[]), \
+                patch.object(submit_proofread, "response_or_fail", side_effect=response):
+            result = submit_proofread.upsert_parse_tracker_issue(
+                "token", "correction", request, "banned-historical-archives25", "publication", pulls, assets,
+            )
+        self.assertEqual(result, "https://example/issue")
 
     def test_identity_change_copies_existing_patch_to_new_article_id(self):
         request = {
@@ -941,8 +985,8 @@ class UpstreamPublishTests(unittest.TestCase):
 
         with patch.object(publish_proofread_upstream, "branch_sha", side_effect=["upstream-sha", "mirror-sha", None]), \
                 patch.object(publish_proofread_upstream, "open_upstream_pull", return_value=None), \
-                patch.object(publish_proofread_upstream, "pull_files", return_value="archives0/[article][book].ts"), \
-                patch.object(publish_proofread_upstream, "get_file", side_effect=[("content", None), ("", None)]), \
+                patch.object(publish_proofread_upstream, "pull_files", return_value=["archives0/[article][book].ts"]), \
+                patch.object(publish_proofread_upstream, "get_file", side_effect=[("content", None), ("", None)]) as get_file, \
                 patch.object(publish_proofread_upstream, "put_file") as put_file, \
                 patch.object(publish_proofread_upstream, "pull_change_details", return_value=None), \
                 patch.object(publish_proofread_upstream, "response_or_fail", side_effect=response) as request_api:
@@ -960,6 +1004,15 @@ class UpstreamPublishTests(unittest.TestCase):
         payload = request_api.call_args.args[4]
         self.assertEqual(payload["head"], f"anftm:{head}")
         self.assertEqual(payload["base"], "ocr_patch")
+        self.assertEqual(get_file.call_args_list[0].args[3], "merge-1")
+
+    def test_pull_files_accepts_paginated_parse_batch(self):
+        first = [{"filename": f"archives25/file-{index}.ts"} for index in range(100)]
+        second = [{"filename": "archives25/file-100.ts"}]
+        with patch.object(publish_proofread_upstream, "api_request", side_effect=[(200, first), (200, second)]):
+            paths = publish_proofread_upstream.pull_files("token", "banned-historical-archives25", 7)
+        self.assertEqual(len(paths), 101)
+        self.assertEqual(paths[-1], "archives25/file-100.ts")
 
     def test_publish_group_reuses_existing_batch_branch_pull(self):
         pull = self._pull(1, "base-1", "merge-1", "2026-08-03T01:00:00Z")

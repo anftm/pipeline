@@ -6,10 +6,11 @@ on:
 
 permissions:
   contents: write
+  issues: write
   pull-requests: write
 
 concurrency:
-  group: submit-parse
+  group: mirror-bha-source-files
   cancel-in-progress: false
 
 jobs:
@@ -20,7 +21,15 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 24
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Install review image dependencies
+        run: pip install -r scripts/requirements.txt
       - name: Create parsing pull request
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
+          TRACKER_TOKEN: ${{ github.token }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_SOURCE_REPOSITORY: vomebook/BHA-Source-Files
         run: python3 scripts/submit_proofread.py

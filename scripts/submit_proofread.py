@@ -14,6 +14,11 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+try:
+    from .review_crops import build_review_crops
+except ImportError:
+    from review_crops import build_review_crops
+
 
 GITHUB_API = "https://api.github.com"
 OWNER = os.environ.get("PROOFREAD_OWNER", "anftm")
@@ -850,6 +855,138 @@ def proofread_pr_body(request, repo, article_id, correction_id):
     return body
 
 
+def parse_crop_markdown(crop_assets):
+    if not crop_assets:
+        return []
+    lines = ["", "## OCR 裁剪原图", ""]
+    for asset in crop_assets:
+        pages = "、".join(str(page) for page in asset["pages"])
+        title = markdown_value(asset["title"])
+        lines.extend([
+            f"### 文章 {asset['article_index'] + 1}：{title}", "",
+            f"裁剪页：{pages}", "",
+            f"![文章 {asset['article_index'] + 1} OCR 裁剪原图]({asset['url']})", "",
+        ])
+    return lines
+
+
+def parse_article_summary(article, index):
+    article_id = parse_article_id(article)
+    authors = "、".join(markdown_value(value) for value in article.get("authors") or []) or "（空）"
+    dates = "、".join(markdown_value(metadata_item("dates", value)) for value in article.get("dates") or []) or "（空）"
+    page_start = article["page_start"]
+    page_end = article["page_end"]
+    page_range = str(page_start) if page_start == page_end else f"{page_start}–{page_end}"
+    lines = [
+        f"### {index + 1}. {markdown_value(article['title'])}", "",
+        f"- Article ID：`{article_id}`",
+        f"- 作者：{authors}",
+        f"- 日期：{dates}",
+        f"- 页码：{page_range}",
+        f"- OCR 基线：{article['base_part_count']} 段",
+    ]
+    article_crop = (article.get("ocr") or {}).get("content_thresholds")
+    if article_crop and any(article_crop):
+        lines.append(f"- 整篇裁剪：`{json.dumps(article_crop, ensure_ascii=False)}`")
+    for page, options in sorted((article.get("ocr_exceptions") or {}).items(), key=lambda item: int(item[0])):
+        thresholds = options.get("content_thresholds")
+        if thresholds is not None:
+            lines.append(f"- 第 {page} 页裁剪覆盖：`{json.dumps(thresholds, ensure_ascii=False)}`")
+    return lines
+
+
+def parse_review_body(request, repo, publication_id, correction_id, crop_assets):
+    locator = payload_field(request, "locator") or {}
+    articles = payload_field(request, "articles") or []
+    lines = [
+        f"<!-- proofreading:{correction_id} -->",
+        "## 解析",
+        "",
+        f"- Archive：`{repo}`",
+        f"- Publication ID：`{publication_id}`",
+        f"- 原占位文章：{markdown_value(locator.get('title') or '')}",
+        f"- 原页码：{locator.get('page_start')}–{locator.get('page_end')}",
+        f"- 拆分结果：{len(articles)} 篇",
+        "",
+        "## 修改内容",
+        "",
+    ]
+    for index, article in enumerate(articles):
+        lines.extend(parse_article_summary(article, index))
+        lines.append("")
+    lines.extend(parse_crop_markdown(crop_assets))
+    description = payload_field(request, "description")
+    if description:
+        lines.extend(["", f"- 说明：{markdown_value(description)}"])
+    lines.extend(["", "完整正文保存在解析审核 Issue 的逐篇评论及 OCR patch PR 文件 diff 中。"])
+    body = "\n".join(lines)
+    if len(body) > GITHUB_BODY_LIMIT:
+        fail("parse review body exceeds the GitHub limit")
+    return body
+
+
+def parse_article_comment_bodies(request, correction_id, crop_assets):
+    assets = {asset["article_index"]: asset for asset in crop_assets}
+    bodies = []
+    for index, article in enumerate(payload_field(request, "articles") or []):
+        content = str(article.get("content") or "")
+        chunks = [content[offset:offset + 52_000] for offset in range(0, len(content), 52_000)] or [""]
+        for part, chunk in enumerate(chunks, start=1):
+            marker = f"<!-- parse-article:{correction_id}:{index + 1}:{part}:{len(chunks)} -->"
+            suffix = f"（第 {part}/{len(chunks)} 部分）" if len(chunks) > 1 else ""
+            lines = [marker, f"## 文章 {index + 1}：{markdown_value(article['title'])} 正文{suffix}", "", fenced_text(chunk)]
+            asset = assets.get(index)
+            if part == 1 and asset:
+                lines.extend(["", "### OCR 裁剪原图", "", f"![文章 {index + 1} OCR 裁剪原图]({asset['url']})"])
+            body = "\n".join(lines)
+            if len(body) > GITHUB_BODY_LIMIT:
+                fail("parse article review comment exceeds the GitHub limit")
+            bodies.append((marker, body))
+    return bodies
+
+
+def upsert_parse_tracker_issue(token, correction_id, request, repo, publication_id, pulls, crop_assets):
+    ensure_tracker_label(token)
+    pull_state = [{"repo": repo, "number": pull["number"], "url": pull["url"]} for pull in pulls]
+    marker = json.dumps(pull_state, ensure_ascii=False, separators=(",", ":"))
+    details = parse_review_body(request, repo, publication_id, correction_id, crop_assets)
+    lines = [
+        f"<!-- proofreading-prs:{marker} -->",
+        details,
+        "",
+        "## 审核方式",
+        "",
+        "1. 核对每篇文章的元数据、页码、正文和有裁剪时显示的原图图块",
+        "2. 打开下方两个 Pull Request 检查 config 与 OCR patch 文件 diff",
+        "3. 全部同意：评论 `/approve`，一次合并两个关联 PR",
+        "4. 拒绝：评论 `/reject 原因`，一次关闭两个关联 PR",
+        "5. 两个 PR 均合并或关闭后，本 Issue 自动关闭",
+        "",
+        "## Pull Requests",
+        "",
+    ]
+    lines.extend(f"- [ ] [{repo}#{pull['number']}]({pull['url']})" for pull in pulls)
+    body = "\n".join(lines)
+    if len(body) > GITHUB_BODY_LIMIT:
+        fail("parse tracker issue body exceeds the GitHub limit")
+    existing = find_tracker_issue(token, correction_id)
+    payload = {"title": f"解析审核：{publication_id}", "body": body, "labels": ["proofreading-review"]}
+    if existing:
+        payload["state"] = "open"
+        issue = response_or_fail(token, "PATCH", f"{full_repo_path(TRACKER_REPOSITORY)}/issues/{existing['number']}", (200,), payload)
+    else:
+        issue = response_or_fail(token, "POST", f"{full_repo_path(TRACKER_REPOSITORY)}/issues", (201,), payload)
+    current = existing_comment_bodies(token, issue["number"])
+    for marker, comment in parse_article_comment_bodies(request, correction_id, crop_assets):
+        if any(marker in value for value in current):
+            continue
+        response_or_fail(
+            token, "POST", f"{full_repo_path(TRACKER_REPOSITORY)}/issues/{issue['number']}/comments", (201,), {"body": comment},
+        )
+        current.append(comment)
+    return issue.get("html_url")
+
+
 def upsert_tracker_issue(token, correction_id, request, repo, article_id, pulls):
     ensure_tracker_label(token)
     title_text = re.sub(r"^(?:校订审核：|校订\s*)+", "", str(request.get("title") or article_id).strip())[:100]
@@ -1074,6 +1211,12 @@ def validate_parse_request(request, archive_id):
     articles = payload_field(request, "articles")
     if not isinstance(locator, dict) or not isinstance(articles, list) or not 1 <= len(articles) <= 200:
         fail("parse requires a locator and 1-200 articles")
+    source_files = payload_field(request, "source_files")
+    if (
+        not isinstance(source_files, list) or not 1 <= len(source_files) <= 1000
+        or any(not isinstance(value, str) or not value or len(value) > 4096 for value in source_files)
+    ):
+        fail("parse source files are invalid")
     try:
         source_start = int(locator["page_start"])
         source_end = int(locator["page_end"])
@@ -1259,6 +1402,9 @@ def main():
     ).hexdigest()[:12]
     if kind == "parse":
         validate_parse_request(request, archive_id)
+        tracker_token = os.environ.get("TRACKER_TOKEN", "")
+        if not tracker_token:
+            fail("TRACKER_TOKEN is required for parse review")
         publication_id = str(request.get("publication_id", ""))
         if not re.fullmatch(r"[A-Za-z0-9_.-]+", publication_id):
             fail("publication_id is invalid")
@@ -1268,10 +1414,8 @@ def main():
             fail(f"config file does not exist: {path}")
         content = replace_config_articles(existing, request)
         title = request.get("title") or f"解析 {publication_id}"
-        description = payload_field(request, "description") or (
-            f"将 {publication_id} 的待拆分占位文章替换为结构化文章。"
-            "对应正文保存在同批 OCR patch PR；两个 PR 都合并后由仓库 workflow 重建 parsed 数据。"
-        )
+        crop_assets = build_review_crops(request)
+        description = parse_review_body(request, repo, publication_id, correction_id, crop_assets)
         config_pull = submit_file(token, repo, "config", path, content, title, description, correction_id)
         patch_contents = {}
         for article in payload_field(request, "articles"):
@@ -1282,10 +1426,14 @@ def main():
         patch_pull = submit_files(
             token, repo, "ocr_patch", patch_contents, title, description, correction_id,
         )
+        tracker_issue = upsert_parse_tracker_issue(
+            tracker_token, correction_id, request, repo, publication_id, [config_pull, patch_pull], crop_assets,
+        )
         print(json.dumps({
             "repository": repo,
             "path": path,
             "pull_requests": [config_pull["url"], patch_pull["url"]],
+            "tracker_issue": tracker_issue,
         }, ensure_ascii=False))
         return
     if kind == "proofread":
