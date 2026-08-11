@@ -479,12 +479,14 @@ class ProofreadBundleTests(unittest.TestCase):
                     patch.object(review_proofread, "authorized", return_value=True), \
                     patch.object(review_proofread, "pull_data", return_value={"state": "open", "merged": False}), \
                     patch.object(review_proofread, "merge_pull", return_value=True) as merge, \
+                    patch.object(review_proofread, "delete_pull_branch") as delete, \
                     patch.object(review_proofread, "response_or_fail") as tracker:
                 with redirect_stdout(io.StringIO()):
                     review_proofread.main()
         finally:
             os.unlink(event_path)
         merge.assert_called_once_with("archive", "banned-historical-archives3", {"repo": "banned-historical-archives3", "number": 5, "url": "u"})
+        delete.assert_called_once()
         self.assertEqual(tracker.call_count, 2)
         body = tracker.call_args_list[0].args[4]["body"]
         self.assertIn("banned-historical-archives3#5: merged", body)
@@ -502,12 +504,14 @@ class ProofreadBundleTests(unittest.TestCase):
                     patch.object(review_proofread, "authorized", return_value=True), \
                     patch.object(review_proofread, "pull_data", return_value={"state": "open", "merged": False}), \
                     patch.object(review_proofread, "close_pull", return_value=True) as close, \
+                    patch.object(review_proofread, "delete_pull_branch") as delete, \
                     patch.object(review_proofread, "response_or_fail") as tracker:
                 with redirect_stdout(io.StringIO()):
                     review_proofread.main()
         finally:
             os.unlink(event_path)
         close.assert_called_once_with("archive", "banned-historical-archives3", 5)
+        delete.assert_called_once()
         self.assertEqual(tracker.call_count, 2)
         body = tracker.call_args_list[0].args[4]["body"]
         self.assertIn("已拒绝本次校订", body)

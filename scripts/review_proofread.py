@@ -10,10 +10,12 @@ from pathlib import Path
 try:
     from .submit_proofread import (
         OWNER, TRACKER_REPOSITORY, api_request, full_repo_path, merge_pull, repo_path, response_or_fail,
+        delete_pull_branch,
     )
 except ImportError:
     from submit_proofread import (
         OWNER, TRACKER_REPOSITORY, api_request, full_repo_path, merge_pull, repo_path, response_or_fail,
+        delete_pull_branch,
     )
 
 PRS_RE = re.compile(r"<!-- proofreading-prs:(\[.*?\]) -->")
@@ -92,16 +94,19 @@ def main():
         if not isinstance(number, int):
             raise RuntimeError("tracker issue contains an invalid pull request reference")
         if data.get("merged") or data.get("state") == "closed":
+            delete_pull_branch(archive_token, repo, data)
             results.append(f"{repo}#{number}: already resolved")
             continue
         if approve:
             if merge_pull(archive_token, repo, pull):
+                delete_pull_branch(archive_token, repo, data)
                 results.append(f"{repo}#{number}: merged")
             else:
                 results.append(f"{repo}#{number}: not mergeable")
                 all_resolved = False
         else:
             close_pull(archive_token, repo, number)
+            delete_pull_branch(archive_token, repo, data)
             results.append(f"{repo}#{number}: closed")
     summary = "已同意并合并/关闭相关 PR" if approve else "已拒绝本次校订"
     reason = reject.group(1) if reject else ""

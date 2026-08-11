@@ -8,6 +8,7 @@ possible; divergent branches are reported instead of being overwritten.
 
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -23,6 +24,10 @@ GITHUB_API = "https://api.github.com"
 DEFAULT_BRANCH = "main"
 FORK_WAIT_SECONDS = 120
 GENERATED_BRANCHES = {"parsed"}
+LEGACY_DATA_BRANCHES = {"ocr_config", "parsed_article", "tags", "origin", "selected"}
+SYNCED_BRANCHES = {"main", "config", "ocr_cache", "ocr_patch"} | LEGACY_DATA_BRANCHES
+MANAGED_BRANCHES = GENERATED_BRANCHES | SYNCED_BRANCHES
+TEMPORARY_BRANCH_RE = re.compile(r"^(?:proofread/[0-9a-f]{12}-(?:config|ocr_patch)|revert-[0-9]+-.+)$")
 
 
 def api_request(token: str, method: str, path: str, payload: dict | None = None):
@@ -88,6 +93,12 @@ def ensure_fork(token: str, repo: str) -> str:
             raise RuntimeError(f"[{repo}] fork did not become available within {FORK_WAIT_SECONDS}s")
     else:
         raise RuntimeError(f"[{repo}] mirror lookup failed ({status}): {data.get('message', data)}")
+
+    if not data.get("delete_branch_on_merge"):
+        status, update = api_request(token, "PATCH", mirror_path, {"delete_branch_on_merge": True})
+        if status != 200:
+            raise RuntimeError(f"[{repo}] branch cleanup setting failed ({status}): {update.get('message', update)}")
+        print(f"[{repo}] enabled automatic merged-branch deletion")
 
     status, data = api_request(token, "GET", upstream_path)
     if status != 200:
@@ -179,6 +190,39 @@ def sync_branch(token: str, repo: str, branch: str) -> None:
     print(f"[{repo}/{branch}] fast-forwarded")
 
 
+def delete_branch(token: str, repo: str, branch: str) -> None:
+    status, data = api_request(token, "DELETE", ref_path(MIRROR_OWNER, repo, branch))
+    if status not in (204, 404):
+        raise RuntimeError(f"[{repo}/{branch}] deletion failed ({status}): {data.get('message', data)}")
+    print(f"[{repo}/{branch}] deleted")
+
+
+def clean_unmanaged_inherited_branches(
+    token: str, repo: str, upstream: set[str], mirror: set[str], managed: set[str] | None = None,
+) -> None:
+    for branch in sorted((upstream & mirror) - (managed or MANAGED_BRANCHES)):
+        upstream_sha = branch_sha(token, UPSTREAM_OWNER, repo, branch)
+        mirror_sha = branch_sha(token, MIRROR_OWNER, repo, branch)
+        if upstream_sha != mirror_sha:
+            print(f"[{repo}/{branch}] unmanaged inherited branch diverged, preserved")
+            continue
+        delete_branch(token, repo, branch)
+
+
+def clean_resolved_temporary_branches(token: str, repo: str, upstream: set[str], mirror: set[str]) -> None:
+    for branch in sorted(mirror - upstream):
+        if not TEMPORARY_BRANCH_RE.fullmatch(branch):
+            continue
+        query = urllib.parse.urlencode({
+            "state": "all", "head": f"{MIRROR_OWNER}:{branch}", "per_page": 100,
+        })
+        status, pulls = api_request(token, "GET", f"{repo_path(MIRROR_OWNER, repo)}/pulls?{query}")
+        if status != 200 or not isinstance(pulls, list):
+            raise RuntimeError(f"[{repo}/{branch}] pull lookup failed ({status})")
+        if pulls and all(pull.get("state") == "closed" for pull in pulls):
+            delete_branch(token, repo, branch)
+
+
 def main() -> int:
     token = os.environ.get("GH_PAT") or os.environ.get("GITHUB_TOKEN", "")
     if not token:
@@ -189,12 +233,16 @@ def main() -> int:
     for number in range(REPO_START, REPO_END + 1):
         repo = f"banned-historical-archives{number}"
         try:
-            ensure_fork(token, repo)
-            for data_branch in list_branches(token, UPSTREAM_OWNER, repo):
-                if data_branch in GENERATED_BRANCHES:
-                    print(f"[{repo}/{data_branch}] generated branch managed separately, skipped")
-                    continue
+            default_branch = ensure_fork(token, repo)
+            upstream_branches = set(list_branches(token, UPSTREAM_OWNER, repo))
+            mirror_branches = set(list_branches(token, MIRROR_OWNER, repo))
+            managed_branches = MANAGED_BRANCHES | {default_branch}
+            for data_branch in sorted(upstream_branches & (SYNCED_BRANCHES | {default_branch})):
                 sync_branch(token, repo, data_branch)
+            clean_unmanaged_inherited_branches(
+                token, repo, upstream_branches, mirror_branches, managed_branches,
+            )
+            clean_resolved_temporary_branches(token, repo, upstream_branches, mirror_branches)
         except Exception as exc:
             print(str(exc), file=sys.stderr)
             failed.append(repo)

@@ -85,6 +85,21 @@ def ref_path(repo, branch):
     return f"{repo_path(repo)}/git/ref/heads/{urllib.parse.quote(branch, safe='')}"
 
 
+def delete_pull_branch(token, repo, pull):
+    head = pull.get("head")
+    branch = head.get("ref") if isinstance(head, dict) else head
+    if isinstance(head, dict):
+        full_name = (head.get("repo") or {}).get("full_name")
+        if full_name and full_name != f"{OWNER}/{repo}":
+            return False
+    if not isinstance(branch, str) or not re.fullmatch(r"proofread/[0-9a-f]{12}-(?:config|ocr_patch)", branch):
+        return False
+    status, data = api_request(token, "DELETE", ref_path(repo, branch))
+    if status not in (204, 404):
+        fail(f"cannot delete resolved proofreading branch {repo}/{branch}: {data}")
+    return True
+
+
 def branch_sha(token, repo, branch):
     status, data = api_request(token, "GET", ref_path(repo, branch))
     if status == 404:
@@ -1559,7 +1574,10 @@ def main():
             and request.get("auto_merge_policy") == AUTO_MERGE_POLICY
             and auto_merge_allowed(kind, patch, metadata)
         ):
-            auto_merged = [pull["url"] for pull in pull_requests if merge_pull(token, repo, pull)]
+            for pull in pull_requests:
+                if merge_pull(token, repo, pull):
+                    auto_merged.append(pull["url"])
+                    delete_pull_branch(token, repo, pull)
         auto_merged_urls = set(auto_merged)
         pending_pulls = [pull for pull in pull_requests if pull["url"] not in auto_merged_urls]
         tracker_issue = None
