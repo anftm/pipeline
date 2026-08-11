@@ -52,16 +52,29 @@ class ForkRepositoriesTests(unittest.TestCase):
             (fork_repositories.MIRROR_OWNER, "feat/diverged"): "b",
         }
         with patch.object(fork_repositories, "branch_sha", side_effect=lambda _t, owner, _r, branch: shas[(owner, branch)]), \
+                patch.object(fork_repositories, "branch_pulls", return_value=[{"state": "closed"}]), \
                 patch.object(fork_repositories, "delete_branch") as delete:
             fork_repositories.clean_unmanaged_inherited_branches(
                 "token", "banned-historical-archives0", upstream, mirror,
             )
         delete.assert_called_once_with("token", "banned-historical-archives0", "feat/old")
 
+    def test_open_or_untracked_upstream_branch_is_preserved(self):
+        upstream = {"main", "feat/open", "manual-data"}
+        with patch.object(
+            fork_repositories, "branch_pulls",
+            side_effect=[[{"state": "open"}], []],
+        ), patch.object(fork_repositories, "branch_sha") as sha, \
+                patch.object(fork_repositories, "delete_branch") as delete:
+            fork_repositories.clean_unmanaged_inherited_branches(
+                "token", "banned-historical-archives0", upstream, set(upstream),
+            )
+        sha.assert_not_called()
+        delete.assert_not_called()
+
     def test_closed_proofreading_branch_is_deleted_but_open_branch_is_kept(self):
-        responses = [(200, [{"state": "closed"}]), (200, [{"state": "open"}])]
         mirror = {"main", "proofread/111111111111-config", "proofread/222222222222-ocr_patch"}
-        with patch.object(fork_repositories, "api_request", side_effect=responses), \
+        with patch.object(fork_repositories, "branch_pulls", side_effect=[[{"state": "closed"}], [{"state": "open"}]]), \
                 patch.object(fork_repositories, "delete_branch") as delete:
             fork_repositories.clean_resolved_temporary_branches(
                 "token", "banned-historical-archives0", {"main"}, mirror,

@@ -197,10 +197,22 @@ def delete_branch(token: str, repo: str, branch: str) -> None:
     print(f"[{repo}/{branch}] deleted")
 
 
+def branch_pulls(token: str, owner: str, repo: str, branch: str) -> list[dict]:
+    query = urllib.parse.urlencode({"state": "all", "head": f"{owner}:{branch}", "per_page": 100})
+    status, pulls = api_request(token, "GET", f"{repo_path(owner, repo)}/pulls?{query}")
+    if status != 200 or not isinstance(pulls, list):
+        raise RuntimeError(f"[{repo}/{branch}] pull lookup failed ({status})")
+    return pulls
+
+
 def clean_unmanaged_inherited_branches(
     token: str, repo: str, upstream: set[str], mirror: set[str], managed: set[str] | None = None,
 ) -> None:
     for branch in sorted((upstream & mirror) - (managed or MANAGED_BRANCHES)):
+        pulls = branch_pulls(token, UPSTREAM_OWNER, repo, branch)
+        if not pulls or any(pull.get("state") != "closed" for pull in pulls):
+            print(f"[{repo}/{branch}] unmanaged inherited branch is not resolved, preserved")
+            continue
         upstream_sha = branch_sha(token, UPSTREAM_OWNER, repo, branch)
         mirror_sha = branch_sha(token, MIRROR_OWNER, repo, branch)
         if upstream_sha != mirror_sha:
@@ -213,12 +225,7 @@ def clean_resolved_temporary_branches(token: str, repo: str, upstream: set[str],
     for branch in sorted(mirror - upstream):
         if not TEMPORARY_BRANCH_RE.fullmatch(branch):
             continue
-        query = urllib.parse.urlencode({
-            "state": "all", "head": f"{MIRROR_OWNER}:{branch}", "per_page": 100,
-        })
-        status, pulls = api_request(token, "GET", f"{repo_path(MIRROR_OWNER, repo)}/pulls?{query}")
-        if status != 200 or not isinstance(pulls, list):
-            raise RuntimeError(f"[{repo}/{branch}] pull lookup failed ({status})")
+        pulls = branch_pulls(token, MIRROR_OWNER, repo, branch)
         if pulls and all(pull.get("state") == "closed" for pull in pulls):
             delete_branch(token, repo, branch)
 
