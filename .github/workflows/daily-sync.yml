@@ -49,6 +49,19 @@ jobs:
           PAGES_REPO: ${{ secrets.PAGES_REPO }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
+      - name: Deploy GitHub Pages
+        env:
+          PAGES_TOKEN: ${{ secrets.PAGES_TOKEN }}
+          PAGES_REPO: ${{ secrets.PAGES_REPO }}
+        run: |
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header "Authorization: Bearer ${PAGES_TOKEN}" \
+            --header "Accept: application/vnd.github+json" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${PAGES_REPO}/actions/workflows/static.yml/dispatches" \
+            --data '{"ref":"main"}'
+
       - name: Commit updated state
         if: steps.check.outputs.data_changed == 'true'
         run: |
