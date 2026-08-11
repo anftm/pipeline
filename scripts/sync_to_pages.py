@@ -7,6 +7,7 @@
   需要环境变量: PAGES_TOKEN, PAGES_REPO (如 anftm/search)
 """
 
+import base64
 import json
 import os
 import shutil
@@ -217,6 +218,28 @@ def run(cmd: list[str], cwd: str = None, env: dict = None) -> tuple[int, str, st
     return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
 
 
+def git_auth_env(host: str, username: str, token: str) -> dict[str, str]:
+    credentials = base64.b64encode(f"{username}:{token}".encode()).decode()
+    return {
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": f"http.https://{host}/.extraheader",
+        "GIT_CONFIG_VALUE_0": f"Authorization: Basic {credentials}",
+    }
+
+
+def push_with_retry(cwd: str, auth_env: dict[str, str]) -> bool:
+    for attempt in range(2):
+        ret, _out, err = run(["git", "push"], cwd=cwd, env=auth_env)
+        if ret == 0:
+            print("   ✅ 推送成功")
+            return True
+        print(f"   ⚠ 推送失败 (第{attempt + 1}次): {err[:200]}")
+        if attempt == 0:
+            run(["git", "pull", "--rebase"], cwd=cwd, env=auth_env)
+            time.sleep(2)
+    return False
+
+
 def main():
     token = os.environ.get("PAGES_TOKEN", "")
     pages_repo = os.environ.get("PAGES_REPO", "")
@@ -295,11 +318,7 @@ def main():
     print(f"\n📥 克隆 GitHub Pages 仓库: {pages_repo} ...")
     tmpdir = tempfile.mkdtemp(prefix="pages_sync_")
     clone_url = f"https://github.com/{pages_repo}.git"
-    auth_env = {
-        "GIT_CONFIG_COUNT": "1",
-        "GIT_CONFIG_KEY_0": "http.extraHeader",
-        "GIT_CONFIG_VALUE_0": f"Authorization: Bearer {token}",
-    }
+    auth_env = git_auth_env("github.com", username, token)
 
     ret, out, err = run(["git", "clone", "--depth", "1", clone_url, tmpdir], env=auth_env)
     if ret != 0:
@@ -372,15 +391,10 @@ def main():
         if ret != 0 and "nothing to commit" not in err:
             print(f"   ⚠ git commit 失败: {err}")
 
-        for attempt in range(2):
-            ret, out, err = run(["git", "push"], cwd=tmpdir, env=auth_env)
-            if ret == 0:
-                print("   ✅ 推送成功")
-                break
-            print(f"   ⚠ 推送失败 (第{attempt + 1}次): {err[:200]}")
-            if attempt == 0:
-                run(["git", "pull", "--rebase"], cwd=tmpdir, env=auth_env)
-                time.sleep(2)
+        if not push_with_retry(tmpdir, auth_env):
+            shutil.rmtree(tmpdir, ignore_errors=True)
+            print("   ❌ 推送失败，未发布生成数据")
+            return 1
 
     shutil.rmtree(tmpdir, ignore_errors=True)
     print(f"\n🧹 已清理临时目录")
