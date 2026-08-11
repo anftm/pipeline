@@ -27,8 +27,10 @@ import posixpath
 import urllib.error
 import urllib.parse
 import urllib.request
+import re
 from pathlib import Path
 from collections import defaultdict
+import jieba
 
 # ═══════════════════════════════════════════════════════════
 # 配置
@@ -40,7 +42,9 @@ FOLDER_BROWSER_JSON = Path("output/folder_browser.json")
 SPACE_REPO = "VoiceOfML/Search"
 SEARCH_DATA_VERSION = 2
 INITIAL_PAGE_SIZE = 100
-NGRAM_MAGIC = b"VNG2"
+NGRAM_MAGIC = b"VNG3"
+WORD_INDEX_MAGIC = b"VWI2"
+WORD_INDEX_TOKENIZER = "jieba-0.42.1-cjk-char-v1"
 
 
 def decode_search_payload(data):
@@ -111,40 +115,95 @@ def encode_varint(value: int) -> bytes:
     return bytes(output)
 
 
-def write_ngram_index(path: Path, records: list[dict], width: int) -> None:
-    postings: dict[str, set[int]] = defaultdict(set)
+def tokenize(text: str) -> set[str]:
+    text_lower = text.lower()
+    tokens = re.findall(r"[a-z0-9]+", text_lower)
+    chinese_text = re.sub(r"[a-z0-9\s]+", " ", text_lower)
+    chinese_text = re.sub(r"[^\u4e00-\u9fff\u3400-\u4dbf\s]+", " ", chinese_text)
+    chinese_tokens = jieba.lcut(chinese_text)
+    tokens.extend(token.strip() for token in chinese_tokens if token.strip())
+    chinese_token_set = set(chinese_tokens)
+    tokens.extend(
+        char for char in text_lower
+        if ("\u4e00" <= char <= "\u9fff" or "\u3400" <= char <= "\u4dbf")
+        and char not in chinese_token_set
+    )
+    return set(tokens)
+
+
+def search_fields(records: list[dict]) -> list[tuple[str, str, str]]:
+    return [
+        (
+            str(record.get("File") or "").lower(),
+            str(record.get("Repo") or "").lower(),
+            "/".join(str(item).lower() for item in (record.get("Folder") or [])),
+        )
+        for record in records
+    ]
+
+
+def search_fields_digest(fields: list[tuple[str, str, str]]) -> bytes:
     digest = hashlib.sha256()
-    for record_id, record in enumerate(records):
-        file_name = str(record.get("File") or "").lower()
-        repo_name = str(record.get("Repo") or "").lower()
-        folder_path = "/".join(str(item).lower() for item in (record.get("Folder") or []))
-        digest.update(file_name.encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(repo_name.encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(folder_path.encode("utf-8"))
-        digest.update(b"\0")
+    for values in fields:
+        for value in values:
+            digest.update(value.encode("utf-8"))
+            digest.update(b"\0")
+    return digest.digest()
+
+
+def encode_postings(record_ids) -> bytes:
+    output = bytearray()
+    previous = 0
+    for record_id in record_ids:
+        output.extend(encode_varint(record_id - previous))
+        previous = record_id
+    return bytes(output)
+
+
+def append_postings(output: bytearray, postings: dict[str, list[int]]) -> None:
+    output.extend(encode_varint(len(postings)))
+    for term in sorted(postings):
+        key = term.encode("utf-8")
+        encoded = encode_postings(postings[term])
+        output.extend(encode_varint(len(key)))
+        output.extend(key)
+        output.extend(encode_varint(len(postings[term])))
+        output.extend(encode_varint(len(encoded)))
+        output.extend(encoded)
+
+
+def write_ngram_index(path: Path, fields: list[tuple[str, str, str]], digest: bytes, width: int) -> None:
+    postings: dict[str, list[int]] = defaultdict(list)
+    for record_id, values in enumerate(fields):
         grams = set()
-        for value in (file_name, repo_name, folder_path):
+        for value in values:
             grams.update(value[index:index + width] for index in range(len(value) - width + 1))
         for gram in grams:
-            postings[gram].add(record_id)
+            postings[gram].append(record_id)
 
     output = bytearray(NGRAM_MAGIC)
     output.append(width)
-    output.extend(digest.digest())
+    output.extend(digest)
+    output.extend(encode_varint(len(fields)))
+    append_postings(output, postings)
+    import gzip
+    path.write_bytes(gzip.compress(bytes(output), compresslevel=9, mtime=0))
+
+
+def write_word_index(path: Path, records: list[dict], digest: bytes) -> None:
+    postings: dict[str, list[int]] = defaultdict(list)
+    for record_id, record in enumerate(records):
+        text = " ".join([str(record.get("File") or "")] + [str(item) for item in (record.get("Folder") or [])])
+        for token in tokenize(text):
+            postings[token].append(record_id)
+
+    output = bytearray(WORD_INDEX_MAGIC)
+    tokenizer = WORD_INDEX_TOKENIZER.encode("utf-8")
+    output.extend(encode_varint(len(tokenizer)))
+    output.extend(tokenizer)
+    output.extend(digest)
     output.extend(encode_varint(len(records)))
-    output.extend(encode_varint(len(postings)))
-    for gram in sorted(postings):
-        key = gram.encode("utf-8")
-        record_ids = sorted(postings[gram])
-        output.extend(encode_varint(len(key)))
-        output.extend(key)
-        output.extend(encode_varint(len(record_ids)))
-        previous = 0
-        for record_id in record_ids:
-            output.extend(encode_varint(record_id - previous))
-            previous = record_id
+    append_postings(output, postings)
     import gzip
     path.write_bytes(gzip.compress(bytes(output), compresslevel=9, mtime=0))
 
@@ -487,8 +546,11 @@ def main():
     (data_dir / "folder_tree.json.gz").write_bytes(FOLDER_TREE_JSON.with_suffix(".json.gz").read_bytes())
     browser_text = json.dumps(browser_data, ensure_ascii=False, separators=(",", ":"))
     (data_dir / "folder_browser.json.gz").write_bytes(gzip.compress(browser_text.encode("utf-8"), compresslevel=9, mtime=0))
-    write_ngram_index(data_dir / "search_ngrams_2.bin.gz", records, 2)
-    write_ngram_index(data_dir / "search_ngrams_3.bin.gz", records, 3)
+    fields = search_fields(records)
+    digest = search_fields_digest(fields)
+    write_word_index(data_dir / "search_words.bin.gz", records, digest)
+    write_ngram_index(data_dir / "search_ngrams_2.bin.gz", fields, digest, 2)
+    write_ngram_index(data_dir / "search_ngrams_3.bin.gz", fields, digest, 3)
     initial_urls = write_initial_payloads(data_dir, records)
     sidebar_urls = write_sidebar_payloads(data_dir, records, browser_data)
 
@@ -496,6 +558,7 @@ def main():
     gz_size_mb = dest_gz.stat().st_size / 1024 / 1024
     print(f"\n💾 已写入:")
     print(f"   {dest_gz} ({gz_size_mb:.1f} MB)")
+    print(f"   words: {((data_dir / 'search_words.bin.gz').stat().st_size / 1024 / 1024):.1f} MB")
     print(f"   ngrams: 2={((data_dir / 'search_ngrams_2.bin.gz').stat().st_size / 1024 / 1024):.1f} MB, 3={((data_dir / 'search_ngrams_3.bin.gz').stat().st_size / 1024 / 1024):.1f} MB")
     print(f"   initial: {len(initial_urls)} 个首屏文件")
     print(f"   sidebar: {len(sidebar_urls)} 个侧栏首屏文件")
@@ -503,7 +566,7 @@ def main():
     print(f"\n📤 提交并推送...")
     run(["git", "config", "user.email", "github-actions[bot]@users.noreply.github.com"], cwd=tmpdir)
     run(["git", "config", "user.name", "github-actions[bot]"], cwd=tmpdir)
-    ret, out, err = run(["git", "add", "data/search_data.json.gz", "data/folder_tree.json.gz", "data/folder_browser.json.gz", "data/search_ngrams_2.bin.gz", "data/search_ngrams_3.bin.gz", "data/initial", "data/sidebar"], cwd=tmpdir)
+    ret, out, err = run(["git", "add", "data/search_data.json.gz", "data/folder_tree.json.gz", "data/folder_browser.json.gz", "data/search_words.bin.gz", "data/search_ngrams_2.bin.gz", "data/search_ngrams_3.bin.gz", "data/initial", "data/sidebar"], cwd=tmpdir)
     if ret != 0:
         print(f"   ⚠ git add 失败: {err}")
 
