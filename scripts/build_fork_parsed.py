@@ -2,6 +2,7 @@
 """Build parsed branches for anftm archives whose source branches changed."""
 
 import base64
+import hashlib
 import html
 import json
 import os
@@ -497,6 +498,76 @@ def has_replacement_character(value) -> bool:
     return False
 
 
+def article_id(article: dict) -> str:
+    dates = sorted(
+        f"{date.get('year') or '0000'}-{int(date.get('month') or 0):02d}-{int(date.get('day') or 0):02d}"
+        for date in article.get("dates") or [] if isinstance(date, dict)
+    )
+    value = json.dumps([
+        str(article.get("title") or ""), dates, bool(article.get("is_range_date")),
+        sorted(str(author) for author in article.get("authors") or []), str(article.get("file_id") or ""),
+    ], ensure_ascii=False, separators=(",", ":"))
+    return hashlib.md5(value.encode()).hexdigest()[:10]
+
+
+def apply_metadata_overrides(parsed: Path, config: Path) -> None:
+    root = config / "metadata_overrides"
+    if not root.exists():
+        return
+    for override_path in sorted(root.glob("*/*.json")):
+        publication_id = override_path.parent.name
+        old_article_id = override_path.stem
+        override = json.loads(override_path.read_text(encoding="utf-8"))
+        if (
+            not isinstance(override, dict) or override.get("version") != 1
+            or override.get("publication_id") != publication_id
+            or override.get("article_id") != old_article_id
+            or not isinstance(override.get("new_article_id"), str)
+            or not isinstance(override.get("article"), dict)
+            or not isinstance(override.get("metadata"), dict)
+            or set(override["metadata"]) - {"title", "authors", "dates", "tags"}
+        ):
+            raise RuntimeError(f"invalid article metadata override: {override_path}")
+        matches = []
+        for metadata_path in parsed.glob("*/*/*.metadata"):
+            if metadata_path.stem == publication_id:
+                matches.extend(metadata_path.parent.glob(f"*/{old_article_id}.json"))
+        if len(matches) != 1:
+            raise RuntimeError(
+                f"article metadata override expected one parsed article, found {len(matches)}: {override_path}"
+            )
+        source = matches[0]
+        article = json.loads(source.read_text(encoding="utf-8"))
+        identity_fields = ("title", "authors", "dates", "is_range_date")
+        if not isinstance(article, dict) or any(
+            article.get(key, False if key == "is_range_date" else []) != override["article"].get(
+                key, False if key == "is_range_date" else []
+            )
+            for key in identity_fields
+        ):
+            raise RuntimeError(f"article metadata override source identity changed: {override_path}")
+        article.update({key: value for key, value in override["metadata"].items() if key != "tags"})
+        new_article_id = article_id(article)
+        if new_article_id != override["new_article_id"]:
+            raise RuntimeError(f"article metadata override target identity changed: {override_path}")
+        target = source.parent.parent / new_article_id[:3] / f"{new_article_id}.json"
+        target_tags = target.with_suffix(".tags")
+        source_tags = source.with_suffix(".tags")
+        if target != source and (target.exists() or target_tags.exists()):
+            raise RuntimeError(f"article metadata override target already exists: {override_path}")
+        source.write_text(json.dumps(article, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+        if "tags" in override["metadata"]:
+            source_tags.write_text(
+                json.dumps(override["metadata"]["tags"], ensure_ascii=False, separators=(",", ":")),
+                encoding="utf-8",
+            )
+        if target != source:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            source.rename(target)
+            if source_tags.exists():
+                source_tags.rename(target_tags)
+
+
 def clean_selected_archive_parsed(parsed: Path, archive_id: int) -> None:
     if archive_id not in CLEANUP_ARCHIVE_IDS:
         return
@@ -559,6 +630,22 @@ def prepare_patch_input(source: Path, target: Path, archive_id: int) -> Path:
     return target
 
 
+def map_override_patches(patch_input: Path, config: Path) -> None:
+    root = config / "metadata_overrides"
+    if not root.exists():
+        return
+    for override_path in sorted(root.glob("*/*.json")):
+        override = json.loads(override_path.read_text(encoding="utf-8"))
+        publication_id = override_path.parent.name
+        old_article_id = override_path.stem
+        new_article_id = str(override.get("new_article_id") or "") if isinstance(override, dict) else ""
+        if not re.fullmatch(r"[0-9a-f]{10}", new_article_id):
+            raise RuntimeError(f"invalid article metadata override target: {override_path}")
+        new_patch = patch_input / f"[{new_article_id}][{publication_id}].ts"
+        if new_patch.exists():
+            shutil.copy2(new_patch, patch_input / f"[{old_article_id}][{publication_id}].ts")
+
+
 def parsed_tree_changed(parsed: Path, current_commit: str, env: dict[str, str]) -> bool:
     generated_tree = run_output(["git", "write-tree"], cwd=parsed, env=env)
     current_tree = run_output(["git", "rev-parse", f"{current_commit}^{{tree}}"], cwd=parsed, env=env)
@@ -579,6 +666,7 @@ def build_archive(token: str, helper: Path, root: Path, archive_id: int, revisio
 
     parsed = paths[PARSED_BRANCH]
     patch_input = prepare_patch_input(paths["ocr_patch"], archive_root / "ocr_patch-input", archive_id)
+    map_override_patches(patch_input, paths["config"])
     run(["git", "checkout", "--orphan", "parsed-build"], cwd=parsed, env=env)
     run(["git", "reset", "--hard"], cwd=parsed, env=env)
     run_in_container(root, helper, [
@@ -587,6 +675,7 @@ def build_archive(token: str, helper: Path, root: Path, archive_id: int, revisio
         str(parsed), str(paths["main"]),
     ])
     clean_selected_archive_parsed(parsed, archive_id)
+    apply_metadata_overrides(parsed, paths["config"])
     sanitize_repository(parsed)
     secure_home = archive_root / "push-home"
     secure_home.mkdir()

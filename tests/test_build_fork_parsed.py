@@ -371,6 +371,88 @@ class BuildForkParsedTests(unittest.TestCase):
             build_fork_parsed.clean_selected_archive_parsed(Path(directory), 19)
             self.assertEqual(__import__("json").loads(article.read_text(encoding="utf-8")), original)
 
+    def test_metadata_override_updates_and_renames_article_and_tags(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            parsed = root / "parsed"
+            config = root / "config"
+            book = parsed / "pub" / "book"
+            articles = book / "art"
+            articles.mkdir(parents=True)
+            (book / "publication.metadata").write_text("{}", encoding="utf-8")
+            article = {
+                "title": "旧标题", "authors": ["旧作者"], "dates": [{"year": 1967}],
+                "is_range_date": False, "parts": [{"text": "正文"}],
+            }
+            old_id = build_fork_parsed.article_id(article)
+            article_path = articles / f"{old_id}.json"
+            tags_path = articles / f"{old_id}.tags"
+            article_path.write_text(__import__("json").dumps(article, ensure_ascii=False), encoding="utf-8")
+            tags_path.write_text('[]', encoding="utf-8")
+            patch = {
+                "title": "新标题", "authors": ["新作者"],
+                "tags": [{"name": "新标签", "type": "主题/事件"}],
+            }
+            expected = {**article, **patch}
+            new_id = build_fork_parsed.article_id(expected)
+            override_dir = config / "metadata_overrides" / "publication"
+            override_dir.mkdir(parents=True)
+            (override_dir / f"{old_id}.json").write_text(__import__("json").dumps({
+                "version": 1, "publication_id": "publication", "article_id": old_id,
+                "new_article_id": new_id,
+                "article": {key: article[key] for key in ("title", "authors", "dates", "is_range_date")},
+                "metadata": patch,
+            }, ensure_ascii=False), encoding="utf-8")
+
+            build_fork_parsed.apply_metadata_overrides(parsed, config)
+
+            self.assertFalse(article_path.exists())
+            updated_path = book / new_id[:3] / f"{new_id}.json"
+            self.assertEqual(__import__("json").loads(updated_path.read_text(encoding="utf-8"))["title"], "新标题")
+            self.assertEqual(__import__("json").loads(updated_path.with_suffix(".tags").read_text(encoding="utf-8")), patch["tags"])
+
+    def test_metadata_override_rejects_stale_source_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            parsed = root / "parsed"
+            config = root / "config"
+            book = parsed / "pub" / "book"
+            articles = book / "art"
+            articles.mkdir(parents=True)
+            (book / "publication.metadata").write_text("{}", encoding="utf-8")
+            (articles / "oldid.json").write_text('{"title":"different"}', encoding="utf-8")
+            override_dir = config / "metadata_overrides" / "publication"
+            override_dir.mkdir(parents=True)
+            (override_dir / "oldid.json").write_text(__import__("json").dumps({
+                "version": 1, "publication_id": "publication", "article_id": "oldid",
+                "new_article_id": "newid",
+                "article": {"title": "expected", "authors": [], "dates": [], "is_range_date": False},
+                "metadata": {"title": "新标题"},
+            }, ensure_ascii=False), encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "source identity changed"):
+                build_fork_parsed.apply_metadata_overrides(parsed, config)
+
+    def test_override_patch_is_mapped_to_parser_source_id(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            patch_input = root / "patch"
+            config = root / "config"
+            patch_input.mkdir()
+            override_dir = config / "metadata_overrides" / "publication"
+            override_dir.mkdir(parents=True)
+            (override_dir / "oldarticle.json").write_text(__import__("json").dumps({
+                "version": 1, "publication_id": "publication", "article_id": "oldarticle",
+                "new_article_id": "1234567890", "article": {}, "metadata": {"title": "新"},
+            }), encoding="utf-8")
+            new_patch = patch_input / "[1234567890][publication].ts"
+            old_patch = patch_input / "[oldarticle][publication].ts"
+            new_patch.write_text("new patch", encoding="utf-8")
+            old_patch.write_text("stale patch", encoding="utf-8")
+
+            build_fork_parsed.map_override_patches(patch_input, config)
+
+            self.assertEqual(old_patch.read_text(encoding="utf-8"), "new patch")
+
     def test_main_builds_diverged_archives_and_records_input_state(self):
         mirror = self.revisions(ocr_patch="fork-patch")
         upstream = self.revisions()

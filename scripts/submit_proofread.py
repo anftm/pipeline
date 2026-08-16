@@ -4,6 +4,7 @@
 import base64
 import ast
 import hashlib
+import html
 import json
 import os
 import re
@@ -92,7 +93,7 @@ def delete_pull_branch(token, repo, pull):
         full_name = (head.get("repo") or {}).get("full_name")
         if full_name and full_name != f"{OWNER}/{repo}":
             return False
-    if not isinstance(branch, str) or not re.fullmatch(r"proofread/[0-9a-f]{12}-(?:config|ocr_patch)", branch):
+    if not isinstance(branch, str) or not re.fullmatch(r"proofread/[0-9a-f]{12}-(?:main|config|ocr_config|ocr_patch|origin)", branch):
         return False
     status, data = api_request(token, "DELETE", ref_path(repo, branch))
     if status not in (204, 404):
@@ -122,16 +123,22 @@ def response_or_fail(token, method, path, expected, payload=None):
 
 
 def get_file(token, repo, branch, path):
+    content, sha = get_file_bytes(token, repo, branch, path)
+    return content.decode("utf-8"), sha
+
+
+def get_file_bytes(token, repo, branch, path):
     encoded = urllib.parse.quote(path, safe="")
     status, data = api_request(
         token, "GET", f"{repo_path(repo)}/contents/{encoded}?ref={urllib.parse.quote(branch)}"
     )
     if status == 404:
-        return "", None
+        return b"", None
+    if status == 200 and (data.get("encoding") != "base64" or not data.get("content")) and data.get("sha"):
+        status, data = api_request(token, "GET", f"{repo_path(repo)}/git/blobs/{data['sha']}")
     if status != 200 or data.get("encoding") != "base64" or not data.get("content"):
         fail(f"cannot read {repo}/{branch}/{path}: {data}")
-    content = base64.b64decode(data["content"]).decode("utf-8")
-    return content, data.get("sha")
+    return base64.b64decode(data["content"]), data.get("sha")
 
 
 def patch_path(archive_id, article_id, publication_id):
@@ -176,11 +183,12 @@ def open_pull_request(token, repo, branch):
 def submit_file(token, repo, base, path, content, title, description, correction_id):
     branch = f"proofread/{correction_id}-{base}"
     existing_pull = open_pull_request(token, repo, branch)
-    _base_content, base_file_sha = get_file(token, repo, base, path)
+    read_file = get_file_bytes if isinstance(content, bytes) else get_file
+    _base_content, base_file_sha = read_file(token, repo, base, path)
     if existing_pull:
         if existing_pull.get("base") != base or existing_pull.get("head") != branch:
             fail(f"existing proofreading PR has an unexpected branch target: {existing_pull}")
-        branch_content, _branch_file_sha = get_file(token, repo, branch, path)
+        branch_content, _branch_file_sha = read_file(token, repo, branch, path)
         if branch_content != content:
             fail("existing proofreading PR branch does not contain the requested file content")
         status, files = api_request(token, "GET", f"{repo_path(repo)}/pulls/{existing_pull['number']}/files?per_page=100")
@@ -199,7 +207,7 @@ def submit_file(token, repo, base, path, content, title, description, correction
             token, "POST", f"{repo_path(repo)}/git/refs", (201,),
             {"ref": f"refs/heads/{branch}", "sha": base_revision},
         )
-    branch_content, branch_file_sha = get_file(token, repo, branch, path)
+    branch_content, branch_file_sha = read_file(token, repo, branch, path)
     if branch_content != content:
         response_or_fail(
             token,
@@ -209,7 +217,7 @@ def submit_file(token, repo, base, path, content, title, description, correction
             {
                 "branch": branch,
                 "message": title,
-                "content": base64.b64encode(content.encode("utf-8")).decode("ascii"),
+                "content": base64.b64encode(content if isinstance(content, bytes) else content.encode("utf-8")).decode("ascii"),
                 **({"sha": branch_file_sha or base_file_sha} if branch_file_sha or base_file_sha else {}),
             },
         )
@@ -1243,12 +1251,560 @@ def request_with_metadata(request, metadata):
     return copied
 
 
+SOURCE_PARSERS = {
+    "rmrb", "whb", "jfjb", "maoistlegacy-txt", "result-json", "result-json-v2",
+    "CCRD", "CND", "aisixiang",
+}
+OVERRIDE_PARSERS = {
+    "chuanxinlu", "jimi", "jinghuo", "jqjianghua", "qibenyu", "wanghongwen",
+    "wengeqianqixinianlu1", "wenji", "xuanji", "yaowenyuan", "zhangchunqiao", "zzj1",
+}
+
+
+def config_parser_id(content):
+    match = re.search(r"(?:['\"])?\bparser_id\b(?:['\"])?\s*:\s*(['\"])([^'\"]+)\1", content)
+    return match.group(2) if match else ""
+
+
+def config_source_path(content):
+    match = re.search(r"(?:['\"])?\bpath\b(?:['\"])?\s*:\s*(['\"])([^'\"]+)\1", content)
+    if not match or not match.group(2).strip() or match.group(2).startswith("/") or ".." in match.group(2).split("/"):
+        fail("source parser config has an invalid path")
+    return match.group(2).strip("/")
+
+
+def list_directory(token, repo, branch, path):
+    encoded = urllib.parse.quote(path, safe="")
+    status, data = api_request(
+        token, "GET", f"{repo_path(repo)}/contents/{encoded}?ref={urllib.parse.quote(branch)}"
+    )
+    if status == 404:
+        return []
+    if status != 200 or not isinstance(data, list):
+        fail(f"cannot list {repo}/{branch}/{path}: {data}")
+    return [str(item.get("path") or "") for item in data if item.get("type") == "file" and item.get("path")]
+
+
+def normalized_article_id(article):
+    if not isinstance(article, dict) or not isinstance(article.get("title"), str):
+        fail("source article is missing a title")
+    if not isinstance(article.get("authors") or [], list) or not isinstance(article.get("dates") or [], list):
+        fail("source article has invalid identity metadata")
+    dates = sorted(
+        f"{date.get('year') or '0000'}-{int(date.get('month') or 0):02d}-{int(date.get('day') or 0):02d}"
+        for date in article.get("dates") or [] if isinstance(date, dict)
+    )
+    return hashlib.md5(json.dumps([
+        str(article.get("title") or ""), dates, bool(article.get("is_range_date")),
+        sorted(str(value) for value in article.get("authors") or []), str(article.get("file_id") or ""),
+    ], ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()[:10]
+
+
+def db_source_paths(token, repo, parser_id, locator):
+    dates = locator.get("dates") if isinstance(locator, dict) else None
+    if not isinstance(dates, list) or len(dates) != 1 or not isinstance(dates[0], dict):
+        fail("database article metadata requires one source date")
+    date = dates[0]
+    try:
+        year, month, day = int(date["year"]), int(date["month"]), int(date["day"])
+    except (KeyError, TypeError, ValueError):
+        fail("database article metadata requires a complete source date")
+    paths = {
+        "rmrb": f"json/{year}/{month}",
+        "whb": "json",
+        "jfjb": f"txt/{year}/{year}{month:02d}/{year}{month:02d}{day:02d}",
+    }
+    if parser_id not in paths:
+        fail(f"unsupported database parser: {parser_id}")
+    if parser_id == "jfjb":
+        prefix = f"{year}{month:02d}{day:02d}{int(locator.get('page_start') or 0):02d}"
+        return [
+            path for path in list_directory(token, repo, "origin", paths[parser_id])
+            if path.rsplit("/", 1)[-1].startswith(prefix)
+        ]
+    # These parsers discard the source filename. WHB also splits a displayed
+    # title across three fields, so try selective title fragments until one
+    # yields a bounded candidate set. Article identity verification below is
+    # still authoritative.
+    title = str(locator.get("title") or "")
+    needles = [title]
+    if parser_id == "whb":
+        for width in (16, 12, 8, 4, 2):
+            if len(title) < width:
+                continue
+            for start in (0, max(0, (len(title) - width) // 2), len(title) - width):
+                value = title[start:start + width]
+                if value not in needles:
+                    needles.append(value)
+    for needle in needles:
+        needle = needle.replace("\\", " ").replace('"', " ").strip()
+        if not needle:
+            continue
+        query = urllib.parse.quote(f'repo:{OWNER}/{repo} path:{paths[parser_id]} "{needle}"')
+        status, data = api_request(token, "GET", f"/search/code?q={query}&per_page=100")
+        if status != 200 or not isinstance(data.get("items"), list):
+            fail(f"cannot locate {parser_id} source article: {data}")
+        total = int(data.get("total_count") or 0)
+        if 0 < total <= 100:
+            return [str(item.get("path") or "") for item in data["items"] if item.get("path")]
+    fail(f"{parser_id} source article search did not yield a bounded candidate set")
+
+
+def decode_db_source(parser_id, content):
+    if isinstance(content, bytes):
+        content = content.decode("gb2312") if parser_id == "jfjb" else content.decode("utf-8")
+    if parser_id in {"rmrb", "whb"}:
+        raw = json.loads(content)
+        if parser_id == "rmrb":
+            return raw
+        return {
+            "title": "".join(str(raw.get(key) or "") for key in ("ytitle", "mtitle", "ftitle")),
+            "authors": raw.get("authors") or [], "dates": raw.get("date") or [],
+            "is_range_date": False,
+        }
+    title = re.search(r"〖BT/标题〗(.*?)〖-BT/标题〗", content, re.DOTALL)
+    subtitle = re.search(r"〖FT/副题〗(.*?)〖-FT/副题〗", content, re.DOTALL)
+    authors = re.search(r"〖ZZ/作者〗(.*?)〖-ZZ/作者〗", content, re.DOTALL)
+    date = re.search(r"〖RQ/日期〗(\d{8})〖-RQ/日期〗", content)
+    if not title or not date:
+        fail("jfjb source article is missing required metadata markers")
+    value = date.group(1)
+    return {
+        "title": title.group(1) + (subtitle.group(1) if subtitle else ""),
+        "authors": authors.group(1).split(" ") if authors else [],
+        "dates": [{"year": int(value[:4]), "month": int(value[4:6]), "day": int(value[6:])}],
+        "is_range_date": False,
+    }
+
+
+def update_db_source(parser_id, content, article_patch):
+    if set(article_patch) != {"authors"}:
+        fail("database article metadata currently supports authors only")
+    authors = article_patch["authors"]
+    if not isinstance(authors, list) or any(not isinstance(value, str) or not value.strip() for value in authors):
+        fail("database article authors are invalid")
+    if parser_id in {"rmrb", "whb"}:
+        raw = json.loads(content)
+        raw["authors"] = authors
+        return json.dumps(raw, ensure_ascii=False, separators=(",", ":"))
+    was_bytes = isinstance(content, bytes)
+    if was_bytes:
+        content = content.decode("gb2312")
+    replacement = "〖ZZ/作者〗" + " ".join(authors) + "〖-ZZ/作者〗"
+    pattern = r"〖ZZ/作者〗.*?〖-ZZ/作者〗"
+    if re.search(pattern, content, re.DOTALL):
+        updated = re.sub(pattern, lambda _match: replacement, content, count=1, flags=re.DOTALL)
+        return updated.encode("gb2312") if was_bytes else updated
+    title_end = content.find("〖-BT/标题〗")
+    if title_end < 0:
+        fail("jfjb source article title marker was not found")
+    title_end += len("〖-BT/标题〗")
+    updated = content[:title_end] + "\n" + replacement + content[title_end:]
+    return updated.encode("gb2312") if was_bytes else updated
+
+
+def update_db_metadata_file(token, repo, parser_id, config_path, config_content, request):
+    metadata = payload_field(request, "metadata") or {}
+    article_patch = metadata.get("article") or {}
+    files = []
+    if not article_patch:
+        return [("config", config_path, update_config(config_content, request)[0])], request.get("article_id")
+    locator = payload_field(request, "locator") or {}
+    matches = []
+    for path in db_source_paths(token, repo, parser_id, locator):
+        content, _sha = (get_file_bytes if parser_id == "jfjb" else get_file)(token, repo, "origin", path)
+        if not content:
+            continue
+        article = decode_db_source(parser_id, content)
+        if normalized_article_id(article) == request.get("article_id"):
+            matches.append((path, content, article))
+    if len(matches) != 1:
+        fail(f"expected one database source article, found {len(matches)}")
+    path, content, article = matches[0]
+    article["authors"] = article_patch.get("authors", article.get("authors") or [])
+    files.append(("origin", path, update_db_source(parser_id, content, article_patch)))
+    if metadata.get("source"):
+        source_request = request_with_metadata(request, {"source": metadata["source"]})
+        files.append(("config", config_path, update_config(config_content, source_request)[0]))
+    return files, normalized_article_id(article)
+
+
+def structured_source_paths(token, repo, parser_id, config_content):
+    path = config_source_path(config_content)
+    if parser_id == "maoistlegacy-txt":
+        return [f"{path}/meta.json"]
+    if parser_id == "result-json-v2" or path.lower().endswith(".json"):
+        return [path]
+    return [value for value in list_directory(token, repo, "main", path) if value.lower().endswith(".json")]
+
+
+def searched_source_paths(token, repo, parser_id, config_content, locator):
+    title = str((locator or {}).get("title") or "").replace("\\", " ").replace('"', " ").strip()
+    if not title:
+        fail(f"{parser_id} source article requires a title locator")
+    root = "html/CR" if parser_id == "CND" else config_source_path(config_content)
+    extension = "json" if parser_id == "CCRD" else "html"
+    query = urllib.parse.quote(f'repo:{OWNER}/{repo} path:{root} extension:{extension} "{title}"')
+    status, data = api_request(token, "GET", f"/search/code?q={query}&per_page=100")
+    if status != 200 or not isinstance(data.get("items"), list):
+        fail(f"cannot locate {parser_id} source article: {data}")
+    total = int(data.get("total_count") or 0)
+    if not 0 < total <= 100:
+        fail(f"{parser_id} source article search did not yield a bounded candidate set")
+    return [str(item.get("path") or "") for item in data["items"] if item.get("path")]
+
+
+def html_text(value):
+    return html.unescape(re.sub(r"<[^>]*>", "", value)).strip()
+
+
+def direct_source_article(parser_id, content):
+    if parser_id == "CCRD":
+        try:
+            raw = json.loads(content)
+            values = str(raw.get("date") or "").split("-")
+            date = {"year": int(values[0])}
+            if len(values) > 1 and int(values[1] or 0):
+                date["month"] = int(values[1])
+            if len(values) > 2 and int(values[2] or 0):
+                date["day"] = int(values[2])
+        except (TypeError, ValueError, json.JSONDecodeError, IndexError) as exc:
+            fail(f"CCRD source metadata is invalid: {exc}")
+        return {
+            "title": raw.get("title") or "", "authors": raw.get("authors") or [],
+            "dates": [date], "is_range_date": False,
+        }
+    title = re.search(r"<h3\b[^>]*>(.*?)</h3\s*>", content, re.I | re.DOTALL)
+    author = re.search(r"<strong\b[^>]*>(.*?)</strong\s*>", content, re.I | re.DOTALL)
+    info = re.search(r"<div\b[^>]*class=(['\"])[^'\"]*\binfo\b[^'\"]*\1[^>]*>(.*?)</div\s*>", content, re.I | re.DOTALL)
+    date = re.search(r"\d{4}-\d{2}-\d{2}", info.group(2) if info else "")
+    if not title or not info or not date:
+        fail("aisixiang source article is missing identity metadata")
+    year, month, day = (int(value) for value in date.group().split("-"))
+    return {
+        "title": html_text(title.group(1)), "authors": [html_text(author.group(1)) if author else ""],
+        "dates": [{"year": year, "month": month, "day": day}], "is_range_date": False,
+    }
+
+
+def update_direct_source(parser_id, content, article_patch):
+    if parser_id == "CCRD":
+        if not article_patch or set(article_patch) - {"title", "authors"}:
+            fail("CCRD article metadata supports title and authors only")
+        raw = json.loads(content)
+        raw.update(article_patch)
+        return json.dumps(raw, ensure_ascii=False, separators=(",", ":"))
+    if not article_patch or set(article_patch) - {"title", "authors", "dates"}:
+        fail("aisixiang article metadata supports title, authors, and dates only")
+    updated = content
+    if "title" in article_patch:
+        title = article_patch["title"]
+        if not isinstance(title, str) or not title.strip():
+            fail("aisixiang article title is invalid")
+        updated, count = re.subn(
+            r"(<h3\b[^>]*>).*?(</h3\s*>)", lambda match: match.group(1) + html.escape(title, quote=False) + match.group(2),
+            updated, count=1, flags=re.I | re.DOTALL,
+        )
+        if count != 1:
+            fail("aisixiang source title was not found")
+    if "authors" in article_patch:
+        authors = article_patch["authors"]
+        if not isinstance(authors, list) or len(authors) != 1 or not isinstance(authors[0], str) or not authors[0].strip():
+            fail("aisixiang article requires exactly one author")
+        updated, count = re.subn(
+            r"(<strong\b[^>]*>).*?(</strong\s*>)", lambda match: match.group(1) + html.escape(authors[0], quote=False) + match.group(2),
+            updated, count=1, flags=re.I | re.DOTALL,
+        )
+        if count != 1:
+            fail("aisixiang source author was not found")
+    if "dates" in article_patch:
+        dates = article_patch["dates"]
+        if not isinstance(dates, list) or len(dates) != 1 or not isinstance(dates[0], dict) or set(dates[0]) != {"year", "month", "day"}:
+            fail("aisixiang article requires one complete date")
+        try:
+            date = f"{int(dates[0]['year']):04d}-{int(dates[0]['month']):02d}-{int(dates[0]['day']):02d}"
+        except (TypeError, ValueError):
+            fail("aisixiang article date is invalid")
+        info = re.search(r"<div\b[^>]*class=(['\"])[^'\"]*\binfo\b[^'\"]*\1[^>]*>.*?</div\s*>", updated, re.I | re.DOTALL)
+        if not info or not re.search(r"\d{4}-\d{2}-\d{2}", info.group()):
+            fail("aisixiang source date was not found")
+        replacement = re.sub(r"\d{4}-\d{2}-\d{2}", date, info.group(), count=1)
+        updated = updated[:info.start()] + replacement + updated[info.end():]
+    return updated
+
+
+def update_direct_metadata_file(token, repo, parser_id, config_path, config_content, request):
+    metadata = payload_field(request, "metadata") or {}
+    article_patch = metadata.get("article") or {}
+    if not article_patch:
+        return [("config", config_path, update_config(config_content, request)[0])], request.get("article_id")
+    locator = payload_field(request, "locator") or {}
+    matches = []
+    for path in searched_source_paths(token, repo, parser_id, config_content, locator):
+        content, _sha = get_file(token, repo, "main", path)
+        if content:
+            article = direct_source_article(parser_id, content)
+            if normalized_article_id(article) == request.get("article_id"):
+                matches.append((path, content))
+    if len(matches) != 1:
+        fail(f"expected one {parser_id} source article, found {len(matches)}")
+    path, content = matches[0]
+    updated = update_direct_source(parser_id, content, article_patch)
+    article = direct_source_article(parser_id, updated)
+    files = [("main", path, updated)]
+    if metadata.get("source"):
+        source_request = request_with_metadata(request, {"source": metadata["source"]})
+        files.append(("config", config_path, update_config(config_content, source_request)[0]))
+    return files, normalized_article_id(article)
+
+
+def cnd_source_articles(content):
+    articles = []
+    for index, original in enumerate(content.split("<a name")[1:], start=1):
+        article = original.replace("\r\n", "\n").replace(
+            "back to TOC</a>\n\n", "back to TOC</a>\n",
+        ).replace("　", " ").replace("\t", " ")
+        if article.startswith("=T"):
+            continue
+        article_type = 0
+        if "·~}" not in article:
+            if "back to TOC" in article:
+                end = article.find("\n\n")
+            elif "</a>" not in article:
+                end = article.find("\n\n")
+            else:
+                end = article.find("</a>")
+            tmp = article[:max(0, end)]
+            if re.search(r"\n +·", article):
+                article_type = 1
+        else:
+            tmp = re.split(r"~\{[ 　]*·", article, maxsplit=1)[0]
+        tmp2 = article[len(tmp):]
+        title = ""
+        if article_type == 0:
+            while "~{" in tmp and "~}" in tmp:
+                start, end = tmp.find("~{") + 2, tmp.find("~}")
+                value = tmp[start:end].strip()
+                if not value.startswith(("【", "〖")):
+                    title += value
+                tmp = tmp[end + 2:]
+        else:
+            before_anchor = tmp.split("</a>", 1)[0]
+            title = before_anchor.split(">", 1)[1].strip() if ">" in before_anchor else ""
+        if title.startswith("杂志上连载"):
+            continue
+        if title.startswith("端思潮》一书的电子"):
+            title = "文化大革命和它的异端思潮（连载之一）"
+        if title.startswith("初所撰写的对文革的反思〈"):
+            title = "我心中的文革"
+        if title.startswith("·杨道远·"):
+            title = "武汉地区文革初期的“五十天”（上）——《武汉地区文革纪实》选载"
+            tmp2 = article[article.find("·杨道远·"):]
+        if not title:
+            continue
+        if article_type == 0:
+            author_start, author_end = tmp2.find("·") + 1, tmp2.find("·~}")
+        else:
+            author_start, author_end = tmp2.find("·") + 1, tmp2.find("·\n")
+        if author_start <= 0 or author_end < author_start:
+            authors = []
+        else:
+            authors = [
+                value.replace(" ", "").replace("　", "")
+                for value in tmp2[author_start:author_end].strip().split("·")
+                if value.replace(" ", "").replace("　", "")
+            ]
+        if any(len(value) >= 10 for value in authors) or len(title) > 50:
+            continue
+        articles.append((index, article_type, {
+            "title": title, "authors": authors, "dates": [], "is_range_date": False,
+        }))
+    return articles
+
+
+def update_cnd_source(content, segment_index, article_type, article_patch):
+    if set(article_patch) != {"authors"}:
+        fail("CND article metadata supports authors only")
+    authors = article_patch["authors"]
+    if not isinstance(authors, list) or any(
+        not isinstance(value, str) or not value.strip() or any(char in value for char in "·\r\n")
+        for value in authors
+    ):
+        fail("CND article authors are invalid")
+    segments = content.split("<a name")
+    if not 0 < segment_index < len(segments):
+        fail("CND source segment was not found")
+    segment = segments[segment_index]
+    replacement = "·" + "·".join(authors) + "·"
+    pattern = r"·[^·\r\n]*(?:·[^·\r\n]*)*·(?=~\})" if article_type == 0 else r"·[^\r\n]*·(?=\r?\n)"
+    segment, count = re.subn(pattern, lambda _match: replacement, segment, count=1)
+    if count != 1:
+        fail("CND source author marker was not found")
+    segments[segment_index] = segment
+    return "<a name".join(segments)
+
+
+def update_cnd_metadata_file(token, repo, config_path, config_content, request):
+    metadata = payload_field(request, "metadata") or {}
+    article_patch = metadata.get("article") or {}
+    if not article_patch:
+        return [("config", config_path, update_config(config_content, request)[0])], request.get("article_id")
+    locator = payload_field(request, "locator") or {}
+    matches = []
+    for path in searched_source_paths(token, repo, "CND", config_content, locator):
+        content, _sha = get_file(token, repo, "main", path)
+        for segment_index, article_type, article in cnd_source_articles(content):
+            if normalized_article_id(article) == request.get("article_id"):
+                matches.append((path, content, segment_index, article_type))
+    if len(matches) != 1:
+        fail(f"expected one CND source article, found {len(matches)}")
+    path, content, segment_index, article_type = matches[0]
+    updated = update_cnd_source(content, segment_index, article_type, article_patch)
+    updated_matches = [
+        article for index, _kind, article in cnd_source_articles(updated) if index == segment_index
+    ]
+    if len(updated_matches) != 1:
+        fail("updated CND source article could not be verified")
+    files = [("main", path, updated)]
+    if metadata.get("source"):
+        source_request = request_with_metadata(request, {"source": metadata["source"]})
+        files.append(("config", config_path, update_config(config_content, source_request)[0]))
+    return files, normalized_article_id(updated_matches[0])
+
+
+def structured_source_articles(parser_id, content):
+    try:
+        raw = json.loads(content)
+    except (TypeError, json.JSONDecodeError) as exc:
+        fail(f"{parser_id} source is invalid JSON: {exc}")
+    if parser_id == "maoistlegacy-txt":
+        if not isinstance(raw, dict):
+            fail("maoistlegacy-txt source metadata is not an object")
+        return raw, [{
+            "title": raw.get("title") or "", "authors": raw.get("creator") or [],
+            "dates": raw.get("dates") or [], "is_range_date": False,
+        }]
+    articles = raw if isinstance(raw, list) else [raw]
+    if not articles or any(not isinstance(article, dict) for article in articles):
+        fail(f"{parser_id} source does not contain articles")
+    return raw, articles
+
+
+def update_structured_source(parser_id, content, article_index, article_patch):
+    allowed = {"title", "authors", "dates", "tags"}
+    if not article_patch or set(article_patch) - allowed:
+        fail("structured source article metadata contains unsupported fields")
+    raw, articles = structured_source_articles(parser_id, content)
+    if parser_id == "maoistlegacy-txt":
+        mapping = {"title": "title", "authors": "creator", "dates": "dates"}
+        for key, value in article_patch.items():
+            if key == "tags":
+                if not isinstance(value, list) or any(
+                    not isinstance(tag, dict) or tag.get("type") != "主题/事件" or not isinstance(tag.get("name"), str)
+                    for tag in value
+                ):
+                    fail("maoistlegacy-txt supports subject tags only")
+                raw["tags"] = [tag["name"] for tag in value]
+            else:
+                raw[mapping[key]] = value
+    else:
+        articles[article_index].update(article_patch)
+    return json.dumps(raw, ensure_ascii=False, separators=(",", ":"))
+
+
+def update_structured_metadata_file(token, repo, parser_id, config_path, config_content, request):
+    metadata = payload_field(request, "metadata") or {}
+    article_patch = metadata.get("article") or {}
+    if not article_patch:
+        return [("config", config_path, update_config(config_content, request)[0])], request.get("article_id")
+    matches = []
+    for path in structured_source_paths(token, repo, parser_id, config_content):
+        content, _sha = get_file(token, repo, "main", path)
+        if not content:
+            continue
+        _raw, articles = structured_source_articles(parser_id, content)
+        for index, article in enumerate(articles):
+            if normalized_article_id(article) == request.get("article_id"):
+                matches.append((path, content, index, article))
+    if len(matches) != 1:
+        fail(f"expected one structured source article, found {len(matches)}")
+    path, content, index, article = matches[0]
+    updated_content = update_structured_source(parser_id, content, index, article_patch)
+    _raw, updated_articles = structured_source_articles(parser_id, updated_content)
+    files = [("main", path, updated_content)]
+    if metadata.get("source"):
+        source_request = request_with_metadata(request, {"source": metadata["source"]})
+        files.append(("config", config_path, update_config(config_content, source_request)[0]))
+    return files, normalized_article_id(updated_articles[index])
+
+
 def update_metadata_files(token, repo, publication_id, request):
     metadata = payload_field(request, "metadata") or {}
     config_path = f"{publication_id}.ts"
     config_content, _sha = get_file(token, repo, "config", config_path)
     if not config_content:
         fail(f"config file does not exist: {config_path}")
+    parser_id = config_parser_id(config_content)
+    if parser_id in {"rmrb", "whb", "jfjb"}:
+        return update_db_metadata_file(token, repo, parser_id, config_path, config_content, request)
+    if parser_id in {"CCRD", "aisixiang"}:
+        return update_direct_metadata_file(token, repo, parser_id, config_path, config_content, request)
+    if parser_id == "CND":
+        return update_cnd_metadata_file(token, repo, config_path, config_content, request)
+    if parser_id in SOURCE_PARSERS:
+        return update_structured_metadata_file(token, repo, parser_id, config_path, config_content, request)
+    if parser_id in OVERRIDE_PARSERS:
+        article_patch = metadata.get("article") or {}
+        if not article_patch:
+            return [("config", config_path, update_config(config_content, request)[0])], request.get("article_id")
+        if set(article_patch) - {"title", "authors", "dates", "tags"}:
+            fail("article metadata override contains unsupported fields")
+        locator = payload_field(request, "locator") or {}
+        current_article_id = str(request.get("article_id") or "")
+        override_path = f"metadata_overrides/{publication_id}/{current_article_id}.json"
+        existing_override, _sha = get_file(token, repo, "config", override_path)
+        if not existing_override:
+            candidates = []
+            directory = f"metadata_overrides/{publication_id}"
+            for candidate_path in list_directory(token, repo, "config", directory):
+                content, _candidate_sha = get_file(token, repo, "config", candidate_path)
+                try:
+                    value = json.loads(content)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(value, dict) and value.get("new_article_id") == current_article_id:
+                    candidates.append((candidate_path, value))
+            if len(candidates) > 1:
+                fail("multiple article metadata overrides match the current article")
+            if candidates:
+                override_path, previous = candidates[0]
+            else:
+                previous = None
+        else:
+            previous = json.loads(existing_override)
+        article = {
+            "title": locator.get("title"), "authors": locator.get("authors") or [],
+            "dates": locator.get("dates") or [], "is_range_date": bool(locator.get("is_range_date")),
+        }
+        article.update(article_patch)
+        new_article_id = normalized_article_id(article)
+        source_article_id = str(previous.get("article_id")) if isinstance(previous, dict) else current_article_id
+        source_article = previous.get("article") if isinstance(previous, dict) else {
+            "title": locator.get("title"), "authors": locator.get("authors") or [],
+            "dates": locator.get("dates") or [], "is_range_date": bool(locator.get("is_range_date")),
+        }
+        merged_patch = dict(previous.get("metadata") or {}) if isinstance(previous, dict) else {}
+        merged_patch.update(article_patch)
+        override = json.dumps({
+            "version": 1, "publication_id": publication_id,
+            "article_id": source_article_id, "new_article_id": new_article_id,
+            "article": source_article, "metadata": merged_patch,
+        }, ensure_ascii=False, separators=(",", ":"))
+        files = [("config", override_path, override)]
+        if metadata.get("source"):
+            source_request = request_with_metadata(request, {"source": metadata["source"]})
+            files.append(("config", config_path, update_config(config_content, source_request)[0]))
+        return files, new_article_id
     try:
         content, article_id = update_config(config_content, request)
         return [("config", config_path, content)], article_id
@@ -1577,11 +2133,20 @@ def main():
         if isinstance(metadata, dict):
             metadata_files, new_article_id = update_metadata_files(token, repo, publication_id, request)
             description = proofread_pr_body(request, repo, new_article_id, correction_id)
+            grouped = {}
             for base, config_path, updated_config in metadata_files:
-                pull_requests.append(submit_file(
-                    token, repo, base, config_path, updated_config,
-                    title, description, correction_id,
-                ))
+                grouped.setdefault(base, {})[config_path] = updated_config
+            for base, contents in grouped.items():
+                if len(contents) == 1:
+                    config_path, updated_config = next(iter(contents.items()))
+                    pull_requests.append(submit_file(
+                        token, repo, base, config_path, updated_config,
+                        title, description, correction_id,
+                    ))
+                else:
+                    pull_requests.append(submit_files(
+                        token, repo, base, contents, title, description, correction_id,
+                    ))
         if patch is not None:
             target_path = patch_path(archive_id, new_article_id, publication_id)
             target_content, _sha = get_file(token, repo, "ocr_patch", target_path)

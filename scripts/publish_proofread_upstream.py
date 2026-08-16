@@ -151,7 +151,7 @@ def proofreading_pulls(token, repo):
         revert = re.match(r"^revert-([0-9]+)-", head_ref)
         if not head_ref.startswith("proofread/") and not revert:
             continue
-        if pull.get("base", {}).get("ref") not in {"config", "ocr_config", "ocr_patch"}:
+        if pull.get("base", {}).get("ref") not in {"main", "config", "ocr_config", "ocr_patch", "origin"}:
             continue
         if revert:
             pull["reverts"] = int(revert.group(1))

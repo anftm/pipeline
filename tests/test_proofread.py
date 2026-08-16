@@ -771,6 +771,439 @@ class ProofreadBundleTests(unittest.TestCase):
         self.assertIn("新作者", files[0][2])
         self.assertIn("新来源作者", files[1][2])
 
+    def test_rmrb_database_author_updates_origin_json(self):
+        source = {
+            "title": "旧标题", "authors": ["旧作者"],
+            "dates": [{"year": 1967, "month": 5, "day": 16}],
+            "parts": [], "page_start": 1, "page_end": 1,
+        }
+        article_id = submit_proofread.normalized_article_id(source)
+        request = {
+            "article_id": article_id,
+            "locator": {"title": "旧标题", "authors": ["旧作者"], "dates": source["dates"], "page_start": 1, "page_end": 1},
+            "metadata": {"article": {"authors": ["新作者"]}},
+        }
+        config = 'export default { "parser_id": "rmrb", "entity": { "type": "db" }, "parser_option": {} };'
+        raw = json.dumps(source, ensure_ascii=False, separators=(",", ":"))
+
+        def get_file(_token, _repo, branch, path):
+            if branch == "config":
+                return config, "config-sha"
+            self.assertEqual((branch, path), ("origin", "json/1967/5/7.json"))
+            return raw, "origin-sha"
+
+        with patch.object(submit_proofread, "get_file", side_effect=get_file), \
+                patch.object(submit_proofread, "db_source_paths", return_value=["json/1967/5/7.json"]):
+            files, new_id = submit_proofread.update_metadata_files(
+                "token", "banned-historical-archives10", "rmrb", request,
+            )
+        self.assertEqual(files[0][:2], ("origin", "json/1967/5/7.json"))
+        self.assertEqual(json.loads(files[0][2])["authors"], ["新作者"])
+        self.assertNotEqual(new_id, article_id)
+
+    def test_whb_database_author_preserves_source_fields(self):
+        raw = {
+            "id": 1234, "ytitle": "主", "mtitle": "题", "ftitle": "",
+            "authors": ["旧作者"], "date": [{"year": 1967, "month": 1, "day": 2}],
+            "source": "新华社", "text": [{"type": "paragraph", "text": "正文"}],
+        }
+        article = submit_proofread.decode_db_source("whb", json.dumps(raw, ensure_ascii=False))
+        request = {
+            "article_id": submit_proofread.normalized_article_id(article),
+            "locator": {"title": "主题", "authors": ["旧作者"], "dates": article["dates"], "page_start": 1, "page_end": 1},
+            "metadata": {"article": {"authors": ["新作者"]}},
+        }
+        config = 'export default { parser_id: "whb", entity: { type: "db" }, parser_option: {} };'
+
+        def get_file(_token, _repo, branch, _path):
+            return (config if branch == "config" else json.dumps(raw, ensure_ascii=False)), "sha"
+
+        with patch.object(submit_proofread, "get_file", side_effect=get_file), \
+                patch.object(submit_proofread, "db_source_paths", return_value=["json/1/1234.json"]):
+            files, _new_id = submit_proofread.update_metadata_files(
+                "token", "banned-historical-archives20", "whb", request,
+            )
+        updated = json.loads(files[0][2])
+        self.assertEqual(updated["authors"], ["新作者"])
+        self.assertEqual(updated["source"], "新华社")
+        self.assertEqual(updated["text"], raw["text"])
+
+    def test_jfjb_database_author_round_trips_gb2312(self):
+        text = "\n".join([
+            "〖RQ/日期〗19690605〖-RQ/日期〗", "〖BH/版号〗02〖-BH/版号〗",
+            "〖BT/标题〗旧标题〖-BT/标题〗", "〖ZZ/作者〗旧作者〖-ZZ/作者〗",
+            "〖ZW/正文〗正文〖-ZW/正文〗",
+        ])
+        encoded = text.encode("gb2312")
+        article = submit_proofread.decode_db_source("jfjb", encoded)
+        request = {
+            "article_id": submit_proofread.normalized_article_id(article),
+            "locator": {"title": "旧标题", "authors": ["旧作者"], "dates": article["dates"], "page_start": 2, "page_end": 2},
+            "metadata": {"article": {"authors": ["新作者", "作者乙"]}},
+        }
+        config = 'export default { parser_id: "jfjb", entity: { type: "db" }, parser_option: {} };'
+        with patch.object(submit_proofread, "get_file", return_value=(config, "sha")), \
+                patch.object(submit_proofread, "get_file_bytes", return_value=(encoded, "sha")), \
+                patch.object(submit_proofread, "db_source_paths", return_value=["txt/1969/196906/19690605/196906050201.TXT"]):
+            files, _new_id = submit_proofread.update_metadata_files(
+                "token", "banned-historical-archives24", "jfjb", request,
+            )
+        self.assertIsInstance(files[0][2], bytes)
+        decoded = files[0][2].decode("gb2312")
+        self.assertIn("〖ZZ/作者〗新作者 作者乙〖-ZZ/作者〗", decoded)
+        self.assertIn("〖ZW/正文〗正文〖-ZW/正文〗", decoded)
+
+    def test_database_metadata_rejects_fields_without_reversible_source_mapping(self):
+        with self.assertRaisesRegex(RuntimeError, "authors only"):
+            submit_proofread.update_db_source("rmrb", "{}", {"title": "新标题"})
+
+    def test_maoistlegacy_metadata_updates_main_meta_json(self):
+        raw = {
+            "title": "旧标题", "creator": ["旧作者"], "dates": [{"year": 1958}],
+            "tags": ["旧标签"], "source": ["来源"], "parts": [{"type": "paragraph", "text": "正文"}],
+        }
+        article = {"title": raw["title"], "authors": raw["creator"], "dates": raw["dates"], "is_range_date": False}
+        request = {
+            "article_id": submit_proofread.normalized_article_id(article),
+            "metadata": {"article": {
+                "title": "新标题", "authors": ["新作者"], "dates": [{"year": 1959}],
+                "tags": [{"name": "新标签", "type": "主题/事件"}],
+            }},
+        }
+        config = 'export default { parser_id: "maoistlegacy-txt", path: "data/1000", entity: {}, parser_option: {} };'
+
+        def get_file(_token, _repo, branch, path):
+            if branch == "config":
+                return config, "config-sha"
+            self.assertEqual((branch, path), ("main", "data/1000/meta.json"))
+            return json.dumps(raw, ensure_ascii=False), "main-sha"
+
+        with patch.object(submit_proofread, "get_file", side_effect=get_file):
+            files, new_id = submit_proofread.update_metadata_files(
+                "token", "banned-historical-archives11", "maoistlegacy.de-1000", request,
+            )
+        self.assertEqual(files[0][:2], ("main", "data/1000/meta.json"))
+        updated = json.loads(files[0][2])
+        self.assertEqual(updated["creator"], ["新作者"])
+        self.assertEqual(updated["tags"], ["新标签"])
+        self.assertEqual(updated["parts"], raw["parts"])
+        self.assertNotEqual(new_id, request["article_id"])
+
+    def test_maoistlegacy_rejects_non_subject_tags(self):
+        with self.assertRaisesRegex(RuntimeError, "subject tags only"):
+            submit_proofread.update_structured_source(
+                "maoistlegacy-txt", '{"title":"标题","creator":[],"dates":[]}', 0,
+                {"tags": [{"name": "人物", "type": "人物"}]},
+            )
+
+    def test_result_json_updates_one_array_article_and_preserves_others(self):
+        articles = [
+            {"title": "第一篇", "authors": ["甲"], "dates": [{"year": 1967}], "parts": []},
+            {"title": "第二篇", "authors": ["乙"], "dates": [{"year": 1968}], "parts": [{"text": "正文"}]},
+        ]
+        request = {
+            "article_id": submit_proofread.normalized_article_id(articles[1]),
+            "metadata": {"article": {"authors": ["新作者"], "title": "新标题"}},
+        }
+        config = 'export default { parser_id: "result-json", path: "collection", entity: {}, parser_option: {} };'
+
+        def get_file(_token, _repo, branch, path):
+            if branch == "config":
+                return config, "config-sha"
+            self.assertEqual((branch, path), ("main", "collection/one.json"))
+            return json.dumps(articles, ensure_ascii=False), "main-sha"
+
+        with patch.object(submit_proofread, "get_file", side_effect=get_file), \
+                patch.object(submit_proofread, "list_directory", return_value=["collection/one.json"]):
+            files, _new_id = submit_proofread.update_metadata_files(
+                "token", "banned-historical-archives18", "publication", request,
+            )
+        updated = json.loads(files[0][2])
+        self.assertEqual(files[0][:2], ("main", "collection/one.json"))
+        self.assertEqual(updated[0], articles[0])
+        self.assertEqual(updated[1]["authors"], ["新作者"])
+        self.assertEqual(updated[1]["parts"], articles[1]["parts"])
+
+    def test_result_json_rejects_ambiguous_article_identity(self):
+        article = {"title": "同一篇", "authors": [], "dates": []}
+        request = {
+            "article_id": submit_proofread.normalized_article_id(article),
+            "metadata": {"article": {"authors": ["新作者"]}},
+        }
+        config = 'export default { parser_id: "result-json", path: "collection", entity: {}, parser_option: {} };'
+        with patch.object(submit_proofread, "get_file", side_effect=[
+                    (config, "sha"), (json.dumps([article]), "sha"), (json.dumps([article]), "sha"),
+                ]), patch.object(
+                    submit_proofread, "list_directory", return_value=["collection/one.json", "collection/two.json"],
+                ):
+            with self.assertRaisesRegex(RuntimeError, "found 2"):
+                submit_proofread.update_metadata_files(
+                    "token", "banned-historical-archives14", "maoistlibrary", request,
+                )
+
+    def test_result_json_v2_updates_direct_main_file(self):
+        article = {"title": "旧标题", "authors": ["旧作者"], "dates": [{"year": 1971}], "parts": []}
+        request = {
+            "article_id": submit_proofread.normalized_article_id(article),
+            "metadata": {"article": {"dates": [{"year": 1972}]}},
+        }
+        config = 'export default { parser_id: "result-json-v2", path: "publication.json", entity: {}, parser_option: { articles: [] } };'
+
+        def get_file(_token, _repo, branch, path):
+            return (config, "sha") if branch == "config" else (json.dumps(article, ensure_ascii=False), "sha")
+
+        with patch.object(submit_proofread, "get_file", side_effect=get_file):
+            files, new_id = submit_proofread.update_metadata_files(
+                "token", "banned-historical-archives21", "publication", request,
+            )
+        self.assertEqual(files[0][:2], ("main", "publication.json"))
+        self.assertEqual(json.loads(files[0][2])["dates"], [{"year": 1972}])
+        self.assertNotEqual(new_id, request["article_id"])
+
+    def test_ccrd_updates_unique_main_json_article(self):
+        raw = {
+            "title": "旧标题", "authors": ["旧作者"], "date": "1967-5-0",
+            "contents": [{"type": "paragraph", "text": "正文"}],
+        }
+        article = submit_proofread.direct_source_article("CCRD", json.dumps(raw, ensure_ascii=False))
+        request = {
+            "article_id": submit_proofread.normalized_article_id(article),
+            "locator": {"title": "旧标题", "authors": ["旧作者"], "dates": article["dates"]},
+            "metadata": {"article": {"title": "新标题", "authors": ["新作者"]}},
+        }
+        config = 'export default { parser_id: "CCRD", path: "CCRD/2", entity: {}, parser_option: {} };'
+
+        def get_file(_token, _repo, branch, path):
+            if branch == "config":
+                return config, "config-sha"
+            self.assertEqual((branch, path), ("main", "CCRD/2/0/0/0.json"))
+            return json.dumps(raw, ensure_ascii=False), "main-sha"
+
+        with patch.object(submit_proofread, "get_file", side_effect=get_file), \
+                patch.object(submit_proofread, "searched_source_paths", return_value=["CCRD/2/0/0/0.json"]):
+            files, new_id = submit_proofread.update_metadata_files(
+                "token", "banned-historical-archives9", "CCRD-dayuejin", request,
+            )
+        updated = json.loads(files[0][2])
+        self.assertEqual(files[0][:2], ("main", "CCRD/2/0/0/0.json"))
+        self.assertEqual(updated["title"], "新标题")
+        self.assertEqual(updated["authors"], ["新作者"])
+        self.assertEqual(updated["date"], "1967-5-0")
+        self.assertEqual(updated["contents"], raw["contents"])
+        self.assertNotEqual(new_id, request["article_id"])
+
+    def test_ccrd_rejects_non_reversible_date_update(self):
+        with self.assertRaisesRegex(RuntimeError, "title and authors only"):
+            submit_proofread.update_direct_source("CCRD", '{"date":"1967-5-0"}', {"dates": [{"year": 1967}]})
+
+    def test_aisixiang_updates_identity_nodes_without_reserializing_html(self):
+        source = '''<!doctype html><html><body>
+<div class="show_text"><h3>旧&amp;标题</h3><div class="info">更新时间：2017-09-26 01:25</div></div>
+<div class="about"><strong>旧作者</strong></div><div class="article-content"><p>正文<strong>粗体</strong></p></div>
+</body></html>'''
+        article = submit_proofread.direct_source_article("aisixiang", source)
+        self.assertEqual(article["title"], "旧&标题")
+        request = {
+            "article_id": submit_proofread.normalized_article_id(article),
+            "locator": {"title": "旧&标题", "authors": ["旧作者"], "dates": article["dates"]},
+            "metadata": {"article": {
+                "title": "新&标题", "authors": ["新作者"],
+                "dates": [{"year": 2018, "month": 10, "day": 7}],
+            }},
+        }
+        config = 'export default { parser_id: "aisixiang", path: "html", entity: {}, parser_option: {} };'
+
+        def get_file(_token, _repo, branch, path):
+            return (config, "config-sha") if branch == "config" else (source, "main-sha")
+
+        with patch.object(submit_proofread, "get_file", side_effect=get_file), \
+                patch.object(submit_proofread, "searched_source_paths", return_value=["html/100267.html"]):
+            files, new_id = submit_proofread.update_metadata_files(
+                "token", "banned-historical-archives31", "aisixiang", request,
+            )
+        updated = files[0][2]
+        self.assertIn("<h3>新&amp;标题</h3>", updated)
+        self.assertIn("<strong>新作者</strong>", updated)
+        self.assertIn("2018-10-07 01:25", updated)
+        self.assertIn("正文<strong>粗体</strong>", updated)
+        self.assertNotEqual(new_id, request["article_id"])
+
+    def test_aisixiang_requires_one_author_and_rejects_tags(self):
+        source = '<h3>标题</h3><div class="info">2020-01-02</div><strong>作者</strong>'
+        with self.assertRaisesRegex(RuntimeError, "exactly one author"):
+            submit_proofread.update_direct_source("aisixiang", source, {"authors": ["甲", "乙"]})
+        with self.assertRaisesRegex(RuntimeError, "title, authors, and dates only"):
+            submit_proofread.update_direct_source("aisixiang", source, {"tags": []})
+
+    def test_direct_source_search_is_bounded_and_scoped(self):
+        config = 'export default { parser_id: "aisixiang", path: "html" };'
+        with patch.object(submit_proofread, "api_request", return_value=(
+                    200, {"total_count": 1, "items": [{"path": "html/1.html"}]},
+                )) as api:
+            paths = submit_proofread.searched_source_paths(
+                "token", "banned-historical-archives31", "aisixiang", config, {"title": "旧标题"},
+            )
+        self.assertEqual(paths, ["html/1.html"])
+        query = api.call_args.args[2]
+        self.assertIn("path%3Ahtml", query)
+        self.assertIn("extension%3Ahtml", query)
+
+    def test_cnd_updates_only_the_uniquely_matched_article_author(self):
+        source = """index
+<a name=\"one\">~{第一篇~}~{ ·作者甲·~}
+   第一篇正文
+
+<a name=\"two\">~{第二篇~}~{ ·作者乙·~}
+   第二篇正文
+"""
+        parsed = submit_proofread.cnd_source_articles(source)
+        self.assertEqual([article[2]["title"] for article in parsed], ["第一篇", "第二篇"])
+        article = parsed[1][2]
+        request = {
+            "article_id": submit_proofread.normalized_article_id(article),
+            "locator": {"title": "第二篇", "authors": ["作者乙"], "dates": []},
+            "metadata": {"article": {"authors": ["新作者", "作者丙"]}},
+        }
+        config = 'export default { parser_id: "CND", path: "", entity: {}, parser_option: {} };'
+
+        def get_file(_token, _repo, branch, path):
+            return (config, "config-sha") if branch == "config" else (source, "main-sha")
+
+        with patch.object(submit_proofread, "get_file", side_effect=get_file), \
+                patch.object(submit_proofread, "searched_source_paths", return_value=["html/CR/ZK00/one.hz8.html"]):
+            files, new_id = submit_proofread.update_metadata_files(
+                "token", "banned-historical-archives12", "cnd", request,
+            )
+        updated = files[0][2]
+        self.assertIn("·作者甲·~}", updated)
+        self.assertIn("·新作者·作者丙·~}", updated)
+        self.assertIn("第二篇正文", updated)
+        self.assertNotEqual(new_id, request["article_id"])
+
+    def test_cnd_rejects_unsupported_fields_and_marker_characters(self):
+        with self.assertRaisesRegex(RuntimeError, "authors only"):
+            submit_proofread.update_cnd_source("index<a name=x>", 1, 0, {"title": "新标题"})
+        with self.assertRaisesRegex(RuntimeError, "authors are invalid"):
+            submit_proofread.update_cnd_source(
+                "index<a name=x>~{标题~}~{ ·作者·~}\n", 1, 0, {"authors": ["甲·乙"]},
+            )
+
+    def test_cnd_source_search_uses_parser_hardcoded_root(self):
+        config = 'export default { parser_id: "CND", path: "" };'
+        with patch.object(submit_proofread, "api_request", return_value=(
+                    200, {"total_count": 1, "items": [{"path": "html/CR/ZK00/one.hz8.html"}]},
+                )) as api:
+            paths = submit_proofread.searched_source_paths(
+                "token", "banned-historical-archives12", "CND", config, {"title": "标题"},
+            )
+        self.assertEqual(paths, ["html/CR/ZK00/one.hz8.html"])
+        self.assertIn("path:html/CR", __import__("urllib.parse").parse.unquote(api.call_args.args[2]))
+
+    def test_pdf_parser_writes_consumed_metadata_override(self):
+        request = {
+            "article_id": "oldarticle",
+            "locator": {
+                "title": "旧标题", "authors": ["旧作者"], "dates": [{"year": 1967}],
+                "is_range_date": False, "page_start": 1, "page_end": 2,
+            },
+            "metadata": {"article": {"authors": ["新作者"], "title": "新标题"}},
+        }
+        config = 'export default { parser_id: "wenji", path: "books/wenji1.pdf", entity: {}, parser_option: {} };'
+        with patch.object(submit_proofread, "get_file", side_effect=[(config, "sha"), ("", None)]), \
+                patch.object(submit_proofread, "list_directory", return_value=[]):
+            files, new_id = submit_proofread.update_metadata_files(
+                "token", "banned-historical-archives9", "wenji1", request,
+            )
+        self.assertEqual(files[0][:2], ("config", "metadata_overrides/wenji1/oldarticle.json"))
+        override = json.loads(files[0][2])
+        self.assertEqual(override["metadata"], request["metadata"]["article"])
+        self.assertEqual(override["new_article_id"], new_id)
+
+    def test_override_parser_mixed_source_metadata_uses_one_config_batch(self):
+        request = {
+            "kind": "proofread", "archive_id": 9, "article_id": "oldarticle", "publication_id": "wenji1",
+            "locator": {"title": "旧标题", "authors": [], "dates": []},
+            "metadata": {"article": {"authors": ["新作者"]}, "source": {"author": "新来源作者"}},
+        }
+        config = 'export default { parser_id: "wenji", path: "books/wenji1.pdf", entity: { author: "旧作者" }, parser_option: {} };'
+        with patch.dict(os.environ, {"GH_PAT": "token"}), \
+                patch.object(submit_proofread, "load_request", return_value=request), \
+                patch.object(submit_proofread, "get_file", side_effect=lambda _t, _r, branch, path: (config, "sha") if branch == "config" and path == "wenji1.ts" else ("", None)), \
+                patch.object(submit_proofread, "list_directory", return_value=[]), \
+                patch.object(submit_proofread, "fetch_bha_changes"), \
+                patch.object(submit_proofread, "submit_files", return_value={"number": 1, "url": "https://example/config"}) as batch, \
+                patch.object(submit_proofread, "submit_file") as single, \
+                redirect_stdout(io.StringIO()):
+            submit_proofread.main()
+        batch.assert_called_once()
+        self.assertEqual(set(batch.call_args.args[3]), {
+            "metadata_overrides/wenji1/oldarticle.json", "wenji1.ts",
+        })
+        single.assert_not_called()
+
+    def test_override_parser_updates_existing_identity_chain(self):
+        previous = {
+            "version": 1, "publication_id": "wenji1", "article_id": "oldarticle",
+            "new_article_id": "currentid", "article": {
+                "title": "原标题", "authors": ["原作者"], "dates": [], "is_range_date": False,
+            },
+            "metadata": {"title": "当前标题"},
+        }
+        request = {
+            "article_id": "currentid",
+            "locator": {"title": "当前标题", "authors": ["原作者"], "dates": [], "is_range_date": False},
+            "metadata": {"article": {"authors": ["新作者"]}},
+        }
+        config = 'export default { parser_id: "wenji", path: "books/wenji1.pdf", entity: {}, parser_option: {} };'
+
+        def get_file(_token, _repo, _branch, path):
+            if path == "wenji1.ts":
+                return config, "sha"
+            if path.endswith("oldarticle.json"):
+                return json.dumps(previous, ensure_ascii=False), "sha"
+            return "", None
+
+        with patch.object(submit_proofread, "get_file", side_effect=get_file), \
+                patch.object(
+                    submit_proofread, "list_directory",
+                    return_value=["metadata_overrides/wenji1/oldarticle.json"],
+                ):
+            files, _new_id = submit_proofread.update_metadata_files(
+                "token", "banned-historical-archives9", "wenji1", request,
+            )
+        self.assertEqual(files[0][1], "metadata_overrides/wenji1/oldarticle.json")
+        updated = json.loads(files[0][2])
+        self.assertEqual(updated["article_id"], "oldarticle")
+        self.assertEqual(updated["article"]["title"], "原标题")
+        self.assertEqual(updated["metadata"], {"title": "当前标题", "authors": ["新作者"]})
+
+    def test_large_source_file_falls_back_to_git_blob(self):
+        encoded = base64.b64encode("大文件".encode()).decode()
+        with patch.object(submit_proofread, "api_request", side_effect=[
+                    (200, {"encoding": "none", "content": "", "sha": "a" * 40}),
+                    (200, {"encoding": "base64", "content": encoded, "sha": "a" * 40}),
+                ]) as api:
+            content, sha = submit_proofread.get_file_bytes("token", "repo", "main", "large.json")
+        self.assertEqual(content.decode(), "大文件")
+        self.assertEqual(sha, "a" * 40)
+        self.assertIn("/git/blobs/", api.call_args_list[1].args[2])
+
+    def test_whb_source_search_falls_back_to_split_title_fragment(self):
+        responses = [
+            (200, {"total_count": 0, "items": []}),
+            (200, {"total_count": 1, "items": [{"path": "json/1/1234.json"}]}),
+        ]
+        locator = {
+            "title": "这是很长的引题这是很长的主题这是很长的副题",
+            "dates": [{"year": 1967, "month": 1, "day": 2}],
+        }
+        with patch.object(submit_proofread, "api_request", side_effect=responses) as api:
+            paths = submit_proofread.db_source_paths(
+                "token", "banned-historical-archives20", "whb", locator,
+            )
+        self.assertEqual(paths, ["json/1/1234.json"])
+        self.assertEqual(api.call_count, 2)
+
     def test_parse_helper_replaces_one_placeholder_article(self):
         existing = '''export default {
   "entity": {"id": "publication"},
@@ -1009,21 +1442,25 @@ class UpstreamPublishTests(unittest.TestCase):
     def test_proofreading_pulls_uses_merged_at_instead_of_list_merged_field(self):
         closed = {"head": {"repo": {"full_name": "anftm/banned-historical-archives0"}, "ref": "proofread/x-config"}, "base": {"ref": "config"}}
         legacy = {"head": {"repo": {"full_name": "anftm/banned-historical-archives0"}, "ref": "proofread/x-ocr_config"}, "base": {"ref": "ocr_config"}}
+        database = {"head": {"repo": {"full_name": "anftm/banned-historical-archives0"}, "ref": "proofread/x-origin"}, "base": {"ref": "origin"}}
+        structured = {"head": {"repo": {"full_name": "anftm/banned-historical-archives0"}, "ref": "proofread/x-main"}, "base": {"ref": "main"}}
         pulls = [
             {"number": 1, "merged_at": "2026-08-05T01:00:00Z", **closed},
             {"number": 2, "merged_at": None, **closed},
             {"number": 3, "merged_at": "2026-08-05T02:00:00Z", **closed},
             {"number": 4, "merged_at": "2026-08-05T03:00:00Z", "head": {"repo": {"full_name": "other/not-the-mirror"}, "ref": "proofread/x-config"}, "base": {"ref": "config"}},
             {"number": 5, "merged_at": "2026-08-05T04:00:00Z", "head": {"repo": {"full_name": "anftm/banned-historical-archives0"}, "ref": "feature/x"}, "base": {"ref": "config"}},
-            {"number": 6, "merged_at": "2026-08-05T05:00:00Z", **closed, "base": {"ref": "main"}},
+            {"number": 6, "merged_at": "2026-08-05T05:00:00Z", **closed, "base": {"ref": "selected"}},
             {"number": 7, "merged_at": "2026-08-05T06:00:00Z", **closed, "head": {"repo": {"full_name": "anftm/banned-historical-archives0"}, "ref": "revert-1-proofread-x-config"}},
             {"number": 8, "merged_at": "2026-08-05T07:00:00Z", **legacy},
+            {"number": 9, "merged_at": "2026-08-05T08:00:00Z", **database},
+            {"number": 10, "merged_at": "2026-08-05T09:00:00Z", **structured},
         ]
         with patch.object(publish_proofread_upstream, "list_closed_pulls", return_value=pulls), \
                 patch.object(publish_proofread_upstream, "MIRROR_OWNER", "anftm"):
             result = publish_proofread_upstream.proofreading_pulls("token", "banned-historical-archives0")
-        self.assertEqual([p["number"] for p in result], [1, 3, 7, 8])
-        self.assertEqual(result[-2]["reverts"], 1)
+        self.assertEqual([p["number"] for p in result], [1, 3, 7, 8, 9, 10])
+        self.assertEqual(next(pull for pull in result if pull["number"] == 7)["reverts"], 1)
 
     def test_merged_reverted_numbers_recognizes_merged_revert_branches(self):
         head = lambda ref: {"repo": {"full_name": "anftm/banned-historical-archives0"}, "ref": ref}

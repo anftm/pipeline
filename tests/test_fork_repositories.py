@@ -73,7 +73,7 @@ class ForkRepositoriesTests(unittest.TestCase):
         delete.assert_not_called()
 
     def test_closed_proofreading_branch_is_deleted_but_open_branch_is_kept(self):
-        mirror = {"main", "proofread/111111111111-config", "proofread/222222222222-ocr_patch", "proofread/333333333333-ocr_config"}
+        mirror = {"main", "proofread/111111111111-config", "proofread/222222222222-ocr_patch", "proofread/333333333333-ocr_config", "proofread/444444444444-origin", "proofread/555555555555-main"}
         def pulls(_token, _owner, _repo, branch):
             return [{"state": "open" if branch.endswith("ocr_patch") else "closed"}]
 
@@ -84,6 +84,7 @@ class ForkRepositoriesTests(unittest.TestCase):
             )
         self.assertEqual({call.args[2] for call in delete.call_args_list}, {
             "proofread/111111111111-config", "proofread/333333333333-ocr_config",
+            "proofread/444444444444-origin", "proofread/555555555555-main",
         })
 
 
