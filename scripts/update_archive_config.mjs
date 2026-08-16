@@ -171,7 +171,12 @@ function fieldReplacements(source, objectStart, objectEnd, values) {
 }
 
 const articles = config.parser_option && config.parser_option.articles;
-if (!Array.isArray(articles)) throw new Error("config does not contain parser_option.articles");
+const metadata = payload.metadata || {};
+const articlePatch = metadata.article || {};
+const sourcePatch = metadata.source || {};
+if (!Array.isArray(articles) && (Array.isArray(payload.replace_articles) || Object.keys(articlePatch).length)) {
+  throw new Error("config does not contain parser_option.articles");
+}
 
 if (Array.isArray(payload.replace_articles)) {
   const locator = payload.locator || {};
@@ -196,8 +201,10 @@ if (Array.isArray(payload.replace_articles)) {
   process.exit(0);
 }
 
-let articleIndex = articles.findIndex((article) => articleId(article) === payload.article_id);
-if (articleIndex < 0 && payload.locator) {
+let articleIndex = Array.isArray(articles)
+  ? articles.findIndex((article) => articleId(article) === payload.article_id)
+  : -1;
+if (Array.isArray(articles) && articleIndex < 0 && payload.locator) {
   const matches = articles.map((article, index) => ({ article, index })).filter(({ article }) =>
     article.title === payload.locator.title
     && article.page_start === payload.locator.page_start
@@ -205,14 +212,11 @@ if (articleIndex < 0 && payload.locator) {
   );
   if (matches.length === 1) articleIndex = matches[0].index;
 }
-if (articleIndex < 0) throw new Error("expected one config article, found none");
+if (Object.keys(articlePatch).length && articleIndex < 0) throw new Error("expected one config article, found none");
 
-const metadata = payload.metadata || {};
-const articlePatch = metadata.article || {};
 for (const key of ["title", "authors", "dates", "tags"]) {
   if (Object.prototype.hasOwnProperty.call(articlePatch, key)) articles[articleIndex][key] = articlePatch[key];
 }
-const sourcePatch = metadata.source || {};
 for (const key of ["name", "author", "type", "files"]) {
   if (Object.prototype.hasOwnProperty.call(sourcePatch, key)) config.entity[key] = sourcePatch[key];
 }
@@ -246,4 +250,7 @@ for (const replacement of replacements.sort((a, b) => b.start - a.start)) {
     + (replacement.raw === undefined ? formattedReplacement(original, replacement.start, replacement.value) : replacement.raw)
     + content.slice(replacement.end);
 }
-process.stdout.write(JSON.stringify({ content, article_id: articleId(articles[articleIndex]) }));
+process.stdout.write(JSON.stringify({
+  content,
+  article_id: Array.isArray(articles) ? articleId(articles[articleIndex]) : payload.article_id,
+}));

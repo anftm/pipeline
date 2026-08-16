@@ -27,7 +27,7 @@ GENERATED_BRANCHES = {"parsed"}
 LEGACY_DATA_BRANCHES = {"ocr_config", "parsed_article", "tags", "origin", "selected"}
 SYNCED_BRANCHES = {"main", "config", "ocr_cache", "ocr_patch"} | LEGACY_DATA_BRANCHES
 MANAGED_BRANCHES = GENERATED_BRANCHES | SYNCED_BRANCHES
-TEMPORARY_BRANCH_RE = re.compile(r"^(?:proofread/[0-9a-f]{12}-(?:config|ocr_patch)|revert-[0-9]+-.+)$")
+TEMPORARY_BRANCH_RE = re.compile(r"^(?:proofread/[0-9a-f]{12}-(?:config|ocr_config|ocr_patch)|revert-[0-9]+-.+)$")
 
 
 def api_request(token: str, method: str, path: str, payload: dict | None = None):

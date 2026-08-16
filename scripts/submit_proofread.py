@@ -1232,6 +1232,44 @@ def update_config(existing, request):
     return result["content"], result["article_id"]
 
 
+def request_with_metadata(request, metadata):
+    copied = dict(request)
+    body = dict(request.get("body") or {}) if isinstance(request.get("body"), dict) else None
+    if body is not None:
+        body["metadata"] = metadata
+        copied["body"] = body
+    else:
+        copied["metadata"] = metadata
+    return copied
+
+
+def update_metadata_files(token, repo, publication_id, request):
+    metadata = payload_field(request, "metadata") or {}
+    config_path = f"{publication_id}.ts"
+    config_content, _sha = get_file(token, repo, "config", config_path)
+    if not config_content:
+        fail(f"config file does not exist: {config_path}")
+    try:
+        content, article_id = update_config(config_content, request)
+        return [("config", config_path, content)], article_id
+    except RuntimeError as exc:
+        if "config does not contain parser_option.articles" not in str(exc) or not metadata.get("article"):
+            raise
+
+    files = []
+    article_request = request_with_metadata(request, {"article": metadata["article"]})
+    article_content, _sha = get_file(token, repo, "ocr_config", config_path)
+    if not article_content:
+        fail(f"legacy article config file does not exist: {config_path}")
+    updated_article, article_id = update_config(article_content, article_request)
+    files.append(("ocr_config", config_path, updated_article))
+    if metadata.get("source"):
+        source_request = request_with_metadata(request, {"source": metadata["source"]})
+        updated_source, _unchanged_article_id = update_config(config_content, source_request)
+        files.append(("config", config_path, updated_source))
+    return files, article_id
+
+
 def replace_config_articles(existing, request):
     helper = os.path.join(os.path.dirname(__file__), "update_archive_config.mjs")
     articles = payload_field(request, "articles") or []
@@ -1537,15 +1575,13 @@ def main():
         pull_requests = []
         new_article_id = article_id
         if isinstance(metadata, dict):
-            config_path = f"{publication_id}.ts"
-            config_content, _sha = get_file(token, repo, "config", config_path)
-            if not config_content:
-                fail(f"config file does not exist: {config_path}")
-            updated_config, new_article_id = update_config(config_content, request)
-            pull_requests.append(submit_file(
-                token, repo, "config", config_path, updated_config,
-                title, proofread_pr_body(request, repo, new_article_id, correction_id), correction_id,
-            ))
+            metadata_files, new_article_id = update_metadata_files(token, repo, publication_id, request)
+            description = proofread_pr_body(request, repo, new_article_id, correction_id)
+            for base, config_path, updated_config in metadata_files:
+                pull_requests.append(submit_file(
+                    token, repo, base, config_path, updated_config,
+                    title, description, correction_id,
+                ))
         if patch is not None:
             target_path = patch_path(archive_id, new_article_id, publication_id)
             target_content, _sha = get_file(token, repo, "ocr_patch", target_path)

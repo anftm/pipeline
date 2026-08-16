@@ -703,6 +703,74 @@ class ProofreadBundleTests(unittest.TestCase):
         )
         self.assertEqual(json.loads(verify.stdout)["article_id"], result["article_id"])
 
+    def test_config_helper_updates_source_without_articles(self):
+        content = 'export default { entity: { name: "旧来源", author: "" }, parser_option: {} };'
+        payload = {
+            "content": content,
+            "article_id": "article-id",
+            "metadata": {"source": {"author": "来源作者"}},
+        }
+        helper = Path(__file__).parents[1] / "scripts" / "update_archive_config.mjs"
+        process = subprocess.run(
+            ["node", str(helper)], input=json.dumps(payload), text=True,
+            capture_output=True, check=True,
+        )
+        result = json.loads(process.stdout)
+        self.assertIn('author: "来源作者"', result["content"])
+        self.assertEqual(result["article_id"], "article-id")
+
+    def test_legacy_article_metadata_updates_ocr_config(self):
+        request = {
+            "article_id": "oldid", "locator": {"title": "旧标题", "page_start": 1, "page_end": 2},
+            "metadata": {"article": {"authors": ["新作者"]}},
+        }
+        config = 'export default { entity: { name: "来源" }, parser_option: {} };'
+        ocr_config = '''export default {
+  entity: { name: "来源" },
+  parser_option: { articles: [
+    { title: "旧标题", authors: ["旧作者"], dates: [{ year: 1967 }], page_start: 1, page_end: 2 }
+  ] }
+};'''
+
+        def get_file(_token, _repo, branch, path):
+            self.assertEqual(path, "publication.ts")
+            return (config if branch == "config" else ocr_config), "sha"
+
+        with patch.object(submit_proofread, "get_file", side_effect=get_file):
+            files, article_id = submit_proofread.update_metadata_files(
+                "token", "banned-historical-archives1", "publication", request,
+            )
+        self.assertEqual([(base, path) for base, path, _content in files], [("ocr_config", "publication.ts")])
+        self.assertIn("新作者", files[0][2])
+        self.assertEqual(len(article_id), 10)
+
+    def test_legacy_mixed_metadata_splits_ocr_config_and_config(self):
+        request = {
+            "article_id": "oldid", "locator": {"title": "旧标题", "page_start": 1, "page_end": 2},
+            "metadata": {
+                "article": {"authors": ["新作者"]},
+                "source": {"author": "新来源作者"},
+            },
+        }
+        config = 'export default { entity: { name: "来源", author: "" }, parser_option: {} };'
+        ocr_config = '''export default {
+  entity: { name: "来源" },
+  parser_option: { articles: [
+    { title: "旧标题", authors: ["旧作者"], dates: [{ year: 1967 }], page_start: 1, page_end: 2 }
+  ] }
+};'''
+
+        def get_file(_token, _repo, branch, _path):
+            return (config if branch == "config" else ocr_config), "sha"
+
+        with patch.object(submit_proofread, "get_file", side_effect=get_file):
+            files, _article_id = submit_proofread.update_metadata_files(
+                "token", "banned-historical-archives1", "publication", request,
+            )
+        self.assertEqual([base for base, _path, _content in files], ["ocr_config", "config"])
+        self.assertIn("新作者", files[0][2])
+        self.assertIn("新来源作者", files[1][2])
+
     def test_parse_helper_replaces_one_placeholder_article(self):
         existing = '''export default {
   "entity": {"id": "publication"},
@@ -940,6 +1008,7 @@ class UpstreamPublishTests(unittest.TestCase):
 
     def test_proofreading_pulls_uses_merged_at_instead_of_list_merged_field(self):
         closed = {"head": {"repo": {"full_name": "anftm/banned-historical-archives0"}, "ref": "proofread/x-config"}, "base": {"ref": "config"}}
+        legacy = {"head": {"repo": {"full_name": "anftm/banned-historical-archives0"}, "ref": "proofread/x-ocr_config"}, "base": {"ref": "ocr_config"}}
         pulls = [
             {"number": 1, "merged_at": "2026-08-05T01:00:00Z", **closed},
             {"number": 2, "merged_at": None, **closed},
@@ -948,12 +1017,13 @@ class UpstreamPublishTests(unittest.TestCase):
             {"number": 5, "merged_at": "2026-08-05T04:00:00Z", "head": {"repo": {"full_name": "anftm/banned-historical-archives0"}, "ref": "feature/x"}, "base": {"ref": "config"}},
             {"number": 6, "merged_at": "2026-08-05T05:00:00Z", **closed, "base": {"ref": "main"}},
             {"number": 7, "merged_at": "2026-08-05T06:00:00Z", **closed, "head": {"repo": {"full_name": "anftm/banned-historical-archives0"}, "ref": "revert-1-proofread-x-config"}},
+            {"number": 8, "merged_at": "2026-08-05T07:00:00Z", **legacy},
         ]
         with patch.object(publish_proofread_upstream, "list_closed_pulls", return_value=pulls), \
                 patch.object(publish_proofread_upstream, "MIRROR_OWNER", "anftm"):
             result = publish_proofread_upstream.proofreading_pulls("token", "banned-historical-archives0")
-        self.assertEqual([p["number"] for p in result], [1, 3, 7])
-        self.assertEqual(result[-1]["reverts"], 1)
+        self.assertEqual([p["number"] for p in result], [1, 3, 7, 8])
+        self.assertEqual(result[-2]["reverts"], 1)
 
     def test_merged_reverted_numbers_recognizes_merged_revert_branches(self):
         head = lambda ref: {"repo": {"full_name": "anftm/banned-historical-archives0"}, "ref": ref}
