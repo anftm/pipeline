@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
 """Compare anftm parsed branch revisions and write a candidate state file."""
 
-import http.client
 import json
 import os
 import subprocess
 import sys
 import time
-import urllib.error
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+
+try:
+    from .github_read import json_request_or_fail
+except ImportError:
+    from github_read import json_request_or_fail
 
 
 OWNER = os.environ.get("BHA_ARCHIVE_OWNER", "anftm")
@@ -26,31 +29,10 @@ GIT_PROPAGATION_POLL_SECONDS = int(os.environ.get("BHA_GIT_PROPAGATION_POLL", "1
 REVISION_WORKERS = int(os.environ.get("BHA_REVISION_WORKERS", "8"))
 GITHUB_API_ATTEMPTS = int(os.environ.get("BHA_GITHUB_API_ATTEMPTS", "4"))
 GITHUB_API_RETRY_SECONDS = float(os.environ.get("BHA_GITHUB_API_RETRY_SECONDS", "1"))
-RETRYABLE_HTTP_STATUSES = {429, 500, 502, 503, 504}
-
-
 def github_json(request: urllib.request.Request, label: str) -> dict:
-    for attempt in range(GITHUB_API_ATTEMPTS):
-        try:
-            with urllib.request.urlopen(request, timeout=30) as response:
-                return json.load(response)
-        except urllib.error.HTTPError as exc:
-            if exc.code not in RETRYABLE_HTTP_STATUSES:
-                raise RuntimeError(f"{label} failed with HTTP {exc.code}") from exc
-            error: Exception = exc
-        except (
-            urllib.error.URLError,
-            http.client.RemoteDisconnected,
-            http.client.IncompleteRead,
-            ConnectionError,
-            TimeoutError,
-            json.JSONDecodeError,
-        ) as exc:
-            error = exc
-        if attempt + 1 == GITHUB_API_ATTEMPTS:
-            raise RuntimeError(f"{label} failed after {GITHUB_API_ATTEMPTS} attempts: {error}") from error
-        time.sleep(GITHUB_API_RETRY_SECONDS * (2 ** attempt))
-    raise AssertionError("unreachable")
+    return json_request_or_fail(
+        request, label, attempts=GITHUB_API_ATTEMPTS, retry_seconds=GITHUB_API_RETRY_SECONDS,
+    )
 
 
 def revision(token: str, archive_id: int) -> str:

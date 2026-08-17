@@ -11,10 +11,14 @@ import subprocess
 import shutil
 import sys
 import tempfile
-import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
+
+try:
+    from .github_read import json_request
+except ImportError:
+    from github_read import json_request
 
 
 GITHUB_API = "https://api.github.com"
@@ -81,17 +85,7 @@ def api_request(token: str, method: str, path: str, payload: dict | None = None)
     request.add_header("Authorization", f"Bearer {token}")
     if body is not None:
         request.add_header("Content-Type", "application/json")
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            raw = response.read()
-            return response.status, json.loads(raw) if raw else {}
-    except urllib.error.HTTPError as exc:
-        raw = exc.read().decode("utf-8", errors="replace")
-        try:
-            detail = json.loads(raw)
-        except json.JSONDecodeError:
-            detail = {"message": raw}
-        return exc.code, detail
+    return json_request(request)
 
 
 def repo_path(owner: str, repo: str) -> str:
