@@ -6,7 +6,9 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -111,20 +113,82 @@ def delete_branch(token, owner, repo, branch):
         fail(f"cannot delete {owner}/{repo}:{branch}: HTTP {status}")
 
 
-def pull_files(token, repo, number):
-    paths = []
+def pull_file_changes(token, repo, number):
+    changes = []
     for page in range(1, 4):
         status, data = api_request(
             token, "GET", f"{repo_path(MIRROR_OWNER, repo)}/pulls/{number}/files?per_page=100&page={page}",
         )
         if status != 200 or not isinstance(data, list):
             fail(f"cannot read files for {repo}#{number}: HTTP {status}")
-        paths.extend(str(item.get("filename") or "") for item in data)
+        changes.extend(data)
         if len(data) < 100:
             break
-    if not paths or any(not path for path in paths) or len(paths) > 200:
+    if (
+        not changes or len(changes) > 200
+        or any(
+            not isinstance(item, dict)
+            or not item.get("filename")
+            or item.get("status") not in {"added", "modified", "removed"}
+            for item in changes
+        )
+    ):
         fail(f"{repo}#{number} has an invalid changed-file set")
-    return paths
+    return changes
+
+
+def merge_file_change(current, base, changed, label):
+    if base is None:
+        if changed is None:
+            fail(f"{label} does not contain a file change")
+        if current is not None and current != changed:
+            fail(f"{label} conflicts with an existing upstream file")
+        return changed
+    if changed is None:
+        if current is None:
+            return None
+        if current != base:
+            fail(f"{label} cannot delete a modified upstream file")
+        return None
+    if current is None:
+        fail(f"{label} cannot modify a missing upstream file")
+    if current == base or current == changed:
+        return changed
+    with tempfile.TemporaryDirectory() as directory:
+        paths = [os.path.join(directory, name) for name in ("current", "base", "changed")]
+        for path, content in zip(paths, (current, base, changed)):
+            with open(path, "w", encoding="utf-8", newline="") as stream:
+                stream.write(content)
+        process = subprocess.run(
+            ["git", "merge-file", "--stdout", paths[0], paths[1], paths[2]],
+            text=True, capture_output=True, check=False,
+        )
+    if process.returncode == 1:
+        fail(f"{label} conflicts with upstream or another proofreading change")
+    if process.returncode != 0:
+        detail = process.stderr.strip() or f"exit {process.returncode}"
+        fail(f"cannot merge {label}: {detail}")
+    return process.stdout
+
+
+def source_change_contents(token, repo, pull, change):
+    base_revision = (pull.get("base") or {}).get("sha")
+    head_revision = (pull.get("head") or {}).get("sha")
+    if not base_revision or not head_revision:
+        fail(f"{repo}#{pull['number']} is missing its base or head revision")
+    path = str(change["filename"])
+    base, base_sha = get_file(token, MIRROR_OWNER, repo, base_revision, path)
+    changed, changed_sha = get_file(token, MIRROR_OWNER, repo, head_revision, path)
+    status = change["status"]
+    if status == "added" and base_sha:
+        fail(f"{repo}#{pull['number']} reports existing file as added: {path}")
+    if status in {"modified", "removed"} and not base_sha:
+        fail(f"{repo}#{pull['number']} is missing base file: {path}")
+    if status in {"added", "modified"} and not changed_sha:
+        fail(f"{repo}#{pull['number']} is missing changed file: {path}")
+    if status == "removed" and changed_sha:
+        fail(f"{repo}#{pull['number']} reports existing file as removed: {path}")
+    return (base if base_sha else None), (changed if changed_sha else None)
 
 
 def list_closed_pulls(token, repo):
@@ -488,25 +552,30 @@ def publish_group(token, repo, base, pulls):
         return existing, branch
 
     try:
-        paths = {}
+        desired = {}
+        branch_files = {}
         for source_pull_item in pulls:
-            for source_path in pull_files(token, repo, source_pull_item["number"]):
+            for change in pull_file_changes(token, repo, source_pull_item["number"]):
+                source_path = str(change["filename"])
                 target_path = upstream_path(repo, source_path)
                 if not source_path or not target_path:
                     fail(f"{repo}#{source_pull_item['number']} has an invalid target path")
-                previous = paths.get(target_path)
-                if previous and previous[0] != source_path:
-                    fail(f"multiple OCR patch paths map to {target_path}")
-                source_revision = source_pull_item.get("merge_commit_sha")
-                if not source_revision:
-                    fail(f"{repo}#{source_pull_item['number']} is missing its merge commit")
-                paths[target_path] = (source_path, source_revision)
-        for target_path, (source_path, source_revision) in sorted(paths.items()):
-            desired, _ = get_file(token, MIRROR_OWNER, repo, source_revision, source_path)
-            current, current_sha = get_file(token, MIRROR_OWNER, repo, branch, target_path)
-            if desired and desired != current:
-                put_file(token, MIRROR_OWNER, repo, branch, target_path, desired, current_sha, f"Publish proofreading to {target_path}")
-            elif not desired and current_sha:
+                base_content, changed_content = source_change_contents(
+                    token, repo, source_pull_item, change,
+                )
+                if target_path not in branch_files:
+                    current, current_sha = get_file(token, MIRROR_OWNER, repo, branch, target_path)
+                    branch_files[target_path] = (current if current_sha else None, current_sha)
+                    desired[target_path] = current if current_sha else None
+                desired[target_path] = merge_file_change(
+                    desired[target_path], base_content, changed_content,
+                    f"{repo}#{source_pull_item['number']} {source_path}",
+                )
+        for target_path, content in sorted(desired.items()):
+            current, current_sha = branch_files[target_path]
+            if content is not None and content != current:
+                put_file(token, MIRROR_OWNER, repo, branch, target_path, content, current_sha, f"Publish proofreading to {target_path}")
+            elif content is None and current_sha:
                 delete_file(token, MIRROR_OWNER, repo, branch, target_path, current_sha, f"Revert proofreading from {target_path}")
 
         details = [pull_change_details(token, repo, pull) for pull in pulls]

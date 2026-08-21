@@ -1482,6 +1482,7 @@ class UpstreamPublishTests(unittest.TestCase):
         return {
             "repo": "banned-historical-archives0", "number": number,
             "base": {"ref": "ocr_patch", "sha": base_sha},
+            "head": {"sha": f"head-{number}"},
             "merge_commit_sha": merge_sha, "merged_at": merged_at,
         }
 
@@ -1559,8 +1560,12 @@ class UpstreamPublishTests(unittest.TestCase):
 
         with patch.object(publish_proofread_upstream, "branch_sha", side_effect=["upstream-sha", "mirror-sha", None]), \
                 patch.object(publish_proofread_upstream, "open_upstream_pull", return_value=None), \
-                patch.object(publish_proofread_upstream, "pull_files", return_value=["archives0/[article][book].ts"]), \
-                patch.object(publish_proofread_upstream, "get_file", side_effect=[("content", None), ("", None)]) as get_file, \
+                patch.object(publish_proofread_upstream, "pull_file_changes", return_value=[{
+                    "filename": "archives0/[article][book].ts", "status": "added",
+                }]), \
+                patch.object(publish_proofread_upstream, "get_file", side_effect=[
+                    ("", None), ("content", "changed-sha"), ("", None),
+                ]) as get_file, \
                 patch.object(publish_proofread_upstream, "put_file") as put_file, \
                 patch.object(publish_proofread_upstream, "pull_change_details", return_value=None), \
                 patch.object(publish_proofread_upstream, "response_or_fail", side_effect=response) as request_api:
@@ -1578,15 +1583,44 @@ class UpstreamPublishTests(unittest.TestCase):
         payload = request_api.call_args.args[4]
         self.assertEqual(payload["head"], f"anftm:{head}")
         self.assertEqual(payload["base"], "ocr_patch")
-        self.assertEqual(get_file.call_args_list[0].args[3], "merge-1")
+        self.assertEqual(get_file.call_args_list[0].args[3], "base-1")
+        self.assertEqual(get_file.call_args_list[1].args[3], "head-1")
 
     def test_pull_files_accepts_paginated_parse_batch(self):
-        first = [{"filename": f"archives25/file-{index}.ts"} for index in range(100)]
-        second = [{"filename": "archives25/file-100.ts"}]
+        first = [{"filename": f"archives25/file-{index}.ts", "status": "added"} for index in range(100)]
+        second = [{"filename": "archives25/file-100.ts", "status": "added"}]
         with patch.object(publish_proofread_upstream, "api_request", side_effect=[(200, first), (200, second)]):
-            paths = publish_proofread_upstream.pull_files("token", "banned-historical-archives25", 7)
-        self.assertEqual(len(paths), 101)
-        self.assertEqual(paths[-1], "archives25/file-100.ts")
+            changes = publish_proofread_upstream.pull_file_changes("token", "banned-historical-archives25", 7)
+        self.assertEqual(len(changes), 101)
+        self.assertEqual(changes[-1]["filename"], "archives25/file-100.ts")
+
+    def test_merge_file_change_applies_only_source_delta_from_cumulative_base(self):
+        unchanged = "".join(f"context-{index}\n" for index in range(20))
+        upstream = f"first: old\n{unchanged}second: old\n"
+        cumulative_base = f"first: earlier correction\n{unchanged}second: old\n"
+        source_head = f"first: earlier correction\n{unchanged}second: current correction\n"
+        merged = publish_proofread_upstream.merge_file_change(
+            upstream, cumulative_base, source_head, "repo#2 config.ts",
+        )
+        self.assertEqual(merged, f"first: old\n{unchanged}second: current correction\n")
+
+    def test_merge_file_change_rejects_overlapping_source_changes(self):
+        with self.assertRaisesRegex(RuntimeError, "conflicts with upstream or another proofreading change"):
+            publish_proofread_upstream.merge_file_change(
+                "value: upstream\n", "value: base\n", "value: source\n", "repo#2 config.ts",
+            )
+
+    def test_source_change_contents_reads_pull_base_and_head_not_merge_commit(self):
+        pull = self._pull(2, "base-2", "cumulative-merge", "2026-08-03T02:00:00Z")
+        with patch.object(publish_proofread_upstream, "get_file", side_effect=[
+                    ("base", "base-blob"), ("changed", "head-blob"),
+                ]) as get_file:
+            result = publish_proofread_upstream.source_change_contents(
+                "token", "banned-historical-archives0", pull,
+                {"filename": "config.ts", "status": "modified"},
+            )
+        self.assertEqual(result, ("base", "changed"))
+        self.assertEqual([call.args[3] for call in get_file.call_args_list], ["base-2", "head-2"])
 
     def test_publish_group_reuses_existing_batch_branch_pull(self):
         pull = self._pull(1, "base-1", "merge-1", "2026-08-03T01:00:00Z")
