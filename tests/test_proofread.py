@@ -392,12 +392,18 @@ class ProofreadBundleTests(unittest.TestCase):
         request = {
             "doc_id": "doc-1",
             "patch": {"parts": {"0": {"diff": "=4\t-1\t+新"}}, "comments": {}},
+            "metadata": {"article": {
+                "dates": [{"year": 1967}],
+                "tags": [{"name": "毛泽东", "type": "人物"}],
+            }},
         }
         preview = {
             "article": {
                 "parts": [{"text": "旧文"}],
                 "comments": [],
                 "comment_pivots": [{"part_idx": 0, "offset": 1, "index": 1}],
+                "dates": [{"year": 1966}],
+                "tags": [{"name": "毛泽东", "type": "人物"}],
             },
             "publication_name": "来源",
             "source_files": [],
@@ -408,12 +414,52 @@ class ProofreadBundleTests(unittest.TestCase):
             submit_proofread.fetch_bha_changes(request)
         self.assertEqual(request["changed"], [
             {"kind": "part", "index": 1, "original": "旧〔1〕文", "edited": "旧〔1〕新"},
+            {"kind": "metadata", "field": "dates", "old": [{"year": 1966}], "new": [{"year": 1967}]},
         ])
         self.assertEqual(request["fulltext"], {
             "original": "旧〔1〕文",
             "edited": "旧〔1〕新",
         })
+        self.assertEqual(request["metadata"], {"article": {"dates": [{"year": 1967}]}})
         self.assertIn("/api/preview/doc-1", urlopen.call_args.args[0].full_url)
+
+    def test_existing_review_details_still_remove_unchanged_generated_tags(self):
+        tags = [{"name": "毛泽东", "type": "人物"}]
+        request = {
+            "doc_id": "doc-1",
+            "changed": [{"kind": "metadata", "field": "dates", "old": [], "new": [{"year": 1967}]}],
+            "fulltext": {"original": "正文", "edited": "正文"},
+            "metadata": {"article": {"dates": [{"year": 1967}], "tags": tags}},
+        }
+        preview = {
+            "article": {"parts": [{"text": "正文"}], "comments": [], "dates": [], "tags": tags},
+            "source_files": [],
+        }
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps(preview).encode()
+        with patch.object(submit_proofread.urllib.request, "urlopen", return_value=response):
+            submit_proofread.fetch_bha_changes(request)
+        self.assertEqual(request["metadata"], {"article": {"dates": [{"year": 1967}]}})
+        self.assertEqual(request["changed"], [
+            {"kind": "metadata", "field": "dates", "old": [], "new": [{"year": 1967}]},
+        ])
+
+    def test_explicit_supplemental_tag_change_remains_in_write_payload(self):
+        old_tags = [{"name": "毛泽东", "type": "人物"}]
+        new_tags = old_tags + [{"name": "无法自动生成", "type": "主题/事件"}]
+        request = {"doc_id": "doc-1", "metadata": {"article": {"tags": new_tags}}}
+        preview = {
+            "article": {"parts": [{"text": "正文"}], "comments": [], "tags": old_tags},
+            "source_files": [],
+        }
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps(preview).encode()
+        with patch.object(submit_proofread.urllib.request, "urlopen", return_value=response):
+            submit_proofread.fetch_bha_changes(request)
+        self.assertEqual(request["metadata"], {"article": {"tags": new_tags}})
+        self.assertEqual(request["changed"], [{
+            "kind": "metadata", "field": "tags", "old": old_tags, "new": new_tags,
+        }])
 
     def test_multi_operation_delta_replays_moved_text_and_utf16(self):
         self.assertEqual(submit_proofread.apply_text_delta("甲乙丙丁", "-2\t=2\t+甲乙"), "丙丁甲乙")

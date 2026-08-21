@@ -555,7 +555,8 @@ def article_part_text(article, index):
 
 
 def fetch_bha_changes(request):
-    if request.get("changed") and request.get("fulltext"):
+    supplied_metadata = payload_field(request, "metadata")
+    if request.get("changed") and request.get("fulltext") and not isinstance(supplied_metadata, dict):
         return
     doc_id = str(request.get("doc_id") or "")
     if not doc_id:
@@ -569,6 +570,30 @@ def fetch_bha_changes(request):
     except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
         fail(f"cannot load BHA text for proofreading issue: {exc}")
     article = preview.get("article") if isinstance(preview.get("article"), dict) else {}
+    source_old = {
+        "name": preview.get("publication_name"),
+        "author": preview.get("publication_author"),
+        "type": preview.get("publication_type"),
+        "files": [item.get("url") for item in preview.get("source_files") or [] if isinstance(item, dict)],
+    }
+    metadata = supplied_metadata if isinstance(supplied_metadata, dict) else {}
+    normalized_metadata = {}
+    for section, current, fields in (
+        ("article", article, {"title", "authors", "dates", "tags"}),
+        ("source", source_old, {"name", "author", "type", "files"}),
+    ):
+        values = metadata.get(section)
+        if not isinstance(values, dict):
+            continue
+        changed_values = {
+            field: value for field, value in values.items()
+            if field not in fields or current.get(field) != value
+        }
+        if changed_values:
+            normalized_metadata[section] = changed_values
+    if isinstance(supplied_metadata, dict):
+        set_payload_field(request, "metadata", normalized_metadata)
+        metadata = normalized_metadata
     comments = article.get("comments") if isinstance(article.get("comments"), list) else []
     patch = payload_field(request, "patch") if isinstance(payload_field(request, "patch"), dict) else {}
     original_parts = [article_part_text(article, index) for index in range(len(article.get("parts") or []))]
@@ -642,12 +667,6 @@ def fetch_bha_changes(request):
     for field, new_value in (metadata.get("article") or {}).items():
         if field in ("title", "authors", "dates", "tags") and article.get(field) != new_value:
             changes.append({"kind": "metadata", "field": field, "old": article.get(field), "new": new_value})
-    source_old = {
-        "name": preview.get("publication_name"),
-        "author": preview.get("publication_author"),
-        "type": preview.get("publication_type"),
-        "files": [item.get("url") for item in preview.get("source_files") or [] if isinstance(item, dict)],
-    }
     for field, new_value in (metadata.get("source") or {}).items():
         if source_old.get(field) != new_value:
             changes.append({"kind": "metadata", "field": field, "old": source_old.get(field), "new": new_value})
@@ -2121,6 +2140,9 @@ def main():
         if patch is not None:
             validate_patch(patch)
         fetch_bha_changes(request)
+        metadata = payload_field(request, "metadata")
+        if patch is None and not metadata:
+            fail("proofread metadata does not change the BHA preview")
         correction_id = hashlib.sha256(json.dumps({
             "archive_id": archive_id, "kind": "proofread", "article_id": article_id,
             "publication_id": publication_id, "patch": patch, "metadata": metadata,
@@ -2130,7 +2152,7 @@ def main():
         title = request.get("title") or f"校订 {article_id}"
         pull_requests = []
         new_article_id = article_id
-        if isinstance(metadata, dict):
+        if isinstance(metadata, dict) and metadata:
             metadata_files, new_article_id = update_metadata_files(token, repo, publication_id, request)
             description = proofread_pr_body(request, repo, new_article_id, correction_id)
             grouped = {}
