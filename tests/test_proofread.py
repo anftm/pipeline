@@ -1610,6 +1610,17 @@ class UpstreamPublishTests(unittest.TestCase):
                 "value: upstream\n", "value: base\n", "value: source\n", "repo#2 config.ts",
             )
 
+    def test_merge_file_change_preserves_missing_final_newline(self):
+        unchanged = "".join(f"context-{index}\n" for index in range(20))
+        upstream = f"first: old\n{unchanged}second: old"
+        base = f"first: old\n{unchanged}second: old"
+        changed = f"first: corrected\n{unchanged}second: old"
+        merged = publish_proofread_upstream.merge_file_change(
+            upstream, base, changed, "repo#2 config.ts",
+        )
+        self.assertEqual(merged, f"first: corrected\n{unchanged}second: old")
+        self.assertFalse(merged.endswith("\n"))
+
     def test_source_change_contents_reads_pull_base_and_head_not_merge_commit(self):
         pull = self._pull(2, "base-2", "cumulative-merge", "2026-08-03T02:00:00Z")
         with patch.object(publish_proofread_upstream, "get_file", side_effect=[
