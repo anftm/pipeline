@@ -6,6 +6,7 @@
 用法:
   python scripts/fetch_and_parse.py
   可选环境变量: HF_TOKEN（提升 API 频率限制）
+  FORCE_SYNC=true 可在来源未变化时强制重新生成
 """
 
 import json
@@ -443,12 +444,20 @@ def write_json_gz(path: Path, data) -> None:
     path.write_text(json_text, encoding="utf-8")
     path.with_suffix(path.suffix + ".gz").write_bytes(gzip.compress(json_text.encode("utf-8"), compresslevel=9, mtime=0))
 
+
+def write_action_output(name: str, value: str) -> None:
+    output_path = os.environ.get("GITHUB_OUTPUT", "")
+    if output_path:
+        with open(output_path, "a", encoding="utf-8") as output:
+            output.write(f"{name}={value}\n")
+
 # ═══════════════════════════════════════════════════════════
 # 主流程
 # ═══════════════════════════════════════════════════════════
 
 def main():
     token = os.environ.get("HF_TOKEN", "")
+    force_sync = os.environ.get("FORCE_SYNC", "false").lower() == "true"
 
     print("=" * 60)
     print("📂 VoiceOfML Search Pipeline — fetch_and_parse")
@@ -468,17 +477,19 @@ def main():
     # ── 2. 检查每个仓库的最新 commit SHA ───────────────
     new_state = {}
     changed_repos = []
+    failed_repos = []
 
     for repo in REPOS:
         print(f"\n🔍 检查仓库: {repo}")
+        old_sha = old_state.get(repo, "")
         sha = get_repo_sha(repo, token)
-        new_state[repo] = sha
+        new_state[repo] = sha or old_sha
 
         if not sha:
-            print(f"  ⚠ 无法获取 SHA，跳过")
+            print(f"  ⚠ 无法获取 SHA")
+            failed_repos.append(repo)
             continue
 
-        old_sha = old_state.get(repo, "")
         if sha != old_sha or not old_sha:
             print(f"  🔄 有变更: {old_sha[:8] if old_sha else '(新)'} → {sha[:8]}")
             changed_repos.append(repo)
@@ -486,21 +497,15 @@ def main():
             print(f"  ✅ 无变更: {sha[:8]}")
 
     # ── 3. 判断是否需要重新生成 ─────────────────────────
-    # 检查 output 是否有效
-    output_is_valid = OUTPUT_FILE.exists()
-    if output_is_valid:
-        try:
-            existing = json.loads(OUTPUT_FILE.read_text(encoding="utf-8"))
-            if isinstance(existing, list):
-                output_is_valid = len(existing) > 0
-            elif isinstance(existing, dict):
-                output_is_valid = bool(existing.get("rc"))
-            else:
-                output_is_valid = False
-        except Exception:
-            output_is_valid = False
- 
-    if not changed_repos and output_is_valid:
+    if failed_repos:
+        write_action_output("data_changed", "false")
+        print("\n❌ 无法确认全部来源版本，停止同步: " + ", ".join(failed_repos))
+        return 1
+
+    data_changed = bool(changed_repos) or force_sync
+    write_action_output("data_changed", "true" if data_changed else "false")
+
+    if not data_changed:
         print("\n✅ 所有仓库无变更，跳过生成。")
         STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
         STATE_FILE.write_text(
@@ -509,9 +514,9 @@ def main():
         )
         return 0
 
-    if not changed_repos and not output_is_valid:
-        print("\n⚠ 仓库无变更，但 output 为空，强制重新生成...")
-
+    if force_sync and not changed_repos:
+        print("\n🔄 已要求强制同步，重新生成当前数据...")
+    else:
         print(f"\n🔄 {len(changed_repos)} 个仓库有变更，开始重新生成...")
 
     # ── 4. 拉取 txt 并解析 ─────────────────────────────

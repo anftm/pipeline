@@ -28,6 +28,7 @@ jobs:
         run: python scripts/fetch_and_parse.py
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          FORCE_SYNC: 'true'
 
       - name: Publish metadata and n-gram indexes to HF Search
         run: python scripts/sync_to_space.py
