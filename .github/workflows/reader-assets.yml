@@ -1,0 +1,93 @@
+name: Build Reader Assets
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: Exact source dataset, or blank for all
+        required: false
+        default: ""
+        type: string
+      extension:
+        description: doc, docx, mobi, azw3, tif, tiff, or blank for all
+        required: false
+        default: ""
+        type: string
+      limit:
+        description: Maximum files in this batch
+        required: true
+        default: "20"
+        type: string
+      retry_failed:
+        description: Retry current-profile failures
+        required: false
+        default: false
+        type: boolean
+      force:
+        description: Rebuild even when the current asset is ready
+        required: false
+        default: false
+        type: boolean
+      dry_run:
+        description: Scan only; do not download, convert, or publish
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: reader-assets
+  cancel-in-progress: false
+
+jobs:
+  convert:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Install conversion tools
+        if: inputs.dry_run == false
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libreoffice calibre
+      - name: Install Python dependencies
+        run: pip install -r scripts/requirements.txt
+      - name: Fetch current source metadata
+        run: python scripts/fetch_and_parse.py
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      - name: Scan incremental Reader Assets queue
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          READER_ASSETS_REPO: vomebook/Reader-Assets
+        run: |
+          args=(
+            --repo "${{ inputs.repo }}"
+            --extension "${{ inputs.extension }}"
+            --limit "${{ inputs.limit }}"
+          )
+          if [[ "${{ inputs.retry_failed }}" == "true" ]]; then args+=(--retry-failed); fi
+          if [[ "${{ inputs.force }}" == "true" ]]; then args+=(--force); fi
+          python scripts/scan_reader_assets.py "${args[@]}"
+      - name: Convert queue
+        if: inputs.dry_run == false
+        run: python scripts/convert_reader_assets.py
+      - name: Publish assets, manifest, and sidecar
+        if: inputs.dry_run == false
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          READER_ASSETS_REPO: vomebook/Reader-Assets
+        run: python scripts/publish_reader_assets.py
+      - name: Publish sidecar to GitHub Pages
+        if: inputs.dry_run == false
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          PAGES_TOKEN: ${{ secrets.PAGES_TOKEN }}
+          PAGES_REPO: ${{ secrets.PAGES_REPO }}
+          READER_ASSETS_REPO: vomebook/Reader-Assets
+        run: python scripts/publish_search_reader_index.py
+      - name: Report dry-run queue
+        if: inputs.dry_run == true
+        run: python -m json.tool output/reader-assets/queue.json
