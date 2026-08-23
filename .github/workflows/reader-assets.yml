@@ -58,6 +58,7 @@ jobs:
         run: python scripts/fetch_and_parse.py
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          FORCE_SYNC: "true"
       - name: Scan incremental Reader Assets queue
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
