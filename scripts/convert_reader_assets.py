@@ -147,6 +147,12 @@ def convert_file(item: dict, source: Path, target: Path, work: Path) -> None:
         if prefix.lower().startswith((b"<html", b"<!doctype html")):
             office_source = work / "source.html"
             shutil.copyfile(source, office_source)
+            intermediate = work / "html-office"
+            intermediate.mkdir()
+            run_checked(["libreoffice", "--headless", f"-env:UserInstallation={office_profile}", "--convert-to", "odt", "--outdir", str(intermediate), str(office_source)])
+            office_source = intermediate / "source.odt"
+            if not office_source.is_file():
+                raise RuntimeError("LibreOffice produced no ODT from HTML source")
         run_checked(["libreoffice", "--headless", f"-env:UserInstallation={office_profile}", "--convert-to", "docx", "--outdir", str(out), str(office_source)])
         produced = out / f"{office_source.stem}.docx"
         if not produced.exists():
