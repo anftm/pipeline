@@ -144,17 +144,21 @@ def convert_file(item: dict, source: Path, target: Path, work: Path) -> None:
             shutil.copyfile(source, target)
         except (zipfile.BadZipFile, KeyError):
             match = PASSWORD_RE.search(item.get("path", ""))
+            with source.open("rb") as handle:
+                is_ole = handle.read(8) == OLE_SIGNATURE
             if match:
                 import msoffcrypto
                 with source.open("rb") as encrypted, target.open("wb") as decrypted:
                     document = msoffcrypto.OfficeFile(encrypted)
                     document.load_key(password=match.group(1))
                     document.decrypt(decrypted)
-            elif source.open("rb").read(8) == OLE_SIGNATURE:
+            elif is_ole:
                 out = work / "mislabeled-office"
                 out.mkdir()
-                run_checked(["libreoffice", "--headless", "--convert-to", "docx", "--outdir", str(out), str(source)])
-                produced = out / f"{source.stem}.docx"
+                mislabeled = work / "mislabeled.doc"
+                shutil.copyfile(source, mislabeled)
+                run_checked(["libreoffice", "--headless", "--convert-to", "docx", "--outdir", str(out), str(mislabeled)])
+                produced = out / "mislabeled.docx"
                 if not produced.is_file():
                     raise RuntimeError("LibreOffice produced no DOCX from mislabeled source")
                 shutil.move(produced, target)
