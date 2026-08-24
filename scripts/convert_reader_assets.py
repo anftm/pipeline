@@ -20,6 +20,7 @@ except ImportError:
 
 MAX_SOURCE_BYTES = 2 * 1024 * 1024 * 1024
 CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
+MIN_PAGE_CONTENT_RATIO = 0.0005
 
 
 def download_source(url: str, target: Path) -> tuple[str, int]:
@@ -88,18 +89,39 @@ def rasterize_pdf(path: Path, work: Path) -> None:
     pages = work / "raster-pages"
     pages.mkdir()
     run_checked(["pdftoppm", "-png", "-r", "150", str(path), str(pages / "page")])
-    images = sorted(pages.glob("page-*.png"))
+    images = sorted(pages.glob("page-*.png"), key=lambda item: int(item.stem.rsplit("-", 1)[-1]))
     if not images:
         raise RuntimeError("PDF rasterization produced no pages")
     sample = "".join(command_output(["tesseract", str(image), "stdout", "-l", "chi_sim"]) for image in images[:3])
     if not CJK_RE.search(sample):
         raise RuntimeError("rasterized office PDF has no recognizable CJK text")
+    content = [page_content_ratio(image) >= MIN_PAGE_CONTENT_RATIO for image in images]
+    for index in range(1, len(images) - 1):
+        if content[index] or not any(content[:index]) or not any(content[index + 1:]):
+            continue
+        replacement = pages / f"ghostscript-{index + 1}.png"
+        run_checked([
+            "gs", "-dSAFER", "-dBATCH", "-dNOPAUSE", "-sDEVICE=png16m", "-r150",
+            f"-dFirstPage={index + 1}", f"-dLastPage={index + 1}",
+            f"-sOutputFile={replacement}", str(path),
+        ])
+        if not replacement.is_file() or page_content_ratio(replacement) < MIN_PAGE_CONTENT_RATIO:
+            raise RuntimeError(f"rasterized office PDF has blank interior page {index + 1}")
+        shutil.move(replacement, images[index])
     frames = [Image.open(image).convert("RGB") for image in images]
     rewritten = work / "rasterized.pdf"
     frames[0].save(rewritten, "PDF", save_all=True, append_images=frames[1:], resolution=150.0)
     for frame in frames:
         frame.close()
     shutil.move(rewritten, path)
+
+
+def page_content_ratio(path: Path) -> float:
+    with Image.open(path) as image:
+        grayscale = image.convert("L")
+        histogram = grayscale.histogram()
+        pixels = grayscale.width * grayscale.height
+    return sum(histogram[:245]) / pixels if pixels else 0.0
 
 
 def convert_file(item: dict, source: Path, target: Path, work: Path) -> None:

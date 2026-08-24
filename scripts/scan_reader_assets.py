@@ -11,13 +11,13 @@ from huggingface_hub.errors import RepositoryNotFoundError
 
 try:
     from .reader_assets import (
-        CONVERTIBLE_EXTENSIONS, MANIFEST_NAME, READER_ASSETS_REPO, asset_key,
+        CONVERTIBLE_EXTENSIONS, MANIFEST_NAME, READER_ASSETS_REPO, asset_key, conversion_contract,
         canonical_json, decode_search_payload, empty_manifest, load_json,
         relative_path, source_url, validate_manifest,
     )
 except ImportError:
     from reader_assets import (
-        CONVERTIBLE_EXTENSIONS, MANIFEST_NAME, READER_ASSETS_REPO, asset_key,
+        CONVERTIBLE_EXTENSIONS, MANIFEST_NAME, READER_ASSETS_REPO, asset_key, conversion_contract,
         canonical_json, decode_search_payload, empty_manifest, load_json,
         relative_path, source_url, validate_manifest,
     )
@@ -48,7 +48,7 @@ def build_queue(records, revisions, manifest, *, repo="", extension="", limit=0,
             continue
         path = relative_path(record)
         key = asset_key(source_repo, path)
-        profile, reader_mode, output_name = CONVERTIBLE_EXTENSIONS[ext]
+        profile, reader_mode, output_name = conversion_contract(ext, key)
         existing = files.get(key, {})
         current = existing.get("source_revision") == revision and existing.get("profile") == profile
         if not force and current and existing.get("status") == "ready":

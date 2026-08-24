@@ -17,6 +17,14 @@ CONVERTIBLE_EXTENSIONS = {
     "tif": ("pillow-pdf-v1", "pdf", "document.pdf"),
     "tiff": ("pillow-pdf-v1", "pdf", "document.pdf"),
 }
+SPECIAL_CONVERSION_PROFILES = {
+    "VoiceOfML/MLMRL-Hub" + "\0" + "000519/1870520043_6148_福州公安学校内部：论处置暴乱骚乱事件的战术方法.doc": "libreoffice-pdf-v3",
+}
+
+
+def conversion_contract(extension: str, key: str = "") -> tuple[str, str, str]:
+    profile, reader_mode, output_name = CONVERTIBLE_EXTENSIONS[extension]
+    return SPECIAL_CONVERSION_PROFILES.get(key, profile), reader_mode, output_name
 
 
 def empty_manifest() -> dict:
