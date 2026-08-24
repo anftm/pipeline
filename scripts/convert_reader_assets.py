@@ -61,11 +61,11 @@ def embedded_pdf_fonts(path: Path) -> list[str]:
     return [line for line in fonts if len(line.split()) >= 6 and line.split()[-5].lower() == "yes"]
 
 
-def embed_pdf_fonts(path: Path, work: Path) -> None:
-    rewritten = work / "embedded-fonts.pdf"
+def outline_pdf_fonts(path: Path, work: Path) -> None:
+    rewritten = work / "outlined-fonts.pdf"
     run_checked([
         "gs", "-dBATCH", "-dNOPAUSE", "-sDEVICE=pdfwrite", "-dCompatibilityLevel=1.7",
-        "-dEmbedAllFonts=true", "-dSubsetFonts=true", "-dCompressFonts=true",
+        "-dNoOutputFonts=true",
         f"-sOutputFile={rewritten}", str(path),
     ])
     if not rewritten.is_file():
@@ -115,13 +115,12 @@ def validate_output(path: Path, reader_mode: str) -> None:
 
 
 def validate_office_pdf(path: Path, item: dict, work: Path) -> None:
-    if not embedded_pdf_fonts(path):
-        embed_pdf_fonts(path, work)
-    if not embedded_pdf_fonts(path):
-        raise RuntimeError("office PDF has no embedded fonts")
     text = command_output(["pdftotext", str(path), "-"])
     if CJK_RE.search(item.get("path", "")) and not CJK_RE.search(text):
         raise RuntimeError("office PDF has no extractable CJK text")
+    if not embedded_pdf_fonts(path):
+        outline_pdf_fonts(path, work)
+        validate_output(path, "pdf")
 
 
 def convert_item(item: dict, bundle: Path) -> dict:
