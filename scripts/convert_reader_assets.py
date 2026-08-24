@@ -84,6 +84,24 @@ def convert_tiff(source: Path, target: Path) -> None:
         frame.close()
 
 
+def rasterize_pdf(path: Path, work: Path) -> None:
+    pages = work / "raster-pages"
+    pages.mkdir()
+    run_checked(["pdftoppm", "-png", "-r", "150", str(path), str(pages / "page")])
+    images = sorted(pages.glob("page-*.png"))
+    if not images:
+        raise RuntimeError("PDF rasterization produced no pages")
+    sample = "".join(command_output(["tesseract", str(image), "stdout", "-l", "chi_sim"]) for image in images[:3])
+    if not CJK_RE.search(sample):
+        raise RuntimeError("rasterized office PDF has no recognizable CJK text")
+    frames = [Image.open(image).convert("RGB") for image in images]
+    rewritten = work / "rasterized.pdf"
+    frames[0].save(rewritten, "PDF", save_all=True, append_images=frames[1:], resolution=150.0)
+    for frame in frames:
+        frame.close()
+    shutil.move(rewritten, path)
+
+
 def convert_file(item: dict, source: Path, target: Path, work: Path) -> None:
     ext = item["extension"]
     if ext in {"doc", "docx"}:
@@ -116,8 +134,11 @@ def validate_output(path: Path, reader_mode: str) -> None:
 
 def validate_office_pdf(path: Path, item: dict, work: Path) -> None:
     text = command_output(["pdftotext", str(path), "-"])
-    if CJK_RE.search(item.get("path", "")) and not CJK_RE.search(text):
-        raise RuntimeError("office PDF has no extractable CJK text")
+    has_cjk_path = bool(CJK_RE.search(item.get("path", "")))
+    if has_cjk_path and not CJK_RE.search(text):
+        rasterize_pdf(path, work)
+        validate_output(path, "pdf")
+        return
     if not embedded_pdf_fonts(path):
         outline_pdf_fonts(path, work)
         validate_output(path, "pdf")
