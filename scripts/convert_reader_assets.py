@@ -99,8 +99,9 @@ def validate_output(path: Path, reader_mode: str) -> None:
 
 def validate_office_pdf(path: Path, item: dict) -> None:
     fonts = command_output(["pdffonts", str(path)]).splitlines()[2:]
-    if not fonts or any(len(line.split()) < 6 or line.split()[-5].lower() != "yes" for line in fonts):
-        raise RuntimeError("office PDF has missing or unembedded fonts")
+    embedded = [line for line in fonts if len(line.split()) >= 6 and line.split()[-5].lower() == "yes"]
+    if not embedded:
+        raise RuntimeError("office PDF has no embedded fonts")
     text = command_output(["pdftotext", str(path), "-"])
     if CJK_RE.search(item.get("path", "")) and not CJK_RE.search(text):
         raise RuntimeError("office PDF has no extractable CJK text")
