@@ -21,6 +21,7 @@ except ImportError:
 
 MAX_SOURCE_BYTES = 2 * 1024 * 1024 * 1024
 CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
+PASSWORD_RE = re.compile(r"(?:密码|password)\s*[：:]\s*([^\]〕】）)\s]+)", re.IGNORECASE)
 MIN_PAGE_CONTENT_RATIO = 0.0005
 
 
@@ -136,7 +137,19 @@ def convert_file(item: dict, source: Path, target: Path, work: Path) -> None:
             raise RuntimeError("LibreOffice produced no DOCX")
         shutil.move(produced, target)
     elif ext == "docx":
-        shutil.copyfile(source, target)
+        try:
+            with zipfile.ZipFile(source) as archive:
+                archive.getinfo("word/document.xml")
+            shutil.copyfile(source, target)
+        except (zipfile.BadZipFile, KeyError):
+            match = PASSWORD_RE.search(item.get("path", ""))
+            if not match:
+                raise
+            import msoffcrypto
+            with source.open("rb") as encrypted, target.open("wb") as decrypted:
+                document = msoffcrypto.OfficeFile(encrypted)
+                document.load_key(password=match.group(1))
+                document.decrypt(decrypted)
     elif ext in {"mobi", "azw3"}:
         run_checked(["ebook-convert", str(source), str(target)])
     elif ext in {"tif", "tiff"}:

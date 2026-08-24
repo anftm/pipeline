@@ -2,3 +2,4 @@ aiohttp==3.9.5
 huggingface_hub>=1.0.0
 jieba==0.42.1
 Pillow==11.3.0
+msoffcrypto-tool==5.4.2
