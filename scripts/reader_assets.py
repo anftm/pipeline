@@ -10,21 +10,15 @@ MANIFEST_VERSION = 1
 READER_ASSETS_REPO = "vomebook/Reader-Assets"
 MANIFEST_NAME = "manifest.json"
 CONVERTIBLE_EXTENSIONS = {
-    "doc": ("libreoffice-pdf-v2", "pdf", "document.pdf"),
-    "docx": ("libreoffice-pdf-v2", "pdf", "document.pdf"),
+    "doc": ("libreoffice-docx-v1", "docx", "document.docx"),
+    "docx": ("docx-native-v1", "docx", "document.docx"),
     "mobi": ("calibre-epub-v1", "epub", "book.epub"),
     "azw3": ("calibre-epub-v1", "epub", "book.epub"),
     "tif": ("pillow-pdf-v1", "pdf", "document.pdf"),
     "tiff": ("pillow-pdf-v1", "pdf", "document.pdf"),
 }
-SPECIAL_CONVERSION_PROFILES = {
-    "VoiceOfML/MLMRL-Hub" + "\0" + "000519/1870520043_6148_福州公安学校内部：论处置暴乱骚乱事件的战术方法.doc": "libreoffice-pdf-v3",
-}
-
-
 def conversion_contract(extension: str, key: str = "") -> tuple[str, str, str]:
-    profile, reader_mode, output_name = CONVERTIBLE_EXTENSIONS[extension]
-    return SPECIAL_CONVERSION_PROFILES.get(key, profile), reader_mode, output_name
+    return CONVERTIBLE_EXTENSIONS[extension]
 
 
 def empty_manifest() -> dict:

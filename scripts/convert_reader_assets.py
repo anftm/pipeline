@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import tempfile
 import urllib.request
+import zipfile
 from pathlib import Path
 
 from PIL import Image, ImageSequence
@@ -126,14 +127,16 @@ def page_content_ratio(path: Path) -> float:
 
 def convert_file(item: dict, source: Path, target: Path, work: Path) -> None:
     ext = item["extension"]
-    if ext in {"doc", "docx"}:
+    if ext == "doc":
         out = work / "office"
         out.mkdir()
-        run_checked(["libreoffice", "--headless", "--convert-to", "pdf", "--outdir", str(out), str(source)])
-        produced = out / f"{source.stem}.pdf"
+        run_checked(["libreoffice", "--headless", "--convert-to", "docx", "--outdir", str(out), str(source)])
+        produced = out / f"{source.stem}.docx"
         if not produced.exists():
-            raise RuntimeError("LibreOffice produced no PDF")
+            raise RuntimeError("LibreOffice produced no DOCX")
         shutil.move(produced, target)
+    elif ext == "docx":
+        shutil.copyfile(source, target)
     elif ext in {"mobi", "azw3"}:
         run_checked(["ebook-convert", str(source), str(target)])
     elif ext in {"tif", "tiff"}:
@@ -168,6 +171,13 @@ def validate_output(path: Path, reader_mode: str) -> None:
         with zipfile.ZipFile(path) as archive:
             if archive.read("mimetype") != b"application/epub+zip":
                 raise RuntimeError("conversion output is not an EPUB")
+    if reader_mode == "docx":
+        with zipfile.ZipFile(path) as archive:
+            names = set(archive.namelist())
+            if "[Content_Types].xml" not in names or "word/document.xml" not in names:
+                raise RuntimeError("conversion output is not a DOCX")
+            if not archive.read("word/document.xml").strip():
+                raise RuntimeError("DOCX document body is empty")
 
 
 def validate_office_pdf(path: Path, item: dict, work: Path, source: Path | None = None) -> None:
@@ -201,7 +211,7 @@ def convert_item(item: dict, bundle: Path) -> dict:
             temporary = work / item["output_name"]
             convert_file(item, source, temporary, work)
             validate_output(temporary, item["reader_mode"])
-            if item["extension"] in {"doc", "docx"}:
+            if item["extension"] in {"doc", "docx"} and item["reader_mode"] == "pdf":
                 validate_office_pdf(temporary, item, work, source)
             shutil.move(temporary, target)
         else:

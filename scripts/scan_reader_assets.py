@@ -33,8 +33,8 @@ def remote_manifest(api: HfApi, repo_id: str) -> dict:
     return validate_manifest(load_json(Path(path)))
 
 
-def build_queue(records, revisions, manifest, *, repo="", extension="", limit=0,
-                retry_failed=False, force=False) -> list[dict]:
+def build_queue(records, revisions, manifest, *, repo="", extension="", exact_path="", limit=0,
+                 retry_failed=False, force=False) -> list[dict]:
     selected = []
     extension = extension.lower().lstrip(".")
     files = manifest.get("files", {})
@@ -47,6 +47,8 @@ def build_queue(records, revisions, manifest, *, repo="", extension="", limit=0,
         if not revision:
             continue
         path = relative_path(record)
+        if exact_path and path != exact_path:
+            continue
         key = asset_key(source_repo, path)
         profile, reader_mode, output_name = conversion_contract(ext, key)
         existing = files.get(key, {})
@@ -72,6 +74,7 @@ def parse_args():
     parser.add_argument("--output", type=Path, default=Path("output/reader-assets/queue.json"))
     parser.add_argument("--repo", default="")
     parser.add_argument("--extension", default="")
+    parser.add_argument("--path", default="")
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--retry-failed", action="store_true")
     parser.add_argument("--force", action="store_true")
@@ -90,7 +93,7 @@ def main() -> int:
         manifest = validate_manifest(load_json(args.manifest))
     else:
         manifest = remote_manifest(HfApi(token=os.environ.get("HF_TOKEN") or None), args.assets_repo)
-    queue = build_queue(records, revisions, manifest, repo=args.repo, extension=args.extension,
+    queue = build_queue(records, revisions, manifest, repo=args.repo, extension=args.extension, exact_path=args.path,
                         limit=args.limit, retry_failed=args.retry_failed, force=args.force)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_bytes(canonical_json({"version": 1, "items": queue}, pretty=True))

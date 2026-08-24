@@ -13,6 +13,11 @@ on:
         required: false
         default: ""
         type: string
+      path:
+        description: Exact source path within the dataset, or blank for all
+        required: false
+        default: ""
+        type: string
       limit:
         description: Maximum files in this batch
         required: true
@@ -69,6 +74,7 @@ jobs:
           args=(
             --repo "${{ inputs.repo }}"
             --extension "${{ inputs.extension }}"
+            --path "${{ inputs.path }}"
             --limit "${{ inputs.limit }}"
           )
           if [[ "${{ inputs.retry_failed }}" == "true" ]]; then args+=(--retry-failed); fi

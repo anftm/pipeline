@@ -12,7 +12,7 @@ except ImportError:
     from reader_assets import load_json, validate_manifest
 
 STATUS = {"ready": 2, "failed": 4}
-MODE = {"pdf": "p", "epub": "e"}
+MODE = {"pdf": "p", "epub": "e", "docx": "d"}
 
 
 def build_index(manifest: dict) -> dict:
