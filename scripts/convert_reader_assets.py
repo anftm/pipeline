@@ -167,7 +167,6 @@ def validate_output(path: Path, reader_mode: str) -> None:
     if reader_mode == "pdf" and not path.read_bytes()[:5] == b"%PDF-":
         raise RuntimeError("conversion output is not a PDF")
     if reader_mode == "epub":
-        import zipfile
         with zipfile.ZipFile(path) as archive:
             if archive.read("mimetype") != b"application/epub+zip":
                 raise RuntimeError("conversion output is not an EPUB")
