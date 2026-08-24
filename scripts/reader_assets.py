@@ -10,8 +10,8 @@ MANIFEST_VERSION = 1
 READER_ASSETS_REPO = "vomebook/Reader-Assets"
 MANIFEST_NAME = "manifest.json"
 CONVERTIBLE_EXTENSIONS = {
-    "doc": ("libreoffice-pdf-v1", "pdf", "document.pdf"),
-    "docx": ("libreoffice-pdf-v1", "pdf", "document.pdf"),
+    "doc": ("libreoffice-pdf-v2", "pdf", "document.pdf"),
+    "docx": ("libreoffice-pdf-v2", "pdf", "document.pdf"),
     "mobi": ("calibre-epub-v1", "epub", "book.epub"),
     "azw3": ("calibre-epub-v1", "epub", "book.epub"),
     "tif": ("pillow-pdf-v1", "pdf", "document.pdf"),

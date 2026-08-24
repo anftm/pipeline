@@ -4,6 +4,7 @@
 import argparse
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import tempfile
@@ -18,6 +19,7 @@ except ImportError:
     from reader_assets import canonical_json, load_json
 
 MAX_SOURCE_BYTES = 2 * 1024 * 1024 * 1024
+CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 
 
 def download_source(url: str, target: Path) -> tuple[str, int]:
@@ -45,6 +47,13 @@ def run_checked(command: list[str]) -> None:
     result = subprocess.run(command, capture_output=True, text=True)
     if result.returncode:
         raise RuntimeError(f"conversion command failed: {Path(command[0]).name}: {result.stderr[-500:]}")
+
+
+def command_output(command: list[str]) -> str:
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode:
+        raise RuntimeError(f"validation command failed: {Path(command[0]).name}: {result.stderr[-500:]}")
+    return result.stdout
 
 
 def convert_tiff(source: Path, target: Path) -> None:
@@ -88,18 +97,29 @@ def validate_output(path: Path, reader_mode: str) -> None:
                 raise RuntimeError("conversion output is not an EPUB")
 
 
+def validate_office_pdf(path: Path, item: dict) -> None:
+    fonts = command_output(["pdffonts", str(path)]).splitlines()[2:]
+    if not fonts or any(len(line.split()) < 6 or line.split()[-5].lower() != "yes" for line in fonts):
+        raise RuntimeError("office PDF has missing or unembedded fonts")
+    text = command_output(["pdftotext", str(path), "-"])
+    if CJK_RE.search(item.get("path", "")) and not CJK_RE.search(text):
+        raise RuntimeError("office PDF has no extractable CJK text")
+
+
 def convert_item(item: dict, bundle: Path) -> dict:
     with tempfile.TemporaryDirectory(prefix="reader-convert-") as root:
         work = Path(root)
         source = work / f"source.{item['extension']}"
         digest, source_bytes = download_source(item["source_url"], source)
-        object_path = f"objects/{digest[:2]}/{digest}/{item['output_name']}"
+        object_path = f"objects/{digest[:2]}/{digest}/{item['profile']}/{item['output_name']}"
         target = bundle / object_path
         target.parent.mkdir(parents=True, exist_ok=True)
         if not target.exists():
             temporary = work / item["output_name"]
             convert_file(item, source, temporary, work)
             validate_output(temporary, item["reader_mode"])
+            if item["extension"] in {"doc", "docx"}:
+                validate_office_pdf(temporary, item)
             shutil.move(temporary, target)
         else:
             validate_output(target, item["reader_mode"])
