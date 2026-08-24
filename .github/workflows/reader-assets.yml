@@ -38,6 +38,11 @@ on:
         required: false
         default: false
         type: boolean
+      command_timeout:
+        description: Per-command timeout in seconds
+        required: false
+        default: "120"
+        type: string
 
 concurrency:
   group: reader-assets
@@ -83,6 +88,8 @@ jobs:
       - name: Convert queue
         if: inputs.dry_run == false
         run: python scripts/convert_reader_assets.py
+        env:
+          READER_CONVERSION_COMMAND_TIMEOUT: ${{ inputs.command_timeout }}
       - name: Publish assets, manifest, and sidecar
         if: inputs.dry_run == false
         env:

@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 import urllib.request
 import zipfile
+import os
 from pathlib import Path
 
 from PIL import Image, ImageSequence
@@ -24,6 +25,7 @@ CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 PASSWORD_RE = re.compile(r"(?:密码|password)\s*[：:]\s*([^\]〕】）)\s]+)", re.IGNORECASE)
 OLE_SIGNATURE = bytes.fromhex("d0cf11e0a1b11ae1")
 MIN_PAGE_CONTENT_RATIO = 0.0005
+COMMAND_TIMEOUT_SECONDS = int(os.environ.get("READER_CONVERSION_COMMAND_TIMEOUT", "120"))
 
 
 def download_source(url: str, target: Path) -> tuple[str, int]:
@@ -49,7 +51,7 @@ def file_sha256(path: Path) -> str:
 
 def run_checked(command: list[str]) -> None:
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=120)
+        result = subprocess.run(command, capture_output=True, text=True, timeout=COMMAND_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(f"conversion command timed out: {Path(command[0]).name}") from exc
     if result.returncode:
@@ -58,7 +60,7 @@ def run_checked(command: list[str]) -> None:
 
 def command_output(command: list[str]) -> str:
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=120)
+        result = subprocess.run(command, capture_output=True, text=True, timeout=COMMAND_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(f"validation command timed out: {Path(command[0]).name}") from exc
     if result.returncode:
@@ -139,8 +141,14 @@ def convert_file(item: dict, source: Path, target: Path, work: Path) -> None:
     if ext == "doc":
         out = work / "office"
         out.mkdir()
-        run_checked(["libreoffice", "--headless", f"-env:UserInstallation={office_profile}", "--convert-to", "docx", "--outdir", str(out), str(source)])
-        produced = out / f"{source.stem}.docx"
+        with source.open("rb") as handle:
+            prefix = handle.read(256).lstrip(b"\xef\xbb\xbf\x00\t\r\n ")
+        office_source = source
+        if prefix.lower().startswith((b"<html", b"<!doctype html")):
+            office_source = work / "source.html"
+            shutil.copyfile(source, office_source)
+        run_checked(["libreoffice", "--headless", f"-env:UserInstallation={office_profile}", "--convert-to", "docx", "--outdir", str(out), str(office_source)])
+        produced = out / f"{office_source.stem}.docx"
         if not produced.exists():
             raise RuntimeError("LibreOffice produced no DOCX")
         shutil.move(produced, target)
