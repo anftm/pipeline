@@ -22,6 +22,7 @@ except ImportError:
 MAX_SOURCE_BYTES = 2 * 1024 * 1024 * 1024
 CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 PASSWORD_RE = re.compile(r"(?:密码|password)\s*[：:]\s*([^\]〕】）)\s]+)", re.IGNORECASE)
+OLE_SIGNATURE = bytes.fromhex("d0cf11e0a1b11ae1")
 MIN_PAGE_CONTENT_RATIO = 0.0005
 
 
@@ -143,13 +144,22 @@ def convert_file(item: dict, source: Path, target: Path, work: Path) -> None:
             shutil.copyfile(source, target)
         except (zipfile.BadZipFile, KeyError):
             match = PASSWORD_RE.search(item.get("path", ""))
-            if not match:
+            if match:
+                import msoffcrypto
+                with source.open("rb") as encrypted, target.open("wb") as decrypted:
+                    document = msoffcrypto.OfficeFile(encrypted)
+                    document.load_key(password=match.group(1))
+                    document.decrypt(decrypted)
+            elif source.open("rb").read(8) == OLE_SIGNATURE:
+                out = work / "mislabeled-office"
+                out.mkdir()
+                run_checked(["libreoffice", "--headless", "--convert-to", "docx", "--outdir", str(out), str(source)])
+                produced = out / f"{source.stem}.docx"
+                if not produced.is_file():
+                    raise RuntimeError("LibreOffice produced no DOCX from mislabeled source")
+                shutil.move(produced, target)
+            else:
                 raise
-            import msoffcrypto
-            with source.open("rb") as encrypted, target.open("wb") as decrypted:
-                document = msoffcrypto.OfficeFile(encrypted)
-                document.load_key(password=match.group(1))
-                document.decrypt(decrypted)
     elif ext in {"mobi", "azw3"}:
         run_checked(["ebook-convert", str(source), str(target)])
     elif ext in {"tif", "tiff"}:
