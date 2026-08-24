@@ -56,6 +56,23 @@ def command_output(command: list[str]) -> str:
     return result.stdout
 
 
+def embedded_pdf_fonts(path: Path) -> list[str]:
+    fonts = command_output(["pdffonts", str(path)]).splitlines()[2:]
+    return [line for line in fonts if len(line.split()) >= 6 and line.split()[-5].lower() == "yes"]
+
+
+def embed_pdf_fonts(path: Path, work: Path) -> None:
+    rewritten = work / "embedded-fonts.pdf"
+    run_checked([
+        "gs", "-dBATCH", "-dNOPAUSE", "-sDEVICE=pdfwrite", "-dCompatibilityLevel=1.7",
+        "-dEmbedAllFonts=true", "-dSubsetFonts=true", "-dCompressFonts=true",
+        f"-sOutputFile={rewritten}", str(path),
+    ])
+    if not rewritten.is_file():
+        raise RuntimeError("Ghostscript produced no PDF")
+    shutil.move(rewritten, path)
+
+
 def convert_tiff(source: Path, target: Path) -> None:
     with Image.open(source) as image:
         frames = [frame.copy().convert("RGB") for frame in ImageSequence.Iterator(image)]
@@ -97,10 +114,10 @@ def validate_output(path: Path, reader_mode: str) -> None:
                 raise RuntimeError("conversion output is not an EPUB")
 
 
-def validate_office_pdf(path: Path, item: dict) -> None:
-    fonts = command_output(["pdffonts", str(path)]).splitlines()[2:]
-    embedded = [line for line in fonts if len(line.split()) >= 6 and line.split()[-5].lower() == "yes"]
-    if not embedded:
+def validate_office_pdf(path: Path, item: dict, work: Path) -> None:
+    if not embedded_pdf_fonts(path):
+        embed_pdf_fonts(path, work)
+    if not embedded_pdf_fonts(path):
         raise RuntimeError("office PDF has no embedded fonts")
     text = command_output(["pdftotext", str(path), "-"])
     if CJK_RE.search(item.get("path", "")) and not CJK_RE.search(text):
@@ -120,7 +137,7 @@ def convert_item(item: dict, bundle: Path) -> dict:
             convert_file(item, source, temporary, work)
             validate_output(temporary, item["reader_mode"])
             if item["extension"] in {"doc", "docx"}:
-                validate_office_pdf(temporary, item)
+                validate_office_pdf(temporary, item, work)
             shutil.move(temporary, target)
         else:
             validate_output(target, item["reader_mode"])
