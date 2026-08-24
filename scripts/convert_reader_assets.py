@@ -48,13 +48,19 @@ def file_sha256(path: Path) -> str:
 
 
 def run_checked(command: list[str]) -> None:
-    result = subprocess.run(command, capture_output=True, text=True)
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=600)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"conversion command timed out: {Path(command[0]).name}") from exc
     if result.returncode:
         raise RuntimeError(f"conversion command failed: {Path(command[0]).name}: {result.stderr[-500:]}")
 
 
 def command_output(command: list[str]) -> str:
-    result = subprocess.run(command, capture_output=True, text=True)
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=600)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"validation command timed out: {Path(command[0]).name}") from exc
     if result.returncode:
         raise RuntimeError(f"validation command failed: {Path(command[0]).name}: {result.stderr[-500:]}")
     return result.stdout
