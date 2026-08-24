@@ -135,10 +135,11 @@ def page_content_ratio(path: Path) -> float:
 
 def convert_file(item: dict, source: Path, target: Path, work: Path) -> None:
     ext = item["extension"]
+    office_profile = (work / "libreoffice-profile").resolve().as_uri()
     if ext == "doc":
         out = work / "office"
         out.mkdir()
-        run_checked(["libreoffice", "--headless", "--convert-to", "docx", "--outdir", str(out), str(source)])
+        run_checked(["libreoffice", "--headless", f"-env:UserInstallation={office_profile}", "--convert-to", "docx", "--outdir", str(out), str(source)])
         produced = out / f"{source.stem}.docx"
         if not produced.exists():
             raise RuntimeError("LibreOffice produced no DOCX")
@@ -163,7 +164,7 @@ def convert_file(item: dict, source: Path, target: Path, work: Path) -> None:
                 out.mkdir()
                 mislabeled = work / "mislabeled.doc"
                 shutil.copyfile(source, mislabeled)
-                run_checked(["libreoffice", "--headless", "--convert-to", "docx", "--outdir", str(out), str(mislabeled)])
+                run_checked(["libreoffice", "--headless", f"-env:UserInstallation={office_profile}", "--convert-to", "docx", "--outdir", str(out), str(mislabeled)])
                 produced = out / "mislabeled.docx"
                 if not produced.is_file():
                     raise RuntimeError("LibreOffice produced no DOCX from mislabeled source")
