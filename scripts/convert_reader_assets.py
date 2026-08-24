@@ -142,6 +142,22 @@ def convert_file(item: dict, source: Path, target: Path, work: Path) -> None:
         raise ValueError(f"unsupported conversion extension: {ext}")
 
 
+def normalized_office_pdf(source: Path, work: Path) -> Path:
+    normalized = work / "normalized-office"
+    normalized.mkdir()
+    run_checked(["libreoffice", "--headless", "--convert-to", "docx", "--outdir", str(normalized), str(source)])
+    docx = normalized / f"{source.stem}.docx"
+    if not docx.is_file():
+        raise RuntimeError("LibreOffice produced no normalized DOCX")
+    pdf_dir = work / "normalized-pdf"
+    pdf_dir.mkdir()
+    run_checked(["libreoffice", "--headless", "--convert-to", "pdf", "--outdir", str(pdf_dir), str(docx)])
+    pdf = pdf_dir / f"{source.stem}.pdf"
+    if not pdf.is_file():
+        raise RuntimeError("LibreOffice produced no normalized PDF")
+    return pdf
+
+
 def validate_output(path: Path, reader_mode: str) -> None:
     if not path.exists() or path.stat().st_size == 0:
         raise RuntimeError("conversion output is empty")
@@ -154,11 +170,18 @@ def validate_output(path: Path, reader_mode: str) -> None:
                 raise RuntimeError("conversion output is not an EPUB")
 
 
-def validate_office_pdf(path: Path, item: dict, work: Path) -> None:
+def validate_office_pdf(path: Path, item: dict, work: Path, source: Path | None = None) -> None:
     text = command_output(["pdftotext", str(path), "-"])
     has_cjk_path = bool(CJK_RE.search(item.get("path", "")))
     if has_cjk_path and not CJK_RE.search(text):
-        rasterize_pdf(path, work)
+        try:
+            rasterize_pdf(path, work)
+        except RuntimeError as exc:
+            if source is None or item.get("profile") != "libreoffice-pdf-v3" or "blank interior page" not in str(exc):
+                raise
+            candidate = normalized_office_pdf(source, work)
+            shutil.move(candidate, path)
+            rasterize_pdf(path, work)
         validate_output(path, "pdf")
         return
     if not embedded_pdf_fonts(path):
@@ -179,7 +202,7 @@ def convert_item(item: dict, bundle: Path) -> dict:
             convert_file(item, source, temporary, work)
             validate_output(temporary, item["reader_mode"])
             if item["extension"] in {"doc", "docx"}:
-                validate_office_pdf(temporary, item, work)
+                validate_office_pdf(temporary, item, work, source)
             shutil.move(temporary, target)
         else:
             validate_output(target, item["reader_mode"])
