@@ -52,6 +52,9 @@ def build_queue(records, revisions, manifest, *, repo="", extension="", exact_pa
         key = asset_key(source_repo, path)
         profile, reader_mode, output_name = conversion_contract(ext, key)
         existing = files.get(key, {})
+        manual = str(existing.get("profile") or "").startswith("manual-")
+        if not force and existing.get("source_revision") == revision and existing.get("status") == "ready" and manual:
+            continue
         current = existing.get("source_revision") == revision and existing.get("profile") == profile
         if not force and current and existing.get("status") == "ready":
             continue

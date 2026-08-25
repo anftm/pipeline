@@ -55,6 +55,16 @@ class ScannerTests(unittest.TestCase):
         }}}
         self.assertEqual(scan_reader_assets.build_queue(self.records, self.revisions, manifest), [])
 
+    def test_ready_manual_profile_is_skipped_for_the_same_source_revision(self):
+        key = reader_assets.asset_key("VoiceOfML/Test", "A/Book.docx")
+        manifest = {"version": 1, "files": {key: {
+            "status": "ready", "source_revision": "rev1", "profile": "manual-pdf-v1"
+        }}}
+        self.assertEqual(scan_reader_assets.build_queue(self.records, self.revisions, manifest), [])
+        self.assertEqual(len(scan_reader_assets.build_queue(
+            self.records, {"VoiceOfML/Test": "rev2"}, manifest,
+        )), 1)
+
     def test_failed_current_profile_requires_retry_flag(self):
         key = reader_assets.asset_key("VoiceOfML/Test", "A/Book.docx")
         manifest = {"version": 1, "files": {key: {
