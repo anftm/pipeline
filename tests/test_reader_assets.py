@@ -87,6 +87,17 @@ class ScannerTests(unittest.TestCase):
         )
         self.assertEqual([item["path"] for item in queue], ["A.mobi"])
 
+    def test_unfiltered_queue_prioritizes_mature_bulk_formats(self):
+        records = [
+            {"Repo": "VoiceOfML/Test", "File": "A", "Extension": "djvu", "Folder": [], "Size": 1},
+            {"Repo": "VoiceOfML/Test", "File": "B", "Extension": "mobi", "Folder": [], "Size": 1},
+            {"Repo": "VoiceOfML/Test", "File": "C", "Extension": "tif", "Folder": [], "Size": 1},
+        ]
+        queue = scan_reader_assets.build_queue(
+            records, self.revisions, reader_assets.empty_manifest(), limit=2,
+        )
+        self.assertEqual([item["extension"] for item in queue], ["tif", "mobi"])
+
     def test_exact_path_filter_selects_one_asset(self):
         queue = scan_reader_assets.build_queue(
             self.records, self.revisions, reader_assets.empty_manifest(), exact_path="A/Book.docx",
