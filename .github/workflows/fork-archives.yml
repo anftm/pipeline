@@ -15,7 +15,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout pipeline repo
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Maintain anftm forks and data branches
         run: python3 scripts/fork_repositories.py

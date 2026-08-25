@@ -16,7 +16,7 @@ jobs:
       group: proofreading-review
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Apply review command
         env:
           GH_PAT: ${{ secrets.GH_PAT }}

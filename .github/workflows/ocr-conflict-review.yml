@@ -16,7 +16,7 @@ jobs:
       group: update-bha-index
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Apply OCR conflict decision
         env:
           GH_PAT: ${{ secrets.GH_PAT }}

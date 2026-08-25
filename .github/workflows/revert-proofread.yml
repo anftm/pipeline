@@ -27,7 +27,7 @@ jobs:
       group: proofreading-revert
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Create human-reviewed revert PRs
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
