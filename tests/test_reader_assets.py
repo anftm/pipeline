@@ -126,56 +126,6 @@ class ConverterTests(unittest.TestCase):
         self.assertEqual(reader_assets.conversion_contract("doc"), ("libreoffice-docx-v1", "docx", "document.docx"))
         self.assertEqual(reader_assets.conversion_contract("docx"), ("docx-native-v1", "docx", "document.docx"))
 
-    def test_oversized_doc_uses_scoped_pdf_profile(self):
-        key = reader_assets.asset_key(
-            "VoiceOfML/SovMaterials",
-            "一手资料/苏联-俄罗斯历史/俄罗斯档案：伟大卫国战争/第16卷/5.2 1942.doc",
-        )
-        self.assertEqual(
-            reader_assets.conversion_contract("doc", key),
-            ("libreoffice-pdf-v4", "pdf", "document.pdf"),
-        )
-        self.assertEqual(
-            reader_assets.conversion_contract("doc", reader_assets.asset_key("VoiceOfML/SovMaterials", "other.doc")),
-            ("libreoffice-docx-v1", "docx", "document.docx"),
-        )
-
-    def test_pdf_exception_converts_doc_directly_to_pdf(self):
-        with tempfile.TemporaryDirectory() as root:
-            work = Path(root)
-            source, target = work / "source.doc", work / "document.pdf"
-            source.write_bytes(b"doc")
-
-            def fake_run(command):
-                (work / "office" / "source.pdf").write_bytes(b"%PDF-test")
-
-            item = {"extension": "doc", "reader_mode": "pdf"}
-            with patch.object(convert_reader_assets, "run_checked", side_effect=fake_run) as run:
-                convert_reader_assets.convert_file(item, source, target, work)
-            command = run.call_args.args[0]
-            self.assertEqual(command[command.index("--convert-to") + 1], "pdf")
-            self.assertEqual(target.read_bytes(), b"%PDF-test")
-
-    def test_large_pdf_validation_samples_first_middle_and_last_pages(self):
-        with tempfile.TemporaryDirectory() as root:
-            work = Path(root)
-            pdf = work / "document.pdf"
-            pdf.write_bytes(b"%PDF-test")
-
-            def fake_run(command):
-                Path(f"{command[-1]}.png").write_bytes(b"png")
-
-            with patch.object(convert_reader_assets, "command_output", return_value="Pages:          1201\n"), \
-                    patch.object(convert_reader_assets, "run_checked", side_effect=fake_run) as run, \
-                    patch.object(convert_reader_assets, "page_content_ratio", return_value=0.1):
-                convert_reader_assets.validate_large_office_pdf(pdf, work)
-            self.assertEqual([call.args[0][2] for call in run.call_args_list], ["1", "601", "1201"])
-
-    def test_large_pdf_validation_rejects_truncated_output(self):
-        with patch.object(convert_reader_assets, "command_output", return_value="Pages: 999\n"):
-            with self.assertRaisesRegex(RuntimeError, "fewer than 1000 pages"):
-                convert_reader_assets.validate_large_office_pdf(Path("document.pdf"), Path("work"))
-
     def test_page_content_ratio_detects_blank_and_nonblank_pages(self):
         from PIL import Image
 

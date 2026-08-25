@@ -135,23 +135,6 @@ def page_content_ratio(path: Path) -> float:
     return sum(histogram[:245]) / pixels if pixels else 0.0
 
 
-def validate_large_office_pdf(path: Path, work: Path) -> None:
-    info = command_output(["pdfinfo", str(path)])
-    match = re.search(r"^Pages:\s+(\d+)\s*$", info, re.MULTILINE)
-    if not match or int(match.group(1)) < 1000:
-        raise RuntimeError("large office PDF has fewer than 1000 pages")
-    page_count = int(match.group(1))
-    for page in (1, (page_count + 1) // 2, page_count):
-        output = work / f"sample-{page}"
-        run_checked([
-            "pdftoppm", "-f", str(page), "-l", str(page), "-singlefile", "-png", "-r", "72",
-            str(path), str(output),
-        ])
-        image = output.with_suffix(".png")
-        if not image.is_file() or page_content_ratio(image) < MIN_PAGE_CONTENT_RATIO:
-            raise RuntimeError(f"large office PDF has blank sample page {page}")
-
-
 def convert_file(item: dict, source: Path, target: Path, work: Path) -> None:
     ext = item["extension"]
     office_profile = (work / "libreoffice-profile").resolve().as_uri()
@@ -170,11 +153,10 @@ def convert_file(item: dict, source: Path, target: Path, work: Path) -> None:
             office_source = intermediate / "source.odt"
             if not office_source.is_file():
                 raise RuntimeError("LibreOffice produced no ODT from HTML source")
-        output_format = "pdf" if item.get("reader_mode") == "pdf" else "docx"
-        run_checked(["libreoffice", "--headless", f"-env:UserInstallation={office_profile}", "--convert-to", output_format, "--outdir", str(out), str(office_source)])
-        produced = out / f"{office_source.stem}.{output_format}"
+        run_checked(["libreoffice", "--headless", f"-env:UserInstallation={office_profile}", "--convert-to", "docx", "--outdir", str(out), str(office_source)])
+        produced = out / f"{office_source.stem}.docx"
         if not produced.exists():
-            raise RuntimeError(f"LibreOffice produced no {output_format.upper()}")
+            raise RuntimeError("LibreOffice produced no DOCX")
         shutil.move(produced, target)
     elif ext == "docx":
         try:
@@ -277,10 +259,7 @@ def convert_item(item: dict, bundle: Path) -> dict:
             convert_file(item, source, temporary, work)
             validate_output(temporary, item["reader_mode"])
             if item["extension"] in {"doc", "docx"} and item["reader_mode"] == "pdf":
-                if item["profile"] == "libreoffice-pdf-v4":
-                    validate_large_office_pdf(temporary, work)
-                else:
-                    validate_office_pdf(temporary, item, work, source)
+                validate_office_pdf(temporary, item, work, source)
             shutil.move(temporary, target)
         else:
             validate_output(target, item["reader_mode"])

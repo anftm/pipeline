@@ -17,14 +17,7 @@ CONVERTIBLE_EXTENSIONS = {
     "tif": ("pillow-pdf-v1", "pdf", "document.pdf"),
     "tiff": ("pillow-pdf-v1", "pdf", "document.pdf"),
 }
-PDF_EXCEPTION_KEYS = {
-    "VoiceOfML/SovMaterials\0一手资料/苏联-俄罗斯历史/俄罗斯档案：伟大卫国战争/第16卷/5.2 1942.doc",
-}
-
-
 def conversion_contract(extension: str, key: str = "") -> tuple[str, str, str]:
-    if key in PDF_EXCEPTION_KEYS:
-        return "libreoffice-pdf-v4", "pdf", "document.pdf"
     return CONVERTIBLE_EXTENSIONS[extension]
 
 
