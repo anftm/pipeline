@@ -106,7 +106,7 @@ jobs:
             doc|docx) packages=(libreoffice fontconfig fonts-noto-cjk fonts-wqy-microhei ghostscript poppler-utils tesseract-ocr tesseract-ocr-chi-sim) ;;
             mobi|azw3) packages=(calibre) ;;
             djvu) packages=(djvulibre-bin poppler-utils) ;;
-            tif|tiff) ;;
+            tif|tiff) packages=(poppler-utils) ;;
             *) echo "Unsupported queued extension: ${EXTENSION}" >&2; exit 1 ;;
           esac
           if ((${#packages[@]})); then

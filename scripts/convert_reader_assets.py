@@ -85,15 +85,23 @@ def outline_pdf_fonts(path: Path, work: Path) -> None:
     shutil.move(rewritten, path)
 
 
-def convert_tiff(source: Path, target: Path) -> None:
+def convert_tiff(source: Path, target: Path, work: Path) -> None:
+    pages = work / "tiff-pages"
+    pages.mkdir()
+    outputs = []
     with Image.open(source) as image:
-        frames = [frame.copy().convert("RGB") for frame in ImageSequence.Iterator(image)]
-    if not frames:
+        for index, frame in enumerate(ImageSequence.Iterator(image), start=1):
+            output = pages / f"{index:08d}.pdf"
+            converted = frame.copy().convert("RGB")
+            converted.save(output, "PDF", resolution=150.0)
+            converted.close()
+            outputs.append(output)
+    if not outputs:
         raise RuntimeError("TIFF has no frames")
-    first, rest = frames[0], frames[1:]
-    first.save(target, "PDF", save_all=True, append_images=rest, resolution=150.0)
-    for frame in frames:
-        frame.close()
+    if len(outputs) == 1:
+        shutil.move(outputs[0], target)
+    else:
+        run_checked(["pdfunite", *(str(output) for output in outputs), str(target)])
 
 
 def validate_djvu_pdf(path: Path, work: Path) -> None:
@@ -205,7 +213,7 @@ def convert_file(item: dict, source: Path, target: Path, work: Path) -> None:
     elif ext in {"mobi", "azw3"}:
         run_checked(["ebook-convert", str(source), str(target)])
     elif ext in {"tif", "tiff"}:
-        convert_tiff(source, target)
+        convert_tiff(source, target, work)
     elif ext == "djvu":
         run_checked(["ddjvu", "-format=pdf", str(source), str(target)])
     else:

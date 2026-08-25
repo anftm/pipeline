@@ -122,9 +122,26 @@ class ConverterTests(unittest.TestCase):
             first = Image.new("RGB", (20, 30), "white")
             second = Image.new("RGB", (20, 30), "black")
             first.save(source, save_all=True, append_images=[second])
-            convert_reader_assets.convert_tiff(source, target)
+            def merge(command):
+                Path(command[-1]).write_bytes(b"%PDF-merged")
+
+            with patch.object(convert_reader_assets, "run_checked", side_effect=merge) as run:
+                convert_reader_assets.convert_tiff(source, target, Path(root))
             self.assertEqual(target.read_bytes()[:5], b"%PDF-")
             self.assertGreater(target.stat().st_size, 0)
+            self.assertEqual(run.call_args.args[0][0], "pdfunite")
+            self.assertEqual(len(run.call_args.args[0][1:-1]), 2)
+
+    def test_single_frame_tiff_does_not_require_pdfunite(self):
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as root:
+            source, target = Path(root) / "source.tif", Path(root) / "document.pdf"
+            Image.new("RGB", (20, 30), "white").save(source)
+            with patch.object(convert_reader_assets, "run_checked") as run:
+                convert_reader_assets.convert_tiff(source, target, Path(root))
+            run.assert_not_called()
+            self.assertEqual(target.read_bytes()[:5], b"%PDF-")
 
     def test_djvu_conversion_uses_ddjvu_pdf_output(self):
         with tempfile.TemporaryDirectory() as root:
@@ -426,6 +443,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("python scripts/publish_reader_assets.py", workflow)
         self.assertIn("packages=(djvulibre-bin poppler-utils)", workflow)
         self.assertIn("packages=(calibre)", workflow)
+        self.assertIn("tif|tiff) packages=(poppler-utils)", workflow)
         self.assertIn('args=(--repo "${SOURCE_REPO}" --extension "${EXTENSION}"', workflow)
         self.assertIn('max_batches=1', workflow)
         self.assertLess(
