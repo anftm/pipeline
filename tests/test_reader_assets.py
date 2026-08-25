@@ -19,7 +19,7 @@ class ReaderAssetContractTests(unittest.TestCase):
     def test_first_conversion_set_excludes_pdg(self):
         self.assertEqual(
             set(reader_assets.CONVERTIBLE_EXTENSIONS),
-            {"doc", "docx", "mobi", "azw3", "tif", "tiff"},
+            {"doc", "docx", "mobi", "azw3", "tif", "tiff", "djvu"},
         )
 
     def test_source_url_pins_revision_and_encodes_path(self):
@@ -114,6 +114,30 @@ class ConverterTests(unittest.TestCase):
             convert_reader_assets.convert_tiff(source, target)
             self.assertEqual(target.read_bytes()[:5], b"%PDF-")
             self.assertGreater(target.stat().st_size, 0)
+
+    def test_djvu_conversion_uses_ddjvu_pdf_output(self):
+        with tempfile.TemporaryDirectory() as root:
+            work = Path(root)
+            source, target = work / "source.djvu", work / "document.pdf"
+            source.write_bytes(b"DJVU")
+            with patch.object(convert_reader_assets, "run_checked") as run:
+                convert_reader_assets.convert_file({"extension": "djvu"}, source, target, work)
+            self.assertEqual(run.call_args.args[0], [
+                "ddjvu", "-format=pdf", str(source), str(target),
+            ])
+
+    def test_djvu_pdf_validation_checks_first_and_last_pages(self):
+        with tempfile.TemporaryDirectory() as root:
+            work, pdf = Path(root), Path(root) / "document.pdf"
+            pdf.write_bytes(b"%PDF-test")
+
+            def render(command):
+                Path(command[-1]).with_suffix(".png").write_bytes(b"png")
+
+            with patch.object(convert_reader_assets, "command_output", return_value="Pages:           12\n"), \
+                    patch.object(convert_reader_assets, "run_checked", side_effect=render) as run:
+                convert_reader_assets.validate_djvu_pdf(pdf, work)
+            self.assertEqual([call.args[0][2] for call in run.call_args_list], ["1", "12"])
 
     def test_doc_conversion_uses_headless_libreoffice_to_docx(self):
         with tempfile.TemporaryDirectory() as root:
@@ -384,6 +408,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("ghostscript", workflow)
         self.assertIn("poppler-utils", workflow)
         self.assertIn("tesseract-ocr-chi-sim", workflow)
+        self.assertIn("djvulibre-bin", workflow)
 
 
 if __name__ == "__main__":

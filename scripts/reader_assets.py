@@ -16,6 +16,7 @@ CONVERTIBLE_EXTENSIONS = {
     "azw3": ("calibre-epub-v1", "epub", "book.epub"),
     "tif": ("pillow-pdf-v1", "pdf", "document.pdf"),
     "tiff": ("pillow-pdf-v1", "pdf", "document.pdf"),
+    "djvu": ("djvulibre-pdf-v1", "pdf", "document.pdf"),
 }
 def conversion_contract(extension: str, key: str = "") -> tuple[str, str, str]:
     return CONVERTIBLE_EXTENSIONS[extension]

@@ -9,7 +9,7 @@ on:
         default: ""
         type: string
       extension:
-        description: doc, docx, mobi, azw3, tif, tiff, or blank for all
+        description: doc, docx, mobi, azw3, tif, tiff, djvu, or blank for all
         required: false
         default: ""
         type: string
@@ -61,7 +61,7 @@ jobs:
         if: inputs.dry_run == false
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libreoffice calibre fontconfig fonts-noto-cjk fonts-wqy-microhei ghostscript poppler-utils tesseract-ocr tesseract-ocr-chi-sim
+          sudo apt-get install -y --no-install-recommends libreoffice calibre djvulibre-bin fontconfig fonts-noto-cjk fonts-wqy-microhei ghostscript poppler-utils tesseract-ocr tesseract-ocr-chi-sim
           fc-cache -f
           fc-match -f '%{family}\n' 'SimSun:lang=zh-cn' | grep -E 'Noto|WenQuanYi'
       - name: Install Python dependencies

@@ -96,6 +96,23 @@ def convert_tiff(source: Path, target: Path) -> None:
         frame.close()
 
 
+def validate_djvu_pdf(path: Path, work: Path) -> None:
+    info = command_output(["pdfinfo", str(path)])
+    match = re.search(r"^Pages:\s+(\d+)\s*$", info, re.MULTILINE)
+    if not match or int(match.group(1)) < 1:
+        raise RuntimeError("converted DjVu PDF has no pages")
+    page_count = int(match.group(1))
+    for page in sorted({1, page_count}):
+        prefix = work / f"djvu-page-{page}"
+        run_checked([
+            "pdftoppm", "-f", str(page), "-l", str(page), "-singlefile", "-png", "-r", "72",
+            str(path), str(prefix),
+        ])
+        rendered = prefix.with_suffix(".png")
+        if not rendered.is_file() or rendered.stat().st_size == 0:
+            raise RuntimeError(f"converted DjVu PDF page {page} is not renderable")
+
+
 def rasterize_pdf(path: Path, work: Path) -> None:
     pages = work / "raster-pages"
     pages.mkdir()
@@ -189,6 +206,8 @@ def convert_file(item: dict, source: Path, target: Path, work: Path) -> None:
         run_checked(["ebook-convert", str(source), str(target)])
     elif ext in {"tif", "tiff"}:
         convert_tiff(source, target)
+    elif ext == "djvu":
+        run_checked(["ddjvu", "-format=pdf", str(source), str(target)])
     else:
         raise ValueError(f"unsupported conversion extension: {ext}")
 
@@ -258,6 +277,8 @@ def convert_item(item: dict, bundle: Path) -> dict:
             temporary = work / item["output_name"]
             convert_file(item, source, temporary, work)
             validate_output(temporary, item["reader_mode"])
+            if item["extension"] == "djvu":
+                validate_djvu_pdf(temporary, work)
             if item["extension"] in {"doc", "docx"} and item["reader_mode"] == "pdf":
                 validate_office_pdf(temporary, item, work, source)
             shutil.move(temporary, target)
