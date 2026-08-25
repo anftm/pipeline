@@ -2,6 +2,7 @@
 """Download and convert one Reader Assets queue into a publishable bundle."""
 
 import argparse
+import concurrent.futures
 import hashlib
 import json
 import re
@@ -26,6 +27,7 @@ PASSWORD_RE = re.compile(r"(?:密码|password)\s*[：:]\s*([^\]〕】）)\s]+)",
 OLE_SIGNATURE = bytes.fromhex("d0cf11e0a1b11ae1")
 MIN_PAGE_CONTENT_RATIO = 0.0005
 COMMAND_TIMEOUT_SECONDS = int(os.environ.get("READER_CONVERSION_COMMAND_TIMEOUT", "120"))
+CONVERSION_WORKERS = max(1, int(os.environ.get("READER_CONVERSION_WORKERS", "1")))
 
 
 def download_source(url: str, target: Path) -> tuple[str, int]:
@@ -319,16 +321,18 @@ def main() -> int:
     if args.dry_run:
         print(f"dry run: would convert {len(queue)} reader asset(s)")
     else:
-        for item in queue:
+        def convert(item):
             try:
-                results.append(convert_item(item, args.bundle))
+                return convert_item(item, args.bundle)
             except Exception as exc:
-                results.append({
+                print(f"failed: {item['repo']}/{item['path']}: {exc}")
+                return {
                     "key": item["key"], "status": "failed", "source_revision": item["source_revision"],
                     "source_extension": item["extension"], "profile": item["profile"],
                     "error": type(exc).__name__,
-                })
-                print(f"failed: {item['repo']}/{item['path']}: {exc}")
+                }
+        with concurrent.futures.ThreadPoolExecutor(max_workers=CONVERSION_WORKERS) as executor:
+            results.extend(executor.map(convert, queue))
     (args.bundle / "bundle.json").write_bytes(canonical_json({"version": 1, "results": results}, pretty=True))
     failed = sum(item["status"] == "failed" for item in results)
     print(f"converted {len(results) - failed}; failed {failed}")
