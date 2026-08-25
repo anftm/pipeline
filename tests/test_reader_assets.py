@@ -155,6 +155,17 @@ class ConverterTests(unittest.TestCase):
                 "ddjvu", "-format=pdf", str(source), str(target),
             ])
 
+    def test_mobi_conversion_keeps_large_unsplittable_flows(self):
+        with tempfile.TemporaryDirectory() as root:
+            work = Path(root)
+            source, target = work / "source.mobi", work / "book.epub"
+            source.write_bytes(b"BOOKMOBI")
+            with patch.object(convert_reader_assets, "run_checked") as run:
+                convert_reader_assets.convert_file({"extension": "mobi"}, source, target, work)
+            self.assertEqual(run.call_args.args[0], [
+                "ebook-convert", str(source), str(target), "--flow-size", "0",
+            ])
+
     def test_djvu_pdf_validation_checks_first_and_last_pages(self):
         with tempfile.TemporaryDirectory() as root:
             work, pdf = Path(root), Path(root) / "document.pdf"

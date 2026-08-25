@@ -213,7 +213,7 @@ def convert_file(item: dict, source: Path, target: Path, work: Path) -> None:
             else:
                 raise
     elif ext in {"mobi", "azw3"}:
-        run_checked(["ebook-convert", str(source), str(target)])
+        run_checked(["ebook-convert", str(source), str(target), "--flow-size", "0"])
     elif ext in {"tif", "tiff"}:
         convert_tiff(source, target, work)
     elif ext == "djvu":
