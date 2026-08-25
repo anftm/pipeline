@@ -1,6 +1,8 @@
 name: Build Reader Assets
 
 on:
+  schedule:
+    - cron: "17 * * * *"
   workflow_dispatch:
     inputs:
       repo:
@@ -77,10 +79,10 @@ jobs:
           READER_ASSETS_REPO: vomebook/Reader-Assets
         run: |
           args=(
-            --repo "${{ inputs.repo }}"
-            --extension "${{ inputs.extension }}"
-            --path "${{ inputs.path }}"
-            --limit "${{ inputs.limit }}"
+            --repo "${{ inputs.repo || '' }}"
+            --extension "${{ inputs.extension || '' }}"
+            --path "${{ inputs.path || '' }}"
+            --limit "${{ inputs.limit || '20' }}"
           )
           if [[ "${{ inputs.retry_failed }}" == "true" ]]; then args+=(--retry-failed); fi
           if [[ "${{ inputs.force }}" == "true" ]]; then args+=(--force); fi
@@ -89,7 +91,7 @@ jobs:
         if: inputs.dry_run == false
         run: python scripts/convert_reader_assets.py
         env:
-          READER_CONVERSION_COMMAND_TIMEOUT: ${{ inputs.command_timeout }}
+          READER_CONVERSION_COMMAND_TIMEOUT: ${{ inputs.command_timeout || '120' }}
       - name: Publish assets, manifest, and sidecar
         if: inputs.dry_run == false
         env:

@@ -409,6 +409,8 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("poppler-utils", workflow)
         self.assertIn("tesseract-ocr-chi-sim", workflow)
         self.assertIn("djvulibre-bin", workflow)
+        self.assertIn('cron: "17 * * * *"', workflow)
+        self.assertIn("inputs.limit || '20'", workflow)
 
 
 if __name__ == "__main__":
