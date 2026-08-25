@@ -410,7 +410,7 @@ class SearchIndexPublicationTests(unittest.TestCase):
 class WorkflowContractTests(unittest.TestCase):
     def test_workflow_exposes_incremental_controls_and_excludes_pdg(self):
         workflow = Path(".github/workflows/reader-assets.yml").read_text(encoding="utf-8")
-        for field in ("repo:", "extension:", "limit:", "retry_failed:", "force:", "dry_run:"):
+        for field in ("repo:", "extension:", "limit:", "checkpoint_batches:", "retry_failed:", "force:", "dry_run:"):
             self.assertIn(field, workflow)
         self.assertNotIn("pdg", workflow.lower())
         self.assertIn("publish_search_reader_index.py", workflow)
@@ -422,6 +422,16 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("djvulibre-bin", workflow)
         self.assertIn('cron: "17 * * * *"', workflow)
         self.assertIn("inputs.limit || '20'", workflow)
+        self.assertIn("inputs.checkpoint_batches || '30'", workflow)
+        self.assertIn("python scripts/publish_reader_assets.py", workflow)
+        self.assertIn("packages=(djvulibre-bin poppler-utils)", workflow)
+        self.assertIn("packages=(calibre)", workflow)
+        self.assertIn('args=(--repo "${SOURCE_REPO}" --extension "${EXTENSION}"', workflow)
+        self.assertIn('max_batches=1', workflow)
+        self.assertLess(
+            workflow.index("python scripts/publish_reader_assets.py"),
+            workflow.index("done\n"),
+        )
 
 
 if __name__ == "__main__":

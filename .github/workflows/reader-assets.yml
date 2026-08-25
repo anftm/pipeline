@@ -21,9 +21,14 @@ on:
         default: ""
         type: string
       limit:
-        description: Maximum files in this batch
+        description: Files per checkpoint
         required: true
         default: "20"
+        type: string
+      checkpoint_batches:
+        description: Maximum checkpoints in this run
+        required: true
+        default: "30"
         type: string
       retry_failed:
         description: Retry current-profile failures
@@ -59,13 +64,6 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
-      - name: Install conversion tools
-        if: inputs.dry_run == false
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libreoffice calibre djvulibre-bin fontconfig fonts-noto-cjk fonts-wqy-microhei ghostscript poppler-utils tesseract-ocr tesseract-ocr-chi-sim
-          fc-cache -f
-          fc-match -f '%{family}\n' 'SimSun:lang=zh-cn' | grep -E 'Noto|WenQuanYi'
       - name: Install Python dependencies
         run: pip install -r scripts/requirements.txt
       - name: Fetch current source metadata
@@ -74,6 +72,7 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           FORCE_SYNC: "true"
       - name: Scan incremental Reader Assets queue
+        id: scan
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           READER_ASSETS_REPO: vomebook/Reader-Assets
@@ -87,19 +86,71 @@ jobs:
           if [[ "${{ inputs.retry_failed }}" == "true" ]]; then args+=(--retry-failed); fi
           if [[ "${{ inputs.force }}" == "true" ]]; then args+=(--force); fi
           python scripts/scan_reader_assets.py "${args[@]}"
-      - name: Convert queue
-        if: inputs.dry_run == false
-        run: python scripts/convert_reader_assets.py
+          python - <<'PY'
+          import json, os
+          items = json.load(open("output/reader-assets/queue.json", encoding="utf-8"))["items"]
+          extension = items[0]["extension"] if items else ""
+          items = [item for item in items if item["extension"] == extension]
+          json.dump({"version": 1, "items": items}, open("output/reader-assets/queue.json", "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"extension={extension}\n")
+              output.write(f"count={len(items)}\n")
+          PY
+      - name: Install conversion tools
+        if: inputs.dry_run != true && steps.scan.outputs.count != '0'
         env:
-          READER_CONVERSION_COMMAND_TIMEOUT: ${{ inputs.command_timeout || '120' }}
-      - name: Publish assets, manifest, and sidecar
-        if: inputs.dry_run == false
+          EXTENSION: ${{ steps.scan.outputs.extension }}
+        run: |
+          packages=()
+          case "${EXTENSION}" in
+            doc|docx) packages=(libreoffice fontconfig fonts-noto-cjk fonts-wqy-microhei ghostscript poppler-utils tesseract-ocr tesseract-ocr-chi-sim) ;;
+            mobi|azw3) packages=(calibre) ;;
+            djvu) packages=(djvulibre-bin poppler-utils) ;;
+            tif|tiff) ;;
+            *) echo "Unsupported queued extension: ${EXTENSION}" >&2; exit 1 ;;
+          esac
+          if ((${#packages[@]})); then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends "${packages[@]}"
+          fi
+          if [[ "${EXTENSION}" == "doc" || "${EXTENSION}" == "docx" ]]; then
+            fc-cache -f
+            fc-match -f '%{family}\n' 'SimSun:lang=zh-cn' | grep -E 'Noto|WenQuanYi'
+          fi
+      - name: Convert and checkpoint queue
+        if: inputs.dry_run != true
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           READER_ASSETS_REPO: vomebook/Reader-Assets
-        run: python scripts/publish_reader_assets.py
+          READER_CONVERSION_COMMAND_TIMEOUT: ${{ inputs.command_timeout || '120' }}
+          EXTENSION: ${{ steps.scan.outputs.extension }}
+          BATCH_SIZE: ${{ inputs.limit || '20' }}
+          CHECKPOINT_BATCHES: ${{ inputs.checkpoint_batches || '30' }}
+          SOURCE_REPO: ${{ inputs.repo || '' }}
+          SOURCE_PATH: ${{ inputs.path || '' }}
+          RETRY_FAILED: ${{ inputs.retry_failed || 'false' }}
+          FORCE_REBUILD: ${{ inputs.force || 'false' }}
+        run: |
+          [[ -z "${EXTENSION}" ]] && exit 0
+          max_batches="${CHECKPOINT_BATCHES}"
+          if [[ "${RETRY_FAILED}" == "true" || "${FORCE_REBUILD}" == "true" || -n "${SOURCE_PATH}" ]]; then
+            max_batches=1
+          fi
+          for ((batch=1; batch<=max_batches; batch++)); do
+            if ((batch > 1)); then
+              args=(--repo "${SOURCE_REPO}" --extension "${EXTENSION}" --limit "${BATCH_SIZE}")
+              [[ "${RETRY_FAILED}" == "true" ]] && args+=(--retry-failed)
+              [[ "${FORCE_REBUILD}" == "true" ]] && args+=(--force)
+              python scripts/scan_reader_assets.py "${args[@]}"
+            fi
+            count=$(python -c 'import json; print(len(json.load(open("output/reader-assets/queue.json"))["items"]))')
+            [[ "${count}" == "0" ]] && break
+            echo "Checkpoint ${batch}/${max_batches}: ${count} ${EXTENSION} asset(s)"
+            python scripts/convert_reader_assets.py
+            python scripts/publish_reader_assets.py
+          done
       - name: Publish sidecar to GitHub Pages
-        if: inputs.dry_run == false
+        if: inputs.dry_run != true && steps.scan.outputs.count != '0'
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           PAGES_TOKEN: ${{ secrets.PAGES_TOKEN }}
