@@ -2,8 +2,14 @@ name: Daily Sync
 
 on:
   schedule:
-    - cron: "0 0 * * *"
+    # Directory generation starts at 20:00 UTC and normally finishes within an hour.
+    - cron: '0 0 * * *'
   workflow_dispatch:
+    inputs:
+      force_sync:
+        description: Rebuild and publish even when source revisions are unchanged
+        type: boolean
+        default: false
 
 jobs:
   sync:
@@ -27,24 +33,16 @@ jobs:
         run: python scripts/fetch_and_parse.py
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-
-      - name: Check if new data generated
-        id: check
-        run: |
-          if [ -f output/search_data.json ]; then
-            echo "data_changed=true" >> $GITHUB_OUTPUT
-          else
-            echo "data_changed=false" >> $GITHUB_OUTPUT
-          fi
+          FORCE_SYNC: ${{ inputs.force_sync || 'false' }}
 
       - name: Sync to HF Space
-        if: steps.check.outputs.data_changed == 'true'
+        if: steps.fetch.outputs.data_changed == 'true'
         run: python scripts/sync_to_space.py
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
       - name: Sync to GitHub Pages
-        if: steps.check.outputs.data_changed == 'true'
+        if: steps.fetch.outputs.data_changed == 'true'
         run: python scripts/sync_to_pages.py
         env:
           PAGES_TOKEN: ${{ secrets.PAGES_TOKEN }}
@@ -52,6 +50,7 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
       - name: Deploy GitHub Pages
+        if: steps.fetch.outputs.data_changed == 'true'
         env:
           PAGES_TOKEN: ${{ secrets.PAGES_TOKEN }}
           PAGES_REPO: ${{ secrets.PAGES_REPO }}
@@ -65,7 +64,7 @@ jobs:
             --data '{"ref":"main"}'
 
       - name: Commit updated state
-        if: steps.check.outputs.data_changed == 'true'
+        if: steps.fetch.outputs.data_changed == 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
