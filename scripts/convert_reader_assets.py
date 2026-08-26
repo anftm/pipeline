@@ -54,9 +54,34 @@ def download_source(url: str, target: Path) -> tuple[str, int]:
     return digest.hexdigest(), size
 
 
+def decode_html_source(source: Path) -> str:
+    data = source.read_bytes()
+    if data.startswith(b"\xef\xbb\xbf"):
+        return data[3:].decode("utf-8", errors="replace")
+    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return data.decode("utf-16", errors="replace")
+    probe = data[:8192].decode("ascii", errors="ignore")
+    match = re.search(
+        r"(?:charset\s*=\s*|content\s*=\s*[\"'][^\"']*?charset=)([A-Za-z0-9._:-]+)",
+        probe,
+        re.IGNORECASE,
+    )
+    if match:
+        encoding = match.group(1).lower().replace("_", "-")
+        encoding = {"gb2312": "gb18030", "gbk": "gb18030"}.get(encoding, encoding)
+        try:
+            return data.decode(encoding)
+        except (LookupError, UnicodeDecodeError):
+            pass
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return data.decode("gb18030", errors="replace")
+
+
 def inline_html_resources(source: Path, source_url: str, work: Path) -> Path:
     """Inline safe same-tree images and stylesheets before the HTML is published."""
-    text = source.read_text(encoding="utf-8", errors="replace")
+    text = decode_html_source(source)
     base = source_url.rsplit("/", 1)[0] + "/"
     root = urllib.parse.urlsplit(base)
     root_path = root.path.rstrip("/") + "/"

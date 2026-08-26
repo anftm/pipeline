@@ -236,6 +236,21 @@ class ConverterTests(unittest.TestCase):
             convert_reader_assets.convert_file({"extension": "html"}, source, target, work)
             self.assertEqual(target.read_bytes(), source.read_bytes())
 
+    def test_html_conversion_decodes_declared_legacy_charset(self):
+        with tempfile.TemporaryDirectory() as root:
+            work = Path(root)
+            source, target = work / "source.html", work / "document.html"
+            source.write_bytes(
+                '<meta http-equiv="Content-Type" content="text/html; charset=GB2312"><p>列宁</p>'.encode("gb18030")
+            )
+            convert_reader_assets.convert_file(
+                {"extension": "html", "source_url": "https://huggingface.co/datasets/VoiceOfML/Test/resolve/rev/source.html"},
+                source,
+                target,
+                work,
+            )
+            self.assertIn("列宁", target.read_text(encoding="utf-8"))
+
     def test_html_conversion_inlines_local_images_and_stylesheets_only(self):
         with tempfile.TemporaryDirectory() as root:
             work = Path(root)
