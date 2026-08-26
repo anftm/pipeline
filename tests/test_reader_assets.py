@@ -223,7 +223,7 @@ class ConverterTests(unittest.TestCase):
         self.assertEqual(reader_assets.conversion_contract("docx"), ("docx-native-v1", "docx", "document.docx"))
 
     def test_html_and_htm_use_sanitized_html_profile(self):
-        expected = ("sanitized-html-v1", "html", "document.html")
+        expected = ("sanitized-html-v2", "html", "document.html")
         self.assertEqual(reader_assets.conversion_contract("html"), expected)
         self.assertEqual(reader_assets.conversion_contract("htm"), expected)
 
@@ -250,6 +250,22 @@ class ConverterTests(unittest.TestCase):
                 work,
             )
             self.assertIn("列宁", target.read_text(encoding="utf-8"))
+            self.assertIn("charset=utf-8", target.read_text(encoding="utf-8").lower())
+
+    def test_html_conversion_decodes_quoted_big5_charset(self):
+        with tempfile.TemporaryDirectory() as root:
+            work = Path(root)
+            source = work / "source.htm"
+            source.write_bytes('<html><head><meta charset="Big5"></head><body>繁體中文</body></html>'.encode("big5"))
+            output = convert_reader_assets.inline_html_resources(
+                source,
+                "https://huggingface.co/datasets/VoiceOfML/Test/resolve/rev/source.htm",
+                work,
+            )
+            text = output.read_text(encoding="utf-8")
+            self.assertIn("繁體中文", text)
+            self.assertIn('charset="utf-8"', text.lower())
+            self.assertNotIn("big5", text.lower())
 
     def test_html_conversion_inlines_local_images_and_stylesheets_only(self):
         with tempfile.TemporaryDirectory() as root:

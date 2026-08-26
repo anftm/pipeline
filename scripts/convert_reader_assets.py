@@ -60,15 +60,14 @@ def decode_html_source(source: Path) -> str:
         return data[3:].decode("utf-8", errors="replace")
     if data.startswith((b"\xff\xfe", b"\xfe\xff")):
         return data.decode("utf-16", errors="replace")
-    probe = data[:8192].decode("ascii", errors="ignore")
-    match = re.search(
-        r"(?:charset\s*=\s*|content\s*=\s*[\"'][^\"']*?charset=)([A-Za-z0-9._:-]+)",
-        probe,
-        re.IGNORECASE,
-    )
+    probe = data[:8192].decode("latin-1")
+    match = re.search(r"charset\s*=\s*[\"']?\s*([A-Za-z0-9._:-]+)", probe, re.IGNORECASE)
     if match:
         encoding = match.group(1).lower().replace("_", "-")
-        encoding = {"gb2312": "gb18030", "gbk": "gb18030"}.get(encoding, encoding)
+        encoding = {
+            "gb2312": "gb18030", "gb-2312": "gb18030", "gbk": "gb18030",
+            "x-gbk": "gb18030", "x-sjis": "shift-jis", "windows-31j": "shift-jis",
+        }.get(encoding, encoding)
         try:
             return data.decode(encoding)
         except (LookupError, UnicodeDecodeError):
@@ -82,6 +81,17 @@ def decode_html_source(source: Path) -> str:
 def inline_html_resources(source: Path, source_url: str, work: Path) -> Path:
     """Inline safe same-tree images and stylesheets before the HTML is published."""
     text = decode_html_source(source)
+    text = re.sub(
+        r"(charset\s*=\s*)([\"']?)[^\s\"'/>;]+\2",
+        lambda match: match.group(1) + ('"utf-8"' if match.group(2) else "utf-8"),
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r"(<\?xml\b[^>]*\bencoding\s*=\s*)[\"'][^\"']+[\"']", r'\1"utf-8"', text, flags=re.IGNORECASE)
+    if not re.search(r"<meta\b[^>]*\bcharset\s*=", text, re.IGNORECASE):
+        text = re.sub(r"(<head\b[^>]*>)", r'\1<meta charset="utf-8">', text, count=1, flags=re.IGNORECASE)
+        if not re.search(r"<meta\b[^>]*\bcharset\s*=", text, re.IGNORECASE):
+            text = '<meta charset="utf-8">' + text
     base = source_url.rsplit("/", 1)[0] + "/"
     root = urllib.parse.urlsplit(base)
     root_path = root.path.rstrip("/") + "/"
