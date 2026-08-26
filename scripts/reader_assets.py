@@ -16,7 +16,7 @@ CONVERTIBLE_EXTENSIONS = {
     "html": ("sanitized-html-v2", "html", "document.html"),
     "mobi": ("calibre-epub-v1", "epub", "book.epub"),
     "azw3": ("calibre-epub-v1", "epub", "book.epub"),
-    "chm": ("calibre-chm-epub-v2", "epub", "book.epub"),
+    "chm": ("calibre-chm-epub-v3", "epub", "book.epub"),
     "tif": ("pillow-pdf-v1", "pdf", "document.pdf"),
     "tiff": ("pillow-pdf-v1", "pdf", "document.pdf"),
     "djvu": ("djvulibre-pdf-v1", "pdf", "document.pdf"),

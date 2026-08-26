@@ -312,18 +312,42 @@ def mhtml_to_html(source: Path, target: Path) -> None:
         document,
         flags=re.IGNORECASE,
     )
-    document = re.sub(r"<(script|object|iframe)\b[^>]*>.*?</\1\s*>", "", document, flags=re.IGNORECASE | re.DOTALL)
-    document = re.sub(r"<(?:embed|base)\b[^>]*?/?>", "", document, flags=re.IGNORECASE)
-    document = re.sub(r"\s+on[a-z0-9_-]+\s*=\s*([\"']).*?\1", "", document, flags=re.IGNORECASE | re.DOTALL)
-    document = re.sub(r"\s+(?:href|src)\s*=\s*([\"'])\s*javascript:.*?\1", "", document, flags=re.IGNORECASE | re.DOTALL)
+    document = sanitize_chm_html(document)
     document = re.sub(r"<meta\b[^>]*charset[^>]*>", "", document, flags=re.IGNORECASE)
     document = re.sub(r"(<head\b[^>]*>)", r'\1<meta charset="utf-8">', document, count=1, flags=re.IGNORECASE)
     target.write_text(document, encoding="utf-8")
 
 
+def sanitize_chm_html(document: str) -> str:
+    document = re.sub(r"<(script|object|iframe)\b[^>]*>.*?</\1\s*>", "", document, flags=re.IGNORECASE | re.DOTALL)
+    document = re.sub(r"<(?:embed|base)\b[^>]*?/?>", "", document, flags=re.IGNORECASE)
+    document = re.sub(r"\s+on[a-z0-9_-]+\s*=\s*([\"']).*?\1", "", document, flags=re.IGNORECASE | re.DOTALL)
+    document = re.sub(r"\s+(?:href|src)\s*=\s*([\"'])\s*javascript:.*?\1", "", document, flags=re.IGNORECASE | re.DOTALL)
+    document = re.sub(r"\s+(?:src|poster)\s*=\s*([\"'])\s*(?:https?:)?//.*?\1", "", document, flags=re.IGNORECASE | re.DOTALL)
+    document = re.sub(r"@import\s+[^;]+;", "", document, flags=re.IGNORECASE)
+    document = re.sub(r"url\(\s*([\"']?)(?:https?:)?//.*?\1\s*\)", "none", document, flags=re.IGNORECASE)
+    return document
+
+
+def sanitize_chm_epub(path: Path, work: Path) -> None:
+    rewritten = work / "sanitized-chm.epub"
+    with zipfile.ZipFile(path) as source, zipfile.ZipFile(rewritten, "w") as target:
+        infos = sorted(source.infolist(), key=lambda info: info.filename != "mimetype")
+        for info in infos:
+            data = source.read(info.filename)
+            suffix = Path(info.filename).suffix.lower()
+            if suffix in {".htm", ".html", ".xhtml", ".css"}:
+                data = sanitize_chm_html(data.decode("utf-8", "replace")).encode("utf-8")
+            if info.filename == "mimetype":
+                info.compress_type = zipfile.ZIP_STORED
+            target.writestr(info, data)
+    shutil.move(rewritten, path)
+
+
 def convert_chm(source: Path, target: Path, work: Path) -> None:
-    run_checked(["ebook-convert", str(source), str(target), "--flow-size", "0"])
     try:
+        run_checked(["ebook-convert", str(source), str(target), "--flow-size", "0"])
+        sanitize_chm_epub(target, work)
         validate_output(target, "epub")
         validate_chm_epub(target)
         return
@@ -349,6 +373,9 @@ def convert_chm(source: Path, target: Path, work: Path) -> None:
         source_html.write_text(f'<meta charset="utf-8"><ul>{links}</ul>', encoding="utf-8")
     target.unlink(missing_ok=True)
     run_checked(["ebook-convert", str(source_html), str(target), "--flow-size", "0"])
+    sanitize_chm_epub(target, work)
+    validate_output(target, "epub")
+    validate_chm_epub(target)
 
 
 def validate_djvu_pdf(path: Path, work: Path) -> None:

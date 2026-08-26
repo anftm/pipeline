@@ -41,7 +41,7 @@ class ReaderAssetContractTests(unittest.TestCase):
             "html": ("sanitized-html-v2", "html", "document.html"),
             "mobi": ("calibre-epub-v1", "epub", "book.epub"),
             "azw3": ("calibre-epub-v1", "epub", "book.epub"),
-            "chm": ("calibre-chm-epub-v2", "epub", "book.epub"),
+            "chm": ("calibre-chm-epub-v3", "epub", "book.epub"),
             "tif": ("pillow-pdf-v1", "pdf", "document.pdf"),
             "tiff": ("pillow-pdf-v1", "pdf", "document.pdf"),
             "djvu": ("djvulibre-pdf-v1", "pdf", "document.pdf"),
@@ -265,11 +265,27 @@ aW1hZ2U=
                     (work / "chm-extracted" / "book.mht").write_text("MIME-Version: 1.0", encoding="utf-8")
 
             with patch.object(convert_reader_assets, "run_checked", side_effect=run), \
+                    patch.object(convert_reader_assets, "sanitize_chm_epub"), \
                     patch.object(convert_reader_assets, "validate_output"), \
-                    patch.object(convert_reader_assets, "validate_chm_epub", side_effect=RuntimeError("converted CHM EPUB has no readable content")), \
+                    patch.object(convert_reader_assets, "validate_chm_epub", side_effect=[RuntimeError("converted CHM EPUB has no readable content"), None]), \
                     patch.object(convert_reader_assets, "mhtml_to_html", side_effect=lambda _source, output: output.write_text("<p>body</p>", encoding="utf-8")):
                 convert_reader_assets.convert_chm(source, target, work)
             self.assertEqual([call[0] for call in calls], ["ebook-convert", "7z", "ebook-convert"])
+
+    def test_chm_epub_sanitizer_removes_active_and_external_content(self):
+        with tempfile.TemporaryDirectory() as root:
+            work, epub = Path(root), Path(root) / "book.epub"
+            with zipfile.ZipFile(epub, "w") as archive:
+                archive.writestr("mimetype", "application/epub+zip")
+                archive.writestr("chapter.xhtml", '<html><head><base href="https://example.test/"></head><body onload="bad()"><script>bad()</script><object>bad</object><img src="https://example.test/a.png"><a href="javascript:bad()">bad</a><p>正文内容保持不变。</p></body></html>')
+                archive.writestr("style.css", '@import "https://example.test/a.css"; body{background:url(//example.test/a.png)}')
+            convert_reader_assets.sanitize_chm_epub(epub, work)
+            with zipfile.ZipFile(epub) as archive:
+                content = archive.read("chapter.xhtml").decode() + archive.read("style.css").decode()
+                self.assertEqual(archive.infolist()[0].filename, "mimetype")
+                self.assertEqual(archive.getinfo("mimetype").compress_type, zipfile.ZIP_STORED)
+            self.assertNotRegex(content, r"(?i)<(?:base|object|script)\b|onload=|javascript:|https://example|//example")
+            self.assertIn("正文内容保持不变", content)
 
     def test_chm_epub_validation_rejects_cover_without_body_text(self):
         with tempfile.TemporaryDirectory() as root:
