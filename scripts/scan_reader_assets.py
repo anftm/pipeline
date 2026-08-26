@@ -134,7 +134,7 @@ def main() -> int:
         "active_keys": current_keys,
         "stale_keys": sorted(set(manifest.get("files", {})) - set(current_keys)),
         "objects": reusable_objects(manifest),
-        "authoritative_snapshot": not bool(repo or extension or exact_path),
+        "authoritative_snapshot": not bool(args.repo or args.extension or args.path),
     }, pretty=True))
     print(f"queued {len(queue)} reader asset conversion(s)")
     return 0
