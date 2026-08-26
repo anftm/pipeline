@@ -3,7 +3,10 @@
 
 import argparse
 import concurrent.futures
+import base64
 import hashlib
+import html
+import mimetypes
 import json
 import re
 import shutil
@@ -11,6 +14,7 @@ import subprocess
 import tempfile
 import threading
 import urllib.request
+import urllib.parse
 import zipfile
 import os
 from pathlib import Path
@@ -23,6 +27,9 @@ except ImportError:
     from reader_assets import canonical_json, load_json
 
 MAX_SOURCE_BYTES = 2 * 1024 * 1024 * 1024
+MAX_HTML_RESOURCE_BYTES = 16 * 1024 * 1024
+MAX_HTML_RESOURCE_TOTAL_BYTES = 64 * 1024 * 1024
+MAX_HTML_RESOURCES = 64
 CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 PASSWORD_RE = re.compile(r"(?:密码|password)\s*[：:]\s*([^\]〕】）)\s]+)", re.IGNORECASE)
 OLE_SIGNATURE = bytes.fromhex("d0cf11e0a1b11ae1")
@@ -45,6 +52,82 @@ def download_source(url: str, target: Path) -> tuple[str, int]:
             digest.update(chunk)
             output.write(chunk)
     return digest.hexdigest(), size
+
+
+def inline_html_resources(source: Path, source_url: str, work: Path) -> Path:
+    """Inline safe same-tree images and stylesheets before the HTML is published."""
+    text = source.read_text(encoding="utf-8", errors="replace")
+    base = source_url.rsplit("/", 1)[0] + "/"
+    root = urllib.parse.urlsplit(base)
+    root_path = root.path.rstrip("/") + "/"
+    total = 0
+    count = 0
+    cache = {}
+
+    def load_resource(raw: str, allowed: set[str]):
+        nonlocal total, count
+        raw = html.unescape(raw).strip()
+        if not raw or raw.startswith(("#", "data:", "mailto:", "javascript:")):
+            return None
+        parsed = urllib.parse.urlsplit(urllib.parse.urljoin(base, raw))
+        if (parsed.scheme != "https" or parsed.netloc != root.netloc or parsed.query or
+                not parsed.path.startswith(root_path) or parsed.path == root_path):
+            return None
+        path = parsed.path
+        if path in cache:
+            return cache[path]
+        if count >= MAX_HTML_RESOURCES:
+            return None
+        suffix = Path(path).suffix.lower()
+        mime = mimetypes.guess_type(path)[0] or ""
+        if suffix not in allowed and mime not in allowed:
+            return None
+        target = work / "html-resources" / str(count)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            digest, size = download_source(urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", "")), target)
+        except Exception:
+            target.unlink(missing_ok=True)
+            return None
+        if size > MAX_HTML_RESOURCE_BYTES or total + size > MAX_HTML_RESOURCE_TOTAL_BYTES:
+            target.unlink(missing_ok=True)
+            return None
+        data = target.read_bytes()
+        total += size
+        count += 1
+        encoded = f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
+        cache[path] = encoded
+        return encoded
+
+    def image(match):
+        value = match.group(2)
+        encoded = load_resource(value, {"image/gif", "image/jpeg", "image/png", "image/webp", ".gif", ".jpg", ".jpeg", ".png", ".webp"})
+        return match.group(1) + (encoded or value) + match.group(3)
+
+    text = re.sub(r"(\b(?:src|data-src)\s*=\s*[\"'])([^\"']+)([\"'])", image, text, flags=re.IGNORECASE)
+
+    # Replace local stylesheet links with their downloaded, resource-checked CSS.
+    def stylesheet_tag(match):
+        value = match.group(2)
+        raw = html.unescape(value).strip()
+        parsed = urllib.parse.urlsplit(urllib.parse.urljoin(base, raw))
+        if parsed.path not in cache:
+            load_resource(raw, {"text/css", ".css"})
+        css_data = cache.get(parsed.path)
+        if not css_data:
+            return ""
+        try:
+            css = base64.b64decode(css_data.split(",", 1)[1]).decode("utf-8", "replace")
+        except Exception:
+            return ""
+        css = re.sub(r"@import[^;]+;|url\s*\([^)]*\)", "", css, flags=re.IGNORECASE)
+        return f"<style>{css}</style>"
+
+    text = re.sub(r"<link\b[^>]*\brel\s*=\s*[\"']stylesheet[\"'][^>]*\bhref\s*=\s*([\"'])([^\"']+)\1[^>]*>\s*", stylesheet_tag, text, flags=re.IGNORECASE)
+    text = re.sub(r"<link\b[^>]*\bhref\s*=\s*([\"'])([^\"']+)\1[^>]*\brel\s*=\s*[\"']stylesheet[\"'][^>]*>\s*", stylesheet_tag, text, flags=re.IGNORECASE)
+    output = work / "inlined.html"
+    output.write_text(text, encoding="utf-8")
+    return output
 
 
 def download_existing(url: str, target: Path, expected_sha256: str) -> None:
@@ -186,14 +269,9 @@ def convert_file(item: dict, source: Path, target: Path, work: Path) -> None:
     ext = item["extension"]
     office_profile = (work / "libreoffice-profile").resolve().as_uri()
     if ext in {"htm", "html"}:
-        out = work / "html-pdf"
-        out.mkdir()
-        run_checked(["libreoffice", "--headless", f"-env:UserInstallation={office_profile}",
-                     "--convert-to", "pdf", "--outdir", str(out), str(source)])
-        produced = out / f"{source.stem}.pdf"
-        if not produced.is_file():
-            raise RuntimeError("LibreOffice produced no PDF from HTML source")
-        shutil.move(produced, target)
+        source_url = item.get("source_url")
+        prepared = inline_html_resources(source, source_url, work) if source_url else source
+        shutil.copyfile(prepared, target)
     elif ext == "doc":
         out = work / "office"
         out.mkdir()
@@ -272,6 +350,8 @@ def validate_output(path: Path, reader_mode: str) -> None:
         raise RuntimeError("conversion output is empty")
     if reader_mode == "pdf" and not path.read_bytes()[:5] == b"%PDF-":
         raise RuntimeError("conversion output is not a PDF")
+    if reader_mode == "html" and not path.read_bytes():
+        raise RuntimeError("conversion output is empty HTML")
     if reader_mode == "epub":
         with zipfile.ZipFile(path) as archive:
             if archive.read("mimetype") != b"application/epub+zip":

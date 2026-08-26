@@ -106,7 +106,8 @@ jobs:
         run: |
           packages=()
           case "${EXTENSION}" in
-            doc|docx|htm|html) packages=(libreoffice fontconfig fonts-noto-cjk fonts-wqy-microhei ghostscript poppler-utils tesseract-ocr tesseract-ocr-chi-sim) ;;
+            doc|docx) packages=(libreoffice fontconfig fonts-noto-cjk fonts-wqy-microhei ghostscript poppler-utils tesseract-ocr tesseract-ocr-chi-sim) ;;
+            htm|html) packages=() ;;
             mobi|azw3) packages=(calibre) ;;
             djvu) packages=(djvulibre-bin poppler-utils) ;;
             tif|tiff) packages=(poppler-utils) ;;

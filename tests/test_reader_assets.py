@@ -222,25 +222,50 @@ class ConverterTests(unittest.TestCase):
         self.assertEqual(reader_assets.conversion_contract("doc"), ("libreoffice-docx-v1", "docx", "document.docx"))
         self.assertEqual(reader_assets.conversion_contract("docx"), ("docx-native-v1", "docx", "document.docx"))
 
-    def test_html_and_htm_use_pdf_profile(self):
-        expected = ("libreoffice-html-pdf-v1", "pdf", "document.pdf")
+    def test_html_and_htm_use_sanitized_html_profile(self):
+        expected = ("sanitized-html-v1", "html", "document.html")
         self.assertEqual(reader_assets.conversion_contract("html"), expected)
         self.assertEqual(reader_assets.conversion_contract("htm"), expected)
 
-    def test_html_conversion_uses_headless_libreoffice_to_pdf(self):
+    def test_html_conversion_preserves_source_html(self):
         with tempfile.TemporaryDirectory() as root:
             work = Path(root)
-            source, target = work / "source.html", work / "document.pdf"
+            source, target = work / "source.html", work / "document.html"
             source.write_bytes(b"<html><body>text</body></html>")
 
-            def fake_run(command):
-                (work / "html-pdf" / "source.pdf").write_bytes(b"%PDF-html")
+            convert_reader_assets.convert_file({"extension": "html"}, source, target, work)
+            self.assertEqual(target.read_bytes(), source.read_bytes())
 
-            with patch.object(convert_reader_assets, "run_checked", side_effect=fake_run) as run:
-                convert_reader_assets.convert_file({"extension": "html"}, source, target, work)
-            command = run.call_args.args[0]
-            self.assertEqual(command[command.index("--convert-to") + 1], "pdf")
-            self.assertEqual(target.read_bytes(), b"%PDF-html")
+    def test_html_conversion_inlines_local_images_and_stylesheets_only(self):
+        with tempfile.TemporaryDirectory() as root:
+            work = Path(root)
+            source = work / "source.html"
+            source.write_text(
+                '<link rel="stylesheet" href="css/site.css">'
+                '<img src="images/picture.png"><img src="https://evil.test/x.png">'
+                '<img src="../secret.png">', encoding="utf-8",
+            )
+            resources = {
+                "https://huggingface.co/datasets/VoiceOfML/Test/resolve/rev/css/site.css": b"body{color:red;background:url(x.png)}",
+                "https://huggingface.co/datasets/VoiceOfML/Test/resolve/rev/images/picture.png": b"PNG",
+            }
+
+            def download(url, target):
+                data = resources[url]
+                target.write_bytes(data)
+                return hashlib.sha256(data).hexdigest(), len(data)
+
+            with patch.object(convert_reader_assets, "download_source", side_effect=download):
+                output = convert_reader_assets.inline_html_resources(
+                    source,
+                    "https://huggingface.co/datasets/VoiceOfML/Test/resolve/rev/source.html",
+                    work,
+                )
+            text = output.read_text(encoding="utf-8")
+            self.assertIn("data:image/png;base64", text)
+            self.assertIn("<style>body{color:red;background:}</style>", text)
+            self.assertIn('src="https://evil.test/x.png"', text)
+            self.assertIn('src="../secret.png"', text)
 
     def test_page_content_ratio_detects_blank_and_nonblank_pages(self):
         from PIL import Image
@@ -646,6 +671,14 @@ class PublicationTests(unittest.TestCase):
             "s": 2, "m": "d", "p": "objects/aa/source/docx-native-v1/document.docx",
         })
 
+    def test_sidecar_encodes_html_reader_mode(self):
+        manifest = {"version": 1, "files": {"page": {
+            "status": "ready", "reader_mode": "html", "path": "objects/aa/source/sanitized-html-v1/document.html",
+        }}}
+        self.assertEqual(build_reader_assets_index.build_index(manifest)["f"]["page"], {
+            "s": 2, "m": "h", "p": "objects/aa/source/sanitized-html-v1/document.html",
+        })
+
 
 class SearchIndexPublicationTests(unittest.TestCase):
     def test_pages_publish_copies_only_sidecar_and_pushes(self):
@@ -723,7 +756,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("tesseract-ocr-chi-sim", workflow)
         self.assertIn("djvulibre-bin", workflow)
         self.assertIn("doc, docx, htm, html, mobi", workflow)
-        self.assertIn("doc|docx|htm|html)", workflow)
+        self.assertIn("htm|html) packages=()", workflow)
         self.assertIn('cron: "17 * * * *"', workflow)
         self.assertIn("inputs.limit || '20'", workflow)
         self.assertIn("inputs.checkpoint_batches || '30'", workflow)
