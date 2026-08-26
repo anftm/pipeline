@@ -234,7 +234,7 @@ Content-Type: multipart/related; boundary=x
 Content-Type: text/html; charset=utf-8
 Content-Location: file:///book/index.html
 
-<html><head></head><body><p>Readable CHM body text</p><img src="image.png"></body></html>
+<html><head><base href="https://example.test/"></head><body onload="alert(1)"><p>Readable CHM body text</p><script>alert(1)</script><object>unsafe</object><img src="image.png"><a href="javascript:alert(1)">bad</a></body></html>
 --x
 Content-Type: image/png
 Content-Transfer-Encoding: base64
@@ -250,6 +250,7 @@ aW1hZ2U=
             document = target.read_text(encoding="utf-8")
             self.assertIn("Readable CHM body text", document)
             self.assertIn("data:image/png;base64,aW1hZ2U=", document)
+            self.assertNotRegex(document, r"(?i)<(?:base|object|script)\b|onload=|javascript:")
 
     def test_chm_conversion_falls_back_to_embedded_mhtml_for_empty_epub(self):
         with tempfile.TemporaryDirectory() as root:

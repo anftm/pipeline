@@ -312,6 +312,10 @@ def mhtml_to_html(source: Path, target: Path) -> None:
         document,
         flags=re.IGNORECASE,
     )
+    document = re.sub(r"<(script|object|iframe)\b[^>]*>.*?</\1\s*>", "", document, flags=re.IGNORECASE | re.DOTALL)
+    document = re.sub(r"<(?:embed|base)\b[^>]*?/?>", "", document, flags=re.IGNORECASE)
+    document = re.sub(r"\s+on[a-z0-9_-]+\s*=\s*([\"']).*?\1", "", document, flags=re.IGNORECASE | re.DOTALL)
+    document = re.sub(r"\s+(?:href|src)\s*=\s*([\"'])\s*javascript:.*?\1", "", document, flags=re.IGNORECASE | re.DOTALL)
     document = re.sub(r"<meta\b[^>]*charset[^>]*>", "", document, flags=re.IGNORECASE)
     document = re.sub(r"(<head\b[^>]*>)", r'\1<meta charset="utf-8">', document, count=1, flags=re.IGNORECASE)
     target.write_text(document, encoding="utf-8")
@@ -324,14 +328,13 @@ def convert_chm(source: Path, target: Path, work: Path) -> None:
         validate_chm_epub(target)
         return
     except RuntimeError as exc:
-        if "no readable content" not in str(exc):
-            raise
+        initial_error = exc
     extracted = work / "chm-extracted"
     extracted.mkdir()
     run_checked(["7z", "x", "-y", f"-o{extracted}", str(source)])
     mhtml_files = sorted((*extracted.rglob("*.mht"), *extracted.rglob("*.mhtml")))
     if not mhtml_files:
-        raise RuntimeError("converted CHM EPUB has no readable content")
+        raise initial_error
     prepared = work / "chm-mhtml"
     prepared.mkdir()
     documents = []
