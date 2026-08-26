@@ -11,7 +11,7 @@ on:
         default: ""
         type: string
       extension:
-        description: doc, docx, mobi, azw3, tif, tiff, djvu, or blank for all
+        description: doc, docx, htm, html, mobi, azw3, tif, tiff, djvu, or blank for all
         required: false
         default: ""
         type: string
@@ -106,7 +106,7 @@ jobs:
         run: |
           packages=()
           case "${EXTENSION}" in
-            doc|docx) packages=(libreoffice fontconfig fonts-noto-cjk fonts-wqy-microhei ghostscript poppler-utils tesseract-ocr tesseract-ocr-chi-sim) ;;
+            doc|docx|htm|html) packages=(libreoffice fontconfig fonts-noto-cjk fonts-wqy-microhei ghostscript poppler-utils tesseract-ocr tesseract-ocr-chi-sim) ;;
             mobi|azw3) packages=(calibre) ;;
             djvu) packages=(djvulibre-bin poppler-utils) ;;
             tif|tiff) packages=(poppler-utils) ;;

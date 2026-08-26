@@ -12,6 +12,8 @@ MANIFEST_NAME = "manifest.json"
 CONVERTIBLE_EXTENSIONS = {
     "doc": ("libreoffice-docx-v1", "docx", "document.docx"),
     "docx": ("docx-native-v1", "docx", "document.docx"),
+    "htm": ("libreoffice-html-pdf-v1", "pdf", "document.pdf"),
+    "html": ("libreoffice-html-pdf-v1", "pdf", "document.pdf"),
     "mobi": ("calibre-epub-v1", "epub", "book.epub"),
     "azw3": ("calibre-epub-v1", "epub", "book.epub"),
     "tif": ("pillow-pdf-v1", "pdf", "document.pdf"),

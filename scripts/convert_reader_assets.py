@@ -185,7 +185,16 @@ def page_content_ratio(path: Path) -> float:
 def convert_file(item: dict, source: Path, target: Path, work: Path) -> None:
     ext = item["extension"]
     office_profile = (work / "libreoffice-profile").resolve().as_uri()
-    if ext == "doc":
+    if ext in {"htm", "html"}:
+        out = work / "html-pdf"
+        out.mkdir()
+        run_checked(["libreoffice", "--headless", f"-env:UserInstallation={office_profile}",
+                     "--convert-to", "pdf", "--outdir", str(out), str(source)])
+        produced = out / f"{source.stem}.pdf"
+        if not produced.is_file():
+            raise RuntimeError("LibreOffice produced no PDF from HTML source")
+        shutil.move(produced, target)
+    elif ext == "doc":
         out = work / "office"
         out.mkdir()
         with source.open("rb") as handle:
@@ -319,7 +328,7 @@ def convert_item(item: dict, bundle: Path, reusable: dict | None = None) -> dict
                     validate_output(temporary, item["reader_mode"])
                     if item["extension"] == "djvu":
                         validate_djvu_pdf(temporary, work)
-                    if item["extension"] in {"doc", "docx"} and item["reader_mode"] == "pdf":
+                    if item["extension"] in {"doc", "docx", "htm", "html"} and item["reader_mode"] == "pdf":
                         validate_office_pdf(temporary, item, work, source)
                     shutil.move(temporary, target)
             else:

@@ -21,7 +21,7 @@ class ReaderAssetContractTests(unittest.TestCase):
     def test_first_conversion_set_excludes_pdg(self):
         self.assertEqual(
             set(reader_assets.CONVERTIBLE_EXTENSIONS),
-            {"doc", "docx", "mobi", "azw3", "tif", "tiff", "djvu"},
+            {"doc", "docx", "htm", "html", "mobi", "azw3", "tif", "tiff", "djvu"},
         )
 
     def test_source_url_pins_revision_and_encodes_path(self):
@@ -221,6 +221,26 @@ class ConverterTests(unittest.TestCase):
     def test_doc_and_docx_use_distinct_docx_profiles(self):
         self.assertEqual(reader_assets.conversion_contract("doc"), ("libreoffice-docx-v1", "docx", "document.docx"))
         self.assertEqual(reader_assets.conversion_contract("docx"), ("docx-native-v1", "docx", "document.docx"))
+
+    def test_html_and_htm_use_pdf_profile(self):
+        expected = ("libreoffice-html-pdf-v1", "pdf", "document.pdf")
+        self.assertEqual(reader_assets.conversion_contract("html"), expected)
+        self.assertEqual(reader_assets.conversion_contract("htm"), expected)
+
+    def test_html_conversion_uses_headless_libreoffice_to_pdf(self):
+        with tempfile.TemporaryDirectory() as root:
+            work = Path(root)
+            source, target = work / "source.html", work / "document.pdf"
+            source.write_bytes(b"<html><body>text</body></html>")
+
+            def fake_run(command):
+                (work / "html-pdf" / "source.pdf").write_bytes(b"%PDF-html")
+
+            with patch.object(convert_reader_assets, "run_checked", side_effect=fake_run) as run:
+                convert_reader_assets.convert_file({"extension": "html"}, source, target, work)
+            command = run.call_args.args[0]
+            self.assertEqual(command[command.index("--convert-to") + 1], "pdf")
+            self.assertEqual(target.read_bytes(), b"%PDF-html")
 
     def test_page_content_ratio_detects_blank_and_nonblank_pages(self):
         from PIL import Image
@@ -702,6 +722,8 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("poppler-utils", workflow)
         self.assertIn("tesseract-ocr-chi-sim", workflow)
         self.assertIn("djvulibre-bin", workflow)
+        self.assertIn("doc, docx, htm, html, mobi", workflow)
+        self.assertIn("doc|docx|htm|html)", workflow)
         self.assertIn('cron: "17 * * * *"', workflow)
         self.assertIn("inputs.limit || '20'", workflow)
         self.assertIn("inputs.checkpoint_batches || '30'", workflow)
