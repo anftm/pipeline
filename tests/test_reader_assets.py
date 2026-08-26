@@ -4,6 +4,7 @@ import hashlib
 import json
 import tempfile
 import unittest
+import zipfile
 from datetime import date
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -30,6 +31,20 @@ class ReaderAssetContractTests(unittest.TestCase):
             "https://huggingface.co/datasets/VoiceOfML/Test/resolve/abc123/"
             "%E7%9B%AE%E5%BD%95/a%20b.docx",
         )
+
+    def test_every_supported_extension_has_an_explicit_contract(self):
+        expected = {
+            "doc": ("libreoffice-docx-v1", "docx", "document.docx"),
+            "docx": ("docx-native-v1", "docx", "document.docx"),
+            "htm": ("sanitized-html-v2", "html", "document.html"),
+            "html": ("sanitized-html-v2", "html", "document.html"),
+            "mobi": ("calibre-epub-v1", "epub", "book.epub"),
+            "azw3": ("calibre-epub-v1", "epub", "book.epub"),
+            "tif": ("pillow-pdf-v1", "pdf", "document.pdf"),
+            "tiff": ("pillow-pdf-v1", "pdf", "document.pdf"),
+            "djvu": ("djvulibre-pdf-v1", "pdf", "document.pdf"),
+        }
+        self.assertEqual({ext: reader_assets.conversion_contract(ext) for ext in expected}, expected)
 
 
 class ScannerTests(unittest.TestCase):
@@ -187,6 +202,28 @@ class ConverterTests(unittest.TestCase):
             self.assertEqual(run.call_args.args[0], [
                 "ebook-convert", str(source), str(target), "--flow-size", "0",
             ])
+
+    def test_azw3_conversion_uses_the_same_calibre_contract(self):
+        with tempfile.TemporaryDirectory() as root:
+            work = Path(root)
+            source, target = work / "source.azw3", work / "book.epub"
+            source.write_bytes(b"BOOKAZW3")
+            with patch.object(convert_reader_assets, "run_checked") as run:
+                convert_reader_assets.convert_file({"extension": "azw3"}, source, target, work)
+            self.assertEqual(run.call_args.args[0], [
+                "ebook-convert", str(source), str(target), "--flow-size", "0",
+            ])
+
+    def test_validation_rejects_malformed_outputs_for_each_active_container(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            bad_pdf = root / "bad.pdf"; bad_pdf.write_bytes(b"not pdf")
+            with self.assertRaises(RuntimeError): convert_reader_assets.validate_output(bad_pdf, "pdf")
+            bad_html = root / "bad.html"; bad_html.write_bytes(b"")
+            with self.assertRaises(RuntimeError): convert_reader_assets.validate_output(bad_html, "html")
+            bad_epub = root / "bad.epub"
+            with zipfile.ZipFile(bad_epub, "w") as archive: archive.writestr("mimetype", "wrong")
+            with self.assertRaises(RuntimeError): convert_reader_assets.validate_output(bad_epub, "epub")
 
     def test_djvu_pdf_validation_checks_first_and_last_pages(self):
         with tempfile.TemporaryDirectory() as root:
