@@ -461,7 +461,7 @@ def main() -> int:
     args = parse_args()
     queue_data = load_json(args.queue)
     queue = queue_data.get("items", [])
-    reusable = queue_data.get("objects", {})
+    reusable = {} if queue_data.get("force_rebuild") else queue_data.get("objects", {})
     if args.bundle.exists():
         shutil.rmtree(args.bundle)
     args.bundle.mkdir(parents=True)

@@ -135,6 +135,7 @@ def main() -> int:
         "active_keys": current_keys,
         "stale_keys": sorted(set(manifest.get("files", {})) - set(current_keys)),
         "objects": reusable_objects(manifest),
+        "force_rebuild": bool(args.force),
         "authoritative_snapshot": not bool(args.repo or args.extension or args.path),
     }, pretty=True))
     print(f"queued {len(queue)} reader asset conversion(s)")
