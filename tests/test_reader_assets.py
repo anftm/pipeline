@@ -41,7 +41,7 @@ class ReaderAssetContractTests(unittest.TestCase):
             "html": ("sanitized-html-v2", "html", "document.html"),
             "mobi": ("calibre-epub-v1", "epub", "book.epub"),
             "azw3": ("calibre-epub-v1", "epub", "book.epub"),
-            "chm": ("calibre-chm-epub-v1", "epub", "book.epub"),
+            "chm": ("calibre-chm-epub-v2", "epub", "book.epub"),
             "tif": ("pillow-pdf-v1", "pdf", "document.pdf"),
             "tiff": ("pillow-pdf-v1", "pdf", "document.pdf"),
             "djvu": ("djvulibre-pdf-v1", "pdf", "document.pdf"),
@@ -222,11 +222,64 @@ class ConverterTests(unittest.TestCase):
             work = Path(root)
             source, target = work / "source.chm", work / "book.epub"
             source.write_bytes(b"ITSF")
-            with patch.object(convert_reader_assets, "run_checked") as run:
+            with patch.object(convert_reader_assets, "convert_chm") as conversion:
                 convert_reader_assets.convert_file({"extension": "chm"}, source, target, work)
-            self.assertEqual(run.call_args.args[0], [
-                "ebook-convert", str(source), str(target), "--flow-size", "0",
-            ])
+            conversion.assert_called_once_with(source, target, work)
+
+    def test_mhtml_fallback_extracts_html_and_inlines_resources(self):
+        message = b"""MIME-Version: 1.0
+Content-Type: multipart/related; boundary=x
+
+--x
+Content-Type: text/html; charset=utf-8
+Content-Location: file:///book/index.html
+
+<html><head></head><body><p>Readable CHM body text</p><img src="image.png"></body></html>
+--x
+Content-Type: image/png
+Content-Transfer-Encoding: base64
+Content-Location: file:///book/image.png
+
+aW1hZ2U=
+--x--
+"""
+        with tempfile.TemporaryDirectory() as root:
+            source, target = Path(root) / "book.mht", Path(root) / "book.html"
+            source.write_bytes(message)
+            convert_reader_assets.mhtml_to_html(source, target)
+            document = target.read_text(encoding="utf-8")
+            self.assertIn("Readable CHM body text", document)
+            self.assertIn("data:image/png;base64,aW1hZ2U=", document)
+
+    def test_chm_conversion_falls_back_to_embedded_mhtml_for_empty_epub(self):
+        with tempfile.TemporaryDirectory() as root:
+            work = Path(root)
+            source, target = work / "source.chm", work / "book.epub"
+            source.write_bytes(b"ITSF")
+            calls = []
+
+            def run(command, **_kwargs):
+                calls.append(command)
+                if command[0] == "7z":
+                    (work / "chm-extracted" / "book.mht").write_text("MIME-Version: 1.0", encoding="utf-8")
+
+            with patch.object(convert_reader_assets, "run_checked", side_effect=run), \
+                    patch.object(convert_reader_assets, "validate_output"), \
+                    patch.object(convert_reader_assets, "validate_chm_epub", side_effect=RuntimeError("converted CHM EPUB has no readable content")), \
+                    patch.object(convert_reader_assets, "mhtml_to_html", side_effect=lambda _source, output: output.write_text("<p>body</p>", encoding="utf-8")):
+                convert_reader_assets.convert_chm(source, target, work)
+            self.assertEqual([call[0] for call in calls], ["ebook-convert", "7z", "ebook-convert"])
+
+    def test_chm_epub_validation_rejects_cover_without_body_text(self):
+        with tempfile.TemporaryDirectory() as root:
+            epub = Path(root) / "book.epub"
+            with zipfile.ZipFile(epub, "w") as archive:
+                archive.writestr("mimetype", "application/epub+zip")
+                archive.writestr("META-INF/container.xml", """<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="content.opf"/></rootfiles></container>""")
+                archive.writestr("content.opf", """<package xmlns="http://www.idpf.org/2007/opf"><manifest><item id="cover" href="cover.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="cover"/></spine></package>""")
+                archive.writestr("cover.xhtml", "<html xmlns=\"http://www.w3.org/1999/xhtml\"><head><style>body has lots of fake readable style content</style></head><body><svg xmlns=\"http://www.w3.org/2000/svg\"/></body></html>")
+            with self.assertRaisesRegex(RuntimeError, "no readable content"):
+                convert_reader_assets.validate_chm_epub(epub)
 
     def test_chm_epub_validation_requires_readable_safe_spine(self):
         with tempfile.TemporaryDirectory() as root:
@@ -870,7 +923,8 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("inputs.checkpoint_batches || '30'", workflow)
         self.assertIn("python scripts/publish_reader_assets.py", workflow)
         self.assertIn("packages=(djvulibre-bin poppler-utils)", workflow)
-        self.assertIn("mobi|azw3|chm) packages=(calibre)", workflow)
+        self.assertIn("mobi|azw3) packages=(calibre)", workflow)
+        self.assertIn("chm) packages=(calibre p7zip-full)", workflow)
         self.assertIn("tif|tiff) packages=(poppler-utils)", workflow)
         self.assertIn("READER_CONVERSION_WORKERS:", workflow)
         self.assertIn("steps.scan.outputs.extension == 'djvu'", workflow)

@@ -4,6 +4,7 @@
 import argparse
 import concurrent.futures
 import base64
+import email.policy
 import hashlib
 import html
 import mimetypes
@@ -20,6 +21,7 @@ import zipfile
 import os
 import posixpath
 import xml.etree.ElementTree as ET
+from email.parser import BytesParser
 from pathlib import Path
 
 from PIL import Image, ImageSequence
@@ -270,6 +272,82 @@ def convert_tiff(source: Path, target: Path, work: Path) -> None:
         run_checked(["pdfunite", *(str(output) for output in outputs), str(target)])
 
 
+def mhtml_to_html(source: Path, target: Path) -> None:
+    message = BytesParser(policy=email.policy.default).parsebytes(source.read_bytes())
+    parts = list(message.walk()) if message.is_multipart() else [message]
+    html_part = next((part for part in parts if part.get_content_type() == "text/html"), None)
+    if html_part is None:
+        raise RuntimeError("CHM MHTML has no HTML body")
+    payload = html_part.get_payload(decode=True) or b""
+    charset = html_part.get_content_charset() or "utf-8"
+    try:
+        document = payload.decode(charset)
+    except (LookupError, UnicodeDecodeError):
+        document = payload.decode("gb18030", "replace")
+    base = str(html_part.get("Content-Location") or "")
+    resources = {}
+    for part in parts:
+        if part is html_part or part.is_multipart():
+            continue
+        data = part.get_payload(decode=True)
+        if not data:
+            continue
+        encoded = f"data:{part.get_content_type()};base64,{base64.b64encode(data).decode('ascii')}"
+        location = str(part.get("Content-Location") or "")
+        content_id = str(part.get("Content-ID") or "").strip("<>")
+        if location:
+            resources[location] = encoded
+            resources[urllib.parse.urljoin(base, location)] = encoded
+        if content_id:
+            resources[f"cid:{content_id}"] = encoded
+
+    def inline_resource(match):
+        value = html.unescape(match.group(2)).strip()
+        replacement = resources.get(value) or resources.get(urllib.parse.urljoin(base, value))
+        return match.group(1) + (replacement or value) + match.group(3)
+
+    document = re.sub(
+        r"(\b(?:src|href|poster)\s*=\s*[\"'])([^\"']+)([\"'])",
+        inline_resource,
+        document,
+        flags=re.IGNORECASE,
+    )
+    document = re.sub(r"<meta\b[^>]*charset[^>]*>", "", document, flags=re.IGNORECASE)
+    document = re.sub(r"(<head\b[^>]*>)", r'\1<meta charset="utf-8">', document, count=1, flags=re.IGNORECASE)
+    target.write_text(document, encoding="utf-8")
+
+
+def convert_chm(source: Path, target: Path, work: Path) -> None:
+    run_checked(["ebook-convert", str(source), str(target), "--flow-size", "0"])
+    try:
+        validate_output(target, "epub")
+        validate_chm_epub(target)
+        return
+    except RuntimeError as exc:
+        if "no readable content" not in str(exc):
+            raise
+    extracted = work / "chm-extracted"
+    extracted.mkdir()
+    run_checked(["7z", "x", "-y", f"-o{extracted}", str(source)])
+    mhtml_files = sorted((*extracted.rglob("*.mht"), *extracted.rglob("*.mhtml")))
+    if not mhtml_files:
+        raise RuntimeError("converted CHM EPUB has no readable content")
+    prepared = work / "chm-mhtml"
+    prepared.mkdir()
+    documents = []
+    for index, mhtml_file in enumerate(mhtml_files):
+        output = prepared / f"{index:04d}.html"
+        mhtml_to_html(mhtml_file, output)
+        documents.append(output)
+    source_html = documents[0]
+    if len(documents) > 1:
+        source_html = prepared / "index.html"
+        links = "".join(f'<li><a href="{item.name}">{html.escape(item.stem)}</a></li>' for item in documents)
+        source_html.write_text(f'<meta charset="utf-8"><ul>{links}</ul>', encoding="utf-8")
+    target.unlink(missing_ok=True)
+    run_checked(["ebook-convert", str(source_html), str(target), "--flow-size", "0"])
+
+
 def validate_djvu_pdf(path: Path, work: Path) -> None:
     info = command_output(["pdfinfo", str(path)])
     match = re.search(r"^Pages:\s+(\d+)\s*$", info, re.MULTILINE)
@@ -380,8 +458,10 @@ def convert_file(item: dict, source: Path, target: Path, work: Path) -> None:
                 shutil.move(produced, target)
             else:
                 raise
-    elif ext in {"mobi", "azw3", "chm"}:
+    elif ext in {"mobi", "azw3"}:
         run_checked(["ebook-convert", str(source), str(target), "--flow-size", "0"])
+    elif ext == "chm":
+        convert_chm(source, target, work)
     elif ext in {"tif", "tiff"}:
         convert_tiff(source, target, work)
     elif ext == "djvu":
@@ -445,7 +525,7 @@ def validate_chm_epub(path: Path) -> None:
         if not spine:
             raise RuntimeError("converted CHM EPUB has no spine")
 
-        readable = False
+        readable_characters = 0
         base = posixpath.dirname(opf_path)
         for idref in spine:
             item = manifest.get(idref)
@@ -461,10 +541,15 @@ def validate_chm_epub(path: Path) -> None:
                 raise RuntimeError("converted CHM EPUB contains active content")
             if re.search(r"\b(?:src|poster)\s*=\s*[\"']\s*(?:https?:)?//", document, re.IGNORECASE):
                 raise RuntimeError("converted CHM EPUB contains an external embedded resource")
-            text = html.unescape(re.sub(r"<[^>]+>", " ", document))
-            if len(re.sub(r"\s+", "", text)) >= 20 or re.search(r"<(?:img|svg)\b", document, re.IGNORECASE):
-                readable = True
-        if not readable:
+            try:
+                root = ET.fromstring(document)
+            except ET.ParseError as exc:
+                raise RuntimeError("converted CHM EPUB has malformed spine content") from exc
+            body = root.find(".//{*}body")
+            if body is not None:
+                text = html.unescape("".join(body.itertext()))
+                readable_characters += len(re.sub(r"\s+", "", text))
+        if readable_characters < 20:
             raise RuntimeError("converted CHM EPUB has no readable content")
 
 

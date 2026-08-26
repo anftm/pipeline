@@ -108,7 +108,8 @@ jobs:
           case "${EXTENSION}" in
             doc|docx) packages=(libreoffice fontconfig fonts-noto-cjk fonts-wqy-microhei ghostscript poppler-utils tesseract-ocr tesseract-ocr-chi-sim) ;;
             htm|html) packages=() ;;
-            mobi|azw3|chm) packages=(calibre) ;;
+            mobi|azw3) packages=(calibre) ;;
+            chm) packages=(calibre p7zip-full) ;;
             djvu) packages=(djvulibre-bin poppler-utils) ;;
             tif|tiff) packages=(poppler-utils) ;;
             *) echo "Unsupported queued extension: ${EXTENSION}" >&2; exit 1 ;;
