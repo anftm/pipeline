@@ -110,26 +110,11 @@ def process_repo(repo_path):
             "commit", "-m", f"{AUTO_COMMIT_PREFIX} [{beijing_now_str()}] [auto-bot]",
         ], cwd=repo_dir)
         push_command = ["git"]
+        if HF_TOKEN:
+            # Keep authentication explicit for Git LFS invoked by git push.
+            push_command.extend(["-c", f"http.extraHeader=Authorization: Bearer {HF_TOKEN}"])
         push_command.append("push")
-        askpass = os.path.join(tmpdir, "git-askpass.sh")
-        with open(askpass, "w", encoding="utf-8") as handle:
-            handle.write(
-                "#!/bin/sh\n"
-                "case \"$1\" in\n"
-                "  *Username*) printf '%s\\n' \"$HF_USERNAME\" ;;\n"
-                "  *) printf '%s\\n' \"$HF_TOKEN\" ;;\n"
-                "esac\n"
-            )
-        os.chmod(askpass, 0o700)
-        result = run_cmd(
-            push_command,
-            cwd=repo_dir,
-            extra_env={
-                "GIT_ASKPASS": askpass,
-                "GIT_TERMINAL_PROMPT": "0",
-                "HF_USERNAME": HF_USERNAME,
-            },
-        )
+        result = run_cmd(push_command, cwd=repo_dir)
         if result.returncode != 0:
             print(f"  push 失败: {result.stderr.strip()[:300]}")
             return False
