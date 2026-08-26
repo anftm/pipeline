@@ -24,6 +24,7 @@ class SyncAuthenticationTests(unittest.TestCase):
     def setUpClass(cls):
         cls.space = load_script("sync_to_space")
         cls.pages = load_script("sync_to_pages")
+        cls.directories = load_script("update_dirs")
 
     def test_git_auth_uses_host_scoped_basic_credentials(self):
         cases = (
@@ -38,6 +39,15 @@ class SyncAuthenticationTests(unittest.TestCase):
                 scheme, encoded = env["GIT_CONFIG_VALUE_0"].split(" ", 2)[1:]
                 self.assertEqual(scheme, "Basic")
                 self.assertEqual(base64.b64decode(encoded).decode(), f"{username}:{token}")
+
+    def test_directory_git_auth_uses_host_scoped_basic_credentials(self):
+        with patch.object(self.directories, "HF_TOKEN", "hf-secret"):
+            env = self.directories.git_auth_env()
+        self.assertEqual(env["GIT_CONFIG_COUNT"], "1")
+        self.assertEqual(env["GIT_CONFIG_KEY_0"], "http.https://huggingface.co/.extraheader")
+        scheme, encoded = env["GIT_CONFIG_VALUE_0"].split(" ", 2)[1:]
+        self.assertEqual(scheme, "Basic")
+        self.assertEqual(base64.b64decode(encoded).decode(), "VoiceOfML:hf-secret")
 
     def test_push_retry_reports_success_after_retry(self):
         for module in (self.space, self.pages):

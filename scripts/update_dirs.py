@@ -2,6 +2,7 @@
 """Update generated directory files in the configured Hugging Face datasets."""
 
 import os
+import base64
 import shutil
 import subprocess
 import sys
@@ -29,15 +30,20 @@ MUL_PY_PATH = os.path.join(SCRIPT_DIR, "mul.py")
 HF_TOKEN = os.environ.get("HF_TOKEN", "")
 
 
+def git_auth_env():
+    encoded = base64.b64encode(f"{HF_USERNAME}:{HF_TOKEN}".encode()).decode()
+    return {
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "http.https://huggingface.co/.extraheader",
+        "GIT_CONFIG_VALUE_0": f"Authorization: Basic {encoded}",
+    }
+
+
 def run_cmd(cmd_list, cwd=None, extra_env=None):
     env = os.environ.copy()
     env["GIT_LFS_SKIP_SMUDGE"] = "1"
     if HF_TOKEN:
-        env.update({
-            "GIT_CONFIG_COUNT": "1",
-            "GIT_CONFIG_KEY_0": "http.extraHeader",
-            "GIT_CONFIG_VALUE_0": f"Authorization: Bearer {HF_TOKEN}",
-        })
+        env.update(git_auth_env())
     if extra_env:
         env.update(extra_env)
     try:
@@ -109,12 +115,7 @@ def process_repo(repo_path):
             "-c", "user.email=github-actions[bot]@users.noreply.github.com",
             "commit", "-m", f"{AUTO_COMMIT_PREFIX} [{beijing_now_str()}] [auto-bot]",
         ], cwd=repo_dir)
-        push_command = ["git"]
-        if HF_TOKEN:
-            # Keep authentication explicit for Git LFS invoked by git push.
-            push_command.extend(["-c", f"http.extraHeader=Authorization: Bearer {HF_TOKEN}"])
-        push_command.append("push")
-        result = run_cmd(push_command, cwd=repo_dir)
+        result = run_cmd(["git", "push"], cwd=repo_dir)
         if result.returncode != 0:
             print(f"  push 失败: {result.stderr.strip()[:300]}")
             return False
