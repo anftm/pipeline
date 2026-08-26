@@ -2,6 +2,7 @@ import gzip
 import hashlib
 import json
 import tempfile
+import concurrent.futures
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -297,6 +298,35 @@ class ConverterTests(unittest.TestCase):
             self.assertEqual(conversion.call_count, 1)
             self.assertEqual(first["path"], second["path"])
             self.assertIn("/libreoffice-pdf-v2/", first["path"])
+
+    def test_concurrent_duplicate_source_digest_converts_once(self):
+        item = {
+            "key": "VoiceOfML/Test\0Book.djvu", "extension": "djvu",
+            "source_url": "https://example.test/book.djvu", "source_revision": "rev1",
+            "profile": "djvulibre-pdf-v1", "reader_mode": "pdf", "output_name": "document.pdf",
+        }
+        with tempfile.TemporaryDirectory() as root:
+            bundle = Path(root)
+
+            def download(_url, target):
+                target.write_bytes(b"same source")
+                return "a" * 64, 11
+
+            def convert(_item, _source, target, _work):
+                target.write_bytes(b"%PDF-converted")
+
+            with patch.object(convert_reader_assets, "download_source", side_effect=download), \
+                    patch.object(convert_reader_assets, "convert_file", side_effect=convert) as conversion, \
+                    patch.object(convert_reader_assets, "validate_djvu_pdf"):
+                with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                    results = list(executor.map(
+                        lambda queued: convert_reader_assets.convert_item(queued, bundle),
+                        [item, {**item, "key": "VoiceOfML/Test\0Copy.djvu"}],
+                    ))
+
+            self.assertEqual(conversion.call_count, 1)
+            self.assertEqual(results[0]["path"], results[1]["path"])
+            self.assertEqual(results[0]["sha256"], results[1]["sha256"])
 
     def test_office_pdf_requires_embedded_fonts_and_extractable_cjk(self):
         item = {"path": "目录/中文.docx"}

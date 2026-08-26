@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import urllib.request
 import zipfile
 import os
@@ -28,6 +29,8 @@ OLE_SIGNATURE = bytes.fromhex("d0cf11e0a1b11ae1")
 MIN_PAGE_CONTENT_RATIO = 0.0005
 COMMAND_TIMEOUT_SECONDS = int(os.environ.get("READER_CONVERSION_COMMAND_TIMEOUT", "120"))
 CONVERSION_WORKERS = max(1, int(os.environ.get("READER_CONVERSION_WORKERS", "1")))
+ARTIFACT_LOCKS = {}
+ARTIFACT_LOCKS_GUARD = threading.Lock()
 
 
 def download_source(url: str, target: Path) -> tuple[str, int]:
@@ -49,6 +52,11 @@ def file_sha256(path: Path) -> str:
         while chunk := handle.read(1024 * 1024):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def artifact_lock(path: Path) -> threading.Lock:
+    with ARTIFACT_LOCKS_GUARD:
+        return ARTIFACT_LOCKS.setdefault(str(path), threading.Lock())
 
 
 def run_checked(command: list[str]) -> None:
@@ -283,17 +291,18 @@ def convert_item(item: dict, bundle: Path) -> dict:
         object_path = f"objects/{digest[:2]}/{digest}/{item['profile']}/{item['output_name']}"
         target = bundle / object_path
         target.parent.mkdir(parents=True, exist_ok=True)
-        if not target.exists():
-            temporary = work / item["output_name"]
-            convert_file(item, source, temporary, work)
-            validate_output(temporary, item["reader_mode"])
-            if item["extension"] == "djvu":
-                validate_djvu_pdf(temporary, work)
-            if item["extension"] in {"doc", "docx"} and item["reader_mode"] == "pdf":
-                validate_office_pdf(temporary, item, work, source)
-            shutil.move(temporary, target)
-        else:
-            validate_output(target, item["reader_mode"])
+        with artifact_lock(target):
+            if not target.exists():
+                temporary = work / item["output_name"]
+                convert_file(item, source, temporary, work)
+                validate_output(temporary, item["reader_mode"])
+                if item["extension"] == "djvu":
+                    validate_djvu_pdf(temporary, work)
+                if item["extension"] in {"doc", "docx"} and item["reader_mode"] == "pdf":
+                    validate_office_pdf(temporary, item, work, source)
+                shutil.move(temporary, target)
+            else:
+                validate_output(target, item["reader_mode"])
         return {
             "key": item["key"], "status": "ready", "source_revision": item["source_revision"],
             "source_sha256": digest, "source_bytes": source_bytes,
