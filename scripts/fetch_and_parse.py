@@ -521,6 +521,7 @@ def main():
 
     # ── 4. 拉取 txt 并解析 ─────────────────────────────
     all_records = []
+    failed_catalogs = []
 
     for repo in REPOS:
         print(f"\n📥 处理仓库: {repo}")
@@ -530,7 +531,8 @@ def main():
         print(f"   📄 下载: {txt_url}")
         txt_content = http_get_text(txt_url, token)
         if not txt_content:
-            print(f"   ⚠ 无法下载，跳过")
+            print(f"   ❌ 无法下载，停止生成")
+            failed_catalogs.append(repo)
             continue
 
         # 2. 先解析（Size 暂时为空）
@@ -563,6 +565,9 @@ def main():
 
         all_records.extend(repo_records)
         time.sleep(0.5)
+    if failed_catalogs:
+        print("\n❌ 无法生成完整搜索数据: " + ", ".join(failed_catalogs))
+        return 1
     # ── 5. 写入 output/*.json(+gz) ─────────────────────
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     json_text = json.dumps(encode_search_payload(all_records), ensure_ascii=False, separators=(",", ":"))

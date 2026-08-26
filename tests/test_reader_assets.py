@@ -1,18 +1,19 @@
+import concurrent.futures
 import gzip
 import hashlib
 import json
 import tempfile
-import concurrent.futures
 import unittest
+from datetime import date
 from pathlib import Path
 from unittest.mock import Mock, patch
 
 import requests
-from huggingface_hub import CommitOperationAdd
+from huggingface_hub import CommitOperationAdd, CommitOperationDelete
 from huggingface_hub.errors import RepositoryNotFoundError
 
 from scripts import build_reader_assets_index, convert_reader_assets, publish_reader_assets
-from scripts import publish_search_reader_index
+from scripts import prune_reader_assets, publish_search_reader_index
 from scripts import reader_assets, scan_reader_assets
 
 
@@ -114,6 +115,26 @@ class ScannerTests(unittest.TestCase):
         api.file_exists.side_effect = RepositoryNotFoundError("missing", response=response)
         self.assertEqual(scan_reader_assets.remote_manifest(api, "vomebook/Missing"), reader_assets.empty_manifest())
 
+    def test_reusable_objects_include_ready_files_and_orphans(self):
+        manifest = {"version": 1, "files": {
+            "book": {"status": "ready", "source_sha256": "a" * 64, "profile": "p1",
+                     "path": "objects/a", "sha256": "b" * 64, "bytes": 10, "reader_mode": "pdf"},
+        }, "orphans": {
+            "objects/b": {"source_sha256": "c" * 64, "profile": "p2", "path": "objects/b",
+                          "sha256": "d" * 64, "bytes": 20, "reader_mode": "epub", "since": "2026-01-01"},
+        }}
+        objects = scan_reader_assets.reusable_objects(manifest)
+        self.assertEqual(objects["a" * 64 + "\0p1"]["path"], "objects/a")
+        self.assertEqual(objects["c" * 64 + "\0p2"]["path"], "objects/b")
+
+    def test_active_keys_can_be_empty_after_all_convertible_files_are_deleted(self):
+        self.assertEqual(scan_reader_assets.active_keys([]), [])
+
+    def test_active_keys_do_not_depend_on_revision_availability(self):
+        self.assertEqual(
+            scan_reader_assets.active_keys(self.records),
+            [reader_assets.asset_key("VoiceOfML/Test", "A/Book.docx")],
+        )
 
 class ConverterTests(unittest.TestCase):
     def test_tiff_conversion_preserves_multiple_frames(self):
@@ -328,6 +349,66 @@ class ConverterTests(unittest.TestCase):
             self.assertEqual(results[0]["path"], results[1]["path"])
             self.assertEqual(results[0]["sha256"], results[1]["sha256"])
 
+    def test_remote_artifact_is_reused_for_matching_source_and_profile(self):
+        item = {
+            "key": "VoiceOfML/Test\0Moved.djvu", "extension": "djvu",
+            "source_url": "https://example.test/moved.djvu", "source_revision": "rev2",
+            "profile": "djvulibre-pdf-v1", "reader_mode": "pdf", "output_name": "document.pdf",
+        }
+        digest = "a" * 64
+        artifact = b"%PDF-reused"
+        reusable = {f"{digest}\0djvulibre-pdf-v1": {
+            "path": f"objects/aa/{digest}/djvulibre-pdf-v1/document.pdf",
+            "bytes": len(artifact), "sha256": hashlib.sha256(artifact).hexdigest(),
+        }}
+        with tempfile.TemporaryDirectory() as root:
+            def download(_url, target):
+                target.write_bytes(b"source")
+                return digest, 6
+
+            def reuse(_url, target, _digest):
+                target.write_bytes(artifact)
+
+            with patch.object(convert_reader_assets, "download_source", side_effect=download), \
+                    patch.object(convert_reader_assets, "download_existing", side_effect=reuse) as reused, \
+                    patch.object(convert_reader_assets, "convert_file") as conversion:
+                result = convert_reader_assets.convert_item(item, Path(root), reusable)
+
+            conversion.assert_not_called()
+            reused.assert_called_once()
+            self.assertTrue(result["reused"])
+            self.assertEqual(result["sha256"], hashlib.sha256(artifact).hexdigest())
+
+    def test_concurrent_remote_reuse_marks_both_results_reused(self):
+        item = {
+            "key": "VoiceOfML/Test\0One.djvu", "extension": "djvu",
+            "source_url": "https://example.test/one.djvu", "source_revision": "rev2",
+            "profile": "djvulibre-pdf-v1", "reader_mode": "pdf", "output_name": "document.pdf",
+        }
+        digest = "a" * 64
+        artifact = b"%PDF-reused"
+        reusable = {f"{digest}\0djvulibre-pdf-v1": {
+            "path": "objects/existing.pdf", "bytes": len(artifact),
+            "sha256": hashlib.sha256(artifact).hexdigest(), "reader_mode": "pdf",
+        }}
+        with tempfile.TemporaryDirectory() as root:
+            def download(_url, target):
+                target.write_bytes(b"source")
+                return digest, 6
+
+            def reuse(_url, target, _digest):
+                target.write_bytes(artifact)
+
+            with patch.object(convert_reader_assets, "download_source", side_effect=download), \
+                    patch.object(convert_reader_assets, "download_existing", side_effect=reuse) as reused:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                    results = list(executor.map(
+                        lambda queued: convert_reader_assets.convert_item(queued, Path(root), reusable),
+                        [item, {**item, "key": "VoiceOfML/Test\0Two.djvu"}],
+                    ))
+        self.assertEqual(reused.call_count, 1)
+        self.assertTrue(all(result["reused"] for result in results))
+
     def test_office_pdf_requires_embedded_fonts_and_extractable_cjk(self):
         item = {"path": "目录/中文.docx"}
         with patch.object(convert_reader_assets, "embedded_pdf_fonts", return_value=["NotoSansCJK"]), \
@@ -416,6 +497,115 @@ class PublicationTests(unittest.TestCase):
         self.assertEqual(manifest["files"][key], existing)
         self.assertEqual(len(operations), 2)
 
+    def test_publish_removes_inactive_mapping_and_marks_orphan(self):
+        removed_key = "VoiceOfML/Test\0Old/Book.djvu"
+        existing = {
+            "status": "ready", "source_revision": "rev1", "source_sha256": "a" * 64,
+            "source_extension": "djvu", "profile": "djvulibre-pdf-v1", "reader_mode": "pdf",
+            "path": "objects/aa/document.pdf", "bytes": 10, "sha256": "b" * 64,
+        }
+        api = Mock()
+        api.file_exists.return_value = True
+        with tempfile.TemporaryDirectory() as root:
+            remote = Path(root) / "remote.json"
+            remote.write_text(json.dumps({"version": 1, "files": {removed_key: existing}}), encoding="utf-8")
+            api.hf_hub_download.return_value = str(remote)
+            bundle = Path(root) / "bundle"
+            bundle.mkdir()
+            (bundle / "bundle.json").write_text(json.dumps({
+            "version": 1, "results": [], "active_keys": ["VoiceOfML/Test\0Other.djvu"],
+            "authoritative_snapshot": True,
+            }), encoding="utf-8")
+            manifest, operations = publish_reader_assets.build_publish(api, "vomebook/Test", bundle)
+
+        self.assertNotIn(removed_key, manifest["files"])
+        self.assertEqual(manifest["orphans"][existing["path"]]["since"], date.today().isoformat())
+        self.assertEqual(len(operations), 2)
+
+    def test_empty_active_key_snapshot_removes_all_mappings(self):
+        key = "VoiceOfML/Test\0Deleted.djvu"
+        existing = {"status": "ready", "path": "objects/deleted", "source_sha256": "a" * 64}
+        api = Mock()
+        api.file_exists.return_value = True
+        with tempfile.TemporaryDirectory() as root:
+            remote = Path(root) / "remote.json"
+            remote.write_text(json.dumps({"version": 1, "files": {key: existing}}), encoding="utf-8")
+            api.hf_hub_download.return_value = str(remote)
+            bundle = Path(root) / "bundle"
+            bundle.mkdir()
+            (bundle / "bundle.json").write_text(json.dumps({
+                "version": 1, "results": [], "active_keys": [], "authoritative_snapshot": True,
+            }), encoding="utf-8")
+            manifest, _ = publish_reader_assets.build_publish(api, "vomebook/Test", bundle)
+        self.assertEqual(manifest["files"], {})
+        self.assertIn(existing["path"], manifest["orphans"])
+
+    def test_reused_result_restores_orphan_without_upload(self):
+        path = "objects/aa/document.pdf"
+        result = {
+            "key": "VoiceOfML/Test\0Moved.djvu", "status": "ready", "source_revision": "rev2",
+            "source_sha256": "a" * 64, "source_bytes": 10, "source_extension": "djvu",
+            "profile": "djvulibre-pdf-v1", "reader_mode": "pdf", "path": path,
+            "bytes": len(b"%PDF-reused"), "sha256": hashlib.sha256(b"%PDF-reused").hexdigest(),
+            "reused": True,
+        }
+        api = Mock()
+        api.file_exists.return_value = True
+        with tempfile.TemporaryDirectory() as root:
+            remote = Path(root) / "remote.json"
+            remote.write_text(json.dumps({"version": 1, "files": {}, "orphans": {
+                path: {**result, "since": "2026-01-01"},
+            }}), encoding="utf-8")
+            api.hf_hub_download.return_value = str(remote)
+            bundle = Path(root) / "bundle"
+            artifact = bundle / path
+            artifact.parent.mkdir(parents=True)
+            artifact.write_bytes(b"%PDF-reused")
+            (bundle / "bundle.json").write_text(json.dumps({
+                "version": 1, "results": [result], "active_keys": [result["key"]],
+                "authoritative_snapshot": True,
+            }), encoding="utf-8")
+            manifest, operations = publish_reader_assets.build_publish(api, "vomebook/Test", bundle)
+
+        self.assertNotIn(path, manifest["orphans"])
+        self.assertEqual(manifest["files"][result["key"]]["path"], path)
+        self.assertEqual(len(operations), 2)
+
+    def test_legacy_bundle_without_authoritative_marker_never_removes_mappings(self):
+        key = "VoiceOfML/Test\0Keep.djvu"
+        existing = {"status": "ready", "path": "objects/keep", "reader_mode": "pdf"}
+        api = Mock()
+        api.file_exists.return_value = True
+        with tempfile.TemporaryDirectory() as root:
+            remote = Path(root) / "remote.json"
+            remote.write_text(json.dumps({"version": 1, "files": {key: existing}}), encoding="utf-8")
+            api.hf_hub_download.return_value = str(remote)
+            bundle = Path(root) / "bundle"
+            bundle.mkdir()
+            (bundle / "bundle.json").write_text(json.dumps({
+                "version": 1, "results": [], "active_keys": [],
+            }), encoding="utf-8")
+            manifest, _ = publish_reader_assets.build_publish(api, "vomebook/Test", bundle)
+        self.assertEqual(manifest["files"][key], existing)
+
+    def test_replacing_ready_mapping_marks_old_object_orphan(self):
+        key = "VoiceOfML/Test\0Changed.djvu"
+        previous = {"status": "ready", "path": "objects/old", "source_sha256": "a" * 64}
+        result = {
+            "key": key, "status": "ready", "source_revision": "rev2", "source_sha256": "b" * 64,
+            "source_bytes": 12, "source_extension": "djvu", "profile": "djvulibre-pdf-v1",
+            "reader_mode": "pdf", "path": "objects/new",
+        }
+        api = Mock()
+        api.file_exists.return_value = True
+        with tempfile.TemporaryDirectory() as root:
+            remote = Path(root) / "remote.json"
+            remote.write_text(json.dumps({"version": 1, "files": {key: previous}}), encoding="utf-8")
+            api.hf_hub_download.return_value = str(remote)
+            bundle = self.make_bundle(root + "/bundle", result)
+            manifest, _ = publish_reader_assets.build_publish(api, "vomebook/Test", bundle)
+        self.assertIn(previous["path"], manifest["orphans"])
+
     def test_sidecar_is_compact_and_deterministic(self):
         manifest = {"version": 1, "files": {
             "b": {"status": "failed"},
@@ -469,6 +659,36 @@ class SearchIndexPublicationTests(unittest.TestCase):
         )
 
 
+class PruneTests(unittest.TestCase):
+    def test_only_unreferenced_orphans_past_grace_period_expire(self):
+        manifest = {"version": 1, "files": {
+            "live": {"status": "ready", "path": "objects/live"},
+        }, "orphans": {
+            "objects/old": {"since": "2026-06-01"},
+            "objects/new": {"since": "2026-08-20"},
+            "objects/live": {"since": "2026-01-01"},
+            "objects/invalid": {"since": "unknown"},
+        }}
+        self.assertEqual(
+            prune_reader_assets.expired_orphans(manifest, date(2026, 8, 26), 30, 100),
+            ["objects/old"],
+        )
+
+    def test_prune_deletes_objects_and_republishes_manifest_and_sidecar(self):
+        manifest = {"version": 1, "files": {}, "orphans": {
+            "objects/old": {"since": "2026-01-01"},
+            "objects/keep": {"since": "2026-08-20"},
+        }}
+        updated, operations = prune_reader_assets.build_prune(manifest, ["objects/old"])
+        self.assertNotIn("objects/old", updated["orphans"])
+        self.assertIn("objects/keep", updated["orphans"])
+        self.assertEqual(
+            {operation.path_in_repo for operation in operations},
+            {"objects/old", "manifest.json", "reader_assets.json.gz"},
+        )
+        self.assertEqual(sum(isinstance(operation, CommitOperationDelete) for operation in operations), 1)
+
+
 class WorkflowContractTests(unittest.TestCase):
     def test_workflow_exposes_incremental_controls_and_excludes_pdg(self):
         workflow = Path(".github/workflows/reader-assets.yml").read_text(encoding="utf-8")
@@ -493,10 +713,20 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("steps.scan.outputs.extension == 'djvu'", workflow)
         self.assertIn('args=(--repo "${SOURCE_REPO}" --extension "${EXTENSION}"', workflow)
         self.assertIn('max_batches=1', workflow)
+        self.assertIn('queue["items"] = items', workflow)
+        self.assertIn("stale_count", workflow)
+        self.assertIn("if: inputs.dry_run != true", workflow)
         self.assertLess(
             workflow.index("python scripts/publish_reader_assets.py"),
             workflow.index("done\n"),
         )
+
+    def test_prune_workflow_uses_shared_concurrency_and_bounded_grace(self):
+        workflow = Path(".github/workflows/prune-reader-assets.yml").read_text(encoding="utf-8")
+        self.assertIn("group: reader-assets", workflow)
+        self.assertIn('default: "30"', workflow)
+        self.assertIn('default: "100"', workflow)
+        self.assertIn("python scripts/prune_reader_assets.py", workflow)
 
 
 if __name__ == "__main__":

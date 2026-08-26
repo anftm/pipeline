@@ -31,6 +31,8 @@ def validate_manifest(manifest: dict) -> dict:
         raise ValueError("unsupported reader manifest version")
     if not isinstance(manifest.get("files"), dict):
         raise ValueError("reader manifest files must be an object")
+    if "orphans" in manifest and not isinstance(manifest["orphans"], dict):
+        raise ValueError("reader manifest orphans must be an object")
     return manifest
 
 

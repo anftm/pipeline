@@ -88,13 +88,16 @@ jobs:
           python scripts/scan_reader_assets.py "${args[@]}"
           python - <<'PY'
           import json, os
-          items = json.load(open("output/reader-assets/queue.json", encoding="utf-8"))["items"]
+          queue = json.load(open("output/reader-assets/queue.json", encoding="utf-8"))
+          items = queue["items"]
           extension = items[0]["extension"] if items else ""
           items = [item for item in items if item["extension"] == extension]
-          json.dump({"version": 1, "items": items}, open("output/reader-assets/queue.json", "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+          queue["items"] = items
+          json.dump(queue, open("output/reader-assets/queue.json", "w", encoding="utf-8"), ensure_ascii=False, indent=2)
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               output.write(f"extension={extension}\n")
               output.write(f"count={len(items)}\n")
+              output.write(f"stale_count={len(queue.get('stale_keys', []))}\n")
           PY
       - name: Install conversion tools
         if: inputs.dry_run != true && steps.scan.outputs.count != '0'
@@ -132,7 +135,13 @@ jobs:
           RETRY_FAILED: ${{ inputs.retry_failed || 'false' }}
           FORCE_REBUILD: ${{ inputs.force || 'false' }}
         run: |
-          [[ -z "${EXTENSION}" ]] && exit 0
+          if [[ -z "${EXTENSION}" ]]; then
+            if [[ "${{ steps.scan.outputs.stale_count }}" != "0" ]]; then
+              python scripts/convert_reader_assets.py
+              python scripts/publish_reader_assets.py
+            fi
+            exit 0
+          fi
           max_batches="${CHECKPOINT_BATCHES}"
           if [[ "${RETRY_FAILED}" == "true" || "${FORCE_REBUILD}" == "true" || -n "${SOURCE_PATH}" ]]; then
             max_batches=1
@@ -151,7 +160,7 @@ jobs:
             python scripts/publish_reader_assets.py
           done
       - name: Publish sidecar to GitHub Pages
-        if: inputs.dry_run != true && steps.scan.outputs.count != '0'
+        if: inputs.dry_run != true
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           PAGES_TOKEN: ${{ secrets.PAGES_TOKEN }}

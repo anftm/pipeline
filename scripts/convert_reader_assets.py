@@ -29,6 +29,7 @@ OLE_SIGNATURE = bytes.fromhex("d0cf11e0a1b11ae1")
 MIN_PAGE_CONTENT_RATIO = 0.0005
 COMMAND_TIMEOUT_SECONDS = int(os.environ.get("READER_CONVERSION_COMMAND_TIMEOUT", "120"))
 CONVERSION_WORKERS = max(1, int(os.environ.get("READER_CONVERSION_WORKERS", "1")))
+READER_ASSETS_REPO = os.environ.get("READER_ASSETS_REPO", "vomebook/Reader-Assets")
 ARTIFACT_LOCKS = {}
 ARTIFACT_LOCKS_GUARD = threading.Lock()
 
@@ -44,6 +45,17 @@ def download_source(url: str, target: Path) -> tuple[str, int]:
             digest.update(chunk)
             output.write(chunk)
     return digest.hexdigest(), size
+
+
+def download_existing(url: str, target: Path, expected_sha256: str) -> None:
+    temporary = target.with_name(f".{target.name}.download")
+    try:
+        digest, _ = download_source(url, temporary)
+        if digest != expected_sha256:
+            raise RuntimeError("reusable reader artifact digest mismatch")
+        temporary.replace(target)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def file_sha256(path: Path) -> str:
@@ -283,32 +295,43 @@ def validate_office_pdf(path: Path, item: dict, work: Path, source: Path | None 
         validate_output(path, "pdf")
 
 
-def convert_item(item: dict, bundle: Path) -> dict:
+def convert_item(item: dict, bundle: Path, reusable: dict | None = None) -> dict:
     with tempfile.TemporaryDirectory(prefix="reader-convert-") as root:
         work = Path(root)
         source = work / f"source.{item['extension']}"
         digest, source_bytes = download_source(item["source_url"], source)
-        object_path = f"objects/{digest[:2]}/{digest}/{item['profile']}/{item['output_name']}"
+        existing = (reusable or {}).get(f"{digest}\0{item['profile']}")
+        object_path = existing["path"] if existing else f"objects/{digest[:2]}/{digest}/{item['profile']}/{item['output_name']}"
         target = bundle / object_path
         target.parent.mkdir(parents=True, exist_ok=True)
+        reused = existing is not None
         with artifact_lock(target):
             if not target.exists():
-                temporary = work / item["output_name"]
-                convert_file(item, source, temporary, work)
-                validate_output(temporary, item["reader_mode"])
-                if item["extension"] == "djvu":
-                    validate_djvu_pdf(temporary, work)
-                if item["extension"] in {"doc", "docx"} and item["reader_mode"] == "pdf":
-                    validate_office_pdf(temporary, item, work, source)
-                shutil.move(temporary, target)
+                if existing:
+                    asset_url = f"https://huggingface.co/datasets/{READER_ASSETS_REPO}/resolve/main/{existing['path']}"
+                    download_existing(asset_url, target, existing["sha256"])
+                    if target.stat().st_size != existing["bytes"]:
+                        raise RuntimeError("reusable reader artifact size mismatch")
+                    validate_output(target, item["reader_mode"])
+                else:
+                    temporary = work / item["output_name"]
+                    convert_file(item, source, temporary, work)
+                    validate_output(temporary, item["reader_mode"])
+                    if item["extension"] == "djvu":
+                        validate_djvu_pdf(temporary, work)
+                    if item["extension"] in {"doc", "docx"} and item["reader_mode"] == "pdf":
+                        validate_office_pdf(temporary, item, work, source)
+                    shutil.move(temporary, target)
             else:
                 validate_output(target, item["reader_mode"])
+                if existing and file_sha256(target) != existing["sha256"]:
+                    raise RuntimeError("reusable reader artifact digest mismatch")
         return {
             "key": item["key"], "status": "ready", "source_revision": item["source_revision"],
             "source_sha256": digest, "source_bytes": source_bytes,
             "source_extension": item["extension"], "profile": item["profile"],
             "reader_mode": item["reader_mode"], "path": object_path, "bytes": target.stat().st_size,
-            "sha256": file_sha256(target),
+            "sha256": file_sha256(target), "reused": reused,
         }
 
 
@@ -322,7 +345,9 @@ def parse_args():
 
 def main() -> int:
     args = parse_args()
-    queue = load_json(args.queue).get("items", [])
+    queue_data = load_json(args.queue)
+    queue = queue_data.get("items", [])
+    reusable = queue_data.get("objects", {})
     if args.bundle.exists():
         shutil.rmtree(args.bundle)
     args.bundle.mkdir(parents=True)
@@ -332,7 +357,7 @@ def main() -> int:
     else:
         def convert(item):
             try:
-                return convert_item(item, args.bundle)
+                return convert_item(item, args.bundle, reusable)
             except Exception as exc:
                 print(f"failed: {item['repo']}/{item['path']}: {exc}")
                 return {
@@ -342,7 +367,14 @@ def main() -> int:
                 }
         with concurrent.futures.ThreadPoolExecutor(max_workers=CONVERSION_WORKERS) as executor:
             results.extend(executor.map(convert, queue))
-    (args.bundle / "bundle.json").write_bytes(canonical_json({"version": 1, "results": results}, pretty=True))
+    bundle_data = {
+        "version": 1,
+        "results": results,
+    }
+    if queue_data.get("authoritative_snapshot") is True:
+        bundle_data["active_keys"] = queue_data.get("active_keys", [])
+        bundle_data["authoritative_snapshot"] = True
+    (args.bundle / "bundle.json").write_bytes(canonical_json(bundle_data, pretty=True))
     failed = sum(item["status"] == "failed" for item in results)
     print(f"converted {len(results) - failed}; failed {failed}")
     return 0

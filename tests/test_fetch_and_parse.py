@@ -76,6 +76,27 @@ class FetchAndParseTests(unittest.TestCase):
             self.assertEqual(action_output.read_text(encoding="utf-8"), "data_changed=false\n")
             self.assertEqual(json.loads(state_file.read_text(encoding="utf-8")), original_state)
 
+    def test_main_stops_when_a_source_catalog_is_unavailable(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_path = Path(temporary)
+            state_file = temporary_path / "commits.json"
+            output_file = temporary_path / "search.json"
+            state_file.write_text(json.dumps({repo: "old-sha" for repo in self.module.REPOS}), encoding="utf-8")
+
+            def get_text(url, _token):
+                return "" if self.module.REPOS[0] in url else "A docx\n"
+
+            with patch.object(self.module, "STATE_FILE", state_file), \
+                 patch.object(self.module, "OUTPUT_FILE", output_file), \
+                 patch.object(self.module, "get_repo_sha", return_value="new-sha"), \
+                 patch.object(self.module, "http_get_text", side_effect=get_text), \
+                 patch.object(self.module, "batch_get_sizes", return_value={}), \
+                 patch.dict(os.environ, {"FORCE_SYNC": "true"}, clear=True):
+                result = self.module.main()
+
+            self.assertEqual(result, 1)
+            self.assertFalse(output_file.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

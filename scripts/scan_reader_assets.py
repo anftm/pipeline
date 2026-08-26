@@ -34,7 +34,7 @@ def remote_manifest(api: HfApi, repo_id: str) -> dict:
 
 
 def build_queue(records, revisions, manifest, *, repo="", extension="", exact_path="", limit=0,
-                 retry_failed=False, force=False) -> list[dict]:
+                  retry_failed=False, force=False) -> list[dict]:
     selected = []
     extension = extension.lower().lstrip(".")
     files = manifest.get("files", {})
@@ -71,6 +71,33 @@ def build_queue(records, revisions, manifest, *, repo="", extension="", exact_pa
     return selected[:limit] if limit > 0 else selected
 
 
+def active_keys(records) -> list[str]:
+    keys = []
+    for record in records:
+        repo = str(record.get("Repo") or "")
+        extension = str(record.get("Extension") or "").lower().lstrip(".")
+        if extension in CONVERTIBLE_EXTENSIONS:
+            keys.append(asset_key(repo, relative_path(record)))
+    return sorted(set(keys))
+
+
+def reusable_objects(manifest: dict) -> dict:
+    objects = {}
+    entries = list(manifest.get("files", {}).values()) + list(manifest.get("orphans", {}).values())
+    for entry in entries:
+        if (entry.get("status", "ready") != "ready" or not entry.get("source_sha256")
+                or not entry.get("path") or not entry.get("sha256")
+                or not isinstance(entry.get("bytes"), int) or entry["bytes"] <= 0
+                or not entry.get("reader_mode")):
+            continue
+        key = f"{entry['source_sha256']}\0{entry.get('profile', '')}"
+        objects[key] = {
+            field: entry[field]
+            for field in ("path", "bytes", "sha256", "reader_mode") if field in entry
+        }
+    return dict(sorted(objects.items()))
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--search-data", type=Path, default=Path("output/search_data.json"))
@@ -100,7 +127,15 @@ def main() -> int:
     queue = build_queue(records, revisions, manifest, repo=args.repo, extension=args.extension, exact_path=args.path,
                         limit=args.limit, retry_failed=args.retry_failed, force=args.force)
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_bytes(canonical_json({"version": 1, "items": queue}, pretty=True))
+    current_keys = active_keys(records)
+    args.output.write_bytes(canonical_json({
+        "version": 1,
+        "items": queue,
+        "active_keys": current_keys,
+        "stale_keys": sorted(set(manifest.get("files", {})) - set(current_keys)),
+        "objects": reusable_objects(manifest),
+        "authoritative_snapshot": not bool(repo or extension or exact_path),
+    }, pretty=True))
     print(f"queued {len(queue)} reader asset conversion(s)")
     return 0
 
