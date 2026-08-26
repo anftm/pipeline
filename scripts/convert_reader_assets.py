@@ -13,10 +13,13 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import urllib.error
 import urllib.request
 import urllib.parse
 import zipfile
 import os
+import posixpath
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from PIL import Image, ImageSequence
@@ -35,6 +38,9 @@ PASSWORD_RE = re.compile(r"(?:密码|password)\s*[：:]\s*([^\]〕】）)\s]+)",
 OLE_SIGNATURE = bytes.fromhex("d0cf11e0a1b11ae1")
 MIN_PAGE_CONTENT_RATIO = 0.0005
 COMMAND_TIMEOUT_SECONDS = int(os.environ.get("READER_CONVERSION_COMMAND_TIMEOUT", "120"))
+DJVU_COMMAND_TIMEOUT_SECONDS = int(os.environ.get(
+    "READER_DJVU_COMMAND_TIMEOUT", str(max(600, COMMAND_TIMEOUT_SECONDS)),
+))
 CONVERSION_WORKERS = max(1, int(os.environ.get("READER_CONVERSION_WORKERS", "1")))
 READER_ASSETS_REPO = os.environ.get("READER_ASSETS_REPO", "vomebook/Reader-Assets")
 ARTIFACT_LOCKS = {}
@@ -189,13 +195,33 @@ def artifact_lock(path: Path) -> threading.Lock:
         return ARTIFACT_LOCKS.setdefault(str(path), threading.Lock())
 
 
-def run_checked(command: list[str]) -> None:
+class ReaderConversionTimeout(RuntimeError):
+    pass
+
+
+class ReaderConversionCommandError(RuntimeError):
+    pass
+
+
+def conversion_error_class(exc: Exception) -> str:
+    if isinstance(exc, ReaderConversionTimeout):
+        return "conversion-timeout"
+    if isinstance(exc, ReaderConversionCommandError):
+        return "conversion-command-failed"
+    if isinstance(exc, urllib.error.URLError):
+        return "source-download-failed"
+    return type(exc).__name__
+
+
+def run_checked(command: list[str], *, timeout_seconds: int | None = None) -> None:
+    timeout_seconds = COMMAND_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=COMMAND_TIMEOUT_SECONDS)
+        result = subprocess.run(command, capture_output=True, text=True, timeout=timeout_seconds)
     except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(f"conversion command timed out: {Path(command[0]).name}") from exc
+        raise ReaderConversionTimeout(f"conversion command timed out: {Path(command[0]).name}") from exc
     if result.returncode:
-        raise RuntimeError(f"conversion command failed: {Path(command[0]).name}: {result.stderr[-500:]}")
+        detail = result.stderr.strip().replace("\n", " ")[-500:]
+        raise ReaderConversionCommandError(f"conversion command failed: {Path(command[0]).name}: {detail}")
 
 
 def command_output(command: list[str]) -> str:
@@ -354,12 +380,12 @@ def convert_file(item: dict, source: Path, target: Path, work: Path) -> None:
                 shutil.move(produced, target)
             else:
                 raise
-    elif ext in {"mobi", "azw3"}:
+    elif ext in {"mobi", "azw3", "chm"}:
         run_checked(["ebook-convert", str(source), str(target), "--flow-size", "0"])
     elif ext in {"tif", "tiff"}:
         convert_tiff(source, target, work)
     elif ext == "djvu":
-        run_checked(["ddjvu", "-format=pdf", str(source), str(target)])
+        run_checked(["ddjvu", "-format=pdf", str(source), str(target)], timeout_seconds=DJVU_COMMAND_TIMEOUT_SECONDS)
     else:
         raise ValueError(f"unsupported conversion extension: {ext}")
 
@@ -400,6 +426,48 @@ def validate_output(path: Path, reader_mode: str) -> None:
                 raise RuntimeError("DOCX document body is empty")
 
 
+def validate_chm_epub(path: Path) -> None:
+    with zipfile.ZipFile(path) as archive:
+        try:
+            container = ET.fromstring(archive.read("META-INF/container.xml"))
+            rootfile = container.find(".//{*}rootfile")
+            opf_path = rootfile.attrib["full-path"]
+            package = ET.fromstring(archive.read(opf_path))
+        except (KeyError, ET.ParseError, AttributeError) as exc:
+            raise RuntimeError("converted CHM EPUB has no package document") from exc
+
+        manifest = {
+            item.attrib.get("id"): item
+            for item in package.findall(".//{*}manifest/{*}item")
+            if item.attrib.get("id")
+        }
+        spine = [item.attrib.get("idref") for item in package.findall(".//{*}spine/{*}itemref")]
+        if not spine:
+            raise RuntimeError("converted CHM EPUB has no spine")
+
+        readable = False
+        base = posixpath.dirname(opf_path)
+        for idref in spine:
+            item = manifest.get(idref)
+            if item is None or not item.attrib.get("href"):
+                raise RuntimeError("converted CHM EPUB has an invalid spine reference")
+            href = urllib.parse.unquote(item.attrib["href"].split("#", 1)[0])
+            document_path = posixpath.normpath(posixpath.join(base, href))
+            try:
+                document = archive.read(document_path).decode("utf-8", "replace")
+            except KeyError as exc:
+                raise RuntimeError("converted CHM EPUB spine document is missing") from exc
+            if re.search(r"<(?:script|object|embed|iframe)\b", document, re.IGNORECASE):
+                raise RuntimeError("converted CHM EPUB contains active content")
+            if re.search(r"\b(?:src|poster)\s*=\s*[\"']\s*(?:https?:)?//", document, re.IGNORECASE):
+                raise RuntimeError("converted CHM EPUB contains an external embedded resource")
+            text = html.unescape(re.sub(r"<[^>]+>", " ", document))
+            if len(re.sub(r"\s+", "", text)) >= 20 or re.search(r"<(?:img|svg)\b", document, re.IGNORECASE):
+                readable = True
+        if not readable:
+            raise RuntimeError("converted CHM EPUB has no readable content")
+
+
 def validate_office_pdf(path: Path, item: dict, work: Path, source: Path | None = None) -> None:
     text = command_output(["pdftotext", str(path), "-"])
     has_cjk_path = bool(CJK_RE.search(item.get("path", "")))
@@ -437,10 +505,14 @@ def convert_item(item: dict, bundle: Path, reusable: dict | None = None) -> dict
                     if target.stat().st_size != existing["bytes"]:
                         raise RuntimeError("reusable reader artifact size mismatch")
                     validate_output(target, item["reader_mode"])
+                    if item["extension"] == "chm":
+                        validate_chm_epub(target)
                 else:
                     temporary = work / item["output_name"]
                     convert_file(item, source, temporary, work)
                     validate_output(temporary, item["reader_mode"])
+                    if item["extension"] == "chm":
+                        validate_chm_epub(temporary)
                     if item["extension"] == "djvu":
                         validate_djvu_pdf(temporary, work)
                     if item["extension"] in {"doc", "docx", "htm", "html"} and item["reader_mode"] == "pdf":
@@ -448,6 +520,8 @@ def convert_item(item: dict, bundle: Path, reusable: dict | None = None) -> dict
                     shutil.move(temporary, target)
             else:
                 validate_output(target, item["reader_mode"])
+                if item["extension"] == "chm":
+                    validate_chm_epub(target)
                 if existing and file_sha256(target) != existing["sha256"]:
                     raise RuntimeError("reusable reader artifact digest mismatch")
         return {
@@ -487,7 +561,7 @@ def main() -> int:
                 return {
                     "key": item["key"], "status": "failed", "source_revision": item["source_revision"],
                     "source_extension": item["extension"], "profile": item["profile"],
-                    "error": type(exc).__name__,
+                    "error": conversion_error_class(exc),
                 }
         with concurrent.futures.ThreadPoolExecutor(max_workers=CONVERSION_WORKERS) as executor:
             results.extend(executor.map(convert, queue))

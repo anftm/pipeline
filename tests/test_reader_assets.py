@@ -4,6 +4,7 @@ import hashlib
 import json
 import tempfile
 import unittest
+import urllib.error
 import zipfile
 from datetime import date
 from pathlib import Path
@@ -22,7 +23,7 @@ class ReaderAssetContractTests(unittest.TestCase):
     def test_first_conversion_set_excludes_pdg(self):
         self.assertEqual(
             set(reader_assets.CONVERTIBLE_EXTENSIONS),
-            {"doc", "docx", "htm", "html", "mobi", "azw3", "tif", "tiff", "djvu"},
+            {"doc", "docx", "htm", "html", "mobi", "azw3", "chm", "tif", "tiff", "djvu"},
         )
 
     def test_source_url_pins_revision_and_encodes_path(self):
@@ -40,6 +41,7 @@ class ReaderAssetContractTests(unittest.TestCase):
             "html": ("sanitized-html-v2", "html", "document.html"),
             "mobi": ("calibre-epub-v1", "epub", "book.epub"),
             "azw3": ("calibre-epub-v1", "epub", "book.epub"),
+            "chm": ("calibre-chm-epub-v1", "epub", "book.epub"),
             "tif": ("pillow-pdf-v1", "pdf", "document.pdf"),
             "tiff": ("pillow-pdf-v1", "pdf", "document.pdf"),
             "djvu": ("djvulibre-pdf-v1", "pdf", "document.pdf"),
@@ -191,6 +193,7 @@ class ConverterTests(unittest.TestCase):
             self.assertEqual(run.call_args.args[0], [
                 "ddjvu", "-format=pdf", str(source), str(target),
             ])
+            self.assertEqual(run.call_args.kwargs["timeout_seconds"], convert_reader_assets.DJVU_COMMAND_TIMEOUT_SECONDS)
 
     def test_mobi_conversion_keeps_large_unsplittable_flows(self):
         with tempfile.TemporaryDirectory() as root:
@@ -213,6 +216,34 @@ class ConverterTests(unittest.TestCase):
             self.assertEqual(run.call_args.args[0], [
                 "ebook-convert", str(source), str(target), "--flow-size", "0",
             ])
+
+    def test_chm_conversion_uses_calibre_epub_output(self):
+        with tempfile.TemporaryDirectory() as root:
+            work = Path(root)
+            source, target = work / "source.chm", work / "book.epub"
+            source.write_bytes(b"ITSF")
+            with patch.object(convert_reader_assets, "run_checked") as run:
+                convert_reader_assets.convert_file({"extension": "chm"}, source, target, work)
+            self.assertEqual(run.call_args.args[0], [
+                "ebook-convert", str(source), str(target), "--flow-size", "0",
+            ])
+
+    def test_chm_epub_validation_requires_readable_safe_spine(self):
+        with tempfile.TemporaryDirectory() as root:
+            epub = Path(root) / "book.epub"
+            def write_epub(document):
+                with zipfile.ZipFile(epub, "w") as archive:
+                    archive.writestr("mimetype", "application/epub+zip")
+                    archive.writestr("META-INF/container.xml", """<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>""")
+                    archive.writestr("OEBPS/content.opf", """<package xmlns="http://www.idpf.org/2007/opf"><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="chapter"/></spine></package>""")
+                    archive.writestr("OEBPS/chapter.xhtml", document)
+
+            write_epub("<html><body><p>这是可以正常阅读的中文 CHM 转换正文内容。</p></body></html>")
+            convert_reader_assets.validate_chm_epub(epub)
+
+            write_epub("<html><body><script>alert(1)</script></body></html>")
+            with self.assertRaisesRegex(RuntimeError, "active content"):
+                convert_reader_assets.validate_chm_epub(epub)
 
     def test_validation_rejects_malformed_outputs_for_each_active_container(self):
         with tempfile.TemporaryDirectory() as root:
@@ -389,6 +420,14 @@ class ConverterTests(unittest.TestCase):
         with patch.object(convert_reader_assets.subprocess, "run", side_effect=convert_reader_assets.subprocess.TimeoutExpired("libreoffice", convert_reader_assets.COMMAND_TIMEOUT_SECONDS)):
             with self.assertRaisesRegex(RuntimeError, "timed out: libreoffice"):
                 convert_reader_assets.run_checked(["libreoffice", "--headless"])
+
+    def test_conversion_failures_use_stable_public_classes(self):
+        self.assertEqual(convert_reader_assets.conversion_error_class(
+            convert_reader_assets.ReaderConversionTimeout("timeout")), "conversion-timeout")
+        self.assertEqual(convert_reader_assets.conversion_error_class(
+            convert_reader_assets.ReaderConversionCommandError("failed")), "conversion-command-failed")
+        self.assertEqual(convert_reader_assets.conversion_error_class(
+            urllib.error.URLError("offline")), "source-download-failed")
 
     def test_conversion_workers_are_bounded(self):
         self.assertGreaterEqual(convert_reader_assets.CONVERSION_WORKERS, 1)
@@ -824,13 +863,14 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("tesseract-ocr-chi-sim", workflow)
         self.assertIn("djvulibre-bin", workflow)
         self.assertIn("doc, docx, htm, html, mobi", workflow)
+        self.assertIn("azw3, chm, tif", workflow)
         self.assertIn("htm|html) packages=()", workflow)
         self.assertIn('cron: "17 * * * *"', workflow)
         self.assertIn("inputs.limit || '20'", workflow)
         self.assertIn("inputs.checkpoint_batches || '30'", workflow)
         self.assertIn("python scripts/publish_reader_assets.py", workflow)
         self.assertIn("packages=(djvulibre-bin poppler-utils)", workflow)
-        self.assertIn("packages=(calibre)", workflow)
+        self.assertIn("mobi|azw3|chm) packages=(calibre)", workflow)
         self.assertIn("tif|tiff) packages=(poppler-utils)", workflow)
         self.assertIn("READER_CONVERSION_WORKERS:", workflow)
         self.assertIn("steps.scan.outputs.extension == 'djvu'", workflow)

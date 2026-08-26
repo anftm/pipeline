@@ -11,7 +11,7 @@ on:
         default: ""
         type: string
       extension:
-        description: doc, docx, htm, html, mobi, azw3, tif, tiff, djvu, or blank for all
+        description: doc, docx, htm, html, mobi, azw3, chm, tif, tiff, djvu, or blank for all
         required: false
         default: ""
         type: string
@@ -108,7 +108,7 @@ jobs:
           case "${EXTENSION}" in
             doc|docx) packages=(libreoffice fontconfig fonts-noto-cjk fonts-wqy-microhei ghostscript poppler-utils tesseract-ocr tesseract-ocr-chi-sim) ;;
             htm|html) packages=() ;;
-            mobi|azw3) packages=(calibre) ;;
+            mobi|azw3|chm) packages=(calibre) ;;
             djvu) packages=(djvulibre-bin poppler-utils) ;;
             tif|tiff) packages=(poppler-utils) ;;
             *) echo "Unsupported queued extension: ${EXTENSION}" >&2; exit 1 ;;
