@@ -83,6 +83,12 @@ class ReaderAssetContractTests(unittest.TestCase):
         self.assertEqual(reader_assets.source_password(
             "VoiceOfML/MLMRL-Library", "基础入门书单/入门答疑/风正集.pdf",
         ), "230505")
+        self.assertEqual(reader_assets.source_password(
+            "VoiceOfML/MLMRL-Hub", "000269/1870520043_3072_风正集230220.pdf",
+        ), "230220")
+        self.assertEqual(reader_assets.source_password(
+            "VoiceOfML/MLMRL-Hub", "001346/1870520043_15344_风正集230123.pdf",
+        ), "230123")
         self.assertEqual(reader_assets.source_password("repo", "密码学原理.pdf"), "")
 
     def test_only_known_password_pdfs_have_a_conversion_contract(self):
