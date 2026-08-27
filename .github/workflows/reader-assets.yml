@@ -50,11 +50,6 @@ on:
         required: false
         default: "120"
         type: string
-      source_password:
-        description: Temporary password for one encrypted Office source; never persisted
-        required: false
-        default: ""
-        type: string
 
 concurrency:
   group: reader-assets
@@ -152,7 +147,7 @@ jobs:
           RETRY_FAILED: ${{ inputs.retry_failed || 'false' }}
           FORCE_REBUILD: ${{ inputs.force || 'false' }}
           CAJ2PDF_DIR: /opt/caj2pdf
-          READER_CONVERSION_PASSWORD: ${{ inputs.source_password || '' }}
+          READER_CONVERSION_PASSWORD: ${{ secrets.READER_CONVERSION_PASSWORD }}
         run: |
           if [[ -z "${EXTENSION}" ]]; then
             if [[ "${{ steps.scan.outputs.stale_count }}" != "0" ]]; then
