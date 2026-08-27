@@ -492,6 +492,10 @@ def convert_caj_family(source: Path, target: Path, work: Path) -> None:
     converter = CAJ2PDF_DIR / "caj2pdf"
     if not converter.is_file():
         raise RuntimeError("pinned caj2pdf converter is unavailable")
+    for library in ("libjbigdec.so", "libjbig2codec.so"):
+        source_library = CAJ2PDF_DIR / library
+        if source_library.is_file():
+            shutil.copyfile(source_library, work / library)
     run_checked(["python3", str(converter), "convert", str(source), "--output", str(target)], cwd=work)
 
 

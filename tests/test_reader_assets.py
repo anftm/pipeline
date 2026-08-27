@@ -441,11 +441,15 @@ aW1hZ2U=
             converter = work / "caj2pdf" / "caj2pdf"
             converter.parent.mkdir()
             converter.write_text("converter", encoding="utf-8")
+            (converter.parent / "libjbigdec.so").write_bytes(b"jbig")
+            (converter.parent / "libjbig2codec.so").write_bytes(b"jbig2")
             with patch.object(convert_reader_assets, "CAJ2PDF_DIR", converter.parent), \
                     patch.object(convert_reader_assets, "run_checked") as run:
                 convert_reader_assets.convert_caj_family(source, target, work)
             self.assertEqual(run.call_args.args[0], ["python3", str(converter), "convert", str(source), "--output", str(target)])
             self.assertEqual(run.call_args.kwargs["cwd"], work)
+            self.assertEqual((work / "libjbigdec.so").read_bytes(), b"jbig")
+            self.assertEqual((work / "libjbig2codec.so").read_bytes(), b"jbig2")
 
     def test_kdh_extraction_decrypts_embedded_pdf_before_repair(self):
         with tempfile.TemporaryDirectory() as root:
@@ -1271,8 +1275,10 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("tif|tiff) packages=(poppler-utils)", workflow)
         self.assertIn("mht|mhtml) packages=()", workflow)
         self.assertIn("ps) packages=(ghostscript poppler-utils)", workflow)
-        self.assertIn("caj|kdh) packages=(git mupdf-tools poppler-utils)", workflow)
+        self.assertIn("caj|kdh) packages=(git mupdf-tools poppler-utils libpoppler-dev)", workflow)
         self.assertIn("checkout --detach 6c4bc32b15ce748d211f45d536f5d5511ef9f368", workflow)
+        self.assertIn("libjbigdec.so /opt/caj2pdf/lib/jbigdec.cc", workflow)
+        self.assertIn("libjbig2codec.so /opt/caj2pdf/lib/decode_jbig2data.cc", workflow)
         self.assertIn("CAJ2PDF_DIR: /opt/caj2pdf", workflow)
         self.assertIn("ape|wma|amr|flv|f4v|rm|rmvb|mkv|avi|mpg|mpeg|mts|ts|wmv) packages=(ffmpeg)", workflow)
         self.assertIn("READER_CONVERSION_WORKERS:", workflow)
