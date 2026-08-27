@@ -309,6 +309,24 @@ class ConverterTests(unittest.TestCase):
             self.assertTrue(str(run.call_args.args[0][-1]).endswith("source.xls"))
             self.assertEqual(target.read_bytes(), b"%PDF-sheet")
 
+    def test_encrypted_ole_xlsx_uses_temporary_conversion_password(self):
+        with tempfile.TemporaryDirectory() as root:
+            work = Path(root)
+            source, target = work / "source.xlsx", work / "document.pdf"
+            source.write_bytes(convert_reader_assets.OLE_SIGNATURE + b"encrypted")
+            office = Mock()
+            office.is_encrypted.return_value = True
+            with patch.dict(convert_reader_assets.os.environ, {"READER_CONVERSION_PASSWORD": "secret"}), \
+                    patch.dict("sys.modules", {"msoffcrypto": Mock(OfficeFile=Mock(return_value=office))}), \
+                    patch.object(convert_reader_assets, "run_checked") as run:
+                def decrypt(target): target.write(b"decrypted")
+                office.decrypt.side_effect = decrypt
+                def fake_run(command, **_kwargs):
+                    (work / "office-pdf" / "decrypted.pdf").write_bytes(b"%PDF-sheet")
+                run.side_effect = fake_run
+                convert_reader_assets.convert_file({"extension": "xlsx"}, source, target, work)
+            self.assertTrue(str(run.call_args.args[0][-1]).endswith("decrypted.xlsx"))
+
     def test_mht_conversion_reuses_mhtml_sanitizer(self):
         with tempfile.TemporaryDirectory() as root:
             work = Path(root)

@@ -765,8 +765,18 @@ def convert_file(item: dict, source: Path, target: Path, work: Path) -> None:
         out.mkdir()
         office_source = source
         if ext == "xlsx" and source.read_bytes()[:8] == OLE_SIGNATURE:
-            office_source = work / "source.xls"
-            shutil.copyfile(source, office_source)
+            password = os.environ.get("READER_CONVERSION_PASSWORD", "")
+            if password:
+                import msoffcrypto
+                with source.open("rb") as encrypted:
+                    document = msoffcrypto.OfficeFile(encrypted)
+                    office_source = work / "decrypted.xlsx"
+                    document.load_key(password=password)
+                    with office_source.open("wb") as decrypted:
+                        document.decrypt(decrypted)
+            else:
+                office_source = work / "source.xls"
+                shutil.copyfile(source, office_source)
         run_checked([
             "libreoffice", "--headless", f"-env:UserInstallation={office_profile}",
             "--convert-to", "pdf", "--outdir", str(out), str(office_source),
