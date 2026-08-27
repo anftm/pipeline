@@ -58,13 +58,13 @@ class ReaderAssetContractTests(unittest.TestCase):
             "pps": ("libreoffice-pdf-office-v2", "pdf", "document.pdf"),
             "odp": ("libreoffice-pdf-office-v2", "pdf", "document.pdf"),
             "xls": ("libreoffice-pdf-office-v2", "pdf", "document.pdf"),
-            "xlsx": ("libreoffice-pdf-office-v2", "pdf", "document.pdf"),
+            "xlsx": ("libreoffice-pdf-office-xlsx-v3", "pdf", "document.pdf"),
             "csv": ("libreoffice-pdf-office-v2", "pdf", "document.pdf"),
             "ods": ("libreoffice-pdf-office-v2", "pdf", "document.pdf"),
             "wps": ("libreoffice-pdf-office-v2", "pdf", "document.pdf"),
-            "mht": ("sanitized-html-v3", "html", "document.html"),
-            "mhtml": ("sanitized-html-v3", "html", "document.html"),
-            "ps": ("ghostscript-pdf-v3", "pdf", "document.pdf"),
+            "mht": ("sanitized-mhtml-v4", "html", "document.html"),
+            "mhtml": ("sanitized-mhtml-v4", "html", "document.html"),
+            "ps": ("ghostscript-pdf-v4", "pdf", "document.pdf"),
             "ape": ("ffmpeg-audio-mp3-v1", "audio", "audio.mp3"),
             "wma": ("ffmpeg-audio-mp3-v1", "audio", "audio.mp3"),
             "amr": ("ffmpeg-audio-mp3-v1", "audio", "audio.mp3"),
@@ -295,6 +295,18 @@ class ConverterTests(unittest.TestCase):
             self.assertEqual(run.call_args.args[0][run.call_args.args[0].index("--convert-to") + 1], "pdf")
             self.assertEqual(target.read_bytes(), b"%PDF-office")
 
+    def test_mislabeled_ole_xlsx_uses_xls_extension(self):
+        with tempfile.TemporaryDirectory() as root:
+            work = Path(root)
+            source, target = work / "source.xlsx", work / "document.pdf"
+            source.write_bytes(convert_reader_assets.OLE_SIGNATURE + b"spreadsheet")
+            def fake_run(command, **_kwargs):
+                (work / "office-pdf" / "source.pdf").write_bytes(b"%PDF-sheet")
+            with patch.object(convert_reader_assets, "run_checked", side_effect=fake_run) as run:
+                convert_reader_assets.convert_file({"extension": "xlsx"}, source, target, work)
+            self.assertTrue(str(run.call_args.args[0][-1]).endswith("source.xls"))
+            self.assertEqual(target.read_bytes(), b"%PDF-sheet")
+
     def test_mht_conversion_reuses_mhtml_sanitizer(self):
         with tempfile.TemporaryDirectory() as root:
             work = Path(root)
@@ -303,6 +315,29 @@ class ConverterTests(unittest.TestCase):
             with patch.object(convert_reader_assets, "mhtml_to_html") as convert:
                 convert_reader_assets.convert_file({"extension": "mht"}, source, target, work)
             convert.assert_called_once_with(source, target)
+
+    def test_mhtml_windows_content_location_does_not_break_resource_joining(self):
+        message = b"""MIME-Version: 1.0
+Content-Type: multipart/related; boundary=x
+
+--x
+Content-Type: text/html; charset=utf-8
+Content-Location: file://D:\\books\\page.htm
+
+<html><body><p>Readable Windows MHTML body</p><img src="image.png"></body></html>
+--x
+Content-Type: image/png
+Content-Transfer-Encoding: base64
+Content-Location: file://D:\\books\\image.png
+
+aW1hZ2U=
+--x--
+"""
+        with tempfile.TemporaryDirectory() as root:
+            source, target = Path(root) / "source.mht", Path(root) / "document.html"
+            source.write_bytes(message)
+            convert_reader_assets.mhtml_to_html(source, target)
+            self.assertIn("Readable Windows MHTML body", target.read_text(encoding="utf-8"))
 
     def test_ps_conversion_uses_ghostscript_pdf(self):
         with tempfile.TemporaryDirectory() as root:
@@ -314,6 +349,7 @@ class ConverterTests(unittest.TestCase):
             command = run.call_args.args[0]
             self.assertIn("-sDEVICE=pdfwrite", command)
             self.assertIn(f"-sOutputFile={target}", command)
+            self.assertEqual(run.call_args.kwargs["timeout_seconds"], convert_reader_assets.POSTSCRIPT_COMMAND_TIMEOUT_SECONDS)
 
     def test_media_validation_requires_browser_compatible_streams(self):
         audio = {"format": {"format_name": "mp3", "duration": "10"}, "streams": [

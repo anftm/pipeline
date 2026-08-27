@@ -46,6 +46,9 @@ DJVU_COMMAND_TIMEOUT_SECONDS = int(os.environ.get(
 MEDIA_COMMAND_TIMEOUT_SECONDS = int(os.environ.get(
     "READER_MEDIA_COMMAND_TIMEOUT", str(max(7200, COMMAND_TIMEOUT_SECONDS)),
 ))
+POSTSCRIPT_COMMAND_TIMEOUT_SECONDS = int(os.environ.get(
+    "READER_POSTSCRIPT_COMMAND_TIMEOUT", str(max(600, COMMAND_TIMEOUT_SECONDS)),
+))
 CONVERSION_WORKERS = max(1, int(os.environ.get("READER_CONVERSION_WORKERS", "1")))
 READER_ASSETS_REPO = os.environ.get("READER_ASSETS_REPO", "vomebook/Reader-Assets")
 ARTIFACT_LOCKS = {}
@@ -329,6 +332,16 @@ def mhtml_to_html(source: Path, target: Path) -> None:
     except (LookupError, UnicodeDecodeError):
         document = payload.decode("gb18030", "replace")
     base = str(html_part.get("Content-Location") or "")
+
+    def safe_join(root: str, value: str) -> str:
+        root, value = root.replace("\\", "/"), value.replace("\\", "/")
+        root = re.sub(r"^file://([A-Za-z]:/)", r"file:///\1", root)
+        if re.match(r"^[A-Za-z]:/", root):
+            root = "file:///" + root
+        try:
+            return urllib.parse.urljoin(root, value)
+        except ValueError:
+            return ""
     resources = {}
     for part in parts:
         if part is html_part or part.is_multipart():
@@ -341,13 +354,15 @@ def mhtml_to_html(source: Path, target: Path) -> None:
         content_id = str(part.get("Content-ID") or "").strip("<>")
         if location:
             resources[location] = encoded
-            resources[urllib.parse.urljoin(base, location)] = encoded
+            joined = safe_join(base, location)
+            if joined:
+                resources[joined] = encoded
         if content_id:
             resources[f"cid:{content_id}"] = encoded
 
     def inline_resource(match):
         value = html.unescape(match.group(2)).strip()
-        replacement = resources.get(value) or resources.get(urllib.parse.urljoin(base, value))
+        replacement = resources.get(value) or resources.get(safe_join(base, value))
         return match.group(1) + (replacement or value) + match.group(3)
 
     document = re.sub(
@@ -702,11 +717,15 @@ def convert_file(item: dict, source: Path, target: Path, work: Path) -> None:
     elif ext in {"ppt", "pptx", "pps", "odp", "xls", "xlsx", "csv", "ods", "wps"}:
         out = work / "office-pdf"
         out.mkdir()
+        office_source = source
+        if ext == "xlsx" and source.read_bytes()[:8] == OLE_SIGNATURE:
+            office_source = work / "source.xls"
+            shutil.copyfile(source, office_source)
         run_checked([
             "libreoffice", "--headless", f"-env:UserInstallation={office_profile}",
-            "--convert-to", "pdf", "--outdir", str(out), str(source),
+            "--convert-to", "pdf", "--outdir", str(out), str(office_source),
         ])
-        produced = out / f"{source.stem}.pdf"
+        produced = out / f"{office_source.stem}.pdf"
         if not produced.is_file():
             raise RuntimeError("LibreOffice produced no PDF")
         shutil.move(produced, target)
@@ -716,7 +735,7 @@ def convert_file(item: dict, source: Path, target: Path, work: Path) -> None:
         run_checked([
             "gs", "-dBATCH", "-dNOPAUSE", "-sDEVICE=pdfwrite", "-dCompatibilityLevel=1.7",
             f"-sOutputFile={target}", str(source),
-        ])
+        ], timeout_seconds=POSTSCRIPT_COMMAND_TIMEOUT_SECONDS)
     elif ext in {"ape", "wma", "amr"}:
         run_checked([
             "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
@@ -871,7 +890,7 @@ def convert_item(item: dict, bundle: Path, reusable: dict | None = None) -> dict
                         validate_chm_epub(temporary)
                     if item["extension"] == "djvu":
                         validate_djvu_pdf(temporary, work)
-                    if item["extension"] in {"doc", "docx", "htm", "html", "ppt", "pptx", "pps", "odp", "xls", "xlsx", "csv", "ods", "wps", "ps"} and item["reader_mode"] == "pdf":
+                    if item["extension"] in {"doc", "docx", "htm", "html", "ppt", "pptx", "pps", "odp", "xls", "xlsx", "csv", "ods", "wps"} and item["reader_mode"] == "pdf":
                         validate_office_pdf(temporary, item, work, source)
                     validate_reader_content(temporary, item, work)
                     shutil.move(temporary, target)
