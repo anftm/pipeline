@@ -48,7 +48,7 @@ class ReaderAssetContractTests(unittest.TestCase):
             "azw3": ("calibre-epub-v2", "epub", "book.epub"),
             "fb2": ("calibre-epub-v2", "epub", "book.epub"),
             "odt": ("calibre-epub-v2", "epub", "book.epub"),
-            "rtf": ("calibre-epub-v2", "epub", "book.epub"),
+            "rtf": ("calibre-rtf-epub-v3", "epub", "book.epub"),
             "chm": ("calibre-chm-epub-v4", "epub", "book.epub"),
             "tif": ("pillow-pdf-v2", "pdf", "document.pdf"),
             "tiff": ("pillow-pdf-v2", "pdf", "document.pdf"),
@@ -64,7 +64,7 @@ class ReaderAssetContractTests(unittest.TestCase):
             "wps": ("libreoffice-pdf-office-v2", "pdf", "document.pdf"),
             "mht": ("sanitized-html-v3", "html", "document.html"),
             "mhtml": ("sanitized-html-v3", "html", "document.html"),
-            "ps": ("ghostscript-pdf-v2", "pdf", "document.pdf"),
+            "ps": ("ghostscript-pdf-v3", "pdf", "document.pdf"),
             "ape": ("ffmpeg-audio-mp3-v1", "audio", "audio.mp3"),
             "wma": ("ffmpeg-audio-mp3-v1", "audio", "audio.mp3"),
             "amr": ("ffmpeg-audio-mp3-v1", "audio", "audio.mp3"),
@@ -254,6 +254,32 @@ class ConverterTests(unittest.TestCase):
             with patch.object(convert_reader_assets, "run_checked") as run:
                 convert_reader_assets.convert_file({"extension": "odt"}, source, target, work)
             self.assertEqual(run.call_args.args[0], ["ebook-convert", str(source), str(target), "--flow-size", "0"])
+
+    def test_rtf_falls_back_to_libreoffice_html_before_calibre(self):
+        with tempfile.TemporaryDirectory() as root:
+            work = Path(root)
+            source, target = work / "source.rtf", work / "book.epub"
+            source.write_bytes(b"rtf")
+            calls = []
+            def fake_run(command, **_kwargs):
+                calls.append(command)
+                if command[0] == "ebook-convert" and len(calls) == 1:
+                    raise convert_reader_assets.ReaderConversionCommandError("unsupported codepage")
+                if command[0] == "libreoffice":
+                    (work / "rtf-html" / "source.html").write_text("<p>body</p>", encoding="utf-8")
+            with patch.object(convert_reader_assets, "run_checked", side_effect=fake_run):
+                convert_reader_assets.convert_file({"extension": "rtf"}, source, target, work)
+            self.assertEqual([call[0] for call in calls], ["ebook-convert", "libreoffice", "ebook-convert"])
+            self.assertEqual(calls[1][calls[1].index("--convert-to") + 1], "html")
+
+    def test_ps_content_validation_uses_pdfinfo_without_rendering_pages(self):
+        with patch.object(convert_reader_assets, "command_output", return_value="Pages: 900\n") as output, \
+                patch.object(convert_reader_assets, "run_checked") as render:
+            convert_reader_assets.validate_reader_content(
+                Path("document.pdf"), {"extension": "ps", "reader_mode": "pdf"}, Path("work"),
+            )
+        output.assert_called_once_with(["pdfinfo", "document.pdf"])
+        render.assert_not_called()
 
     def test_office_presentation_conversion_uses_libreoffice_pdf(self):
         with tempfile.TemporaryDirectory() as root:
@@ -1137,7 +1163,8 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("inputs.checkpoint_batches || '30'", workflow)
         self.assertIn("python scripts/publish_reader_assets.py", workflow)
         self.assertIn("packages=(djvulibre-bin poppler-utils)", workflow)
-        self.assertIn("mobi|azw3|fb2|odt|rtf) packages=(calibre)", workflow)
+        self.assertIn("mobi|azw3|fb2|odt) packages=(calibre)", workflow)
+        self.assertIn("rtf) packages=(calibre libreoffice", workflow)
         self.assertIn("chm) packages=(calibre p7zip-full)", workflow)
         self.assertIn("tif|tiff) packages=(poppler-utils)", workflow)
         self.assertIn("mht|mhtml) packages=()", workflow)

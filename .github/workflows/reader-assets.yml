@@ -108,7 +108,8 @@ jobs:
           case "${EXTENSION}" in
             doc|docx|ppt|pptx|pps|odp|xls|xlsx|csv|ods|wps) packages=(libreoffice fontconfig fonts-noto-cjk fonts-wqy-microhei ghostscript poppler-utils tesseract-ocr tesseract-ocr-chi-sim) ;;
             htm|html) packages=() ;;
-            mobi|azw3|fb2|odt|rtf) packages=(calibre) ;;
+            mobi|azw3|fb2|odt) packages=(calibre) ;;
+            rtf) packages=(calibre libreoffice fontconfig fonts-noto-cjk fonts-wqy-microhei) ;;
             chm) packages=(calibre p7zip-full) ;;
             djvu) packages=(djvulibre-bin poppler-utils) ;;
             tif|tiff) packages=(poppler-utils) ;;

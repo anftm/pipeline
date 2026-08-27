@@ -481,6 +481,13 @@ def validate_pdf_content(path: Path, work: Path) -> None:
         raise RuntimeError("converted PDF has no visible content after its midpoint")
 
 
+def validate_pdf_structure(path: Path) -> None:
+    info = command_output(["pdfinfo", str(path)])
+    match = re.search(r"^Pages:\s+(\d+)\s*$", info, re.MULTILINE)
+    if not match or int(match.group(1)) < 1:
+        raise RuntimeError("converted PDF has no pages")
+
+
 def rasterize_pdf(path: Path, work: Path) -> None:
     pages = work / "raster-pages"
     pages.mkdir()
@@ -603,7 +610,10 @@ def validate_html_content(path: Path) -> None:
 def validate_reader_content(path: Path, item: dict, work: Path) -> None:
     mode = item["reader_mode"]
     if mode == "pdf":
-        validate_pdf_content(path, work)
+        if item["extension"] == "ps":
+            validate_pdf_structure(path)
+        else:
+            validate_pdf_content(path, work)
     elif mode == "epub":
         validate_epub_content(path)
     elif mode == "docx":
@@ -666,8 +676,23 @@ def convert_file(item: dict, source: Path, target: Path, work: Path) -> None:
                 shutil.move(produced, target)
             else:
                 raise
-    elif ext in {"mobi", "azw3", "fb2", "odt", "rtf"}:
+    elif ext in {"mobi", "azw3", "fb2", "odt"}:
         run_checked(["ebook-convert", str(source), str(target), "--flow-size", "0"])
+    elif ext == "rtf":
+        try:
+            run_checked(["ebook-convert", str(source), str(target), "--flow-size", "0"])
+        except ReaderConversionCommandError:
+            target.unlink(missing_ok=True)
+            intermediate = work / "rtf-html"
+            intermediate.mkdir()
+            run_checked([
+                "libreoffice", "--headless", f"-env:UserInstallation={office_profile}",
+                "--convert-to", "html", "--outdir", str(intermediate), str(source),
+            ])
+            html_source = intermediate / f"{source.stem}.html"
+            if not html_source.is_file():
+                raise RuntimeError("LibreOffice produced no HTML from RTF")
+            run_checked(["ebook-convert", str(html_source), str(target), "--flow-size", "0"])
     elif ext == "chm":
         convert_chm(source, target, work)
     elif ext in {"tif", "tiff"}:
