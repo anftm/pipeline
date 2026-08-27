@@ -11,7 +11,7 @@ on:
         default: ""
         type: string
       extension:
-        description: doc, docx, htm, html, mobi, azw3, fb2, odt, rtf, chm, tif, tiff, djvu, ppt, pptx, pps, odp, xls, xlsx, csv, ods, wps, mht, mhtml, ps, caj, kdh, or blank
+        description: pdf, doc, docx, htm, html, mobi, azw3, fb2, odt, rtf, chm, tif, tiff, djvu, ppt, pptx, pps, odp, xls, xlsx, csv, ods, wps, mht, mhtml, ps, caj, kdh, or blank
         required: false
         default: ""
         type: string
@@ -106,6 +106,7 @@ jobs:
         run: |
           packages=()
           case "${EXTENSION}" in
+            pdf) packages=(qpdf poppler-utils) ;;
             doc|docx|ppt|pptx|pps|odp|xls|xlsx|csv|ods|wps) packages=(libreoffice fontconfig fonts-noto-cjk fonts-wqy-microhei ghostscript poppler-utils tesseract-ocr tesseract-ocr-chi-sim) ;;
             htm|html) packages=() ;;
             mobi|azw3|fb2|odt) packages=(calibre) ;;

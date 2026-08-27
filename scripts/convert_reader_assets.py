@@ -27,16 +27,15 @@ from pathlib import Path
 from PIL import Image, ImageSequence
 
 try:
-    from .reader_assets import canonical_json, load_json
+    from .reader_assets import PASSWORD_RE, canonical_json, load_json, source_password
 except ImportError:
-    from reader_assets import canonical_json, load_json
+    from reader_assets import PASSWORD_RE, canonical_json, load_json, source_password
 
 MAX_SOURCE_BYTES = 2 * 1024 * 1024 * 1024
 MAX_HTML_RESOURCE_BYTES = 16 * 1024 * 1024
 MAX_HTML_RESOURCE_TOTAL_BYTES = 64 * 1024 * 1024
 MAX_HTML_RESOURCES = 64
 CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
-PASSWORD_RE = re.compile(r"(?:密码|password)\s*[：:]\s*([^\]〕】）)\s]+)", re.IGNORECASE)
 OLE_SIGNATURE = bytes.fromhex("d0cf11e0a1b11ae1")
 MIN_PAGE_CONTENT_RATIO = 0.0005
 COMMAND_TIMEOUT_SECONDS = int(os.environ.get("READER_CONVERSION_COMMAND_TIMEOUT", "120"))
@@ -690,7 +689,22 @@ def validate_reader_content(path: Path, item: dict, work: Path) -> None:
 def convert_file(item: dict, source: Path, target: Path, work: Path) -> None:
     ext = item["extension"]
     office_profile = (work / "libreoffice-profile").resolve().as_uri()
-    if ext in {"htm", "html"}:
+    password = source_password(item.get("repo", ""), item.get("path", ""))
+    if password and ext in {"doc", "docx", "ppt", "pptx", "pps", "xls", "xlsx"}:
+        import msoffcrypto
+        with source.open("rb") as encrypted:
+            document = msoffcrypto.OfficeFile(encrypted)
+            if document.is_encrypted():
+                decrypted_source = work / f"decrypted.{ext}"
+                document.load_key(password=password)
+                with decrypted_source.open("wb") as decrypted:
+                    document.decrypt(decrypted)
+                source = decrypted_source
+    if ext == "pdf":
+        if not password:
+            raise RuntimeError("protected PDF has no known password")
+        run_checked(["qpdf", f"--password={password}", "--decrypt", str(source), str(target)])
+    elif ext in {"htm", "html"}:
         source_url = item.get("source_url")
         prepared = inline_html_resources(source, source_url, work) if source_url else source
         shutil.copyfile(prepared, target)
@@ -720,16 +734,9 @@ def convert_file(item: dict, source: Path, target: Path, work: Path) -> None:
                 archive.getinfo("word/document.xml")
             shutil.copyfile(source, target)
         except (zipfile.BadZipFile, KeyError):
-            match = PASSWORD_RE.search(item.get("path", ""))
             with source.open("rb") as handle:
                 is_ole = handle.read(8) == OLE_SIGNATURE
-            if match:
-                import msoffcrypto
-                with source.open("rb") as encrypted, target.open("wb") as decrypted:
-                    document = msoffcrypto.OfficeFile(encrypted)
-                    document.load_key(password=match.group(1))
-                    document.decrypt(decrypted)
-            elif is_ole:
+            if is_ole:
                 out = work / "mislabeled-office"
                 out.mkdir()
                 mislabeled = work / "mislabeled.doc"

@@ -3,6 +3,7 @@
 
 import json
 import posixpath
+import re
 import urllib.parse
 from pathlib import Path
 
@@ -52,8 +53,33 @@ CONVERTIBLE_EXTENSIONS = {
     "ts": ("ffmpeg-video-mp4-h264-aac-v1", "video", "video.mp4"),
     "wmv": ("ffmpeg-video-mp4-h264-aac-v1", "video", "video.mp4"),
 }
+PROTECTED_PDF_CONTRACT = ("qpdf-decrypted-v1", "pdf", "document.pdf")
+PASSWORD_RE = re.compile(r"(?:密码|口令|password|passwd)\s*[：:=]?\s*([A-Za-z0-9]+)", re.IGNORECASE)
+KNOWN_SOURCE_PASSWORDS = {
+    ("VoiceOfML/MLMRL-Library", "基础入门书单/入门答疑/风正集.pdf"): "230505",
+    ("VoiceOfML/MLMRL-Hub", "000269/1870520043_3072_风正集230220.pdf"): "230505",
+    ("VoiceOfML/MLMRL-Hub", "001346/1870520043_15344_风正集230123.pdf"): "230505",
+    ("VoiceOfML/MLMRL-Hub", "001346/1870520043_15348_风正集230505.pdf"): "230505",
+}
+
+
 def conversion_contract(extension: str, key: str = "") -> tuple[str, str, str]:
     return CONVERTIBLE_EXTENSIONS[extension]
+
+
+def source_password(repo: str, path: str) -> str:
+    match = PASSWORD_RE.search(path)
+    if match:
+        return match.group(1)
+    return KNOWN_SOURCE_PASSWORDS.get((repo, path), "")
+
+
+def source_conversion_contract(repo: str, path: str, extension: str):
+    if extension in CONVERTIBLE_EXTENSIONS:
+        return CONVERTIBLE_EXTENSIONS[extension]
+    if extension == "pdf" and source_password(repo, path):
+        return PROTECTED_PDF_CONTRACT
+    return None
 
 
 def empty_manifest() -> dict:
