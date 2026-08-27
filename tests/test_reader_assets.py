@@ -23,7 +23,8 @@ class ReaderAssetContractTests(unittest.TestCase):
     def test_conversion_set_excludes_unsafe_or_native_media(self):
         self.assertEqual(
             set(reader_assets.CONVERTIBLE_EXTENSIONS),
-            {"doc", "docx", "htm", "html", "mobi", "azw3", "chm", "tif", "tiff", "djvu",
+            {"doc", "docx", "htm", "html", "mobi", "azw3", "fb2", "odt", "rtf", "chm", "tif", "tiff", "djvu",
+             "ppt", "pptx", "pps", "odp", "xls", "xlsx", "csv", "ods", "wps", "mht", "mhtml", "ps",
              "ape", "wma", "amr", "flv", "f4v", "rm", "rmvb", "mkv", "avi", "mpg",
              "mpeg", "mts", "ts", "wmv"},
         )
@@ -45,10 +46,25 @@ class ReaderAssetContractTests(unittest.TestCase):
             "html": ("sanitized-html-v2", "html", "document.html"),
             "mobi": ("calibre-epub-v1", "epub", "book.epub"),
             "azw3": ("calibre-epub-v1", "epub", "book.epub"),
+            "fb2": ("calibre-epub-v1", "epub", "book.epub"),
+            "odt": ("calibre-epub-v1", "epub", "book.epub"),
+            "rtf": ("calibre-epub-v1", "epub", "book.epub"),
             "chm": ("calibre-chm-epub-v3", "epub", "book.epub"),
             "tif": ("pillow-pdf-v1", "pdf", "document.pdf"),
             "tiff": ("pillow-pdf-v1", "pdf", "document.pdf"),
             "djvu": ("djvulibre-pdf-v1", "pdf", "document.pdf"),
+            "ppt": ("libreoffice-pdf-office-v1", "pdf", "document.pdf"),
+            "pptx": ("libreoffice-pdf-office-v1", "pdf", "document.pdf"),
+            "pps": ("libreoffice-pdf-office-v1", "pdf", "document.pdf"),
+            "odp": ("libreoffice-pdf-office-v1", "pdf", "document.pdf"),
+            "xls": ("libreoffice-pdf-office-v1", "pdf", "document.pdf"),
+            "xlsx": ("libreoffice-pdf-office-v1", "pdf", "document.pdf"),
+            "csv": ("libreoffice-pdf-office-v1", "pdf", "document.pdf"),
+            "ods": ("libreoffice-pdf-office-v1", "pdf", "document.pdf"),
+            "wps": ("libreoffice-pdf-office-v1", "pdf", "document.pdf"),
+            "mht": ("sanitized-html-v2", "html", "document.html"),
+            "mhtml": ("sanitized-html-v2", "html", "document.html"),
+            "ps": ("ghostscript-pdf-v1", "pdf", "document.pdf"),
             "ape": ("ffmpeg-audio-mp3-v1", "audio", "audio.mp3"),
             "wma": ("ffmpeg-audio-mp3-v1", "audio", "audio.mp3"),
             "amr": ("ffmpeg-audio-mp3-v1", "audio", "audio.mp3"),
@@ -229,6 +245,49 @@ class ConverterTests(unittest.TestCase):
             for value in ("libx264", "yuv420p", "aac", "+faststart", "0:v:0", "0:a:0?"):
                 self.assertIn(value, command)
             self.assertEqual(run.call_args.kwargs["timeout_seconds"], convert_reader_assets.MEDIA_COMMAND_TIMEOUT_SECONDS)
+
+    def test_calibre_office_book_conversion_uses_epub_output(self):
+        with tempfile.TemporaryDirectory() as root:
+            work = Path(root)
+            source, target = work / "source.odt", work / "book.epub"
+            source.write_bytes(b"office book")
+            with patch.object(convert_reader_assets, "run_checked") as run:
+                convert_reader_assets.convert_file({"extension": "odt"}, source, target, work)
+            self.assertEqual(run.call_args.args[0], ["ebook-convert", str(source), str(target), "--flow-size", "0"])
+
+    def test_office_presentation_conversion_uses_libreoffice_pdf(self):
+        with tempfile.TemporaryDirectory() as root:
+            work = Path(root)
+            source, target = work / "source.pptx", work / "document.pdf"
+            source.write_bytes(b"slides")
+            def fake_run(command, **_kwargs):
+                if command[0] == "libreoffice":
+                    (work / "office-pdf" / "source.pdf").write_bytes(b"%PDF-office")
+            with patch.object(convert_reader_assets, "run_checked", side_effect=fake_run) as run:
+                convert_reader_assets.convert_file({"extension": "pptx"}, source, target, work)
+            self.assertEqual(run.call_args.args[0][0:2], ["libreoffice", "--headless"])
+            self.assertEqual(run.call_args.args[0][run.call_args.args[0].index("--convert-to") + 1], "pdf")
+            self.assertEqual(target.read_bytes(), b"%PDF-office")
+
+    def test_mht_conversion_reuses_mhtml_sanitizer(self):
+        with tempfile.TemporaryDirectory() as root:
+            work = Path(root)
+            source, target = work / "source.mht", work / "document.html"
+            source.write_bytes(b"MIME-Version: 1.0")
+            with patch.object(convert_reader_assets, "mhtml_to_html") as convert:
+                convert_reader_assets.convert_file({"extension": "mht"}, source, target, work)
+            convert.assert_called_once_with(source, target)
+
+    def test_ps_conversion_uses_ghostscript_pdf(self):
+        with tempfile.TemporaryDirectory() as root:
+            work = Path(root)
+            source, target = work / "source.ps", work / "document.pdf"
+            source.write_bytes(b"%!PS")
+            with patch.object(convert_reader_assets, "run_checked") as run:
+                convert_reader_assets.convert_file({"extension": "ps"}, source, target, work)
+            command = run.call_args.args[0]
+            self.assertIn("-sDEVICE=pdfwrite", command)
+            self.assertIn(f"-sOutputFile={target}", command)
 
     def test_media_validation_requires_browser_compatible_streams(self):
         audio = {"format": {"format_name": "mp3", "duration": "10"}, "streams": [
@@ -992,17 +1051,19 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("poppler-utils", workflow)
         self.assertIn("tesseract-ocr-chi-sim", workflow)
         self.assertIn("djvulibre-bin", workflow)
-        self.assertIn("doc, docx, htm, html, mobi", workflow)
-        self.assertIn("azw3, chm, tif", workflow)
+        self.assertIn("doc, docx, htm, html, mobi, azw3, fb2, odt, rtf", workflow)
+        self.assertIn("chm, tif, tiff, djvu, ppt, pptx, pps, odp", workflow)
         self.assertIn("htm|html) packages=()", workflow)
         self.assertIn('cron: "17 * * * *"', workflow)
         self.assertIn("inputs.limit || '20'", workflow)
         self.assertIn("inputs.checkpoint_batches || '30'", workflow)
         self.assertIn("python scripts/publish_reader_assets.py", workflow)
         self.assertIn("packages=(djvulibre-bin poppler-utils)", workflow)
-        self.assertIn("mobi|azw3) packages=(calibre)", workflow)
+        self.assertIn("mobi|azw3|fb2|odt|rtf) packages=(calibre)", workflow)
         self.assertIn("chm) packages=(calibre p7zip-full)", workflow)
         self.assertIn("tif|tiff) packages=(poppler-utils)", workflow)
+        self.assertIn("mht|mhtml) packages=()", workflow)
+        self.assertIn("ps) packages=(ghostscript poppler-utils)", workflow)
         self.assertIn("ape|wma|amr|flv|f4v|rm|rmvb|mkv|avi|mpg|mpeg|mts|ts|wmv) packages=(ffmpeg)", workflow)
         self.assertIn("READER_CONVERSION_WORKERS:", workflow)
         self.assertIn("steps.scan.outputs.extension == 'djvu'", workflow)

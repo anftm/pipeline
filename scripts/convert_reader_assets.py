@@ -532,7 +532,7 @@ def convert_file(item: dict, source: Path, target: Path, work: Path) -> None:
                 shutil.move(produced, target)
             else:
                 raise
-    elif ext in {"mobi", "azw3"}:
+    elif ext in {"mobi", "azw3", "fb2", "odt", "rtf"}:
         run_checked(["ebook-convert", str(source), str(target), "--flow-size", "0"])
     elif ext == "chm":
         convert_chm(source, target, work)
@@ -540,6 +540,24 @@ def convert_file(item: dict, source: Path, target: Path, work: Path) -> None:
         convert_tiff(source, target, work)
     elif ext == "djvu":
         run_checked(["ddjvu", "-format=pdf", str(source), str(target)], timeout_seconds=DJVU_COMMAND_TIMEOUT_SECONDS)
+    elif ext in {"ppt", "pptx", "pps", "odp", "xls", "xlsx", "csv", "ods", "wps"}:
+        out = work / "office-pdf"
+        out.mkdir()
+        run_checked([
+            "libreoffice", "--headless", f"-env:UserInstallation={office_profile}",
+            "--convert-to", "pdf", "--outdir", str(out), str(source),
+        ])
+        produced = out / f"{source.stem}.pdf"
+        if not produced.is_file():
+            raise RuntimeError("LibreOffice produced no PDF")
+        shutil.move(produced, target)
+    elif ext in {"mht", "mhtml"}:
+        mhtml_to_html(source, target)
+    elif ext == "ps":
+        run_checked([
+            "gs", "-dBATCH", "-dNOPAUSE", "-sDEVICE=pdfwrite", "-dCompatibilityLevel=1.7",
+            f"-sOutputFile={target}", str(source),
+        ])
     elif ext in {"ape", "wma", "amr"}:
         run_checked([
             "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
@@ -693,7 +711,7 @@ def convert_item(item: dict, bundle: Path, reusable: dict | None = None) -> dict
                         validate_chm_epub(temporary)
                     if item["extension"] == "djvu":
                         validate_djvu_pdf(temporary, work)
-                    if item["extension"] in {"doc", "docx", "htm", "html"} and item["reader_mode"] == "pdf":
+                    if item["extension"] in {"doc", "docx", "htm", "html", "ppt", "pptx", "pps", "odp", "xls", "xlsx", "csv", "ods", "wps", "ps"} and item["reader_mode"] == "pdf":
                         validate_office_pdf(temporary, item, work, source)
                     shutil.move(temporary, target)
             else:
