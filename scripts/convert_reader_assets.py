@@ -14,6 +14,8 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
+import http.client
 import urllib.error
 import urllib.request
 import urllib.parse
@@ -24,17 +26,48 @@ import xml.etree.ElementTree as ET
 from email.parser import BytesParser
 from pathlib import Path
 
+import bleach
+import tinycss2
+from bleach.css_sanitizer import CSSSanitizer
 from PIL import Image, ImageSequence
 
 try:
-    from .reader_assets import PASSWORD_RE, canonical_json, load_json, source_password
+    from .reader_assets import (
+        PASSWORD_RE, canonical_json, load_json, object_profile_path, reusable_object_key,
+        source_password, validate_object_path,
+    )
 except ImportError:
-    from reader_assets import PASSWORD_RE, canonical_json, load_json, source_password
+    from reader_assets import (
+        PASSWORD_RE, canonical_json, load_json, object_profile_path, reusable_object_key,
+        source_password, validate_object_path,
+    )
 
 MAX_SOURCE_BYTES = 2 * 1024 * 1024 * 1024
 MAX_HTML_RESOURCE_BYTES = 16 * 1024 * 1024
 MAX_HTML_RESOURCE_TOTAL_BYTES = 64 * 1024 * 1024
 MAX_HTML_RESOURCES = 64
+MAX_EPUB_MEMBERS = 10000
+MAX_EPUB_EXPANDED_BYTES = 2 * 1024 * 1024 * 1024
+MAX_EPUB_MEMBER_BYTES = 256 * 1024 * 1024
+MAX_MHTML_RESOURCE_BYTES = 128 * 1024 * 1024
+MAX_MHTML_SOURCE_BYTES = 256 * 1024 * 1024
+HTML_TAGS = {
+    "a", "abbr", "address", "article", "aside", "b", "bdi", "bdo", "blockquote", "body", "br",
+    "caption", "cite", "code", "col", "colgroup", "dd", "del", "details", "dfn", "div", "dl", "dt",
+    "em", "figcaption", "figure", "footer", "h1", "h2", "h3", "h4", "h5", "h6", "head", "header",
+    "hgroup", "hr", "html", "i", "img", "ins", "kbd", "li", "link", "main", "mark", "meta", "nav",
+    "ol", "p", "picture", "pre", "q", "rp", "rt", "ruby", "s", "samp", "section", "small", "source",
+    "span", "strong", "style", "sub", "summary", "sup", "table", "tbody", "td", "tfoot", "th", "thead",
+    "time", "title", "tr", "u", "ul", "var", "wbr",
+}
+GLOBAL_HTML_ATTRIBUTES = {"class", "dir", "id", "lang", "style", "title"}
+TAG_HTML_ATTRIBUTES = {
+    "a": {"href", "name"}, "col": {"span", "width"}, "colgroup": {"span", "width"},
+    "img": {"alt", "height", "src", "width"}, "link": {"href", "media", "rel", "type"},
+    "meta": {"charset"}, "source": {"src", "type"}, "td": {"colspan", "rowspan"},
+    "th": {"colspan", "rowspan", "scope"}, "time": {"datetime"},
+}
+CSS_SANITIZER = CSSSanitizer()
 CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 OLE_SIGNATURE = bytes.fromhex("d0cf11e0a1b11ae1")
 MIN_PAGE_CONTENT_RATIO = 0.0005
@@ -55,17 +88,30 @@ ARTIFACT_LOCKS = {}
 ARTIFACT_LOCKS_GUARD = threading.Lock()
 
 
-def download_source(url: str, target: Path) -> tuple[str, int]:
+def download_source(url: str, target: Path, *, max_bytes: int = MAX_SOURCE_BYTES) -> tuple[str, int]:
     request = urllib.request.Request(url, headers={"User-Agent": "VoiceOfML-Reader-Assets/1.0"})
-    digest, size = hashlib.sha256(), 0
-    with urllib.request.urlopen(request, timeout=180) as response, target.open("wb") as output:
-        while chunk := response.read(1024 * 1024):
-            size += len(chunk)
-            if size > MAX_SOURCE_BYTES:
-                raise RuntimeError("source exceeds reader conversion size limit")
-            digest.update(chunk)
-            output.write(chunk)
-    return digest.hexdigest(), size
+    for attempt in range(3):
+        digest, size = hashlib.sha256(), 0
+        try:
+            with urllib.request.urlopen(request, timeout=180) as response, target.open("wb") as output:
+                while chunk := response.read(1024 * 1024):
+                    size += len(chunk)
+                    if size > max_bytes:
+                        raise RuntimeError("download exceeds size limit")
+                    digest.update(chunk)
+                    output.write(chunk)
+            return digest.hexdigest(), size
+        except urllib.error.HTTPError as exc:
+            if exc.code not in {408, 429} and exc.code < 500:
+                raise
+            error = exc
+        except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.IncompleteRead) as exc:
+            error = exc
+        target.unlink(missing_ok=True)
+        if attempt == 2:
+            raise error
+        time.sleep(attempt + 1)
+    raise RuntimeError("source download retry limit reached")
 
 
 def decode_html_source(source: Path) -> str:
@@ -102,6 +148,10 @@ def inline_html_resources(source: Path, source_url: str, work: Path) -> Path:
         flags=re.IGNORECASE,
     )
     text = re.sub(r"(<\?xml\b[^>]*\bencoding\s*=\s*)[\"'][^\"']+[\"']", r'\1"utf-8"', text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"<meta\b(?=[^>]*\bhttp-equiv\b)(?=[^>]*\bcharset\s*=)[^>]*>",
+        '<meta charset="utf-8">', text, flags=re.IGNORECASE,
+    )
     if not re.search(r"<meta\b[^>]*\bcharset\s*=", text, re.IGNORECASE):
         text = re.sub(r"(<head\b[^>]*>)", r'\1<meta charset="utf-8">', text, count=1, flags=re.IGNORECASE)
         if not re.search(r"<meta\b[^>]*\bcharset\s*=", text, re.IGNORECASE):
@@ -134,7 +184,10 @@ def inline_html_resources(source: Path, source_url: str, work: Path) -> Path:
         target = work / "html-resources" / str(count)
         target.parent.mkdir(parents=True, exist_ok=True)
         try:
-            digest, size = download_source(urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", "")), target)
+            digest, size = download_source(
+                urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", "")),
+                target, max_bytes=MAX_HTML_RESOURCE_BYTES,
+            )
         except Exception:
             target.unlink(missing_ok=True)
             return None
@@ -174,6 +227,7 @@ def inline_html_resources(source: Path, source_url: str, work: Path) -> Path:
 
     text = re.sub(r"<link\b[^>]*\brel\s*=\s*[\"']stylesheet[\"'][^>]*\bhref\s*=\s*([\"'])([^\"']+)\1[^>]*>\s*", stylesheet_tag, text, flags=re.IGNORECASE)
     text = re.sub(r"<link\b[^>]*\bhref\s*=\s*([\"'])([^\"']+)\1[^>]*\brel\s*=\s*[\"']stylesheet[\"'][^>]*>\s*", stylesheet_tag, text, flags=re.IGNORECASE)
+    text = sanitize_html(text)
     output = work / "inlined.html"
     output.write_text(text, encoding="utf-8")
     return output
@@ -216,7 +270,7 @@ def conversion_error_class(exc: Exception) -> str:
         return "conversion-timeout"
     if isinstance(exc, ReaderConversionCommandError):
         return "conversion-command-failed"
-    if isinstance(exc, urllib.error.URLError):
+    if isinstance(exc, (urllib.error.URLError, TimeoutError, ConnectionError, http.client.IncompleteRead)):
         return "source-download-failed"
     return type(exc).__name__
 
@@ -224,7 +278,12 @@ def conversion_error_class(exc: Exception) -> str:
 def run_checked(command: list[str], *, timeout_seconds: int | None = None, cwd: Path | None = None) -> None:
     timeout_seconds = COMMAND_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=timeout_seconds, cwd=cwd)
+        result = subprocess.run(
+            command, capture_output=True, text=True, timeout=timeout_seconds, cwd=cwd,
+            env={key: value for key, value in os.environ.items() if key not in {
+                "HF_TOKEN", "PAGES_TOKEN", "GH_PAT", "READER_CONVERSION_PASSWORD",
+            }},
+        )
     except subprocess.TimeoutExpired as exc:
         raise ReaderConversionTimeout(f"conversion command timed out: {Path(command[0]).name}") from exc
     if result.returncode:
@@ -234,7 +293,12 @@ def run_checked(command: list[str], *, timeout_seconds: int | None = None, cwd: 
 
 def command_output(command: list[str]) -> str:
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=COMMAND_TIMEOUT_SECONDS)
+        result = subprocess.run(
+            command, capture_output=True, text=True, timeout=COMMAND_TIMEOUT_SECONDS,
+            env={key: value for key, value in os.environ.items() if key not in {
+                "HF_TOKEN", "PAGES_TOKEN", "GH_PAT", "READER_CONVERSION_PASSWORD",
+            }},
+        )
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(f"validation command timed out: {Path(command[0]).name}") from exc
     if result.returncode:
@@ -277,7 +341,7 @@ def validate_media_output(path: Path, reader_mode: str) -> None:
     if reader_mode != "video" or len(video) != 1 or len(audio) > 1:
         raise RuntimeError("conversion output has invalid video streams")
     width, height = int(video[0].get("width") or 0), int(video[0].get("height") or 0)
-    if (video[0].get("codec_name") != "h264" or "mp4" not in format_names
+    if (video[0].get("codec_name") != "h264" or video[0].get("pix_fmt") != "yuv420p" or "mp4" not in format_names
             or not 0 < width <= 1920 or not 0 < height <= 1080
             or (audio and audio[0].get("codec_name") != "aac")):
         raise RuntimeError("conversion output is not compatible H.264/AAC video")
@@ -343,12 +407,16 @@ def mhtml_to_html(source: Path, target: Path) -> None:
         except ValueError:
             return ""
     resources = {}
+    resource_bytes = 0
     for part in parts:
         if part is html_part or part.is_multipart():
             continue
         data = part.get_payload(decode=True)
         if not data:
             continue
+        resource_bytes += len(data)
+        if resource_bytes > MAX_MHTML_RESOURCE_BYTES:
+            raise RuntimeError("MHTML embedded resources exceed size limit")
         encoded = f"data:{part.get_content_type()};base64,{base64.b64encode(data).decode('ascii')}"
         location = str(part.get("Content-Location") or "")
         content_id = str(part.get("Content-ID") or "").strip("<>")
@@ -377,26 +445,76 @@ def mhtml_to_html(source: Path, target: Path) -> None:
     target.write_text(document, encoding="utf-8")
 
 
-def sanitize_chm_html(document: str) -> str:
-    document = re.sub(r"<(script|object|iframe)\b[^>]*>.*?</\1\s*>", "", document, flags=re.IGNORECASE | re.DOTALL)
-    document = re.sub(r"<(?:embed|base)\b[^>]*?/?>", "", document, flags=re.IGNORECASE)
-    document = re.sub(r"\s+on[a-z0-9_-]+\s*=\s*([\"']).*?\1", "", document, flags=re.IGNORECASE | re.DOTALL)
-    document = re.sub(r"\s+(?:href|src)\s*=\s*([\"'])\s*javascript:.*?\1", "", document, flags=re.IGNORECASE | re.DOTALL)
-    document = re.sub(r"\s+(?:src|poster)\s*=\s*([\"'])\s*(?:https?:)?//.*?\1", "", document, flags=re.IGNORECASE | re.DOTALL)
-    document = re.sub(r"@import\s+[^;]+;", "", document, flags=re.IGNORECASE)
-    document = re.sub(r"url\(\s*([\"']?)(?:https?:)?//.*?\1\s*\)", "none", document, flags=re.IGNORECASE)
-    return document
+def sanitize_css(document: str) -> str:
+    output = []
+    for rule in tinycss2.parse_stylesheet(document, skip_comments=True, skip_whitespace=True):
+        if rule.type != "qualified-rule":
+            continue
+        selector = tinycss2.serialize(rule.prelude).strip()
+        declarations = CSS_SANITIZER.sanitize_css(tinycss2.serialize(rule.content))
+        declarations = re.sub(r"\bexpression\s*\([^)]*\)", "", declarations, flags=re.IGNORECASE)
+        if selector and declarations.strip():
+            output.append(f"{selector}{{{declarations}}}")
+    return "".join(output)
+
+
+def sanitize_html(document: str, *, allow_relative: bool = False) -> str:
+    styles = []
+
+    def extract_style(match):
+        token = f"READER_STYLE_{len(styles)}_{hashlib.sha256(match.group(0).encode()).hexdigest()}"
+        styles.append((token, f"<style>{sanitize_css(match.group(1))}</style>"))
+        return token
+
+    document = re.sub(
+        r"<style\b[^>]*>(.*?)</style\s*>", extract_style, document,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+    def allowed_attribute(tag: str, name: str, value: str) -> bool:
+        if name not in GLOBAL_HTML_ATTRIBUTES | TAG_HTML_ATTRIBUTES.get(tag, set()):
+            return False
+        if name not in {"href", "src"}:
+            return True
+        value = html.unescape(value).strip()
+        normalized = re.sub(r"[\x00-\x20]+", "", value).lower()
+        if name == "src" and re.match(r"^data:image/(?:gif|jpeg|png|webp);base64,", normalized):
+            return True
+        if name == "href" and normalized.startswith("#"):
+            return True
+        parsed = urllib.parse.urlsplit(normalized)
+        return allow_relative and not parsed.scheme and not parsed.netloc and not normalized.startswith("//")
+
+    cleaner = bleach.Cleaner(
+        tags=HTML_TAGS,
+        attributes=allowed_attribute,
+        protocols={"data"},
+        css_sanitizer=CSS_SANITIZER,
+        strip=True,
+        strip_comments=True,
+    )
+    cleaned = cleaner.clean(document)
+    for token, style in styles:
+        cleaned = cleaned.replace(token, style)
+    return cleaned
+
+
+sanitize_chm_html = sanitize_html
 
 
 def sanitize_chm_epub(path: Path, work: Path) -> None:
     rewritten = work / "sanitized-chm.epub"
     with zipfile.ZipFile(path) as source, zipfile.ZipFile(rewritten, "w") as target:
         infos = sorted(source.infolist(), key=lambda info: info.filename != "mimetype")
+        if (len(infos) > MAX_EPUB_MEMBERS or any(info.file_size > MAX_EPUB_MEMBER_BYTES for info in infos)
+                or sum(info.file_size for info in infos) > MAX_EPUB_EXPANDED_BYTES):
+            raise RuntimeError("EPUB expanded content exceeds limits")
         for info in infos:
             data = source.read(info.filename)
             suffix = Path(info.filename).suffix.lower()
-            if suffix in {".htm", ".html", ".xhtml", ".css"}:
-                data = sanitize_chm_html(data.decode("utf-8", "replace")).encode("utf-8")
+            if suffix in {".htm", ".html", ".xhtml", ".css", ".svg"}:
+                text = data.decode("utf-8", "replace")
+                data = (sanitize_css(text) if suffix == ".css" else sanitize_html(text, allow_relative=True)).encode("utf-8")
             if info.filename == "mimetype":
                 info.compress_type = zipfile.ZIP_STORED
             target.writestr(info, data)
@@ -410,7 +528,7 @@ def convert_chm(source: Path, target: Path, work: Path) -> None:
         validate_output(target, "epub")
         validate_chm_epub(target)
         return
-    except RuntimeError as exc:
+    except (RuntimeError, FileNotFoundError, zipfile.BadZipFile, KeyError) as exc:
         initial_error = exc
     extracted = work / "chm-extracted"
     extracted.mkdir()
@@ -422,17 +540,13 @@ def convert_chm(source: Path, target: Path, work: Path) -> None:
     prepared = work / "chm-mhtml"
     prepared.mkdir()
     documents = []
-    if mhtml_files:
-        for index, mhtml_file in enumerate(mhtml_files):
-            output = prepared / f"{index:04d}.html"
-            mhtml_to_html(mhtml_file, output)
-            documents.append(output)
-    else:
-        # Some CHM files contain ordinary HTML pages directly rather than MHTML.
-        # Keep their relative asset paths so ebook-convert can collect images and
-        # linked pages into the resulting EPUB.
+    if html_files:
         shutil.copytree(extracted, prepared, dirs_exist_ok=True)
         documents = [prepared / html_file.relative_to(extracted) for html_file in html_files]
+    for index, mhtml_file in enumerate(mhtml_files):
+        output = prepared / f"mhtml-{index:04d}.html"
+        mhtml_to_html(mhtml_file, output)
+        documents.append(output)
     source_html = documents[0]
     if len(documents) > 1:
         source_html = prepared / "index.html"
@@ -491,6 +605,10 @@ def convert_caj_family(source: Path, target: Path, work: Path) -> None:
     converter = CAJ2PDF_DIR / "caj2pdf"
     if not converter.is_file():
         raise RuntimeError("pinned caj2pdf converter is unavailable")
+    for library in ("libjbigdec.so", "libjbig2codec.so"):
+        source_library = CAJ2PDF_DIR / library
+        if source_library.is_file():
+            shutil.copyfile(source_library, work / library)
     run_checked(["python3", str(converter), "convert", str(source), "--output", str(target)], cwd=work)
 
 
@@ -670,10 +788,7 @@ def validate_html_content(path: Path) -> None:
 def validate_reader_content(path: Path, item: dict, work: Path) -> None:
     mode = item["reader_mode"]
     if mode == "pdf":
-        if item["extension"] == "ps":
-            validate_pdf_structure(path)
-        else:
-            validate_pdf_content(path, work)
+        validate_pdf_content(path, work)
     elif mode == "epub":
         validate_epub_content(path)
     elif mode == "docx":
@@ -685,24 +800,36 @@ def validate_reader_content(path: Path, item: dict, work: Path) -> None:
 def convert_file(item: dict, source: Path, target: Path, work: Path) -> None:
     ext = item["extension"]
     office_profile = (work / "libreoffice-profile").resolve().as_uri()
-    password = item.get("source_password") or source_password(item.get("repo", ""), item.get("path", ""))
+    explicit_password = item.get("source_password") or source_password(item.get("repo", ""), item.get("path", ""))
+    password = explicit_password
+    if not password and ext == "xlsx":
+        password = os.environ.get("READER_CONVERSION_PASSWORD", "")
     if password and ext in {"doc", "docx", "ppt", "pptx", "pps", "xls", "xlsx"}:
         import msoffcrypto
-        with source.open("rb") as encrypted:
-            document = msoffcrypto.OfficeFile(encrypted)
-            if document.is_encrypted():
-                decrypted_source = work / f"decrypted.{ext}"
-                document.load_key(password=password)
-                with decrypted_source.open("wb") as decrypted:
-                    document.decrypt(decrypted)
-                source = decrypted_source
+        document = None
+        try:
+            with source.open("rb") as encrypted:
+                document = msoffcrypto.OfficeFile(encrypted)
+        except Exception:
+            if explicit_password:
+                raise
+        if document is not None and document.is_encrypted():
+            decrypted_source = work / f"decrypted.{ext}"
+            document.load_key(password=password)
+            with decrypted_source.open("wb") as decrypted:
+                document.decrypt(decrypted)
+            source = decrypted_source
     if ext == "pdf":
         if not password:
             raise RuntimeError("protected PDF has no known password")
         run_checked(["qpdf", f"--password={password}", "--decrypt", str(source), str(target)])
     elif ext in {"htm", "html"}:
         source_url = item.get("source_url")
-        prepared = inline_html_resources(source, source_url, work) if source_url else source
+        if source_url:
+            prepared = inline_html_resources(source, source_url, work)
+        else:
+            prepared = work / "sanitized.html"
+            prepared.write_text(sanitize_html(decode_html_source(source)), encoding="utf-8")
         shutil.copyfile(prepared, target)
     elif ext == "doc":
         out = work / "office"
@@ -904,7 +1031,9 @@ def validate_office_pdf(path: Path, item: dict, work: Path, source: Path | None 
         try:
             rasterize_pdf(path, work)
         except RuntimeError as exc:
-            if source is None or item.get("profile") != "libreoffice-pdf-v3" or "blank interior page" not in str(exc):
+            if (source is None or item.get("profile") not in {
+                    "libreoffice-pdf-office-v2", "libreoffice-pdf-office-xlsx-v3"
+                    } or "blank interior page" not in str(exc)):
                 raise
             candidate = normalized_office_pdf(source, work)
             shutil.move(candidate, path)
@@ -921,8 +1050,19 @@ def convert_item(item: dict, bundle: Path, reusable: dict | None = None) -> dict
         work = Path(root)
         source = work / f"source.{item['extension']}"
         digest, source_bytes = download_source(item["source_url"], source)
-        existing = (reusable or {}).get(f"{digest}\0{item['profile']}")
-        object_path = existing["path"] if existing else f"objects/{digest[:2]}/{digest}/{item['profile']}/{item['output_name']}"
+        if item["extension"] in {"mht", "mhtml"} and source_bytes > MAX_MHTML_SOURCE_BYTES:
+            raise RuntimeError("MHTML source exceeds size limit")
+        identity = reusable_object_key(
+            digest, item["profile"], extension=item["extension"],
+            source_revision=item["source_revision"], key=item["key"],
+        )
+        existing = (reusable or {}).get(identity)
+        profile_path = object_profile_path(
+            item["profile"], extension=item["extension"],
+            source_revision=item["source_revision"], key=item["key"],
+        )
+        object_path = existing["path"] if existing else f"objects/{digest[:2]}/{digest}/{profile_path}/{item['output_name']}"
+        validate_object_path(object_path)
         target = bundle / object_path
         target.parent.mkdir(parents=True, exist_ok=True)
         reused = existing is not None
@@ -940,6 +1080,8 @@ def convert_item(item: dict, bundle: Path, reusable: dict | None = None) -> dict
                 else:
                     temporary = work / item["output_name"]
                     convert_file(item, source, temporary, work)
+                    if item["reader_mode"] == "epub" and item["extension"] != "chm":
+                        sanitize_chm_epub(temporary, work)
                     validate_output(temporary, item["reader_mode"])
                     if item["extension"] == "chm":
                         validate_chm_epub(temporary)
@@ -1008,7 +1150,7 @@ def main() -> int:
     (args.bundle / "bundle.json").write_bytes(canonical_json(bundle_data, pretty=True))
     failed = sum(item["status"] == "failed" for item in results)
     print(f"converted {len(results) - failed}; failed {failed}")
-    return 0
+    return 1 if results and failed == len(results) else 0
 
 
 if __name__ == "__main__":

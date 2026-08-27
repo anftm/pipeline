@@ -83,14 +83,21 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           READER_ASSETS_REPO: vomebook/Reader-Assets
           PER_SHARD_LIMIT: ${{ inputs.limit || '20' }}
+          CHECKPOINT_BATCHES: ${{ inputs.checkpoint_batches || '30' }}
+          COMMAND_TIMEOUT: ${{ inputs.command_timeout || '120' }}
           FORCE_REBUILD: ${{ inputs.force || 'false' }}
+          INPUT_REPO: ${{ inputs.repo || '' }}
+          INPUT_EXTENSION: ${{ inputs.extension || '' }}
+          INPUT_PATH: ${{ inputs.path || '' }}
         run: |
-          [[ "${PER_SHARD_LIMIT}" =~ ^[0-9]+$ ]] || { echo "limit must be a non-negative integer" >&2; exit 1; }
+          [[ "${PER_SHARD_LIMIT}" =~ ^[0-9]+$ ]] && ((10#${PER_SHARD_LIMIT} >= 1 && 10#${PER_SHARD_LIMIT} <= 100)) || { echo "limit must be between 1 and 100" >&2; exit 1; }
+          [[ "${CHECKPOINT_BATCHES}" =~ ^[0-9]+$ ]] && ((10#${CHECKPOINT_BATCHES} >= 1 && 10#${CHECKPOINT_BATCHES} <= 100)) || { echo "checkpoint_batches must be between 1 and 100" >&2; exit 1; }
+          [[ "${COMMAND_TIMEOUT}" =~ ^[0-9]+$ ]] && ((10#${COMMAND_TIMEOUT} >= 30 && 10#${COMMAND_TIMEOUT} <= 7200)) || { echo "command_timeout must be between 30 and 7200" >&2; exit 1; }
           total_limit=$((10 * 10#${PER_SHARD_LIMIT}))
           args=(
-            --repo "${{ inputs.repo || '' }}"
-            --extension "${{ inputs.extension || '' }}"
-            --path "${{ inputs.path || '' }}"
+            --repo "${INPUT_REPO}"
+            --extension "${INPUT_EXTENSION}"
+            --path "${INPUT_PATH}"
             --limit "${total_limit}"
           )
           if [[ "${{ inputs.retry_failed }}" == "true" ]]; then args+=(--retry-failed); fi
@@ -208,6 +215,10 @@ jobs:
           CAJ2PDF_DIR: /opt/caj2pdf
           READER_CONVERSION_PASSWORD: ${{ secrets.READER_CONVERSION_PASSWORD }}
         run: |
+          batch_size="${BATCH_SIZE}"
+          case "${EXTENSION}" in
+            ape|wma|amr|flv|f4v|rm|rmvb|mkv|avi|mpg|mpeg|mts|ts|wmv) batch_size=1 ;;
+          esac
           max_batches="${CHECKPOINT_BATCHES}"
           if [[ "${RETRY_FAILED}" == "true" || "${FORCE_REBUILD}" == "true" || -n "${SOURCE_PATH}" ]]; then
             max_batches=1
@@ -215,7 +226,7 @@ jobs:
           for ((batch=1; batch<=max_batches; batch++)); do
             args=(
               --repo "${SOURCE_REPO}" --extension "${EXTENSION}" --path "${SOURCE_PATH}"
-              --limit "${BATCH_SIZE}" --shard-count "${SHARD_COUNT}" --shard-index "${SHARD_INDEX}"
+              --limit "${batch_size}" --shard-count "${SHARD_COUNT}" --shard-index "${SHARD_INDEX}"
             )
             [[ "${RETRY_FAILED}" == "true" ]] && args+=(--retry-failed)
             [[ "${FORCE_REBUILD}" == "true" ]] && args+=(--force)
@@ -224,15 +235,20 @@ jobs:
             [[ "${count}" == "0" ]] && break
             echo "Shard ${SHARD_INDEX}, checkpoint ${batch}/${max_batches}: ${count} ${EXTENSION} asset(s)"
             bundle="output/reader-assets/bundle-${SHARD_INDEX}"
-            python scripts/convert_reader_assets.py --bundle "${bundle}"
+            conversion_status=0
+            python scripts/convert_reader_assets.py --bundle "${bundle}" || conversion_status=$?
             python scripts/publish_reader_assets.py --bundle "${bundle}"
+            if ((conversion_status != 0)); then
+              echo "All conversions in this checkpoint failed; failure state was published" >&2
+              exit "${conversion_status}"
+            fi
           done
 
   finalize:
     needs: [plan, convert]
     if: >-
       always() && inputs.dry_run != true && needs.plan.result == 'success' &&
-      (needs.convert.result == 'success' || needs.convert.result == 'skipped')
+      (needs.convert.result == 'success' || needs.convert.result == 'failure' || needs.convert.result == 'skipped')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -249,7 +265,7 @@ jobs:
       - name: Restore conversion plan
         run: tar -xzf output/reader-assets/plan/plan.tgz
       - name: Remove stale Reader mappings
-        if: needs.plan.outputs.authoritative == 'true' && needs.plan.outputs.stale_count != '0'
+        if: needs.convert.result == 'success' && needs.plan.outputs.authoritative == 'true' && needs.plan.outputs.stale_count != '0'
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           READER_ASSETS_REPO: vomebook/Reader-Assets

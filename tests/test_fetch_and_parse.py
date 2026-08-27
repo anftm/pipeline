@@ -97,6 +97,39 @@ class FetchAndParseTests(unittest.TestCase):
             self.assertEqual(result, 1)
             self.assertFalse(output_file.exists())
 
+    def test_catalog_and_sizes_are_fetched_from_the_captured_revision(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_path = Path(temporary)
+            state_file = temporary_path / "commits.json"
+            output_file = temporary_path / "search.json"
+            state_file.write_text(json.dumps({repo: "old-sha" for repo in self.module.REPOS}), encoding="utf-8")
+            catalog_urls = []
+            size_calls = []
+
+            def get_text(url, _token):
+                catalog_urls.append(url)
+                return "Book.docx\n"
+
+            def get_sizes(repo, revision, paths, _token):
+                size_calls.append((repo, revision, paths))
+                return {}
+
+            with patch.object(self.module, "STATE_FILE", state_file), \
+                    patch.object(self.module, "OUTPUT_DIR", temporary_path), \
+                    patch.object(self.module, "OUTPUT_FILE", output_file), \
+                    patch.object(self.module, "FOLDER_TREE_FILE", temporary_path / "folder_tree.json"), \
+                    patch.object(self.module, "FOLDER_BROWSER_FILE", temporary_path / "folder_browser.json"), \
+                    patch.object(self.module, "get_repo_sha", return_value="captured-sha"), \
+                    patch.object(self.module, "http_get_text", side_effect=get_text), \
+                    patch.object(self.module, "batch_get_sizes", side_effect=get_sizes), \
+                    patch.object(self.module.time, "sleep"), \
+                    patch.dict(os.environ, {"FORCE_SYNC": "true"}, clear=True):
+                result = self.module.main()
+
+            self.assertEqual(result, 0)
+            self.assertTrue(all("/resolve/captured-sha/" in url for url in catalog_urls))
+            self.assertTrue(all(revision == "captured-sha" for _, revision, _ in size_calls))
+
 
 if __name__ == "__main__":
     unittest.main()

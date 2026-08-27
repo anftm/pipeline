@@ -226,8 +226,8 @@ def encode_folder_browser(browser_by_repo: dict) -> dict:
             }
     return encoded
 
-def batch_get_sizes(repo: str, paths: list[str], token: str, max_bytes: int = 80000) -> dict:
-    url = f"https://huggingface.co/api/datasets/{repo}/paths-info/main"
+def batch_get_sizes(repo: str, revision: str, paths: list[str], token: str, max_bytes: int = 80000) -> dict:
+    url = f"https://huggingface.co/api/datasets/{repo}/paths-info/{revision}"
     size_map = {}
     total = len(paths)
     idx = 0
@@ -527,7 +527,8 @@ def main():
         print(f"\n📥 处理仓库: {repo}")
 
         # 1. 下载 txt
-        txt_url = f"{RAW_BASE}/{repo}/resolve/main/{urllib.parse.quote('直接目录.txt')}"
+        revision = new_state[repo]
+        txt_url = f"{RAW_BASE}/{repo}/resolve/{revision}/{urllib.parse.quote('直接目录.txt')}"
         print(f"   📄 下载: {txt_url}")
         txt_content = http_get_text(txt_url, token)
         if not txt_content:
@@ -551,7 +552,7 @@ def main():
 
         # 3. 批量获取大小
         print(f"   📏 批量获取文件大小 ({len(all_paths)} 个文件)...")
-        size_map = batch_get_sizes(repo, all_paths, token)
+        size_map = batch_get_sizes(repo, revision, all_paths, token)
         
         # 4. 补全 Size
         filled = 0

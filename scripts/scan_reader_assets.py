@@ -13,13 +13,13 @@ from huggingface_hub.errors import RepositoryNotFoundError
 try:
     from .reader_assets import (
         MANIFEST_NAME, READER_ASSETS_REPO, asset_key, canonical_json, decode_search_payload,
-        empty_manifest, load_json, relative_path, source_conversion_contract, source_url,
+        empty_manifest, load_json, relative_path, reusable_object_key, source_conversion_contract, source_url,
         validate_manifest,
     )
 except ImportError:
     from reader_assets import (
         MANIFEST_NAME, READER_ASSETS_REPO, asset_key, canonical_json, decode_search_payload,
-        empty_manifest, load_json, relative_path, source_conversion_contract, source_url,
+        empty_manifest, load_json, relative_path, reusable_object_key, source_conversion_contract, source_url,
         validate_manifest,
     )
 
@@ -72,6 +72,10 @@ def build_queue(records, revisions, manifest, *, repo="", extension="", exact_pa
             continue
         if not force and current and existing.get("status") == "failed" and not retry_failed:
             continue
+        failed_current = (existing.get("failed_source_revision") == revision
+                          and existing.get("failed_profile") == profile)
+        if not force and failed_current and not retry_failed:
+            continue
         item = {
             "key": key, "repo": source_repo, "path": path, "extension": ext,
             "source_revision": revision, "source_bytes": record.get("Size") or 0,
@@ -103,15 +107,22 @@ def active_keys(records) -> list[str]:
 
 def reusable_objects(manifest: dict) -> dict:
     objects = {}
-    entries = list(manifest.get("files", {}).values()) + list(manifest.get("orphans", {}).values())
-    for entry in entries:
+    entries = list(manifest.get("files", {}).items())
+    entries.extend(("", entry) for entry in manifest.get("orphans", {}).values())
+    for key, entry in entries:
         if (entry.get("status", "ready") != "ready" or not entry.get("source_sha256")
                 or not entry.get("path") or not entry.get("sha256")
                 or not isinstance(entry.get("bytes"), int) or entry["bytes"] <= 0
                 or not entry.get("reader_mode")):
             continue
-        key = f"{entry['source_sha256']}\0{entry.get('profile', '')}"
-        objects[key] = {
+        extension = entry.get("source_extension", "")
+        if not key and extension in {"htm", "html"}:
+            continue
+        identity = reusable_object_key(
+            entry["source_sha256"], entry.get("profile", ""), extension=extension,
+            source_revision=entry.get("source_revision", ""), key=key,
+        )
+        objects[identity] = {
             field: entry[field]
             for field in ("path", "bytes", "sha256", "reader_mode") if field in entry
         }

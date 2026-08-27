@@ -16,13 +16,13 @@ try:
     from .build_reader_assets_index import encode_index
     from .reader_assets import (
         MANIFEST_NAME, READER_ASSETS_REPO, canonical_json, empty_manifest, load_json,
-        validate_manifest,
+        reusable_object_key, validate_manifest, validate_object_path,
     )
 except ImportError:
     from build_reader_assets_index import encode_index
     from reader_assets import (
         MANIFEST_NAME, READER_ASSETS_REPO, canonical_json, empty_manifest, load_json,
-        validate_manifest,
+        reusable_object_key, validate_manifest, validate_object_path,
     )
 
 SIDECAR_NAME = "reader_assets.json.gz"
@@ -65,19 +65,33 @@ def build_publish(api: HfApi, repo_id: str, bundle: Path, revision: str | None =
     files = dict(manifest["files"])
     orphans = dict(manifest.get("orphans", {}))
     reusable = {}
-    for candidate in list(files.values()) + list(orphans.values()):
+    candidates = list(files.items()) + [("", entry) for entry in orphans.values()]
+    for key, candidate in candidates:
         if (candidate.get("status", "ready") == "ready" and candidate.get("source_sha256")
                 and candidate.get("profile") and candidate.get("path") and candidate.get("sha256")
                 and isinstance(candidate.get("bytes"), int) and candidate["bytes"] > 0
                 and candidate.get("reader_mode")):
-            reusable[f"{candidate['source_sha256']}\0{candidate['profile']}"] = candidate
+            extension = candidate.get("source_extension", "")
+            if not key and extension in {"htm", "html"}:
+                continue
+            identity = reusable_object_key(
+                candidate["source_sha256"], candidate["profile"], extension=extension,
+                source_revision=candidate.get("source_revision", ""), key=key,
+            )
+            reusable[identity] = candidate
     artifacts = {}
     for result in data["results"]:
         entry = {key: value for key, value in result.items() if key != "key"}
         if result.get("status") == "ready":
+            validate_object_path(result.get("path"))
             remote = None
             if not data.get("force_rebuild"):
-                remote = reusable.get(f"{result.get('source_sha256', '')}\0{result.get('profile', '')}")
+                identity = reusable_object_key(
+                    result.get("source_sha256", ""), result.get("profile", ""),
+                    extension=result.get("source_extension", ""),
+                    source_revision=result.get("source_revision", ""), key=result.get("key", ""),
+                )
+                remote = reusable.get(identity)
             if remote:
                 for field in ("path", "bytes", "sha256", "reader_mode"):
                     entry[field] = remote[field]
@@ -88,11 +102,17 @@ def build_publish(api: HfApi, repo_id: str, bundle: Path, revision: str | None =
                     raise ValueError(f"missing or invalid artifact for {result['key']}")
                 if file_sha256(artifact) != result["sha256"]:
                     raise ValueError(f"artifact digest mismatch for {result['key']}")
-                if not result.get("reused"):
-                    artifacts[result["path"]] = str(artifact)
+                artifacts[result["path"]] = str(artifact)
         elif result.get("status") != "failed":
             raise ValueError("unknown reader asset result status")
         elif files.get(result["key"], {}).get("status") == "ready":
+            previous = dict(files[result["key"]])
+            previous.update({
+                "failed_source_revision": result.get("source_revision", ""),
+                "failed_profile": result.get("profile", ""),
+                "failed_error": result.get("error", "RuntimeError"),
+            })
+            files[result["key"]] = previous
             continue
         entry.pop("reused", None)
         previous = files.get(result["key"], {})
@@ -131,6 +151,7 @@ def build_publish(api: HfApi, repo_id: str, bundle: Path, revision: str | None =
         "files": dict(sorted(files.items())),
         "orphans": dict(sorted(orphans.items())),
     }
+    validate_manifest(updated)
     operations = [
         CommitOperationAdd(path_in_repo=path, path_or_fileobj=source)
         for path, source in sorted(artifacts.items())
@@ -141,8 +162,17 @@ def build_publish(api: HfApi, repo_id: str, bundle: Path, revision: str | None =
 
 
 def publish_bundle(api: HfApi, repo_id: str, bundle: Path, *, max_attempts: int = 20) -> tuple[dict, int]:
+    data = load_json(bundle / "bundle.json")
+    result_keys = {result.get("key") for result in data.get("results", []) if result.get("key")}
+    baseline = None
     for attempt in range(max_attempts):
         revision = api.repo_info(repo_id=repo_id, repo_type="dataset").sha
+        current = remote_manifest(api, repo_id, revision)
+        current_entries = {key: current["files"].get(key) for key in result_keys}
+        if baseline is None:
+            baseline = current_entries
+        elif current_entries != baseline:
+            raise RuntimeError("reader asset key changed during publication retry")
         manifest, operations = build_publish(api, repo_id, bundle, revision)
         try:
             api.create_commit(

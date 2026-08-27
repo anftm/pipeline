@@ -2,6 +2,7 @@
 """Shared contracts for incremental VoiceOfML reader assets."""
 
 import json
+import hashlib
 import posixpath
 import re
 import urllib.parse
@@ -13,14 +14,14 @@ MANIFEST_NAME = "manifest.json"
 CONVERTIBLE_EXTENSIONS = {
     "doc": ("libreoffice-docx-v2", "docx", "document.docx"),
     "docx": ("docx-native-v2", "docx", "document.docx"),
-    "htm": ("sanitized-html-v3", "html", "document.html"),
-    "html": ("sanitized-html-v3", "html", "document.html"),
-    "mobi": ("calibre-epub-v2", "epub", "book.epub"),
-    "azw3": ("calibre-epub-v2", "epub", "book.epub"),
-    "fb2": ("calibre-epub-v2", "epub", "book.epub"),
-    "odt": ("calibre-epub-v2", "epub", "book.epub"),
-    "rtf": ("calibre-rtf-epub-v3", "epub", "book.epub"),
-    "chm": ("calibre-chm-epub-v4", "epub", "book.epub"),
+    "htm": ("sanitized-html-v4", "html", "document.html"),
+    "html": ("sanitized-html-v4", "html", "document.html"),
+    "mobi": ("calibre-epub-v3", "epub", "book.epub"),
+    "azw3": ("calibre-epub-v3", "epub", "book.epub"),
+    "fb2": ("calibre-epub-v3", "epub", "book.epub"),
+    "odt": ("calibre-epub-v3", "epub", "book.epub"),
+    "rtf": ("calibre-rtf-epub-v4", "epub", "book.epub"),
+    "chm": ("calibre-chm-epub-v5", "epub", "book.epub"),
     "tif": ("pillow-pdf-v2", "pdf", "document.pdf"),
     "tiff": ("pillow-pdf-v2", "pdf", "document.pdf"),
     "djvu": ("djvulibre-pdf-v2", "pdf", "document.pdf"),
@@ -33,9 +34,9 @@ CONVERTIBLE_EXTENSIONS = {
     "csv": ("libreoffice-pdf-office-v2", "pdf", "document.pdf"),
     "ods": ("libreoffice-pdf-office-v2", "pdf", "document.pdf"),
     "wps": ("libreoffice-pdf-office-v2", "pdf", "document.pdf"),
-    "mht": ("sanitized-mhtml-v4", "html", "document.html"),
-    "mhtml": ("sanitized-mhtml-v4", "html", "document.html"),
-    "ps": ("ghostscript-pdf-v4", "pdf", "document.pdf"),
+    "mht": ("sanitized-mhtml-v5", "html", "document.html"),
+    "mhtml": ("sanitized-mhtml-v5", "html", "document.html"),
+    "ps": ("ghostscript-pdf-v5", "pdf", "document.pdf"),
     "caj": ("caj-family-pdf-v1", "pdf", "document.pdf"),
     "kdh": ("caj-family-pdf-v1", "pdf", "document.pdf"),
     "ape": ("ffmpeg-audio-mp3-v1", "audio", "audio.mp3"),
@@ -54,7 +55,11 @@ CONVERTIBLE_EXTENSIONS = {
     "wmv": ("ffmpeg-video-mp4-h264-aac-v1", "video", "video.mp4"),
 }
 PROTECTED_PDF_CONTRACT = ("qpdf-decrypted-v1", "pdf", "document.pdf")
-PASSWORD_RE = re.compile(r"(?:密码|口令|password|passwd)\s*[：:=]?\s*([A-Za-z0-9]+)", re.IGNORECASE)
+PASSWORD_RE = re.compile(
+    r"(?:密码|口令|password|passwd)\s*(?:[：:=]\s*|(?=[A-Za-z0-9]))"
+    r"([^\s\]〕】）)},，；;]+)",
+    re.IGNORECASE,
+)
 KNOWN_SOURCE_PASSWORDS = {
     ("VoiceOfML/MLMRL-Library", "基础入门书单/入门答疑/风正集.pdf"): "230505",
     ("VoiceOfML/MLMRL-Hub", "000269/1870520043_3072_风正集230220.pdf"): "230220",
@@ -70,8 +75,32 @@ def conversion_contract(extension: str, key: str = "") -> tuple[str, str, str]:
 def source_password(repo: str, path: str) -> str:
     match = PASSWORD_RE.search(path)
     if match:
-        return match.group(1)
+        value = match.group(1)
+        suffix = Path(path).suffix
+        return value[:-len(suffix)] if suffix and value.lower().endswith(suffix.lower()) else value
     return KNOWN_SOURCE_PASSWORDS.get((repo, path), "")
+
+
+def reusable_object_key(source_sha256: str, profile: str, *, extension: str = "",
+                        source_revision: str = "", key: str = "") -> str:
+    identity = f"{source_sha256}\0{profile}"
+    if extension in {"htm", "html"}:
+        identity += f"\0{source_revision}\0{key}"
+    return identity
+
+
+def object_profile_path(profile: str, *, extension: str = "", source_revision: str = "", key: str = "") -> str:
+    if extension not in {"htm", "html"}:
+        return profile
+    context = hashlib.sha256(f"{source_revision}\0{key}".encode("utf-8")).hexdigest()[:16]
+    return f"{profile}-{context}"
+
+
+def validate_object_path(path: str) -> str:
+    if (not isinstance(path, str) or not path.startswith("objects/") or "\\" in path
+            or path.startswith("/") or any(part in {"", ".", ".."} for part in path.split("/"))):
+        raise ValueError("invalid reader asset object path")
+    return path
 
 
 def source_conversion_contract(repo: str, path: str, extension: str):
@@ -93,6 +122,13 @@ def validate_manifest(manifest: dict) -> dict:
         raise ValueError("reader manifest files must be an object")
     if "orphans" in manifest and not isinstance(manifest["orphans"], dict):
         raise ValueError("reader manifest orphans must be an object")
+    for entry in manifest["files"].values():
+        if isinstance(entry, dict) and entry.get("status") == "ready":
+            validate_object_path(entry.get("path"))
+    for path, entry in manifest.get("orphans", {}).items():
+        validate_object_path(path)
+        if isinstance(entry, dict) and entry.get("path") not in {None, path}:
+            raise ValueError("reader asset orphan path mismatch")
     return manifest
 
 

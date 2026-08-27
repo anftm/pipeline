@@ -8,6 +8,7 @@ import urllib.error
 import zipfile
 from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import requests
@@ -42,14 +43,14 @@ class ReaderAssetContractTests(unittest.TestCase):
         expected = {
             "doc": ("libreoffice-docx-v2", "docx", "document.docx"),
             "docx": ("docx-native-v2", "docx", "document.docx"),
-            "htm": ("sanitized-html-v3", "html", "document.html"),
-            "html": ("sanitized-html-v3", "html", "document.html"),
-            "mobi": ("calibre-epub-v2", "epub", "book.epub"),
-            "azw3": ("calibre-epub-v2", "epub", "book.epub"),
-            "fb2": ("calibre-epub-v2", "epub", "book.epub"),
-            "odt": ("calibre-epub-v2", "epub", "book.epub"),
-            "rtf": ("calibre-rtf-epub-v3", "epub", "book.epub"),
-            "chm": ("calibre-chm-epub-v4", "epub", "book.epub"),
+            "htm": ("sanitized-html-v4", "html", "document.html"),
+            "html": ("sanitized-html-v4", "html", "document.html"),
+            "mobi": ("calibre-epub-v3", "epub", "book.epub"),
+            "azw3": ("calibre-epub-v3", "epub", "book.epub"),
+            "fb2": ("calibre-epub-v3", "epub", "book.epub"),
+            "odt": ("calibre-epub-v3", "epub", "book.epub"),
+            "rtf": ("calibre-rtf-epub-v4", "epub", "book.epub"),
+            "chm": ("calibre-chm-epub-v5", "epub", "book.epub"),
             "tif": ("pillow-pdf-v2", "pdf", "document.pdf"),
             "tiff": ("pillow-pdf-v2", "pdf", "document.pdf"),
             "djvu": ("djvulibre-pdf-v2", "pdf", "document.pdf"),
@@ -62,9 +63,9 @@ class ReaderAssetContractTests(unittest.TestCase):
             "csv": ("libreoffice-pdf-office-v2", "pdf", "document.pdf"),
             "ods": ("libreoffice-pdf-office-v2", "pdf", "document.pdf"),
             "wps": ("libreoffice-pdf-office-v2", "pdf", "document.pdf"),
-            "mht": ("sanitized-mhtml-v4", "html", "document.html"),
-            "mhtml": ("sanitized-mhtml-v4", "html", "document.html"),
-            "ps": ("ghostscript-pdf-v4", "pdf", "document.pdf"),
+            "mht": ("sanitized-mhtml-v5", "html", "document.html"),
+            "mhtml": ("sanitized-mhtml-v5", "html", "document.html"),
+            "ps": ("ghostscript-pdf-v5", "pdf", "document.pdf"),
             "caj": ("caj-family-pdf-v1", "pdf", "document.pdf"),
             "kdh": ("caj-family-pdf-v1", "pdf", "document.pdf"),
             "ape": ("ffmpeg-audio-mp3-v1", "audio", "audio.mp3"),
@@ -90,6 +91,15 @@ class ReaderAssetContractTests(unittest.TestCase):
             "VoiceOfML/MLMRL-Hub", "001346/1870520043_15344_风正集230123.pdf",
         ), "230123")
         self.assertEqual(reader_assets.source_password("repo", "密码学原理.pdf"), "")
+        self.assertEqual(reader_assets.source_password("repo", "book password: s3cr3t-1.pdf"), "s3cr3t-1")
+        self.assertEqual(reader_assets.source_password("repo", "book passwd=p@ss.docx"), "p@ss")
+
+    def test_manifest_rejects_unsafe_object_paths(self):
+        for path in ("../../outside.pdf", "/tmp/outside.pdf", "objects/../outside.pdf", "objects\\outside.pdf"):
+            with self.subTest(path=path), self.assertRaisesRegex(ValueError, "object path"):
+                reader_assets.validate_manifest({
+                    "version": 1, "files": {"key": {"status": "ready", "path": path}},
+                })
 
     def test_only_known_password_pdfs_have_a_conversion_contract(self):
         self.assertEqual(
@@ -143,6 +153,18 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(
             len(scan_reader_assets.build_queue(self.records, self.revisions, manifest, retry_failed=True)), 1
         )
+
+    def test_failed_update_attempt_on_ready_asset_requires_retry_flag(self):
+        key = reader_assets.asset_key("VoiceOfML/Test", "A/Book.docx")
+        manifest = {"version": 1, "files": {key: {
+            "status": "ready", "source_revision": "old", "profile": "docx-native-v2",
+            "path": "objects/old/document.docx", "failed_source_revision": "rev1",
+            "failed_profile": "docx-native-v2",
+        }}}
+        self.assertEqual(scan_reader_assets.build_queue(self.records, self.revisions, manifest), [])
+        self.assertEqual(len(scan_reader_assets.build_queue(
+            self.records, self.revisions, manifest, retry_failed=True,
+        )), 1)
 
     def test_filter_and_limit_are_deterministic(self):
         records = self.records + [
@@ -341,14 +363,12 @@ class ConverterTests(unittest.TestCase):
             self.assertEqual([call[0] for call in calls], ["ebook-convert", "libreoffice", "ebook-convert"])
             self.assertEqual(calls[1][calls[1].index("--convert-to") + 1], "html")
 
-    def test_ps_content_validation_uses_pdfinfo_without_rendering_pages(self):
-        with patch.object(convert_reader_assets, "command_output", return_value="Pages: 900\n") as output, \
-                patch.object(convert_reader_assets, "run_checked") as render:
+    def test_ps_content_validation_renders_sample_pages(self):
+        with patch.object(convert_reader_assets, "validate_pdf_content") as validate:
             convert_reader_assets.validate_reader_content(
                 Path("document.pdf"), {"extension": "ps", "reader_mode": "pdf"}, Path("work"),
             )
-        output.assert_called_once_with(["pdfinfo", "document.pdf"])
-        render.assert_not_called()
+        validate.assert_called_once_with(Path("document.pdf"), Path("work"))
 
     def test_office_presentation_conversion_uses_libreoffice_pdf(self):
         with tempfile.TemporaryDirectory() as root:
@@ -375,6 +395,42 @@ class ConverterTests(unittest.TestCase):
                 convert_reader_assets.convert_file({"extension": "xlsx"}, source, target, work)
             self.assertTrue(str(run.call_args.args[0][-1]).endswith("source.xls"))
             self.assertEqual(target.read_bytes(), b"%PDF-sheet")
+
+    def test_mislabeled_ole_xlsx_ignores_inapplicable_workflow_password(self):
+        with tempfile.TemporaryDirectory() as root:
+            work = Path(root)
+            source, target = work / "source.xlsx", work / "document.pdf"
+            source.write_bytes(convert_reader_assets.OLE_SIGNATURE + b"spreadsheet")
+
+            def fake_run(command, **_kwargs):
+                (work / "office-pdf" / "source.pdf").write_bytes(b"%PDF-sheet")
+
+            with patch.dict(convert_reader_assets.os.environ, {"READER_CONVERSION_PASSWORD": "secret"}), \
+                    patch.dict("sys.modules", {"msoffcrypto": Mock(OfficeFile=Mock(side_effect=ValueError("not encrypted")))}), \
+                    patch.object(convert_reader_assets, "run_checked", side_effect=fake_run) as run:
+                convert_reader_assets.convert_file({"extension": "xlsx", "path": "book.xlsx"}, source, target, work)
+            self.assertTrue(str(run.call_args.args[0][-1]).endswith("source.xls"))
+
+    def test_encrypted_ole_xlsx_uses_temporary_conversion_password(self):
+        with tempfile.TemporaryDirectory() as root:
+            work = Path(root)
+            source, target = work / "source.xlsx", work / "document.pdf"
+            source.write_bytes(convert_reader_assets.OLE_SIGNATURE + b"encrypted")
+            office = Mock()
+            office.is_encrypted.return_value = True
+
+            def decrypt(target_file):
+                target_file.write(b"decrypted")
+
+            office.decrypt.side_effect = decrypt
+            with patch.dict(convert_reader_assets.os.environ, {"READER_CONVERSION_PASSWORD": "secret"}), \
+                    patch.dict("sys.modules", {"msoffcrypto": Mock(OfficeFile=Mock(return_value=office))}), \
+                    patch.object(convert_reader_assets, "run_checked") as run:
+                def fake_run(command, **_kwargs):
+                    (work / "office-pdf" / "decrypted.pdf").write_bytes(b"%PDF-sheet")
+                run.side_effect = fake_run
+                convert_reader_assets.convert_file({"extension": "xlsx"}, source, target, work)
+            self.assertTrue(str(run.call_args.args[0][-1]).endswith("decrypted.xlsx"))
 
     def test_mht_conversion_reuses_mhtml_sanitizer(self):
         with tempfile.TemporaryDirectory() as root:
@@ -425,7 +481,7 @@ aW1hZ2U=
             {"codec_type": "audio", "codec_name": "mp3"},
         ]}
         video = {"format": {"format_name": "mov,mp4,m4a,3gp,3g2,mj2", "duration": "20"}, "streams": [
-            {"codec_type": "video", "codec_name": "h264", "width": 1920, "height": 1080},
+            {"codec_type": "video", "codec_name": "h264", "pix_fmt": "yuv420p", "width": 1920, "height": 1080},
             {"codec_type": "audio", "codec_name": "aac"},
         ]}
         with patch.object(convert_reader_assets, "media_probe", return_value=audio):
@@ -490,11 +546,15 @@ aW1hZ2U=
             converter = work / "caj2pdf" / "caj2pdf"
             converter.parent.mkdir()
             converter.write_text("converter", encoding="utf-8")
+            for library in ("libjbigdec.so", "libjbig2codec.so"):
+                (converter.parent / library).write_bytes(library.encode())
             with patch.object(convert_reader_assets, "CAJ2PDF_DIR", converter.parent), \
                     patch.object(convert_reader_assets, "run_checked") as run:
                 convert_reader_assets.convert_caj_family(source, target, work)
             self.assertEqual(run.call_args.args[0], ["python3", str(converter), "convert", str(source), "--output", str(target)])
             self.assertEqual(run.call_args.kwargs["cwd"], work)
+            self.assertEqual((work / "libjbigdec.so").read_bytes(), b"libjbigdec.so")
+            self.assertEqual((work / "libjbig2codec.so").read_bytes(), b"libjbig2codec.so")
 
     def test_kdh_extraction_decrypts_embedded_pdf_before_repair(self):
         with tempfile.TemporaryDirectory() as root:
@@ -676,18 +736,51 @@ aW1hZ2U=
         self.assertEqual(reader_assets.conversion_contract("docx"), ("docx-native-v2", "docx", "document.docx"))
 
     def test_html_and_htm_use_sanitized_html_profile(self):
-        expected = ("sanitized-html-v3", "html", "document.html")
+        expected = ("sanitized-html-v4", "html", "document.html")
         self.assertEqual(reader_assets.conversion_contract("html"), expected)
         self.assertEqual(reader_assets.conversion_contract("htm"), expected)
 
-    def test_html_conversion_preserves_source_html(self):
+    def test_html_conversion_preserves_safe_source_html(self):
         with tempfile.TemporaryDirectory() as root:
             work = Path(root)
             source, target = work / "source.html", work / "document.html"
             source.write_bytes(b"<html><body>text</body></html>")
 
             convert_reader_assets.convert_file({"extension": "html"}, source, target, work)
-            self.assertEqual(target.read_bytes(), source.read_bytes())
+            self.assertEqual(target.read_text(encoding="utf-8"), "text")
+
+    def test_html_conversion_removes_active_and_remote_content(self):
+        with tempfile.TemporaryDirectory() as root:
+            work = Path(root)
+            source, target = work / "source.html", work / "document.html"
+            source.write_text(
+                '<meta http-equiv="refresh" content="0;url=https://evil.test">'
+                '<script>alert(1)</script><form action="https://evil.test"><p onclick="x()">safe</p></form>'
+                '<a href="https://evil.test">remote</a><img src="//evil.test/x.png">',
+                encoding="utf-8",
+            )
+            convert_reader_assets.convert_file(
+                {"extension": "html", "source_url": "https://huggingface.co/datasets/VoiceOfML/Test/resolve/rev/source.html"},
+                source, target, work,
+            )
+            text = target.read_text(encoding="utf-8")
+            self.assertIn("safe", text)
+            self.assertIn("remote", text)
+            for unsafe in ("http-equiv", "<script", "<form", "onclick", "https://evil.test", "//evil.test"):
+                self.assertNotIn(unsafe, text)
+
+    def test_html_sanitizer_removes_unquoted_active_and_remote_urls(self):
+        sanitized = convert_reader_assets.sanitize_html(
+            "<script>alert(1)<img srcset='https://evil.test/a 1x'>"
+            "<a href=javascript:alert(1)>x</a><img src=https://evil.test/x>"
+            "<img src=data:text/html,evil><svg><a xlink:href='javascript:alert(2)'>x</a></svg>"
+        )
+        self.assertNotIn("javascript:", sanitized)
+        self.assertNotIn("https://", sanitized)
+        self.assertNotIn("data:text/html", sanitized)
+        self.assertNotIn("srcset", sanitized)
+        self.assertNotIn("<script", sanitized)
+        self.assertNotIn("<svg", sanitized)
 
     def test_html_conversion_decodes_declared_legacy_charset(self):
         with tempfile.TemporaryDirectory() as root:
@@ -703,7 +796,7 @@ aW1hZ2U=
                 work,
             )
             self.assertIn("列宁", target.read_text(encoding="utf-8"))
-            self.assertIn("charset=utf-8", target.read_text(encoding="utf-8").lower())
+            self.assertIn('charset="utf-8"', target.read_text(encoding="utf-8").lower())
 
     def test_html_conversion_decodes_quoted_big5_charset(self):
         with tempfile.TemporaryDirectory() as root:
@@ -734,7 +827,7 @@ aW1hZ2U=
                 "https://huggingface.co/datasets/VoiceOfML/Test/resolve/rev/images/picture.png": b"PNG",
             }
 
-            def download(url, target):
+            def download(url, target, **_kwargs):
                 data = resources[url]
                 target.write_bytes(data)
                 return hashlib.sha256(data).hexdigest(), len(data)
@@ -747,9 +840,9 @@ aW1hZ2U=
                 )
             text = output.read_text(encoding="utf-8")
             self.assertIn("data:image/png;base64", text)
-            self.assertIn("<style>body{color:red;background:}</style>", text)
-            self.assertIn('src="https://evil.test/x.png"', text)
-            self.assertIn('src="../secret.png"', text)
+            self.assertIn("<style>body{color:red;}</style>", text)
+            self.assertNotIn('src="https://evil.test/x.png"', text)
+            self.assertNotIn('src="../secret.png"', text)
 
     def test_page_content_ratio_detects_blank_and_nonblank_pages(self):
         from PIL import Image
@@ -828,9 +921,9 @@ aW1hZ2U=
                 convert_reader_assets.validate_output(invalid, "docx")
 
     def test_docx_password_is_extracted_only_from_explicit_path_marker(self):
-        self.assertEqual(convert_reader_assets.PASSWORD_RE.search("资料〔密码：123〕.docx").group(1), "123")
-        self.assertEqual(convert_reader_assets.PASSWORD_RE.search("book password: secret.docx").group(1), "secret")
-        self.assertIsNone(convert_reader_assets.PASSWORD_RE.search("ordinary.docx"))
+        self.assertEqual(reader_assets.source_password("repo", "资料〔密码：123〕.docx"), "123")
+        self.assertEqual(reader_assets.source_password("repo", "book password: secret.docx"), "secret")
+        self.assertEqual(reader_assets.source_password("repo", "ordinary.docx"), "")
 
     def test_password_protected_pdf_is_decrypted_with_qpdf(self):
         with tempfile.TemporaryDirectory() as root:
@@ -863,6 +956,18 @@ aW1hZ2U=
             with self.assertRaisesRegex(RuntimeError, "timed out: libreoffice"):
                 convert_reader_assets.run_checked(["libreoffice", "--headless"])
 
+    def test_conversion_commands_do_not_inherit_publish_credentials(self):
+        completed = Mock(returncode=0, stderr="")
+        with patch.dict(convert_reader_assets.os.environ, {
+                "HF_TOKEN": "hf-secret", "PAGES_TOKEN": "pages-secret",
+                "READER_CONVERSION_PASSWORD": "office-secret", "SAFE_VALUE": "kept",
+                }), patch.object(convert_reader_assets.subprocess, "run", return_value=completed) as run:
+            convert_reader_assets.run_checked(["libreoffice", "--headless"])
+        child_env = run.call_args.kwargs["env"]
+        self.assertEqual(child_env["SAFE_VALUE"], "kept")
+        for secret in ("HF_TOKEN", "PAGES_TOKEN", "READER_CONVERSION_PASSWORD"):
+            self.assertNotIn(secret, child_env)
+
     def test_conversion_failures_use_stable_public_classes(self):
         self.assertEqual(convert_reader_assets.conversion_error_class(
             convert_reader_assets.ReaderConversionTimeout("timeout")), "conversion-timeout")
@@ -870,6 +975,8 @@ aW1hZ2U=
             convert_reader_assets.ReaderConversionCommandError("failed")), "conversion-command-failed")
         self.assertEqual(convert_reader_assets.conversion_error_class(
             urllib.error.URLError("offline")), "source-download-failed")
+        self.assertEqual(convert_reader_assets.conversion_error_class(
+            TimeoutError("offline")), "source-download-failed")
 
     def test_conversion_workers_are_bounded(self):
         self.assertGreaterEqual(convert_reader_assets.CONVERSION_WORKERS, 1)
@@ -914,6 +1021,31 @@ aW1hZ2U=
             self.assertEqual(conversion.call_count, 1)
             self.assertEqual(first["path"], second["path"])
             self.assertIn("/libreoffice-pdf-v2/", first["path"])
+
+    def test_identical_html_in_different_contexts_does_not_share_output(self):
+        item = {
+            "key": "VoiceOfML/Test\0A/Book.html", "extension": "html",
+            "source_url": "https://example.test/A/Book.html", "source_revision": "rev1",
+            "profile": "sanitized-html-v4", "reader_mode": "html", "output_name": "document.html",
+        }
+        with tempfile.TemporaryDirectory() as root:
+            def download(_url, target):
+                target.write_bytes(b"<p>same source document</p>")
+                return "a" * 64, 27
+
+            def convert(_item, _source, target, _work):
+                target.write_text(_item["source_url"], encoding="utf-8")
+
+            with patch.object(convert_reader_assets, "download_source", side_effect=download), \
+                    patch.object(convert_reader_assets, "convert_file", side_effect=convert) as conversion, \
+                    patch.object(convert_reader_assets, "validate_reader_content"):
+                first = convert_reader_assets.convert_item(item, Path(root))
+                second = convert_reader_assets.convert_item({
+                    **item, "key": "VoiceOfML/Test\0B/Book.html",
+                    "source_url": "https://example.test/B/Book.html",
+                }, Path(root))
+            self.assertEqual(conversion.call_count, 2)
+            self.assertNotEqual(first["path"], second["path"])
 
     def test_concurrent_duplicate_source_digest_converts_once(self):
         item = {
@@ -1041,6 +1173,40 @@ aW1hZ2U=
             )
         outline.assert_called_once_with(Path("document.pdf"), Path("work"))
 
+    def test_office_pdf_recovers_blank_pages_for_current_profiles(self):
+        for profile in ("libreoffice-pdf-office-v2", "libreoffice-pdf-office-xlsx-v3"):
+            with self.subTest(profile=profile), tempfile.TemporaryDirectory() as root:
+                work = Path(root)
+                source, target, candidate = work / "source.xlsx", work / "document.pdf", work / "candidate.pdf"
+                source.write_bytes(b"office")
+                target.write_bytes(b"bad")
+                candidate.write_bytes(b"fixed")
+                with patch.object(convert_reader_assets, "command_output", return_value=""), \
+                        patch.object(convert_reader_assets, "rasterize_pdf", side_effect=[RuntimeError("blank interior page 2"), None]) as rasterize, \
+                        patch.object(convert_reader_assets, "normalized_office_pdf", return_value=candidate) as normalize, \
+                        patch.object(convert_reader_assets, "validate_output"):
+                    convert_reader_assets.validate_office_pdf(
+                        target, {"path": "中文.xlsx", "profile": profile}, work, source,
+                    )
+                normalize.assert_called_once_with(source, work)
+                self.assertEqual(rasterize.call_count, 2)
+                self.assertEqual(target.read_bytes(), b"fixed")
+
+    def test_converter_returns_failure_when_the_entire_batch_fails(self):
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            queue = root_path / "queue.json"
+            bundle = root_path / "bundle"
+            queue.write_text(json.dumps({"items": [{
+                "key": "VoiceOfML/Test\0bad.docx", "repo": "VoiceOfML/Test", "path": "bad.docx",
+                "extension": "docx", "source_revision": "rev", "profile": "docx-native-v2",
+            }]}), encoding="utf-8")
+            with patch.object(convert_reader_assets, "parse_args", return_value=SimpleNamespace(queue=queue, bundle=bundle, dry_run=False)), \
+                    patch.object(convert_reader_assets, "convert_item", side_effect=RuntimeError("missing converter")):
+                self.assertEqual(convert_reader_assets.main(), 1)
+            result = json.loads((bundle / "bundle.json").read_text(encoding="utf-8"))["results"][0]
+            self.assertEqual(result["status"], "failed")
+
 class PublicationTests(unittest.TestCase):
     def make_bundle(self, root: str, result: dict) -> Path:
         bundle = Path(root)
@@ -1092,7 +1258,11 @@ class PublicationTests(unittest.TestCase):
                 "source_extension": "docx", "profile": "libreoffice-pdf-v2", "error": "RuntimeError",
             }]}), encoding="utf-8")
             manifest, operations = publish_reader_assets.build_publish(api, "vomebook/Test", bundle)
-        self.assertEqual(manifest["files"][key], existing)
+        self.assertEqual(
+            {field: manifest["files"][key][field] for field in existing}, existing,
+        )
+        self.assertEqual(manifest["files"][key]["failed_source_revision"], "new")
+        self.assertEqual(manifest["files"][key]["failed_profile"], "libreoffice-pdf-v2")
         self.assertEqual(len(operations), 2)
 
     def test_publish_removes_inactive_mapping_and_marks_orphan(self):
@@ -1168,6 +1338,21 @@ class PublicationTests(unittest.TestCase):
         self.assertNotIn(path, manifest["orphans"])
         self.assertEqual(manifest["files"][result["key"]]["path"], path)
         self.assertEqual(len(operations), 2)
+
+    def test_stale_reused_hint_uploads_when_object_is_absent_from_latest_manifest(self):
+        result = {
+            "key": "VoiceOfML/Test\0Moved.docx", "status": "ready", "source_revision": "rev2",
+            "source_sha256": "a" * 64, "source_bytes": 10, "source_extension": "docx",
+            "profile": "docx-native-v2", "reader_mode": "docx",
+            "path": "objects/aa/document.docx", "reused": True,
+        }
+        api = Mock()
+        api.file_exists.return_value = False
+        with tempfile.TemporaryDirectory() as root:
+            bundle = self.make_bundle(root, result)
+            _, operations = publish_reader_assets.build_publish(api, "vomebook/Test", bundle)
+        self.assertEqual(len(operations), 3)
+        self.assertIn(result["path"], {operation.path_in_repo for operation in operations})
 
     def test_publish_reuses_matching_object_added_by_another_shard(self):
         path = "objects/aa/remote/document.pdf"
@@ -1269,6 +1454,33 @@ class PublicationTests(unittest.TestCase):
             [call.kwargs["parent_commit"] for call in api.create_commit.call_args_list],
             ["parent-1", "parent-2"],
         )
+
+    def test_parent_retry_rejects_a_concurrent_change_to_the_same_key(self):
+        key = "VoiceOfML/Test\0A/Book.docx"
+        result = {
+            "key": key, "status": "ready", "source_revision": "rev1", "source_sha256": "a" * 64,
+            "source_bytes": 10, "source_extension": "docx", "profile": "docx-native-v2",
+            "reader_mode": "docx", "path": "objects/aa/document.docx",
+        }
+        response = requests.Response()
+        response.status_code = 412
+        response.request = requests.Request("POST", "https://huggingface.co/api/datasets/vomebook/Test/commit/main").prepare()
+        api = Mock()
+        api.repo_info.side_effect = [Mock(sha="parent-1"), Mock(sha="parent-2")]
+        api.file_exists.return_value = True
+        with tempfile.TemporaryDirectory() as root:
+            first = Path(root) / "first.json"
+            second = Path(root) / "second.json"
+            first.write_text(json.dumps({"version": 1, "files": {}}), encoding="utf-8")
+            second.write_text(json.dumps({"version": 1, "files": {key: {
+                **result, "source_revision": "newer", "path": "objects/bb/newer.docx",
+            }}}), encoding="utf-8")
+            api.hf_hub_download.side_effect = [str(first), str(first), str(second)]
+            api.create_commit.side_effect = HfHubHTTPError("conflict", response=response)
+            bundle = self.make_bundle(str(Path(root) / "bundle"), result)
+            with patch.object(publish_reader_assets.time, "sleep"), self.assertRaisesRegex(
+                    RuntimeError, "key changed"):
+                publish_reader_assets.publish_bundle(api, "vomebook/Test", bundle)
 
     def test_legacy_bundle_without_authoritative_marker_never_removes_mappings(self):
         key = "VoiceOfML/Test\0Keep.djvu"
@@ -1449,6 +1661,12 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("reader-assets-plan", workflow)
         self.assertIn("needs: [plan, convert]", workflow)
         self.assertIn("needs.convert.result == 'success'", workflow)
+        self.assertIn("needs.convert.result == 'failure'", workflow)
+        self.assertIn('exit "${conversion_status}"', workflow)
+        self.assertIn('--repo "${INPUT_REPO}"', workflow)
+        self.assertNotIn('--repo "${{ inputs.repo', workflow)
+        self.assertIn("conversion_status=0", workflow)
+        self.assertIn('python scripts/publish_reader_assets.py --bundle "${bundle}"', workflow)
         self.assertLess(
             workflow.index("python scripts/publish_reader_assets.py"),
             workflow.index("done\n"),
