@@ -51,6 +51,7 @@ MAX_EPUB_EXPANDED_BYTES = 2 * 1024 * 1024 * 1024
 MAX_EPUB_MEMBER_BYTES = 256 * 1024 * 1024
 MAX_MHTML_RESOURCE_BYTES = 128 * 1024 * 1024
 MAX_MHTML_SOURCE_BYTES = 256 * 1024 * 1024
+MAX_CHM_EXPANDED_BYTES = 2 * 1024 * 1024 * 1024
 HTML_TAGS = {
     "a", "abbr", "address", "article", "aside", "b", "bdi", "bdo", "blockquote", "body", "br",
     "caption", "cite", "code", "col", "colgroup", "dd", "del", "details", "dfn", "div", "dl", "dt",
@@ -68,6 +69,11 @@ TAG_HTML_ATTRIBUTES = {
     "th": {"colspan", "rowspan", "scope"}, "time": {"datetime"},
 }
 CSS_SANITIZER = CSSSanitizer()
+SVG_TAGS = {
+    "circle", "clippath", "defs", "desc", "ellipse", "g", "image", "line", "lineargradient",
+    "mask", "path", "pattern", "polygon", "polyline", "radialgradient", "rect", "stop", "svg",
+    "symbol", "text", "title", "tspan", "use",
+}
 CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 OLE_SIGNATURE = bytes.fromhex("d0cf11e0a1b11ae1")
 MIN_PAGE_CONTENT_RATIO = 0.0005
@@ -458,6 +464,17 @@ def sanitize_css(document: str) -> str:
     return "".join(output)
 
 
+def safe_embedded_url(name: str, value: str, *, allow_relative: bool) -> bool:
+    value = html.unescape(value).strip()
+    normalized = re.sub(r"[\x00-\x20]+", "", value).lower()
+    if name == "src" and re.match(r"^data:image/(?:gif|jpeg|png|webp);base64,", normalized):
+        return True
+    if name == "href" and normalized.startswith("#"):
+        return True
+    parsed = urllib.parse.urlsplit(normalized)
+    return allow_relative and not parsed.scheme and not parsed.netloc and not normalized.startswith("//")
+
+
 def sanitize_html(document: str, *, allow_relative: bool = False) -> str:
     styles = []
 
@@ -476,19 +493,12 @@ def sanitize_html(document: str, *, allow_relative: bool = False) -> str:
             return False
         if name not in {"href", "src"}:
             return True
-        value = html.unescape(value).strip()
-        normalized = re.sub(r"[\x00-\x20]+", "", value).lower()
-        if name == "src" and re.match(r"^data:image/(?:gif|jpeg|png|webp);base64,", normalized):
-            return True
-        if name == "href" and normalized.startswith("#"):
-            return True
-        parsed = urllib.parse.urlsplit(normalized)
-        return allow_relative and not parsed.scheme and not parsed.netloc and not normalized.startswith("//")
+        return safe_embedded_url(name, value, allow_relative=allow_relative)
 
     cleaner = bleach.Cleaner(
         tags=HTML_TAGS,
         attributes=allowed_attribute,
-        protocols={"data"},
+        protocols={"data", "http", "https"},
         css_sanitizer=CSS_SANITIZER,
         strip=True,
         strip_comments=True,
@@ -497,6 +507,46 @@ def sanitize_html(document: str, *, allow_relative: bool = False) -> str:
     for token, style in styles:
         cleaned = cleaned.replace(token, style)
     return cleaned
+
+
+def sanitize_xml_document(document: str) -> str:
+    try:
+        root = ET.fromstring(document)
+    except ET.ParseError as exc:
+        raise RuntimeError("EPUB XML content is malformed") from exc
+    root_kind = root.tag.rsplit("}", 1)[-1].lower()
+    allowed_tags = SVG_TAGS if root_kind == "svg" else {tag.lower() for tag in HTML_TAGS if tag != "style"}
+
+    def clean(parent):
+        for child in list(parent):
+            local_tag = child.tag.rsplit("}", 1)[-1].lower() if isinstance(child.tag, str) else ""
+            if local_tag not in allowed_tags:
+                parent.remove(child)
+                continue
+            clean(child)
+        local_tag = parent.tag.rsplit("}", 1)[-1].lower() if isinstance(parent.tag, str) else ""
+        for attribute, value in list(parent.attrib.items()):
+            name = attribute.rsplit("}", 1)[-1].lower()
+            if name.startswith("on"):
+                del parent.attrib[attribute]
+                continue
+            if root_kind == "svg":
+                if name == "style":
+                    parent.attrib[attribute] = CSS_SANITIZER.sanitize_css(value)
+                elif name in {"href", "src"} and not safe_embedded_url(name, value, allow_relative=True):
+                    del parent.attrib[attribute]
+                elif re.search(r"(?:javascript|vbscript|https?:|//)", html.unescape(value), re.IGNORECASE):
+                    del parent.attrib[attribute]
+                continue
+            if name not in GLOBAL_HTML_ATTRIBUTES | TAG_HTML_ATTRIBUTES.get(local_tag, set()):
+                del parent.attrib[attribute]
+            elif name == "style":
+                parent.attrib[attribute] = CSS_SANITIZER.sanitize_css(value)
+            elif name in {"href", "src"} and not safe_embedded_url(name, value, allow_relative=True):
+                del parent.attrib[attribute]
+
+    clean(root)
+    return ET.tostring(root, encoding="unicode")
 
 
 sanitize_chm_html = sanitize_html
@@ -514,7 +564,11 @@ def sanitize_chm_epub(path: Path, work: Path) -> None:
             suffix = Path(info.filename).suffix.lower()
             if suffix in {".htm", ".html", ".xhtml", ".css", ".svg"}:
                 text = data.decode("utf-8", "replace")
-                data = (sanitize_css(text) if suffix == ".css" else sanitize_html(text, allow_relative=True)).encode("utf-8")
+                if suffix == ".css":
+                    text = sanitize_css(text)
+                else:
+                    text = sanitize_xml_document(text)
+                data = text.encode("utf-8")
             if info.filename == "mimetype":
                 info.compress_type = zipfile.ZIP_STORED
             target.writestr(info, data)
@@ -530,6 +584,11 @@ def convert_chm(source: Path, target: Path, work: Path) -> None:
         return
     except (RuntimeError, FileNotFoundError, zipfile.BadZipFile, KeyError) as exc:
         initial_error = exc
+    listing = command_output(["7z", "l", "-slt", str(source)])
+    expanded_size = sum(int(value) for value in re.findall(r"^Size = (\d+)\s*$", listing, re.MULTILINE))
+    member_count = len(re.findall(r"^Path = ", listing, re.MULTILINE))
+    if expanded_size > MAX_CHM_EXPANDED_BYTES or member_count > MAX_EPUB_MEMBERS:
+        raise RuntimeError("CHM expanded content exceeds limits")
     extracted = work / "chm-extracted"
     extracted.mkdir()
     run_checked(["7z", "x", "-y", f"-o{extracted}", str(source)])
@@ -544,6 +603,8 @@ def convert_chm(source: Path, target: Path, work: Path) -> None:
         shutil.copytree(extracted, prepared, dirs_exist_ok=True)
         documents = [prepared / html_file.relative_to(extracted) for html_file in html_files]
     for index, mhtml_file in enumerate(mhtml_files):
+        if mhtml_file.stat().st_size > MAX_MHTML_SOURCE_BYTES:
+            raise RuntimeError("CHM MHTML source exceeds size limit")
         output = prepared / f"mhtml-{index:04d}.html"
         mhtml_to_html(mhtml_file, output)
         documents.append(output)

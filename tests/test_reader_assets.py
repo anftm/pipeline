@@ -612,6 +612,7 @@ aW1hZ2U=
                     (work / "chm-extracted" / "book.mht").write_text("MIME-Version: 1.0", encoding="utf-8")
 
             with patch.object(convert_reader_assets, "run_checked", side_effect=run), \
+                    patch.object(convert_reader_assets, "command_output", return_value="Path = book.mht\nSize = 100\n"), \
                     patch.object(convert_reader_assets, "sanitize_chm_epub"), \
                     patch.object(convert_reader_assets, "validate_output"), \
                     patch.object(convert_reader_assets, "validate_chm_epub", side_effect=[RuntimeError("converted CHM EPUB has no readable content"), None]), \
@@ -636,6 +637,7 @@ aW1hZ2U=
                     (extracted / "images" / "cover.jpg").write_bytes(b"image")
 
             with patch.object(convert_reader_assets, "run_checked", side_effect=run), \
+                    patch.object(convert_reader_assets, "command_output", return_value="Path = 000.htm\nSize = 100\n"), \
                     patch.object(convert_reader_assets, "sanitize_chm_epub"), \
                     patch.object(convert_reader_assets, "validate_output"), \
                     patch.object(convert_reader_assets, "validate_chm_epub", side_effect=[RuntimeError("empty"), None]), \
@@ -652,7 +654,7 @@ aW1hZ2U=
             work, epub = Path(root), Path(root) / "book.epub"
             with zipfile.ZipFile(epub, "w") as archive:
                 archive.writestr("mimetype", "application/epub+zip")
-                archive.writestr("chapter.xhtml", '<html><head><base href="https://example.test/"></head><body onload="bad()"><script>bad()</script><object>bad</object><img src="https://example.test/a.png"><a href="javascript:bad()">bad</a><p>正文内容保持不变。</p></body></html>')
+                archive.writestr("chapter.xhtml", '<html xmlns="http://www.w3.org/1999/xhtml"><head><base href="https://example.test/"/></head><body onload="bad()"><script>bad()</script><object>bad</object><img src="https://example.test/a.png"/><a href="javascript:bad()">bad</a><p>正文内容保持不变。</p></body></html>')
                 archive.writestr("style.css", '@import "https://example.test/a.css"; body{background:url(//example.test/a.png)}')
             convert_reader_assets.sanitize_chm_epub(epub, work)
             with zipfile.ZipFile(epub) as archive:
@@ -661,6 +663,24 @@ aW1hZ2U=
                 self.assertEqual(archive.getinfo("mimetype").compress_type, zipfile.ZIP_STORED)
             self.assertNotRegex(content, r"(?i)<(?:base|object|script)\b|onload=|javascript:|https://example|//example")
             self.assertIn("正文内容保持不变", content)
+
+    def test_epub_sanitizer_preserves_valid_xhtml_and_internal_resources(self):
+        with tempfile.TemporaryDirectory() as root:
+            work, epub = Path(root), Path(root) / "book.epub"
+            with zipfile.ZipFile(epub, "w") as archive:
+                archive.writestr("mimetype", "application/epub+zip")
+                archive.writestr("META-INF/container.xml", '<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>')
+                archive.writestr("OEBPS/content.opf", '<package xmlns="http://www.idpf.org/2007/opf"><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="chapter"/></spine></package>')
+                archive.writestr("OEBPS/chapter.xhtml", '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Book</title><link rel="stylesheet" href="style.css"/></head><body><p>This is enough readable chapter text.</p><img src="images/cover.png" alt="cover"/></body></html>')
+                archive.writestr("OEBPS/style.css", "p{color:red}")
+                archive.writestr("OEBPS/images/cover.png", b"PNG")
+            convert_reader_assets.sanitize_chm_epub(epub, work)
+            convert_reader_assets.validate_epub_content(epub)
+            with zipfile.ZipFile(epub) as archive:
+                chapter = archive.read("OEBPS/chapter.xhtml").decode()
+            self.assertIn("style.css", chapter)
+            self.assertIn("images/cover.png", chapter)
+            self.assertIn("<", chapter)
 
     def test_chm_epub_validation_rejects_cover_without_body_text(self):
         with tempfile.TemporaryDirectory() as root:
