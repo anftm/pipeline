@@ -401,19 +401,31 @@ def convert_chm(source: Path, target: Path, work: Path) -> None:
     extracted.mkdir()
     run_checked(["7z", "x", "-y", f"-o{extracted}", str(source)])
     mhtml_files = sorted((*extracted.rglob("*.mht"), *extracted.rglob("*.mhtml")))
-    if not mhtml_files:
+    html_files = sorted((*extracted.rglob("*.htm"), *extracted.rglob("*.html")))
+    if not mhtml_files and not html_files:
         raise initial_error
     prepared = work / "chm-mhtml"
     prepared.mkdir()
     documents = []
-    for index, mhtml_file in enumerate(mhtml_files):
-        output = prepared / f"{index:04d}.html"
-        mhtml_to_html(mhtml_file, output)
-        documents.append(output)
+    if mhtml_files:
+        for index, mhtml_file in enumerate(mhtml_files):
+            output = prepared / f"{index:04d}.html"
+            mhtml_to_html(mhtml_file, output)
+            documents.append(output)
+    else:
+        # Some CHM files contain ordinary HTML pages directly rather than MHTML.
+        # Keep their relative asset paths so ebook-convert can collect images and
+        # linked pages into the resulting EPUB.
+        shutil.copytree(extracted, prepared, dirs_exist_ok=True)
+        documents = [prepared / html_file.relative_to(extracted) for html_file in html_files]
     source_html = documents[0]
     if len(documents) > 1:
         source_html = prepared / "index.html"
-        links = "".join(f'<li><a href="{item.name}">{html.escape(item.stem)}</a></li>' for item in documents)
+        links = "".join(
+            f'<li><a href="{urllib.parse.quote(item.relative_to(prepared).as_posix())}">'
+            f'{html.escape(item.stem)}</a></li>'
+            for item in documents
+        )
         source_html.write_text(f'<meta charset="utf-8"><ul>{links}</ul>', encoding="utf-8")
     target.unlink(missing_ok=True)
     run_checked(["ebook-convert", str(source_html), str(target), "--flow-size", "0"])
@@ -437,6 +449,36 @@ def validate_djvu_pdf(path: Path, work: Path) -> None:
         rendered = prefix.with_suffix(".png")
         if not rendered.is_file() or rendered.stat().st_size == 0:
             raise RuntimeError(f"converted DjVu PDF page {page} is not renderable")
+
+
+def validate_pdf_content(path: Path, work: Path) -> None:
+    info = command_output(["pdfinfo", str(path)])
+    match = re.search(r"^Pages:\s+(\d+)\s*$", info, re.MULTILINE)
+    if not match or int(match.group(1)) < 1:
+        raise RuntimeError("converted PDF has no pages")
+    page_count = int(match.group(1))
+    if page_count <= 12:
+        samples = list(range(1, page_count + 1))
+    else:
+        samples = sorted({1, 2, page_count // 4, page_count // 2, page_count * 3 // 4, page_count - 1, page_count})
+    content_pages = []
+    sample_dir = work / "pdf-content-samples"
+    sample_dir.mkdir(exist_ok=True)
+    for page in samples:
+        prefix = sample_dir / f"page-{page}"
+        run_checked([
+            "pdftoppm", "-f", str(page), "-l", str(page), "-singlefile", "-png", "-r", "72",
+            str(path), str(prefix),
+        ])
+        rendered = prefix.with_suffix(".png")
+        if not rendered.is_file() or rendered.stat().st_size == 0:
+            raise RuntimeError(f"converted PDF page {page} is not renderable")
+        if page_content_ratio(rendered) >= MIN_PAGE_CONTENT_RATIO:
+            content_pages.append(page)
+    if not content_pages:
+        raise RuntimeError("converted PDF has no visible page content")
+    if page_count >= 4 and not any(page > page_count // 2 for page in content_pages):
+        raise RuntimeError("converted PDF has no visible content after its midpoint")
 
 
 def rasterize_pdf(path: Path, work: Path) -> None:
@@ -476,6 +518,98 @@ def page_content_ratio(path: Path) -> float:
         histogram = grayscale.histogram()
         pixels = grayscale.width * grayscale.height
     return sum(histogram[:245]) / pixels if pixels else 0.0
+
+
+def epub_package(path: Path):
+    archive = zipfile.ZipFile(path)
+    try:
+        container = ET.fromstring(archive.read("META-INF/container.xml"))
+        rootfile = container.find(".//{*}rootfile")
+        opf_path = rootfile.attrib["full-path"]
+        package = ET.fromstring(archive.read(opf_path))
+    except (KeyError, ET.ParseError, AttributeError) as exc:
+        archive.close()
+        raise RuntimeError("converted EPUB has no package document") from exc
+    return archive, package, opf_path
+
+
+def validate_epub_content(path: Path) -> None:
+    archive, package, opf_path = epub_package(path)
+    with archive:
+        names = set(archive.namelist())
+        manifest = {item.attrib.get("id"): item for item in package.findall(".//{*}manifest/{*}item") if item.attrib.get("id")}
+        spine = [item.attrib.get("idref") for item in package.findall(".//{*}spine/{*}itemref")]
+        if not spine:
+            raise RuntimeError("converted EPUB has no spine")
+        base = posixpath.dirname(opf_path)
+        meaningful = []
+        for idref in spine:
+            item = manifest.get(idref)
+            if item is None or not item.attrib.get("href"):
+                raise RuntimeError("converted EPUB has an invalid spine reference")
+            href = urllib.parse.unquote(item.attrib["href"].split("#", 1)[0])
+            document_path = posixpath.normpath(posixpath.join(base, href))
+            if document_path.startswith("../"):
+                raise RuntimeError("converted EPUB spine escapes its package directory")
+            try:
+                document = archive.read(document_path).decode("utf-8", "replace")
+                root = ET.fromstring(document)
+            except KeyError as exc:
+                raise RuntimeError("converted EPUB spine document is missing") from exc
+            except ET.ParseError as exc:
+                raise RuntimeError("converted EPUB has malformed spine content") from exc
+            if re.search(r"<(?:script|object|embed|iframe)\b", document, re.IGNORECASE):
+                raise RuntimeError("converted EPUB contains active content")
+            if re.search(r"\b(?:src|poster)\s*=\s*[\"']\s*(?:https?:)?//", document, re.IGNORECASE):
+                raise RuntimeError("converted EPUB contains an external embedded resource")
+            body = root.find(".//{*}body")
+            text = html.unescape("".join(body.itertext())) if body is not None else ""
+            has_text = len(re.sub(r"\s+", "", text)) >= 20
+            has_image = False
+            for image in root.findall(".//{*}img"):
+                source = urllib.parse.unquote((image.attrib.get("src") or "").split("#", 1)[0])
+                image_path = posixpath.normpath(posixpath.join(posixpath.dirname(document_path), source))
+                if source and not image_path.startswith("../") and image_path in names:
+                    has_image = True
+                    break
+            meaningful.append(has_text or has_image)
+        if not any(meaningful):
+            raise RuntimeError("converted EPUB has no readable content")
+        if len(meaningful) >= 4 and not any(meaningful[len(meaningful) // 2:]):
+            raise RuntimeError("converted EPUB has no readable content after its midpoint")
+
+
+def validate_docx_content(path: Path) -> None:
+    with zipfile.ZipFile(path) as archive:
+        try:
+            document = ET.fromstring(archive.read("word/document.xml"))
+        except (KeyError, ET.ParseError) as exc:
+            raise RuntimeError("converted DOCX has malformed document content") from exc
+        text = "".join(node.text or "" for node in document.findall(".//{*}t"))
+        visible_objects = document.findall(".//{*}drawing") + document.findall(".//{*}pict") + document.findall(".//{*}object")
+        if not re.sub(r"\s+", "", text) and not visible_objects:
+            raise RuntimeError("converted DOCX has no readable content")
+
+
+def validate_html_content(path: Path) -> None:
+    document = path.read_text(encoding="utf-8", errors="replace")
+    visible = re.sub(r"<(script|style|template|object|iframe)\b[^>]*>.*?</\1\s*>", "", document, flags=re.IGNORECASE | re.DOTALL)
+    visible = html.unescape(re.sub(r"<[^>]+>", " ", visible))
+    has_image = bool(re.search(r"<img\b[^>]*\bsrc\s*=\s*[\"']data:image/", document, re.IGNORECASE))
+    if not re.sub(r"\s+", "", visible) and not has_image:
+        raise RuntimeError("converted HTML has no readable content")
+
+
+def validate_reader_content(path: Path, item: dict, work: Path) -> None:
+    mode = item["reader_mode"]
+    if mode == "pdf":
+        validate_pdf_content(path, work)
+    elif mode == "epub":
+        validate_epub_content(path)
+    elif mode == "docx":
+        validate_docx_content(path)
+    elif mode == "html":
+        validate_html_content(path)
 
 
 def convert_file(item: dict, source: Path, target: Path, work: Path) -> None:
@@ -703,6 +837,7 @@ def convert_item(item: dict, bundle: Path, reusable: dict | None = None) -> dict
                     validate_output(target, item["reader_mode"])
                     if item["extension"] == "chm":
                         validate_chm_epub(target)
+                    validate_reader_content(target, item, work)
                 else:
                     temporary = work / item["output_name"]
                     convert_file(item, source, temporary, work)
@@ -713,11 +848,13 @@ def convert_item(item: dict, bundle: Path, reusable: dict | None = None) -> dict
                         validate_djvu_pdf(temporary, work)
                     if item["extension"] in {"doc", "docx", "htm", "html", "ppt", "pptx", "pps", "odp", "xls", "xlsx", "csv", "ods", "wps", "ps"} and item["reader_mode"] == "pdf":
                         validate_office_pdf(temporary, item, work, source)
+                    validate_reader_content(temporary, item, work)
                     shutil.move(temporary, target)
             else:
                 validate_output(target, item["reader_mode"])
                 if item["extension"] == "chm":
                     validate_chm_epub(target)
+                validate_reader_content(target, item, work)
                 if existing and file_sha256(target) != existing["sha256"]:
                     raise RuntimeError("reusable reader artifact digest mismatch")
         return {

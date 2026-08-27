@@ -40,31 +40,31 @@ class ReaderAssetContractTests(unittest.TestCase):
 
     def test_every_supported_extension_has_an_explicit_contract(self):
         expected = {
-            "doc": ("libreoffice-docx-v1", "docx", "document.docx"),
-            "docx": ("docx-native-v1", "docx", "document.docx"),
-            "htm": ("sanitized-html-v2", "html", "document.html"),
-            "html": ("sanitized-html-v2", "html", "document.html"),
-            "mobi": ("calibre-epub-v1", "epub", "book.epub"),
-            "azw3": ("calibre-epub-v1", "epub", "book.epub"),
-            "fb2": ("calibre-epub-v1", "epub", "book.epub"),
-            "odt": ("calibre-epub-v1", "epub", "book.epub"),
-            "rtf": ("calibre-epub-v1", "epub", "book.epub"),
-            "chm": ("calibre-chm-epub-v3", "epub", "book.epub"),
-            "tif": ("pillow-pdf-v1", "pdf", "document.pdf"),
-            "tiff": ("pillow-pdf-v1", "pdf", "document.pdf"),
-            "djvu": ("djvulibre-pdf-v1", "pdf", "document.pdf"),
-            "ppt": ("libreoffice-pdf-office-v1", "pdf", "document.pdf"),
-            "pptx": ("libreoffice-pdf-office-v1", "pdf", "document.pdf"),
-            "pps": ("libreoffice-pdf-office-v1", "pdf", "document.pdf"),
-            "odp": ("libreoffice-pdf-office-v1", "pdf", "document.pdf"),
-            "xls": ("libreoffice-pdf-office-v1", "pdf", "document.pdf"),
-            "xlsx": ("libreoffice-pdf-office-v1", "pdf", "document.pdf"),
-            "csv": ("libreoffice-pdf-office-v1", "pdf", "document.pdf"),
-            "ods": ("libreoffice-pdf-office-v1", "pdf", "document.pdf"),
-            "wps": ("libreoffice-pdf-office-v1", "pdf", "document.pdf"),
-            "mht": ("sanitized-html-v2", "html", "document.html"),
-            "mhtml": ("sanitized-html-v2", "html", "document.html"),
-            "ps": ("ghostscript-pdf-v1", "pdf", "document.pdf"),
+            "doc": ("libreoffice-docx-v2", "docx", "document.docx"),
+            "docx": ("docx-native-v2", "docx", "document.docx"),
+            "htm": ("sanitized-html-v3", "html", "document.html"),
+            "html": ("sanitized-html-v3", "html", "document.html"),
+            "mobi": ("calibre-epub-v2", "epub", "book.epub"),
+            "azw3": ("calibre-epub-v2", "epub", "book.epub"),
+            "fb2": ("calibre-epub-v2", "epub", "book.epub"),
+            "odt": ("calibre-epub-v2", "epub", "book.epub"),
+            "rtf": ("calibre-epub-v2", "epub", "book.epub"),
+            "chm": ("calibre-chm-epub-v4", "epub", "book.epub"),
+            "tif": ("pillow-pdf-v2", "pdf", "document.pdf"),
+            "tiff": ("pillow-pdf-v2", "pdf", "document.pdf"),
+            "djvu": ("djvulibre-pdf-v2", "pdf", "document.pdf"),
+            "ppt": ("libreoffice-pdf-office-v2", "pdf", "document.pdf"),
+            "pptx": ("libreoffice-pdf-office-v2", "pdf", "document.pdf"),
+            "pps": ("libreoffice-pdf-office-v2", "pdf", "document.pdf"),
+            "odp": ("libreoffice-pdf-office-v2", "pdf", "document.pdf"),
+            "xls": ("libreoffice-pdf-office-v2", "pdf", "document.pdf"),
+            "xlsx": ("libreoffice-pdf-office-v2", "pdf", "document.pdf"),
+            "csv": ("libreoffice-pdf-office-v2", "pdf", "document.pdf"),
+            "ods": ("libreoffice-pdf-office-v2", "pdf", "document.pdf"),
+            "wps": ("libreoffice-pdf-office-v2", "pdf", "document.pdf"),
+            "mht": ("sanitized-html-v3", "html", "document.html"),
+            "mhtml": ("sanitized-html-v3", "html", "document.html"),
+            "ps": ("ghostscript-pdf-v2", "pdf", "document.pdf"),
             "ape": ("ffmpeg-audio-mp3-v1", "audio", "audio.mp3"),
             "wma": ("ffmpeg-audio-mp3-v1", "audio", "audio.mp3"),
             "amr": ("ffmpeg-audio-mp3-v1", "audio", "audio.mp3"),
@@ -90,13 +90,13 @@ class ScannerTests(unittest.TestCase):
         )
         self.assertEqual(len(queue), 1)
         self.assertEqual(queue[0]["path"], "A/Book.docx")
-        self.assertEqual(queue[0]["profile"], "docx-native-v1")
+        self.assertEqual(queue[0]["profile"], "docx-native-v2")
         self.assertEqual(queue[0]["reader_mode"], "docx")
 
     def test_ready_current_profile_is_skipped(self):
         key = reader_assets.asset_key("VoiceOfML/Test", "A/Book.docx")
         manifest = {"version": 1, "files": {key: {
-            "status": "ready", "source_revision": "rev1", "profile": "docx-native-v1"
+            "status": "ready", "source_revision": "rev1", "profile": "docx-native-v2"
         }}}
         self.assertEqual(scan_reader_assets.build_queue(self.records, self.revisions, manifest), [])
 
@@ -113,7 +113,7 @@ class ScannerTests(unittest.TestCase):
     def test_failed_current_profile_requires_retry_flag(self):
         key = reader_assets.asset_key("VoiceOfML/Test", "A/Book.docx")
         manifest = {"version": 1, "files": {key: {
-            "status": "failed", "source_revision": "rev1", "profile": "docx-native-v1"
+            "status": "failed", "source_revision": "rev1", "profile": "docx-native-v2"
         }}}
         self.assertEqual(scan_reader_assets.build_queue(self.records, self.revisions, manifest), [])
         self.assertEqual(
@@ -382,6 +382,34 @@ aW1hZ2U=
                 convert_reader_assets.convert_chm(source, target, work)
             self.assertEqual([call[0] for call in calls], ["ebook-convert", "7z", "ebook-convert"])
 
+    def test_chm_conversion_falls_back_to_direct_html_pages(self):
+        with tempfile.TemporaryDirectory() as root:
+            work = Path(root)
+            source, target = work / "source.chm", work / "book.epub"
+            source.write_bytes(b"ITSF")
+            calls = []
+
+            def run(command, **_kwargs):
+                calls.append(command)
+                if command[0] == "7z":
+                    extracted = work / "chm-extracted"
+                    (extracted / "images").mkdir(parents=True)
+                    (extracted / "000.htm").write_text("<html><body>第一章</body></html>", encoding="utf-8")
+                    (extracted / "001.htm").write_text("<html><body>第二章</body></html>", encoding="utf-8")
+                    (extracted / "images" / "cover.jpg").write_bytes(b"image")
+
+            with patch.object(convert_reader_assets, "run_checked", side_effect=run), \
+                    patch.object(convert_reader_assets, "sanitize_chm_epub"), \
+                    patch.object(convert_reader_assets, "validate_output"), \
+                    patch.object(convert_reader_assets, "validate_chm_epub", side_effect=[RuntimeError("empty"), None]), \
+                    patch.object(convert_reader_assets, "validate_reader_content"):
+                convert_reader_assets.convert_chm(source, target, work)
+            self.assertEqual([call[0] for call in calls], ["ebook-convert", "7z", "ebook-convert"])
+            index = (work / "chm-mhtml" / "index.html").read_text(encoding="utf-8")
+            self.assertIn('href="000.htm"', index)
+            self.assertIn('href="001.htm"', index)
+            self.assertTrue((work / "chm-mhtml" / "images" / "cover.jpg").is_file())
+
     def test_chm_epub_sanitizer_removes_active_and_external_content(self):
         with tempfile.TemporaryDirectory() as root:
             work, epub = Path(root), Path(root) / "book.epub"
@@ -467,11 +495,11 @@ aW1hZ2U=
             self.assertEqual(target.read_bytes(), b"docx")
 
     def test_doc_and_docx_use_distinct_docx_profiles(self):
-        self.assertEqual(reader_assets.conversion_contract("doc"), ("libreoffice-docx-v1", "docx", "document.docx"))
-        self.assertEqual(reader_assets.conversion_contract("docx"), ("docx-native-v1", "docx", "document.docx"))
+        self.assertEqual(reader_assets.conversion_contract("doc"), ("libreoffice-docx-v2", "docx", "document.docx"))
+        self.assertEqual(reader_assets.conversion_contract("docx"), ("docx-native-v2", "docx", "document.docx"))
 
     def test_html_and_htm_use_sanitized_html_profile(self):
-        expected = ("sanitized-html-v2", "html", "document.html")
+        expected = ("sanitized-html-v3", "html", "document.html")
         self.assertEqual(reader_assets.conversion_contract("html"), expected)
         self.assertEqual(reader_assets.conversion_contract("htm"), expected)
 
@@ -561,6 +589,52 @@ aW1hZ2U=
             self.assertEqual(convert_reader_assets.page_content_ratio(blank), 0)
             self.assertGreater(convert_reader_assets.page_content_ratio(content), 0.1)
 
+    def test_pdf_content_validation_rejects_empty_pages_after_midpoint(self):
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as root:
+            work, pdf = Path(root), Path(root) / "document.pdf"
+            pdf.write_bytes(b"%PDF-test")
+
+            def render(command):
+                page = int(command[command.index("-f") + 1])
+                image = Image.new("RGB", (40, 40), "white")
+                if page <= 2:
+                    for x in range(10, 30):
+                        for y in range(10, 30):
+                            image.putpixel((x, y), (0, 0, 0))
+                output = Path(command[-1]).with_suffix(".png")
+                output.parent.mkdir(parents=True, exist_ok=True)
+                image.save(output)
+
+            with patch.object(convert_reader_assets, "command_output", return_value="Pages: 4\n"), \
+                    patch.object(convert_reader_assets, "run_checked", side_effect=render):
+                with self.assertRaisesRegex(RuntimeError, "after its midpoint"):
+                    convert_reader_assets.validate_pdf_content(pdf, work)
+
+    def test_endpoint_content_validation_rejects_empty_epub_docx_and_html(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            epub = root / "book.epub"
+            with zipfile.ZipFile(epub, "w") as archive:
+                archive.writestr("mimetype", "application/epub+zip")
+                archive.writestr("META-INF/container.xml", "<container><rootfiles><rootfile full-path=\"content.opf\"/></rootfiles></container>")
+                archive.writestr("content.opf", "<package><manifest><item id=\"chapter\" href=\"chapter.xhtml\"/></manifest><spine><itemref idref=\"chapter\"/></spine></package>")
+                archive.writestr("chapter.xhtml", "<html><body><p></p></body></html>")
+            with self.assertRaisesRegex(RuntimeError, "no readable content"):
+                convert_reader_assets.validate_epub_content(epub)
+
+            docx = root / "document.docx"
+            with zipfile.ZipFile(docx, "w") as archive:
+                archive.writestr("word/document.xml", "<w:document xmlns:w=\"urn:word\"><w:body><w:p/></w:body></w:document>")
+            with self.assertRaisesRegex(RuntimeError, "no readable content"):
+                convert_reader_assets.validate_docx_content(docx)
+
+            html_file = root / "document.html"
+            html_file.write_text("<html><body><style>only css</style></body></html>", encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "no readable content"):
+                convert_reader_assets.validate_html_content(html_file)
+
     def test_docx_validation_requires_document_structure(self):
         import zipfile
 
@@ -644,7 +718,8 @@ aW1hZ2U=
 
             with patch.object(convert_reader_assets, "download_source", side_effect=download), \
                     patch.object(convert_reader_assets, "convert_file", side_effect=convert) as conversion, \
-                    patch.object(convert_reader_assets, "validate_office_pdf"):
+                    patch.object(convert_reader_assets, "validate_office_pdf"), \
+                    patch.object(convert_reader_assets, "validate_reader_content"):
                 first = convert_reader_assets.convert_item(item, bundle)
                 second = convert_reader_assets.convert_item({**item, "key": "VoiceOfML/Test\0Copy.docx"}, bundle)
 
@@ -670,7 +745,8 @@ aW1hZ2U=
 
             with patch.object(convert_reader_assets, "download_source", side_effect=download), \
                     patch.object(convert_reader_assets, "convert_file", side_effect=convert) as conversion, \
-                    patch.object(convert_reader_assets, "validate_djvu_pdf"):
+                    patch.object(convert_reader_assets, "validate_djvu_pdf"), \
+                    patch.object(convert_reader_assets, "validate_reader_content"):
                 with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
                     results = list(executor.map(
                         lambda queued: convert_reader_assets.convert_item(queued, bundle),
@@ -703,7 +779,8 @@ aW1hZ2U=
 
             with patch.object(convert_reader_assets, "download_source", side_effect=download), \
                     patch.object(convert_reader_assets, "download_existing", side_effect=reuse) as reused, \
-                    patch.object(convert_reader_assets, "convert_file") as conversion:
+                    patch.object(convert_reader_assets, "convert_file") as conversion, \
+                    patch.object(convert_reader_assets, "validate_reader_content"):
                 result = convert_reader_assets.convert_item(item, Path(root), reusable)
 
             conversion.assert_not_called()
@@ -732,7 +809,8 @@ aW1hZ2U=
                 target.write_bytes(artifact)
 
             with patch.object(convert_reader_assets, "download_source", side_effect=download), \
-                    patch.object(convert_reader_assets, "download_existing", side_effect=reuse) as reused:
+                    patch.object(convert_reader_assets, "download_existing", side_effect=reuse) as reused, \
+                    patch.object(convert_reader_assets, "validate_reader_content"):
                 with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
                     results = list(executor.map(
                         lambda queued: convert_reader_assets.convert_item(queued, Path(root), reusable),
