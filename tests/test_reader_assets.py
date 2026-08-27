@@ -417,14 +417,24 @@ class ConverterTests(unittest.TestCase):
             source, target = work / "source.xlsx", work / "document.pdf"
             source.write_bytes(convert_reader_assets.OLE_SIGNATURE + b"encrypted")
             office = Mock()
-            office.is_encrypted.return_value = True
+            source_handles = []
+
+            def office_file(handle):
+                source_handles.append(handle)
+                return office
+
+            def is_encrypted():
+                self.assertFalse(source_handles[0].closed)
+                return True
+
+            office.is_encrypted.side_effect = is_encrypted
 
             def decrypt(target_file):
                 target_file.write(b"decrypted")
 
             office.decrypt.side_effect = decrypt
             with patch.dict(convert_reader_assets.os.environ, {"READER_CONVERSION_PASSWORD": "secret"}), \
-                    patch.dict("sys.modules", {"msoffcrypto": Mock(OfficeFile=Mock(return_value=office))}), \
+                    patch.dict("sys.modules", {"msoffcrypto": Mock(OfficeFile=office_file)}), \
                     patch.object(convert_reader_assets, "run_checked") as run:
                 def fake_run(command, **_kwargs):
                     (work / "office-pdf" / "decrypted.pdf").write_bytes(b"%PDF-sheet")
@@ -681,6 +691,26 @@ aW1hZ2U=
             self.assertIn("style.css", chapter)
             self.assertIn("images/cover.png", chapter)
             self.assertIn("<", chapter)
+
+    def test_epub_html_extension_preserves_xml_document_structure(self):
+        with tempfile.TemporaryDirectory() as root:
+            work, epub = Path(root), Path(root) / "book.epub"
+            with zipfile.ZipFile(epub, "w") as archive:
+                archive.writestr("mimetype", "application/epub+zip")
+                archive.writestr("chapter.html", '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Book</title></head><body><p>Readable chapter text.</p><img src="images/a.png"/></body></html>')
+            convert_reader_assets.sanitize_chm_epub(epub, work)
+            with zipfile.ZipFile(epub) as archive:
+                chapter = archive.read("chapter.html").decode()
+            parsed = convert_reader_assets.ET.fromstring(chapter)
+            self.assertEqual(parsed.tag.rsplit("}", 1)[-1], "html")
+            self.assertIn("images/a.png", chapter)
+
+    def test_css_sanitizer_removes_external_urls(self):
+        sanitized = convert_reader_assets.sanitize_css(
+            "p{color:red;fill:url(https://evil.test/a.svg);cursor:url(//evil.test/a.cur)}"
+        )
+        self.assertIn("color:red", sanitized)
+        self.assertNotIn("evil.test", sanitized)
 
     def test_chm_epub_validation_rejects_cover_without_body_text(self):
         with tempfile.TemporaryDirectory() as root:

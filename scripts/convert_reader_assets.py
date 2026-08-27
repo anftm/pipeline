@@ -61,7 +61,7 @@ HTML_TAGS = {
     "span", "strong", "style", "sub", "summary", "sup", "table", "tbody", "td", "tfoot", "th", "thead",
     "time", "title", "tr", "u", "ul", "var", "wbr",
 }
-GLOBAL_HTML_ATTRIBUTES = {"class", "dir", "id", "lang", "style", "title"}
+GLOBAL_HTML_ATTRIBUTES = {"class", "dir", "id", "lang", "title"}
 TAG_HTML_ATTRIBUTES = {
     "a": {"href", "name"}, "col": {"span", "width"}, "colgroup": {"span", "width"},
     "img": {"alt", "height", "src", "width"}, "link": {"href", "media", "rel", "type"},
@@ -451,13 +451,35 @@ def mhtml_to_html(source: Path, target: Path) -> None:
     target.write_text(document, encoding="utf-8")
 
 
+def css_token_has_external_url(token) -> bool:
+    if token.type == "url":
+        value = token.value
+    elif token.type == "function" and token.name.lower() == "url":
+        value = tinycss2.serialize(token.arguments).strip(" \t\r\n\"'")
+    else:
+        children = getattr(token, "arguments", None) or getattr(token, "content", None) or []
+        return any(css_token_has_external_url(child) for child in children)
+    normalized = re.sub(r"[\x00-\x20]+", "", value).lower()
+    parsed = urllib.parse.urlsplit(normalized)
+    return bool(parsed.scheme or parsed.netloc or normalized.startswith("//"))
+
+
+def sanitize_css_declarations(document: str) -> str:
+    sanitized = CSS_SANITIZER.sanitize_css(document)
+    declarations = []
+    for declaration in tinycss2.parse_declaration_list(sanitized, skip_comments=True, skip_whitespace=True):
+        if declaration.type == "declaration" and not any(css_token_has_external_url(token) for token in declaration.value):
+            declarations.append(declaration)
+    return tinycss2.serialize(declarations)
+
+
 def sanitize_css(document: str) -> str:
     output = []
     for rule in tinycss2.parse_stylesheet(document, skip_comments=True, skip_whitespace=True):
         if rule.type != "qualified-rule":
             continue
         selector = tinycss2.serialize(rule.prelude).strip()
-        declarations = CSS_SANITIZER.sanitize_css(tinycss2.serialize(rule.content))
+        declarations = sanitize_css_declarations(tinycss2.serialize(rule.content))
         declarations = re.sub(r"\bexpression\s*\([^)]*\)", "", declarations, flags=re.IGNORECASE)
         if selector and declarations.strip():
             output.append(f"{selector}{{{declarations}}}")
@@ -532,7 +554,7 @@ def sanitize_xml_document(document: str) -> str:
                 continue
             if root_kind == "svg":
                 if name == "style":
-                    parent.attrib[attribute] = CSS_SANITIZER.sanitize_css(value)
+                    parent.attrib[attribute] = sanitize_css_declarations(value)
                 elif name in {"href", "src"} and not safe_embedded_url(name, value, allow_relative=True):
                     del parent.attrib[attribute]
                 elif re.search(r"(?:javascript|vbscript|https?:|//)", html.unescape(value), re.IGNORECASE):
@@ -541,7 +563,7 @@ def sanitize_xml_document(document: str) -> str:
             if name not in GLOBAL_HTML_ATTRIBUTES | TAG_HTML_ATTRIBUTES.get(local_tag, set()):
                 del parent.attrib[attribute]
             elif name == "style":
-                parent.attrib[attribute] = CSS_SANITIZER.sanitize_css(value)
+                parent.attrib[attribute] = sanitize_css_declarations(value)
             elif name in {"href", "src"} and not safe_embedded_url(name, value, allow_relative=True):
                 del parent.attrib[attribute]
 
@@ -867,19 +889,19 @@ def convert_file(item: dict, source: Path, target: Path, work: Path) -> None:
         password = os.environ.get("READER_CONVERSION_PASSWORD", "")
     if password and ext in {"doc", "docx", "ppt", "pptx", "pps", "xls", "xlsx"}:
         import msoffcrypto
-        document = None
-        try:
-            with source.open("rb") as encrypted:
+        with source.open("rb") as encrypted:
+            document = None
+            try:
                 document = msoffcrypto.OfficeFile(encrypted)
-        except Exception:
-            if explicit_password:
-                raise
-        if document is not None and document.is_encrypted():
-            decrypted_source = work / f"decrypted.{ext}"
-            document.load_key(password=password)
-            with decrypted_source.open("wb") as decrypted:
-                document.decrypt(decrypted)
-            source = decrypted_source
+            except Exception:
+                if explicit_password:
+                    raise
+            if document is not None and document.is_encrypted():
+                decrypted_source = work / f"decrypted.{ext}"
+                document.load_key(password=password)
+                with decrypted_source.open("wb") as decrypted:
+                    document.decrypt(decrypted)
+                source = decrypted_source
     if ext == "pdf":
         if not password:
             raise RuntimeError("protected PDF has no known password")
