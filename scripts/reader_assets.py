@@ -57,8 +57,8 @@ PROTECTED_PDF_CONTRACT = ("qpdf-decrypted-v1", "pdf", "document.pdf")
 PASSWORD_RE = re.compile(r"(?:密码|口令|password|passwd)\s*[：:=]?\s*([A-Za-z0-9]+)", re.IGNORECASE)
 KNOWN_SOURCE_PASSWORDS = {
     ("VoiceOfML/MLMRL-Library", "基础入门书单/入门答疑/风正集.pdf"): "230505",
-    ("VoiceOfML/MLMRL-Hub", "000269/1870520043_3072_风正集230220.pdf"): "230505",
-    ("VoiceOfML/MLMRL-Hub", "001346/1870520043_15344_风正集230123.pdf"): "230505",
+    ("VoiceOfML/MLMRL-Hub", "000269/1870520043_3072_风正集230220.pdf"): "230220",
+    ("VoiceOfML/MLMRL-Hub", "001346/1870520043_15344_风正集230123.pdf"): "230123",
     ("VoiceOfML/MLMRL-Hub", "001346/1870520043_15348_风正集230505.pdf"): "230505",
 }
 
