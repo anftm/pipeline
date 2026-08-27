@@ -43,14 +43,14 @@ class ReaderAssetContractTests(unittest.TestCase):
         expected = {
             "doc": ("libreoffice-docx-v2", "docx", "document.docx"),
             "docx": ("docx-native-v2", "docx", "document.docx"),
-            "htm": ("sanitized-html-v4", "html", "document.html"),
-            "html": ("sanitized-html-v4", "html", "document.html"),
-            "mobi": ("calibre-epub-v3", "epub", "book.epub"),
-            "azw3": ("calibre-epub-v3", "epub", "book.epub"),
-            "fb2": ("calibre-epub-v3", "epub", "book.epub"),
-            "odt": ("calibre-epub-v3", "epub", "book.epub"),
-            "rtf": ("calibre-rtf-epub-v4", "epub", "book.epub"),
-            "chm": ("calibre-chm-epub-v5", "epub", "book.epub"),
+            "htm": ("sanitized-html-v5", "html", "document.html"),
+            "html": ("sanitized-html-v5", "html", "document.html"),
+            "mobi": ("calibre-epub-v4", "epub", "book.epub"),
+            "azw3": ("calibre-epub-v4", "epub", "book.epub"),
+            "fb2": ("calibre-epub-v4", "epub", "book.epub"),
+            "odt": ("calibre-epub-v4", "epub", "book.epub"),
+            "rtf": ("calibre-rtf-epub-v5", "epub", "book.epub"),
+            "chm": ("calibre-chm-epub-v6", "epub", "book.epub"),
             "tif": ("pillow-pdf-v2", "pdf", "document.pdf"),
             "tiff": ("pillow-pdf-v2", "pdf", "document.pdf"),
             "djvu": ("djvulibre-pdf-v2", "pdf", "document.pdf"),
@@ -63,8 +63,8 @@ class ReaderAssetContractTests(unittest.TestCase):
             "csv": ("libreoffice-pdf-office-v2", "pdf", "document.pdf"),
             "ods": ("libreoffice-pdf-office-v2", "pdf", "document.pdf"),
             "wps": ("libreoffice-pdf-office-v2", "pdf", "document.pdf"),
-            "mht": ("sanitized-mhtml-v5", "html", "document.html"),
-            "mhtml": ("sanitized-mhtml-v5", "html", "document.html"),
+            "mht": ("sanitized-mhtml-v6", "html", "document.html"),
+            "mhtml": ("sanitized-mhtml-v6", "html", "document.html"),
             "ps": ("ghostscript-pdf-v5", "pdf", "document.pdf"),
             "caj": ("caj-family-pdf-v1", "pdf", "document.pdf"),
             "kdh": ("caj-family-pdf-v1", "pdf", "document.pdf"),
@@ -786,7 +786,7 @@ aW1hZ2U=
         self.assertEqual(reader_assets.conversion_contract("docx"), ("docx-native-v2", "docx", "document.docx"))
 
     def test_html_and_htm_use_sanitized_html_profile(self):
-        expected = ("sanitized-html-v4", "html", "document.html")
+        expected = ("sanitized-html-v5", "html", "document.html")
         self.assertEqual(reader_assets.conversion_contract("html"), expected)
         self.assertEqual(reader_assets.conversion_contract("htm"), expected)
 
@@ -1076,7 +1076,7 @@ aW1hZ2U=
         item = {
             "key": "VoiceOfML/Test\0A/Book.html", "extension": "html",
             "source_url": "https://example.test/A/Book.html", "source_revision": "rev1",
-            "profile": "sanitized-html-v4", "reader_mode": "html", "output_name": "document.html",
+            "profile": "sanitized-html-v5", "reader_mode": "html", "output_name": "document.html",
         }
         with tempfile.TemporaryDirectory() as root:
             def download(_url, target):
