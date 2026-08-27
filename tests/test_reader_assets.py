@@ -24,7 +24,7 @@ class ReaderAssetContractTests(unittest.TestCase):
         self.assertEqual(
             set(reader_assets.CONVERTIBLE_EXTENSIONS),
             {"doc", "docx", "htm", "html", "mobi", "azw3", "fb2", "odt", "rtf", "chm", "tif", "tiff", "djvu",
-             "ppt", "pptx", "pps", "odp", "xls", "xlsx", "csv", "ods", "wps", "mht", "mhtml", "ps",
+             "ppt", "pptx", "pps", "odp", "xls", "xlsx", "csv", "ods", "wps", "mht", "mhtml", "ps", "caj", "kdh",
              "ape", "wma", "amr", "flv", "f4v", "rm", "rmvb", "mkv", "avi", "mpg",
              "mpeg", "mts", "ts", "wmv"},
         )
@@ -65,6 +65,8 @@ class ReaderAssetContractTests(unittest.TestCase):
             "mht": ("sanitized-mhtml-v4", "html", "document.html"),
             "mhtml": ("sanitized-mhtml-v4", "html", "document.html"),
             "ps": ("ghostscript-pdf-v4", "pdf", "document.pdf"),
+            "caj": ("caj-family-pdf-v1", "pdf", "document.pdf"),
+            "kdh": ("caj-family-pdf-v1", "pdf", "document.pdf"),
             "ape": ("ffmpeg-audio-mp3-v1", "audio", "audio.mp3"),
             "wma": ("ffmpeg-audio-mp3-v1", "audio", "audio.mp3"),
             "amr": ("ffmpeg-audio-mp3-v1", "audio", "audio.mp3"),
@@ -397,6 +399,52 @@ aW1hZ2U=
             with patch.object(convert_reader_assets, "convert_chm") as conversion:
                 convert_reader_assets.convert_file({"extension": "chm"}, source, target, work)
             conversion.assert_called_once_with(source, target, work)
+
+    def test_caj_family_detection_uses_content_not_extension(self):
+        cases = {
+            b"%PDF-1.7": "pdf", b"KDH 2.00": "kdh", b"CAJ\0": "caj",
+            b"HN\0\0": "hn", b"\xc8\0\0\0": "c8", b"\0" * 16: "hn",
+        }
+        with tempfile.TemporaryDirectory() as root:
+            source = Path(root) / "source.caj"
+            for header, expected in cases.items():
+                source.write_bytes(header)
+                self.assertEqual(convert_reader_assets.detect_caj_family(source), expected)
+
+    def test_caj_family_copies_embedded_pdf_and_dispatches_converter(self):
+        with tempfile.TemporaryDirectory() as root:
+            work = Path(root)
+            source, target = work / "source.caj", work / "document.pdf"
+            source.write_bytes(b"%PDF-1.7\nbody")
+            convert_reader_assets.convert_caj_family(source, target, work)
+            self.assertEqual(target.read_bytes(), source.read_bytes())
+
+            source.write_bytes(b"CAJ\0data")
+            converter = work / "caj2pdf" / "caj2pdf"
+            converter.parent.mkdir()
+            converter.write_text("converter", encoding="utf-8")
+            with patch.object(convert_reader_assets, "CAJ2PDF_DIR", converter.parent), \
+                    patch.object(convert_reader_assets, "run_checked") as run:
+                convert_reader_assets.convert_caj_family(source, target, work)
+            self.assertEqual(run.call_args.args[0], ["python3", str(converter), "convert", str(source), "--output", str(target)])
+            self.assertEqual(run.call_args.kwargs["cwd"], work)
+
+    def test_kdh_extraction_decrypts_embedded_pdf_before_repair(self):
+        with tempfile.TemporaryDirectory() as root:
+            work = Path(root)
+            source, target = work / "source.kdh", work / "document.pdf"
+            payload = b"%PDF-1.3\nbody\n%%EOFtrailer"
+            key = b"FZHMEI"
+            encrypted = bytes(value ^ key[index % len(key)] for index, value in enumerate(payload))
+            source.write_bytes(b"KDH " + b"\0" * 250 + encrypted)
+
+            def repair(command):
+                self.assertEqual(Path(command[2]).read_bytes(), b"%PDF-1.3\nbody\n%%EOF")
+                Path(command[3]).write_bytes(Path(command[2]).read_bytes())
+
+            with patch.object(convert_reader_assets, "run_checked", side_effect=repair):
+                convert_reader_assets.extract_kdh_pdf(source, target, work)
+            self.assertTrue(target.read_bytes().startswith(b"%PDF-"))
 
     def test_mhtml_fallback_extracts_html_and_inlines_resources(self):
         message = b"""MIME-Version: 1.0
@@ -1205,6 +1253,9 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("tif|tiff) packages=(poppler-utils)", workflow)
         self.assertIn("mht|mhtml) packages=()", workflow)
         self.assertIn("ps) packages=(ghostscript poppler-utils)", workflow)
+        self.assertIn("caj|kdh) packages=(git mupdf-tools poppler-utils)", workflow)
+        self.assertIn("checkout --detach 6c4bc32b15ce748d211f45d536f5d5511ef9f368", workflow)
+        self.assertIn("CAJ2PDF_DIR: /opt/caj2pdf", workflow)
         self.assertIn("ape|wma|amr|flv|f4v|rm|rmvb|mkv|avi|mpg|mpeg|mts|ts|wmv) packages=(ffmpeg)", workflow)
         self.assertIn("READER_CONVERSION_WORKERS:", workflow)
         self.assertIn("steps.scan.outputs.extension == 'djvu'", workflow)

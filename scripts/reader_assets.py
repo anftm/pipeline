@@ -35,6 +35,8 @@ CONVERTIBLE_EXTENSIONS = {
     "mht": ("sanitized-mhtml-v4", "html", "document.html"),
     "mhtml": ("sanitized-mhtml-v4", "html", "document.html"),
     "ps": ("ghostscript-pdf-v4", "pdf", "document.pdf"),
+    "caj": ("caj-family-pdf-v1", "pdf", "document.pdf"),
+    "kdh": ("caj-family-pdf-v1", "pdf", "document.pdf"),
     "ape": ("ffmpeg-audio-mp3-v1", "audio", "audio.mp3"),
     "wma": ("ffmpeg-audio-mp3-v1", "audio", "audio.mp3"),
     "amr": ("ffmpeg-audio-mp3-v1", "audio", "audio.mp3"),

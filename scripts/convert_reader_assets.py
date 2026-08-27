@@ -51,6 +51,7 @@ POSTSCRIPT_COMMAND_TIMEOUT_SECONDS = int(os.environ.get(
 ))
 CONVERSION_WORKERS = max(1, int(os.environ.get("READER_CONVERSION_WORKERS", "1")))
 READER_ASSETS_REPO = os.environ.get("READER_ASSETS_REPO", "vomebook/Reader-Assets")
+CAJ2PDF_DIR = Path(os.environ.get("CAJ2PDF_DIR", "/opt/caj2pdf"))
 ARTIFACT_LOCKS = {}
 ARTIFACT_LOCKS_GUARD = threading.Lock()
 
@@ -221,10 +222,10 @@ def conversion_error_class(exc: Exception) -> str:
     return type(exc).__name__
 
 
-def run_checked(command: list[str], *, timeout_seconds: int | None = None) -> None:
+def run_checked(command: list[str], *, timeout_seconds: int | None = None, cwd: Path | None = None) -> None:
     timeout_seconds = COMMAND_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=timeout_seconds)
+        result = subprocess.run(command, capture_output=True, text=True, timeout=timeout_seconds, cwd=cwd)
     except subprocess.TimeoutExpired as exc:
         raise ReaderConversionTimeout(f"conversion command timed out: {Path(command[0]).name}") from exc
     if result.returncode:
@@ -447,6 +448,51 @@ def convert_chm(source: Path, target: Path, work: Path) -> None:
     sanitize_chm_epub(target, work)
     validate_output(target, "epub")
     validate_chm_epub(target)
+
+
+def detect_caj_family(source: Path) -> str:
+    header = source.read_bytes()[:16]
+    if header.startswith(b"%PDF-"):
+        return "pdf"
+    if header.startswith(b"KDH "):
+        return "kdh"
+    if header.startswith(b"CAJ"):
+        return "caj"
+    if header.startswith(b"HN"):
+        return "hn"
+    if header.startswith(b"\xc8"):
+        return "c8"
+    if header[:8] == b"\0" * 8:
+        return "hn"
+    raise RuntimeError("unsupported CAJ-family container")
+
+
+def extract_kdh_pdf(source: Path, target: Path, work: Path) -> None:
+    data = source.read_bytes()
+    if len(data) <= 254:
+        raise RuntimeError("KDH container is truncated")
+    key = b"FZHMEI"
+    decrypted = bytes(value ^ key[index % len(key)] for index, value in enumerate(data[254:]))
+    end = decrypted.rfind(b"%%EOF")
+    if end < 0:
+        raise RuntimeError("KDH container has no embedded PDF terminator")
+    raw = work / "kdh-raw.pdf"
+    raw.write_bytes(decrypted[:end + 5])
+    run_checked(["mutool", "clean", str(raw), str(target)])
+
+
+def convert_caj_family(source: Path, target: Path, work: Path) -> None:
+    kind = detect_caj_family(source)
+    if kind == "pdf":
+        shutil.copyfile(source, target)
+        return
+    if kind == "kdh":
+        extract_kdh_pdf(source, target, work)
+        return
+    converter = CAJ2PDF_DIR / "caj2pdf"
+    if not converter.is_file():
+        raise RuntimeError("pinned caj2pdf converter is unavailable")
+    run_checked(["python3", str(converter), "convert", str(source), "--output", str(target)], cwd=work)
 
 
 def validate_djvu_pdf(path: Path, work: Path) -> None:
@@ -736,6 +782,8 @@ def convert_file(item: dict, source: Path, target: Path, work: Path) -> None:
             "gs", "-dBATCH", "-dNOPAUSE", "-sDEVICE=pdfwrite", "-dCompatibilityLevel=1.7",
             f"-sOutputFile={target}", str(source),
         ], timeout_seconds=POSTSCRIPT_COMMAND_TIMEOUT_SECONDS)
+    elif ext in {"caj", "kdh"}:
+        convert_caj_family(source, target, work)
     elif ext in {"ape", "wma", "amr"}:
         run_checked([
             "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",

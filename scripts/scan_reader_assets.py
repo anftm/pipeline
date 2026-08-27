@@ -67,7 +67,7 @@ def build_queue(records, revisions, manifest, *, repo="", extension="", exact_pa
             "reader_mode": reader_mode, "output_name": output_name,
         })
     priority = {"tif": 0, "tiff": 0, "mobi": 1, "azw3": 1, "fb2": 1, "odt": 1, "rtf": 1, "chm": 1, "djvu": 2,
-                 "doc": 3, "docx": 3, "htm": 3, "html": 3,
+                 "doc": 3, "docx": 3, "htm": 3, "html": 3, "caj": 3, "kdh": 3,
                  "ppt": 3, "pptx": 3, "pps": 3, "odp": 3, "xls": 3, "xlsx": 3, "csv": 3, "ods": 3, "wps": 3,
                  "mht": 3, "mhtml": 3, "ps": 3,
                  "ape": 3, "wma": 3, "amr": 3,

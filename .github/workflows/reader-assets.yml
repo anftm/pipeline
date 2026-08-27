@@ -11,7 +11,7 @@ on:
         default: ""
         type: string
       extension:
-        description: doc, docx, htm, html, mobi, azw3, fb2, odt, rtf, chm, tif, tiff, djvu, ppt, pptx, pps, odp, xls, xlsx, csv, ods, wps, mht, mhtml, ps, or blank
+        description: doc, docx, htm, html, mobi, azw3, fb2, odt, rtf, chm, tif, tiff, djvu, ppt, pptx, pps, odp, xls, xlsx, csv, ods, wps, mht, mhtml, ps, caj, kdh, or blank
         required: false
         default: ""
         type: string
@@ -115,12 +115,18 @@ jobs:
             tif|tiff) packages=(poppler-utils) ;;
             mht|mhtml) packages=() ;;
             ps) packages=(ghostscript poppler-utils) ;;
+            caj|kdh) packages=(git mupdf-tools poppler-utils) ;;
             ape|wma|amr|flv|f4v|rm|rmvb|mkv|avi|mpg|mpeg|mts|ts|wmv) packages=(ffmpeg) ;;
             *) echo "Unsupported queued extension: ${EXTENSION}" >&2; exit 1 ;;
           esac
           if ((${#packages[@]})); then
             sudo apt-get update
             sudo apt-get install -y --no-install-recommends "${packages[@]}"
+          fi
+          if [[ "${EXTENSION}" == "caj" || "${EXTENSION}" == "kdh" ]]; then
+            sudo git clone --filter=blob:none --no-checkout https://github.com/caj2pdf/caj2pdf.git /opt/caj2pdf
+            sudo git -C /opt/caj2pdf checkout --detach 6c4bc32b15ce748d211f45d536f5d5511ef9f368
+            pip install imagesize==1.3.0 PyPDF2==2.2.0
           fi
           if [[ "${EXTENSION}" == "doc" || "${EXTENSION}" == "docx" ]]; then
             fc-cache -f
@@ -140,6 +146,7 @@ jobs:
           SOURCE_PATH: ${{ inputs.path || '' }}
           RETRY_FAILED: ${{ inputs.retry_failed || 'false' }}
           FORCE_REBUILD: ${{ inputs.force || 'false' }}
+          CAJ2PDF_DIR: /opt/caj2pdf
         run: |
           if [[ -z "${EXTENSION}" ]]; then
             if [[ "${{ steps.scan.outputs.stale_count }}" != "0" ]]; then
