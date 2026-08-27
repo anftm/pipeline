@@ -2,6 +2,7 @@
 """Build a deterministic queue for changed files requiring reader conversion."""
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -33,8 +34,14 @@ def remote_manifest(api: HfApi, repo_id: str) -> dict:
     return validate_manifest(load_json(Path(path)))
 
 
+def shard_for_key(key: str, shard_count: int) -> int:
+    return int.from_bytes(hashlib.sha256(key.encode("utf-8")).digest()[:8], "big") % shard_count
+
+
 def build_queue(records, revisions, manifest, *, repo="", extension="", exact_path="", limit=0,
-                  retry_failed=False, force=False) -> list[dict]:
+                  retry_failed=False, force=False, shard_count=1, shard_index=0) -> list[dict]:
+    if shard_count < 1 or not 0 <= shard_index < shard_count:
+        raise ValueError("invalid reader asset shard")
     selected = []
     extension = extension.lower().lstrip(".")
     files = manifest.get("files", {})
@@ -53,6 +60,8 @@ def build_queue(records, revisions, manifest, *, repo="", extension="", exact_pa
         if exact_path and path != exact_path:
             continue
         key = asset_key(source_repo, path)
+        if shard_for_key(key, shard_count) != shard_index:
+            continue
         profile, reader_mode, output_name = contract
         existing = files.get(key, {})
         manual = str(existing.get("profile") or "").startswith("manual-")
@@ -63,12 +72,13 @@ def build_queue(records, revisions, manifest, *, repo="", extension="", exact_pa
             continue
         if not force and current and existing.get("status") == "failed" and not retry_failed:
             continue
-        selected.append({
+        item = {
             "key": key, "repo": source_repo, "path": path, "extension": ext,
             "source_revision": revision, "source_bytes": record.get("Size") or 0,
             "source_url": source_url(source_repo, revision, path), "profile": profile,
             "reader_mode": reader_mode, "output_name": output_name,
-        })
+        }
+        selected.append(item)
     priority = {"pdf": 0, "tif": 0, "tiff": 0, "mobi": 1, "azw3": 1, "fb2": 1, "odt": 1, "rtf": 1, "chm": 1, "djvu": 2,
                  "doc": 3, "docx": 3, "htm": 3, "html": 3, "caj": 3, "kdh": 3,
                  "ppt": 3, "pptx": 3, "pps": 3, "odp": 3, "xls": 3, "xlsx": 3, "csv": 3, "ods": 3, "wps": 3,
@@ -119,6 +129,8 @@ def parse_args():
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--retry-failed", action="store_true")
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--shard-count", type=int, default=1)
+    parser.add_argument("--shard-index", type=int, default=0)
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--assets-repo", default=os.environ.get("READER_ASSETS_REPO", READER_ASSETS_REPO))
     return parser.parse_args()
@@ -128,6 +140,8 @@ def main() -> int:
     args = parse_args()
     if args.limit < 0:
         raise ValueError("limit must be non-negative")
+    if args.shard_count < 1 or not 0 <= args.shard_index < args.shard_count:
+        raise ValueError("invalid reader asset shard")
     records = decode_search_payload(load_json(args.search_data))
     revisions = load_json(args.revisions)
     if args.manifest:
@@ -135,7 +149,8 @@ def main() -> int:
     else:
         manifest = remote_manifest(HfApi(token=os.environ.get("HF_TOKEN") or None), args.assets_repo)
     queue = build_queue(records, revisions, manifest, repo=args.repo, extension=args.extension, exact_path=args.path,
-                        limit=args.limit, retry_failed=args.retry_failed, force=args.force)
+                        limit=args.limit, retry_failed=args.retry_failed, force=args.force,
+                        shard_count=args.shard_count, shard_index=args.shard_index)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     current_keys = active_keys(records)
     args.output.write_bytes(canonical_json({

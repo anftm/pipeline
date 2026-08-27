@@ -491,10 +491,6 @@ def convert_caj_family(source: Path, target: Path, work: Path) -> None:
     converter = CAJ2PDF_DIR / "caj2pdf"
     if not converter.is_file():
         raise RuntimeError("pinned caj2pdf converter is unavailable")
-    for library in ("libjbigdec.so", "libjbig2codec.so"):
-        source_library = CAJ2PDF_DIR / library
-        if source_library.is_file():
-            shutil.copyfile(source_library, work / library)
     run_checked(["python3", str(converter), "convert", str(source), "--output", str(target)], cwd=work)
 
 
@@ -689,7 +685,7 @@ def validate_reader_content(path: Path, item: dict, work: Path) -> None:
 def convert_file(item: dict, source: Path, target: Path, work: Path) -> None:
     ext = item["extension"]
     office_profile = (work / "libreoffice-profile").resolve().as_uri()
-    password = source_password(item.get("repo", ""), item.get("path", ""))
+    password = item.get("source_password") or source_password(item.get("repo", ""), item.get("path", ""))
     if password and ext in {"doc", "docx", "ppt", "pptx", "pps", "xls", "xlsx"}:
         import msoffcrypto
         with source.open("rb") as encrypted:
@@ -776,18 +772,8 @@ def convert_file(item: dict, source: Path, target: Path, work: Path) -> None:
         out.mkdir()
         office_source = source
         if ext == "xlsx" and source.read_bytes()[:8] == OLE_SIGNATURE:
-            password = os.environ.get("READER_CONVERSION_PASSWORD", "")
-            if password:
-                import msoffcrypto
-                with source.open("rb") as encrypted:
-                    document = msoffcrypto.OfficeFile(encrypted)
-                    office_source = work / "decrypted.xlsx"
-                    document.load_key(password=password)
-                    with office_source.open("wb") as decrypted:
-                        document.decrypt(decrypted)
-            else:
-                office_source = work / "source.xls"
-                shutil.copyfile(source, office_source)
+            office_source = work / "source.xls"
+            shutil.copyfile(source, office_source)
         run_checked([
             "libreoffice", "--headless", f"-env:UserInstallation={office_profile}",
             "--convert-to", "pdf", "--outdir", str(out), str(office_source),
@@ -1014,6 +1000,7 @@ def main() -> int:
     bundle_data = {
         "version": 1,
         "results": results,
+        "force_rebuild": bool(queue_data.get("force_rebuild")),
     }
     if queue_data.get("authoritative_snapshot") is True:
         bundle_data["active_keys"] = queue_data.get("active_keys", [])

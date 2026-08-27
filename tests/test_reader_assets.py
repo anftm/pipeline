@@ -12,7 +12,7 @@ from unittest.mock import Mock, patch
 
 import requests
 from huggingface_hub import CommitOperationAdd, CommitOperationDelete
-from huggingface_hub.errors import RepositoryNotFoundError
+from huggingface_hub.errors import HfHubHTTPError, RepositoryNotFoundError
 
 from scripts import build_reader_assets_index, convert_reader_assets, publish_reader_assets
 from scripts import prune_reader_assets, publish_search_reader_index
@@ -155,6 +155,41 @@ class ScannerTests(unittest.TestCase):
             repo="VoiceOfML/Test", extension="mobi", limit=1,
         )
         self.assertEqual([item["path"] for item in queue], ["A.mobi"])
+
+    def test_stable_shards_are_disjoint_and_cover_the_queue(self):
+        records = [
+            {"Repo": "VoiceOfML/Test", "File": f"Book-{index}", "Extension": "docx", "Folder": [], "Size": 1}
+            for index in range(40)
+        ]
+        complete = scan_reader_assets.build_queue(records, self.revisions, reader_assets.empty_manifest())
+        shards = [
+            scan_reader_assets.build_queue(
+                records, self.revisions, reader_assets.empty_manifest(), shard_count=10, shard_index=index,
+            )
+            for index in range(10)
+        ]
+        shard_keys = [{item["key"] for item in shard} for shard in shards]
+        self.assertEqual(set().union(*shard_keys), {item["key"] for item in complete})
+        self.assertEqual(sum(len(keys) for keys in shard_keys), len(set().union(*shard_keys)))
+        for index, shard in enumerate(shards):
+            self.assertTrue(all(scan_reader_assets.shard_for_key(item["key"], 10) == index for item in shard))
+
+    def test_shard_limit_is_applied_after_partitioning(self):
+        records = [
+            {"Repo": "VoiceOfML/Test", "File": f"Book-{index}", "Extension": "docx", "Folder": [], "Size": 1}
+            for index in range(100)
+        ]
+        queue = scan_reader_assets.build_queue(
+            records, self.revisions, reader_assets.empty_manifest(), limit=2, shard_count=4, shard_index=2,
+        )
+        self.assertEqual(len(queue), 2)
+        self.assertTrue(all(scan_reader_assets.shard_for_key(item["key"], 4) == 2 for item in queue))
+
+    def test_invalid_shard_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "invalid reader asset shard"):
+            scan_reader_assets.build_queue(
+                self.records, self.revisions, reader_assets.empty_manifest(), shard_count=2, shard_index=2,
+            )
 
     def test_queues_only_password_marked_pdfs_without_exposing_password(self):
         records = self.records + [
@@ -341,24 +376,6 @@ class ConverterTests(unittest.TestCase):
             self.assertTrue(str(run.call_args.args[0][-1]).endswith("source.xls"))
             self.assertEqual(target.read_bytes(), b"%PDF-sheet")
 
-    def test_encrypted_ole_xlsx_uses_temporary_conversion_password(self):
-        with tempfile.TemporaryDirectory() as root:
-            work = Path(root)
-            source, target = work / "source.xlsx", work / "document.pdf"
-            source.write_bytes(convert_reader_assets.OLE_SIGNATURE + b"encrypted")
-            office = Mock()
-            office.is_encrypted.return_value = True
-            with patch.dict(convert_reader_assets.os.environ, {"READER_CONVERSION_PASSWORD": "secret"}), \
-                    patch.dict("sys.modules", {"msoffcrypto": Mock(OfficeFile=Mock(return_value=office))}), \
-                    patch.object(convert_reader_assets, "run_checked") as run:
-                def decrypt(target): target.write(b"decrypted")
-                office.decrypt.side_effect = decrypt
-                def fake_run(command, **_kwargs):
-                    (work / "office-pdf" / "decrypted.pdf").write_bytes(b"%PDF-sheet")
-                run.side_effect = fake_run
-                convert_reader_assets.convert_file({"extension": "xlsx"}, source, target, work)
-            self.assertTrue(str(run.call_args.args[0][-1]).endswith("decrypted.xlsx"))
-
     def test_mht_conversion_reuses_mhtml_sanitizer(self):
         with tempfile.TemporaryDirectory() as root:
             work = Path(root)
@@ -473,15 +490,11 @@ aW1hZ2U=
             converter = work / "caj2pdf" / "caj2pdf"
             converter.parent.mkdir()
             converter.write_text("converter", encoding="utf-8")
-            (converter.parent / "libjbigdec.so").write_bytes(b"jbig")
-            (converter.parent / "libjbig2codec.so").write_bytes(b"jbig2")
             with patch.object(convert_reader_assets, "CAJ2PDF_DIR", converter.parent), \
                     patch.object(convert_reader_assets, "run_checked") as run:
                 convert_reader_assets.convert_caj_family(source, target, work)
             self.assertEqual(run.call_args.args[0], ["python3", str(converter), "convert", str(source), "--output", str(target)])
             self.assertEqual(run.call_args.kwargs["cwd"], work)
-            self.assertEqual((work / "libjbigdec.so").read_bytes(), b"jbig")
-            self.assertEqual((work / "libjbig2codec.so").read_bytes(), b"jbig2")
 
     def test_kdh_extraction_decrypts_embedded_pdf_before_repair(self):
         with tempfile.TemporaryDirectory() as root:
@@ -1156,6 +1169,107 @@ class PublicationTests(unittest.TestCase):
         self.assertEqual(manifest["files"][result["key"]]["path"], path)
         self.assertEqual(len(operations), 2)
 
+    def test_publish_reuses_matching_object_added_by_another_shard(self):
+        path = "objects/aa/remote/document.pdf"
+        remote_entry = {
+            "status": "ready", "source_revision": "other", "source_sha256": "a" * 64,
+            "source_bytes": 10, "source_extension": "docx", "profile": "libreoffice-pdf-v2",
+            "reader_mode": "pdf", "path": path, "bytes": 12, "sha256": "b" * 64,
+        }
+        result = {
+            **remote_entry, "key": "VoiceOfML/Test\0Copy.docx", "source_revision": "rev2",
+            "path": "objects/aa/local/document.pdf", "bytes": 99, "sha256": "c" * 64,
+        }
+        api = Mock()
+        api.file_exists.return_value = True
+        with tempfile.TemporaryDirectory() as root:
+            remote = Path(root) / "remote.json"
+            remote.write_text(json.dumps({
+                "version": 1, "files": {"VoiceOfML/Test\0Original.docx": remote_entry},
+            }), encoding="utf-8")
+            api.hf_hub_download.return_value = str(remote)
+            bundle = Path(root) / "bundle"
+            bundle.mkdir()
+            (bundle / "bundle.json").write_text(json.dumps({"version": 1, "results": [result]}), encoding="utf-8")
+            manifest, operations = publish_reader_assets.build_publish(api, "vomebook/Test", bundle)
+        published = manifest["files"][result["key"]]
+        self.assertEqual(published["path"], path)
+        self.assertEqual(published["sha256"], remote_entry["sha256"])
+        self.assertEqual(len(operations), 2)
+
+    def test_force_publish_does_not_reuse_matching_remote_object(self):
+        key = "VoiceOfML/Test\0Book.docx"
+        remote_entry = {
+            "status": "ready", "source_revision": "rev1", "source_sha256": "a" * 64,
+            "source_bytes": 10, "source_extension": "docx", "profile": "libreoffice-pdf-v2",
+            "reader_mode": "pdf", "path": "objects/aa/old/document.pdf", "bytes": 12, "sha256": "b" * 64,
+        }
+        result = {**remote_entry, "key": key, "path": "objects/aa/new/document.pdf"}
+        api = Mock()
+        api.file_exists.return_value = True
+        with tempfile.TemporaryDirectory() as root:
+            remote = Path(root) / "remote.json"
+            remote.write_text(json.dumps({"version": 1, "files": {key: remote_entry}}), encoding="utf-8")
+            api.hf_hub_download.return_value = str(remote)
+            bundle = self.make_bundle(str(Path(root) / "bundle"), result)
+            bundle_data = json.loads((bundle / "bundle.json").read_text(encoding="utf-8"))
+            bundle_data["force_rebuild"] = True
+            (bundle / "bundle.json").write_text(json.dumps(bundle_data), encoding="utf-8")
+            manifest, operations = publish_reader_assets.build_publish(api, "vomebook/Test", bundle)
+        self.assertEqual(manifest["files"][key]["path"], result["path"])
+        self.assertEqual(len(operations), 3)
+
+    def test_force_publish_refreshes_every_mapping_for_an_overwritten_object(self):
+        path = "objects/aa/shared/document.pdf"
+        old = {
+            "status": "ready", "source_revision": "rev1", "source_sha256": "a" * 64,
+            "source_bytes": 10, "source_extension": "docx", "profile": "libreoffice-pdf-v2",
+            "reader_mode": "pdf", "path": path, "bytes": 12, "sha256": "b" * 64,
+        }
+        rebuilt_key = "VoiceOfML/Test\0Rebuilt.docx"
+        shared_key = "VoiceOfML/Test\0Shared.docx"
+        result = {**old, "key": rebuilt_key}
+        api = Mock()
+        api.file_exists.return_value = True
+        with tempfile.TemporaryDirectory() as root:
+            remote = Path(root) / "remote.json"
+            remote.write_text(json.dumps({
+                "version": 1, "files": {rebuilt_key: old, shared_key: {**old, "source_revision": "rev2"}},
+            }), encoding="utf-8")
+            api.hf_hub_download.return_value = str(remote)
+            bundle = self.make_bundle(str(Path(root) / "bundle"), result)
+            bundle_data = json.loads((bundle / "bundle.json").read_text(encoding="utf-8"))
+            bundle_data["force_rebuild"] = True
+            (bundle / "bundle.json").write_text(json.dumps(bundle_data), encoding="utf-8")
+            manifest, _ = publish_reader_assets.build_publish(api, "vomebook/Test", bundle)
+        self.assertEqual(manifest["files"][shared_key]["bytes"], result["bytes"])
+        self.assertEqual(manifest["files"][shared_key]["sha256"], result["sha256"])
+
+    def test_parent_conflict_rebuilds_publish_against_latest_revision(self):
+        result = {
+            "key": "VoiceOfML/Test\0A/Book.docx", "status": "ready", "source_revision": "rev1",
+            "source_sha256": "a" * 64, "source_bytes": 10, "source_extension": "docx",
+            "profile": "libreoffice-pdf-v2", "reader_mode": "pdf", "path": "objects/aa/document.pdf",
+        }
+        response = requests.Response()
+        response.status_code = 412
+        response.request = requests.Request("POST", "https://huggingface.co/api/datasets/vomebook/Test/commit/main").prepare()
+        conflict = HfHubHTTPError("conflict", response=response)
+        api = Mock()
+        api.repo_info.side_effect = [Mock(sha="parent-1"), Mock(sha="parent-2")]
+        api.file_exists.return_value = False
+        api.create_commit.side_effect = [conflict, None]
+        with tempfile.TemporaryDirectory() as root:
+            bundle = self.make_bundle(root, result)
+            with patch.object(publish_reader_assets.time, "sleep"):
+                _, count = publish_reader_assets.publish_bundle(api, "vomebook/Test", bundle)
+        self.assertEqual(count, 1)
+        self.assertEqual(api.create_commit.call_count, 2)
+        self.assertEqual(
+            [call.kwargs["parent_commit"] for call in api.create_commit.call_args_list],
+            ["parent-1", "parent-2"],
+        )
+
     def test_legacy_bundle_without_authoritative_marker_never_removes_mappings(self):
         key = "VoiceOfML/Test\0Keep.djvu"
         existing = {"status": "ready", "path": "objects/keep", "reader_mode": "pdf"}
@@ -1318,19 +1432,23 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("tif|tiff) packages=(poppler-utils)", workflow)
         self.assertIn("mht|mhtml) packages=()", workflow)
         self.assertIn("ps) packages=(ghostscript poppler-utils)", workflow)
-        self.assertIn("caj|kdh) packages=(git mupdf-tools poppler-utils libjbig2dec0-dev)", workflow)
+        self.assertIn("caj|kdh) packages=(git mupdf-tools poppler-utils", workflow)
         self.assertIn("checkout --detach 6c4bc32b15ce748d211f45d536f5d5511ef9f368", workflow)
-        self.assertIn("libjbigdec.so /opt/caj2pdf/lib/jbigdec.cc", workflow)
-        self.assertIn("libjbig2codec.so /opt/caj2pdf/lib/decode_jbig2data_x.cc", workflow)
         self.assertIn("CAJ2PDF_DIR: /opt/caj2pdf", workflow)
         self.assertIn("ape|wma|amr|flv|f4v|rm|rmvb|mkv|avi|mpg|mpeg|mts|ts|wmv) packages=(ffmpeg)", workflow)
         self.assertIn("READER_CONVERSION_WORKERS:", workflow)
-        self.assertIn("steps.scan.outputs.extension == 'djvu'", workflow)
-        self.assertIn('args=(--repo "${SOURCE_REPO}" --extension "${EXTENSION}"', workflow)
+        self.assertIn("needs.plan.outputs.extension == 'djvu'", workflow)
+        self.assertIn('--shard-count "${SHARD_COUNT}" --shard-index "${SHARD_INDEX}"', workflow)
         self.assertIn('max_batches=1', workflow)
         self.assertIn('queue["items"] = items', workflow)
         self.assertIn("stale_count", workflow)
         self.assertIn("if: inputs.dry_run != true", workflow)
+        self.assertIn("max-parallel: 10", workflow)
+        self.assertIn("shard: ${{ fromJSON(needs.plan.outputs.shards) }}", workflow)
+        self.assertIn("fail-fast: false", workflow)
+        self.assertIn("reader-assets-plan", workflow)
+        self.assertIn("needs: [plan, convert]", workflow)
+        self.assertIn("needs.convert.result == 'success'", workflow)
         self.assertLess(
             workflow.index("python scripts/publish_reader_assets.py"),
             workflow.index("done\n"),
