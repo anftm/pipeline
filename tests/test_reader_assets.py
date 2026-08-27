@@ -76,6 +76,22 @@ class ReaderAssetContractTests(unittest.TestCase):
         }
         self.assertEqual({ext: reader_assets.conversion_contract(ext) for ext in expected}, expected)
 
+    def test_passwords_require_an_explicit_marker_or_known_source(self):
+        self.assertEqual(reader_assets.source_password("repo", "资料〔密码：123〕.docx"), "123")
+        self.assertEqual(reader_assets.source_password("repo", "毛的遗产 密码0000.pdf"), "0000")
+        self.assertEqual(reader_assets.source_password("repo", "对中帝论的批判（密码：1921）.pdf"), "1921")
+        self.assertEqual(reader_assets.source_password(
+            "VoiceOfML/MLMRL-Library", "基础入门书单/入门答疑/风正集.pdf",
+        ), "230505")
+        self.assertEqual(reader_assets.source_password("repo", "密码学原理.pdf"), "")
+
+    def test_only_known_password_pdfs_have_a_conversion_contract(self):
+        self.assertEqual(
+            reader_assets.source_conversion_contract("repo", "书（密码1949）.pdf", "pdf"),
+            reader_assets.PROTECTED_PDF_CONTRACT,
+        )
+        self.assertIsNone(reader_assets.source_conversion_contract("repo", "普通书.pdf", "pdf"))
+
 
 class ScannerTests(unittest.TestCase):
     def setUp(self):
@@ -133,6 +149,16 @@ class ScannerTests(unittest.TestCase):
             repo="VoiceOfML/Test", extension="mobi", limit=1,
         )
         self.assertEqual([item["path"] for item in queue], ["A.mobi"])
+
+    def test_queues_only_password_marked_pdfs_without_exposing_password(self):
+        records = self.records + [
+            {"Repo": "VoiceOfML/Test", "File": "Protected（密码123）", "Extension": "pdf", "Folder": [], "Size": 1},
+            {"Repo": "VoiceOfML/Test", "File": "Ordinary", "Extension": "pdf", "Folder": [], "Size": 1},
+        ]
+        queue = scan_reader_assets.build_queue(records, self.revisions, reader_assets.empty_manifest(), extension="pdf")
+        self.assertEqual([item["path"] for item in queue], ["Protected（密码123）.pdf"])
+        self.assertNotIn("source_password", queue[0])
+        self.assertEqual(queue[0]["profile"], "qpdf-decrypted-v1")
 
     def test_unfiltered_queue_prioritizes_mature_bulk_formats(self):
         records = [
@@ -784,8 +810,19 @@ aW1hZ2U=
 
     def test_docx_password_is_extracted_only_from_explicit_path_marker(self):
         self.assertEqual(convert_reader_assets.PASSWORD_RE.search("资料〔密码：123〕.docx").group(1), "123")
-        self.assertEqual(convert_reader_assets.PASSWORD_RE.search("book password: secret.docx").group(1), "secret.docx")
+        self.assertEqual(convert_reader_assets.PASSWORD_RE.search("book password: secret.docx").group(1), "secret")
         self.assertIsNone(convert_reader_assets.PASSWORD_RE.search("ordinary.docx"))
+
+    def test_password_protected_pdf_is_decrypted_with_qpdf(self):
+        with tempfile.TemporaryDirectory() as root:
+            work = Path(root)
+            source, target = work / "source.pdf", work / "document.pdf"
+            source.write_bytes(b"%PDF-encrypted")
+            with patch.object(convert_reader_assets, "run_checked") as run:
+                convert_reader_assets.convert_file({
+                    "extension": "pdf", "repo": "VoiceOfML/Test", "path": "book（密码123）.pdf",
+                }, source, target, work)
+            self.assertEqual(run.call_args.args[0][:3], ["qpdf", "--password=123", "--decrypt"])
 
     def test_ole_signature_is_detected_for_mislabeled_docx(self):
         self.assertEqual(convert_reader_assets.OLE_SIGNATURE, b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1")

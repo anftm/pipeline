@@ -11,15 +11,15 @@ from huggingface_hub.errors import RepositoryNotFoundError
 
 try:
     from .reader_assets import (
-        CONVERTIBLE_EXTENSIONS, MANIFEST_NAME, READER_ASSETS_REPO, asset_key, conversion_contract,
-        canonical_json, decode_search_payload, empty_manifest, load_json,
-        relative_path, source_url, validate_manifest,
+        MANIFEST_NAME, READER_ASSETS_REPO, asset_key, canonical_json, decode_search_payload,
+        empty_manifest, load_json, relative_path, source_conversion_contract, source_url,
+        validate_manifest,
     )
 except ImportError:
     from reader_assets import (
-        CONVERTIBLE_EXTENSIONS, MANIFEST_NAME, READER_ASSETS_REPO, asset_key, conversion_contract,
-        canonical_json, decode_search_payload, empty_manifest, load_json,
-        relative_path, source_url, validate_manifest,
+        MANIFEST_NAME, READER_ASSETS_REPO, asset_key, canonical_json, decode_search_payload,
+        empty_manifest, load_json, relative_path, source_conversion_contract, source_url,
+        validate_manifest,
     )
 
 
@@ -41,16 +41,19 @@ def build_queue(records, revisions, manifest, *, repo="", extension="", exact_pa
     for record in records:
         source_repo = str(record.get("Repo") or "")
         ext = str(record.get("Extension") or "").lower().lstrip(".")
-        if ext not in CONVERTIBLE_EXTENSIONS or (repo and source_repo != repo) or (extension and ext != extension):
+        if (repo and source_repo != repo) or (extension and ext != extension):
+            continue
+        path = relative_path(record)
+        contract = source_conversion_contract(source_repo, path, ext)
+        if contract is None:
             continue
         revision = str(revisions.get(source_repo) or "")
         if not revision:
             continue
-        path = relative_path(record)
         if exact_path and path != exact_path:
             continue
         key = asset_key(source_repo, path)
-        profile, reader_mode, output_name = conversion_contract(ext, key)
+        profile, reader_mode, output_name = contract
         existing = files.get(key, {})
         manual = str(existing.get("profile") or "").startswith("manual-")
         if not force and existing.get("source_revision") == revision and existing.get("status") == "ready" and manual:
@@ -66,7 +69,7 @@ def build_queue(records, revisions, manifest, *, repo="", extension="", exact_pa
             "source_url": source_url(source_repo, revision, path), "profile": profile,
             "reader_mode": reader_mode, "output_name": output_name,
         })
-    priority = {"tif": 0, "tiff": 0, "mobi": 1, "azw3": 1, "fb2": 1, "odt": 1, "rtf": 1, "chm": 1, "djvu": 2,
+    priority = {"pdf": 0, "tif": 0, "tiff": 0, "mobi": 1, "azw3": 1, "fb2": 1, "odt": 1, "rtf": 1, "chm": 1, "djvu": 2,
                  "doc": 3, "docx": 3, "htm": 3, "html": 3, "caj": 3, "kdh": 3,
                  "ppt": 3, "pptx": 3, "pps": 3, "odp": 3, "xls": 3, "xlsx": 3, "csv": 3, "ods": 3, "wps": 3,
                  "mht": 3, "mhtml": 3, "ps": 3,
@@ -82,8 +85,9 @@ def active_keys(records) -> list[str]:
     for record in records:
         repo = str(record.get("Repo") or "")
         extension = str(record.get("Extension") or "").lower().lstrip(".")
-        if extension in CONVERTIBLE_EXTENSIONS:
-            keys.append(asset_key(repo, relative_path(record)))
+        path = relative_path(record)
+        if source_conversion_contract(repo, path, extension) is not None:
+            keys.append(asset_key(repo, path))
     return sorted(set(keys))
 
 
