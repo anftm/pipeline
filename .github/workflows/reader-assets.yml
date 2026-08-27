@@ -21,7 +21,7 @@ on:
         default: ""
         type: string
       limit:
-        description: Files per shard checkpoint
+        description: Files per shard conversion batch
         required: true
         default: "20"
         type: string
@@ -221,6 +221,10 @@ jobs:
           esac
           max_batches="${CHECKPOINT_BATCHES}"
           if [[ "${RETRY_FAILED}" == "true" || "${FORCE_REBUILD}" == "true" || -n "${SOURCE_PATH}" ]]; then
+            max_batches=1
+          elif [[ "${batch_size}" != "1" ]]; then
+            batch_size=$((10#${batch_size} * 10#${max_batches}))
+            ((batch_size > 100)) && batch_size=100
             max_batches=1
           fi
           for ((batch=1; batch<=max_batches; batch++)); do

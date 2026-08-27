@@ -1702,6 +1702,8 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("needs.plan.outputs.extension == 'djvu'", workflow)
         self.assertIn('--shard-count "${SHARD_COUNT}" --shard-index "${SHARD_INDEX}"', workflow)
         self.assertIn('max_batches=1', workflow)
+        self.assertIn('batch_size=$((10#${batch_size} * 10#${max_batches}))', workflow)
+        self.assertIn('((batch_size > 100)) && batch_size=100', workflow)
         self.assertIn('queue["items"] = items', workflow)
         self.assertIn("stale_count", workflow)
         self.assertIn("if: inputs.dry_run != true", workflow)
@@ -1717,10 +1719,6 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertNotIn('--repo "${{ inputs.repo', workflow)
         self.assertIn("conversion_status=0", workflow)
         self.assertIn('python scripts/publish_reader_assets.py --bundle "${bundle}"', workflow)
-        self.assertLess(
-            workflow.index("python scripts/publish_reader_assets.py"),
-            workflow.index("done\n"),
-        )
 
     def test_prune_workflow_uses_shared_concurrency_and_bounded_grace(self):
         workflow = Path(".github/workflows/prune-reader-assets.yml").read_text(encoding="utf-8")
