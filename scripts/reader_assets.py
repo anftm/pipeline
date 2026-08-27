@@ -20,6 +20,20 @@ CONVERTIBLE_EXTENSIONS = {
     "tif": ("pillow-pdf-v1", "pdf", "document.pdf"),
     "tiff": ("pillow-pdf-v1", "pdf", "document.pdf"),
     "djvu": ("djvulibre-pdf-v1", "pdf", "document.pdf"),
+    "ape": ("ffmpeg-audio-mp3-v1", "audio", "audio.mp3"),
+    "wma": ("ffmpeg-audio-mp3-v1", "audio", "audio.mp3"),
+    "amr": ("ffmpeg-audio-mp3-v1", "audio", "audio.mp3"),
+    "flv": ("ffmpeg-video-mp4-h264-aac-v1", "video", "video.mp4"),
+    "f4v": ("ffmpeg-video-mp4-h264-aac-v1", "video", "video.mp4"),
+    "rm": ("ffmpeg-video-mp4-h264-aac-v1", "video", "video.mp4"),
+    "rmvb": ("ffmpeg-video-mp4-h264-aac-v1", "video", "video.mp4"),
+    "mkv": ("ffmpeg-video-mp4-h264-aac-v1", "video", "video.mp4"),
+    "avi": ("ffmpeg-video-mp4-h264-aac-v1", "video", "video.mp4"),
+    "mpg": ("ffmpeg-video-mp4-h264-aac-v1", "video", "video.mp4"),
+    "mpeg": ("ffmpeg-video-mp4-h264-aac-v1", "video", "video.mp4"),
+    "mts": ("ffmpeg-video-mp4-h264-aac-v1", "video", "video.mp4"),
+    "ts": ("ffmpeg-video-mp4-h264-aac-v1", "video", "video.mp4"),
+    "wmv": ("ffmpeg-video-mp4-h264-aac-v1", "video", "video.mp4"),
 }
 def conversion_contract(extension: str, key: str = "") -> tuple[str, str, str]:
     return CONVERTIBLE_EXTENSIONS[extension]

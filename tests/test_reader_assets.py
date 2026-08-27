@@ -20,11 +20,15 @@ from scripts import reader_assets, scan_reader_assets
 
 
 class ReaderAssetContractTests(unittest.TestCase):
-    def test_first_conversion_set_excludes_pdg(self):
+    def test_conversion_set_excludes_unsafe_or_native_media(self):
         self.assertEqual(
             set(reader_assets.CONVERTIBLE_EXTENSIONS),
-            {"doc", "docx", "htm", "html", "mobi", "azw3", "chm", "tif", "tiff", "djvu"},
+            {"doc", "docx", "htm", "html", "mobi", "azw3", "chm", "tif", "tiff", "djvu",
+             "ape", "wma", "amr", "flv", "f4v", "rm", "rmvb", "mkv", "avi", "mpg",
+             "mpeg", "mts", "ts", "wmv"},
         )
+        for extension in ("pdg", "swf", "asx", "dat", "mp3", "mp4", "wav", "m4a", "flac", "mov", "mpga"):
+            self.assertNotIn(extension, reader_assets.CONVERTIBLE_EXTENSIONS)
 
     def test_source_url_pins_revision_and_encodes_path(self):
         self.assertEqual(
@@ -45,6 +49,12 @@ class ReaderAssetContractTests(unittest.TestCase):
             "tif": ("pillow-pdf-v1", "pdf", "document.pdf"),
             "tiff": ("pillow-pdf-v1", "pdf", "document.pdf"),
             "djvu": ("djvulibre-pdf-v1", "pdf", "document.pdf"),
+            "ape": ("ffmpeg-audio-mp3-v1", "audio", "audio.mp3"),
+            "wma": ("ffmpeg-audio-mp3-v1", "audio", "audio.mp3"),
+            "amr": ("ffmpeg-audio-mp3-v1", "audio", "audio.mp3"),
+            **{extension: ("ffmpeg-video-mp4-h264-aac-v1", "video", "video.mp4") for extension in (
+                "flv", "f4v", "rm", "rmvb", "mkv", "avi", "mpg", "mpeg", "mts", "ts", "wmv",
+            )},
         }
         self.assertEqual({ext: reader_assets.conversion_contract(ext) for ext in expected}, expected)
 
@@ -194,6 +204,47 @@ class ConverterTests(unittest.TestCase):
                 "ddjvu", "-format=pdf", str(source), str(target),
             ])
             self.assertEqual(run.call_args.kwargs["timeout_seconds"], convert_reader_assets.DJVU_COMMAND_TIMEOUT_SECONDS)
+
+    def test_audio_conversion_uses_bounded_mp3_contract(self):
+        with tempfile.TemporaryDirectory() as root:
+            work = Path(root)
+            source, target = work / "source.ape", work / "audio.mp3"
+            source.write_bytes(b"audio")
+            with patch.object(convert_reader_assets, "run_checked") as run:
+                convert_reader_assets.convert_file({"extension": "ape"}, source, target, work)
+            command = run.call_args.args[0]
+            self.assertEqual(command[0:6], ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y"])
+            self.assertIn("libmp3lame", command)
+            self.assertIn("0:a:0", command)
+            self.assertEqual(run.call_args.kwargs["timeout_seconds"], convert_reader_assets.MEDIA_COMMAND_TIMEOUT_SECONDS)
+
+    def test_video_conversion_uses_h264_aac_faststart_contract(self):
+        with tempfile.TemporaryDirectory() as root:
+            work = Path(root)
+            source, target = work / "source.flv", work / "video.mp4"
+            source.write_bytes(b"video")
+            with patch.object(convert_reader_assets, "run_checked") as run:
+                convert_reader_assets.convert_file({"extension": "flv"}, source, target, work)
+            command = run.call_args.args[0]
+            for value in ("libx264", "yuv420p", "aac", "+faststart", "0:v:0", "0:a:0?"):
+                self.assertIn(value, command)
+            self.assertEqual(run.call_args.kwargs["timeout_seconds"], convert_reader_assets.MEDIA_COMMAND_TIMEOUT_SECONDS)
+
+    def test_media_validation_requires_browser_compatible_streams(self):
+        audio = {"format": {"format_name": "mp3", "duration": "10"}, "streams": [
+            {"codec_type": "audio", "codec_name": "mp3"},
+        ]}
+        video = {"format": {"format_name": "mov,mp4,m4a,3gp,3g2,mj2", "duration": "20"}, "streams": [
+            {"codec_type": "video", "codec_name": "h264", "width": 1920, "height": 1080},
+            {"codec_type": "audio", "codec_name": "aac"},
+        ]}
+        with patch.object(convert_reader_assets, "media_probe", return_value=audio):
+            convert_reader_assets.validate_media_output(Path("audio.mp3"), "audio")
+        with patch.object(convert_reader_assets, "media_probe", return_value=video):
+            convert_reader_assets.validate_media_output(Path("video.mp4"), "video")
+        video["streams"][0]["codec_name"] = "hevc"
+        with patch.object(convert_reader_assets, "media_probe", return_value=video), self.assertRaises(RuntimeError):
+            convert_reader_assets.validate_media_output(Path("video.mp4"), "video")
 
     def test_mobi_conversion_keeps_large_unsplittable_flows(self):
         with tempfile.TemporaryDirectory() as root:
@@ -856,6 +907,15 @@ class PublicationTests(unittest.TestCase):
             "s": 2, "m": "h", "p": "objects/aa/source/sanitized-html-v1/document.html",
         })
 
+    def test_sidecar_encodes_audio_and_video_reader_modes(self):
+        manifest = {"version": 1, "files": {
+            "sound": {"status": "ready", "reader_mode": "audio", "path": "objects/aa/source/audio.mp3"},
+            "movie": {"status": "ready", "reader_mode": "video", "path": "objects/bb/source/video.mp4"},
+        }}
+        files = build_reader_assets_index.build_index(manifest)["f"]
+        self.assertEqual(files["sound"]["m"], "a")
+        self.assertEqual(files["movie"]["m"], "v")
+
 
 class SearchIndexPublicationTests(unittest.TestCase):
     def test_pages_publish_copies_only_sidecar_and_pushes(self):
@@ -943,6 +1003,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("mobi|azw3) packages=(calibre)", workflow)
         self.assertIn("chm) packages=(calibre p7zip-full)", workflow)
         self.assertIn("tif|tiff) packages=(poppler-utils)", workflow)
+        self.assertIn("ape|wma|amr|flv|f4v|rm|rmvb|mkv|avi|mpg|mpeg|mts|ts|wmv) packages=(ffmpeg)", workflow)
         self.assertIn("READER_CONVERSION_WORKERS:", workflow)
         self.assertIn("steps.scan.outputs.extension == 'djvu'", workflow)
         self.assertIn('args=(--repo "${SOURCE_REPO}" --extension "${EXTENSION}"', workflow)

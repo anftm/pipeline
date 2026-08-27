@@ -43,6 +43,9 @@ COMMAND_TIMEOUT_SECONDS = int(os.environ.get("READER_CONVERSION_COMMAND_TIMEOUT"
 DJVU_COMMAND_TIMEOUT_SECONDS = int(os.environ.get(
     "READER_DJVU_COMMAND_TIMEOUT", str(max(600, COMMAND_TIMEOUT_SECONDS)),
 ))
+MEDIA_COMMAND_TIMEOUT_SECONDS = int(os.environ.get(
+    "READER_MEDIA_COMMAND_TIMEOUT", str(max(7200, COMMAND_TIMEOUT_SECONDS)),
+))
 CONVERSION_WORKERS = max(1, int(os.environ.get("READER_CONVERSION_WORKERS", "1")))
 READER_ASSETS_REPO = os.environ.get("READER_ASSETS_REPO", "vomebook/Reader-Assets")
 ARTIFACT_LOCKS = {}
@@ -234,6 +237,47 @@ def command_output(command: list[str]) -> str:
     if result.returncode:
         raise RuntimeError(f"validation command failed: {Path(command[0]).name}: {result.stderr[-500:]}")
     return result.stdout
+
+
+def media_probe(path: Path) -> dict:
+    try:
+        return json.loads(command_output([
+            "ffprobe", "-v", "error", "-show_format", "-show_streams",
+            "-print_format", "json", str(path),
+        ]))
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise RuntimeError("media probe returned invalid data") from exc
+
+
+def validate_media_output(path: Path, reader_mode: str) -> None:
+    probe = media_probe(path)
+    streams = probe.get("streams") if isinstance(probe, dict) else None
+    media_format = probe.get("format") if isinstance(probe, dict) else None
+    if not isinstance(streams, list) or not isinstance(media_format, dict):
+        raise RuntimeError("media output has no stream metadata")
+    try:
+        duration = float(media_format.get("duration") or 0)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("media output has invalid duration") from exc
+    if not 0 < duration <= 24 * 60 * 60:
+        raise RuntimeError("media output duration is outside limits")
+    audio = [stream for stream in streams if stream.get("codec_type") == "audio"]
+    video = [stream for stream in streams if stream.get("codec_type") == "video"]
+    unexpected = [stream for stream in streams if stream.get("codec_type") not in {"audio", "video"}]
+    format_names = set(str(media_format.get("format_name") or "").split(","))
+    if unexpected:
+        raise RuntimeError("media output contains unsupported streams")
+    if reader_mode == "audio":
+        if len(audio) != 1 or video or audio[0].get("codec_name") != "mp3" or "mp3" not in format_names:
+            raise RuntimeError("conversion output is not compatible MP3 audio")
+        return
+    if reader_mode != "video" or len(video) != 1 or len(audio) > 1:
+        raise RuntimeError("conversion output has invalid video streams")
+    width, height = int(video[0].get("width") or 0), int(video[0].get("height") or 0)
+    if (video[0].get("codec_name") != "h264" or "mp4" not in format_names
+            or not 0 < width <= 1920 or not 0 < height <= 1080
+            or (audio and audio[0].get("codec_name") != "aac")):
+        raise RuntimeError("conversion output is not compatible H.264/AAC video")
 
 
 def embedded_pdf_fonts(path: Path) -> list[str]:
@@ -496,6 +540,21 @@ def convert_file(item: dict, source: Path, target: Path, work: Path) -> None:
         convert_tiff(source, target, work)
     elif ext == "djvu":
         run_checked(["ddjvu", "-format=pdf", str(source), str(target)], timeout_seconds=DJVU_COMMAND_TIMEOUT_SECONDS)
+    elif ext in {"ape", "wma", "amr"}:
+        run_checked([
+            "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+            "-i", str(source), "-map", "0:a:0", "-vn", "-sn", "-dn",
+            "-map_metadata", "-1", "-c:a", "libmp3lame", "-q:a", "3", str(target),
+        ], timeout_seconds=MEDIA_COMMAND_TIMEOUT_SECONDS)
+    elif ext in {"flv", "f4v", "rm", "rmvb", "mkv", "avi", "mpg", "mpeg", "mts", "ts", "wmv"}:
+        run_checked([
+            "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+            "-i", str(source), "-map", "0:v:0", "-map", "0:a:0?", "-sn", "-dn",
+            "-map_metadata", "-1", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+            "-vf", "scale=w='min(1920,iw)':h='min(1080,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2",
+            "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
+            "-movflags", "+faststart", str(target),
+        ], timeout_seconds=MEDIA_COMMAND_TIMEOUT_SECONDS)
     else:
         raise ValueError(f"unsupported conversion extension: {ext}")
 
@@ -519,6 +578,8 @@ def normalized_office_pdf(source: Path, work: Path) -> Path:
 def validate_output(path: Path, reader_mode: str) -> None:
     if not path.exists() or path.stat().st_size == 0:
         raise RuntimeError("conversion output is empty")
+    if path.stat().st_size > MAX_SOURCE_BYTES:
+        raise RuntimeError("conversion output exceeds size limit")
     if reader_mode == "pdf" and not path.read_bytes()[:5] == b"%PDF-":
         raise RuntimeError("conversion output is not a PDF")
     if reader_mode == "html" and not path.read_bytes():
@@ -534,6 +595,8 @@ def validate_output(path: Path, reader_mode: str) -> None:
                 raise RuntimeError("conversion output is not a DOCX")
             if not archive.read("word/document.xml").strip():
                 raise RuntimeError("DOCX document body is empty")
+    if reader_mode in {"audio", "video"}:
+        validate_media_output(path, reader_mode)
 
 
 def validate_chm_epub(path: Path) -> None:

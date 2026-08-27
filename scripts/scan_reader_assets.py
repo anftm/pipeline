@@ -67,7 +67,10 @@ def build_queue(records, revisions, manifest, *, repo="", extension="", exact_pa
             "reader_mode": reader_mode, "output_name": output_name,
         })
     priority = {"tif": 0, "tiff": 0, "mobi": 1, "azw3": 1, "chm": 1, "djvu": 2,
-                 "doc": 3, "docx": 3, "htm": 3, "html": 3}
+                 "doc": 3, "docx": 3, "htm": 3, "html": 3,
+                 "ape": 3, "wma": 3, "amr": 3,
+                 "flv": 4, "f4v": 4, "rm": 4, "rmvb": 4, "mkv": 4, "avi": 4,
+                 "mpg": 4, "mpeg": 4, "mts": 4, "ts": 4, "wmv": 4}
     selected.sort(key=lambda item: (priority[item["extension"]], item["repo"], item["path"]))
     return selected[:limit] if limit > 0 else selected
 
