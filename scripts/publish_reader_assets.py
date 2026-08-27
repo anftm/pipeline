@@ -181,7 +181,7 @@ def publish_bundle(api: HfApi, repo_id: str, bundle: Path, *, max_attempts: int 
             )
             return manifest, len(operations) - 2
         except HfHubHTTPError as exc:
-            if getattr(exc.response, "status_code", None) != 412 or attempt + 1 == max_attempts:
+            if getattr(exc.response, "status_code", None) not in {409, 412} or attempt + 1 == max_attempts:
                 raise
             print(f"reader asset parent changed; rebuilding publication ({attempt + 2}/{max_attempts})")
             time.sleep(random.uniform(0.5, min(8.0, 0.5 * (attempt + 1))))

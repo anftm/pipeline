@@ -1480,14 +1480,14 @@ class PublicationTests(unittest.TestCase):
         self.assertEqual(manifest["files"][shared_key]["bytes"], result["bytes"])
         self.assertEqual(manifest["files"][shared_key]["sha256"], result["sha256"])
 
-    def test_parent_conflict_rebuilds_publish_against_latest_revision(self):
+    def test_parent_409_conflict_rebuilds_publish_against_latest_revision(self):
         result = {
             "key": "VoiceOfML/Test\0A/Book.docx", "status": "ready", "source_revision": "rev1",
             "source_sha256": "a" * 64, "source_bytes": 10, "source_extension": "docx",
             "profile": "libreoffice-pdf-v2", "reader_mode": "pdf", "path": "objects/aa/document.pdf",
         }
         response = requests.Response()
-        response.status_code = 412
+        response.status_code = 409
         response.request = requests.Request("POST", "https://huggingface.co/api/datasets/vomebook/Test/commit/main").prepare()
         conflict = HfHubHTTPError("conflict", response=response)
         api = Mock()
