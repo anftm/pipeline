@@ -2,7 +2,7 @@ name: Build Reader Assets
 
 on:
   schedule:
-    - cron: "17 * * * *"
+    - cron: "7/10 * * * *"
   workflow_dispatch:
     inputs:
       repo:
