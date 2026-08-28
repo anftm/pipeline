@@ -303,7 +303,7 @@ jobs:
           READER_ASSETS_REPO: vomebook/Reader-Assets
         run: |
           shopt -s nullglob
-          archives=(output/reader-assets/bundles/reader-assets-bundles-*/*.tgz)
+          archives=(output/reader-assets/bundles/*.tgz output/reader-assets/bundles/*/*.tgz)
           if ((${#archives[@]} == 0)); then
             echo "No Reader Asset bundle archives remain to publish"
             exit 0
