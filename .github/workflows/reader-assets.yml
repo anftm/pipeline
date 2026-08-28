@@ -255,8 +255,10 @@ jobs:
           ((${#bundles[@]})) || exit 0
           names=()
           for bundle in "${bundles[@]}"; do names+=("${bundle##*/}"); done
-          tar -czf "shard-${SHARD_INDEX}.tgz" \
+          archive="${GITHUB_WORKSPACE}/shard-${SHARD_INDEX}.tgz"
+          tar -czf "${archive}" \
             -C output/reader-assets "${names[@]}"
+          test -s "${archive}"
 
       - uses: actions/upload-artifact@v7
         if: always()

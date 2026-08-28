@@ -1715,6 +1715,8 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("path: shard-${{ matrix.shard }}.tgz", workflow)
         self.assertIn("Package conversion bundles", workflow)
         self.assertIn("pattern: reader-assets-bundles-*", workflow)
+        self.assertIn('archive="${GITHUB_WORKSPACE}/shard-${SHARD_INDEX}.tgz"', workflow)
+        self.assertIn('test -s "${archive}"', workflow)
         self.assertIn("Publish conversion bundles serially", workflow)
         self.assertIn("shopt -s nullglob", workflow)
         self.assertIn("No Reader Asset bundle archives remain to publish", workflow)
