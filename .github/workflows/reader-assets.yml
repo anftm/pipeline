@@ -141,7 +141,7 @@ jobs:
 
   convert:
     needs: plan
-    if: inputs.dry_run != true && needs.plan.outputs.extension != ''
+    if: inputs.dry_run != true && needs.plan.outputs.extension != '' && needs.plan.outputs.count != '0'
     runs-on: ubuntu-latest
     timeout-minutes: 360
     strategy:
@@ -259,7 +259,6 @@ jobs:
           tar -czf "${archive}" \
             -C output/reader-assets "${names[@]}"
           test -s "${archive}"
-
       - uses: actions/upload-artifact@v7
         if: always()
         with:

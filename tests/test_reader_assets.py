@@ -1699,6 +1699,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("ape|wma|amr|flv|f4v|rm|rmvb|mkv|avi|mpg|mpeg|mts|ts|wmv) packages=(ffmpeg)", workflow)
         self.assertIn("READER_CONVERSION_WORKERS:", workflow)
         self.assertIn("needs.plan.outputs.extension == 'djvu'", workflow)
+        self.assertIn("needs.plan.outputs.count != '0'", workflow)
         self.assertIn('--shard-count "${SHARD_COUNT}" --shard-index "${SHARD_INDEX}"', workflow)
         self.assertIn('max_batches=1', workflow)
         self.assertIn('batch_size=$((10#${batch_size} * 10#${max_batches}))', workflow)
