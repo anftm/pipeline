@@ -1712,7 +1712,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("reader-assets-plan", workflow)
         self.assertIn("name: reader-assets-bundles-${{ matrix.shard }}", workflow)
         self.assertIn('bundle="output/reader-assets/bundle-${SHARD_INDEX}-${batch}"', workflow)
-        self.assertIn("path: output/reader-assets/shard-${{ matrix.shard }}.tgz", workflow)
+        self.assertIn("path: shard-${{ matrix.shard }}.tgz", workflow)
         self.assertIn("Package conversion bundles", workflow)
         self.assertIn("pattern: reader-assets-bundles-*", workflow)
         self.assertIn("Publish conversion bundles serially", workflow)

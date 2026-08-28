@@ -255,14 +255,14 @@ jobs:
           ((${#bundles[@]})) || exit 0
           names=()
           for bundle in "${bundles[@]}"; do names+=("${bundle##*/}"); done
-          tar -czf "output/reader-assets/shard-${SHARD_INDEX}.tgz" \
+          tar -czf "shard-${SHARD_INDEX}.tgz" \
             -C output/reader-assets "${names[@]}"
 
       - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: reader-assets-bundles-${{ matrix.shard }}
-          path: output/reader-assets/shard-${{ matrix.shard }}.tgz
+          path: shard-${{ matrix.shard }}.tgz
           retention-days: 1
           if-no-files-found: ignore
 
