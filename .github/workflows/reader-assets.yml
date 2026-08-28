@@ -247,11 +247,22 @@ jobs:
             fi
           done
 
+      - name: Package conversion bundles
+        if: always()
+        run: |
+          shopt -s nullglob
+          bundles=(output/reader-assets/bundle-${SHARD_INDEX}-*)
+          ((${#bundles[@]})) || exit 0
+          names=()
+          for bundle in "${bundles[@]}"; do names+=("${bundle##*/}"); done
+          tar -czf "output/reader-assets/shard-${SHARD_INDEX}.tgz" \
+            -C output/reader-assets "${names[@]}"
+
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: reader-assets-bundle-${{ matrix.shard }}
-          path: output/reader-assets/bundle-${{ matrix.shard }}-*
+          name: reader-assets-bundles-${{ matrix.shard }}
+          path: output/reader-assets/shard-${{ matrix.shard }}.tgz
           retention-days: 1
           if-no-files-found: ignore
 
@@ -271,7 +282,7 @@ jobs:
         run: pip install -r scripts/requirements.txt
       - uses: actions/download-artifact@v8
         with:
-          pattern: reader-assets-bundle-*
+          pattern: reader-assets-bundles-*
           path: output/reader-assets/bundles
         continue-on-error: true
       - name: Publish conversion bundles serially
@@ -280,11 +291,18 @@ jobs:
           READER_ASSETS_REPO: vomebook/Reader-Assets
         run: |
           shopt -s nullglob
-          bundles=(output/reader-assets/bundles/reader-assets-bundle-*/bundle-*)
-          if ((${#bundles[@]} == 0)); then
-            echo "No Reader Asset bundles remain to publish"
+          archives=(output/reader-assets/bundles/reader-assets-bundles-*/*.tgz)
+          if ((${#archives[@]} == 0)); then
+            echo "No Reader Asset bundle archives remain to publish"
             exit 0
           fi
+          mkdir -p output/reader-assets/published-bundles
+          for archive in "${archives[@]}"; do
+            destination="output/reader-assets/published-bundles/$(basename "${archive%.tgz}")"
+            mkdir -p "${destination}"
+            tar -xzf "${archive}" -C "${destination}"
+          done
+          bundles=(output/reader-assets/published-bundles/*/bundle-*)
           for bundle in "${bundles[@]}"; do
             python scripts/publish_reader_assets.py --bundle "${bundle}"
           done
