@@ -238,7 +238,7 @@ jobs:
             count=$(python -c 'import json; print(len(json.load(open("output/reader-assets/queue.json"))["items"]))')
             [[ "${count}" == "0" ]] && break
             echo "Shard ${SHARD_INDEX}, checkpoint ${batch}/${max_batches}: ${count} ${EXTENSION} asset(s)"
-            bundle="output/reader-assets/bundle-${SHARD_INDEX}"
+            bundle="output/reader-assets/bundle-${SHARD_INDEX}-${batch}"
             conversion_status=0
             python scripts/convert_reader_assets.py --bundle "${bundle}" || conversion_status=$?
             if ((conversion_status != 0)); then
@@ -251,7 +251,7 @@ jobs:
         if: always()
         with:
           name: reader-assets-bundle-${{ matrix.shard }}
-          path: output/reader-assets/bundle-${{ matrix.shard }}
+          path: output/reader-assets/bundle-${{ matrix.shard }}-*
           retention-days: 1
           if-no-files-found: ignore
 
@@ -280,7 +280,7 @@ jobs:
           READER_ASSETS_REPO: vomebook/Reader-Assets
         run: |
           shopt -s nullglob
-          bundles=(output/reader-assets/bundles/reader-assets-bundle-*)
+          bundles=(output/reader-assets/bundles/reader-assets-bundle-*/bundle-*)
           if ((${#bundles[@]} == 0)); then
             echo "No Reader Asset bundles remain to publish"
             exit 0

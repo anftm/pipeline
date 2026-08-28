@@ -1711,6 +1711,8 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("fail-fast: false", workflow)
         self.assertIn("reader-assets-plan", workflow)
         self.assertIn("name: reader-assets-bundle-${{ matrix.shard }}", workflow)
+        self.assertIn('bundle="output/reader-assets/bundle-${SHARD_INDEX}-${batch}"', workflow)
+        self.assertIn("path: output/reader-assets/bundle-${{ matrix.shard }}-*", workflow)
         self.assertIn("pattern: reader-assets-bundle-*", workflow)
         self.assertIn("Publish conversion bundles serially", workflow)
         self.assertIn("shopt -s nullglob", workflow)
