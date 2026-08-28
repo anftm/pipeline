@@ -255,15 +255,16 @@ jobs:
           ((${#bundles[@]})) || exit 0
           names=()
           for bundle in "${bundles[@]}"; do names+=("${bundle##*/}"); done
-          archive="${GITHUB_WORKSPACE}/shard-${SHARD_INDEX}.tgz"
+          archive="${RUNNER_TEMP}/shard-${SHARD_INDEX}.tgz"
           tar -czf "${archive}" \
-            -C output/reader-assets "${names[@]}"
+            -C "${GITHUB_WORKSPACE}/output/reader-assets" "${names[@]}"
           test -s "${archive}"
+          stat "${archive}"
       - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: reader-assets-bundles-${{ matrix.shard }}
-          path: shard-${{ matrix.shard }}.tgz
+          path: ${{ runner.temp }}/shard-${{ matrix.shard }}.tgz
           retention-days: 1
           if-no-files-found: ignore
 
