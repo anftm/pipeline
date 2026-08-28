@@ -1713,6 +1713,8 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("name: reader-assets-bundle-${{ matrix.shard }}", workflow)
         self.assertIn("pattern: reader-assets-bundle-*", workflow)
         self.assertIn("Publish conversion bundles serially", workflow)
+        self.assertIn("shopt -s nullglob", workflow)
+        self.assertIn("No Reader Asset bundles remain to publish", workflow)
         self.assertIn("needs: [plan, convert, publish]", workflow)
         self.assertIn("needs.convert.result == 'success'", workflow)
         self.assertIn("needs.convert.result == 'failure'", workflow)

@@ -273,13 +273,18 @@ jobs:
         with:
           pattern: reader-assets-bundle-*
           path: output/reader-assets/bundles
+        continue-on-error: true
       - name: Publish conversion bundles serially
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           READER_ASSETS_REPO: vomebook/Reader-Assets
         run: |
+          shopt -s nullglob
           bundles=(output/reader-assets/bundles/reader-assets-bundle-*)
-          ((${#bundles[@]})) || { echo "No Reader Asset bundles were downloaded" >&2; exit 1; }
+          if ((${#bundles[@]} == 0)); then
+            echo "No Reader Asset bundles remain to publish"
+            exit 0
+          fi
           for bundle in "${bundles[@]}"; do
             python scripts/publish_reader_assets.py --bundle "${bundle}"
           done
