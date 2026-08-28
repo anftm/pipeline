@@ -1357,7 +1357,6 @@ class PublicationTests(unittest.TestCase):
             manifest, _ = publish_reader_assets.build_publish(api, "vomebook/Test", bundle)
         self.assertEqual(manifest["files"], {})
         self.assertIn(existing["path"], manifest["orphans"])
-
     def test_reused_result_restores_orphan_without_upload(self):
         path = "objects/aa/document.pdf"
         result = {
@@ -1711,14 +1710,19 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("shard: ${{ fromJSON(needs.plan.outputs.shards) }}", workflow)
         self.assertIn("fail-fast: false", workflow)
         self.assertIn("reader-assets-plan", workflow)
-        self.assertIn("needs: [plan, convert]", workflow)
+        self.assertIn("name: reader-assets-bundle-${{ matrix.shard }}", workflow)
+        self.assertIn("pattern: reader-assets-bundle-*", workflow)
+        self.assertIn("Publish conversion bundles serially", workflow)
+        self.assertIn("needs: [plan, convert, publish]", workflow)
         self.assertIn("needs.convert.result == 'success'", workflow)
         self.assertIn("needs.convert.result == 'failure'", workflow)
         self.assertIn('exit "${conversion_status}"', workflow)
         self.assertIn('--repo "${INPUT_REPO}"', workflow)
         self.assertNotIn('--repo "${{ inputs.repo', workflow)
         self.assertIn("conversion_status=0", workflow)
-        self.assertIn('python scripts/publish_reader_assets.py --bundle "${bundle}"', workflow)
+        convert_section, publish_section = workflow.split("\n  publish:\n", 1)
+        self.assertNotIn("publish_reader_assets.py", convert_section.split("\n  convert:\n", 1)[1])
+        self.assertIn('python scripts/publish_reader_assets.py --bundle "${bundle}"', publish_section)
 
     def test_prune_workflow_uses_shared_concurrency_and_bounded_grace(self):
         workflow = Path(".github/workflows/prune-reader-assets.yml").read_text(encoding="utf-8")

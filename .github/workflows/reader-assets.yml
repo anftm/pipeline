@@ -241,18 +241,54 @@ jobs:
             bundle="output/reader-assets/bundle-${SHARD_INDEX}"
             conversion_status=0
             python scripts/convert_reader_assets.py --bundle "${bundle}" || conversion_status=$?
-            python scripts/publish_reader_assets.py --bundle "${bundle}"
             if ((conversion_status != 0)); then
-              echo "All conversions in this checkpoint failed; failure state was published" >&2
+              echo "All conversions in this batch failed; failure state was bundled" >&2
               exit "${conversion_status}"
             fi
           done
 
-  finalize:
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: reader-assets-bundle-${{ matrix.shard }}
+          path: output/reader-assets/bundle-${{ matrix.shard }}
+          retention-days: 1
+          if-no-files-found: ignore
+
+  publish:
     needs: [plan, convert]
     if: >-
       always() && inputs.dry_run != true && needs.plan.result == 'success' &&
-      (needs.convert.result == 'success' || needs.convert.result == 'failure' || needs.convert.result == 'skipped')
+      (needs.convert.result == 'success' || needs.convert.result == 'failure')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Install Python dependencies
+        run: pip install -r scripts/requirements.txt
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: reader-assets-bundle-*
+          path: output/reader-assets/bundles
+      - name: Publish conversion bundles serially
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          READER_ASSETS_REPO: vomebook/Reader-Assets
+        run: |
+          bundles=(output/reader-assets/bundles/reader-assets-bundle-*)
+          ((${#bundles[@]})) || { echo "No Reader Asset bundles were downloaded" >&2; exit 1; }
+          for bundle in "${bundles[@]}"; do
+            python scripts/publish_reader_assets.py --bundle "${bundle}"
+          done
+
+  finalize:
+    needs: [plan, convert, publish]
+    if: >-
+      always() && inputs.dry_run != true && needs.plan.result == 'success' &&
+      (needs.publish.result == 'success' || needs.publish.result == 'skipped')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -269,7 +305,7 @@ jobs:
       - name: Restore conversion plan
         run: tar -xzf output/reader-assets/plan/plan.tgz
       - name: Remove stale Reader mappings
-        if: needs.convert.result == 'success' && needs.plan.outputs.authoritative == 'true' && needs.plan.outputs.stale_count != '0'
+        if: needs.convert.result == 'success' && needs.publish.result == 'success' && needs.plan.outputs.authoritative == 'true' && needs.plan.outputs.stale_count != '0'
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           READER_ASSETS_REPO: vomebook/Reader-Assets
