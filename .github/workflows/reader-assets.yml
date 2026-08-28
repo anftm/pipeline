@@ -73,7 +73,14 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r scripts/requirements.txt
       - name: Fetch current source metadata
-        run: python scripts/fetch_and_parse.py
+        run: |
+          for attempt in 1 2 3 4 5; do
+            if python scripts/fetch_and_parse.py; then exit 0; fi
+            ((attempt == 5)) && exit 1
+            delay=$((30 * 2 ** (attempt - 1)))
+            echo "Source metadata request failed; retrying in ${delay}s (attempt $((attempt + 1))/5)" >&2
+            sleep "${delay}"
+          done
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           FORCE_SYNC: "true"
@@ -90,6 +97,16 @@ jobs:
           INPUT_EXTENSION: ${{ inputs.extension || '' }}
           INPUT_PATH: ${{ inputs.path || '' }}
         run: |
+          retry_reader_command() {
+            local attempt delay
+            for attempt in 1 2 3 4 5; do
+              if "$@"; then return 0; fi
+              ((attempt == 5)) && return 1
+              delay=$((30 * 2 ** (attempt - 1)))
+              echo "Reader metadata request failed; retrying in ${delay}s (attempt $((attempt + 1))/5)" >&2
+              sleep "${delay}"
+            done
+          }
           [[ "${PER_SHARD_LIMIT}" =~ ^[0-9]+$ ]] && ((10#${PER_SHARD_LIMIT} >= 1 && 10#${PER_SHARD_LIMIT} <= 100)) || { echo "limit must be between 1 and 100" >&2; exit 1; }
           [[ "${CHECKPOINT_BATCHES}" =~ ^[0-9]+$ ]] && ((10#${CHECKPOINT_BATCHES} >= 1 && 10#${CHECKPOINT_BATCHES} <= 100)) || { echo "checkpoint_batches must be between 1 and 100" >&2; exit 1; }
           [[ "${COMMAND_TIMEOUT}" =~ ^[0-9]+$ ]] && ((10#${COMMAND_TIMEOUT} >= 30 && 10#${COMMAND_TIMEOUT} <= 7200)) || { echo "command_timeout must be between 30 and 7200" >&2; exit 1; }
@@ -102,7 +119,7 @@ jobs:
           )
           if [[ "${{ inputs.retry_failed }}" == "true" ]]; then args+=(--retry-failed); fi
           if [[ "${{ inputs.force }}" == "true" ]]; then args+=(--force); fi
-          python scripts/scan_reader_assets.py "${args[@]}"
+          retry_reader_command python scripts/scan_reader_assets.py "${args[@]}"
           python - <<'PY'
           import json
           import os
@@ -215,6 +232,16 @@ jobs:
           CAJ2PDF_DIR: /opt/caj2pdf
           READER_CONVERSION_PASSWORD: ${{ secrets.READER_CONVERSION_PASSWORD }}
         run: |
+          retry_reader_command() {
+            local attempt delay
+            for attempt in 1 2 3 4 5; do
+              if "$@"; then return 0; fi
+              ((attempt == 5)) && return 1
+              delay=$((30 * 2 ** (attempt - 1)))
+              echo "Reader metadata request failed; retrying in ${delay}s (attempt $((attempt + 1))/5)" >&2
+              sleep "${delay}"
+            done
+          }
           batch_size="${BATCH_SIZE}"
           case "${EXTENSION}" in
             ape|wma|amr|flv|f4v|rm|rmvb|mkv|avi|mpg|mpeg|mts|ts|wmv) batch_size=1 ;;
@@ -234,7 +261,7 @@ jobs:
             )
             [[ "${RETRY_FAILED}" == "true" ]] && args+=(--retry-failed)
             [[ "${FORCE_REBUILD}" == "true" ]] && args+=(--force)
-            python scripts/scan_reader_assets.py "${args[@]}"
+            retry_reader_command python scripts/scan_reader_assets.py "${args[@]}"
             count=$(python -c 'import json; print(len(json.load(open("output/reader-assets/queue.json"))["items"]))')
             [[ "${count}" == "0" ]] && break
             echo "Shard ${SHARD_INDEX}, checkpoint ${batch}/${max_batches}: ${count} ${EXTENSION} asset(s)"
