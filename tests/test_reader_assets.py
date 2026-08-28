@@ -1719,6 +1719,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn('bundle="output/reader-assets/bundle-${SHARD_INDEX}-1"', workflow)
         self.assertIn("path: ${{ runner.temp }}/shard-${{ matrix.shard }}.tgz", workflow)
         self.assertIn("Package conversion bundles", workflow)
+        self.assertIn("SHARD_INDEX: ${{ matrix.shard }}", workflow)
         self.assertIn("pattern: reader-assets-bundles-*", workflow)
         self.assertIn('archive="${RUNNER_TEMP}/shard-${SHARD_INDEX}.tgz"', workflow)
         self.assertIn('-C "${GITHUB_WORKSPACE}/output/reader-assets"', workflow)

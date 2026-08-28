@@ -257,6 +257,8 @@ jobs:
 
       - name: Package conversion bundles
         if: always()
+        env:
+          SHARD_INDEX: ${{ matrix.shard }}
         run: |
           shopt -s nullglob
           bundles=(output/reader-assets/bundle-${SHARD_INDEX}-*)
