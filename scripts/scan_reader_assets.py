@@ -104,6 +104,10 @@ def active_keys(records) -> list[str]:
         repo = str(record.get("Repo") or "")
         extension = str(record.get("Extension") or "").lower().lstrip(".")
         path = relative_path(record)
+        if extension in {"htm", "html"} and any(
+                part.lower() == ".files" or part.lower().endswith("_files")
+                for part in path.split("/")):
+            continue
         if source_conversion_contract(repo, path, extension) is not None:
             keys.append(asset_key(repo, path))
     return sorted(set(keys))

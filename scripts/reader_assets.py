@@ -122,9 +122,20 @@ def validate_manifest(manifest: dict) -> dict:
         raise ValueError("reader manifest files must be an object")
     if "orphans" in manifest and not isinstance(manifest["orphans"], dict):
         raise ValueError("reader manifest orphans must be an object")
-    for entry in manifest["files"].values():
-        if isinstance(entry, dict) and entry.get("status") == "ready":
+    for key, entry in manifest["files"].items():
+        if not isinstance(key, str) or not isinstance(entry, dict):
+            raise ValueError("reader manifest file entries must be objects")
+        status = entry.get("status", "ready")
+        if status not in {"ready", "failed"}:
+            raise ValueError("reader manifest file entry has invalid status")
+        if status == "ready":
             validate_object_path(entry.get("path"))
+            if "reader_mode" in entry and entry.get("reader_mode") not in {"pdf", "epub", "docx", "html", "audio", "video"}:
+                raise ValueError("reader manifest ready entry has invalid reader mode")
+            if "bytes" in entry and (not isinstance(entry.get("bytes"), int) or entry["bytes"] <= 0):
+                raise ValueError("reader manifest ready entry has invalid byte count")
+            if "sha256" in entry and not re.fullmatch(r"[0-9a-f]{64}", str(entry.get("sha256", ""))):
+                raise ValueError("reader manifest ready entry has invalid digest")
     for path, entry in manifest.get("orphans", {}).items():
         validate_object_path(path)
         if isinstance(entry, dict) and entry.get("path") not in {None, path}:

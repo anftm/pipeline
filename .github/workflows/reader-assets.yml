@@ -110,7 +110,7 @@ jobs:
           [[ "${PER_SHARD_LIMIT}" =~ ^[0-9]+$ ]] && ((10#${PER_SHARD_LIMIT} >= 1 && 10#${PER_SHARD_LIMIT} <= 100)) || { echo "limit must be between 1 and 100" >&2; exit 1; }
           [[ "${CHECKPOINT_BATCHES}" =~ ^[0-9]+$ ]] && ((10#${CHECKPOINT_BATCHES} >= 1 && 10#${CHECKPOINT_BATCHES} <= 100)) || { echo "checkpoint_batches must be between 1 and 100" >&2; exit 1; }
           [[ "${COMMAND_TIMEOUT}" =~ ^[0-9]+$ ]] && ((10#${COMMAND_TIMEOUT} >= 30 && 10#${COMMAND_TIMEOUT} <= 7200)) || { echo "command_timeout must be between 30 and 7200" >&2; exit 1; }
-          total_limit=$((10 * 10#${PER_SHARD_LIMIT}))
+          total_limit=$((10 * 10#${PER_SHARD_LIMIT} * 10#${CHECKPOINT_BATCHES}))
           args=(
             --repo "${INPUT_REPO}"
             --extension "${INPUT_EXTENSION}"
@@ -284,7 +284,7 @@ jobs:
     needs: [plan, convert]
     if: >-
       always() && inputs.dry_run != true && needs.plan.result == 'success' &&
-      (needs.convert.result == 'success' || needs.convert.result == 'failure')
+      (needs.convert.result == 'success' || needs.convert.result == 'failure' || needs.convert.result == 'skipped')
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -342,7 +342,7 @@ jobs:
       - name: Restore conversion plan
         run: tar -xzf output/reader-assets/plan/plan.tgz
       - name: Remove stale Reader mappings
-        if: needs.convert.result == 'success' && needs.publish.result == 'success' && needs.plan.outputs.authoritative == 'true' && needs.plan.outputs.stale_count != '0'
+        if: (needs.convert.result == 'success' || needs.convert.result == 'skipped') && (needs.publish.result == 'success' || needs.publish.result == 'skipped') && needs.plan.outputs.authoritative == 'true' && needs.plan.outputs.stale_count != '0'
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           READER_ASSETS_REPO: vomebook/Reader-Assets

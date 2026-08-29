@@ -1,6 +1,7 @@
 import concurrent.futures
 import gzip
 import hashlib
+import http.client
 import json
 import tempfile
 import unittest
@@ -101,6 +102,17 @@ class ReaderAssetContractTests(unittest.TestCase):
                 reader_assets.validate_manifest({
                     "version": 1, "files": {"key": {"status": "ready", "path": path}},
                 })
+
+    def test_manifest_rejects_invalid_ready_entry_metadata(self):
+        base = {"status": "ready", "path": "objects/x", "reader_mode": "pdf", "bytes": 10,
+                "sha256": "a" * 64}
+        for field, value in (("reader_mode", "unknown"), ("bytes", 0), ("sha256", "bad")):
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, "ready entry"):
+                reader_assets.validate_manifest({"version": 1, "files": {"key": {**base, field: value}}})
+
+    def test_manifest_rejects_invalid_file_status(self):
+        with self.assertRaisesRegex(ValueError, "invalid status"):
+            reader_assets.validate_manifest({"version": 1, "files": {"key": {"status": "pending"}}})
 
     def test_only_known_password_pdfs_have_a_conversion_contract(self):
         self.assertEqual(
@@ -284,6 +296,7 @@ class ConverterTests(unittest.TestCase):
     def test_download_source_resumes_partial_response(self):
         class Response:
             status = 206
+            headers = {"Content-Range": "bytes 6-10/11"}
             def __enter__(self):
                 return self
             def __exit__(self, *_):
@@ -305,6 +318,23 @@ class ConverterTests(unittest.TestCase):
             self.assertEqual(size, 11)
             self.assertEqual(digest, hashlib.sha256(b"hello world").hexdigest())
             self.assertEqual(open_url.call_args.args[0].headers["Range"], "bytes=6-")
+
+    def test_download_source_rejects_invalid_content_range(self):
+        class Response:
+            status = 206
+            headers = {"Content-Range": "bytes 0-4/11"}
+            def __enter__(self): return self
+            def __exit__(self, *_): return False
+            def read(self, _size): return b"wrong"
+
+        with tempfile.TemporaryDirectory() as root:
+            target = Path(root) / "source.bin"
+            target.write_bytes(b"hello ")
+            with patch.object(urllib.request, "urlopen", return_value=Response()), \
+                    patch.object(convert_reader_assets.time, "sleep"):
+                with self.assertRaises(http.client.IncompleteRead):
+                    convert_reader_assets.download_source("https://example.test/source", target)
+            self.assertFalse(target.exists())
 
     def test_tiff_conversion_preserves_multiple_frames(self):
         from PIL import Image
@@ -1761,6 +1791,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("READER_CONVERSION_WORKERS:", workflow)
         self.assertIn("needs.plan.outputs.extension == 'djvu'", workflow)
         self.assertIn("needs.plan.outputs.count != '0'", workflow)
+        self.assertIn("total_limit=$((10 * 10#${PER_SHARD_LIMIT} * 10#${CHECKPOINT_BATCHES}))", workflow)
         self.assertIn("queue-${SHARD_INDEX}.json", workflow)
         self.assertIn('--queue "${queue}"', workflow)
         self.assertIn("Convert assigned queue", workflow)
@@ -1795,6 +1826,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("needs: [plan, convert, publish]", workflow)
         self.assertIn("needs.convert.result == 'success'", workflow)
         self.assertIn("needs.convert.result == 'failure'", workflow)
+        self.assertIn("needs.convert.result == 'skipped'", workflow)
         self.assertIn('exit "${conversion_status}"', workflow)
         self.assertIn('--repo "${INPUT_REPO}"', workflow)
         self.assertNotIn('--repo "${{ inputs.repo', workflow)

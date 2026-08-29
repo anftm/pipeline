@@ -107,7 +107,15 @@ def download_source(url: str, target: Path, *, max_bytes: int = MAX_SOURCE_BYTES
         digest, size = hashlib.sha256(), 0
         try:
             with urllib.request.urlopen(request, timeout=180) as response:
-                resumed = offset and response.status == 206
+                resumed = bool(offset and response.status == 206)
+                if not offset and response.status == 206:
+                    raise http.client.IncompleteRead(b"unexpected partial response")
+                if resumed:
+                    content_range = response.headers.get("Content-Range", "")
+                    match = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+|\*)", content_range)
+                    if not match or int(match.group(1)) != offset:
+                        target.unlink(missing_ok=True)
+                        raise http.client.IncompleteRead(b"invalid Content-Range")
                 if offset and not resumed:
                     offset = 0
                 mode = "ab" if resumed else "wb"
@@ -132,7 +140,6 @@ def download_source(url: str, target: Path, *, max_bytes: int = MAX_SOURCE_BYTES
             error = exc
         except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.IncompleteRead) as exc:
             error = exc
-        target.unlink(missing_ok=True)
         if attempt == 2:
             raise error
         time.sleep(attempt + 1)
