@@ -55,7 +55,7 @@ def build_queue(records, revisions, manifest, *, repo="", extension="", exact_pa
                 part.lower() == ".files" or part.lower().endswith("_files")
                 for part in path.split("/")):
             continue
-        contract = source_conversion_contract(source_repo, path, ext)
+        contract = source_conversion_contract(source_repo, path, ext, int(record.get("Size") or 0))
         if contract is None:
             continue
         revision = str(revisions.get(source_repo) or "")
@@ -108,7 +108,7 @@ def active_keys(records) -> list[str]:
                 part.lower() == ".files" or part.lower().endswith("_files")
                 for part in path.split("/")):
             continue
-        if source_conversion_contract(repo, path, extension) is not None:
+        if source_conversion_contract(repo, path, extension, int(record.get("Size") or 0)) is not None:
             keys.append(asset_key(repo, path))
     return sorted(set(keys))
 
