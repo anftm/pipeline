@@ -169,8 +169,8 @@ def validate_manifest(manifest: dict) -> dict:
                     validate_object_path(entry[field])
             if "chapter_manifest" in entry and not entry["chapter_manifest"].endswith("/chapter-manifest.json"):
                 raise ValueError("invalid chapter manifest path")
-            if "chapter_manifest" in entry and entry.get("reader_mode") != "epub":
-                raise ValueError("chapter manifest requires EPUB reader mode")
+            if "chapter_manifest" in entry and entry.get("reader_mode") not in {"epub", "pdf"}:
+                raise ValueError("chapter manifest requires EPUB or PDF reader mode")
             if "reader_mode" in entry and entry.get("reader_mode") not in {"pdf", "epub", "docx", "html", "audio", "video"}:
                 raise ValueError("reader manifest ready entry has invalid reader mode")
             if "bytes" in entry and (not isinstance(entry.get("bytes"), int) or entry["bytes"] <= 0):
