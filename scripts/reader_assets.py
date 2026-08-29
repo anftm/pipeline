@@ -128,6 +128,15 @@ def validate_chapter_manifest(manifest: dict) -> dict:
             raise ValueError("invalid EPUB chapter metadata")
         if not re.fullmatch(r"[0-9a-f]{64}", str(chapter.get("sha256", ""))):
             raise ValueError("invalid EPUB chapter digest")
+    search_index = manifest.get("search_index")
+    if search_index is not None:
+        if not isinstance(search_index, dict):
+            raise ValueError("invalid EPUB search index metadata")
+        search_path = search_index.get("path")
+        if (not isinstance(search_path, str) or search_path != "epub-search-index.json.gz"
+                or search_index.get("bytes", 0) <= 0
+                or not re.fullmatch(r"[0-9a-f]{64}", str(search_index.get("sha256", "")))):
+            raise ValueError("invalid EPUB search index metadata")
     if manifest.get("fallback") is not None:
         validate_object_path(manifest["fallback"])
     return manifest
