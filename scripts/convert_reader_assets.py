@@ -98,17 +98,33 @@ ARTIFACT_LOCKS_GUARD = threading.Lock()
 
 
 def download_source(url: str, target: Path, *, max_bytes: int = MAX_SOURCE_BYTES) -> tuple[str, int]:
-    request = urllib.request.Request(url, headers={"User-Agent": "VoiceOfML-Reader-Assets/1.0"})
     for attempt in range(3):
+        offset = target.stat().st_size if target.exists() else 0
+        headers = {"User-Agent": "VoiceOfML-Reader-Assets/1.0"}
+        if offset:
+            headers["Range"] = f"bytes={offset}-"
+        request = urllib.request.Request(url, headers=headers)
         digest, size = hashlib.sha256(), 0
         try:
-            with urllib.request.urlopen(request, timeout=180) as response, target.open("wb") as output:
-                while chunk := response.read(1024 * 1024):
-                    size += len(chunk)
-                    if size > max_bytes:
-                        raise RuntimeError("download exceeds size limit")
-                    digest.update(chunk)
-                    output.write(chunk)
+            with urllib.request.urlopen(request, timeout=180) as response:
+                resumed = offset and response.status == 206
+                if offset and not resumed:
+                    offset = 0
+                mode = "ab" if resumed else "wb"
+                if not resumed:
+                    digest = hashlib.sha256()
+                if resumed:
+                    with target.open("rb") as existing:
+                        while chunk := existing.read(1024 * 1024):
+                            digest.update(chunk)
+                    size = offset
+                with target.open(mode) as output:
+                    while chunk := response.read(1024 * 1024):
+                        size += len(chunk)
+                        if size > max_bytes:
+                            raise RuntimeError("download exceeds size limit")
+                        digest.update(chunk)
+                        output.write(chunk)
             return digest.hexdigest(), size
         except urllib.error.HTTPError as exc:
             if exc.code not in {408, 429} and exc.code < 500:
@@ -1002,7 +1018,17 @@ def convert_file(item: dict, source: Path, target: Path, work: Path) -> None:
     elif ext in {"tif", "tiff"}:
         convert_tiff(source, target, work)
     elif ext == "djvu":
-        run_checked(["ddjvu", "-format=pdf", str(source), str(target)], timeout_seconds=DJVU_COMMAND_TIMEOUT_SECONDS)
+        last_error = None
+        for attempt in range(2):
+            try:
+                run_checked(["ddjvu", "-format=pdf", str(source), str(target)], timeout_seconds=DJVU_COMMAND_TIMEOUT_SECONDS)
+                break
+            except (ReaderConversionCommandError, ReaderConversionTimeout) as exc:
+                last_error = exc
+                target.unlink(missing_ok=True)
+                if attempt == 1:
+                    raise
+                time.sleep(2)
     elif ext in {"ppt", "pptx", "pps", "odp", "xls", "xlsx", "csv", "ods", "wps"}:
         out = work / "office-pdf"
         out.mkdir()

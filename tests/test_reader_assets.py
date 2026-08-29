@@ -5,6 +5,7 @@ import json
 import tempfile
 import unittest
 import urllib.error
+import urllib.request
 import zipfile
 from datetime import date
 from pathlib import Path
@@ -280,6 +281,31 @@ class ScannerTests(unittest.TestCase):
         )
 
 class ConverterTests(unittest.TestCase):
+    def test_download_source_resumes_partial_response(self):
+        class Response:
+            status = 206
+            def __enter__(self):
+                return self
+            def __exit__(self, *_):
+                return False
+            def read(self, _size):
+                if self.done:
+                    return b""
+                self.done = True
+                return b"world"
+
+        with tempfile.TemporaryDirectory() as root:
+            target = Path(root) / "source.bin"
+            target.write_bytes(b"hello ")
+            response = Response()
+            response.done = False
+            with patch.object(urllib.request, "urlopen", return_value=response) as open_url:
+                digest, size = convert_reader_assets.download_source("https://example.test/source", target)
+            self.assertEqual(target.read_bytes(), b"hello world")
+            self.assertEqual(size, 11)
+            self.assertEqual(digest, hashlib.sha256(b"hello world").hexdigest())
+            self.assertEqual(open_url.call_args.args[0].headers["Range"], "bytes=6-")
+
     def test_tiff_conversion_preserves_multiple_frames(self):
         from PIL import Image
 
@@ -320,6 +346,17 @@ class ConverterTests(unittest.TestCase):
                 "ddjvu", "-format=pdf", str(source), str(target),
             ])
             self.assertEqual(run.call_args.kwargs["timeout_seconds"], convert_reader_assets.DJVU_COMMAND_TIMEOUT_SECONDS)
+
+    def test_djvu_conversion_retries_command_once(self):
+        with tempfile.TemporaryDirectory() as root:
+            work = Path(root)
+            source, target = work / "source.djvu", work / "document.pdf"
+            source.write_bytes(b"DJVU")
+            with patch.object(convert_reader_assets, "run_checked", side_effect=[
+                    convert_reader_assets.ReaderConversionCommandError("temporary"), None,
+            ]) as run, patch.object(convert_reader_assets.time, "sleep"):
+                convert_reader_assets.convert_file({"extension": "djvu"}, source, target, work)
+            self.assertEqual(run.call_count, 2)
 
     def test_audio_conversion_uses_bounded_mp3_contract(self):
         with tempfile.TemporaryDirectory() as root:
