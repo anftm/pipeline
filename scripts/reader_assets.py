@@ -59,7 +59,7 @@ PROTECTED_PDF_CONTRACT = ("qpdf-decrypted-v1", "pdf", "document.pdf")
 LARGE_DOCX_BYTES = 64 * 1024 * 1024
 LARGE_DOCX_PDF_CONTRACT = ("libreoffice-pdf-docx-linearized-v1", "pdf", "document.pdf")
 LARGE_EPUB_BYTES = 64 * 1024 * 1024
-LARGE_EPUB_PDF_CONTRACT = ("calibre-pdf-epub-linearized-v1", "pdf", "document.pdf")
+LARGE_EPUB_PDF_CONTRACT = ("calibre-pdf-epub-linearized-v2", "pdf", "document.pdf")
 PASSWORD_RE = re.compile(
     r"(?:密码|口令|password|passwd)\s*(?:[：:=]\s*|(?=[A-Za-z0-9]))"
     r"([^\s\]〕】）)},，；;]+)",
