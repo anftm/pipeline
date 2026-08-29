@@ -78,6 +78,9 @@ CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 OLE_SIGNATURE = bytes.fromhex("d0cf11e0a1b11ae1")
 MIN_PAGE_CONTENT_RATIO = 0.0005
 COMMAND_TIMEOUT_SECONDS = int(os.environ.get("READER_CONVERSION_COMMAND_TIMEOUT", "120"))
+EPUB_COMMAND_TIMEOUT_SECONDS = max(1800, int(os.environ.get(
+    "READER_EPUB_COMMAND_TIMEOUT", str(COMMAND_TIMEOUT_SECONDS),
+)))
 CHM_COMMAND_TIMEOUT_SECONDS = max(900, int(os.environ.get(
     "READER_CHM_COMMAND_TIMEOUT", str(COMMAND_TIMEOUT_SECONDS),
 )))
@@ -1131,12 +1134,18 @@ def convert_large_epub_to_pdf(source: Path, target: Path, work: Path) -> None:
     """Create a linearized PDF so PDF.js can show the first page via Range."""
     output_dir = work / "large-epub-calibre"
     output_dir.mkdir()
-    run_checked(["ebook-convert", str(source), str(output_dir / "converted.pdf")])
+    run_checked(
+        ["ebook-convert", str(source), str(output_dir / "converted.pdf")],
+        timeout_seconds=EPUB_COMMAND_TIMEOUT_SECONDS,
+    )
     produced = output_dir / "converted.pdf"
     if not produced.is_file():
         raise RuntimeError("Calibre produced no PDF from large EPUB")
     linearized = work / "large-epub-linearized.pdf"
-    run_checked(["qpdf", "--linearize", str(produced), str(linearized)])
+    run_checked(
+        ["qpdf", "--linearize", str(produced), str(linearized)],
+        timeout_seconds=EPUB_COMMAND_TIMEOUT_SECONDS,
+    )
     if not linearized.is_file():
         raise RuntimeError("qpdf produced no linearized EPUB PDF")
     shutil.move(linearized, target)

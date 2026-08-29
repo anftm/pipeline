@@ -831,6 +831,29 @@ aW1hZ2U=
             with self.assertRaisesRegex(RuntimeError, "active content"):
                 convert_reader_assets.validate_chm_epub(epub)
 
+    def test_large_epub_conversion_uses_extended_timeout(self):
+        with tempfile.TemporaryDirectory() as root:
+            work = Path(root)
+            source, target = work / "source.epub", work / "document.pdf"
+            source.write_bytes(b"epub")
+
+            def fake_run(command, **_kwargs):
+                if command[0] == "ebook-convert":
+                    (work / "large-epub-calibre" / "converted.pdf").write_bytes(b"%PDF-calibre")
+                else:
+                    (work / "large-epub-linearized.pdf").write_bytes(b"%PDF-linearized")
+
+            with patch.object(convert_reader_assets, "run_checked", side_effect=fake_run) as run:
+                convert_reader_assets.convert_file(
+                    {"extension": "epub", "reader_mode": "pdf"}, source, target, work,
+                )
+
+            self.assertEqual(target.read_bytes(), b"%PDF-linearized")
+            self.assertEqual(
+                [call.kwargs["timeout_seconds"] for call in run.call_args_list],
+                [convert_reader_assets.EPUB_COMMAND_TIMEOUT_SECONDS] * 2,
+            )
+
     def test_validation_rejects_malformed_outputs_for_each_active_container(self):
         with tempfile.TemporaryDirectory() as root:
             root = Path(root)
@@ -1770,7 +1793,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("poppler-utils", workflow)
         self.assertIn("tesseract-ocr-chi-sim", workflow)
         self.assertIn("djvulibre-bin", workflow)
-        self.assertIn("doc, docx, htm, html, mobi, azw3, fb2, odt, rtf", workflow)
+        self.assertIn("doc, docx, epub, htm, html, mobi, azw3, fb2, odt, rtf", workflow)
         self.assertIn("chm, tif, tiff, djvu, ppt, pptx, pps, odp", workflow)
         self.assertIn("htm|html) packages=()", workflow)
         self.assertIn('cron: "17 * * * *"', workflow)
@@ -1778,7 +1801,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("inputs.checkpoint_batches || '30'", workflow)
         self.assertIn("python scripts/publish_reader_assets.py", workflow)
         self.assertIn("packages=(djvulibre-bin poppler-utils)", workflow)
-        self.assertIn("mobi|azw3|fb2|odt) packages=(calibre)", workflow)
+        self.assertIn("epub|mobi|azw3|fb2|odt) packages=(calibre qpdf)", workflow)
         self.assertIn("rtf) packages=(calibre libreoffice", workflow)
         self.assertIn("chm) packages=(calibre p7zip-full)", workflow)
         self.assertIn("tif|tiff) packages=(poppler-utils)", workflow)
