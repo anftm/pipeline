@@ -9,6 +9,7 @@ import urllib.parse
 from pathlib import Path
 
 MANIFEST_VERSION = 1
+CHAPTER_MANIFEST_VERSION = 1
 READER_ASSETS_REPO = "vomebook/Reader-Assets"
 MANIFEST_NAME = "manifest.json"
 CONVERTIBLE_EXTENSIONS = {
@@ -107,6 +108,31 @@ def validate_object_path(path: str) -> str:
     return path
 
 
+def validate_chapter_manifest(manifest: dict) -> dict:
+    if not isinstance(manifest, dict) or manifest.get("version") != CHAPTER_MANIFEST_VERSION:
+        raise ValueError("unsupported EPUB chapter manifest version")
+    chapters = manifest.get("chapters")
+    if manifest.get("kind") != "epub-chapters" or not isinstance(chapters, list) or not chapters:
+        raise ValueError("invalid EPUB chapter manifest")
+    seen = set()
+    for index, chapter in enumerate(chapters, 1):
+        if not isinstance(chapter, dict) or chapter.get("index") != index:
+            raise ValueError("EPUB chapters must be ordered")
+        path = chapter.get("path")
+        if (not isinstance(path, str) or path.startswith("/") or "\\" in path
+                or any(part in {"", ".", ".."} for part in path.split("/"))
+                or not path.startswith("chapters/") or path in seen):
+            raise ValueError("invalid EPUB chapter path")
+        seen.add(path)
+        if not isinstance(chapter.get("title", ""), str) or not isinstance(chapter.get("bytes"), int) or chapter["bytes"] <= 0:
+            raise ValueError("invalid EPUB chapter metadata")
+        if not re.fullmatch(r"[0-9a-f]{64}", str(chapter.get("sha256", ""))):
+            raise ValueError("invalid EPUB chapter digest")
+    if manifest.get("fallback") is not None:
+        validate_object_path(manifest["fallback"])
+    return manifest
+
+
 def source_conversion_contract(repo: str, path: str, extension: str, source_bytes: int = 0):
     if extension == "docx" and source_bytes >= LARGE_DOCX_BYTES:
         return LARGE_DOCX_PDF_CONTRACT
@@ -138,6 +164,13 @@ def validate_manifest(manifest: dict) -> dict:
             raise ValueError("reader manifest file entry has invalid status")
         if status == "ready":
             validate_object_path(entry.get("path"))
+            for field in ("chapter_manifest", "fallback_path"):
+                if field in entry:
+                    validate_object_path(entry[field])
+            if "chapter_manifest" in entry and not entry["chapter_manifest"].endswith("/chapter-manifest.json"):
+                raise ValueError("invalid chapter manifest path")
+            if "chapter_manifest" in entry and entry.get("reader_mode") != "epub":
+                raise ValueError("chapter manifest requires EPUB reader mode")
             if "reader_mode" in entry and entry.get("reader_mode") not in {"pdf", "epub", "docx", "html", "audio", "video"}:
                 raise ValueError("reader manifest ready entry has invalid reader mode")
             if "bytes" in entry and (not isinstance(entry.get("bytes"), int) or entry["bytes"] <= 0):
