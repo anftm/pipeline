@@ -55,6 +55,10 @@ CONVERTIBLE_EXTENSIONS = {
     "wmv": ("ffmpeg-video-mp4-h264-aac-v1", "video", "video.mp4"),
 }
 PROTECTED_PDF_CONTRACT = ("qpdf-decrypted-v1", "pdf", "document.pdf")
+LARGE_DOCX_BYTES = 64 * 1024 * 1024
+LARGE_DOCX_PDF_CONTRACT = ("libreoffice-pdf-docx-linearized-v1", "pdf", "document.pdf")
+LARGE_EPUB_BYTES = 64 * 1024 * 1024
+LARGE_EPUB_PDF_CONTRACT = ("calibre-pdf-epub-linearized-v1", "pdf", "document.pdf")
 PASSWORD_RE = re.compile(
     r"(?:密码|口令|password|passwd)\s*(?:[：:=]\s*|(?=[A-Za-z0-9]))"
     r"([^\s\]〕】）)},，；;]+)",
@@ -103,7 +107,11 @@ def validate_object_path(path: str) -> str:
     return path
 
 
-def source_conversion_contract(repo: str, path: str, extension: str):
+def source_conversion_contract(repo: str, path: str, extension: str, source_bytes: int = 0):
+    if extension == "docx" and source_bytes >= LARGE_DOCX_BYTES:
+        return LARGE_DOCX_PDF_CONTRACT
+    if extension == "epub" and source_bytes >= LARGE_EPUB_BYTES:
+        return LARGE_EPUB_PDF_CONTRACT
     if extension in CONVERTIBLE_EXTENSIONS:
         return CONVERTIBLE_EXTENSIONS[extension]
     if extension == "pdf" and source_password(repo, path):
