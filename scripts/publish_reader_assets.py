@@ -103,6 +103,16 @@ def build_publish(api: HfApi, repo_id: str, bundle: Path, revision: str | None =
                 if file_sha256(artifact) != result["sha256"]:
                     raise ValueError(f"artifact digest mismatch for {result['key']}")
                 artifacts[result["path"]] = str(artifact)
+                if result.get("chapter_manifest"):
+                    prefix = Path(result["chapter_manifest"]).parent
+                    root = bundle / prefix
+                    if not root.is_dir():
+                        raise ValueError(f"missing EPUB chapter bundle for {result['key']}")
+                    for child in sorted(root.rglob("*")):
+                        if child.is_file():
+                            path = (prefix / child.relative_to(root)).as_posix()
+                            validate_object_path(path)
+                            artifacts[path] = str(child)
         elif result.get("status") != "failed":
             raise ValueError("unknown reader asset result status")
         elif files.get(result["key"], {}).get("status") == "ready":
