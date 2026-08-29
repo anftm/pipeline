@@ -1290,13 +1290,32 @@ def convert_item(item: dict, bundle: Path, reusable: dict | None = None) -> dict
                 validate_reader_content(target, item, work)
                 if existing and file_sha256(target) != existing["sha256"]:
                     raise RuntimeError("reusable reader artifact digest mismatch")
-        return {
+        result = {
             "key": item["key"], "status": "ready", "source_revision": item["source_revision"],
             "source_sha256": digest, "source_bytes": source_bytes,
             "source_extension": item["extension"], "profile": item["profile"],
             "reader_mode": item["reader_mode"], "path": object_path, "bytes": target.stat().st_size,
             "sha256": file_sha256(target), "reused": reused,
         }
+        if item["extension"] == "epub" and item["reader_mode"] == "pdf":
+            try:
+                try:
+                    from .epub_chapters import build_bundle
+                except ImportError:
+                    from epub_chapters import build_bundle
+                chapter_root = target.parent / "chapter-build"
+                chapter_manifest = build_bundle(source, chapter_root, fallback=object_path)
+                for generated in chapter_root.rglob("*"):
+                    if generated.is_file():
+                        destination = target.parent / generated.relative_to(chapter_root)
+                        destination.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.move(generated, destination)
+                shutil.rmtree(chapter_root, ignore_errors=True)
+                result["chapter_manifest"] = f"{object_path.rsplit('/', 1)[0]}/chapter-manifest.json"
+                result["fallback_path"] = object_path
+            except (RuntimeError, ValueError, KeyError, zipfile.BadZipFile, ET.ParseError) as exc:
+                print(f"chapter bundle unavailable; retaining PDF fallback: {exc}")
+        return result
 
 
 def parse_args():
