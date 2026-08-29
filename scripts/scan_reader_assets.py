@@ -51,6 +51,10 @@ def build_queue(records, revisions, manifest, *, repo="", extension="", exact_pa
         if (repo and source_repo != repo) or (extension and ext != extension):
             continue
         path = relative_path(record)
+        if ext in {"htm", "html"} and any(
+                part.lower() == ".files" or part.lower().endswith("_files")
+                for part in path.split("/")):
+            continue
         contract = source_conversion_contract(source_repo, path, ext)
         if contract is None:
             continue

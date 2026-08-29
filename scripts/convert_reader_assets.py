@@ -78,9 +78,12 @@ CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 OLE_SIGNATURE = bytes.fromhex("d0cf11e0a1b11ae1")
 MIN_PAGE_CONTENT_RATIO = 0.0005
 COMMAND_TIMEOUT_SECONDS = int(os.environ.get("READER_CONVERSION_COMMAND_TIMEOUT", "120"))
-DJVU_COMMAND_TIMEOUT_SECONDS = int(os.environ.get(
-    "READER_DJVU_COMMAND_TIMEOUT", str(max(600, COMMAND_TIMEOUT_SECONDS)),
-))
+CHM_COMMAND_TIMEOUT_SECONDS = max(900, int(os.environ.get(
+    "READER_CHM_COMMAND_TIMEOUT", str(COMMAND_TIMEOUT_SECONDS),
+)))
+DJVU_COMMAND_TIMEOUT_SECONDS = max(600, int(os.environ.get(
+    "READER_DJVU_COMMAND_TIMEOUT", str(COMMAND_TIMEOUT_SECONDS),
+)))
 MEDIA_COMMAND_TIMEOUT_SECONDS = int(os.environ.get(
     "READER_MEDIA_COMMAND_TIMEOUT", str(max(7200, COMMAND_TIMEOUT_SECONDS)),
 ))
@@ -297,18 +300,19 @@ def run_checked(command: list[str], *, timeout_seconds: int | None = None, cwd: 
         raise ReaderConversionCommandError(f"conversion command failed: {Path(command[0]).name}: {detail}")
 
 
-def command_output(command: list[str]) -> str:
+def command_output(command: list[str], *, timeout_seconds: int | None = None) -> str:
+    timeout_seconds = COMMAND_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
     try:
         result = subprocess.run(
-            command, capture_output=True, text=True, timeout=COMMAND_TIMEOUT_SECONDS,
+            command, capture_output=True, text=True, timeout=timeout_seconds,
             env={key: value for key, value in os.environ.items() if key not in {
                 "HF_TOKEN", "PAGES_TOKEN", "GH_PAT", "READER_CONVERSION_PASSWORD",
             }},
         )
     except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(f"validation command timed out: {Path(command[0]).name}") from exc
+        raise ReaderConversionTimeout(f"validation command timed out: {Path(command[0]).name}") from exc
     if result.returncode:
-        raise RuntimeError(f"validation command failed: {Path(command[0]).name}: {result.stderr[-500:]}")
+        raise ReaderConversionCommandError(f"validation command failed: {Path(command[0]).name}: {result.stderr[-500:]}")
     return result.stdout
 
 
@@ -320,6 +324,18 @@ def media_probe(path: Path) -> dict:
         ]))
     except (json.JSONDecodeError, TypeError) as exc:
         raise RuntimeError("media probe returned invalid data") from exc
+
+
+def source_media_mode(path: Path) -> str:
+    probe = media_probe(path)
+    streams = probe.get("streams") if isinstance(probe, dict) else None
+    if not isinstance(streams, list):
+        raise RuntimeError("source media has no stream metadata")
+    if any(stream.get("codec_type") == "video" for stream in streams):
+        return "video"
+    if any(stream.get("codec_type") == "audio" for stream in streams):
+        return "audio"
+    raise RuntimeError("source media has no audio or video stream")
 
 
 def validate_media_output(path: Path, reader_mode: str) -> None:
@@ -599,23 +615,30 @@ def sanitize_chm_epub(path: Path, work: Path) -> None:
 
 def convert_chm(source: Path, target: Path, work: Path) -> None:
     try:
-        run_checked(["ebook-convert", str(source), str(target), "--flow-size", "0"])
+        run_checked(
+            ["ebook-convert", str(source), str(target), "--flow-size", "0"],
+            timeout_seconds=CHM_COMMAND_TIMEOUT_SECONDS,
+        )
         sanitize_chm_epub(target, work)
         validate_output(target, "epub")
         validate_chm_epub(target)
         return
     except (RuntimeError, FileNotFoundError, zipfile.BadZipFile, KeyError) as exc:
         initial_error = exc
-    listing = command_output(["7z", "l", "-slt", str(source)])
+    listing = command_output(["7z", "l", "-slt", str(source)], timeout_seconds=CHM_COMMAND_TIMEOUT_SECONDS)
     expanded_size = sum(int(value) for value in re.findall(r"^Size = (\d+)\s*$", listing, re.MULTILINE))
     member_count = len(re.findall(r"^Path = ", listing, re.MULTILINE))
     if expanded_size > MAX_CHM_EXPANDED_BYTES or member_count > MAX_EPUB_MEMBERS:
         raise RuntimeError("CHM expanded content exceeds limits")
     extracted = work / "chm-extracted"
     extracted.mkdir()
-    run_checked(["7z", "x", "-y", f"-o{extracted}", str(source)])
-    mhtml_files = sorted((*extracted.rglob("*.mht"), *extracted.rglob("*.mhtml")))
-    html_files = sorted((*extracted.rglob("*.htm"), *extracted.rglob("*.html")))
+    run_checked(["7z", "x", "-y", f"-o{extracted}", str(source)], timeout_seconds=CHM_COMMAND_TIMEOUT_SECONDS)
+    mhtml_files = sorted(
+        path for path in extracted.rglob("*") if path.is_file() and path.suffix.lower() in {".mht", ".mhtml"}
+    )
+    html_files = sorted(
+        path for path in extracted.rglob("*") if path.is_file() and path.suffix.lower() in {".htm", ".html"}
+    )
     if not mhtml_files and not html_files:
         raise initial_error
     prepared = work / "chm-mhtml"
@@ -640,7 +663,10 @@ def convert_chm(source: Path, target: Path, work: Path) -> None:
         )
         source_html.write_text(f'<meta charset="utf-8"><ul>{links}</ul>', encoding="utf-8")
     target.unlink(missing_ok=True)
-    run_checked(["ebook-convert", str(source_html), str(target), "--flow-size", "0"])
+    run_checked(
+        ["ebook-convert", str(source_html), str(target), "--flow-size", "0"],
+        timeout_seconds=CHM_COMMAND_TIMEOUT_SECONDS,
+    )
     sanitize_chm_epub(target, work)
     validate_output(target, "epub")
     validate_chm_epub(target)
@@ -696,7 +722,7 @@ def convert_caj_family(source: Path, target: Path, work: Path) -> None:
 
 
 def validate_djvu_pdf(path: Path, work: Path) -> None:
-    info = command_output(["pdfinfo", str(path)])
+    info = command_output(["pdfinfo", str(path)], timeout_seconds=DJVU_COMMAND_TIMEOUT_SECONDS)
     match = re.search(r"^Pages:\s+(\d+)\s*$", info, re.MULTILINE)
     if not match or int(match.group(1)) < 1:
         raise RuntimeError("converted DjVu PDF has no pages")
@@ -706,7 +732,7 @@ def validate_djvu_pdf(path: Path, work: Path) -> None:
         run_checked([
             "pdftoppm", "-f", str(page), "-l", str(page), "-singlefile", "-png", "-r", "72",
             str(path), str(prefix),
-        ])
+        ], timeout_seconds=DJVU_COMMAND_TIMEOUT_SECONDS)
         rendered = prefix.with_suffix(".png")
         if not rendered.is_file() or rendered.stat().st_size == 0:
             raise RuntimeError(f"converted DjVu PDF page {page} is not renderable")
@@ -1008,6 +1034,15 @@ def convert_file(item: dict, source: Path, target: Path, work: Path) -> None:
             "-map_metadata", "-1", "-c:a", "libmp3lame", "-q:a", "3", str(target),
         ], timeout_seconds=MEDIA_COMMAND_TIMEOUT_SECONDS)
     elif ext in {"flv", "f4v", "rm", "rmvb", "mkv", "avi", "mpg", "mpeg", "mts", "ts", "wmv"}:
+        if ext in {"rm", "rmvb"} and item.get("source_media_mode") == "audio":
+            run_checked([
+                "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+                "-f", "lavfi", "-i", "color=c=black:s=640x360:r=1",
+                "-i", str(source), "-map", "0:v:0", "-map", "1:a:0", "-shortest",
+                "-map_metadata", "-1", "-c:v", "libx264", "-preset", "veryfast", "-tune", "stillimage",
+                "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", str(target),
+            ], timeout_seconds=MEDIA_COMMAND_TIMEOUT_SECONDS)
+            return
         run_checked([
             "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
             "-i", str(source), "-map", "0:v:0", "-map", "0:a:0?", "-sn", "-dn",
@@ -1133,6 +1168,9 @@ def convert_item(item: dict, bundle: Path, reusable: dict | None = None) -> dict
         work = Path(root)
         source = work / f"source.{item['extension']}"
         digest, source_bytes = download_source(item["source_url"], source)
+        if item["extension"] in {"rm", "rmvb"}:
+            item = dict(item)
+            item["source_media_mode"] = source_media_mode(source)
         if item["extension"] in {"mht", "mhtml"} and source_bytes > MAX_MHTML_SOURCE_BYTES:
             raise RuntimeError("MHTML source exceeds size limit")
         identity = reusable_object_key(

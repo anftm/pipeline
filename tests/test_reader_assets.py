@@ -127,6 +127,15 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(queue[0]["profile"], "docx-native-v2")
         self.assertEqual(queue[0]["reader_mode"], "docx")
 
+    def test_html_resource_fragments_are_not_reader_documents(self):
+        records = [{
+            "Repo": "VoiceOfML/Test", "File": "script", "Folder": ["page_files"],
+            "Extension": "htm", "Size": 10,
+        }]
+        self.assertEqual(
+            scan_reader_assets.build_queue(records, self.revisions, reader_assets.empty_manifest()), []
+        )
+
     def test_ready_current_profile_is_skipped(self):
         key = reader_assets.asset_key("VoiceOfML/Test", "A/Book.docx")
         manifest = {"version": 1, "files": {key: {
@@ -336,6 +345,21 @@ class ConverterTests(unittest.TestCase):
             for value in ("libx264", "yuv420p", "aac", "+faststart", "0:v:0", "0:a:0?"):
                 self.assertIn(value, command)
             self.assertEqual(run.call_args.kwargs["timeout_seconds"], convert_reader_assets.MEDIA_COMMAND_TIMEOUT_SECONDS)
+
+    def test_audio_only_rm_uses_black_video_and_aac_audio(self):
+        with tempfile.TemporaryDirectory() as root:
+            work = Path(root)
+            source, target = work / "source.rm", work / "video.mp4"
+            source.write_bytes(b"rm")
+            item = {"extension": "rm", "source_media_mode": "audio"}
+            with patch.object(convert_reader_assets, "run_checked") as run:
+                convert_reader_assets.convert_file(item, source, target, work)
+            command = run.call_args.args[0]
+            self.assertIn("color=c=black:s=640x360:r=1", command)
+            self.assertIn("0:v:0", command)
+            self.assertIn("1:a:0", command)
+            self.assertIn("libx264", command)
+            self.assertIn("aac", command)
 
     def test_calibre_office_book_conversion_uses_epub_output(self):
         with tempfile.TemporaryDirectory() as root:
@@ -756,7 +780,7 @@ aW1hZ2U=
             work, pdf = Path(root), Path(root) / "document.pdf"
             pdf.write_bytes(b"%PDF-test")
 
-            def render(command):
+            def render(command, **_kwargs):
                 Path(command[-1]).with_suffix(".png").write_bytes(b"png")
 
             with patch.object(convert_reader_assets, "command_output", return_value="Pages:           12\n"), \
@@ -1704,6 +1728,8 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn('--queue "${queue}"', workflow)
         self.assertIn("Convert assigned queue", workflow)
         self.assertIn("Reader metadata request failed; retrying", workflow)
+        self.assertIn("READER_CHM_COMMAND_TIMEOUT:", workflow)
+        self.assertIn("READER_DJVU_COMMAND_TIMEOUT:", workflow)
         self.assertIn("Source metadata request failed; retrying", workflow)
         self.assertIn("for attempt in 1 2 3 4 5", workflow)
         self.assertIn("delay=$((30 * 2 ** (attempt - 1)))", workflow)

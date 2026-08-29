@@ -230,6 +230,8 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           READER_ASSETS_REPO: vomebook/Reader-Assets
           READER_CONVERSION_COMMAND_TIMEOUT: ${{ inputs.command_timeout || '120' }}
+          READER_CHM_COMMAND_TIMEOUT: ${{ inputs.command_timeout || '120' }}
+          READER_DJVU_COMMAND_TIMEOUT: ${{ inputs.command_timeout || '120' }}
           READER_CONVERSION_WORKERS: ${{ needs.plan.outputs.extension == 'djvu' && '2' || '1' }}
           EXTENSION: ${{ needs.plan.outputs.extension }}
           BATCH_SIZE: ${{ inputs.limit || '20' }}
