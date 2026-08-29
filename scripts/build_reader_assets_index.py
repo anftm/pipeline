@@ -24,6 +24,10 @@ def build_index(manifest: dict) -> dict:
         compact = {"s": STATUS[status]}
         if status == "ready":
             compact.update({"m": MODE[entry["reader_mode"]], "p": entry["path"]})
+            if entry.get("chapter_manifest"):
+                compact["c"] = entry["chapter_manifest"]
+            if entry.get("fallback_path"):
+                compact["f"] = entry["fallback_path"]
         files[key] = compact
     return {"v": 1, "f": dict(sorted(files.items()))}
 
