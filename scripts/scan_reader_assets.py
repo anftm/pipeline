@@ -71,10 +71,17 @@ def build_queue(records, revisions, manifest, *, repo="", extension="", exact_pa
         manual = str(existing.get("profile") or "").startswith("manual-")
         if not force and existing.get("status") == "ready" and manual:
             continue
-        current = existing.get("source_revision") == revision and existing.get("profile") == profile
-        if not force and current and existing.get("status") == "ready":
-            continue
-        if not force and current and existing.get("status") == "failed" and not retry_failed:
+        # Source revisions are repository-wide. A new commit does not mean this
+        # particular file changed, and the metadata feed has no file digest.
+        # Reuse a ready artifact unless an explicit rebuild was requested.
+        if not force and existing.get("status") == "ready" and existing.get("profile") == profile:
+            retryable_update = (
+                retry_failed and existing.get("failed_source_revision") == revision
+                and existing.get("failed_profile") == profile
+            )
+            if not retryable_update:
+                continue
+        if not force and existing.get("status") == "failed" and existing.get("profile") == profile and not retry_failed:
             continue
         failed_current = (existing.get("failed_source_revision") == revision
                           and existing.get("failed_profile") == profile)
