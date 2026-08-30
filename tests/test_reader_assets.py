@@ -524,7 +524,8 @@ class ConverterTests(unittest.TestCase):
                     raise convert_reader_assets.ReaderConversionCommandError("unsupported codepage")
                 if command[0] == "libreoffice":
                     (work / "rtf-html" / "source.html").write_text("<p>body</p>", encoding="utf-8")
-            with patch.object(convert_reader_assets, "run_checked", side_effect=fake_run):
+            with patch.object(convert_reader_assets, "download_source", return_value=("a" * 64, 100)), patch.object(
+                    convert_reader_assets, "run_checked", side_effect=fake_run):
                 convert_reader_assets.convert_file({"extension": "rtf"}, source, target, work)
             self.assertEqual([call[0] for call in calls], ["ebook-convert", "libreoffice", "ebook-convert"])
             self.assertEqual(calls[1][calls[1].index("--convert-to") + 1], "html")
@@ -914,9 +915,9 @@ aW1hZ2U=
 
             def fake_run(command, **_kwargs):
                 if command[0] == "ebook-convert":
-                    (work / "large-epub-calibre" / "converted.pdf").write_bytes(b"%PDF-calibre")
+                    Path(command[2]).write_bytes(b"%PDF-calibre")
                 else:
-                    (work / "large-epub-linearized.pdf").write_bytes(b"%PDF-linearized")
+                    Path(command[3]).write_bytes(b"%PDF-linearized")
 
             with patch.object(convert_reader_assets, "run_checked", side_effect=fake_run) as run:
                 convert_reader_assets.convert_file(
@@ -928,6 +929,24 @@ aW1hZ2U=
                 [call.kwargs["timeout_seconds"] for call in run.call_args_list],
                 [convert_reader_assets.EPUB_COMMAND_TIMEOUT_SECONDS] * 2,
             )
+
+    def test_large_epub_pdf_conversion_does_not_create_resource_bundle(self):
+        with tempfile.TemporaryDirectory() as root:
+            work = Path(root)
+            source, target = work / "source.epub", work / "document.pdf"
+            source.write_bytes(b"epub")
+
+            def fake_run(command, **_kwargs):
+                if command[0] == "ebook-convert":
+                    Path(command[2]).write_bytes(b"%PDF-calibre")
+                else:
+                    Path(command[3]).write_bytes(b"%PDF-linearized")
+
+            with patch.object(convert_reader_assets, "run_checked", side_effect=fake_run):
+                convert_reader_assets.convert_file(
+                    {"extension": "epub", "reader_mode": "pdf"}, source, target, work,
+                )
+            self.assertEqual(target.read_bytes(), b"%PDF-linearized")
 
     def test_validation_rejects_malformed_outputs_for_each_active_container(self):
         with tempfile.TemporaryDirectory() as root:
