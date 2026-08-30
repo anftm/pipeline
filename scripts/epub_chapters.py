@@ -13,6 +13,9 @@ from urllib.parse import unquote, urlsplit
 import xml.etree.ElementTree as ET
 from html.parser import HTMLParser
 
+MAX_CHAPTER_RESOURCES = 2000
+MAX_CHAPTER_RESOURCE_BYTES = 256 * 1024 * 1024
+
 try:
     from .convert_reader_assets import sanitize_css, sanitize_xml_document
     from .reader_assets import canonical_json, validate_chapter_manifest
@@ -107,6 +110,10 @@ def build_bundle(epub: Path, output: Path, *, fallback: str | None = None) -> di
                 resources.add(posixpath.normpath(match.group(1)))
         if not chapters:
             raise ValueError("EPUB spine has no readable chapters")
+        resource_bytes = sum(archive.getinfo(resource).file_size for resource in resources)
+        if (len(resources) > MAX_CHAPTER_RESOURCES
+                or resource_bytes > MAX_CHAPTER_RESOURCE_BYTES):
+            raise ValueError("EPUB chapter bundle resource budget exceeded")
         for resource in sorted(resources):
             target = output / "resources" / resource
             target.parent.mkdir(parents=True, exist_ok=True)

@@ -191,7 +191,13 @@ def publish_bundle(api: HfApi, repo_id: str, bundle: Path, *, max_attempts: int 
             )
             return manifest, len(operations) - 2
         except HfHubHTTPError as exc:
-            if getattr(exc.response, "status_code", None) not in {409, 412} or attempt + 1 == max_attempts:
+            status = getattr(exc.response, "status_code", None)
+            if status in {429, 500, 502, 503, 504} and attempt + 1 < max_attempts:
+                delay = min(60.0, 2.0 ** min(attempt, 5)) + random.uniform(0, 2)
+                print(f"transient Hugging Face upload error ({status}); retrying in {delay:.1f}s")
+                time.sleep(delay)
+                continue
+            if status not in {409, 412} or attempt + 1 == max_attempts:
                 raise
             print(f"reader asset parent changed; rebuilding publication ({attempt + 2}/{max_attempts})")
             time.sleep(random.uniform(0.5, min(8.0, 0.5 * (attempt + 1))))

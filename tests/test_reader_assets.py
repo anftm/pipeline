@@ -19,7 +19,7 @@ from huggingface_hub.errors import HfHubHTTPError, RepositoryNotFoundError
 
 from scripts import build_reader_assets_index, convert_reader_assets, publish_reader_assets
 from scripts import prune_reader_assets, publish_search_reader_index
-from scripts import reader_assets, scan_reader_assets
+from scripts import epub_chapters, reader_assets, scan_reader_assets
 
 
 class ReaderAssetContractTests(unittest.TestCase):
@@ -79,6 +79,36 @@ class ReaderAssetContractTests(unittest.TestCase):
         }
         self.assertEqual({ext: reader_assets.conversion_contract(ext) for ext in expected}, expected)
 
+    def test_large_docx_uses_lazy_pdf_contract(self):
+        self.assertEqual(
+            reader_assets.source_conversion_contract(
+                "repo", "large.docx", "docx", reader_assets.LARGE_DOCX_BYTES,
+            ),
+            reader_assets.LARGE_DOCX_PDF_CONTRACT,
+        )
+        self.assertEqual(
+            reader_assets.source_conversion_contract("repo", "small.docx", "docx", 1),
+            reader_assets.conversion_contract("docx"),
+        )
+
+    def test_large_epub_uses_lazy_pdf_contract(self):
+        self.assertEqual(
+            reader_assets.source_conversion_contract(
+                "repo", "large.epub", "epub", reader_assets.LARGE_EPUB_BYTES,
+            ),
+            reader_assets.LARGE_EPUB_PDF_CONTRACT,
+        )
+        self.assertIsNone(reader_assets.source_conversion_contract("repo", "small.epub", "epub", 1))
+
+    def test_pdf_fallback_can_carry_epub_chapter_manifest(self):
+        manifest = reader_assets.empty_manifest()
+        manifest["files"]["repo\\0book.epub"] = {
+            "status": "ready", "path": "objects/a/document.pdf",
+            "chapter_manifest": "objects/a/chapter-manifest.json",
+            "fallback_path": "objects/a/document.pdf", "reader_mode": "pdf",
+        }
+        self.assertIs(reader_assets.validate_manifest(manifest), manifest)
+
     def test_passwords_require_an_explicit_marker_or_known_source(self):
         self.assertEqual(reader_assets.source_password("repo", "资料〔密码：123〕.docx"), "123")
         self.assertEqual(reader_assets.source_password("repo", "毛的遗产 密码0000.pdf"), "0000")
@@ -121,6 +151,42 @@ class ReaderAssetContractTests(unittest.TestCase):
         )
         self.assertIsNone(reader_assets.source_conversion_contract("repo", "普通书.pdf", "pdf"))
 
+    def test_chapter_manifest_validates_order_and_fallback(self):
+        chapter = {"index": 1, "title": "第一章", "path": "chapters/chapter-0001.xhtml", "bytes": 3, "sha256": "a" * 64}
+        manifest = {"version": 1, "kind": "epub-chapters", "fallback": "objects/aa/" + "b" * 64 + "/profile/document.pdf", "chapters": [chapter], "search_index": {"path": "epub-search-index.json.gz", "bytes": 3, "sha256": "c" * 64}}
+        self.assertIs(reader_assets.validate_chapter_manifest(manifest), manifest)
+
+    def test_chapter_bundle_follows_spine_and_sanitizes(self):
+        with tempfile.TemporaryDirectory() as root:
+            root, epub, output = Path(root), Path(root) / "book.epub", Path(root) / "bundle"
+            with zipfile.ZipFile(epub, "w") as archive:
+                archive.writestr("mimetype", "application/epub+zip")
+                archive.writestr("META-INF/container.xml", '<container><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>')
+                archive.writestr("OEBPS/content.opf", '<package><manifest><item id="a" href="a.xhtml" media-type="application/xhtml+xml"/><item id="b" href="b.xhtml" media-type="application/xhtml+xml"/><item id="i" href="images/x.png" media-type="image/png"/></manifest><spine><itemref idref="a"/><itemref idref="b"/></spine></package>')
+                archive.writestr("OEBPS/a.xhtml", '<html><body><script>bad()</script><img src="images/x.png"/><p>one</p></body></html>')
+                archive.writestr("OEBPS/b.xhtml", '<html><body><p>two</p></body></html>')
+                archive.writestr("OEBPS/images/x.png", b"png")
+            manifest = epub_chapters.build_bundle(epub, output)
+            self.assertEqual([item["index"] for item in manifest["chapters"]], [1, 2])
+            self.assertNotIn("script", (output / "chapters/chapter-0001.xhtml").read_text())
+            self.assertTrue((output / "resources/OEBPS/images/x.png").is_file())
+            self.assertTrue((output / "epub-search-index.json.gz").is_file())
+            self.assertEqual(manifest["search_index"]["bytes"], (output / "epub-search-index.json.gz").stat().st_size)
+
+    def test_chapter_bundle_skips_oversized_resource_sets(self):
+        with tempfile.TemporaryDirectory() as root:
+            epub = Path(root) / "book.epub"
+            with zipfile.ZipFile(epub, "w") as archive:
+                archive.writestr("mimetype", "application/epub+zip")
+                archive.writestr("META-INF/container.xml", '<container><rootfiles><rootfile full-path="content.opf"/></rootfiles></container>')
+                archive.writestr("content.opf", '<package><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/><item id="image" href="image.png" media-type="image/png"/></manifest><spine><itemref idref="chapter"/></spine></package>')
+                archive.writestr("chapter.xhtml", '<html><body><p>这是一个足够长的章节正文，用来验证超大资源集合不会生成独立章节包。</p><img src="image.png"/></body></html>')
+                archive.writestr("image.png", b"image")
+
+            with patch.object(epub_chapters, "MAX_CHAPTER_RESOURCE_BYTES", 1), self.assertRaisesRegex(
+                    ValueError, "resource budget"):
+                epub_chapters.build_bundle(epub, Path(root) / "bundle")
+
 
 class ScannerTests(unittest.TestCase):
     def setUp(self):
@@ -139,6 +205,15 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(queue[0]["path"], "A/Book.docx")
         self.assertEqual(queue[0]["profile"], "docx-native-v2")
         self.assertEqual(queue[0]["reader_mode"], "docx")
+
+    def test_large_docx_queue_selects_pdf_reader_mode(self):
+        records = [{
+            "Repo": "VoiceOfML/Test", "File": "Large", "Extension": "docx", "Folder": [],
+            "Size": reader_assets.LARGE_DOCX_BYTES,
+        }]
+        queue = scan_reader_assets.build_queue(records, self.revisions, reader_assets.empty_manifest())
+        self.assertEqual(queue[0]["reader_mode"], "pdf")
+        self.assertEqual(queue[0]["output_name"], "document.pdf")
 
     def test_html_resource_fragments_are_not_reader_documents(self):
         records = [{
@@ -895,6 +970,52 @@ aW1hZ2U=
             self.assertEqual(command[command.index("--convert-to") + 1], "docx")
             self.assertEqual(target.read_bytes(), b"docx")
 
+    def test_large_docx_conversion_linearizes_pdf(self):
+        with tempfile.TemporaryDirectory() as root:
+            work = Path(root)
+            source, target = work / "source.docx", work / "document.pdf"
+            source.write_bytes(b"docx")
+
+            def fake_run(command, **_kwargs):
+                if command[0] == "libreoffice":
+                    (work / "large-docx-office" / "source.pdf").write_bytes(b"%PDF-office")
+                else:
+                    (work / "large-docx-linearized.pdf").write_bytes(b"%PDF-linearized")
+
+            with patch.object(convert_reader_assets, "run_checked", side_effect=fake_run) as run:
+                convert_reader_assets.convert_file(
+                    {"extension": "docx", "reader_mode": "pdf"}, source, target, work,
+                )
+            self.assertEqual(target.read_bytes(), b"%PDF-linearized")
+            self.assertEqual(run.call_args_list[-1].args[0][0:2], ["qpdf", "--linearize"])
+
+    def test_large_epub_conversion_linearizes_pdf(self):
+        with tempfile.TemporaryDirectory() as root:
+            work = Path(root)
+            source, target = work / "source.epub", work / "document.pdf"
+            source.write_bytes(b"epub")
+
+            def fake_run(command, **_kwargs):
+                if command[0] == "ebook-convert":
+                    (work / "large-epub-calibre" / "converted.pdf").write_bytes(b"%PDF-calibre")
+                else:
+                    (work / "large-epub-linearized.pdf").write_bytes(b"%PDF-linearized")
+
+            with patch.object(convert_reader_assets, "run_checked", side_effect=fake_run) as run:
+                convert_reader_assets.convert_file(
+                    {"extension": "epub", "reader_mode": "pdf"}, source, target, work,
+                )
+            self.assertEqual(target.read_bytes(), b"%PDF-linearized")
+            self.assertEqual(run.call_args_list[-1].args[0][0:2], ["qpdf", "--linearize"])
+            self.assertEqual(
+                run.call_args_list[0].kwargs["timeout_seconds"],
+                convert_reader_assets.EPUB_COMMAND_TIMEOUT_SECONDS,
+            )
+            self.assertEqual(
+                run.call_args_list[-1].kwargs["timeout_seconds"],
+                convert_reader_assets.EPUB_COMMAND_TIMEOUT_SECONDS,
+            )
+
     def test_doc_and_docx_use_distinct_docx_profiles(self):
         self.assertEqual(reader_assets.conversion_contract("doc"), ("libreoffice-docx-v2", "docx", "document.docx"))
         self.assertEqual(reader_assets.conversion_contract("docx"), ("docx-native-v2", "docx", "document.docx"))
@@ -1607,6 +1728,30 @@ class PublicationTests(unittest.TestCase):
         api.repo_info.side_effect = [Mock(sha="parent-1"), Mock(sha="parent-2")]
         api.file_exists.return_value = False
         api.create_commit.side_effect = [conflict, None]
+        with tempfile.TemporaryDirectory() as root:
+            bundle = self.make_bundle(root, result)
+            with patch.object(publish_reader_assets.time, "sleep"):
+                _, count = publish_reader_assets.publish_bundle(api, "vomebook/Test", bundle)
+        self.assertEqual(count, 1)
+        self.assertEqual(api.create_commit.call_count, 2)
+        self.assertEqual(
+            [call.kwargs["parent_commit"] for call in api.create_commit.call_args_list],
+            ["parent-1", "parent-2"],
+        )
+
+    def test_transient_upload_error_rebuilds_commit_with_fresh_signature(self):
+        result = {
+            "key": "VoiceOfML/Test\0A/Book.docx", "status": "ready", "source_revision": "rev1",
+            "source_sha256": "a" * 64, "source_bytes": 10, "source_extension": "docx",
+            "profile": "libreoffice-pdf-v2", "reader_mode": "pdf", "path": "objects/aa/document.pdf",
+        }
+        response = requests.Response()
+        response.status_code = 503
+        response.request = requests.Request("POST", "https://huggingface.co/api/datasets/vomebook/Test/commit/main").prepare()
+        api = Mock()
+        api.repo_info.side_effect = [Mock(sha="parent-1"), Mock(sha="parent-2")]
+        api.file_exists.return_value = False
+        api.create_commit.side_effect = [HfHubHTTPError("unavailable", response=response), None]
         with tempfile.TemporaryDirectory() as root:
             bundle = self.make_bundle(root, result)
             with patch.object(publish_reader_assets.time, "sleep"):
