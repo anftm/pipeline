@@ -269,7 +269,15 @@ jobs:
         run: |
           shopt -s nullglob
           bundles=(output/reader-assets/bundle-${SHARD_INDEX}-*)
-          ((${#bundles[@]})) || exit 0
+          if ((${#bundles[@]} == 0)); then
+            marker="output/reader-assets/.empty-${SHARD_INDEX}"
+            : > "${marker}"
+            archive="${RUNNER_TEMP}/shard-${SHARD_INDEX}.tgz"
+            tar -czf "${archive}" -C "$(dirname "${marker}")" "$(basename "${marker}")"
+            test -s "${archive}"
+            stat "${archive}"
+            exit 0
+          fi
           names=()
           for bundle in "${bundles[@]}"; do names+=("${bundle##*/}"); done
           archive="${RUNNER_TEMP}/shard-${SHARD_INDEX}.tgz"
@@ -289,7 +297,7 @@ jobs:
     needs: [plan, convert]
     if: >-
       always() && inputs.dry_run != true && needs.plan.result == 'success' &&
-      (needs.convert.result == 'success' || needs.convert.result == 'failure' || needs.convert.result == 'skipped')
+      (needs.convert.result == 'success' || needs.convert.result == 'failure')
     runs-on: ubuntu-latest
     timeout-minutes: 360
     strategy:
