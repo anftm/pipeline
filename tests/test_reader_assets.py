@@ -26,7 +26,7 @@ class ReaderAssetContractTests(unittest.TestCase):
     def test_conversion_set_excludes_unsafe_or_native_media(self):
         self.assertEqual(
             set(reader_assets.CONVERTIBLE_EXTENSIONS),
-            {"doc", "docx", "htm", "html", "mobi", "azw3", "fb2", "odt", "rtf", "chm", "tif", "tiff", "djvu",
+            {"doc", "docx", "epub", "htm", "html", "mobi", "azw3", "fb2", "odt", "rtf", "chm", "tif", "tiff", "djvu",
              "ppt", "pptx", "pps", "odp", "xls", "xlsx", "csv", "ods", "wps", "mht", "mhtml", "ps", "caj", "kdh",
              "ape", "wma", "amr", "flv", "f4v", "rm", "rmvb", "mkv", "avi", "mpg",
              "mpeg", "mts", "ts", "wmv"},
@@ -98,7 +98,10 @@ class ReaderAssetContractTests(unittest.TestCase):
             ),
             reader_assets.LARGE_EPUB_PDF_CONTRACT,
         )
-        self.assertIsNone(reader_assets.source_conversion_contract("repo", "small.epub", "epub", 1))
+        self.assertEqual(
+            reader_assets.source_conversion_contract("repo", "small.epub", "epub", 1),
+            reader_assets.conversion_contract("epub"),
+        )
 
     def test_pdf_fallback_can_carry_epub_chapter_manifest(self):
         manifest = reader_assets.empty_manifest()
@@ -186,6 +189,20 @@ class ReaderAssetContractTests(unittest.TestCase):
             with patch.object(epub_chapters, "MAX_CHAPTER_RESOURCE_BYTES", 1), self.assertRaisesRegex(
                     ValueError, "resource budget"):
                 epub_chapters.build_bundle(epub, Path(root) / "bundle")
+
+    def test_chapter_bundle_can_publish_text_without_resources(self):
+        with tempfile.TemporaryDirectory() as root:
+            root, epub, output = Path(root), Path(root) / "book.epub", Path(root) / "bundle"
+            with zipfile.ZipFile(epub, "w") as archive:
+                archive.writestr("mimetype", "application/epub+zip")
+                archive.writestr("META-INF/container.xml", '<container><rootfiles><rootfile full-path="content.opf"/></rootfiles></container>')
+                archive.writestr("content.opf", '<package><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/><item id="image" href="image.png" media-type="image/png"/></manifest><spine><itemref idref="chapter"/></spine></package>')
+                archive.writestr("chapter.xhtml", '<html><body><p>这是章节正文内容，用于全文检索。</p><img src="image.png"/></body></html>')
+                archive.writestr("image.png", b"x" * 10)
+            manifest = epub_chapters.build_bundle(epub, output, include_resources=False)
+            self.assertTrue((output / "epub-search-index.json.gz").is_file())
+            self.assertFalse((output / "resources/image.png").exists())
+            self.assertNotIn("resources", manifest)
 
 
 class ScannerTests(unittest.TestCase):

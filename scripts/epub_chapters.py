@@ -61,7 +61,8 @@ def _chapter_text(document: str) -> str:
     return re.sub(r"\s+", " ", html.unescape(" ".join(parser.parts))).strip()
 
 
-def build_bundle(epub: Path, output: Path, *, fallback: str | None = None) -> dict:
+def build_bundle(epub: Path, output: Path, *, fallback: str | None = None,
+                 include_resources: bool = True) -> dict:
     """Write chapter files and return the validated manifest.
 
     The output directory contains only files intended for a dataset commit.
@@ -110,17 +111,18 @@ def build_bundle(epub: Path, output: Path, *, fallback: str | None = None) -> di
                 resources.add(posixpath.normpath(match.group(1)))
         if not chapters:
             raise ValueError("EPUB spine has no readable chapters")
-        resource_bytes = sum(archive.getinfo(resource).file_size for resource in resources)
-        if (len(resources) > MAX_CHAPTER_RESOURCES
-                or resource_bytes > MAX_CHAPTER_RESOURCE_BYTES):
-            raise ValueError("EPUB chapter bundle resource budget exceeded")
-        for resource in sorted(resources):
-            target = output / "resources" / resource
-            target.parent.mkdir(parents=True, exist_ok=True)
-            data = archive.read(resource)
-            if resource.lower().endswith(".css"):
-                data = sanitize_css(data.decode("utf-8", "replace")).encode("utf-8")
-            target.write_bytes(data)
+        if include_resources:
+            resource_bytes = sum(archive.getinfo(resource).file_size for resource in resources)
+            if (len(resources) > MAX_CHAPTER_RESOURCES
+                    or resource_bytes > MAX_CHAPTER_RESOURCE_BYTES):
+                raise ValueError("EPUB chapter bundle resource budget exceeded")
+            for resource in sorted(resources):
+                target = output / "resources" / resource
+                target.parent.mkdir(parents=True, exist_ok=True)
+                data = archive.read(resource)
+                if resource.lower().endswith(".css"):
+                    data = sanitize_css(data.decode("utf-8", "replace")).encode("utf-8")
+                target.write_bytes(data)
     search_data = canonical_json({"version": 1, "kind": "epub-search-index", "chapters": search_chapters})
     search_bytes = gzip.compress(search_data, mtime=0)
     search_target = output / "epub-search-index.json.gz"

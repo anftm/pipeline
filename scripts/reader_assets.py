@@ -15,6 +15,7 @@ MANIFEST_NAME = "manifest.json"
 CONVERTIBLE_EXTENSIONS = {
     "doc": ("libreoffice-docx-v2", "docx", "document.docx"),
     "docx": ("docx-native-v2", "docx", "document.docx"),
+    "epub": ("calibre-epub-v5", "epub", "book.epub"),
     "htm": ("sanitized-html-v5", "html", "document.html"),
     "html": ("sanitized-html-v5", "html", "document.html"),
     "mobi": ("calibre-epub-v4", "epub", "book.epub"),
@@ -59,7 +60,7 @@ PROTECTED_PDF_CONTRACT = ("qpdf-decrypted-v1", "pdf", "document.pdf")
 LARGE_DOCX_BYTES = 64 * 1024 * 1024
 LARGE_DOCX_PDF_CONTRACT = ("libreoffice-pdf-docx-linearized-v1", "pdf", "document.pdf")
 LARGE_EPUB_BYTES = 64 * 1024 * 1024
-LARGE_EPUB_PDF_CONTRACT = ("calibre-pdf-epub-linearized-v2", "pdf", "document.pdf")
+LARGE_EPUB_PDF_CONTRACT = ("calibre-pdf-epub-linearized-v3", "pdf", "document.pdf")
 PASSWORD_RE = re.compile(
     r"(?:密码|口令|password|passwd)\s*(?:[：:=]\s*|(?=[A-Za-z0-9]))"
     r"([^\s\]〕】）)},，；;]+)",
