@@ -15,15 +15,15 @@ MANIFEST_NAME = "manifest.json"
 CONVERTIBLE_EXTENSIONS = {
     "doc": ("libreoffice-docx-v2", "docx", "document.docx"),
     "docx": ("docx-native-v2", "docx", "document.docx"),
-    "epub": ("calibre-epub-v5", "epub", "book.epub"),
+    "epub": ("foliate-original-v1", "foliate", "document.epub"),
     "htm": ("sanitized-html-v5", "html", "document.html"),
     "html": ("sanitized-html-v5", "html", "document.html"),
-    "mobi": ("calibre-epub-v4", "epub", "book.epub"),
-    "azw3": ("calibre-epub-v4", "epub", "book.epub"),
-    "fb2": ("calibre-epub-v4", "epub", "book.epub"),
-    "odt": ("calibre-epub-v4", "epub", "book.epub"),
-    "rtf": ("calibre-rtf-epub-v5", "epub", "book.epub"),
-    "chm": ("calibre-chm-epub-v6", "epub", "book.epub"),
+    "mobi": ("foliate-original-v1", "foliate", "document.mobi"),
+    "azw3": ("foliate-original-v1", "foliate", "document.azw3"),
+    "fb2": ("foliate-original-v1", "foliate", "document.fb2"),
+    "odt": ("calibre-odt-html-v1", "html", "document.html"),
+    "rtf": ("calibre-rtf-html-v1", "html", "document.html"),
+    "chm": ("calibre-chm-html-v1", "html", "document.html"),
     "tif": ("pillow-pdf-v2", "pdf", "document.pdf"),
     "tiff": ("pillow-pdf-v2", "pdf", "document.pdf"),
     "djvu": ("djvulibre-pdf-v2", "pdf", "document.pdf"),
@@ -60,7 +60,7 @@ PROTECTED_PDF_CONTRACT = ("qpdf-decrypted-v1", "pdf", "document.pdf")
 LARGE_DOCX_BYTES = 64 * 1024 * 1024
 LARGE_DOCX_PDF_CONTRACT = ("libreoffice-pdf-docx-linearized-v1", "pdf", "document.pdf")
 LARGE_EPUB_BYTES = 64 * 1024 * 1024
-LARGE_EPUB_PDF_CONTRACT = ("calibre-pdf-epub-linearized-v3", "pdf", "document.pdf")
+LARGE_EPUB_PDF_CONTRACT = ("calibre-pdf-epub-linearized-v4", "pdf", "document.pdf")
 PASSWORD_RE = re.compile(
     r"(?:密码|口令|password|passwd)\s*(?:[：:=]\s*|(?=[A-Za-z0-9]))"
     r"([^\s\]〕】）)},，；;]+)",
@@ -179,9 +179,9 @@ def validate_manifest(manifest: dict) -> dict:
                     validate_object_path(entry[field])
             if "chapter_manifest" in entry and not entry["chapter_manifest"].endswith("/chapter-manifest.json"):
                 raise ValueError("invalid chapter manifest path")
-            if "chapter_manifest" in entry and entry.get("reader_mode") not in {"epub", "pdf"}:
+            if "chapter_manifest" in entry and entry.get("reader_mode") not in {"epub", "foliate", "pdf"}:
                 raise ValueError("chapter manifest requires EPUB or PDF reader mode")
-            if "reader_mode" in entry and entry.get("reader_mode") not in {"pdf", "epub", "docx", "html", "audio", "video"}:
+            if "reader_mode" in entry and entry.get("reader_mode") not in {"pdf", "epub", "foliate", "docx", "html", "audio", "video"}:
                 raise ValueError("reader manifest ready entry has invalid reader mode")
             if "bytes" in entry and (not isinstance(entry.get("bytes"), int) or entry["bytes"] <= 0):
                 raise ValueError("reader manifest ready entry has invalid byte count")

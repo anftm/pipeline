@@ -698,6 +698,21 @@ def convert_chm(source: Path, target: Path, work: Path) -> None:
     validate_chm_epub(target)
 
 
+def convert_chm_to_html(source: Path, target: Path, work: Path) -> None:
+    """Convert CHM to a single sanitized HTML document for browser reading."""
+    try:
+        run_checked(
+            ["ebook-convert", str(source), str(target), "--flow-size", "0"],
+            timeout_seconds=CHM_COMMAND_TIMEOUT_SECONDS,
+        )
+        target.write_text(sanitize_html(target.read_text(encoding="utf-8", errors="replace")), encoding="utf-8")
+        validate_html_content(target)
+        return
+    except (RuntimeError, FileNotFoundError, UnicodeError) as exc:
+        initial_error = exc
+    raise initial_error
+
+
 def detect_caj_family(source: Path) -> str:
     header = source.read_bytes()[:16]
     if header.startswith(b"%PDF-"):
@@ -930,6 +945,8 @@ def validate_reader_content(path: Path, item: dict, work: Path) -> None:
         validate_docx_content(path)
     elif mode == "html":
         validate_html_content(path)
+    elif mode == "foliate" and path.stat().st_size == 0:
+        raise RuntimeError("original Foliate asset is empty")
 
 
 def convert_file(item: dict, source: Path, target: Path, work: Path) -> None:
@@ -1008,9 +1025,14 @@ def convert_file(item: dict, source: Path, target: Path, work: Path) -> None:
                 shutil.move(produced, target)
             else:
                 raise
+    elif ext in {"epub", "mobi", "azw3", "fb2"} and item.get("reader_mode") == "foliate":
+        shutil.copyfile(source, target)
     elif ext == "epub" and item.get("reader_mode") == "pdf":
         convert_large_epub_to_pdf(source, target, work)
-    elif ext in {"mobi", "azw3", "fb2", "odt"}:
+    elif ext == "odt":
+        run_checked(["ebook-convert", str(source), str(target), "--flow-size", "0"])
+        target.write_text(sanitize_html(target.read_text(encoding="utf-8", errors="replace")), encoding="utf-8")
+    elif ext in {"mobi", "azw3", "fb2"}:
         run_checked(["ebook-convert", str(source), str(target), "--flow-size", "0"])
     elif ext == "rtf":
         try:
@@ -1026,9 +1048,10 @@ def convert_file(item: dict, source: Path, target: Path, work: Path) -> None:
             html_source = intermediate / f"{source.stem}.html"
             if not html_source.is_file():
                 raise RuntimeError("LibreOffice produced no HTML from RTF")
-            run_checked(["ebook-convert", str(html_source), str(target), "--flow-size", "0"])
+            shutil.copyfile(html_source, target)
+        target.write_text(sanitize_html(target.read_text(encoding="utf-8", errors="replace")), encoding="utf-8")
     elif ext == "chm":
-        convert_chm(source, target, work)
+        convert_chm_to_html(source, target, work)
     elif ext in {"tif", "tiff"}:
         convert_tiff(source, target, work)
     elif ext == "djvu":
@@ -1131,21 +1154,15 @@ def convert_large_docx_to_pdf(source: Path, target: Path, work: Path) -> None:
 
 
 def convert_large_epub_to_pdf(source: Path, target: Path, work: Path) -> None:
-    """Create a linearized PDF so PDF.js can show the first page via Range."""
+    """Create a linearized PDF fallback for EPUBs too large for browser EPUB rendering."""
     output_dir = work / "large-epub-calibre"
     output_dir.mkdir()
-    run_checked(
-        ["ebook-convert", str(source), str(output_dir / "converted.pdf")],
-        timeout_seconds=EPUB_COMMAND_TIMEOUT_SECONDS,
-    )
     produced = output_dir / "converted.pdf"
+    run_checked(["ebook-convert", str(source), str(produced)], timeout_seconds=EPUB_COMMAND_TIMEOUT_SECONDS)
     if not produced.is_file():
         raise RuntimeError("Calibre produced no PDF from large EPUB")
     linearized = work / "large-epub-linearized.pdf"
-    run_checked(
-        ["qpdf", "--linearize", str(produced), str(linearized)],
-        timeout_seconds=EPUB_COMMAND_TIMEOUT_SECONDS,
-    )
+    run_checked(["qpdf", "--linearize", str(produced), str(linearized)], timeout_seconds=EPUB_COMMAND_TIMEOUT_SECONDS)
     if not linearized.is_file():
         raise RuntimeError("qpdf produced no linearized EPUB PDF")
     shutil.move(linearized, target)
@@ -1164,6 +1181,8 @@ def validate_output(path: Path, reader_mode: str) -> None:
         with zipfile.ZipFile(path) as archive:
             if archive.read("mimetype") != b"application/epub+zip":
                 raise RuntimeError("conversion output is not an EPUB")
+    if reader_mode == "foliate" and path.stat().st_size == 0:
+        raise RuntimeError("conversion output is empty")
     if reader_mode == "docx":
         with zipfile.ZipFile(path) as archive:
             names = set(archive.namelist())
@@ -1275,8 +1294,6 @@ def convert_item(item: dict, bundle: Path, reusable: dict | None = None) -> dict
                     if target.stat().st_size != existing["bytes"]:
                         raise RuntimeError("reusable reader artifact size mismatch")
                     validate_output(target, item["reader_mode"])
-                    if item["extension"] == "chm":
-                        validate_chm_epub(target)
                     validate_reader_content(target, item, work)
                 else:
                     temporary = work / item["output_name"]
@@ -1284,8 +1301,8 @@ def convert_item(item: dict, bundle: Path, reusable: dict | None = None) -> dict
                     if item["reader_mode"] == "epub" and item["extension"] != "chm":
                         sanitize_chm_epub(temporary, work)
                     validate_output(temporary, item["reader_mode"])
-                    if item["extension"] == "chm":
-                        validate_chm_epub(temporary)
+                    if item["extension"] in {"odt", "rtf", "chm"}:
+                        validate_html_content(temporary)
                     if item["extension"] == "djvu":
                         validate_djvu_pdf(temporary, work)
                     if item["extension"] in {"doc", "docx", "htm", "html", "ppt", "pptx", "pps", "odp", "xls", "xlsx", "csv", "ods", "wps"} and item["reader_mode"] == "pdf":

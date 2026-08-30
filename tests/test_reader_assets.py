@@ -47,12 +47,13 @@ class ReaderAssetContractTests(unittest.TestCase):
             "docx": ("docx-native-v2", "docx", "document.docx"),
             "htm": ("sanitized-html-v5", "html", "document.html"),
             "html": ("sanitized-html-v5", "html", "document.html"),
-            "mobi": ("calibre-epub-v4", "epub", "book.epub"),
-            "azw3": ("calibre-epub-v4", "epub", "book.epub"),
-            "fb2": ("calibre-epub-v4", "epub", "book.epub"),
-            "odt": ("calibre-epub-v4", "epub", "book.epub"),
-            "rtf": ("calibre-rtf-epub-v5", "epub", "book.epub"),
-            "chm": ("calibre-chm-epub-v6", "epub", "book.epub"),
+            "epub": ("foliate-original-v1", "foliate", "document.epub"),
+            "mobi": ("foliate-original-v1", "foliate", "document.mobi"),
+            "azw3": ("foliate-original-v1", "foliate", "document.azw3"),
+            "fb2": ("foliate-original-v1", "foliate", "document.fb2"),
+            "odt": ("calibre-odt-html-v1", "html", "document.html"),
+            "rtf": ("calibre-rtf-html-v1", "html", "document.html"),
+            "chm": ("calibre-chm-html-v1", "html", "document.html"),
             "tif": ("pillow-pdf-v2", "pdf", "document.pdf"),
             "tiff": ("pillow-pdf-v2", "pdf", "document.pdf"),
             "djvu": ("djvulibre-pdf-v2", "pdf", "document.pdf"),
@@ -91,12 +92,14 @@ class ReaderAssetContractTests(unittest.TestCase):
             reader_assets.conversion_contract("docx"),
         )
 
-    def test_large_epub_uses_lazy_pdf_contract(self):
+    def test_large_epub_uses_pdf_fallback_contract(self):
         self.assertEqual(
-            reader_assets.source_conversion_contract(
-                "repo", "large.epub", "epub", reader_assets.LARGE_EPUB_BYTES,
-            ),
+            reader_assets.source_conversion_contract("repo", "large.epub", "epub", 64 * 1024 * 1024),
             reader_assets.LARGE_EPUB_PDF_CONTRACT,
+        )
+        self.assertEqual(
+            reader_assets.source_conversion_contract("repo", "small.epub", "epub", 1),
+            reader_assets.conversion_contract("epub"),
         )
         self.assertEqual(
             reader_assets.source_conversion_contract("repo", "small.epub", "epub", 1),
@@ -520,19 +523,20 @@ class ConverterTests(unittest.TestCase):
             self.assertIn("libx264", command)
             self.assertIn("aac", command)
 
-    def test_calibre_office_book_conversion_uses_epub_output(self):
+    def test_calibre_office_book_conversion_uses_html_output(self):
         with tempfile.TemporaryDirectory() as root:
             work = Path(root)
-            source, target = work / "source.odt", work / "book.epub"
+            source, target = work / "source.odt", work / "document.html"
             source.write_bytes(b"office book")
-            with patch.object(convert_reader_assets, "run_checked") as run:
+            with patch.object(convert_reader_assets, "run_checked") as run, patch.object(
+                    convert_reader_assets.Path, "read_text", return_value="<p>body</p>"):
                 convert_reader_assets.convert_file({"extension": "odt"}, source, target, work)
             self.assertEqual(run.call_args.args[0], ["ebook-convert", str(source), str(target), "--flow-size", "0"])
 
     def test_rtf_falls_back_to_libreoffice_html_before_calibre(self):
         with tempfile.TemporaryDirectory() as root:
             work = Path(root)
-            source, target = work / "source.rtf", work / "book.epub"
+            source, target = work / "source.rtf", work / "document.html"
             source.write_bytes(b"rtf")
             calls = []
             def fake_run(command, **_kwargs):
@@ -544,7 +548,7 @@ class ConverterTests(unittest.TestCase):
             with patch.object(convert_reader_assets, "download_source", return_value=("a" * 64, 100)), patch.object(
                     convert_reader_assets, "run_checked", side_effect=fake_run):
                 convert_reader_assets.convert_file({"extension": "rtf"}, source, target, work)
-            self.assertEqual([call[0] for call in calls], ["ebook-convert", "libreoffice", "ebook-convert"])
+            self.assertEqual([call[0] for call in calls], ["ebook-convert", "libreoffice"])
             self.assertEqual(calls[1][calls[1].index("--convert-to") + 1], "html")
 
     def test_ps_content_validation_renders_sample_pages(self):
@@ -686,34 +690,28 @@ aW1hZ2U=
         with patch.object(convert_reader_assets, "media_probe", return_value=video), self.assertRaises(RuntimeError):
             convert_reader_assets.validate_media_output(Path("video.mp4"), "video")
 
-    def test_mobi_conversion_keeps_large_unsplittable_flows(self):
+    def test_mobi_is_copied_for_foliate(self):
         with tempfile.TemporaryDirectory() as root:
             work = Path(root)
-            source, target = work / "source.mobi", work / "book.epub"
+            source, target = work / "source.mobi", work / "document.mobi"
             source.write_bytes(b"BOOKMOBI")
-            with patch.object(convert_reader_assets, "run_checked") as run:
-                convert_reader_assets.convert_file({"extension": "mobi"}, source, target, work)
-            self.assertEqual(run.call_args.args[0], [
-                "ebook-convert", str(source), str(target), "--flow-size", "0",
-            ])
+            convert_reader_assets.convert_file({"extension": "mobi", "reader_mode": "foliate"}, source, target, work)
+            self.assertEqual(target.read_bytes(), b"BOOKMOBI")
 
-    def test_azw3_conversion_uses_the_same_calibre_contract(self):
+    def test_azw3_is_copied_for_foliate(self):
         with tempfile.TemporaryDirectory() as root:
             work = Path(root)
-            source, target = work / "source.azw3", work / "book.epub"
+            source, target = work / "source.azw3", work / "document.azw3"
             source.write_bytes(b"BOOKAZW3")
-            with patch.object(convert_reader_assets, "run_checked") as run:
-                convert_reader_assets.convert_file({"extension": "azw3"}, source, target, work)
-            self.assertEqual(run.call_args.args[0], [
-                "ebook-convert", str(source), str(target), "--flow-size", "0",
-            ])
+            convert_reader_assets.convert_file({"extension": "azw3", "reader_mode": "foliate"}, source, target, work)
+            self.assertEqual(target.read_bytes(), b"BOOKAZW3")
 
-    def test_chm_conversion_uses_calibre_epub_output(self):
+    def test_chm_conversion_uses_sanitized_html_output(self):
         with tempfile.TemporaryDirectory() as root:
             work = Path(root)
-            source, target = work / "source.chm", work / "book.epub"
+            source, target = work / "source.chm", work / "document.html"
             source.write_bytes(b"ITSF")
-            with patch.object(convert_reader_assets, "convert_chm") as conversion:
+            with patch.object(convert_reader_assets, "convert_chm_to_html") as conversion:
                 convert_reader_assets.convert_file({"extension": "chm"}, source, target, work)
             conversion.assert_called_once_with(source, target, work)
 
@@ -924,46 +922,28 @@ aW1hZ2U=
             with self.assertRaisesRegex(RuntimeError, "active content"):
                 convert_reader_assets.validate_chm_epub(epub)
 
-    def test_large_epub_conversion_uses_extended_timeout(self):
+    def test_large_epub_uses_linearized_pdf_fallback(self):
         with tempfile.TemporaryDirectory() as root:
             work = Path(root)
             source, target = work / "source.epub", work / "document.pdf"
             source.write_bytes(b"epub")
-
             def fake_run(command, **_kwargs):
                 if command[0] == "ebook-convert":
                     Path(command[2]).write_bytes(b"%PDF-calibre")
                 else:
                     Path(command[3]).write_bytes(b"%PDF-linearized")
-
             with patch.object(convert_reader_assets, "run_checked", side_effect=fake_run) as run:
-                convert_reader_assets.convert_file(
-                    {"extension": "epub", "reader_mode": "pdf"}, source, target, work,
-                )
-
+                convert_reader_assets.convert_file({"extension": "epub", "reader_mode": "pdf"}, source, target, work)
             self.assertEqual(target.read_bytes(), b"%PDF-linearized")
-            self.assertEqual(
-                [call.kwargs["timeout_seconds"] for call in run.call_args_list],
-                [convert_reader_assets.EPUB_COMMAND_TIMEOUT_SECONDS] * 2,
-            )
+            self.assertEqual(len(run.call_args_list), 2)
 
-    def test_large_epub_pdf_conversion_does_not_create_resource_bundle(self):
+    def test_small_epub_direct_copy_uses_foliate(self):
         with tempfile.TemporaryDirectory() as root:
             work = Path(root)
-            source, target = work / "source.epub", work / "document.pdf"
+            source, target = work / "source.epub", work / "document.epub"
             source.write_bytes(b"epub")
-
-            def fake_run(command, **_kwargs):
-                if command[0] == "ebook-convert":
-                    Path(command[2]).write_bytes(b"%PDF-calibre")
-                else:
-                    Path(command[3]).write_bytes(b"%PDF-linearized")
-
-            with patch.object(convert_reader_assets, "run_checked", side_effect=fake_run):
-                convert_reader_assets.convert_file(
-                    {"extension": "epub", "reader_mode": "pdf"}, source, target, work,
-                )
-            self.assertEqual(target.read_bytes(), b"%PDF-linearized")
+            convert_reader_assets.convert_file({"extension": "epub", "reader_mode": "foliate"}, source, target, work)
+            self.assertEqual(target.read_bytes(), b"epub")
 
     def test_validation_rejects_malformed_outputs_for_each_active_container(self):
         with tempfile.TemporaryDirectory() as root:
@@ -1025,32 +1005,13 @@ aW1hZ2U=
             self.assertEqual(target.read_bytes(), b"%PDF-linearized")
             self.assertEqual(run.call_args_list[-1].args[0][0:2], ["qpdf", "--linearize"])
 
-    def test_large_epub_conversion_linearizes_pdf(self):
+    def test_epub_conversion_does_not_linearize_pdf(self):
         with tempfile.TemporaryDirectory() as root:
             work = Path(root)
-            source, target = work / "source.epub", work / "document.pdf"
+            source, target = work / "source.epub", work / "document.epub"
             source.write_bytes(b"epub")
-
-            def fake_run(command, **_kwargs):
-                if command[0] == "ebook-convert":
-                    (work / "large-epub-calibre" / "converted.pdf").write_bytes(b"%PDF-calibre")
-                else:
-                    (work / "large-epub-linearized.pdf").write_bytes(b"%PDF-linearized")
-
-            with patch.object(convert_reader_assets, "run_checked", side_effect=fake_run) as run:
-                convert_reader_assets.convert_file(
-                    {"extension": "epub", "reader_mode": "pdf"}, source, target, work,
-                )
-            self.assertEqual(target.read_bytes(), b"%PDF-linearized")
-            self.assertEqual(run.call_args_list[-1].args[0][0:2], ["qpdf", "--linearize"])
-            self.assertEqual(
-                run.call_args_list[0].kwargs["timeout_seconds"],
-                convert_reader_assets.EPUB_COMMAND_TIMEOUT_SECONDS,
-            )
-            self.assertEqual(
-                run.call_args_list[-1].kwargs["timeout_seconds"],
-                convert_reader_assets.EPUB_COMMAND_TIMEOUT_SECONDS,
-            )
+            convert_reader_assets.convert_file({"extension": "epub", "reader_mode": "foliate"}, source, target, work)
+            self.assertEqual(target.read_bytes(), b"epub")
 
     def test_doc_and_docx_use_distinct_docx_profiles(self):
         self.assertEqual(reader_assets.conversion_contract("doc"), ("libreoffice-docx-v2", "docx", "document.docx"))
@@ -1982,7 +1943,9 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("inputs.checkpoint_batches || '30'", workflow)
         self.assertIn("python scripts/publish_reader_assets.py", workflow)
         self.assertIn("packages=(djvulibre-bin poppler-utils)", workflow)
-        self.assertIn("epub|mobi|azw3|fb2|odt) packages=(calibre qpdf)", workflow)
+        self.assertIn("epub) packages=(calibre qpdf)", workflow)
+        self.assertIn("mobi|azw3|fb2) packages=()", workflow)
+        self.assertIn("odt) packages=(calibre)", workflow)
         self.assertIn("rtf) packages=(calibre libreoffice", workflow)
         self.assertIn("chm) packages=(calibre p7zip-full)", workflow)
         self.assertIn("tif|tiff) packages=(poppler-utils)", workflow)

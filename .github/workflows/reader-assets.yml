@@ -199,7 +199,9 @@ jobs:
             pdf) packages=(qpdf poppler-utils) ;;
             doc|docx|ppt|pptx|pps|odp|xls|xlsx|csv|ods|wps) packages=(libreoffice qpdf fontconfig fonts-noto-cjk fonts-wqy-microhei ghostscript poppler-utils tesseract-ocr tesseract-ocr-chi-sim) ;;
             htm|html) packages=() ;;
-            epub|mobi|azw3|fb2|odt) packages=(calibre qpdf) ;;
+            epub) packages=(calibre qpdf) ;;
+            mobi|azw3|fb2) packages=() ;;
+            odt) packages=(calibre) ;;
             rtf) packages=(calibre libreoffice fontconfig fonts-noto-cjk fonts-wqy-microhei) ;;
             chm) packages=(calibre p7zip-full) ;;
             djvu) packages=(djvulibre-bin poppler-utils) ;;
