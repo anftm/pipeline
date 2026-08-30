@@ -346,11 +346,12 @@ class ScannerTests(unittest.TestCase):
             {"Repo": "VoiceOfML/Test", "File": "B", "Extension": "mobi", "Folder": [], "Size": 1},
             {"Repo": "VoiceOfML/Test", "File": "C", "Extension": "tif", "Folder": [], "Size": 1},
             {"Repo": "VoiceOfML/Test", "File": "D", "Extension": "djvu", "Folder": [], "Size": 1},
+            {"Repo": "VoiceOfML/Test", "File": "E 密码123", "Extension": "pdf", "Folder": [], "Size": 1},
         ]
         queue = scan_reader_assets.build_queue(
             records, self.revisions, reader_assets.empty_manifest(),
         )
-        self.assertEqual([item["extension"] for item in queue], ["tif", "mobi", "djvu", "doc"])
+        self.assertEqual([item["extension"] for item in queue], ["tif", "mobi", "djvu", "doc", "pdf"])
 
     def test_exact_path_filter_selects_one_asset(self):
         queue = scan_reader_assets.build_queue(
