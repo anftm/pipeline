@@ -1760,6 +1760,30 @@ class PublicationTests(unittest.TestCase):
             ["parent-1", "parent-2"],
         )
 
+    def test_transient_error_after_remote_commit_is_idempotent(self):
+        result = {
+            "key": "VoiceOfML/Test\0A/Book.docx", "status": "ready", "source_revision": "rev1",
+            "source_sha256": "a" * 64, "source_bytes": 10, "source_extension": "docx",
+            "profile": "libreoffice-pdf-v2", "reader_mode": "pdf", "path": "objects/aa/document.pdf",
+            "bytes": 12, "sha256": "b" * 64,
+        }
+        response = requests.Response()
+        response.status_code = 504
+        response.request = requests.Request("POST", "https://huggingface.co/api/datasets/vomebook/Test/commit/main").prepare()
+        api = Mock()
+        api.repo_info.side_effect = [Mock(sha="parent-1"), Mock(sha="parent-2")]
+        api.file_exists.return_value = True
+        with tempfile.TemporaryDirectory() as root:
+            bundle = self.make_bundle(root, result)
+            remote = Path(root) / "remote.json"
+            remote.write_text(json.dumps({"version": 1, "files": {result["key"]: result}}), encoding="utf-8")
+            api.hf_hub_download.return_value = str(remote)
+            api.create_commit.side_effect = HfHubHTTPError("gateway timeout", response=response)
+            with patch.object(publish_reader_assets.time, "sleep"):
+                _, count = publish_reader_assets.publish_bundle(api, "vomebook/Test", bundle)
+        self.assertEqual(count, 0)
+        self.assertEqual(api.create_commit.call_count, 1)
+
     def test_parent_retry_rejects_a_concurrent_change_to_the_same_key(self):
         key = "VoiceOfML/Test\0A/Book.docx"
         result = {

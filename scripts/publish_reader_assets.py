@@ -28,6 +28,24 @@ except ImportError:
 SIDECAR_NAME = "reader_assets.json.gz"
 
 
+def bundle_is_published(manifest: dict, data: dict) -> bool:
+    """Recognize a commit that succeeded remotely before its response timed out."""
+    entries = manifest.get("files", {})
+    for result in data.get("results", []):
+        key = result.get("key")
+        current = entries.get(key)
+        if not key or not current or current.get("status") != result.get("status"):
+            return False
+        if result.get("status") == "ready":
+            for field in ("source_revision", "source_sha256", "source_extension", "profile",
+                          "reader_mode", "path", "bytes", "sha256"):
+                if current.get(field) != result.get(field):
+                    return False
+        elif current.get("error") != result.get("error"):
+            return False
+    return bool(data.get("results"))
+
+
 def orphan_entry(entry: dict) -> dict:
     orphan = {field: entry[field] for field in (
         "source_sha256", "profile", "reader_mode", "path", "bytes", "sha256"
@@ -178,6 +196,8 @@ def publish_bundle(api: HfApi, repo_id: str, bundle: Path, *, max_attempts: int 
     for attempt in range(max_attempts):
         revision = api.repo_info(repo_id=repo_id, repo_type="dataset").sha
         current = remote_manifest(api, repo_id, revision)
+        if attempt and bundle_is_published(current, data):
+            return current, 0
         current_entries = {key: current["files"].get(key) for key in result_keys}
         if baseline is None:
             baseline = current_entries
