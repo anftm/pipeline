@@ -1109,6 +1109,9 @@ def convert_file(item: dict, source: Path, target: Path, work: Path) -> None:
     elif ext in {"tif", "tiff"}:
         convert_tiff(source, target, work)
     elif ext == "djvu":
+        if source.read_bytes()[:5] == b"%PDF-":
+            run_checked(["qpdf", "--linearize", str(source), str(target)], timeout_seconds=DJVU_COMMAND_TIMEOUT_SECONDS)
+            return
         last_error = None
         for attempt in range(2):
             try:
