@@ -52,7 +52,7 @@ def build_queue(records, revisions, manifest, *, repo="", extension="", exact_pa
             continue
         path = relative_path(record)
         if ext in {"htm", "html"} and any(
-                part.lower() == ".files" or part.lower().endswith("_files")
+                part.lower() == ".files" or part.lower().endswith(".files") or part.lower().endswith("_files")
                 for part in path.split("/")):
             continue
         contract = source_conversion_contract(source_repo, path, ext, int(record.get("Size") or 0))
@@ -112,7 +112,7 @@ def active_keys(records) -> list[str]:
         extension = str(record.get("Extension") or "").lower().lstrip(".")
         path = relative_path(record)
         if extension in {"htm", "html"} and any(
-                part.lower() == ".files" or part.lower().endswith("_files")
+                part.lower() == ".files" or part.lower().endswith(".files") or part.lower().endswith("_files")
                 for part in path.split("/")):
             continue
         if source_conversion_contract(repo, path, extension, int(record.get("Size") or 0)) is not None:
