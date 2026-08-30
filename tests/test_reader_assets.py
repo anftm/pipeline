@@ -1984,7 +1984,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("packages=(djvulibre-bin poppler-utils)", workflow)
         self.assertIn("epub) packages=(calibre qpdf)", workflow)
         self.assertIn("mobi|azw3|fb2) packages=()", workflow)
-        self.assertIn("odt) packages=(calibre)", workflow)
+        self.assertIn("odt) packages=(libreoffice)", workflow)
         self.assertIn("rtf) packages=(calibre libreoffice", workflow)
         self.assertIn("chm) packages=(calibre p7zip-full)", workflow)
         self.assertIn("tif|tiff) packages=(poppler-utils)", workflow)

@@ -201,7 +201,7 @@ jobs:
             htm|html) packages=() ;;
             epub) packages=(calibre qpdf) ;;
             mobi|azw3|fb2) packages=() ;;
-            odt) packages=(calibre) ;;
+            odt) packages=(libreoffice) ;;
             rtf) packages=(calibre libreoffice fontconfig fonts-noto-cjk fonts-wqy-microhei) ;;
             chm) packages=(calibre p7zip-full) ;;
             djvu) packages=(djvulibre-bin poppler-utils) ;;
