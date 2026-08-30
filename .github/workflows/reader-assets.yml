@@ -52,7 +52,7 @@ on:
         type: string
 
 concurrency:
-  group: reader-assets
+  group: reader-assets-${{ inputs.extension || 'auto' }}
   cancel-in-progress: false
 
 jobs:
