@@ -268,6 +268,50 @@ def inline_html_resources(source: Path, source_url: str, work: Path) -> Path:
     return output
 
 
+def inline_local_html_resources(document: str, root: Path, base: Path) -> str:
+    """Inline local images and stylesheets before sanitizing a generated HTML file."""
+    cache = {}
+
+    def resource(raw: str, *, css: bool = False) -> str | None:
+        value = html.unescape(raw).strip().split("#", 1)[0]
+        if not value or re.match(r"^(?:data:|https?:|//|#|javascript:)", value, re.IGNORECASE):
+            return None
+        path = (base / urllib.parse.unquote(value)).resolve()
+        try:
+            path.relative_to(root.resolve())
+        except ValueError:
+            return None
+        if not path.is_file() or path.stat().st_size > MAX_HTML_RESOURCE_BYTES:
+            return None
+        key = str(path)
+        if key not in cache:
+            data = path.read_bytes()
+            if css:
+                cache[key] = f"<style>{sanitize_css(data.decode('utf-8', 'replace'))}</style>"
+            else:
+                mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+                if mime not in {"image/gif", "image/jpeg", "image/png", "image/webp", "image/svg+xml"}:
+                    return None
+                cache[key] = f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
+        return cache[key]
+
+    def image(match):
+        value = resource(match.group(2))
+        return match.group(1) + (value or match.group(2)) + match.group(3)
+
+    document = re.sub(r"(\b(?:src|data-src|poster)\s*=\s*[\"'])([^\"']+)([\"'])", image, document, flags=re.IGNORECASE)
+
+    def stylesheet(match):
+        value = resource(match.group(2), css=True)
+        return value or ""
+
+    document = re.sub(
+        r"<link\b[^>]*\brel\s*=\s*[\"']stylesheet[\"'][^>]*\bhref\s*=\s*([\"'])([^\"']+)\1[^>]*>\s*",
+        stylesheet, document, flags=re.IGNORECASE,
+    )
+    return sanitize_html(document)
+
+
 def download_existing(url: str, target: Path, expected_sha256: str) -> None:
     temporary = target.with_name(f".{target.name}.download")
     try:
@@ -709,13 +753,13 @@ def convert_chm_to_html(source: Path, target: Path, work: Path) -> None:
     run_checked(["7z", "x", "-y", f"-o{extracted}", str(source)], timeout_seconds=CHM_COMMAND_TIMEOUT_SECONDS)
     pages = sorted(path for path in extracted.rglob("*") if path.is_file() and path.suffix.lower() in {".htm", ".html"})
     mhtml = sorted(path for path in extracted.rglob("*") if path.is_file() and path.suffix.lower() in {".mht", ".mhtml"})
-    documents = [sanitize_html(path.read_text(encoding="utf-8", errors="replace")) for path in pages]
+    documents = [inline_local_html_resources(path.read_text(encoding="utf-8", errors="replace"), extracted, path.parent) for path in pages]
     for index, path in enumerate(mhtml):
         if path.stat().st_size > MAX_MHTML_SOURCE_BYTES:
             raise RuntimeError("CHM MHTML source exceeds size limit")
         converted = work / f"chm-mhtml-{index:04d}.html"
         mhtml_to_html(path, converted)
-        documents.append(sanitize_html(converted.read_text(encoding="utf-8", errors="replace")))
+        documents.append(converted.read_text(encoding="utf-8", errors="replace"))
     if not documents:
         raise RuntimeError("CHM contains no HTML pages")
     body = "".join(f"<section><h1>第 {index} 页</h1>{document}</section>" for index, document in enumerate(documents, 1))
@@ -1040,26 +1084,26 @@ def convert_file(item: dict, source: Path, target: Path, work: Path) -> None:
     elif ext == "epub" and item.get("reader_mode") == "pdf":
         convert_large_epub_to_pdf(source, target, work)
     elif ext == "odt":
-        run_checked(["ebook-convert", str(source), str(target), "--flow-size", "0"])
-        target.write_text(sanitize_html(target.read_text(encoding="utf-8", errors="replace")), encoding="utf-8")
+        output = work / "odt-html"
+        output.mkdir()
+        run_checked(["libreoffice", "--headless", f"-env:UserInstallation={office_profile}", "--convert-to", "html", "--outdir", str(output), str(source)])
+        generated = output / f"{source.stem}.html"
+        if not generated.is_file():
+            raise RuntimeError("LibreOffice produced no HTML from ODT")
+        target.write_text(inline_local_html_resources(generated.read_text(encoding="utf-8", errors="replace"), output, output), encoding="utf-8")
     elif ext in {"mobi", "azw3", "fb2"}:
         run_checked(["ebook-convert", str(source), str(target), "--flow-size", "0"])
     elif ext == "rtf":
-        try:
-            run_checked(["ebook-convert", str(source), str(target), "--flow-size", "0"])
-        except ReaderConversionCommandError:
-            target.unlink(missing_ok=True)
-            intermediate = work / "rtf-html"
-            intermediate.mkdir()
-            run_checked([
-                "libreoffice", "--headless", f"-env:UserInstallation={office_profile}",
-                "--convert-to", "html", "--outdir", str(intermediate), str(source),
-            ])
-            html_source = intermediate / f"{source.stem}.html"
-            if not html_source.is_file():
-                raise RuntimeError("LibreOffice produced no HTML from RTF")
-            shutil.copyfile(html_source, target)
-        target.write_text(sanitize_html(target.read_text(encoding="utf-8", errors="replace")), encoding="utf-8")
+        intermediate = work / "rtf-html"
+        intermediate.mkdir()
+        run_checked([
+            "libreoffice", "--headless", f"-env:UserInstallation={office_profile}",
+            "--convert-to", "html", "--outdir", str(intermediate), str(source),
+        ])
+        html_source = intermediate / f"{source.stem}.html"
+        if not html_source.is_file():
+            raise RuntimeError("LibreOffice produced no HTML from RTF")
+        target.write_text(inline_local_html_resources(html_source.read_text(encoding="utf-8", errors="replace"), intermediate, intermediate), encoding="utf-8")
     elif ext == "chm":
         convert_chm_to_html(source, target, work)
     elif ext in {"tif", "tiff"}:

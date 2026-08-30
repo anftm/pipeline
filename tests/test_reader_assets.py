@@ -528,10 +528,12 @@ class ConverterTests(unittest.TestCase):
             work = Path(root)
             source, target = work / "source.odt", work / "document.html"
             source.write_bytes(b"office book")
-            with patch.object(convert_reader_assets, "run_checked") as run, patch.object(
-                    convert_reader_assets.Path, "read_text", return_value="<p>body</p>"):
+            def fake_run(command, **_kwargs):
+                if command[0] == "libreoffice":
+                    (work / "odt-html" / "source.html").write_text("<p>body</p>", encoding="utf-8")
+            with patch.object(convert_reader_assets, "run_checked", side_effect=fake_run) as run:
                 convert_reader_assets.convert_file({"extension": "odt"}, source, target, work)
-            self.assertEqual(run.call_args.args[0], ["ebook-convert", str(source), str(target), "--flow-size", "0"])
+            self.assertEqual(run.call_args.args[0][0:2], ["libreoffice", "--headless"])
 
     def test_rtf_falls_back_to_libreoffice_html_before_calibre(self):
         with tempfile.TemporaryDirectory() as root:
@@ -548,8 +550,8 @@ class ConverterTests(unittest.TestCase):
             with patch.object(convert_reader_assets, "download_source", return_value=("a" * 64, 100)), patch.object(
                     convert_reader_assets, "run_checked", side_effect=fake_run):
                 convert_reader_assets.convert_file({"extension": "rtf"}, source, target, work)
-            self.assertEqual([call[0] for call in calls], ["ebook-convert", "libreoffice"])
-            self.assertEqual(calls[1][calls[1].index("--convert-to") + 1], "html")
+            self.assertEqual([call[0] for call in calls], ["libreoffice"])
+            self.assertEqual(calls[0][calls[0].index("--convert-to") + 1], "html")
 
     def test_ps_content_validation_renders_sample_pages(self):
         with patch.object(convert_reader_assets, "validate_pdf_content") as validate:
@@ -1030,6 +1032,19 @@ aW1hZ2U=
 
             convert_reader_assets.convert_file({"extension": "html"}, source, target, work)
             self.assertEqual(target.read_text(encoding="utf-8"), "text")
+
+    def test_generated_html_inlines_local_images_and_stylesheets(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            (root / "image.png").write_bytes(b"png")
+            (root / "style.css").write_text("p { color: red; }", encoding="utf-8")
+            result = convert_reader_assets.inline_local_html_resources(
+                '<link rel="stylesheet" href="style.css"><p><img src="image.png">正文</p>',
+                root, root,
+            )
+            self.assertIn("data:image/png;base64", result)
+            self.assertIn("color: red", result)
+            self.assertNotIn('href="style.css"', result)
 
     def test_html_conversion_removes_active_and_remote_content(self):
         with tempfile.TemporaryDirectory() as root:
