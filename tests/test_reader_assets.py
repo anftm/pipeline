@@ -2002,6 +2002,7 @@ class WorkflowContractTests(unittest.TestCase):
         convert_section, publish_section = workflow.split("\n  publish:\n", 1)
         self.assertNotIn("publish_reader_assets.py", convert_section.split("\n  convert:\n", 1)[1])
         self.assertIn('python scripts/publish_reader_assets.py --bundle "${bundle}"', publish_section)
+        self.assertIn("timeout-minutes: 360", publish_section)
 
     def test_prune_workflow_uses_shared_concurrency_and_bounded_grace(self):
         workflow = Path(".github/workflows/prune-reader-assets.yml").read_text(encoding="utf-8")
