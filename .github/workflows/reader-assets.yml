@@ -254,6 +254,8 @@ jobs:
           echo "Shard ${SHARD_INDEX}: ${count} ${EXTENSION} asset(s)"
           bundle="output/reader-assets/bundle-${SHARD_INDEX}-1"
           conversion_status=0
+          # The plan already contains the complete shard queue. Re-scanning the
+          # remote manifest here makes every shard race on the same HF request.
           python scripts/convert_reader_assets.py --queue "${queue}" --bundle "${bundle}" || conversion_status=$?
           if ((conversion_status != 0)); then
             echo "All conversions in this batch failed; failure state was bundled" >&2
@@ -290,6 +292,11 @@ jobs:
       (needs.convert.result == 'success' || needs.convert.result == 'failure' || needs.convert.result == 'skipped')
     runs-on: ubuntu-latest
     timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -297,32 +304,27 @@ jobs:
           python-version: "3.11"
       - name: Install Python dependencies
         run: pip install -r scripts/requirements.txt
-      - uses: actions/download-artifact@v8
+      - name: Download shard ${{ matrix.shard }}
+        uses: actions/download-artifact@v8
         with:
-          pattern: reader-assets-bundles-*
+          name: reader-assets-bundles-${{ matrix.shard }}
           path: output/reader-assets/bundles
-        continue-on-error: true
-      - name: Publish conversion bundles serially
+      - name: Publish shard ${{ matrix.shard }}
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           READER_ASSETS_REPO: vomebook/Reader-Assets
           HF_HUB_DISABLE_XET: "1"
         run: |
           shopt -s nullglob
-          archives=(output/reader-assets/bundles/*.tgz output/reader-assets/bundles/*/*.tgz)
-          if ((${#archives[@]} == 0)); then
-            echo "No Reader Asset bundle archives remain to publish"
-            exit 0
-          fi
-          mkdir -p output/reader-assets/published-bundles
-          for archive in "${archives[@]}"; do
-            destination="output/reader-assets/published-bundles/$(basename "${archive%.tgz}")"
+          for archive in output/reader-assets/bundles/*.tgz output/reader-assets/bundles/*/*.tgz; do
+            [[ -f "${archive}" ]] || continue
+            destination="${RUNNER_TEMP}/published-$(basename "${archive%.tgz}")"
             mkdir -p "${destination}"
             tar -xzf "${archive}" -C "${destination}"
-          done
-          bundles=(output/reader-assets/published-bundles/*/bundle-*)
-          for bundle in "${bundles[@]}"; do
-            python scripts/publish_reader_assets.py --bundle "${bundle}"
+            for bundle in "${destination}"/bundle-*; do
+              python scripts/publish_reader_assets.py --bundle "${bundle}"
+            done
+            rm -rf "${destination}" "${archive}"
           done
 
   finalize:
