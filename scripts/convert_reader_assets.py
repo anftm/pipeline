@@ -699,18 +699,28 @@ def convert_chm(source: Path, target: Path, work: Path) -> None:
 
 
 def convert_chm_to_html(source: Path, target: Path, work: Path) -> None:
-    """Convert CHM to a single sanitized HTML document for browser reading."""
-    try:
-        run_checked(
-            ["ebook-convert", str(source), str(target), "--flow-size", "0"],
-            timeout_seconds=CHM_COMMAND_TIMEOUT_SECONDS,
-        )
-        target.write_text(sanitize_html(target.read_text(encoding="utf-8", errors="replace")), encoding="utf-8")
-        validate_html_content(target)
-        return
-    except (RuntimeError, FileNotFoundError, UnicodeError) as exc:
-        initial_error = exc
-    raise initial_error
+    """Extract CHM pages and merge their sanitized text into one HTML document."""
+    listing = command_output(["7z", "l", "-slt", str(source)], timeout_seconds=CHM_COMMAND_TIMEOUT_SECONDS)
+    expanded_size = sum(int(value) for value in re.findall(r"^Size = (\d+)\s*$", listing, re.MULTILINE))
+    member_count = len(re.findall(r"^Path = ", listing, re.MULTILINE))
+    if expanded_size > MAX_CHM_EXPANDED_BYTES or member_count > MAX_EPUB_MEMBERS:
+        raise RuntimeError("CHM expanded content exceeds limits")
+    extracted = work / "chm-html"
+    run_checked(["7z", "x", "-y", f"-o{extracted}", str(source)], timeout_seconds=CHM_COMMAND_TIMEOUT_SECONDS)
+    pages = sorted(path for path in extracted.rglob("*") if path.is_file() and path.suffix.lower() in {".htm", ".html"})
+    mhtml = sorted(path for path in extracted.rglob("*") if path.is_file() and path.suffix.lower() in {".mht", ".mhtml"})
+    documents = [sanitize_html(path.read_text(encoding="utf-8", errors="replace")) for path in pages]
+    for index, path in enumerate(mhtml):
+        if path.stat().st_size > MAX_MHTML_SOURCE_BYTES:
+            raise RuntimeError("CHM MHTML source exceeds size limit")
+        converted = work / f"chm-mhtml-{index:04d}.html"
+        mhtml_to_html(path, converted)
+        documents.append(sanitize_html(converted.read_text(encoding="utf-8", errors="replace")))
+    if not documents:
+        raise RuntimeError("CHM contains no HTML pages")
+    body = "".join(f"<section><h1>第 {index} 页</h1>{document}</section>" for index, document in enumerate(documents, 1))
+    target.write_text(f"<!doctype html><meta charset=\"utf-8\"><main>{body}</main>", encoding="utf-8")
+    validate_html_content(target)
 
 
 def detect_caj_family(source: Path) -> str:
