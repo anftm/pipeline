@@ -281,7 +281,10 @@ def inline_local_html_resources(document: str, root: Path, base: Path) -> str:
             path.relative_to(root.resolve())
         except ValueError:
             return None
-        if not path.is_file() or path.stat().st_size > MAX_HTML_RESOURCE_BYTES:
+        try:
+            if not path.is_file() or path.stat().st_size > MAX_HTML_RESOURCE_BYTES:
+                return None
+        except OSError:
             return None
         key = str(path)
         if key not in cache:
@@ -744,16 +747,32 @@ def convert_chm(source: Path, target: Path, work: Path) -> None:
 
 def convert_chm_to_html(source: Path, target: Path, work: Path) -> None:
     """Extract CHM pages and merge their sanitized text into one HTML document."""
-    listing = command_output(["7z", "l", "-slt", str(source)], timeout_seconds=CHM_COMMAND_TIMEOUT_SECONDS)
+    try:
+        listing = command_output(["7z", "l", "-slt", str(source)], timeout_seconds=CHM_COMMAND_TIMEOUT_SECONDS)
+    except ReaderConversionCommandError:
+        # 7z can list the readable portion of a damaged CHM only with a
+        # non-zero status; extraction below still recovers its HTML pages.
+        listing = ""
     expanded_size = sum(int(value) for value in re.findall(r"^Size = (\d+)\s*$", listing, re.MULTILINE))
     member_count = len(re.findall(r"^Path = ", listing, re.MULTILINE))
     if expanded_size > MAX_CHM_EXPANDED_BYTES or member_count > MAX_EPUB_MEMBERS:
         raise RuntimeError("CHM expanded content exceeds limits")
     extracted = work / "chm-html"
-    run_checked(["7z", "x", "-y", f"-o{extracted}", str(source)], timeout_seconds=CHM_COMMAND_TIMEOUT_SECONDS)
+    try:
+        run_checked(["7z", "x", "-y", f"-o{extracted}", str(source)], timeout_seconds=CHM_COMMAND_TIMEOUT_SECONDS)
+    except (ReaderConversionCommandError, ReaderConversionTimeout, OSError):
+        # Some CHMs contain corrupt or overlong image names. Preserve their
+        # readable pages already extracted before the error.
+        if not extracted.is_dir():
+            extracted.mkdir()
     pages = sorted(path for path in extracted.rglob("*") if path.is_file() and path.suffix.lower() in {".htm", ".html"})
+    text_pages = sorted(path for path in extracted.rglob("*") if path.is_file() and path.suffix.lower() == ".txt")
     mhtml = sorted(path for path in extracted.rglob("*") if path.is_file() and path.suffix.lower() in {".mht", ".mhtml"})
     documents = [inline_local_html_resources(path.read_text(encoding="utf-8", errors="replace"), extracted, path.parent) for path in pages]
+    documents.extend(
+        f"<pre>{html.escape(path.read_text(encoding='utf-8', errors='replace'))}</pre>"
+        for path in text_pages
+    )
     for index, path in enumerate(mhtml):
         if path.stat().st_size > MAX_MHTML_SOURCE_BYTES:
             raise RuntimeError("CHM MHTML source exceeds size limit")
