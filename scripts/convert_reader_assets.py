@@ -771,9 +771,9 @@ def convert_chm_to_html(source: Path, target: Path, work: Path) -> None:
     pages = sorted(path for path in extracted.rglob("*") if path.is_file() and path.suffix.lower() in {".htm", ".html"})
     text_pages = sorted(path for path in extracted.rglob("*") if path.is_file() and path.suffix.lower() == ".txt")
     mhtml = sorted(path for path in extracted.rglob("*") if path.is_file() and path.suffix.lower() in {".mht", ".mhtml"})
-    documents = [inline_local_html_resources(path.read_text(encoding="utf-8", errors="replace"), extracted, path.parent) for path in pages]
+    documents = [inline_local_html_resources(decode_html_source(path), extracted, path.parent) for path in pages]
     documents.extend(
-        f"<pre>{html.escape(path.read_text(encoding='utf-8', errors='replace'))}</pre>"
+        f"<pre>{html.escape(decode_html_source(path))}</pre>"
         for path in text_pages
     )
     for index, path in enumerate(mhtml):
@@ -781,7 +781,7 @@ def convert_chm_to_html(source: Path, target: Path, work: Path) -> None:
             raise RuntimeError("CHM MHTML source exceeds size limit")
         converted = work / f"chm-mhtml-{index:04d}.html"
         mhtml_to_html(path, converted)
-        documents.append(converted.read_text(encoding="utf-8", errors="replace"))
+        documents.append(decode_html_source(converted))
     if not documents:
         raise RuntimeError("CHM contains no HTML pages")
     body = "".join(f"<section><h1>第 {index} 页</h1>{document}</section>" for index, document in enumerate(documents, 1))
