@@ -75,9 +75,10 @@ jobs:
             --repo "${{ inputs.repo }}" \
             --source "${{ inputs.source || 'all' }}" \
             --limit "${{ inputs.limit }}" \
-            --checkpoint "${{ inputs.checkpoint }}" \
-            --shard-count 10 \
-            --output output/pdf-assets/queue.json
+             --checkpoint "${{ inputs.checkpoint }}" \
+             --shard-count 10 \
+             --workers 8 \
+             --output output/pdf-assets/queue.json
       - uses: actions/upload-artifact@v7
         with:
           name: pdf-assets-queue

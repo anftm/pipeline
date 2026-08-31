@@ -4,6 +4,7 @@
 import argparse
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from huggingface_hub import hf_hub_download
@@ -24,13 +25,16 @@ def source_path(item: dict, source_dir: Path | None, assets_repo: str) -> Path:
                                 revision=item["source_revision"], token=os.environ.get("HF_TOKEN")))
 
 
-def plan(records: list[dict], source_dir: Path | None, assets_repo: str, shard_count: int) -> dict:
-    selected = []
-    for item in records:
+def plan(records: list[dict], source_dir: Path | None, assets_repo: str, shard_count: int,
+         workers: int = 8) -> dict:
+    def inspect(item: dict) -> dict:
         pages = pdf_assets._pages(source_path(item, source_dir, assets_repo))
         if pages < 1:
             raise ValueError(f"invalid page count for {item['key']}")
-        selected.append({**item, "page_count": pages})
+        return {**item, "page_count": pages}
+
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
+        selected = list(executor.map(inspect, records))
     shards = pdf_assets.weighted_shards(selected, shard_count)
     return {"version": 1, "kind": "pdf-assets-queue", "shard_count": shard_count,
             "total_records": len(selected),
@@ -50,6 +54,7 @@ def main() -> int:
     parser.add_argument("--limit", type=int, required=True, help="Total PDFs in this checkpoint")
     parser.add_argument("--checkpoint", type=int, default=0)
     parser.add_argument("--shard-count", type=int, default=10)
+    parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--source-dir", type=Path)
     parser.add_argument("--output", type=Path, default=Path("output/pdf-assets/queue.json"))
     args = parser.parse_args()
@@ -65,7 +70,7 @@ def main() -> int:
     records.sort(key=lambda item: (0 if item.get("source_extension") in {"caj", "kdh"} else 1,
                                    item["repo"], item["path"], item["source_kind"]))
     selected = pdf_assets.queue(records, args.limit, args.checkpoint)
-    planned = plan(selected, args.source_dir, args.assets_repo, args.shard_count)
+    planned = plan(selected, args.source_dir, args.assets_repo, args.shard_count, args.workers)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(planned, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
     print(f"planned {planned['total_records']} PDF asset(s) across {args.shard_count} shard(s)")
