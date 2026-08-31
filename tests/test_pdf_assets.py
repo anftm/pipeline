@@ -32,6 +32,19 @@ class PdfAssetsTests(unittest.TestCase):
             self.assertEqual(result["status"], "skipped")
             run.assert_not_called()
 
+    def test_weighted_shards_use_descending_page_count_and_stable_ties(self):
+        records = [{"key": key, "page_count": pages} for key, pages in (
+            ("a", 10), ("b", 9), ("c", 8), ("d", 7), ("e", 6), ("f", 5))]
+        shards = pdf_assets.weighted_shards(records, 3)
+        self.assertEqual([[item["key"] for item in shard] for shard in shards],
+                         [["a", "f"], ["b", "e"], ["c", "d"]])
+        self.assertEqual([sum(item["page_count"] for item in shard) for shard in shards], [15, 15, 15])
+
+    def test_weighted_shards_tie_breaks_by_key(self):
+        records = [{"key": key, "page_count": 4} for key in ("c", "a", "b")]
+        shards = pdf_assets.weighted_shards(records, 2)
+        self.assertEqual([[item["key"] for item in shard] for shard in shards], [["a", "c"], ["b"]])
+
     def test_publish_manifest_is_separate_and_content_addressed(self):
         result = {"key": "r\0x.pdf", "status": "skipped", "reason": "estimated-webp-over-90-percent",
                   "strategy": "sampled-webp", "source_sha256": "a" * 64}

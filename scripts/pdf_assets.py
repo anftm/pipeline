@@ -106,7 +106,33 @@ def shard_records(records: list[dict], shard_count: int, shard_index: int) -> li
     if shard_count < 1 or not 0 <= shard_index < shard_count:
         raise ValueError("invalid PDF asset shard")
     return [item for item in records
-            if int.from_bytes(hashlib.sha256(item["key"].encode()).digest()[:8], "big") % shard_count == shard_index]
+             if int.from_bytes(hashlib.sha256(item["key"].encode()).digest()[:8], "big") % shard_count == shard_index]
+
+
+def weighted_shards(records: list[dict], shard_count: int = 10) -> list[list[dict]]:
+    """Assign records to the least-loaded shard, using page counts as weight."""
+    if shard_count < 1:
+        raise ValueError("shard_count must be positive")
+    shards = [[] for _ in range(shard_count)]
+    loads = [0] * shard_count
+    for item in sorted(records, key=lambda value: (-int(value["page_count"]), value["key"])):
+        shard = min(range(shard_count), key=lambda index: (loads[index], index))
+        shards[shard].append(item)
+        loads[shard] += int(item["page_count"])
+    return shards
+
+
+def load_planned_shard(queue_file: Path, shard_count: int, shard_index: int) -> list[dict]:
+    data = json.loads(queue_file.read_text(encoding="utf-8"))
+    if data.get("version") != 1 or data.get("shard_count") != shard_count:
+        raise ValueError("invalid PDF asset queue")
+    shards = data.get("shards")
+    if not isinstance(shards, list) or len(shards) != shard_count:
+        raise ValueError("invalid PDF asset shard queue")
+    shard = shards[shard_index]
+    if not isinstance(shard, dict) or shard.get("index") != shard_index or not isinstance(shard.get("records"), list):
+        raise ValueError("invalid PDF asset shard queue")
+    return shard["records"]
 
 
 def _run(args: list[str], *, text: bool = False) -> str:
@@ -315,6 +341,7 @@ def parse_args():
     parser.add_argument("--checkpoint", type=int, default=0)
     parser.add_argument("--shard-count", type=int, default=1)
     parser.add_argument("--shard-index", type=int, default=0)
+    parser.add_argument("--queue-file", type=Path, help="Weighted queue produced by plan_pdf_assets.py")
     parser.add_argument("--source-dir", type=Path, help="Local source mirror, keyed by dataset/path")
     parser.add_argument("--bundle", type=Path, default=Path("output/pdf-assets/bundle"))
     parser.add_argument("--dry-run", action="store_true")
@@ -324,28 +351,35 @@ def parse_args():
 
 def main() -> int:
     args = parse_args()
-    records = []
-    if args.source in {"upstream", "all"}:
-        records.extend(load_records(args.search_data, args.revisions, args.repo, args.extension))
-    if args.source in {"generated", "all"}:
-        if args.reader_assets_manifest:
-            manifest_path = args.reader_assets_manifest
-        else:
-            from huggingface_hub import hf_hub_download
-            manifest_path = Path(hf_hub_download(args.assets_repo, "manifest.json", repo_type="dataset",
-                                                 token=os.environ.get("HF_TOKEN")))
-        records.extend(load_generated_records(manifest_path, args.assets_repo, args.repo))
-    records.sort(key=lambda item: (0 if item.get("source_extension") in {"caj", "kdh"} else 1,
-                                   item["repo"], item["path"], item["source_kind"]))
-    if args.failed_only:
-        token = os.environ.get("HF_TOKEN")
-        if not token:
-            raise RuntimeError("HF_TOKEN is required for --failed-only")
-        failed = failed_source_keys(HfApi(token=token), args.assets_repo, args.extension)
-        records = [item for item in records if item["key"] in failed]
-    records = shard_records(records, args.shard_count, args.shard_index)
-    records = queue(records, args.limit, args.checkpoint)
+    if args.queue_file:
+        records = load_planned_shard(args.queue_file, args.shard_count, args.shard_index)
+    else:
+        records = []
+        if args.source in {"upstream", "all"}:
+            records.extend(load_records(args.search_data, args.revisions, args.repo, args.extension))
+        if args.source in {"generated", "all"}:
+            if args.reader_assets_manifest:
+                manifest_path = args.reader_assets_manifest
+            else:
+                from huggingface_hub import hf_hub_download
+                manifest_path = Path(hf_hub_download(args.assets_repo, "manifest.json", repo_type="dataset",
+                                                     token=os.environ.get("HF_TOKEN")))
+            records.extend(load_generated_records(manifest_path, args.assets_repo, args.repo))
+        records.sort(key=lambda item: (0 if item.get("source_extension") in {"caj", "kdh"} else 1,
+                                       item["repo"], item["path"], item["source_kind"]))
+        if args.failed_only:
+            token = os.environ.get("HF_TOKEN")
+            if not token:
+                raise RuntimeError("HF_TOKEN is required for --failed-only")
+            failed = failed_source_keys(HfApi(token=token), args.assets_repo, args.extension)
+            records = [item for item in records if item["key"] in failed]
+        records = shard_records(records, args.shard_count, args.shard_index)
+        records = queue(records, args.limit, args.checkpoint)
     args.bundle.mkdir(parents=True, exist_ok=True)
+    if not records:
+        (args.bundle / MANIFEST_NAME).write_text(json.dumps(empty_manifest(), sort_keys=True) + "\n", encoding="utf-8")
+        print("processed 0 PDF asset(s)")
+        return 0
     results = []
     built_by_sha = {}
     for item in records:
