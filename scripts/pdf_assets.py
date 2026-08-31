@@ -307,14 +307,52 @@ def update_sidecar(sidecar: dict, results: list[dict]) -> bytes:
     return gzip.compress(payload, compresslevel=9, mtime=0)
 
 
-def publish(api: HfApi, repo: str, manifest: dict, results: list[dict], bundle: Path) -> None:
-    for attempt in range(6):
+def bundle_is_published(manifest: dict, results: list[dict]) -> bool:
+    entries = manifest.get("files", {})
+    for result in results:
+        current = entries.get(result.get("key"))
+        if not current or current.get("status") != result.get("status"):
+            return False
+        for field in ("source_revision", "source_sha256", "source_extension", "profile", "strategy"):
+            if current.get(field) != result.get(field):
+                return False
+        if result.get("status") == "ready":
+            if current.get("path") != result.get("path", ""):
+                return False
+            if result.get("page_manifest") and current.get("page_manifest") != result["page_manifest"]:
+                return False
+    return bool(results)
+
+
+def publish(api: HfApi, repo: str, manifest: dict, results: list[dict], bundle: Path,
+            max_attempts: int = 20) -> None:
+    if not results:
+        return
+    baseline = None
+    for attempt in range(max_attempts):
         info = api.repo_info(repo_id=repo, repo_type="dataset")
         current = remote_manifest(api, repo)
+        sidecar = remote_sidecar(api, repo)
+        sidecar_keys = sidecar.get("f", {})
+        sidecar_matches = all(
+            result.get("status") != "ready"
+            or sidecar_keys.get(result["key"], {}).get("p") == (
+                result.get("path") or result.get("page_manifest", {}).get("path")
+            )
+            for result in results
+        )
+        if bundle_is_published(current, results) and sidecar_matches:
+            return
+        keys = {result["key"] for result in results}
+        current_entries = {key: current.get("files", {}).get(key) for key in keys}
+        if baseline is None:
+            baseline = current_entries
+        elif current_entries != baseline:
+            raise RuntimeError("PDF asset key changed during publication retry")
         updated, operations = build_publish(current, results, bundle)
         operations.append(CommitOperationAdd(
             path_in_repo="reader_assets.json.gz",
-            path_or_fileobj=update_sidecar(remote_sidecar(api, repo), results),
+            path_or_fileobj=update_sidecar(sidecar, results),
         ))
         try:
             api.create_commit(repo_id=repo, repo_type="dataset", operations=operations,
@@ -322,9 +360,11 @@ def publish(api: HfApi, repo: str, manifest: dict, results: list[dict], bundle: 
             return
         except HfHubHTTPError as exc:
             status = getattr(exc.response, "status_code", None)
-            if status not in {409, 412, 429, 500, 502, 503, 504} or attempt == 5:
+            if status not in {409, 412} and not (status == 429 or 500 <= (status or 0) < 600):
                 raise
-            time.sleep(min(30, 2 ** attempt))
+            if attempt + 1 == max_attempts:
+                raise
+            time.sleep(min(60, 2 ** min(attempt, 5)))
     raise RuntimeError("PDF asset publication retry limit reached")
 
 
@@ -344,6 +384,7 @@ def parse_args():
     parser.add_argument("--queue-file", type=Path, help="Weighted queue produced by plan_pdf_assets.py")
     parser.add_argument("--source-dir", type=Path, help="Local source mirror, keyed by dataset/path")
     parser.add_argument("--bundle", type=Path, default=Path("output/pdf-assets/bundle"))
+    parser.add_argument("--build-only", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--assets-repo", default=os.environ.get("READER_ASSETS_REPO", READER_ASSETS_REPO))
     return parser.parse_args()
@@ -377,7 +418,8 @@ def main() -> int:
         records = queue(records, args.limit, args.checkpoint)
     args.bundle.mkdir(parents=True, exist_ok=True)
     if not records:
-        (args.bundle / MANIFEST_NAME).write_text(json.dumps(empty_manifest(), sort_keys=True) + "\n", encoding="utf-8")
+        (args.bundle / "bundle.json").write_text(
+            json.dumps({"version": 1, "results": []}, sort_keys=True) + "\n", encoding="utf-8")
         print("processed 0 PDF asset(s)")
         return 0
     results = []
@@ -421,7 +463,11 @@ def main() -> int:
                     raise RuntimeError(f"missing built artifact: {path}")
     manifest, _ = build_publish(empty_manifest(), results, args.bundle)
     (args.bundle / MANIFEST_NAME).write_bytes(json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2).encode())
-    if not args.dry_run:
+    (args.bundle / "bundle.json").write_text(
+        json.dumps({"version": 1, "results": results}, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    if not args.dry_run and not args.build_only:
         token = os.environ.get("HF_TOKEN")
         if not token:
             raise RuntimeError("HF_TOKEN is required")
