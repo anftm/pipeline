@@ -42,20 +42,20 @@ def digest(path: Path) -> tuple[str, int]:
     return h.hexdigest(), size
 
 
-def load_records(search_data: Path, revisions: Path, repo: str = "") -> list[dict]:
+def load_records(search_data: Path, revisions: Path, repo: str = "", extension: str = "pdf") -> list[dict]:
     records = decode_search_payload(json.loads(search_data.read_text(encoding="utf-8")))
     revision_map = json.loads(revisions.read_text(encoding="utf-8"))
     selected = []
     for record in records:
         source_repo = str(record.get("Repo") or "")
-        extension = str(record.get("Extension") or "").lower().lstrip(".")
+        source_extension = str(record.get("Extension") or "").lower().lstrip(".")
         revision = str(revision_map.get(source_repo) or "")
-        if extension != "pdf" or (repo and source_repo != repo) or not revision:
+        if source_extension != extension or (repo and source_repo != repo) or not revision:
             continue
         path = relative_path(record)
         selected.append({
             "key": f"{source_repo}\0{path}", "repo": source_repo, "path": path,
-            "source_revision": revision, "source_bytes": int(record.get("Size") or 0),
+            "extension": source_extension, "source_revision": revision, "source_bytes": int(record.get("Size") or 0),
             "source_url": source_url(source_repo, revision, path),
         })
     selected.sort(key=lambda item: (item["repo"], item["path"]))
@@ -77,7 +77,10 @@ def _run(args: list[str], *, text: bool = False) -> str:
     return result.stdout.strip() if text else ""
 
 
-def _pages(pdf: Path) -> int:
+def _pages(pdf: Path, extension: str = "pdf") -> int:
+    if extension == "djvu":
+        output = _run(["djvused", str(pdf), "-e", "select; print-pagelength"], text=True)
+        return int(output.split()[-1])
     output = _run(["pdfinfo", str(pdf)], text=True)
     for line in output.splitlines():
         if line.startswith("Pages:"):
@@ -85,9 +88,12 @@ def _pages(pdf: Path) -> int:
     raise RuntimeError("missing page count")
 
 
-def _render(pdf: Path, page: int, directory: Path) -> Path:
+def _render(pdf: Path, page: int, directory: Path, extension: str = "pdf") -> Path:
     stem = directory / f"page-{page:06d}"
-    _run(["pdftocairo", "-png", "-singlefile", "-f", str(page), "-l", str(page), str(pdf), str(stem)])
+    if extension == "djvu":
+        _run(["ddjvu", "-format=png", f"-page={page}", str(pdf), str(stem.with_suffix(".png"))])
+    else:
+        _run(["pdftocairo", "-png", "-singlefile", "-f", str(page), "-l", str(page), str(pdf), str(stem)])
     png = stem.with_suffix(".png")
     webp = stem.with_suffix(".webp")
     args = ["cwebp", "-quiet", "-q", str(WEBP_QUALITY)]
@@ -101,10 +107,10 @@ def _render(pdf: Path, page: int, directory: Path) -> Path:
 def build_item(item: dict, source: Path, bundle: Path) -> dict:
     source_sha, actual_bytes = digest(source)
     base = {**item, "source_sha256": source_sha, "source_bytes": actual_bytes}
-    if actual_bytes < MIN_BYTES:
+    if item.get("extension") != "djvu" and actual_bytes < MIN_BYTES:
         return {**base, "status": "skipped", "reason": "below-minimum-50-mib", "strategy": "none"}
     object_root = Path("objects") / source_sha[:2] / source_sha
-    if actual_bytes < LARGE_BYTES:
+    if item.get("extension") != "djvu" and actual_bytes < LARGE_BYTES:
         output = bundle / object_root / "linearized.pdf"
         output.parent.mkdir(parents=True, exist_ok=True)
         _run(["qpdf", "--linearize", str(source), str(output)])
@@ -115,7 +121,7 @@ def build_item(item: dict, source: Path, bundle: Path) -> dict:
                 "bytes": output_bytes, "sha256": output_sha,
                 "pdf": {"source_bytes": actual_bytes, "output_bytes": output_bytes}}
 
-    pages = _pages(source)
+    pages = _pages(source, str(item.get("extension") or "pdf"))
     with tempfile.TemporaryDirectory(dir=bundle) as temp:
         sample = sorted(set([1, max(1, pages // 2), pages]))[:max(1, SAMPLE_PAGES)]
         sample_sizes = []
@@ -127,7 +133,7 @@ def build_item(item: dict, source: Path, bundle: Path) -> dict:
             return {**base, "status": "skipped", "reason": "native-text-pdf",
                     "strategy": "native-text", "pdf": metadata}
         for page in sample:
-            sample_sizes.append(_render(source, page, Path(temp)).stat().st_size)
+            sample_sizes.append(_render(source, page, Path(temp), str(item.get("extension") or "pdf")).stat().st_size)
         estimated = int(round(sum(sample_sizes) / len(sample_sizes) * pages))
         metadata.update({"sample_webp_bytes": sample_sizes,
                     "estimated_webp_bytes": estimated})
@@ -136,7 +142,7 @@ def build_item(item: dict, source: Path, bundle: Path) -> dict:
                     "strategy": "sampled-webp", "pdf": metadata}
         page_entries = []
         for page in range(1, pages + 1):
-            rendered = _render(source, page, Path(temp))
+            rendered = _render(source, page, Path(temp), str(item.get("extension") or "pdf"))
             page_sha, page_bytes = digest(rendered)
             destination = bundle / object_root / "pages" / f"page-{page:06d}.webp"
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -197,6 +203,20 @@ def remote_manifest(api: HfApi, repo: str) -> dict:
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
+def failed_source_keys(api: HfApi, repo: str, extension: str) -> set[str]:
+    try:
+        path = api.hf_hub_download(repo_id=repo, repo_type="dataset", filename="manifest.json")
+    except HfHubHTTPError as exc:
+        if getattr(exc.response, "status_code", None) == 404:
+            return set()
+        raise
+    manifest = json.loads(Path(path).read_text(encoding="utf-8"))
+    return {
+        key for key, entry in manifest.get("files", {}).items()
+        if entry.get("status") == "failed" and entry.get("source_extension") == extension
+    }
+
+
 def remote_sidecar(api: HfApi, repo: str) -> dict:
     try:
         path = api.hf_hub_download(repo_id=repo, repo_type="dataset", filename="reader_assets.json.gz")
@@ -246,6 +266,8 @@ def parse_args():
     parser.add_argument("--search-data", type=Path, default=Path("output/search_data.json"))
     parser.add_argument("--revisions", type=Path, default=Path("state/commits.json"))
     parser.add_argument("--repo", default="")
+    parser.add_argument("--extension", choices=("pdf", "djvu"), default="pdf")
+    parser.add_argument("--failed-only", action="store_true")
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--checkpoint", type=int, default=0)
     parser.add_argument("--source-dir", type=Path, help="Local source mirror, keyed by dataset/path")
@@ -257,7 +279,14 @@ def parse_args():
 
 def main() -> int:
     args = parse_args()
-    records = queue(load_records(args.search_data, args.revisions, args.repo), args.limit, args.checkpoint)
+    records = load_records(args.search_data, args.revisions, args.repo, args.extension)
+    if args.failed_only:
+        token = os.environ.get("HF_TOKEN")
+        if not token:
+            raise RuntimeError("HF_TOKEN is required for --failed-only")
+        failed = failed_source_keys(HfApi(token=token), args.assets_repo, args.extension)
+        records = [item for item in records if item["key"] in failed]
+    records = queue(records, args.limit, args.checkpoint)
     args.bundle.mkdir(parents=True, exist_ok=True)
     results = []
     built_by_sha = {}

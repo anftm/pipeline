@@ -8,6 +8,11 @@ on:
         required: false
         default: ""
         type: string
+      extension:
+        description: pdf or djvu
+        required: true
+        default: pdf
+        type: string
       limit:
         description: PDFs in this deterministic checkpoint
         required: true
@@ -42,7 +47,7 @@ jobs:
       - name: Install PDF tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qpdf poppler-utils webp
+           sudo apt-get install -y --no-install-recommends qpdf poppler-utils webp djvulibre-bin
       - name: Build and publish PDF assets
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -52,6 +57,8 @@ jobs:
           [[ "${{ inputs.limit }}" =~ ^[0-9]+$ ]] && ((10#${{ inputs.limit }} >= 1 && 10#${{ inputs.limit }} <= 100))
           [[ "${{ inputs.checkpoint }}" =~ ^[0-9]+$ ]]
           python scripts/fetch_and_parse.py
-          args=(--repo "${{ inputs.repo }}" --limit "${{ inputs.limit }}" --checkpoint "${{ inputs.checkpoint }}")
+          [[ "${{ inputs.extension }}" == "pdf" || "${{ inputs.extension }}" == "djvu" ]]
+          args=(--repo "${{ inputs.repo }}" --limit "${{ inputs.limit }}" --checkpoint "${{ inputs.checkpoint }}" --extension "${{ inputs.extension }}")
+          [[ "${{ inputs.extension }}" == "djvu" ]] && args+=(--failed-only)
           [[ "${{ inputs.dry_run }}" == "true" ]] && args+=(--dry-run)
           python scripts/pdf_assets.py "${args[@]}"
