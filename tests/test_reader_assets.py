@@ -80,25 +80,15 @@ class ReaderAssetContractTests(unittest.TestCase):
         }
         self.assertEqual({ext: reader_assets.conversion_contract(ext) for ext in expected}, expected)
 
-    def test_large_docx_uses_lazy_pdf_contract(self):
+    def test_large_docx_keeps_native_contract(self):
         self.assertEqual(
-            reader_assets.source_conversion_contract(
-                "repo", "large.docx", "docx", reader_assets.LARGE_DOCX_BYTES,
-            ),
-            reader_assets.LARGE_DOCX_PDF_CONTRACT,
-        )
-        self.assertEqual(
-            reader_assets.source_conversion_contract("repo", "small.docx", "docx", 1),
+            reader_assets.source_conversion_contract("repo", "large.docx", "docx", 128 * 1024 * 1024),
             reader_assets.conversion_contract("docx"),
         )
 
-    def test_large_epub_uses_pdf_fallback_contract(self):
+    def test_large_epub_keeps_native_contract(self):
         self.assertEqual(
-            reader_assets.source_conversion_contract("repo", "large.epub", "epub", 64 * 1024 * 1024),
-            reader_assets.LARGE_EPUB_PDF_CONTRACT,
-        )
-        self.assertEqual(
-            reader_assets.source_conversion_contract("repo", "small.epub", "epub", 1),
+            reader_assets.source_conversion_contract("repo", "large.epub", "epub", 128 * 1024 * 1024),
             reader_assets.conversion_contract("epub"),
         )
         self.assertEqual(
@@ -225,15 +215,6 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(queue[0]["path"], "A/Book.docx")
         self.assertEqual(queue[0]["profile"], "docx-native-v2")
         self.assertEqual(queue[0]["reader_mode"], "docx")
-
-    def test_large_docx_queue_selects_pdf_reader_mode(self):
-        records = [{
-            "Repo": "VoiceOfML/Test", "File": "Large", "Extension": "docx", "Folder": [],
-            "Size": reader_assets.LARGE_DOCX_BYTES,
-        }]
-        queue = scan_reader_assets.build_queue(records, self.revisions, reader_assets.empty_manifest())
-        self.assertEqual(queue[0]["reader_mode"], "pdf")
-        self.assertEqual(queue[0]["output_name"], "document.pdf")
 
     def test_html_resource_fragments_are_not_reader_documents(self):
         records = [{
@@ -925,21 +906,6 @@ aW1hZ2U=
             with self.assertRaisesRegex(RuntimeError, "active content"):
                 convert_reader_assets.validate_chm_epub(epub)
 
-    def test_large_epub_uses_linearized_pdf_fallback(self):
-        with tempfile.TemporaryDirectory() as root:
-            work = Path(root)
-            source, target = work / "source.epub", work / "document.pdf"
-            source.write_bytes(b"epub")
-            def fake_run(command, **_kwargs):
-                if command[0] == "ebook-convert":
-                    Path(command[2]).write_bytes(b"%PDF-calibre")
-                else:
-                    Path(command[3]).write_bytes(b"%PDF-linearized")
-            with patch.object(convert_reader_assets, "run_checked", side_effect=fake_run) as run:
-                convert_reader_assets.convert_file({"extension": "epub", "reader_mode": "pdf"}, source, target, work)
-            self.assertEqual(target.read_bytes(), b"%PDF-linearized")
-            self.assertEqual(len(run.call_args_list), 2)
-
     def test_small_epub_direct_copy_uses_foliate(self):
         with tempfile.TemporaryDirectory() as root:
             work = Path(root)
@@ -988,25 +954,6 @@ aW1hZ2U=
             self.assertTrue(any(arg.startswith("-env:UserInstallation=file://") for arg in command))
             self.assertEqual(command[command.index("--convert-to") + 1], "docx")
             self.assertEqual(target.read_bytes(), b"docx")
-
-    def test_large_docx_conversion_linearizes_pdf(self):
-        with tempfile.TemporaryDirectory() as root:
-            work = Path(root)
-            source, target = work / "source.docx", work / "document.pdf"
-            source.write_bytes(b"docx")
-
-            def fake_run(command, **_kwargs):
-                if command[0] == "libreoffice":
-                    (work / "large-docx-office" / "source.pdf").write_bytes(b"%PDF-office")
-                else:
-                    (work / "large-docx-linearized.pdf").write_bytes(b"%PDF-linearized")
-
-            with patch.object(convert_reader_assets, "run_checked", side_effect=fake_run) as run:
-                convert_reader_assets.convert_file(
-                    {"extension": "docx", "reader_mode": "pdf"}, source, target, work,
-                )
-            self.assertEqual(target.read_bytes(), b"%PDF-linearized")
-            self.assertEqual(run.call_args_list[-1].args[0][0:2], ["qpdf", "--linearize"])
 
     def test_epub_conversion_does_not_linearize_pdf(self):
         with tempfile.TemporaryDirectory() as root:
@@ -1982,7 +1929,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("inputs.limit || '20'", workflow)
         self.assertIn("inputs.checkpoint_batches || '30'", workflow)
         self.assertIn("python scripts/publish_reader_assets.py", workflow)
-        self.assertIn("packages=(djvulibre-bin poppler-utils)", workflow)
+        self.assertIn("djvu) packages=(djvulibre-bin qpdf poppler-utils)", workflow)
         self.assertIn("epub) packages=(calibre qpdf)", workflow)
         self.assertIn("mobi|azw3|fb2) packages=()", workflow)
         self.assertIn("odt) packages=(libreoffice)", workflow)
@@ -2021,15 +1968,15 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("path: ${{ runner.temp }}/shard-${{ matrix.shard }}.tgz", workflow)
         self.assertIn("Package conversion bundles", workflow)
         self.assertIn("SHARD_INDEX: ${{ matrix.shard }}", workflow)
-        self.assertIn("pattern: reader-assets-bundles-*", workflow)
-        self.assertIn("archives=(output/reader-assets/bundles/*.tgz output/reader-assets/bundles/*/*.tgz)", workflow)
+        self.assertIn("name: reader-assets-bundles-${{ matrix.shard }}", workflow)
+        self.assertIn("for archive in output/reader-assets/bundles/*.tgz output/reader-assets/bundles/*/*.tgz; do", workflow)
         self.assertIn('archive="${RUNNER_TEMP}/shard-${SHARD_INDEX}.tgz"', workflow)
         self.assertIn('-C "${GITHUB_WORKSPACE}/output/reader-assets"', workflow)
         self.assertIn('test -s "${archive}"', workflow)
         self.assertIn('stat "${archive}"', workflow)
-        self.assertIn("Publish conversion bundles serially", workflow)
+        self.assertIn("Publish shard ${{ matrix.shard }}", workflow)
         self.assertIn("shopt -s nullglob", workflow)
-        self.assertIn("No Reader Asset bundle archives remain to publish", workflow)
+        self.assertIn("for archive in output/reader-assets/bundles/*.tgz", workflow)
         self.assertIn("needs: [plan, convert, publish]", workflow)
         self.assertIn("needs.convert.result == 'success'", workflow)
         self.assertIn("needs.convert.result == 'failure'", workflow)

@@ -1079,8 +1079,6 @@ def convert_file(item: dict, source: Path, target: Path, work: Path) -> None:
         if not produced.exists():
             raise RuntimeError("LibreOffice produced no DOCX")
         shutil.move(produced, target)
-    elif ext == "docx" and item.get("reader_mode") == "pdf":
-        convert_large_docx_to_pdf(source, target, work)
     elif ext == "docx":
         try:
             with zipfile.ZipFile(source) as archive:
@@ -1103,8 +1101,6 @@ def convert_file(item: dict, source: Path, target: Path, work: Path) -> None:
                 raise
     elif ext in {"epub", "mobi", "azw3", "fb2"} and item.get("reader_mode") == "foliate":
         shutil.copyfile(source, target)
-    elif ext == "epub" and item.get("reader_mode") == "pdf":
-        convert_large_epub_to_pdf(source, target, work)
     elif ext == "odt":
         output = work / "odt-html"
         output.mkdir()
@@ -1211,40 +1207,6 @@ def normalized_office_pdf(source: Path, work: Path) -> Path:
     if not pdf.is_file():
         raise RuntimeError("LibreOffice produced no normalized PDF")
     return pdf
-
-
-def convert_large_docx_to_pdf(source: Path, target: Path, work: Path) -> None:
-    """Create a linearized PDF so PDF.js can request and render pages lazily."""
-    output_dir = work / "large-docx-office"
-    output_dir.mkdir()
-    office_profile = (work / "libreoffice-profile").resolve().as_uri()
-    run_checked([
-        "libreoffice", "--headless", f"-env:UserInstallation={office_profile}",
-        "--convert-to", "pdf", "--outdir", str(output_dir), str(source),
-    ])
-    produced = output_dir / f"{source.stem}.pdf"
-    if not produced.is_file():
-        raise RuntimeError("LibreOffice produced no PDF from large DOCX")
-    linearized = work / "large-docx-linearized.pdf"
-    run_checked(["qpdf", "--linearize", str(produced), str(linearized)])
-    if not linearized.is_file():
-        raise RuntimeError("qpdf produced no linearized PDF")
-    shutil.move(linearized, target)
-
-
-def convert_large_epub_to_pdf(source: Path, target: Path, work: Path) -> None:
-    """Create a linearized PDF fallback for EPUBs too large for browser EPUB rendering."""
-    output_dir = work / "large-epub-calibre"
-    output_dir.mkdir()
-    produced = output_dir / "converted.pdf"
-    run_checked(["ebook-convert", str(source), str(produced)], timeout_seconds=EPUB_COMMAND_TIMEOUT_SECONDS)
-    if not produced.is_file():
-        raise RuntimeError("Calibre produced no PDF from large EPUB")
-    linearized = work / "large-epub-linearized.pdf"
-    run_checked(["qpdf", "--linearize", str(produced), str(linearized)], timeout_seconds=EPUB_COMMAND_TIMEOUT_SECONDS)
-    if not linearized.is_file():
-        raise RuntimeError("qpdf produced no linearized EPUB PDF")
-    shutil.move(linearized, target)
 
 
 def validate_output(path: Path, reader_mode: str) -> None:
