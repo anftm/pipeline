@@ -189,7 +189,7 @@ def build_item(item: dict, source: Path, bundle: Path) -> dict:
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(json.dumps(page_manifest, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
     manifest_sha, manifest_bytes = digest(manifest_path)
-    return {**base, "status": "ready", "strategy": "sampled-webp", "pdf": metadata,
+    return {**base, "path": "", "status": "ready", "strategy": "sampled-webp", "pdf": metadata,
             "pages": page_entries, "page_manifest": {
                 "path": (object_root / "page-manifest.json").as_posix(),
                 "sha256": manifest_sha, "bytes": manifest_bytes,
@@ -365,6 +365,14 @@ def main() -> int:
                 source_bytes = item.get("source_bytes", 0)
             results.append({**item, "source_sha256": source_sha, "source_bytes": source_bytes,
                             "status": "failed", "reason": "tool-error", "strategy": "none"})
+    for result in results:
+        if result.get("status") == "ready":
+            paths = [result.get("path")] if result.get("path") else [page["path"] for page in result.get("pages", [])]
+            if result.get("page_manifest"):
+                paths.append(result["page_manifest"]["path"])
+            for path in paths:
+                if not (args.bundle / path).is_file():
+                    raise RuntimeError(f"missing built artifact: {path}")
     manifest, _ = build_publish(empty_manifest(), results, args.bundle)
     (args.bundle / MANIFEST_NAME).write_bytes(json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2).encode())
     if not args.dry_run:
