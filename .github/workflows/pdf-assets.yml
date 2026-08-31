@@ -47,6 +47,7 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           READER_ASSETS_REPO: vomebook/Reader-Assets
+          FORCE_SYNC: "true"
         run: |
           [[ "${{ inputs.limit }}" =~ ^[0-9]+$ ]] && ((10#${{ inputs.limit }} >= 1 && 10#${{ inputs.limit }} <= 100))
           [[ "${{ inputs.checkpoint }}" =~ ^[0-9]+$ ]]
