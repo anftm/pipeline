@@ -68,6 +68,7 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           READER_ASSETS_REPO: vomebook/Reader-Assets
+          HF_HUB_DISABLE_XET: "1"
         run: |
           [[ "${{ inputs.limit }}" =~ ^[0-9]+$ ]] && ((10#${{ inputs.limit }} >= 1 && 10#${{ inputs.limit }} <= 100))
           [[ "${{ inputs.checkpoint }}" =~ ^[0-9]+$ ]]
@@ -143,4 +144,5 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           READER_ASSETS_REPO: vomebook/Reader-Assets
+          HF_HUB_DISABLE_XET: "1"
         run: python scripts/publish_pdf_assets.py --bundles output/pdf-assets/bundles/*
