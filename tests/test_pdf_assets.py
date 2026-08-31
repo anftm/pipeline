@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 from huggingface_hub.errors import HfHubHTTPError
 
 from scripts import pdf_assets
+from scripts import plan_pdf_assets
 from scripts import publish_pdf_assets
 
 
@@ -57,6 +58,17 @@ class PdfAssetsTests(unittest.TestCase):
         self.assertIn("r\0x.pdf", manifest["files"])
         self.assertEqual(operations[-1].path_in_repo, "pdf_manifest.json")
         self.assertEqual(pdf_assets.MANIFEST_NAME, "pdf_manifest.json")
+
+    def test_pending_records_exclude_completed_and_small_sources(self):
+        records = [
+            {"key": "r\0small.pdf", "source_kind": "upstream", "source_bytes": pdf_assets.MIN_BYTES - 1},
+            {"key": "r\0done.pdf", "source_kind": "upstream", "source_bytes": pdf_assets.MIN_BYTES},
+            {"key": "r\0new.pdf", "source_kind": "upstream", "source_bytes": pdf_assets.MIN_BYTES},
+        ]
+        pending = plan_pdf_assets.pending_records(records, {"files": {
+            "r\0done.pdf": {"status": "ready"},
+        }})
+        self.assertEqual([item["key"] for item in pending], ["r\0new.pdf"])
 
     def test_merge_bundles_combines_multiple_shards_and_empty_shards(self):
         with tempfile.TemporaryDirectory() as root:

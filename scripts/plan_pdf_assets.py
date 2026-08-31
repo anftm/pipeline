@@ -43,6 +43,22 @@ def plan(records: list[dict], source_dir: Path | None, assets_repo: str, shard_c
                         "records": shard} for index, shard in enumerate(shards)]}
 
 
+def pending_records(records: list[dict], manifest: dict) -> list[dict]:
+    done = {}
+    for key, entry in manifest.get("files", {}).items():
+        if isinstance(entry, dict) and entry.get("status") in {"ready", "skipped"}:
+            done[key] = entry
+    pending = []
+    for item in records:
+        if item.get("source_kind") == "generated":
+            if item["key"] not in done:
+                pending.append(item)
+            continue
+        if int(item.get("source_bytes") or 0) >= pdf_assets.MIN_BYTES and item["key"] not in done:
+            pending.append(item)
+    return pending
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--search-data", type=Path, default=Path("output/search_data.json"))
@@ -69,6 +85,13 @@ def main() -> int:
         records.extend(pdf_assets.load_generated_records(args.reader_assets_manifest, args.assets_repo, args.repo))
     records.sort(key=lambda item: (0 if item.get("source_extension") in {"caj", "kdh"} else 1,
                                    item["repo"], item["path"], item["source_kind"]))
+    try:
+        manifest_path = hf_hub_download(args.assets_repo, "pdf_manifest.json", repo_type="dataset",
+                                        token=os.environ.get("HF_TOKEN"))
+        pdf_manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+    except Exception:
+        pdf_manifest = {"files": {}}
+    records = pending_records(records, pdf_manifest)
     selected = pdf_assets.queue(records, args.limit, args.checkpoint)
     planned = plan(selected, args.source_dir, args.assets_repo, args.shard_count, args.workers)
     args.output.parent.mkdir(parents=True, exist_ok=True)
