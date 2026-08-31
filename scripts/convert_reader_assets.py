@@ -171,8 +171,8 @@ def decode_html_source(source: Path) -> str:
         except (LookupError, UnicodeDecodeError):
             pass
     try:
-        # A valid UTF-8 page is unambiguous; do not reinterpret it as a
-        # legacy encoding merely because that produces more code points.
+        # Valid UTF-8 is unambiguous; never reinterpret it as a legacy
+        # encoding merely because that produces more code points.
         return data.decode("utf-8")
     except UnicodeDecodeError:
         pass
@@ -188,8 +188,6 @@ def decode_html_source(source: Path) -> str:
         controls = len(re.findall(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", text))
         readable = len(re.findall(r"[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af\u0400-\u04ffA-Za-z0-9]", text))
         score = readable - replacement * 80 - controls * 20
-        if encoding == declared:
-            score += 20
         if score > best_score:
             best_text, best_score = text, score
     return best_text
