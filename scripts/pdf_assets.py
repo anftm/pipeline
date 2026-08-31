@@ -62,6 +62,31 @@ def load_records(search_data: Path, revisions: Path, repo: str = "", extension: 
     return selected
 
 
+def load_generated_records(manifest: Path | dict, assets_repo: str = READER_ASSETS_REPO,
+                           repo: str = "") -> list[dict]:
+    data = manifest if isinstance(manifest, dict) else json.loads(manifest.read_text(encoding="utf-8"))
+    selected = []
+    for key, entry in data.get("files", {}).items():
+        source_repo, separator, source_path = str(key).partition("\0")
+        artifact = str(entry.get("path") or "") if isinstance(entry, dict) else ""
+        artifact_bytes = entry.get("bytes") if isinstance(entry, dict) else None
+        if (not separator or (repo and source_repo != repo) or entry.get("status", "ready") != "ready"
+                or entry.get("reader_mode") != "pdf" or not artifact.endswith("/document.pdf")
+                or not isinstance(artifact_bytes, int) or artifact_bytes < MIN_BYTES):
+            continue
+        selected.append({
+            "key": key, "repo": source_repo, "path": source_path,
+            "source_revision": str(entry.get("source_revision") or ""),
+            "source_bytes": artifact_bytes, "source_url": "", "extension": "pdf",
+            "source_extension": Path(source_path).suffix.lower().lstrip("."),
+            "source_kind": "generated", "profile": SOURCE_PROFILES["generated"],
+            "reader_assets_repo": assets_repo, "reader_assets_path": artifact,
+        })
+    selected.sort(key=lambda item: (0 if item.get("source_extension") in {"caj", "kdh"} else 1,
+                                    item["repo"], item["path"]))
+    return selected
+
+
 def queue(records: list[dict], limit: int = 0, checkpoint: int = 0) -> list[dict]:
     if limit < 0 or checkpoint < 0:
         raise ValueError("limit and checkpoint must be non-negative")
@@ -271,6 +296,8 @@ def parse_args():
     parser.add_argument("--repo", default="")
     parser.add_argument("--extension", choices=("pdf", "djvu"), default="pdf")
     parser.add_argument("--failed-only", action="store_true")
+    parser.add_argument("--source", choices=("upstream", "generated", "all"), default="all")
+    parser.add_argument("--reader-assets-manifest", type=Path)
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--checkpoint", type=int, default=0)
     parser.add_argument("--source-dir", type=Path, help="Local source mirror, keyed by dataset/path")
@@ -282,7 +309,19 @@ def parse_args():
 
 def main() -> int:
     args = parse_args()
-    records = load_records(args.search_data, args.revisions, args.repo, args.extension)
+    records = []
+    if args.source in {"upstream", "all"}:
+        records.extend(load_records(args.search_data, args.revisions, args.repo, args.extension))
+    if args.source in {"generated", "all"}:
+        if args.reader_assets_manifest:
+            manifest_path = args.reader_assets_manifest
+        else:
+            from huggingface_hub import hf_hub_download
+            manifest_path = Path(hf_hub_download(args.assets_repo, "manifest.json", repo_type="dataset",
+                                                 token=os.environ.get("HF_TOKEN")))
+        records.extend(load_generated_records(manifest_path, args.assets_repo, args.repo))
+    records.sort(key=lambda item: (0 if item.get("source_extension") in {"caj", "kdh"} else 1,
+                                   item["repo"], item["path"], item["source_kind"]))
     if args.failed_only:
         token = os.environ.get("HF_TOKEN")
         if not token:
@@ -294,7 +333,11 @@ def main() -> int:
     results = []
     built_by_sha = {}
     for item in records:
-        if args.source_dir:
+        if item.get("source_kind") == "generated":
+            from huggingface_hub import hf_hub_download
+            source = Path(hf_hub_download(item["reader_assets_repo"], item["reader_assets_path"],
+                                          repo_type="dataset", token=os.environ.get("HF_TOKEN")))
+        elif args.source_dir:
             source = args.source_dir / item["repo"] / item["path"]
         else:
             from huggingface_hub import hf_hub_download

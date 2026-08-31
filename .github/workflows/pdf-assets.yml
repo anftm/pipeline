@@ -10,7 +10,7 @@ on:
         type: string
       extension:
         description: pdf or djvu
-        required: true
+        required: false
         default: pdf
         type: string
       limit:
@@ -23,6 +23,15 @@ on:
         required: true
         default: "0"
         type: string
+      source:
+        description: upstream or generated Reader-Assets PDFs
+        required: false
+        default: all
+        type: choice
+        options:
+          - upstream
+          - generated
+          - all
       dry_run:
         description: Build and validate locally without publishing
         required: false
@@ -58,7 +67,7 @@ jobs:
           [[ "${{ inputs.checkpoint }}" =~ ^[0-9]+$ ]]
           python scripts/fetch_and_parse.py
           [[ "${{ inputs.extension }}" == "pdf" || "${{ inputs.extension }}" == "djvu" ]]
-          args=(--repo "${{ inputs.repo }}" --limit "${{ inputs.limit }}" --checkpoint "${{ inputs.checkpoint }}" --extension "${{ inputs.extension }}")
+          args=(--repo "${{ inputs.repo }}" --source "${{ inputs.source || 'all' }}" --limit "${{ inputs.limit }}" --checkpoint "${{ inputs.checkpoint }}" --extension "${{ inputs.extension || 'pdf' }}")
           [[ "${{ inputs.extension }}" == "djvu" ]] && args+=(--failed-only)
           [[ "${{ inputs.dry_run }}" == "true" ]] && args+=(--dry-run)
           python scripts/pdf_assets.py "${args[@]}"
