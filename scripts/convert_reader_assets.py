@@ -157,20 +157,31 @@ def decode_html_source(source: Path) -> str:
         return data.decode("utf-16", errors="replace")
     probe = data[:8192].decode("latin-1")
     match = re.search(r"charset\s*=\s*[\"']?\s*([A-Za-z0-9._:-]+)", probe, re.IGNORECASE)
+    declared = None
     if match:
-        encoding = match.group(1).lower().replace("_", "-")
-        encoding = {
+        declared = match.group(1).lower().replace("_", "-")
+        declared = {
             "gb2312": "gb18030", "gb-2312": "gb18030", "gbk": "gb18030",
             "x-gbk": "gb18030", "x-sjis": "shift-jis", "windows-31j": "shift-jis",
-        }.get(encoding, encoding)
+            "ks_c_5601-1987": "euc-kr", "euc-cn": "gb18030", "x-euc-tw": "big5",
+        }.get(declared, declared)
+    candidates = [encoding for encoding in (declared, "utf-8", "gb18030", "big5",
+                  "shift-jis", "euc-kr", "windows-1251", "windows-1252", "latin-1") if encoding]
+    best_text, best_score = "", float("-inf")
+    for encoding in dict.fromkeys(candidates):
         try:
-            return data.decode(encoding)
-        except (LookupError, UnicodeDecodeError):
-            pass
-    try:
-        return data.decode("utf-8")
-    except UnicodeDecodeError:
-        return data.decode("gb18030", errors="replace")
+            text = data.decode(encoding, errors="replace")
+        except (LookupError, UnicodeError):
+            continue
+        replacement = text.count("\ufffd")
+        controls = len(re.findall(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", text))
+        readable = len(re.findall(r"[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af\u0400-\u04ffA-Za-z0-9]", text))
+        score = readable - replacement * 80 - controls * 20
+        if encoding == declared:
+            score += 20
+        if score > best_score:
+            best_text, best_score = text, score
+    return best_text
 
 
 def inline_html_resources(source: Path, source_url: str, work: Path) -> Path:
