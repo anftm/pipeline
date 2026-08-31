@@ -79,7 +79,7 @@ def _run(args: list[str], *, text: bool = False) -> str:
 
 def _pages(pdf: Path, extension: str = "pdf") -> int:
     if extension == "djvu":
-        output = _run(["djvused", str(pdf), "-e", "select; print-pagelength"], text=True)
+        output = _run(["djvused", str(pdf), "-e", "n"], text=True)
         return int(output.split()[-1])
     output = _run(["pdfinfo", str(pdf)], text=True)
     for line in output.splitlines():
