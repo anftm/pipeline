@@ -758,13 +758,16 @@ def convert_chm_to_html(source: Path, target: Path, work: Path) -> None:
     if expanded_size > MAX_CHM_EXPANDED_BYTES or member_count > MAX_EPUB_MEMBERS:
         raise RuntimeError("CHM expanded content exceeds limits")
     extracted = work / "chm-html"
+    extracted.mkdir()
     try:
-        run_checked(["7z", "x", "-y", f"-o{extracted}", str(source)], timeout_seconds=CHM_COMMAND_TIMEOUT_SECONDS)
-    except (ReaderConversionCommandError, ReaderConversionTimeout, OSError):
-        # Some CHMs contain corrupt or overlong image names. Preserve their
-        # readable pages already extracted before the error.
-        if not extracted.is_dir():
-            extracted.mkdir()
+        subprocess.run(
+            ["7z", "x", "-y", f"-o{extracted}", str(source)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            timeout=CHM_COMMAND_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        pass
     pages = sorted(path for path in extracted.rglob("*") if path.is_file() and path.suffix.lower() in {".htm", ".html"})
     text_pages = sorted(path for path in extracted.rglob("*") if path.is_file() and path.suffix.lower() == ".txt")
     mhtml = sorted(path for path in extracted.rglob("*") if path.is_file() and path.suffix.lower() in {".mht", ".mhtml"})
