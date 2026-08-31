@@ -102,6 +102,13 @@ def queue(records: list[dict], limit: int = 0, checkpoint: int = 0) -> list[dict
     return records[start:start + limit]
 
 
+def shard_records(records: list[dict], shard_count: int, shard_index: int) -> list[dict]:
+    if shard_count < 1 or not 0 <= shard_index < shard_count:
+        raise ValueError("invalid PDF asset shard")
+    return [item for item in records
+            if int.from_bytes(hashlib.sha256(item["key"].encode()).digest()[:8], "big") % shard_count == shard_index]
+
+
 def _run(args: list[str], *, text: bool = False) -> str:
     result = subprocess.run(args, check=True, stdout=subprocess.PIPE if text else subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL, text=text)
@@ -306,6 +313,8 @@ def parse_args():
     parser.add_argument("--reader-assets-manifest", type=Path)
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--checkpoint", type=int, default=0)
+    parser.add_argument("--shard-count", type=int, default=1)
+    parser.add_argument("--shard-index", type=int, default=0)
     parser.add_argument("--source-dir", type=Path, help="Local source mirror, keyed by dataset/path")
     parser.add_argument("--bundle", type=Path, default=Path("output/pdf-assets/bundle"))
     parser.add_argument("--dry-run", action="store_true")
@@ -334,6 +343,7 @@ def main() -> int:
             raise RuntimeError("HF_TOKEN is required for --failed-only")
         failed = failed_source_keys(HfApi(token=token), args.assets_repo, args.extension)
         records = [item for item in records if item["key"] in failed]
+    records = shard_records(records, args.shard_count, args.shard_index)
     records = queue(records, args.limit, args.checkpoint)
     args.bundle.mkdir(parents=True, exist_ok=True)
     results = []
