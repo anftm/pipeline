@@ -1,0 +1,301 @@
+#!/usr/bin/env python3
+"""Build and atomically publish the independent large-PDF asset collection."""
+
+import argparse
+import gzip
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import tempfile
+import time
+from pathlib import Path
+
+from huggingface_hub import CommitOperationAdd, HfApi
+from huggingface_hub.errors import HfHubHTTPError
+
+try:
+    from .reader_assets import READER_ASSETS_REPO, decode_search_payload, relative_path, source_url
+except ImportError:
+    from reader_assets import READER_ASSETS_REPO, decode_search_payload, relative_path, source_url
+
+MANIFEST_NAME = "pdf_manifest.json"
+MANIFEST_VERSION = 1
+MI = 1024 * 1024
+MIN_BYTES = 50 * MI
+LARGE_BYTES = 100 * MI
+WEBP_QUALITY = int(os.environ.get("PDF_WEBP_QUALITY", "85"))
+WEBP_MAX_DIMENSION = int(os.environ.get("PDF_WEBP_MAX_DIMENSION", "2400"))
+SAMPLE_PAGES = int(os.environ.get("PDF_SAMPLE_PAGES", "3"))
+WEBP_MAX_RATIO = float(os.environ.get("PDF_WEBP_MAX_RATIO", "0.9"))
+PDF_PROFILE = f"pdf-pages-v1-{WEBP_QUALITY}-{WEBP_MAX_DIMENSION}"
+
+
+def digest(path: Path) -> tuple[str, int]:
+    h = hashlib.sha256()
+    size = 0
+    with path.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            h.update(chunk)
+            size += len(chunk)
+    return h.hexdigest(), size
+
+
+def load_records(search_data: Path, revisions: Path, repo: str = "") -> list[dict]:
+    records = decode_search_payload(json.loads(search_data.read_text(encoding="utf-8")))
+    revision_map = json.loads(revisions.read_text(encoding="utf-8"))
+    selected = []
+    for record in records:
+        source_repo = str(record.get("Repo") or "")
+        extension = str(record.get("Extension") or "").lower().lstrip(".")
+        revision = str(revision_map.get(source_repo) or "")
+        if extension != "pdf" or (repo and source_repo != repo) or not revision:
+            continue
+        path = relative_path(record)
+        selected.append({
+            "key": f"{source_repo}\0{path}", "repo": source_repo, "path": path,
+            "source_revision": revision, "source_bytes": int(record.get("Size") or 0),
+            "source_url": source_url(source_repo, revision, path),
+        })
+    selected.sort(key=lambda item: (item["repo"], item["path"]))
+    return selected
+
+
+def queue(records: list[dict], limit: int = 0, checkpoint: int = 0) -> list[dict]:
+    if limit < 0 or checkpoint < 0:
+        raise ValueError("limit and checkpoint must be non-negative")
+    if not limit:
+        return records
+    start = checkpoint * limit
+    return records[start:start + limit]
+
+
+def _run(args: list[str], *, text: bool = False) -> str:
+    result = subprocess.run(args, check=True, stdout=subprocess.PIPE if text else subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL, text=text)
+    return result.stdout.strip() if text else ""
+
+
+def _pages(pdf: Path) -> int:
+    output = _run(["pdfinfo", str(pdf)], text=True)
+    for line in output.splitlines():
+        if line.startswith("Pages:"):
+            return int(line.split(":", 1)[1].strip())
+    raise RuntimeError("missing page count")
+
+
+def _render(pdf: Path, page: int, directory: Path) -> Path:
+    stem = directory / f"page-{page:06d}"
+    _run(["pdftocairo", "-png", "-singlefile", "-f", str(page), "-l", str(page), str(pdf), str(stem)])
+    png = stem.with_suffix(".png")
+    webp = stem.with_suffix(".webp")
+    args = ["cwebp", "-quiet", "-q", str(WEBP_QUALITY)]
+    if WEBP_MAX_DIMENSION > 0:
+        args += ["-resize", str(WEBP_MAX_DIMENSION), str(WEBP_MAX_DIMENSION)]
+    _run([*args, str(png), "-o", str(webp)])
+    png.unlink(missing_ok=True)
+    return webp
+
+
+def build_item(item: dict, source: Path, bundle: Path) -> dict:
+    source_sha, actual_bytes = digest(source)
+    base = {**item, "source_sha256": source_sha, "source_bytes": actual_bytes}
+    if actual_bytes < MIN_BYTES:
+        return {**base, "status": "skipped", "reason": "below-minimum-50-mib", "strategy": "none"}
+    object_root = Path("objects") / source_sha[:2] / source_sha
+    if actual_bytes < LARGE_BYTES:
+        output = bundle / object_root / "linearized.pdf"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        _run(["qpdf", "--linearize", str(source), str(output)])
+        _run(["qpdf", "--check-linearization", str(output)])
+        output_sha, output_bytes = digest(output)
+        return {**base, "status": "ready", "strategy": "linearized-pdf",
+                "path": (object_root / "linearized.pdf").as_posix(),
+                "bytes": output_bytes, "sha256": output_sha,
+                "pdf": {"source_bytes": actual_bytes, "output_bytes": output_bytes}}
+
+    pages = _pages(source)
+    with tempfile.TemporaryDirectory(dir=bundle) as temp:
+        sample = sorted(set([1, max(1, pages // 2), pages]))[:max(1, SAMPLE_PAGES)]
+        sample_sizes = []
+        sample_end = min(pages, max(sample))
+        text = _run(["pdftotext", "-f", "1", "-l", str(sample_end), str(source), "-"], text=True)
+        classification = "native-text" if len("".join(text.split())) >= max(100, sample_end * 40) else "scan"
+        metadata = {"pages": pages, "classification": classification, "sample_pages": sample}
+        if classification == "native-text":
+            return {**base, "status": "skipped", "reason": "native-text-pdf",
+                    "strategy": "native-text", "pdf": metadata}
+        for page in sample:
+            sample_sizes.append(_render(source, page, Path(temp)).stat().st_size)
+        estimated = int(round(sum(sample_sizes) / len(sample_sizes) * pages))
+        metadata.update({"sample_webp_bytes": sample_sizes,
+                    "estimated_webp_bytes": estimated})
+        if estimated > actual_bytes * WEBP_MAX_RATIO:
+            return {**base, "status": "skipped", "reason": "estimated-webp-over-90-percent",
+                    "strategy": "sampled-webp", "pdf": metadata}
+        page_entries = []
+        for page in range(1, pages + 1):
+            rendered = _render(source, page, Path(temp))
+            page_sha, page_bytes = digest(rendered)
+            destination = bundle / object_root / "pages" / f"page-{page:06d}.webp"
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(rendered, destination)
+            page_entries.append({"page": page, "path": (object_root / "pages" / destination.name).as_posix(),
+                                 "sha256": page_sha, "bytes": page_bytes})
+    page_manifest = {
+        "version": 1, "kind": "pdf-pages", "source_sha256": source_sha,
+        "profile": PDF_PROFILE, "pages": page_entries,
+    }
+    manifest_path = bundle / object_root / "page-manifest.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(json.dumps(page_manifest, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    manifest_sha, manifest_bytes = digest(manifest_path)
+    return {**base, "status": "ready", "strategy": "sampled-webp", "pdf": metadata,
+            "pages": page_entries, "page_manifest": {
+                "path": (object_root / "page-manifest.json").as_posix(),
+                "sha256": manifest_sha, "bytes": manifest_bytes,
+            }}
+
+
+def empty_manifest() -> dict:
+    return {"version": MANIFEST_VERSION, "files": {}}
+
+
+def build_publish(manifest: dict, results: list[dict], bundle: Path) -> tuple[dict, list[CommitOperationAdd]]:
+    files = dict(manifest.get("files", {}))
+    artifacts = {}
+    for result in results:
+        entry = {k: v for k, v in result.items() if k != "key"}
+        if result["status"] == "ready":
+            paths = [result["path"]] if result.get("path") else [page["path"] for page in result["pages"]]
+            if result.get("page_manifest"):
+                paths.append(result["page_manifest"]["path"])
+            for path in paths:
+                artifact = bundle / path
+                if not artifact.is_file():
+                    raise ValueError("missing PDF asset artifact")
+                artifacts[path] = str(artifact)
+        files[result["key"]] = entry
+    updated = {"version": MANIFEST_VERSION, "files": dict(sorted(files.items()))}
+    operations = [CommitOperationAdd(path_in_repo=path, path_or_fileobj=artifacts[path])
+                  for path in sorted(artifacts)]
+    operations.append(CommitOperationAdd(
+        path_in_repo=MANIFEST_NAME,
+        path_or_fileobj=json.dumps(updated, ensure_ascii=False, sort_keys=True, indent=2).encode(),
+    ))
+    return updated, operations
+
+
+def remote_manifest(api: HfApi, repo: str) -> dict:
+    try:
+        path = api.hf_hub_download(repo_id=repo, repo_type="dataset", filename=MANIFEST_NAME)
+    except HfHubHTTPError as exc:
+        if getattr(exc.response, "status_code", None) != 404:
+            raise
+        return empty_manifest()
+    return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def remote_sidecar(api: HfApi, repo: str) -> dict:
+    try:
+        path = api.hf_hub_download(repo_id=repo, repo_type="dataset", filename="reader_assets.json.gz")
+    except HfHubHTTPError as exc:
+        if getattr(exc.response, "status_code", None) != 404:
+            raise
+        return {"v": 1, "f": {}}
+    return json.loads(gzip.decompress(Path(path).read_bytes()).decode("utf-8"))
+
+
+def update_sidecar(sidecar: dict, results: list[dict]) -> bytes:
+    updated = {"v": 1, "f": dict(sidecar.get("f", {}))}
+    for result in results:
+        if result.get("status") != "ready":
+            continue
+        path = result.get("path") or result.get("page_manifest", {}).get("path")
+        if not path:
+            continue
+        updated["f"][result["key"]] = {"s": 2, "m": "p", "p": path}
+    payload = json.dumps(updated, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    return gzip.compress(payload, compresslevel=9, mtime=0)
+
+
+def publish(api: HfApi, repo: str, manifest: dict, results: list[dict], bundle: Path) -> None:
+    for attempt in range(6):
+        info = api.repo_info(repo_id=repo, repo_type="dataset")
+        current = remote_manifest(api, repo)
+        updated, operations = build_publish(current, results, bundle)
+        operations.append(CommitOperationAdd(
+            path_in_repo="reader_assets.json.gz",
+            path_or_fileobj=update_sidecar(remote_sidecar(api, repo), results),
+        ))
+        try:
+            api.create_commit(repo_id=repo, repo_type="dataset", operations=operations,
+                              commit_message="Publish independent PDF assets", parent_commit=info.sha)
+            return
+        except HfHubHTTPError as exc:
+            status = getattr(exc.response, "status_code", None)
+            if status not in {409, 412, 429, 500, 502, 503, 504} or attempt == 5:
+                raise
+            time.sleep(min(30, 2 ** attempt))
+    raise RuntimeError("PDF asset publication retry limit reached")
+
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--search-data", type=Path, default=Path("output/search_data.json"))
+    parser.add_argument("--revisions", type=Path, default=Path("state/commits.json"))
+    parser.add_argument("--repo", default="")
+    parser.add_argument("--limit", type=int, default=0)
+    parser.add_argument("--checkpoint", type=int, default=0)
+    parser.add_argument("--source-dir", type=Path, help="Local source mirror, keyed by dataset/path")
+    parser.add_argument("--bundle", type=Path, default=Path("output/pdf-assets/bundle"))
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--assets-repo", default=os.environ.get("READER_ASSETS_REPO", READER_ASSETS_REPO))
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    records = queue(load_records(args.search_data, args.revisions, args.repo), args.limit, args.checkpoint)
+    args.bundle.mkdir(parents=True, exist_ok=True)
+    results = []
+    built_by_sha = {}
+    for item in records:
+        if args.source_dir:
+            source = args.source_dir / item["repo"] / item["path"]
+        else:
+            from huggingface_hub import hf_hub_download
+            source = Path(hf_hub_download(item["repo"], item["path"], repo_type="dataset",
+                                          revision=item["source_revision"], token=os.environ.get("HF_TOKEN")))
+        try:
+            source_sha, source_bytes = digest(source)
+            if source_sha in built_by_sha:
+                result = {**built_by_sha[source_sha], **item,
+                          "source_sha256": source_sha, "source_bytes": source_bytes}
+            else:
+                result = build_item(item, source, args.bundle)
+                built_by_sha[source_sha] = {k: v for k, v in result.items()
+                                            if k not in {"key", "repo", "path", "source_revision", "source_url"}}
+            results.append(result)
+        except (OSError, subprocess.CalledProcessError, ValueError, RuntimeError):
+            source_sha = ""
+            try:
+                source_sha, source_bytes = digest(source)
+            except OSError:
+                source_bytes = item.get("source_bytes", 0)
+            results.append({**item, "source_sha256": source_sha, "source_bytes": source_bytes,
+                            "status": "failed", "reason": "tool-error", "strategy": "none"})
+    manifest, _ = build_publish(empty_manifest(), results, args.bundle)
+    (args.bundle / MANIFEST_NAME).write_bytes(json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2).encode())
+    if not args.dry_run:
+        token = os.environ.get("HF_TOKEN")
+        if not token:
+            raise RuntimeError("HF_TOKEN is required")
+        publish(HfApi(token=token), args.assets_repo, manifest, results, args.bundle)
+    print(f"processed {len(results)} PDF asset(s)")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
