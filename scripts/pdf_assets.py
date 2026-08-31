@@ -126,8 +126,11 @@ def build_item(item: dict, source: Path, bundle: Path) -> dict:
         sample = sorted(set([1, max(1, pages // 2), pages]))[:max(1, SAMPLE_PAGES)]
         sample_sizes = []
         sample_end = min(pages, max(sample))
-        text = _run(["pdftotext", "-f", "1", "-l", str(sample_end), str(source), "-"], text=True)
-        classification = "native-text" if len("".join(text.split())) >= max(100, sample_end * 40) else "scan"
+        if item.get("extension") == "djvu":
+            classification = "djvu-image"
+        else:
+            text = _run(["pdftotext", "-f", "1", "-l", str(sample_end), str(source), "-"], text=True)
+            classification = "native-text" if len("".join(text.split())) >= max(100, sample_end * 40) else "scan"
         metadata = {"pages": pages, "classification": classification, "sample_pages": sample}
         if classification == "native-text":
             return {**base, "status": "skipped", "reason": "native-text-pdf",
