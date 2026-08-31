@@ -61,6 +61,8 @@ def load_records(search_data: Path, revisions: Path, repo: str = "", extension: 
             "key": f"{source_repo}\0{path}", "repo": source_repo, "path": path,
             "extension": source_extension, "source_revision": revision, "source_bytes": int(record.get("Size") or 0),
             "source_url": source_url(source_repo, revision, path),
+            "source_kind": "upstream", "profile": SOURCE_PROFILES["upstream"],
+            "source_extension": source_extension,
         })
     selected.sort(key=lambda item: (item["repo"], item["path"]))
     return selected
