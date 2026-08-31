@@ -204,7 +204,7 @@ def build_item(item: dict, source: Path, bundle: Path) -> dict:
         estimated = int(round(sum(sample_sizes) / len(sample_sizes) * pages))
         metadata.update({"sample_webp_bytes": sample_sizes,
                     "estimated_webp_bytes": estimated})
-        if estimated > actual_bytes * WEBP_MAX_RATIO:
+        if item.get("extension") != "djvu" and estimated > actual_bytes * WEBP_MAX_RATIO:
             return {**base, "status": "skipped", "reason": "estimated-webp-over-90-percent",
                     "strategy": "sampled-webp", "pdf": metadata}
         page_entries = []
