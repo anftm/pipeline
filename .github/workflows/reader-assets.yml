@@ -133,7 +133,7 @@ jobs:
           items = [item for item in items if item["extension"] == extension]
           queue["items"] = items
           queue_path.write_text(json.dumps(queue, ensure_ascii=False, indent=2), encoding="utf-8")
-          shard_count = 1 if os.environ.get("FORCE_REBUILD") == "true" else 10
+          shard_count = 1 if os.environ.get("FORCE_REBUILD") == "true" or os.environ.get("INPUT_PATH") else 10
           for shard in range(shard_count):
               shard_items = [
                   item for item in items
@@ -151,7 +151,7 @@ jobs:
               output.write(f"count={len(items)}\n")
               output.write(f"stale_count={len(queue.get('stale_keys', []))}\n")
               output.write(f"authoritative={str(queue.get('authoritative_snapshot') is True).lower()}\n")
-              output.write(f"shards={'[0]' if os.environ.get('FORCE_REBUILD') == 'true' else '[0,1,2,3,4,5,6,7,8,9]'}\n")
+              output.write(f"shards={'[0]' if os.environ.get('FORCE_REBUILD') == 'true' or os.environ.get('INPUT_PATH') else '[0,1,2,3,4,5,6,7,8,9]'}\n")
           PY
       - name: Package conversion plan
         if: inputs.dry_run != true
