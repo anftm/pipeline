@@ -238,8 +238,6 @@ def main() -> int:
     if not token and not args.dry_run:
         raise RuntimeError("HF_TOKEN is required")
     api = HfApi(token=token or None)
-    if not args.dry_run:
-        api.create_repo(repo_id=args.assets_repo, repo_type="dataset", exist_ok=True)
     if args.dry_run:
         manifest, operations = build_publish(api, args.assets_repo, args.bundle)
         print(f"dry run: validated {len(operations) - 2} artifact(s), {len(manifest['files'])} manifest entries")
