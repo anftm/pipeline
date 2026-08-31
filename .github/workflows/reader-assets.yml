@@ -204,7 +204,7 @@ jobs:
             odt) packages=(libreoffice) ;;
             rtf) packages=(calibre libreoffice fontconfig fonts-noto-cjk fonts-wqy-microhei) ;;
             chm) packages=(calibre p7zip-full) ;;
-            djvu) packages=(djvulibre-bin poppler-utils) ;;
+            djvu) packages=(djvulibre-bin qpdf poppler-utils) ;;
             tif|tiff) packages=(poppler-utils) ;;
             mht|mhtml) packages=() ;;
             ps) packages=(ghostscript poppler-utils) ;;
