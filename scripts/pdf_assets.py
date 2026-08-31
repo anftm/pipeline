@@ -91,10 +91,10 @@ def _pages(pdf: Path, extension: str = "pdf") -> int:
 def _render(pdf: Path, page: int, directory: Path, extension: str = "pdf") -> Path:
     stem = directory / f"page-{page:06d}"
     if extension == "djvu":
-        _run(["ddjvu", "-format=png", f"-page={page}", str(pdf), str(stem.with_suffix(".png"))])
+        _run(["ddjvu", "-format=ppm", f"-page={page}", str(pdf), str(stem.with_suffix(".ppm"))])
     else:
         _run(["pdftocairo", "-png", "-singlefile", "-f", str(page), "-l", str(page), str(pdf), str(stem)])
-    png = stem.with_suffix(".png")
+    png = stem.with_suffix(".png") if extension != "djvu" else stem.with_suffix(".ppm")
     webp = stem.with_suffix(".webp")
     args = ["cwebp", "-quiet", "-q", str(WEBP_QUALITY)]
     if WEBP_MAX_DIMENSION > 0:
