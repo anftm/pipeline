@@ -30,6 +30,10 @@ WEBP_MAX_DIMENSION = int(os.environ.get("PDF_WEBP_MAX_DIMENSION", "2400"))
 SAMPLE_PAGES = int(os.environ.get("PDF_SAMPLE_PAGES", "3"))
 WEBP_MAX_RATIO = float(os.environ.get("PDF_WEBP_MAX_RATIO", "0.9"))
 PDF_PROFILE = f"pdf-pages-v1-{WEBP_QUALITY}-{WEBP_MAX_DIMENSION}"
+SOURCE_PROFILES = {
+    "upstream": "pdf-assets-upstream-v1",
+    "generated": "pdf-assets-reader-generated-v1",
+}
 
 
 def digest(path: Path) -> tuple[str, int]:
