@@ -899,30 +899,11 @@ def convert_chm_to_html(source: Path, target: Path, work: Path) -> None:
 
         return re.sub(r"(\bhref\s*=\s*[\"'])([^\"']+)([\"'])", link, document, flags=re.IGNORECASE)
 
-    def render_toc(nodes):
-        rendered = []
-        for node in nodes:
-            page_index, fragment = page_target(node.get("local", ""), "")
-            label = html.escape(node.get("name", "") or "未命名目录项")
-            if page_index is not None:
-                href = f"#chm-page-{page_index}"
-                if fragment:
-                    href += "--" + html.escape(fragment, quote=True)
-                item = f'<li><a href="{href}">{label}</a>'
-            else:
-                item = f"<li>{label}"
-            children = render_toc(node.get("children", []))
-            rendered.append(item + (f"<ol>{children}</ol>" if children else "") + "</li>")
-        return "".join(rendered)
-
     body_parts = []
     for index, (path, document) in enumerate(documents):
         body_parts.append(f'<section id="chm-page-{index}">{rewrite_document(document, path, index)}</section>')
-    toc_html = ""
-    if toc_nodes:
-        toc_html = f'<nav id="chm-toc"><strong>目录</strong><ol>{render_toc(toc_nodes)}</ol></nav>'
     body = "".join(body_parts)
-    target.write_text(f"<!doctype html><meta charset=\"utf-8\">{toc_html}<main>{body}</main>", encoding="utf-8")
+    target.write_text(f"<!doctype html><meta charset=\"utf-8\"><main>{body}</main>", encoding="utf-8")
     validate_html_content(target)
 
 
