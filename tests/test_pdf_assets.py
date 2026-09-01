@@ -70,6 +70,14 @@ class PdfAssetsTests(unittest.TestCase):
         }})
         self.assertEqual([item["key"] for item in pending], ["r\0new.pdf"])
 
+    def test_byte_range_selects_medium_and_large_sources(self):
+        records = [{"key": key, "source_bytes": size} for key, size in (
+            ("medium", 50 * pdf_assets.MI), ("large", 100 * pdf_assets.MI),
+            ("small", 49 * pdf_assets.MI))]
+        selected = [item for item in records if item["source_bytes"] >= 50 * pdf_assets.MI
+                    and item["source_bytes"] < 100 * pdf_assets.MI]
+        self.assertEqual([item["key"] for item in selected], ["medium"])
+
     def test_merge_bundles_combines_multiple_shards_and_empty_shards(self):
         with tempfile.TemporaryDirectory() as root:
             root = Path(root)

@@ -39,6 +39,16 @@ on:
         required: false
         default: true
         type: boolean
+      min_mib:
+        description: Minimum source size in MiB, inclusive
+        required: false
+        default: "0"
+        type: string
+      max_mib:
+        description: Maximum source size in MiB, exclusive; 0 means no maximum
+        required: false
+        default: "0"
+        type: string
 
 concurrency:
   group: reader-assets-pdf
@@ -72,11 +82,18 @@ jobs:
         run: |
           [[ "${{ inputs.limit }}" =~ ^[0-9]+$ ]] && ((10#${{ inputs.limit }} >= 1 && 10#${{ inputs.limit }} <= 100))
           [[ "${{ inputs.checkpoint }}" =~ ^[0-9]+$ ]]
+          [[ "${{ inputs.min_mib || '0' }}" =~ ^[0-9]+$ ]]
+          [[ "${{ inputs.max_mib || '0' }}" =~ ^[0-9]+$ ]]
+          min_bytes=$((10#${{ inputs.min_mib || '0' }} * 1024 * 1024))
+          max_bytes=$((10#${{ inputs.max_mib || '0' }} * 1024 * 1024))
+          ((max_bytes == 0 || max_bytes > min_bytes))
           python scripts/plan_pdf_assets.py \
             --repo "${{ inputs.repo }}" \
             --source "${{ inputs.source || 'all' }}" \
             --limit "${{ inputs.limit }}" \
              --checkpoint "${{ inputs.checkpoint }}" \
+             --min-bytes "${min_bytes}" \
+             --max-bytes "${max_bytes}" \
              --shard-count 10 \
              --workers 8 \
              --output output/pdf-assets/queue.json

@@ -69,6 +69,8 @@ def main() -> int:
     parser.add_argument("--assets-repo", default=os.environ.get("READER_ASSETS_REPO", pdf_assets.READER_ASSETS_REPO))
     parser.add_argument("--limit", type=int, required=True, help="Total PDFs in this checkpoint")
     parser.add_argument("--checkpoint", type=int, default=0)
+    parser.add_argument("--min-bytes", type=int, default=0)
+    parser.add_argument("--max-bytes", type=int, default=0)
     parser.add_argument("--shard-count", type=int, default=10)
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--source-dir", type=Path)
@@ -92,6 +94,11 @@ def main() -> int:
     except Exception:
         pdf_manifest = {"files": {}}
     records = pending_records(records, pdf_manifest)
+    if args.min_bytes < 0 or args.max_bytes < 0 or (args.max_bytes and args.max_bytes < args.min_bytes):
+        raise ValueError("invalid byte range")
+    records = [item for item in records
+               if (not args.min_bytes or item["source_bytes"] >= args.min_bytes)
+               and (not args.max_bytes or item["source_bytes"] < args.max_bytes)]
     selected = pdf_assets.queue(records, args.limit, args.checkpoint)
     planned = plan(selected, args.source_dir, args.assets_repo, args.shard_count, args.workers)
     args.output.parent.mkdir(parents=True, exist_ok=True)
