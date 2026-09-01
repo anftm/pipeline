@@ -1738,6 +1738,28 @@ class PublicationTests(unittest.TestCase):
             ["parent-1", "parent-2"],
         )
 
+    def test_transient_preflight_error_is_retried(self):
+        result = {
+            "key": "VoiceOfML/Test\0A/Book.docx", "status": "ready", "source_revision": "rev1",
+            "source_sha256": "a" * 64, "source_bytes": 10, "source_extension": "docx",
+            "profile": "docx-native-v2", "reader_mode": "docx", "path": "objects/aa/document.docx",
+            "bytes": 12, "sha256": "b" * 64,
+        }
+        response = requests.Response()
+        response.status_code = 429
+        response.request = requests.Request("GET", "https://huggingface.co/api/datasets/vomebook/Test").prepare()
+        api = Mock()
+        api.repo_info.side_effect = [HfHubHTTPError("rate limited", response=response), Mock(sha="parent-1")]
+        api.file_exists.return_value = True
+        with tempfile.TemporaryDirectory() as root, patch.object(publish_reader_assets.time, "sleep"):
+            remote = Path(root) / "remote.json"
+            remote.write_text(json.dumps({"version": 1, "files": {}}), encoding="utf-8")
+            api.hf_hub_download.return_value = str(remote)
+            bundle = self.make_bundle(root, result)
+            _, count = publish_reader_assets.publish_bundle(api, "vomebook/Test", bundle)
+        self.assertEqual(count, 1)
+        self.assertEqual(api.repo_info.call_count, 2)
+
     def test_transient_error_after_remote_commit_is_idempotent(self):
         result = {
             "key": "VoiceOfML/Test\0A/Book.docx", "status": "ready", "source_revision": "rev1",

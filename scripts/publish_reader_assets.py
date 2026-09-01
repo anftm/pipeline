@@ -194,17 +194,17 @@ def publish_bundle(api: HfApi, repo_id: str, bundle: Path, *, max_attempts: int 
     result_keys = {result.get("key") for result in data.get("results", []) if result.get("key")}
     baseline = None
     for attempt in range(max_attempts):
-        revision = api.repo_info(repo_id=repo_id, repo_type="dataset").sha
-        current = remote_manifest(api, repo_id, revision)
-        if attempt and bundle_is_published(current, data):
-            return current, 0
-        current_entries = {key: current["files"].get(key) for key in result_keys}
-        if baseline is None:
-            baseline = current_entries
-        elif current_entries != baseline:
-            raise RuntimeError("reader asset key changed during publication retry")
-        manifest, operations = build_publish(api, repo_id, bundle, revision)
         try:
+            revision = api.repo_info(repo_id=repo_id, repo_type="dataset").sha
+            current = remote_manifest(api, repo_id, revision)
+            if attempt and bundle_is_published(current, data):
+                return current, 0
+            current_entries = {key: current["files"].get(key) for key in result_keys}
+            if baseline is None:
+                baseline = current_entries
+            elif current_entries != baseline:
+                raise RuntimeError("reader asset key changed during publication retry")
+            manifest, operations = build_publish(api, repo_id, bundle, revision)
             api.create_commit(
                 repo_id=repo_id, repo_type="dataset", operations=operations,
                 commit_message="Update reader assets", parent_commit=revision,
