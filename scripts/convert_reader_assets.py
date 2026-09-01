@@ -859,9 +859,9 @@ def convert_chm_to_html(source: Path, target: Path, work: Path) -> None:
         parser.feed(decode_html_source(hhc[0]))
         for entry in parser.entries:
             local = entry.get("local", "")
-            target, fragment = page_target(local, "")
-            if target is not None:
-                toc.append((entry.get("name", ""), target, fragment))
+            page_index, fragment = page_target(local, "")
+            if page_index is not None:
+                toc.append((entry.get("name", ""), page_index, fragment))
 
     body_parts = []
     for index, (path, document) in enumerate(documents):
