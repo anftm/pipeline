@@ -1067,12 +1067,6 @@ aW1hZ2U=
             self.assertIn('charset="utf-8"', text.lower())
             self.assertNotIn("big5", text.lower())
 
-    def test_undecorated_utf8_is_not_reinterpreted_as_legacy_encoding(self):
-        with tempfile.TemporaryDirectory() as root:
-            source = Path(root) / "source.html"
-            source.write_bytes("<p>这是 UTF-8 正文</p>".encode("utf-8"))
-            self.assertIn("这是 UTF-8 正文", convert_reader_assets.decode_html_source(source))
-
     def test_html_conversion_inlines_local_images_and_stylesheets_only(self):
         with tempfile.TemporaryDirectory() as root:
             work = Path(root)

@@ -167,17 +167,6 @@ def decode_html_source(source: Path) -> str:
             "x-gbk": "gb18030", "x-sjis": "shift-jis", "windows-31j": "shift-jis",
             "ks_c_5601-1987": "euc-kr", "euc-cn": "gb18030", "x-euc-tw": "big5",
         }.get(declared, declared)
-    if declared:
-        try:
-            return data.decode(declared)
-        except (LookupError, UnicodeDecodeError):
-            pass
-    try:
-        # A valid UTF-8 page is unambiguous; do not reinterpret it as a
-        # legacy encoding merely because that produces more code points.
-        return data.decode("utf-8")
-    except UnicodeDecodeError:
-        pass
     candidates = [encoding for encoding in (declared, "utf-8", "gb18030", "big5",
                   "shift-jis", "euc-kr", "windows-1251", "windows-1252", "latin-1") if encoding]
     best_text, best_score = "", float("-inf")
