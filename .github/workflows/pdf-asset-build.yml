@@ -3,6 +3,8 @@ name: Build PDF Assets
 on:
   push:
     branches: []
+  repository_dispatch:
+    types: [pdf-assets]
   workflow_dispatch:
     inputs:
       repo:
@@ -72,13 +74,13 @@ jobs:
           READER_ASSETS_REPO: vomebook/Reader-Assets
           HF_HUB_DISABLE_XET: "1"
         run: |
-          [[ "${{ inputs.limit }}" =~ ^[0-9]+$ ]] && ((10#${{ inputs.limit }} >= 1 && 10#${{ inputs.limit }} <= 100))
-          [[ "${{ inputs.checkpoint }}" =~ ^[0-9]+$ ]]
+          [[ "${{ inputs.limit || github.event.client_payload.limit || '10' }}" =~ ^[0-9]+$ ]] && ((10#${{ inputs.limit || github.event.client_payload.limit || '10' }} >= 1 && 10#${{ inputs.limit || github.event.client_payload.limit || '10' }} <= 100))
+          [[ "${{ inputs.checkpoint || github.event.client_payload.checkpoint || '0' }}" =~ ^[0-9]+$ ]]
           python scripts/plan_pdf_assets.py \
-            --repo "${{ inputs.repo }}" \
-            --source "${{ inputs.source || 'all' }}" \
-            --limit "${{ inputs.limit }}" \
-             --checkpoint "${{ inputs.checkpoint }}" \
+            --repo "${{ inputs.repo || github.event.client_payload.repo || '' }}" \
+            --source "${{ inputs.source || github.event.client_payload.source || 'all' }}" \
+            --limit "${{ inputs.limit || github.event.client_payload.limit || '10' }}" \
+             --checkpoint "${{ inputs.checkpoint || github.event.client_payload.checkpoint || '0' }}" \
              --shard-count 10 \
              --workers 8 \
              --output output/pdf-assets/queue.json
@@ -116,7 +118,7 @@ jobs:
           READER_ASSETS_REPO: vomebook/Reader-Assets
           FORCE_SYNC: "true"
         run: |
-          args=(--source "${{ inputs.source || 'all' }}" --shard-count 10 --shard-index "${{ matrix.shard }}" --extension pdf --queue-file output/pdf-assets/queue.json --build-only)
+            args=(--source "${{ inputs.source || github.event.client_payload.source || 'all' }}" --shard-count 10 --shard-index "${{ matrix.shard }}" --extension pdf --queue-file output/pdf-assets/queue.json --build-only)
           python scripts/pdf_assets.py "${args[@]}" --bundle "output/pdf-assets/bundle"
       - uses: actions/upload-artifact@v7
         with:
@@ -142,7 +144,7 @@ jobs:
           path: output/pdf-assets/bundles
           merge-multiple: false
       - name: Publish merged PDF assets atomically
-        if: inputs.dry_run != true
+        if: (inputs.dry_run || github.event.client_payload.dry_run) != true
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           READER_ASSETS_REPO: vomebook/Reader-Assets
