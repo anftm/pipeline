@@ -873,7 +873,6 @@ def convert_chm_to_html(source: Path, target: Path, work: Path) -> None:
     collect_toc_order(toc_nodes)
     if ordered_indices:
         ordered = [documents[index] for index in ordered_indices]
-        ordered.extend(document for index, document in enumerate(documents) if index not in ordered_indices)
         documents = ordered
         page_map = {path.lower(): index for index, (path, _) in enumerate(documents)}
         basename_map = {}
