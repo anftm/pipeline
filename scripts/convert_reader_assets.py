@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import traceback
 import time
 import http.client
 import urllib.error
@@ -1413,7 +1414,8 @@ def main() -> int:
             try:
                 return convert_item(item, args.bundle, reusable)
             except Exception as exc:
-                print(f"failed: {item['repo']}/{item['path']}: {exc}")
+                print(f"failed: {item['repo']}/{item['path']}: {type(exc).__name__}: {exc}")
+                traceback.print_exc()
                 return {
                     "key": item["key"], "status": "failed", "source_revision": item["source_revision"],
                     "source_extension": item["extension"], "profile": item["profile"],
