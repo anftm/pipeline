@@ -83,7 +83,8 @@ def build_queue(records, revisions, manifest, *, repo="", extension="", exact_pa
                 continue
         if not force and existing.get("status") == "failed" and existing.get("profile") == profile and not retry_failed:
             continue
-        failed_current = (existing.get("failed_source_revision") == revision
+        failed_current = (existing.get("profile") == profile
+                          and existing.get("failed_source_revision") == revision
                           and existing.get("failed_profile") == profile)
         if not force and failed_current and not retry_failed:
             continue
