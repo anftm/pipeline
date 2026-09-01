@@ -1,8 +1,6 @@
 name: Build PDF Assets
 
 on:
-  push:
-    branches: []
   repository_dispatch:
     types: [pdf-assets]
   workflow_dispatch:
