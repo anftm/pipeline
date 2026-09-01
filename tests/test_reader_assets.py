@@ -53,7 +53,7 @@ class ReaderAssetContractTests(unittest.TestCase):
             "fb2": ("foliate-original-v1", "foliate", "document.fb2"),
             "odt": ("calibre-odt-html-v1", "html", "document.html"),
             "rtf": ("calibre-rtf-html-v1", "html", "document.html"),
-            "chm": ("calibre-chm-html-v5", "html", "document.html"),
+            "chm": ("calibre-chm-html-v6", "html", "document.html"),
             "tif": ("pillow-pdf-v2", "pdf", "document.pdf"),
             "tiff": ("pillow-pdf-v2", "pdf", "document.pdf"),
             "djvu": ("djvulibre-pdf-v2", "pdf", "document.pdf"),
@@ -1066,6 +1066,12 @@ aW1hZ2U=
             self.assertIn("繁體中文", text)
             self.assertIn('charset="utf-8"', text.lower())
             self.assertNotIn("big5", text.lower())
+
+    def test_undecorated_gb18030_prefers_chinese_over_cyrillic(self):
+        with tempfile.TemporaryDirectory() as root:
+            source = Path(root) / "source.html"
+            source.write_bytes("<p>目录 人民日报 研究资料</p>".encode("gb18030"))
+            self.assertIn("目录 人民日报 研究资料", convert_reader_assets.decode_html_source(source))
 
     def test_html_conversion_inlines_local_images_and_stylesheets_only(self):
         with tempfile.TemporaryDirectory() as root:
