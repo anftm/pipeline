@@ -23,7 +23,7 @@ CONVERTIBLE_EXTENSIONS = {
     "fb2": ("foliate-original-v1", "foliate", "document.fb2"),
     "odt": ("calibre-odt-html-v1", "html", "document.html"),
     "rtf": ("calibre-rtf-html-v1", "html", "document.html"),
-    "chm": ("calibre-chm-html-v4", "html", "document.html"),
+    "chm": ("calibre-chm-html-v5", "html", "document.html"),
     "tif": ("pillow-pdf-v2", "pdf", "document.pdf"),
     "tiff": ("pillow-pdf-v2", "pdf", "document.pdf"),
     "djvu": ("djvulibre-pdf-v2", "pdf", "document.pdf"),

@@ -874,7 +874,10 @@ def convert_chm_to_html(source: Path, target: Path, work: Path) -> None:
 
     body_parts = []
     for index, (path, document) in enumerate(documents):
-        body_parts.append(f'<section id="chm-page-{index}">{rewrite_document(document, path, index)}</section>')
+        body_parts.append(
+            f'<section id="chm-page-{index}"><h2>第 {index + 1} 页</h2>'
+            f'{rewrite_document(document, path, index)}</section>'
+        )
     toc_html = ""
     if toc:
         links = "".join(
