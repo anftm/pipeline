@@ -1446,8 +1446,10 @@ def convert_item(item: dict, bundle: Path, reusable: dict | None = None) -> dict
                     shutil.move(temporary, target)
             else:
                 validate_output(target, item["reader_mode"])
-                if item["extension"] == "chm":
+                if item["extension"] == "chm" and item["reader_mode"] == "epub":
                     validate_chm_epub(target)
+                elif item["extension"] == "chm":
+                    validate_html_content(target)
                 validate_reader_content(target, item, work)
                 if existing and file_sha256(target) != existing["sha256"]:
                     raise RuntimeError("reusable reader artifact digest mismatch")
