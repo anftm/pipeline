@@ -50,6 +50,12 @@ class PdfAssetsTests(unittest.TestCase):
         shards = pdf_assets.weighted_shards(records, 2)
         self.assertEqual([[item["key"] for item in shard] for shard in shards], [["a", "c"], ["b"]])
 
+    def test_object_root_is_unique_per_source_entry(self):
+        self.assertNotEqual(
+            pdf_assets.object_root("a" * 64, "repo\0first.pdf"),
+            pdf_assets.object_root("a" * 64, "repo\0second.pdf"),
+        )
+
     def test_publish_manifest_is_separate_and_content_addressed(self):
         result = {"key": "r\0x.pdf", "status": "skipped", "reason": "estimated-webp-over-90-percent",
                   "strategy": "sampled-webp", "source_sha256": "a" * 64}
