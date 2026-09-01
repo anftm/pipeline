@@ -45,10 +45,17 @@ def merge_bundles(bundle_paths: list[Path], output: Path) -> list[dict]:
     return results
 
 
+def result_chunks(results: list[dict], size: int) -> list[list[dict]]:
+    if size < 1:
+        raise ValueError("publication chunk size must be positive")
+    return [results[index:index + size] for index in range(0, len(results), size)]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--bundles", type=Path, nargs="+", required=True)
     parser.add_argument("--assets-repo", default=os.environ.get("READER_ASSETS_REPO", pdf_assets.READER_ASSETS_REPO))
+    parser.add_argument("--chunk-results", type=int, default=1)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     with tempfile.TemporaryDirectory() as root:
@@ -61,7 +68,11 @@ def main() -> int:
             token = os.environ.get("HF_TOKEN")
             if not token:
                 raise RuntimeError("HF_TOKEN is required")
-            pdf_assets.publish(HfApi(token=token), args.assets_repo, manifest, results, merged)
+            api = HfApi(token=token)
+            chunks = result_chunks(results, args.chunk_results)
+            for index, chunk in enumerate(chunks, 1):
+                print(f"publishing PDF chunk {index}/{len(chunks)} ({len(chunk)} asset(s))")
+                pdf_assets.publish(api, args.assets_repo, manifest, chunk, merged)
         print(f"published {len(results)} PDF asset(s) to {args.assets_repo}")
     return 0
 

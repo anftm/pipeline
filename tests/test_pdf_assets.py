@@ -97,6 +97,13 @@ class PdfAssetsTests(unittest.TestCase):
         self.assertEqual([result["key"] for result in merged_results], ["r\0a.pdf"])
         self.assertIn("objects/a/page.webp", {operation.path_in_repo for operation in operations})
 
+    def test_result_chunks_are_stable_and_bounded(self):
+        results = [{"key": str(index)} for index in range(5)]
+        self.assertEqual(
+            publish_pdf_assets.result_chunks(results, 2),
+            [[results[0], results[1]], [results[2], results[3]], [results[4]]],
+        )
+
     def test_publish_retries_parent_race_and_reuses_successful_commit(self):
         result = {"key": "r\0a.pdf", "status": "skipped", "reason": "native-text-pdf",
                   "strategy": "native-text", "source_revision": "1", "source_sha256": "a" * 64,
