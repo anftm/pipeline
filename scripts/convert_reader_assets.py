@@ -25,6 +25,7 @@ import os
 import posixpath
 import xml.etree.ElementTree as ET
 from email.parser import BytesParser
+from html.parser import HTMLParser
 from pathlib import Path
 
 import bleach
@@ -792,21 +793,99 @@ def convert_chm_to_html(source: Path, target: Path, work: Path) -> None:
     pages = sorted(path for path in extracted.rglob("*") if path.is_file() and path.suffix.lower() in {".htm", ".html"})
     text_pages = sorted(path for path in extracted.rglob("*") if path.is_file() and path.suffix.lower() == ".txt")
     mhtml = sorted(path for path in extracted.rglob("*") if path.is_file() and path.suffix.lower() in {".mht", ".mhtml"})
-    documents = [inline_local_html_resources(decode_html_source(path), extracted, path.parent) for path in pages]
-    documents.extend(
-        f"<pre>{html.escape(decode_html_source(path))}</pre>"
-        for path in text_pages
-    )
+    hhc = sorted(path for path in extracted.rglob("*") if path.is_file() and path.suffix.lower() == ".hhc")
+    documents = [(path.relative_to(extracted).as_posix(), inline_local_html_resources(
+        decode_html_source(path), extracted, path.parent)) for path in pages]
+    documents.extend((path.relative_to(extracted).as_posix(), f"<pre>{html.escape(decode_html_source(path))}</pre>")
+                     for path in text_pages)
     for index, path in enumerate(mhtml):
         if path.stat().st_size > MAX_MHTML_SOURCE_BYTES:
             raise RuntimeError("CHM MHTML source exceeds size limit")
         converted = work / f"chm-mhtml-{index:04d}.html"
         mhtml_to_html(path, converted)
-        documents.append(decode_html_source(converted))
+        documents.append((converted.name, decode_html_source(converted)))
     if not documents:
         raise RuntimeError("CHM contains no HTML pages")
-    body = "".join(f"<section><h1>第 {index} 页</h1>{document}</section>" for index, document in enumerate(documents, 1))
-    target.write_text(f"<!doctype html><meta charset=\"utf-8\"><main>{body}</main>", encoding="utf-8")
+
+    page_map = {path.lower(): index for index, (path, _) in enumerate(documents)}
+    basename_map = {}
+    for path, index in page_map.items():
+        basename_map.setdefault(posixpath.basename(path), []).append(index)
+
+    def page_target(raw: str, current: str):
+        value = urllib.parse.unquote(html.unescape(raw).replace("\\", "/"))
+        value, fragment = value.split("#", 1) if "#" in value else (value, "")
+        if not value:
+            return None, fragment
+        resolved = posixpath.normpath(posixpath.join(posixpath.dirname(current), value)).lower()
+        index = page_map.get(resolved)
+        if index is None and len(basename_map.get(posixpath.basename(resolved), [])) == 1:
+            index = basename_map[posixpath.basename(resolved)][0]
+        return index, fragment
+
+    def rewrite_document(document: str, current: str, index: int) -> str:
+        prefix = f"chm-page-{index}--"
+        document = re.sub(r"(\bid\s*=\s*[\"'])([^\"']+)([\"'])",
+                          lambda match: match.group(1) + prefix + match.group(2) + match.group(3), document,
+                          flags=re.IGNORECASE)
+
+        def link(match):
+            before, raw, quote = match.groups()
+            if raw.startswith("#"):
+                value = "#" + prefix + raw[1:]
+            else:
+                target, fragment = page_target(raw, current)
+                if target is None:
+                    return match.group(0)
+                value = f"#chm-page-{target}" + (f"--{fragment}" if fragment else "")
+            return before + value + quote
+
+        return re.sub(r"(\bhref\s*=\s*[\"'])([^\"']+)([\"'])", link, document, flags=re.IGNORECASE)
+
+    toc = []
+    if hhc:
+        class TocParser(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.current = None
+                self.entries = []
+
+            def handle_starttag(self, tag, attrs):
+                attrs = dict(attrs)
+                if tag.lower() == "object":
+                    self.current = {}
+                elif tag.lower() == "param" and self.current is not None:
+                    name = attrs.get("name", "").lower()
+                    if name in {"name", "local"}:
+                        self.current[name] = attrs.get("value", "")
+
+            def handle_endtag(self, tag):
+                if tag.lower() == "object" and self.current:
+                    self.entries.append(self.current)
+                    self.current = None
+
+        parser = TocParser()
+        parser.feed(decode_html_source(hhc[0]))
+        for entry in parser.entries:
+            local = entry.get("local", "")
+            target, fragment = page_target(local, "")
+            if target is not None:
+                toc.append((entry.get("name", ""), target, fragment))
+
+    body_parts = []
+    for index, (path, document) in enumerate(documents):
+        body_parts.append(f'<section id="chm-page-{index}">{rewrite_document(document, path, index)}</section>')
+    toc_html = ""
+    if toc:
+        links = "".join(
+            f'<li><a href="#chm-page-{index}' + (f'--{html.escape(fragment, quote=True)}' if fragment else '') +
+            f'">{html.escape(name or path)}</a></li>'
+            for name, index, fragment in toc
+            for path, _ in [documents[index]]
+        )
+        toc_html = f'<nav id="chm-toc"><strong>目录</strong><ol>{links}</ol></nav>'
+    body = "".join(body_parts)
+    target.write_text(f"<!doctype html><meta charset=\"utf-8\">{toc_html}<main>{body}</main>", encoding="utf-8")
     validate_html_content(target)
 
 
