@@ -1,9 +1,6 @@
 name: Build PDF Assets
 
-"on":
-  repository_dispatch:
-    types:
-      - pdf-assets
+on: repository_dispatch
 
 concurrency:
   group: reader-assets-pdf
