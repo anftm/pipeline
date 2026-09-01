@@ -3,44 +3,6 @@ name: Build PDF Assets
 on:
   repository_dispatch:
     types: [pdf-assets]
-  workflow_dispatch:
-    inputs:
-      repo:
-        description: Exact VoiceOfML dataset, or blank for all nine
-        required: false
-        default: ""
-        type: string
-      extension:
-        description: PDF only
-        required: false
-        default: pdf
-        type: choice
-        options:
-          - pdf
-      limit:
-        description: Total PDFs in this round, distributed by page count (maximum 100)
-        required: true
-        default: "10"
-        type: string
-      checkpoint:
-        description: Zero-based sorted queue checkpoint
-        required: true
-        default: "0"
-        type: string
-      source:
-        description: upstream or generated Reader-Assets PDFs
-        required: false
-        default: all
-        type: choice
-        options:
-          - upstream
-          - generated
-          - all
-      dry_run:
-        description: Build and validate locally without publishing
-        required: false
-        default: true
-        type: boolean
 
 concurrency:
   group: reader-assets-pdf
@@ -72,13 +34,13 @@ jobs:
           READER_ASSETS_REPO: vomebook/Reader-Assets
           HF_HUB_DISABLE_XET: "1"
         run: |
-          [[ "${{ inputs.limit || github.event.client_payload.limit || '10' }}" =~ ^[0-9]+$ ]] && ((10#${{ inputs.limit || github.event.client_payload.limit || '10' }} >= 1 && 10#${{ inputs.limit || github.event.client_payload.limit || '10' }} <= 100))
-          [[ "${{ inputs.checkpoint || github.event.client_payload.checkpoint || '0' }}" =~ ^[0-9]+$ ]]
+          [[ "${{ github.event.client_payload.limit || '10' }}" =~ ^[0-9]+$ ]] && ((10#${{ github.event.client_payload.limit || '10' }} >= 1 && 10#${{ github.event.client_payload.limit || '10' }} <= 100))
+          [[ "${{ github.event.client_payload.checkpoint || '0' }}" =~ ^[0-9]+$ ]]
           python scripts/plan_pdf_assets.py \
-            --repo "${{ inputs.repo || github.event.client_payload.repo || '' }}" \
-            --source "${{ inputs.source || github.event.client_payload.source || 'all' }}" \
-            --limit "${{ inputs.limit || github.event.client_payload.limit || '10' }}" \
-             --checkpoint "${{ inputs.checkpoint || github.event.client_payload.checkpoint || '0' }}" \
+            --repo "${{ github.event.client_payload.repo || '' }}" \
+            --source "${{ github.event.client_payload.source || 'all' }}" \
+            --limit "${{ github.event.client_payload.limit || '10' }}" \
+             --checkpoint "${{ github.event.client_payload.checkpoint || '0' }}" \
              --shard-count 10 \
              --workers 8 \
              --output output/pdf-assets/queue.json
@@ -116,7 +78,7 @@ jobs:
           READER_ASSETS_REPO: vomebook/Reader-Assets
           FORCE_SYNC: "true"
         run: |
-            args=(--source "${{ inputs.source || github.event.client_payload.source || 'all' }}" --shard-count 10 --shard-index "${{ matrix.shard }}" --extension pdf --queue-file output/pdf-assets/queue.json --build-only)
+            args=(--source "${{ github.event.client_payload.source || 'all' }}" --shard-count 10 --shard-index "${{ matrix.shard }}" --extension pdf --queue-file output/pdf-assets/queue.json --build-only)
           python scripts/pdf_assets.py "${args[@]}" --bundle "output/pdf-assets/bundle"
       - uses: actions/upload-artifact@v7
         with:
@@ -142,7 +104,7 @@ jobs:
           path: output/pdf-assets/bundles
           merge-multiple: false
       - name: Publish merged PDF assets atomically
-        if: (inputs.dry_run || github.event.client_payload.dry_run) != true
+        if: github.event.client_payload.dry_run != true
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           READER_ASSETS_REPO: vomebook/Reader-Assets
