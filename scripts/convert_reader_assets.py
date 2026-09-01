@@ -809,6 +809,42 @@ def convert_chm_to_html(source: Path, target: Path, work: Path) -> None:
     if not documents:
         raise RuntimeError("CHM contains no HTML pages")
 
+    toc_nodes = []
+    if hhc:
+        class TocParser(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.entries = []
+                self.stack = [self.entries]
+                self.current = None
+
+            def handle_starttag(self, tag, attrs):
+                attrs = dict(attrs)
+                tag = tag.lower()
+                if tag == "object":
+                    self.current = {}
+                elif tag == "param" and self.current is not None:
+                    name = attrs.get("name", "").lower()
+                    if name in {"name", "local"}:
+                        self.current[name] = attrs.get("value", "")
+                elif tag == "ul" and self.stack[-1]:
+                    last = self.stack[-1][-1]
+                    if isinstance(last, dict) and "children" in last:
+                        self.stack.append(last["children"])
+
+            def handle_endtag(self, tag):
+                tag = tag.lower()
+                if tag == "object" and self.current:
+                    node = {**self.current, "children": []}
+                    self.stack[-1].append(node)
+                    self.current = None
+                elif tag == "ul" and len(self.stack) > 1:
+                    self.stack.pop()
+
+        parser = TocParser()
+        parser.feed(decode_html_source(hhc[0]))
+        toc_nodes = parser.entries
+
     page_map = {path.lower(): index for index, (path, _) in enumerate(documents)}
     basename_map = {}
     for path, index in page_map.items():
@@ -825,9 +861,28 @@ def convert_chm_to_html(source: Path, target: Path, work: Path) -> None:
             index = basename_map[posixpath.basename(resolved)][0]
         return index, fragment
 
+    ordered_indices = []
+
+    def collect_toc_order(nodes):
+        for node in nodes:
+            page_index, _ = page_target(node.get("local", ""), "")
+            if page_index is not None and page_index not in ordered_indices:
+                ordered_indices.append(page_index)
+            collect_toc_order(node.get("children", []))
+
+    collect_toc_order(toc_nodes)
+    if ordered_indices:
+        ordered = [documents[index] for index in ordered_indices]
+        ordered.extend(document for index, document in enumerate(documents) if index not in ordered_indices)
+        documents = ordered
+        page_map = {path.lower(): index for index, (path, _) in enumerate(documents)}
+        basename_map = {}
+        for path, index in page_map.items():
+            basename_map.setdefault(posixpath.basename(path), []).append(index)
+
     def rewrite_document(document: str, current: str, index: int) -> str:
         prefix = f"chm-page-{index}--"
-        document = re.sub(r"(\bid\s*=\s*[\"'])([^\"']+)([\"'])",
+        document = re.sub(r"(\b(?:id|name)\s*=\s*[\"'])([^\"']+)([\"'])",
                           lambda match: match.group(1) + prefix + match.group(2) + match.group(3), document,
                           flags=re.IGNORECASE)
 
@@ -844,35 +899,21 @@ def convert_chm_to_html(source: Path, target: Path, work: Path) -> None:
 
         return re.sub(r"(\bhref\s*=\s*[\"'])([^\"']+)([\"'])", link, document, flags=re.IGNORECASE)
 
-    toc = []
-    if hhc:
-        class TocParser(HTMLParser):
-            def __init__(self):
-                super().__init__()
-                self.current = None
-                self.entries = []
-
-            def handle_starttag(self, tag, attrs):
-                attrs = dict(attrs)
-                if tag.lower() == "object":
-                    self.current = {}
-                elif tag.lower() == "param" and self.current is not None:
-                    name = attrs.get("name", "").lower()
-                    if name in {"name", "local"}:
-                        self.current[name] = attrs.get("value", "")
-
-            def handle_endtag(self, tag):
-                if tag.lower() == "object" and self.current:
-                    self.entries.append(self.current)
-                    self.current = None
-
-        parser = TocParser()
-        parser.feed(decode_html_source(hhc[0]))
-        for entry in parser.entries:
-            local = entry.get("local", "")
-            page_index, fragment = page_target(local, "")
+    def render_toc(nodes):
+        rendered = []
+        for node in nodes:
+            page_index, fragment = page_target(node.get("local", ""), "")
+            label = html.escape(node.get("name", "") or "未命名目录项")
             if page_index is not None:
-                toc.append((entry.get("name", ""), page_index, fragment))
+                href = f"#chm-page-{page_index}"
+                if fragment:
+                    href += "--" + html.escape(fragment, quote=True)
+                item = f'<li><a href="{href}">{label}</a>'
+            else:
+                item = f"<li>{label}"
+            children = render_toc(node.get("children", []))
+            rendered.append(item + (f"<ol>{children}</ol>" if children else "") + "</li>")
+        return "".join(rendered)
 
     body_parts = []
     for index, (path, document) in enumerate(documents):
@@ -881,14 +922,8 @@ def convert_chm_to_html(source: Path, target: Path, work: Path) -> None:
             f'{rewrite_document(document, path, index)}</section>'
         )
     toc_html = ""
-    if toc:
-        links = "".join(
-            f'<li><a href="#chm-page-{index}' + (f'--{html.escape(fragment, quote=True)}' if fragment else '') +
-            f'">{html.escape(name or path)}</a></li>'
-            for name, index, fragment in toc
-            for path, _ in [documents[index]]
-        )
-        toc_html = f'<nav id="chm-toc"><strong>目录</strong><ol>{links}</ol></nav>'
+    if toc_nodes:
+        toc_html = f'<nav id="chm-toc"><strong>目录</strong><ol>{render_toc(toc_nodes)}</ol></nav>'
     body = "".join(body_parts)
     target.write_text(f"<!doctype html><meta charset=\"utf-8\">{toc_html}<main>{body}</main>", encoding="utf-8")
     validate_html_content(target)
