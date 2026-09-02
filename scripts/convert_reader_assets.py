@@ -1250,7 +1250,7 @@ def convert_file(item: dict, source: Path, target: Path, work: Path) -> None:
             raise RuntimeError("LibreOffice produced no HTML from RTF")
         target.write_text(inline_local_html_resources(html_source.read_text(encoding="utf-8", errors="replace"), intermediate, intermediate), encoding="utf-8")
     elif ext == "chm":
-        convert_chm_to_html(source, target, work)
+        convert_chm(source, target, work)
     elif ext in {"tif", "tiff"}:
         convert_tiff(source, target, work)
     elif ext == "djvu":

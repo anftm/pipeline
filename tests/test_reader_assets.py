@@ -53,7 +53,7 @@ class ReaderAssetContractTests(unittest.TestCase):
             "fb2": ("foliate-original-v1", "foliate", "document.fb2"),
             "odt": ("calibre-odt-html-v1", "html", "document.html"),
             "rtf": ("calibre-rtf-html-v1", "html", "document.html"),
-            "chm": ("calibre-chm-html-v13", "html", "document.html"),
+            "chm": ("calibre-chm-epub-v1", "epub", "document.epub"),
             "tif": ("pillow-pdf-v2", "pdf", "document.pdf"),
             "tiff": ("pillow-pdf-v2", "pdf", "document.pdf"),
             "djvu": ("djvulibre-pdf-v2", "pdf", "document.pdf"),
@@ -699,12 +699,12 @@ aW1hZ2U=
             convert_reader_assets.convert_file({"extension": "azw3", "reader_mode": "foliate"}, source, target, work)
             self.assertEqual(target.read_bytes(), b"BOOKAZW3")
 
-    def test_chm_conversion_uses_sanitized_html_output(self):
+    def test_chm_conversion_uses_native_epub_output(self):
         with tempfile.TemporaryDirectory() as root:
             work = Path(root)
-            source, target = work / "source.chm", work / "document.html"
+            source, target = work / "source.chm", work / "document.epub"
             source.write_bytes(b"ITSF")
-            with patch.object(convert_reader_assets, "convert_chm_to_html") as conversion:
+            with patch.object(convert_reader_assets, "convert_chm") as conversion:
                 convert_reader_assets.convert_file({"extension": "chm"}, source, target, work)
             conversion.assert_called_once_with(source, target, work)
 
