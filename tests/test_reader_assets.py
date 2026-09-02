@@ -793,17 +793,14 @@ aW1hZ2U=
 
             def run(command, **_kwargs):
                 calls.append(command)
-                if command[0] == "7z":
-                    (work / "chm-extracted" / "book.mht").write_text("MIME-Version: 1.0", encoding="utf-8")
 
             with patch.object(convert_reader_assets, "run_checked", side_effect=run), \
-                    patch.object(convert_reader_assets, "command_output", return_value="Path = book.mht\nSize = 100\n"), \
+                    patch.object(convert_reader_assets, "convert_chm_to_html", side_effect=lambda _source, output, _work: output.write_text("<p>body</p>", encoding="utf-8")), \
                     patch.object(convert_reader_assets, "sanitize_chm_epub"), \
                     patch.object(convert_reader_assets, "validate_output"), \
-                    patch.object(convert_reader_assets, "validate_chm_epub", side_effect=[RuntimeError("converted CHM EPUB has no readable content"), None]), \
-                    patch.object(convert_reader_assets, "mhtml_to_html", side_effect=lambda _source, output: output.write_text("<p>body</p>", encoding="utf-8")):
+                    patch.object(convert_reader_assets, "validate_chm_epub", side_effect=[RuntimeError("converted CHM EPUB has no readable content"), None]):
                 convert_reader_assets.convert_chm(source, target, work)
-            self.assertEqual([call[0] for call in calls], ["ebook-convert", "7z", "ebook-convert"])
+            self.assertEqual([call[0] for call in calls], ["ebook-convert", "ebook-convert"])
 
     def test_chm_conversion_falls_back_to_direct_html_pages(self):
         with tempfile.TemporaryDirectory() as root:
@@ -814,25 +811,16 @@ aW1hZ2U=
 
             def run(command, **_kwargs):
                 calls.append(command)
-                if command[0] == "7z":
-                    extracted = work / "chm-extracted"
-                    (extracted / "images").mkdir(parents=True)
-                    (extracted / "000.htm").write_text("<html><body>第一章</body></html>", encoding="utf-8")
-                    (extracted / "001.htm").write_text("<html><body>第二章</body></html>", encoding="utf-8")
-                    (extracted / "images" / "cover.jpg").write_bytes(b"image")
 
             with patch.object(convert_reader_assets, "run_checked", side_effect=run), \
-                    patch.object(convert_reader_assets, "command_output", return_value="Path = 000.htm\nSize = 100\n"), \
+                    patch.object(convert_reader_assets, "convert_chm_to_html", side_effect=lambda _source, output, _work: output.write_text("<p>第一章</p><p>第二章</p>", encoding="utf-8")), \
                     patch.object(convert_reader_assets, "sanitize_chm_epub"), \
                     patch.object(convert_reader_assets, "validate_output"), \
                     patch.object(convert_reader_assets, "validate_chm_epub", side_effect=[RuntimeError("empty"), None]), \
                     patch.object(convert_reader_assets, "validate_reader_content"):
                 convert_reader_assets.convert_chm(source, target, work)
-            self.assertEqual([call[0] for call in calls], ["ebook-convert", "7z", "ebook-convert"])
-            index = (work / "chm-mhtml" / "index.html").read_text(encoding="utf-8")
-            self.assertIn('href="000.htm"', index)
-            self.assertIn('href="001.htm"', index)
-            self.assertTrue((work / "chm-mhtml" / "images" / "cover.jpg").is_file())
+            self.assertEqual([call[0] for call in calls], ["ebook-convert", "ebook-convert"])
+            self.assertIn("第一章", (work / "chm-fallback.html").read_text(encoding="utf-8"))
 
     def test_chm_epub_sanitizer_removes_active_and_external_content(self):
         with tempfile.TemporaryDirectory() as root:

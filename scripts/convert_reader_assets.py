@@ -724,43 +724,11 @@ def convert_chm(source: Path, target: Path, work: Path) -> None:
         return
     except (RuntimeError, FileNotFoundError, zipfile.BadZipFile, KeyError) as exc:
         initial_error = exc
-    listing = command_output(["7z", "l", "-slt", str(source)], timeout_seconds=CHM_COMMAND_TIMEOUT_SECONDS)
-    expanded_size = sum(int(value) for value in re.findall(r"^Size = (\d+)\s*$", listing, re.MULTILINE))
-    member_count = len(re.findall(r"^Path = ", listing, re.MULTILINE))
-    if expanded_size > MAX_CHM_EXPANDED_BYTES or member_count > MAX_EPUB_MEMBERS:
-        raise RuntimeError("CHM expanded content exceeds limits")
-    extracted = work / "chm-extracted"
-    extracted.mkdir()
-    run_checked(["7z", "x", "-y", f"-o{extracted}", str(source)], timeout_seconds=CHM_COMMAND_TIMEOUT_SECONDS)
-    mhtml_files = sorted(
-        path for path in extracted.rglob("*") if path.is_file() and path.suffix.lower() in {".mht", ".mhtml"}
-    )
-    html_files = sorted(
-        path for path in extracted.rglob("*") if path.is_file() and path.suffix.lower() in {".htm", ".html"}
-    )
-    if not mhtml_files and not html_files:
+    source_html = work / "chm-fallback.html"
+    try:
+        convert_chm_to_html(source, source_html, work)
+    except Exception:
         raise initial_error
-    prepared = work / "chm-mhtml"
-    prepared.mkdir()
-    documents = []
-    if html_files:
-        shutil.copytree(extracted, prepared, dirs_exist_ok=True)
-        documents = [prepared / html_file.relative_to(extracted) for html_file in html_files]
-    for index, mhtml_file in enumerate(mhtml_files):
-        if mhtml_file.stat().st_size > MAX_MHTML_SOURCE_BYTES:
-            raise RuntimeError("CHM MHTML source exceeds size limit")
-        output = prepared / f"mhtml-{index:04d}.html"
-        mhtml_to_html(mhtml_file, output)
-        documents.append(output)
-    source_html = documents[0]
-    if len(documents) > 1:
-        source_html = prepared / "index.html"
-        links = "".join(
-            f'<li><a href="{urllib.parse.quote(item.relative_to(prepared).as_posix())}">'
-            f'{html.escape(item.stem)}</a></li>'
-            for item in documents
-        )
-        source_html.write_text(f'<meta charset="utf-8"><ul>{links}</ul>', encoding="utf-8")
     target.unlink(missing_ok=True)
     run_checked(
         ["ebook-convert", str(source_html), str(target), "--flow-size", "0"],
