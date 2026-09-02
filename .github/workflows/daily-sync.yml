@@ -71,7 +71,21 @@ jobs:
           git add state/commits.json
           if git diff --staged --quiet; then
             echo "No state changes to commit"
-          else
-            git commit -m "chore: update commit state [skip ci]"
-            git push
-          fi
+           else
+             git commit -m "chore: update commit state [skip ci]"
+            for attempt in 1 2 3 4 5; do
+              if git push; then
+                exit 0
+              fi
+              echo "State push raced with another pipeline update; rebasing (attempt $((attempt + 1))/5)" >&2
+              git fetch origin main
+              if ! git rebase origin/main; then
+                git checkout --theirs state/commits.json
+                git add state/commits.json
+                GIT_EDITOR=true git rebase --continue
+              fi
+              sleep $((attempt * 5))
+            done
+            echo "Unable to publish updated commit state after retries" >&2
+             exit 1
+           fi
