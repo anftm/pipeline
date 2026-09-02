@@ -34,13 +34,13 @@ jobs:
           READER_ASSETS_REPO: vomebook/Reader-Assets
           HF_HUB_DISABLE_XET: "1"
         run: |
-          [[ "${{ github.event.client_payload.limit || '10' }}" =~ ^[0-9]+$ ]] && ((10#${{ github.event.client_payload.limit || '10' }} >= 1 && 10#${{ github.event.client_payload.limit || '10' }} <= 100))
-          [[ "${{ github.event.client_payload.checkpoint || '0' }}" =~ ^[0-9]+$ ]]
+          limit=100
+          checkpoint=0
           python scripts/plan_pdf_assets.py \
-            --repo "${{ github.event.client_payload.repo || '' }}" \
-            --source "${{ github.event.client_payload.source || 'all' }}" \
-            --limit "${{ github.event.client_payload.limit || '10' }}" \
-             --checkpoint "${{ github.event.client_payload.checkpoint || '0' }}" \
+            --repo "" \
+            --source "all" \
+            --limit "${limit}" \
+             --checkpoint "${checkpoint}" \
              --shard-count 10 \
              --workers 8 \
              --output output/pdf-assets/queue.json
@@ -78,7 +78,7 @@ jobs:
           READER_ASSETS_REPO: vomebook/Reader-Assets
           FORCE_SYNC: "true"
         run: |
-            args=(--source "${{ github.event.client_payload.source || 'all' }}" --shard-count 10 --shard-index "${{ matrix.shard }}" --extension pdf --queue-file output/pdf-assets/queue.json --build-only)
+          args=(--source "all" --shard-count 10 --shard-index "${{ matrix.shard }}" --extension pdf --queue-file output/pdf-assets/queue.json --build-only)
           python scripts/pdf_assets.py "${args[@]}" --bundle "output/pdf-assets/bundle"
       - uses: actions/upload-artifact@v7
         with:
@@ -104,9 +104,9 @@ jobs:
           path: output/pdf-assets/bundles
           merge-multiple: false
       - name: Publish merged PDF assets atomically
-        if: github.event.client_payload.dry_run != true
+        if: true
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           READER_ASSETS_REPO: vomebook/Reader-Assets
           HF_HUB_DISABLE_XET: "1"
-         run: python scripts/publish_pdf_assets.py --chunk-results 1 --bundles output/pdf-assets/bundles/*
+        run: python scripts/publish_pdf_assets.py --chunk-results 1 --bundles output/pdf-assets/bundles/*
