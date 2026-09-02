@@ -375,7 +375,8 @@ def publish(api: HfApi, repo: str, manifest: dict, results: list[dict], bundle: 
         ))
         artifact_operations = operations[:-2]
         metadata_operations = operations[-2:]
-        batch_size = max(1, int(os.environ.get("PDF_PUBLISH_BATCH_SIZE", "500")))
+        batch_size = max(1, int(os.environ.get("PDF_PUBLISH_BATCH_SIZE", "100")))
+        batch_delay = max(0.0, float(os.environ.get("PDF_PUBLISH_BATCH_DELAY", "5")))
         try:
             parent = info.sha
             for start in range(0, len(artifact_operations), batch_size):
@@ -385,6 +386,8 @@ def publish(api: HfApi, repo: str, manifest: dict, results: list[dict], bundle: 
                     commit_message="Publish independent PDF assets (artifacts)",
                     parent_commit=parent,
                 )
+                if batch_delay:
+                    time.sleep(batch_delay)
                 parent = api.repo_info(repo_id=repo, repo_type="dataset").sha
             api.create_commit(
                 repo_id=repo, repo_type="dataset", operations=metadata_operations,
