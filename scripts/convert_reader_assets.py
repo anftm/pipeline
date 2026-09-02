@@ -697,7 +697,9 @@ def sanitize_chm_epub(path: Path, work: Path) -> None:
         for info in infos:
             data = source.read(info.filename)
             suffix = Path(info.filename).suffix.lower()
-            if suffix in {".htm", ".html", ".xhtml", ".css", ".svg"}:
+            if suffix == ".opf":
+                data = re.sub(rb'(\blinear\s*=\s*["\'])no(["\'])', rb'\1yes\2', data, flags=re.IGNORECASE)
+            elif suffix in {".htm", ".html", ".xhtml", ".css", ".svg"}:
                 text = data.decode("utf-8", "replace")
                 if suffix == ".css":
                     text = sanitize_css(text)
