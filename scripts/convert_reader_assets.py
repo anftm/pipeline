@@ -292,7 +292,7 @@ def inline_html_resources(source: Path, source_url: str, work: Path) -> Path:
     return output
 
 
-def inline_local_html_resources(document: str, root: Path, base: Path) -> str:
+def inline_local_html_resources(document: str, root: Path, base: Path, *, allow_relative: bool = False) -> str:
     """Inline local images and stylesheets before sanitizing a generated HTML file."""
     cache = {}
 
@@ -336,7 +336,7 @@ def inline_local_html_resources(document: str, root: Path, base: Path) -> str:
         r"<link\b[^>]*\brel\s*=\s*[\"']stylesheet[\"'][^>]*\bhref\s*=\s*([\"'])([^\"']+)\1[^>]*>\s*",
         stylesheet, document, flags=re.IGNORECASE,
     )
-    return sanitize_html(document)
+    return sanitize_html(document, allow_relative=allow_relative)
 
 
 def download_existing(url: str, target: Path, expected_sha256: str) -> None:
@@ -797,7 +797,7 @@ def convert_chm_to_html(source: Path, target: Path, work: Path) -> None:
     mhtml = sorted(path for path in extracted.rglob("*") if path.is_file() and path.suffix.lower() in {".mht", ".mhtml"})
     hhc = sorted(path for path in extracted.rglob("*") if path.is_file() and path.suffix.lower() == ".hhc")
     documents = [(path.relative_to(extracted).as_posix(), inline_local_html_resources(
-        decode_html_source(path), extracted, path.parent)) for path in pages]
+        decode_html_source(path), extracted, path.parent, allow_relative=True)) for path in pages]
     documents.extend((path.relative_to(extracted).as_posix(), f"<pre>{html.escape(decode_html_source(path))}</pre>")
                      for path in text_pages)
     for index, path in enumerate(mhtml):
@@ -883,8 +883,7 @@ def convert_chm_to_html(source: Path, target: Path, work: Path) -> None:
     collect_toc_order(toc_nodes)
     if directory_candidates and directory_candidates[0][0] >= 2:
         directory_index = directory_candidates[0][1]
-        if directory_index not in ordered_indices:
-            ordered_indices.insert(0, directory_index)
+        ordered_indices = [directory_index] + [index for index in ordered_indices if index != directory_index]
     if ordered_indices:
         ordered = [documents[index] for index in ordered_indices]
         documents = ordered
