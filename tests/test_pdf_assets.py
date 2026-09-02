@@ -128,6 +128,14 @@ class PdfAssetsTests(unittest.TestCase):
         pdf_assets.publish(api, "repo", pdf_assets.empty_manifest(), [], Path("/tmp/unused"))
         api.repo_info.assert_not_called()
 
+    def test_hf_source_download_retries_rate_limit(self):
+        response = requests.Response()
+        response.status_code = 429
+        error = HfHubHTTPError("rate limited", response=response)
+        with patch("huggingface_hub.hf_hub_download", side_effect=[error, "/tmp/source.pdf"]), patch.object(pdf_assets.time, "sleep") as sleep:
+            self.assertEqual(pdf_assets.download_hf_source("repo", "book.pdf", "rev", "token"), Path("/tmp/source.pdf"))
+        sleep.assert_called_once_with(1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -36,6 +36,20 @@ SOURCE_PROFILES = {
 }
 
 
+def download_hf_source(repo: str, path: str, revision: str, token: str | None) -> Path:
+    from huggingface_hub import hf_hub_download
+    for attempt in range(5):
+        try:
+            return Path(hf_hub_download(repo, path, repo_type="dataset", revision=revision, token=token))
+        except HfHubHTTPError as exc:
+            status = getattr(exc.response, "status_code", None)
+            if status not in {429, 500, 502, 503, 504} or attempt == 4:
+                raise
+            delay = min(60, 2 ** attempt)
+            print(f"transient PDF source download error ({status}); retrying in {delay}s", flush=True)
+            time.sleep(delay)
+
+
 def object_root(source_sha: str, key: str) -> Path:
     key_sha = hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
     return Path("objects") / source_sha[:2] / source_sha / key_sha
@@ -444,17 +458,13 @@ def main() -> int:
     results = []
     built_by_sha = {}
     for item in records:
-        if item.get("source_kind") == "generated":
-            from huggingface_hub import hf_hub_download
-            source = Path(hf_hub_download(item["reader_assets_repo"], item["reader_assets_path"],
-                                          repo_type="dataset", token=os.environ.get("HF_TOKEN")))
-        elif args.source_dir:
-            source = args.source_dir / item["repo"] / item["path"]
-        else:
-            from huggingface_hub import hf_hub_download
-            source = Path(hf_hub_download(item["repo"], item["path"], repo_type="dataset",
-                                          revision=item["source_revision"], token=os.environ.get("HF_TOKEN")))
         try:
+            if item.get("source_kind") == "generated":
+                source = download_hf_source(item["reader_assets_repo"], item["reader_assets_path"], "main", os.environ.get("HF_TOKEN"))
+            elif args.source_dir:
+                source = args.source_dir / item["repo"] / item["path"]
+            elif not args.source_dir:
+                source = download_hf_source(item["repo"], item["path"], item["source_revision"], os.environ.get("HF_TOKEN"))
             source_sha, source_bytes = digest(source)
             if source_sha in built_by_sha:
                 result = {**built_by_sha[source_sha], **item,
