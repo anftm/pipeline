@@ -863,6 +863,16 @@ def convert_chm_to_html(source: Path, target: Path, work: Path) -> None:
 
     ordered_indices = []
 
+    directory_candidates = []
+    for index, (_, document) in enumerate(documents):
+        visible = html.unescape(re.sub(r"<[^>]+>", " ", document))
+        internal_links = len(re.findall(
+            r"\bhref\s*=\s*[\"'][^\"']+\.(?:htm|html)(?:#[^\"']*)?[\"']",
+            document, re.IGNORECASE,
+        ))
+        directory_candidates.append(((2 if "目录" in visible else 0) + min(internal_links, 100) / 100, index))
+    directory_candidates.sort(reverse=True)
+
     def collect_toc_order(nodes):
         for node in nodes:
             page_index, _ = page_target(node.get("local", ""), "")
@@ -871,6 +881,10 @@ def convert_chm_to_html(source: Path, target: Path, work: Path) -> None:
             collect_toc_order(node.get("children", []))
 
     collect_toc_order(toc_nodes)
+    if directory_candidates and directory_candidates[0][0] >= 2:
+        directory_index = directory_candidates[0][1]
+        if directory_index not in ordered_indices:
+            ordered_indices.insert(0, directory_index)
     if ordered_indices:
         ordered = [documents[index] for index in ordered_indices]
         documents = ordered
