@@ -373,25 +373,10 @@ def publish(api: HfApi, repo: str, manifest: dict, results: list[dict], bundle: 
             path_in_repo="reader_assets.json.gz",
             path_or_fileobj=update_sidecar(sidecar, results),
         ))
-        artifact_operations = operations[:-2]
-        metadata_operations = operations[-2:]
-        batch_size = max(1, int(os.environ.get("PDF_PUBLISH_BATCH_SIZE", "100")))
-        batch_delay = max(0.0, float(os.environ.get("PDF_PUBLISH_BATCH_DELAY", "5")))
         try:
-            parent = info.sha
-            for start in range(0, len(artifact_operations), batch_size):
-                api.create_commit(
-                    repo_id=repo, repo_type="dataset",
-                    operations=artifact_operations[start:start + batch_size],
-                    commit_message="Publish independent PDF assets (artifacts)",
-                    parent_commit=parent,
-                )
-                if batch_delay:
-                    time.sleep(batch_delay)
-                parent = api.repo_info(repo_id=repo, repo_type="dataset").sha
             api.create_commit(
-                repo_id=repo, repo_type="dataset", operations=metadata_operations,
-                commit_message="Publish independent PDF assets", parent_commit=parent,
+                repo_id=repo, repo_type="dataset", operations=operations,
+                commit_message="Publish independent PDF asset", parent_commit=info.sha,
             )
             return
         except HfHubHTTPError as exc:
