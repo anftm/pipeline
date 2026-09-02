@@ -1,6 +1,11 @@
 name: Build PDF Assets
 
-on: [schedule, repository_dispatch]
+on:
+  schedule:
+    - cron: "17,47 * * * *"
+  repository_dispatch:
+    types: [pdf-assets]
+  workflow_dispatch:
 
 concurrency:
   group: reader-assets-pdf
