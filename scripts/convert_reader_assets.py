@@ -881,9 +881,6 @@ def convert_chm_to_html(source: Path, target: Path, work: Path) -> None:
             collect_toc_order(node.get("children", []))
 
     collect_toc_order(toc_nodes)
-    if directory_candidates and directory_candidates[0][0] >= 2:
-        directory_index = directory_candidates[0][1]
-        ordered_indices = [directory_index] + [index for index in ordered_indices if index != directory_index]
     if ordered_indices:
         ordered = [documents[index] for index in ordered_indices]
         documents = ordered
