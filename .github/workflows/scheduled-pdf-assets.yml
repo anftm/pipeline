@@ -55,10 +55,15 @@ jobs:
         run: |
           echo "shard-count=$(jq -r '.shard_count' output/pdf-assets/queue.json)" >> "$GITHUB_OUTPUT"
           echo "shard-ids=$(jq -c '.shard_ids' output/pdf-assets/queue.json)" >> "$GITHUB_OUTPUT"
+          jq -c '.skipped // []' output/pdf-assets/queue.json > output/pdf-assets/skipped.json
       - uses: actions/upload-artifact@v7
         with:
           name: pdf-assets-queue
           path: output/pdf-assets/queue.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: pdf-assets-skipped
+          path: output/pdf-assets/skipped.json
   build:
     needs: plan
     runs-on: ubuntu-latest
@@ -114,10 +119,15 @@ jobs:
           pattern: pdf-assets-bundle-*
           path: output/pdf-assets/bundles
           merge-multiple: false
+      - name: Download skipped entries
+        uses: actions/download-artifact@v8
+        with:
+          name: pdf-assets-skipped
+          path: output/pdf-assets
       - name: Publish merged PDF assets atomically
         if: true
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           READER_ASSETS_REPO: vomebook/Reader-Assets
           HF_HUB_DISABLE_XET: "1"
-        run: python scripts/publish_pdf_assets.py --chunk-results 1 --bundles output/pdf-assets/bundles/*
+        run: python scripts/publish_pdf_assets.py --chunk-results 1 --bundles output/pdf-assets/bundles/* --skipped output/pdf-assets/skipped.json

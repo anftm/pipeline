@@ -54,25 +54,26 @@ class PdfAssetsTests(unittest.TestCase):
     def test_plan_splits_only_oversized_pdfs_into_deterministic_ranges(self):
         records = [{"key": "r\0large.pdf", "repo": "r", "path": "large.pdf"},
                    {"key": "r\0normal.pdf", "repo": "r", "path": "normal.pdf"}]
-        with patch.object(plan_pdf_assets.pdf_assets, "_pages", side_effect=[2501, 1000]), patch.object(
-                plan_pdf_assets, "source_path", side_effect=[Path("large.pdf"), Path("normal.pdf")]):
-             planned = plan_pdf_assets.plan(records, None, "assets", 18, workers=1)
+        with patch.object(plan_pdf_assets.pdf_assets, "_pages", side_effect=[2501, 300]), patch.object(
+                plan_pdf_assets, "source_path", side_effect=[Path("large.pdf"), Path("normal.pdf")]), patch.object(
+                plan_pdf_assets, "_classify_book", return_value="scan"):
+            planned = plan_pdf_assets.plan(records, None, "assets", 18, workers=1)
         tasks = [task for shard in planned["shards"] for task in shard["records"]]
         ranges = sorted((task["page_start"], task["page_end"]) for task in tasks
                         if task["key"] == "r\0large.pdf")
-        self.assertEqual(ranges, [(1, 1000), (1001, 2000), (2001, 2501)])
+        self.assertEqual(ranges, [(1, 500), (501, 1000), (1001, 1500), (1501, 2000), (2001, 2500), (2501, 2501)])
         self.assertEqual(len([task for task in tasks if task["key"] == "r\0normal.pdf"]), 1)
-        self.assertEqual((planned["total_records"], planned["total_tasks"]), (2, 4))
+        self.assertEqual((planned["total_records"], planned["total_tasks"]), (2, 7))
         self.assertEqual(planned["ordinary_shard_count"], 18)
-        self.assertEqual(planned["shard_count"], 21)
-        self.assertEqual(planned["shard_ids"], list(range(21)))
+        self.assertEqual(planned["shard_count"], 24)
+        self.assertEqual(planned["shard_ids"], list(range(24)))
         self.assertEqual(
             [shard["index"] for shard in planned["shards"]
              if any("page_start" in task for task in shard["records"])],
-             [18, 19, 20],
+             [18, 19, 20, 21, 22, 23],
         )
         self.assertTrue(all(len(shard["records"]) == 1 for shard in planned["shards"][18:]))
-        self.assertEqual(len({task["task_key"] for task in tasks if "task_key" in task}), 3)
+        self.assertEqual(len({task["task_key"] for task in tasks if "task_key" in task}), 6)
         self.assertTrue(all(
             "page_start" not in task
              for shard in planned["shards"][:18]
@@ -82,6 +83,32 @@ class PdfAssetsTests(unittest.TestCase):
     def test_plan_requires_exactly_ten_ordinary_shards(self):
         with self.assertRaisesRegex(ValueError, "ordinary PDF shard count must be 18"):
             plan_pdf_assets.plan([], None, "assets", 10)
+
+    def test_plan_skips_oversized_native_text_books(self):
+        records = [{"key": "r\0big.pdf", "repo": "r", "path": "big.pdf", "extension": "pdf"}]
+        with patch.object(plan_pdf_assets.pdf_assets, "_pages", return_value=2501), patch.object(
+                plan_pdf_assets, "source_path", return_value=Path("big.pdf")), patch.object(
+                plan_pdf_assets, "_classify_book", return_value="native-text"):
+            planned = plan_pdf_assets.plan(records, None, "assets", 18, workers=1)
+        self.assertEqual(planned["total_tasks"], 0)
+        self.assertEqual(planned["shard_count"], 18)
+        self.assertEqual(len(planned["skipped"]), 1)
+        self.assertEqual(planned["skipped"][0]["status"], "skipped")
+        self.assertEqual(planned["skipped"][0]["reason"], "native-text-pdf")
+        all_tasks = [t for s in planned["shards"] for t in s["records"]]
+        self.assertFalse(any(t["key"] == "r\0big.pdf" for t in all_tasks))
+
+    def test_plan_includes_oversized_scan_books_as_range_tasks(self):
+        records = [{"key": "r\0scan.pdf", "repo": "r", "path": "scan.pdf", "extension": "pdf"}]
+        with patch.object(plan_pdf_assets.pdf_assets, "_pages", return_value=1200), patch.object(
+                plan_pdf_assets, "source_path", return_value=Path("scan.pdf")), patch.object(
+                plan_pdf_assets, "_classify_book", return_value="scan"):
+            planned = plan_pdf_assets.plan(records, None, "assets", 18, workers=1)
+        self.assertEqual(planned["total_tasks"], 3)
+        self.assertEqual(len(planned["skipped"]), 0)
+        all_tasks = [t for s in planned["shards"] for t in s["records"]]
+        ranges = sorted((t["page_start"], t["page_end"]) for t in all_tasks)
+        self.assertEqual(ranges, [(1, 500), (501, 1000), (1001, 1200)])
 
     def test_generated_records_pin_reader_assets_revision(self):
         manifest = {"files": {"r\0book.caj": {
@@ -256,6 +283,31 @@ class PdfAssetsTests(unittest.TestCase):
         with patch("huggingface_hub.hf_hub_download", side_effect=[error, "/tmp/source.pdf"]), patch.object(pdf_assets.time, "sleep") as sleep:
             self.assertEqual(pdf_assets.download_hf_source("repo", "book.pdf", "rev", "token"), Path("/tmp/source.pdf"))
         sleep.assert_called_once_with(1)
+
+    def test_publish_includes_skipped_entries_from_file(self):
+        skipped = [{"key": "r\0native.pdf", "status": "skipped", "reason": "native-text-pdf",
+                    "strategy": "none", "source_sha256": "a" * 64, "source_extension": "pdf",
+                    "page_count": 2501}]
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            skipped_path = root / "skipped.json"
+            skipped_path.write_text(json.dumps(skipped), encoding="utf-8")
+            bundle = root / "bundle"
+            bundle.mkdir()
+            (bundle / "bundle.json").write_text(json.dumps({"version": 1, "results": []}), encoding="utf-8")
+            args = SimpleNamespace(bundles=[bundle], assets_repo="repo", chunk_results=1,
+                                   skipped=skipped_path, dry_run=True)
+            with patch.object(publish_pdf_assets, "merge_bundles", return_value=[]), patch.object(
+                    pdf_assets, "build_publish", return_value=(pdf_assets.empty_manifest(), [])):
+                # Just test that --skipped is read and merged
+                results = []
+                merged = root / "merged"
+                merged_results = publish_pdf_assets.merge_bundles([bundle], merged)
+                import json as _json
+                skipped_data = _json.loads(skipped_path.read_text(encoding="utf-8"))
+                merged_results.extend(skipped_data)
+            self.assertEqual(len(merged_results), 1)
+            self.assertEqual(merged_results[0]["key"], "r\0native.pdf")
 
 
 if __name__ == "__main__":

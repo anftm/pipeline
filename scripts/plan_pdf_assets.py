@@ -26,24 +26,44 @@ def source_path(item: dict, source_dir: Path | None, assets_repo: str) -> Path:
                                 revision=item["source_revision"], token=os.environ.get("HF_TOKEN")))
 
 
+def _classify_book(source: Path, pages: int, extension: str = "pdf") -> str:
+    """Classify a whole book as 'native-text' or 'scan' by sampling start/middle/end pages."""
+    import tempfile
+    sample = sorted(set([1, pages // 2, pages]))[:max(1, pdf_assets.SAMPLE_PAGES)]
+    sample_end = max(sample)
+    with tempfile.TemporaryDirectory() as tmp:
+        text = pdf_assets._run(
+            ["pdftotext", "-f", str(sample[0]), "-l", str(sample_end), str(source), "-"], text=True)
+    return "native-text" if len("".join(text.split())) >= max(100, sample_end * 40) else "scan"
+
+
 def plan(records: list[dict], source_dir: Path | None, assets_repo: str, shard_count: int,
          workers: int = 8) -> dict:
     if shard_count != 18:
         raise ValueError("ordinary PDF shard count must be 18")
 
     def inspect(item: dict) -> dict:
-        pages = pdf_assets._pages(source_path(item, source_dir, assets_repo))
+        source = source_path(item, source_dir, assets_repo)
+        pages = pdf_assets._pages(source, str(item.get("extension") or "pdf"))
         if pages < 1:
             raise ValueError(f"invalid page count for {item['key']}")
-        return {**item, "page_count": pages}
+        oversized = pages > pdf_assets.MAX_PAGES_PER_TASK
+        classification = None
+        if oversized:
+            classification = _classify_book(source, pages, str(item.get("extension") or "pdf"))
+        return {**item, "page_count": pages, "oversized": oversized, "classification": classification}
 
     with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
         selected = list(executor.map(inspect, records))
     ordinary = []
     range_tasks = []
+    skipped = []
     for item in selected:
-        if item["page_count"] <= pdf_assets.MAX_PAGES_PER_TASK:
+        if not item["oversized"]:
             ordinary.append(item)
+            continue
+        if item["classification"] == "native-text":
+            skipped.append({**item, "status": "skipped", "reason": "native-text-pdf"})
             continue
         for start in range(1, item["page_count"] + 1, pdf_assets.MAX_PAGES_PER_TASK):
             end = min(item["page_count"], start + pdf_assets.MAX_PAGES_PER_TASK - 1)
@@ -58,6 +78,7 @@ def plan(records: list[dict], source_dir: Path | None, assets_repo: str, shard_c
             "ordinary_shard_count": shard_count,
             "total_records": len(selected), "total_tasks": len(ordinary) + len(range_tasks),
             "total_pages": sum(item["page_count"] for item in selected),
+            "skipped": skipped,
             "shards": [{"index": index, "page_count": sum(item.get("range_page_count", item["page_count"])
                                                                 for item in shard),
                         "records": shard} for index, shard in enumerate(shards)]}

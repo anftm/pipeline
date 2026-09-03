@@ -107,11 +107,15 @@ def main() -> int:
     parser.add_argument("--bundles", type=Path, nargs="+", required=True)
     parser.add_argument("--assets-repo", default=os.environ.get("READER_ASSETS_REPO", pdf_assets.READER_ASSETS_REPO))
     parser.add_argument("--chunk-results", type=int, default=1)
+    parser.add_argument("--skipped", type=Path, help="JSON file with skipped entries from plan step")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     with tempfile.TemporaryDirectory() as root:
         merged = Path(root)
         results = merge_bundles(args.bundles, merged)
+        if args.skipped and args.skipped.is_file():
+            skipped_data = json.loads(args.skipped.read_text(encoding="utf-8"))
+            results.extend(skipped_data)
         manifest, _ = pdf_assets.build_publish(pdf_assets.empty_manifest(), results, merged)
         (merged / pdf_assets.MANIFEST_NAME).write_text(
             json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
