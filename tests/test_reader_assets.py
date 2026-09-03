@@ -264,14 +264,17 @@ class ScannerTests(unittest.TestCase):
             self.records, self.revisions, manifest, retry_failed=True,
         )), 1)
 
-    def test_profile_change_is_not_hidden_by_old_failure_marker(self):
+    def test_ready_fallback_with_failed_upgrade_is_not_retried_automatically(self):
         key = reader_assets.asset_key("VoiceOfML/Test", "A/Book.docx")
         manifest = {"version": 1, "files": {key: {
             "status": "ready", "source_revision": "old", "profile": "old-profile",
             "path": "objects/old/document.docx", "failed_source_revision": "rev1",
             "failed_profile": "docx-native-v2",
         }}}
-        self.assertEqual(len(scan_reader_assets.build_queue(self.records, self.revisions, manifest)), 1)
+        self.assertEqual(scan_reader_assets.build_queue(self.records, self.revisions, manifest), [])
+        self.assertEqual(len(scan_reader_assets.build_queue(
+            self.records, self.revisions, manifest, retry_failed=True,
+        )), 1)
 
     def test_filter_and_limit_are_deterministic(self):
         records = self.records + [
