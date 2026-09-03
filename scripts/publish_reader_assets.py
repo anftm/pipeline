@@ -75,11 +75,27 @@ def remote_manifest(api: HfApi, repo_id: str, revision: str | None = None) -> di
     return validate_manifest(load_json(Path(path)))
 
 
+def remote_pdf_manifest(api: HfApi, repo_id: str, revision: str | None = None) -> dict:
+    try:
+        path = api.hf_hub_download(
+            repo_id=repo_id, repo_type="dataset", filename="pdf_manifest.json", revision=revision,
+        )
+    except HfHubHTTPError as exc:
+        if getattr(exc.response, "status_code", None) != 404:
+            raise
+        return {"version": 1, "files": {}}
+    data = load_json(Path(path))
+    if data.get("version") != 1 or not isinstance(data.get("files"), dict):
+        raise ValueError("invalid PDF asset manifest")
+    return data
+
+
 def build_publish(api: HfApi, repo_id: str, bundle: Path, revision: str | None = None):
     data = load_json(bundle / "bundle.json")
     if data.get("version") != 1 or not isinstance(data.get("results"), list):
         raise ValueError("invalid reader asset bundle")
     manifest = remote_manifest(api, repo_id, revision)
+    pdf_manifest = remote_pdf_manifest(api, repo_id, revision)
     files = dict(manifest["files"])
     orphans = dict(manifest.get("orphans", {}))
     reusable = {}
@@ -185,7 +201,8 @@ def build_publish(api: HfApi, repo_id: str, bundle: Path, revision: str | None =
         for path, source in sorted(artifacts.items())
     ]
     operations.append(CommitOperationAdd(path_in_repo=MANIFEST_NAME, path_or_fileobj=canonical_json(updated, pretty=True)))
-    operations.append(CommitOperationAdd(path_in_repo=SIDECAR_NAME, path_or_fileobj=encode_index(updated)))
+    operations.append(CommitOperationAdd(
+        path_in_repo=SIDECAR_NAME, path_or_fileobj=encode_index(updated, pdf_manifest)))
     return updated, operations
 
 

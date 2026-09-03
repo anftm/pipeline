@@ -1459,6 +1459,12 @@ aW1hZ2U=
             self.assertEqual(result["status"], "failed")
 
 class PublicationTests(unittest.TestCase):
+    def setUp(self):
+        patcher = patch.object(
+            publish_reader_assets, "remote_pdf_manifest", return_value={"version": 1, "files": {}})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def make_bundle(self, root: str, result: dict) -> Path:
         bundle = Path(root)
         artifact = bundle / result["path"]
@@ -1873,6 +1879,23 @@ class PublicationTests(unittest.TestCase):
         files = build_reader_assets_index.build_index(manifest)["f"]
         self.assertEqual(files["sound"]["m"], "a")
         self.assertEqual(files["movie"]["m"], "v")
+
+    def test_sidecar_merges_ready_pdf_assets(self):
+        manifest = {"version": 1, "files": {
+            "book": {"status": "ready", "reader_mode": "epub", "path": "objects/aa/book.epub"},
+        }}
+        pdf_manifest = {"version": 1, "files": {
+            "scan": {"status": "ready", "path": "", "page_manifest": {
+                "path": "objects/bb/" + "b" * 64 + "/page-manifest.json",
+            }},
+            "text": {"status": "skipped", "reason": "native-text-pdf"},
+        }}
+        files = build_reader_assets_index.build_index(manifest, pdf_manifest)["f"]
+        self.assertEqual(files["book"]["m"], "e")
+        self.assertEqual(files["scan"], {
+            "s": 2, "m": "p", "p": "objects/bb/" + "b" * 64 + "/page-manifest.json",
+        })
+        self.assertNotIn("text", files)
 
 
 class SearchIndexPublicationTests(unittest.TestCase):
