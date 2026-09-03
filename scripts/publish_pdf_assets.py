@@ -49,7 +49,8 @@ def merge_bundles(bundle_paths: list[Path], output: Path) -> list[dict]:
             continue
         if len(ranged) != len(entries):
             raise ValueError(f"incomplete PDF page ranges: {key}")
-        identity = ("source_sha256", "source_revision", "source_extension", "profile", "strategy")
+        identity = ("source_sha256", "source_revision", "source_extension", "profile", "strategy",
+                    "render_profile", "decision_profile")
         if any(tuple(entry.get(field) for field in identity) != tuple(entries[0].get(field) for field in identity)
                or entry.get("page_count") != entries[0].get("page_count") for entry in entries):
             raise ValueError(f"conflicting PDF page ranges: {key}")

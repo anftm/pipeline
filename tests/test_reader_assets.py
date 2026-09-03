@@ -17,7 +17,7 @@ import requests
 from huggingface_hub import CommitOperationAdd, CommitOperationDelete
 from huggingface_hub.errors import HfHubHTTPError, RepositoryNotFoundError
 
-from scripts import build_reader_assets_index, convert_reader_assets, publish_reader_assets
+from scripts import build_reader_assets_index, convert_reader_assets, pdf_assets, publish_reader_assets
 from scripts import prune_reader_assets, publish_search_reader_index
 from scripts import epub_chapters, reader_assets, scan_reader_assets
 
@@ -1885,7 +1885,10 @@ class PublicationTests(unittest.TestCase):
             "book": {"status": "ready", "reader_mode": "epub", "path": "objects/aa/book.epub"},
         }}
         pdf_manifest = {"version": 1, "files": {
-            "scan": {"status": "ready", "path": "", "page_manifest": {
+            "scan": {"status": "ready", "strategy": "sampled-webp",
+                     "render_profile": pdf_assets.PDF_PROFILE,
+                     "decision_profile": pdf_assets.PDF_DECISION_PROFILE,
+                     "path": "", "page_manifest": {
                 "path": "objects/bb/" + "b" * 64 + "/page-manifest.json",
             }},
             "text": {"status": "skipped", "reason": "native-text-pdf"},
@@ -1896,6 +1899,23 @@ class PublicationTests(unittest.TestCase):
             "s": 2, "m": "p", "p": "objects/bb/" + "b" * 64 + "/page-manifest.json",
         })
         self.assertNotIn("text", files)
+
+    def test_sidecar_excludes_legacy_streams_and_linearized_pdfs(self):
+        manifest = {"version": 1, "files": {}}
+        pdf_manifest = {"version": 1, "files": {
+            "legacy": {"status": "ready", "strategy": "sampled-webp",
+                       "page_manifest": {"path": "objects/aa/" + "a" * 64 + "/page-manifest.json"}},
+            "current": {"status": "ready", "strategy": "sampled-webp", "source_extension": "caj",
+                        "render_profile": pdf_assets.PDF_PROFILE,
+                        "decision_profile": pdf_assets.PDF_DECISION_PROFILE,
+                        "page_manifest": {"path": "objects/bb/" + "b" * 64 + "/page-manifest.json"}},
+            "linear": {"status": "ready", "strategy": "linearized-pdf", "source_extension": "pdf",
+                       "path": "objects/cc/" + "c" * 64 + "/linearized.pdf"},
+        }}
+        files = build_reader_assets_index.build_index(manifest, pdf_manifest)["f"]
+        self.assertNotIn("legacy", files)
+        self.assertIn("current", files)
+        self.assertNotIn("linear", files)
 
 
 class SearchIndexPublicationTests(unittest.TestCase):

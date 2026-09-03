@@ -8,8 +8,10 @@ from pathlib import Path
 
 try:
     from .reader_assets import load_json, validate_manifest
+    from .pdf_assets import PDF_DECISION_PROFILE, PDF_PROFILE
 except ImportError:
     from reader_assets import load_json, validate_manifest
+    from pdf_assets import PDF_DECISION_PROFILE, PDF_PROFILE
 
 STATUS = {"ready": 2, "failed": 4}
 MODE = {"pdf": "p", "epub": "e", "foliate": "e", "docx": "d", "html": "h", "audio": "a", "video": "v"}
@@ -31,6 +33,10 @@ def build_index(manifest: dict, pdf_manifest: dict | None = None) -> dict:
         files[key] = compact
     for key, entry in (pdf_manifest or {}).get("files", {}).items():
         if entry.get("status") != "ready":
+            continue
+        if (entry.get("strategy") != "sampled-webp"
+                or entry.get("render_profile") != PDF_PROFILE
+                or entry.get("decision_profile") != PDF_DECISION_PROFILE):
             continue
         path = entry.get("path") or entry.get("page_manifest", {}).get("path")
         if path:

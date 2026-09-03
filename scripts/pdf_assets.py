@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import shutil
+import struct
 import subprocess
 import tempfile
 import time
@@ -26,11 +27,12 @@ MI = 1024 * 1024
 MIN_BYTES = 50 * MI
 LARGE_BYTES = 100 * MI
 WEBP_QUALITY = int(os.environ.get("PDF_WEBP_QUALITY", "85"))
-WEBP_MAX_DIMENSION = int(os.environ.get("PDF_WEBP_MAX_DIMENSION", "2400"))
+WEBP_MAX_DIMENSION = int(os.environ.get("PDF_WEBP_MAX_DIMENSION", "1800"))
 SAMPLE_PAGES = int(os.environ.get("PDF_SAMPLE_PAGES", "3"))
 WEBP_MAX_RATIO = float(os.environ.get("PDF_WEBP_MAX_RATIO", "0.9"))
 MAX_PAGES_PER_TASK = 500
-PDF_PROFILE = f"pdf-pages-v1-{WEBP_QUALITY}-{WEBP_MAX_DIMENSION}"
+PDF_PROFILE = f"pdf-pages-v2-{WEBP_QUALITY}-{WEBP_MAX_DIMENSION}-no-upscale"
+PDF_DECISION_PROFILE = f"pdf-large-v2-{LARGE_BYTES}-whole-book-{SAMPLE_PAGES}"
 SOURCE_PROFILES = {
     "upstream": "pdf-assets-upstream-v1",
     "generated": "pdf-assets-reader-generated-v1",
@@ -98,7 +100,7 @@ def load_generated_records(manifest: Path | dict, assets_repo: str = READER_ASSE
         artifact_bytes = entry.get("bytes") if isinstance(entry, dict) else None
         if (not separator or (repo and source_repo != repo) or entry.get("status", "ready") != "ready"
                 or entry.get("reader_mode") != "pdf" or not artifact.endswith("/document.pdf")
-                or not isinstance(artifact_bytes, int) or artifact_bytes < MIN_BYTES):
+                or not isinstance(artifact_bytes, int) or artifact_bytes < LARGE_BYTES):
             continue
         selected.append({
             "key": key, "repo": source_repo, "path": source_path,
@@ -174,6 +176,34 @@ def _pages(pdf: Path, extension: str = "pdf") -> int:
     raise RuntimeError("missing page count")
 
 
+def classify_pdf(source: Path, pages: int) -> str:
+    sample = sorted(set([1, max(1, (pages + 1) // 2), pages]))[:max(1, SAMPLE_PAGES)]
+    text = "".join(
+        _run(["pdftotext", "-f", str(page), "-l", str(page), str(source), "-"], text=True)
+        for page in sample
+    )
+    return "native-text" if len("".join(text.split())) >= max(100, len(sample) * 40) else "scan"
+
+
+def _image_dimensions(path: Path) -> tuple[int, int]:
+    with path.open("rb") as stream:
+        header = stream.read(24)
+        if header.startswith(b"\x89PNG\r\n\x1a\n") and len(header) == 24:
+            return struct.unpack(">II", header[16:24])
+        if not header.startswith((b"P6", b"P5")):
+            raise ValueError("unsupported rendered image")
+        stream.seek(0)
+        tokens = []
+        while len(tokens) < 4:
+            line = stream.readline()
+            if not line:
+                break
+            tokens.extend(line.split(b"#", 1)[0].split())
+        if len(tokens) < 4:
+            raise ValueError("invalid rendered image")
+        return int(tokens[1]), int(tokens[2])
+
+
 def _render(pdf: Path, page: int, directory: Path, extension: str = "pdf") -> Path:
     stem = directory / f"page-{page:06d}"
     if extension == "djvu":
@@ -183,8 +213,10 @@ def _render(pdf: Path, page: int, directory: Path, extension: str = "pdf") -> Pa
     png = stem.with_suffix(".png") if extension != "djvu" else stem.with_suffix(".ppm")
     webp = stem.with_suffix(".webp")
     args = ["cwebp", "-quiet", "-q", str(WEBP_QUALITY)]
-    if WEBP_MAX_DIMENSION > 0:
-        args += ["-resize", str(WEBP_MAX_DIMENSION), str(WEBP_MAX_DIMENSION)]
+    width, height = _image_dimensions(png)
+    if WEBP_MAX_DIMENSION > 0 and max(width, height) > WEBP_MAX_DIMENSION:
+        args += (["-resize", str(WEBP_MAX_DIMENSION), "0"] if width >= height
+                 else ["-resize", "0", str(WEBP_MAX_DIMENSION)])
     _run([*args, str(png), "-o", str(webp)])
     png.unlink(missing_ok=True)
     return webp
@@ -193,21 +225,11 @@ def _render(pdf: Path, page: int, directory: Path, extension: str = "pdf") -> Pa
 def build_item(item: dict, source: Path, bundle: Path) -> dict:
     source_sha, actual_bytes = digest(source)
     base = {**item, "source_sha256": source_sha, "source_bytes": actual_bytes}
-    if item.get("extension") != "djvu" and actual_bytes < MIN_BYTES:
-        return {**base, "status": "skipped", "reason": "below-minimum-50-mib", "strategy": "none"}
+    if actual_bytes < LARGE_BYTES:
+        return {**base, "status": "skipped", "reason": "below-minimum-100-mib", "strategy": "none",
+                "decision_profile": PDF_DECISION_PROFILE}
     object_dir = object_root(source_sha, str(item.get("key") or ""))
     ranged = "page_start" in item or "page_end" in item
-    if item.get("extension") != "djvu" and actual_bytes < LARGE_BYTES and not ranged:
-        output = bundle / object_dir / "linearized.pdf"
-        output.parent.mkdir(parents=True, exist_ok=True)
-        _run(["qpdf", "--linearize", str(source), str(output)])
-        _run(["qpdf", "--check-linearization", str(output)])
-        output_sha, output_bytes = digest(output)
-        return {**base, "status": "ready", "strategy": "linearized-pdf",
-                "path": (object_dir / "linearized.pdf").as_posix(),
-                "bytes": output_bytes, "sha256": output_sha,
-                "pdf": {"source_bytes": actual_bytes, "output_bytes": output_bytes}}
-
     pages = _pages(source, str(item.get("extension") or "pdf"))
     page_start = int(item.get("page_start", 1))
     page_end = int(item.get("page_end", pages))
@@ -217,24 +239,17 @@ def build_item(item: dict, source: Path, bundle: Path) -> dict:
         sample = sorted(set([page_start, (page_start + page_end) // 2, page_end]))[:max(1, SAMPLE_PAGES)]
         sample_sizes = []
         sample_end = max(sample)
-        if item.get("extension") == "djvu":
-            classification = "djvu-image"
-        else:
-            text = _run(["pdftotext", "-f", str(page_start), "-l", str(sample_end), str(source), "-"], text=True)
-            classification = "native-text" if len("".join(text.split())) >= max(100, sample_end * 40) else "scan"
+        classification = str(item.get("classification") or classify_pdf(source, pages))
         metadata = {"pages": pages, "classification": classification, "sample_pages": sample}
         if classification == "native-text":
             return {**base, "status": "skipped", "reason": "native-text-pdf",
-                    "strategy": "native-text", "pdf": metadata}
+                    "strategy": "native-text", "decision_profile": PDF_DECISION_PROFILE, "pdf": metadata}
         for page in sample:
             sample_sizes.append(_render(source, page, Path(temp), str(item.get("extension") or "pdf")).stat().st_size)
         range_pages = page_end - page_start + 1
         estimated = int(round(sum(sample_sizes) / len(sample_sizes) * range_pages))
         metadata.update({"sample_webp_bytes": sample_sizes,
                     "estimated_webp_bytes": estimated})
-        if item.get("extension") != "djvu" and estimated > actual_bytes * WEBP_MAX_RATIO:
-            return {**base, "status": "skipped", "reason": "estimated-webp-over-90-percent",
-                    "strategy": "sampled-webp", "pdf": metadata}
         page_entries = []
         for page in range(page_start, page_end + 1):
             rendered = _render(source, page, Path(temp), str(item.get("extension") or "pdf"))
@@ -250,12 +265,14 @@ def build_item(item: dict, source: Path, bundle: Path) -> dict:
     }
     if ranged:
         return {**base, "path": "", "status": "ready", "strategy": "sampled-webp", "pdf": metadata,
+                "render_profile": PDF_PROFILE, "decision_profile": PDF_DECISION_PROFILE,
                 "pages": page_entries}
     manifest_path = bundle / object_dir / "page-manifest.json"
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(json.dumps(page_manifest, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
     manifest_sha, manifest_bytes = digest(manifest_path)
     return {**base, "path": "", "status": "ready", "strategy": "sampled-webp", "pdf": metadata,
+            "render_profile": PDF_PROFILE, "decision_profile": PDF_DECISION_PROFILE,
             "pages": page_entries, "page_manifest": {
                 "path": (object_dir / "page-manifest.json").as_posix(),
                 "sha256": manifest_sha, "bytes": manifest_bytes,
@@ -328,6 +345,7 @@ def remote_sidecar(api: HfApi, repo: str) -> dict:
 def update_sidecar(sidecar: dict, results: list[dict]) -> bytes:
     updated = {"v": 1, "f": dict(sidecar.get("f", {}))}
     for result in results:
+        updated["f"].pop(result.get("key"), None)
         if result.get("status") != "ready":
             continue
         path = result.get("path") or result.get("page_manifest", {}).get("path")
@@ -344,7 +362,8 @@ def bundle_is_published(manifest: dict, results: list[dict]) -> bool:
         current = entries.get(result.get("key"))
         if not current or current.get("status") != result.get("status"):
             return False
-        for field in ("source_revision", "source_sha256", "source_extension", "profile", "strategy"):
+        for field in ("source_revision", "source_sha256", "source_extension", "profile", "strategy",
+                      "render_profile", "decision_profile"):
             if current.get(field) != result.get(field):
                 return False
         if result.get("status") == "ready":

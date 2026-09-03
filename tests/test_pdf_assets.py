@@ -1,5 +1,6 @@
 import json
 import requests
+import struct
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,6 +12,7 @@ from huggingface_hub.errors import HfHubHTTPError
 from scripts import pdf_assets
 from scripts import plan_pdf_assets
 from scripts import publish_pdf_assets
+from scripts import retire_pdf_assets
 
 
 class PdfAssetsTests(unittest.TestCase):
@@ -38,6 +40,34 @@ class PdfAssetsTests(unittest.TestCase):
             self.assertEqual(result["status"], "skipped")
             run.assert_not_called()
 
+    def test_render_does_not_upscale_small_portrait(self):
+        with tempfile.TemporaryDirectory() as root, patch.object(
+                pdf_assets, "_run") as run, patch.object(
+                pdf_assets, "_image_dimensions", return_value=(1200, 1700)):
+            output = pdf_assets._render(Path("book.pdf"), 1, Path(root))
+        self.assertTrue(output.name.endswith(".webp"))
+        cwebp = run.call_args_list[-1].args[0]
+        self.assertNotIn("-resize", cwebp)
+
+    def test_render_downscales_longest_edge_and_preserves_aspect_ratio(self):
+        with tempfile.TemporaryDirectory() as root, patch.object(
+                pdf_assets, "_run") as run, patch.object(
+                pdf_assets, "_image_dimensions", return_value=(2400, 3200)):
+            pdf_assets._render(Path("book.pdf"), 1, Path(root))
+        cwebp = run.call_args_list[-1].args[0]
+        resize = cwebp.index("-resize")
+        self.assertEqual(cwebp[resize:resize + 3], ["-resize", "0", "1800"])
+
+    def test_rendered_image_dimensions_support_png_and_ppm(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            png = root / "page.png"
+            png.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\0" * 8 + struct.pack(">II", 1234, 1678))
+            ppm = root / "page.ppm"
+            ppm.write_bytes(b"P6\n# generated\n640 480\n255\n")
+            self.assertEqual(pdf_assets._image_dimensions(png), (1234, 1678))
+            self.assertEqual(pdf_assets._image_dimensions(ppm), (640, 480))
+
     def test_weighted_shards_use_descending_page_count_and_stable_ties(self):
         records = [{"key": key, "page_count": pages} for key, pages in (
             ("a", 10), ("b", 9), ("c", 8), ("d", 7), ("e", 6), ("f", 5))]
@@ -51,19 +81,22 @@ class PdfAssetsTests(unittest.TestCase):
         shards = pdf_assets.weighted_shards(records, 2)
         self.assertEqual([[item["key"] for item in shard] for shard in shards], [["a", "c"], ["b"]])
 
-    def test_plan_splits_only_oversized_pdfs_into_deterministic_ranges(self):
-        records = [{"key": "r\0large.pdf", "repo": "r", "path": "large.pdf"},
-                   {"key": "r\0normal.pdf", "repo": "r", "path": "normal.pdf"}]
+    def test_plan_splits_only_large_caj_into_deterministic_ranges(self):
+        records = [{"key": "r\0large.caj", "repo": "r", "path": "large.caj", "source_extension": "caj"},
+                   {"key": "r\0normal.pdf", "repo": "r", "path": "normal.pdf", "source_extension": "pdf"}]
         with patch.object(plan_pdf_assets.pdf_assets, "_pages", side_effect=[2501, 300]), patch.object(
                 plan_pdf_assets, "source_path", side_effect=[Path("large.pdf"), Path("normal.pdf")]), patch.object(
-                plan_pdf_assets, "_classify_book", return_value="scan"):
+                plan_pdf_assets.pdf_assets, "digest", side_effect=[("a" * 64, pdf_assets.LARGE_BYTES),
+                                                                    ("b" * 64, pdf_assets.LARGE_BYTES)]), patch.object(
+                plan_pdf_assets.pdf_assets, "classify_pdf", side_effect=["scan", "native-text"]):
             planned = plan_pdf_assets.plan(records, None, "assets", 18, workers=1)
         tasks = [task for shard in planned["shards"] for task in shard["records"]]
         ranges = sorted((task["page_start"], task["page_end"]) for task in tasks
-                        if task["key"] == "r\0large.pdf")
+                        if task["key"] == "r\0large.caj")
         self.assertEqual(ranges, [(1, 500), (501, 1000), (1001, 1500), (1501, 2000), (2001, 2500), (2501, 2501)])
-        self.assertEqual(len([task for task in tasks if task["key"] == "r\0normal.pdf"]), 1)
-        self.assertEqual((planned["total_records"], planned["total_tasks"]), (2, 7))
+        self.assertEqual(len([task for task in tasks if task["key"] == "r\0normal.pdf"]), 0)
+        self.assertEqual((planned["total_records"], planned["total_tasks"]), (2, 6))
+        self.assertEqual([item["key"] for item in planned["skipped"]], ["r\0normal.pdf"])
         self.assertEqual(planned["ordinary_shard_count"], 18)
         self.assertEqual(planned["shard_count"], 24)
         self.assertEqual(planned["shard_ids"], list(range(24)))
@@ -80,40 +113,28 @@ class PdfAssetsTests(unittest.TestCase):
             for task in shard["records"]
         ))
 
-    def test_plan_requires_exactly_ten_ordinary_shards(self):
+    def test_plan_requires_exactly_eighteen_ordinary_shards(self):
         with self.assertRaisesRegex(ValueError, "ordinary PDF shard count must be 18"):
             plan_pdf_assets.plan([], None, "assets", 10)
 
-    def test_plan_skips_oversized_native_text_books(self):
-        records = [{"key": "r\0big.pdf", "repo": "r", "path": "big.pdf", "extension": "pdf"}]
-        with patch.object(plan_pdf_assets.pdf_assets, "_pages", return_value=2501), patch.object(
-                plan_pdf_assets, "source_path", return_value=Path("big.pdf")), patch.object(
-                plan_pdf_assets, "_classify_book", return_value="native-text"):
-            planned = plan_pdf_assets.plan(records, None, "assets", 18, workers=1)
-        self.assertEqual(planned["total_tasks"], 0)
-        self.assertEqual(planned["shard_count"], 18)
-        self.assertEqual(len(planned["skipped"]), 1)
-        self.assertEqual(planned["skipped"][0]["status"], "skipped")
-        self.assertEqual(planned["skipped"][0]["reason"], "native-text-pdf")
-        all_tasks = [t for s in planned["shards"] for t in s["records"]]
-        self.assertFalse(any(t["key"] == "r\0big.pdf" for t in all_tasks))
-
-    def test_plan_includes_oversized_scan_books_as_range_tasks(self):
-        records = [{"key": "r\0scan.pdf", "repo": "r", "path": "scan.pdf", "extension": "pdf"}]
+    def test_plan_splits_oversized_original_scan_pdf(self):
+        records = [{"key": "r\0scan.pdf", "repo": "r", "path": "scan.pdf",
+                    "extension": "pdf", "source_extension": "pdf"}]
         with patch.object(plan_pdf_assets.pdf_assets, "_pages", return_value=1200), patch.object(
                 plan_pdf_assets, "source_path", return_value=Path("scan.pdf")), patch.object(
-                plan_pdf_assets, "_classify_book", return_value="scan"):
+                plan_pdf_assets.pdf_assets, "digest", return_value=("a" * 64, pdf_assets.LARGE_BYTES)), patch.object(
+                plan_pdf_assets.pdf_assets, "classify_pdf", return_value="scan"):
             planned = plan_pdf_assets.plan(records, None, "assets", 18, workers=1)
         self.assertEqual(planned["total_tasks"], 3)
-        self.assertEqual(len(planned["skipped"]), 0)
+        self.assertEqual(planned["shard_count"], 21)
         all_tasks = [t for s in planned["shards"] for t in s["records"]]
-        ranges = sorted((t["page_start"], t["page_end"]) for t in all_tasks)
-        self.assertEqual(ranges, [(1, 500), (501, 1000), (1001, 1200)])
+        self.assertEqual([(t["page_start"], t["page_end"]) for t in all_tasks],
+                         [(1, 500), (501, 1000), (1001, 1200)])
 
     def test_generated_records_pin_reader_assets_revision(self):
         manifest = {"files": {"r\0book.caj": {
             "status": "ready", "reader_mode": "pdf", "path": "objects/a/document.pdf",
-            "bytes": pdf_assets.MIN_BYTES, "source_revision": "source-rev",
+            "bytes": pdf_assets.LARGE_BYTES, "source_revision": "source-rev",
         }}}
         records = pdf_assets.load_generated_records(manifest, "reader-assets", assets_revision="assets-rev")
         self.assertEqual(records[0]["reader_assets_revision"], "assets-rev")
@@ -124,6 +145,15 @@ class PdfAssetsTests(unittest.TestCase):
         with patch.object(plan_pdf_assets, "hf_hub_download", return_value="/tmp/document.pdf") as download:
             self.assertEqual(plan_pdf_assets.source_path(item, None, "reader-assets"), Path("/tmp/document.pdf"))
         self.assertEqual(download.call_args.kwargs["revision"], "assets-rev")
+
+    def test_planner_isolates_invalid_pdf(self):
+        records = [{"key": "r\0bad.pdf", "repo": "r", "path": "bad.pdf", "source_bytes": pdf_assets.LARGE_BYTES}]
+        with patch.object(plan_pdf_assets, "source_path", return_value=Path("bad.pdf")), patch.object(
+                plan_pdf_assets.pdf_assets, "_pages", side_effect=ValueError("bad PDF")):
+            planned = plan_pdf_assets.plan(records, None, "assets", 18, workers=1)
+        self.assertEqual(planned["total_tasks"], 0)
+        self.assertEqual(planned["skipped"][0]["status"], "failed")
+        self.assertEqual(planned["skipped"][0]["reason"], "tool-error")
 
     def test_download_failure_does_not_reuse_previous_source(self):
         records = [
@@ -165,14 +195,35 @@ class PdfAssetsTests(unittest.TestCase):
 
     def test_pending_records_exclude_completed_and_small_sources(self):
         records = [
-            {"key": "r\0small.pdf", "source_kind": "upstream", "source_bytes": pdf_assets.MIN_BYTES - 1},
-            {"key": "r\0done.pdf", "source_kind": "upstream", "source_bytes": pdf_assets.MIN_BYTES},
-            {"key": "r\0new.pdf", "source_kind": "upstream", "source_bytes": pdf_assets.MIN_BYTES},
+            {"key": "r\0small.pdf", "source_kind": "upstream", "source_bytes": pdf_assets.LARGE_BYTES - 1},
+            {"key": "r\0done.pdf", "source_kind": "upstream", "source_bytes": pdf_assets.LARGE_BYTES},
+            {"key": "r\0new.pdf", "source_kind": "upstream", "source_bytes": pdf_assets.LARGE_BYTES},
         ]
         pending = plan_pdf_assets.pending_records(records, {"files": {
-            "r\0done.pdf": {"status": "ready"},
+            "r\0done.pdf": {"status": "ready", "strategy": "sampled-webp",
+                             "render_profile": pdf_assets.PDF_PROFILE,
+                             "decision_profile": pdf_assets.PDF_DECISION_PROFILE},
         }})
         self.assertEqual([item["key"] for item in pending], ["r\0new.pdf"])
+
+    def test_pending_records_rebuild_old_streams_and_linearized_pdfs(self):
+        records = [
+            {"key": "r\0legacy.pdf", "source_kind": "upstream", "source_bytes": pdf_assets.LARGE_BYTES},
+            {"key": "r\0current.pdf", "source_kind": "upstream", "source_bytes": pdf_assets.LARGE_BYTES},
+            {"key": "r\0linear.pdf", "source_kind": "upstream", "source_bytes": pdf_assets.LARGE_BYTES},
+        ]
+        manifest = {"files": {
+            "r\0legacy.pdf": {"status": "ready", "strategy": "sampled-webp",
+                               "render_profile": "pdf-pages-v1-85-2400"},
+            "r\0current.pdf": {"status": "ready", "strategy": "sampled-webp",
+                                "render_profile": pdf_assets.PDF_PROFILE,
+                                "decision_profile": pdf_assets.PDF_DECISION_PROFILE},
+            "r\0linear.pdf": {"status": "ready", "strategy": "linearized-pdf"},
+        }}
+        self.assertEqual(
+            [item["key"] for item in plan_pdf_assets.pending_records(records, manifest)],
+            ["r\0legacy.pdf", "r\0linear.pdf"],
+        )
 
     def test_merge_bundles_combines_multiple_shards_and_empty_shards(self):
         with tempfile.TemporaryDirectory() as root:
@@ -308,6 +359,28 @@ class PdfAssetsTests(unittest.TestCase):
                 merged_results.extend(skipped_data)
             self.assertEqual(len(merged_results), 1)
             self.assertEqual(merged_results[0]["key"], "r\0native.pdf")
+
+    def test_retire_removes_linearized_and_legacy_streams_but_keeps_current_streams(self):
+        old_root = "objects/aa/" + "a" * 64
+        current_root = "objects/bb/" + "b" * 64
+        pdf_manifest = {"version": 1, "files": {
+            "linear": {"status": "ready", "strategy": "linearized-pdf",
+                       "path": "objects/cc/" + "c" * 64 + "/linearized.pdf"},
+            "legacy": {"status": "ready", "strategy": "sampled-webp",
+                       "page_manifest": {"path": old_root + "/page-manifest.json"}},
+            "current": {"status": "ready", "strategy": "sampled-webp",
+                        "render_profile": pdf_assets.PDF_PROFILE,
+                        "decision_profile": pdf_assets.PDF_DECISION_PROFILE,
+                        "page_manifest": {"path": current_root + "/page-manifest.json"}},
+        }}
+        updated, _, deletes = retire_pdf_assets.retire({"version": 1, "files": {}}, pdf_manifest)
+        self.assertEqual(updated["files"]["linear"]["status"], "retired")
+        self.assertEqual(updated["files"]["legacy"]["status"], "retired")
+        self.assertEqual(updated["files"]["current"]["status"], "ready")
+        paths = {operation.path_in_repo for operation in deletes}
+        self.assertIn(old_root + "/page-manifest.json", paths)
+        self.assertIn(old_root + "/pages", paths)
+        self.assertNotIn(current_root + "/page-manifest.json", paths)
 
 
 if __name__ == "__main__":

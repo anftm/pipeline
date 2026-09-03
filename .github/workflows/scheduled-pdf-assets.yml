@@ -83,7 +83,7 @@ jobs:
       - name: Install PDF tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qpdf poppler-utils webp
+          sudo apt-get install -y --no-install-recommends poppler-utils webp
       - uses: actions/download-artifact@v8
         with:
           name: pdf-assets-queue
