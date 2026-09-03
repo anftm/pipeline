@@ -29,6 +29,7 @@ WEBP_QUALITY = int(os.environ.get("PDF_WEBP_QUALITY", "85"))
 WEBP_MAX_DIMENSION = int(os.environ.get("PDF_WEBP_MAX_DIMENSION", "2400"))
 SAMPLE_PAGES = int(os.environ.get("PDF_SAMPLE_PAGES", "3"))
 WEBP_MAX_RATIO = float(os.environ.get("PDF_WEBP_MAX_RATIO", "0.9"))
+MAX_PAGES_PER_TASK = 1000
 PDF_PROFILE = f"pdf-pages-v1-{WEBP_QUALITY}-{WEBP_MAX_DIMENSION}"
 SOURCE_PROFILES = {
     "upstream": "pdf-assets-upstream-v1",
@@ -134,10 +135,11 @@ def weighted_shards(records: list[dict], shard_count: int = 10) -> list[list[dic
         raise ValueError("shard_count must be positive")
     shards = [[] for _ in range(shard_count)]
     loads = [0] * shard_count
-    for item in sorted(records, key=lambda value: (-int(value["page_count"]), value["key"])):
+    for item in sorted(records, key=lambda value: (-int(value.get("range_page_count", value["page_count"])),
+                                                   value.get("task_key", value["key"]))):
         shard = min(range(shard_count), key=lambda index: (loads[index], index))
         shards[shard].append(item)
-        loads[shard] += int(item["page_count"])
+        loads[shard] += int(item.get("range_page_count", item["page_count"]))
     return shards
 
 
@@ -193,7 +195,8 @@ def build_item(item: dict, source: Path, bundle: Path) -> dict:
     if item.get("extension") != "djvu" and actual_bytes < MIN_BYTES:
         return {**base, "status": "skipped", "reason": "below-minimum-50-mib", "strategy": "none"}
     object_dir = object_root(source_sha, str(item.get("key") or ""))
-    if item.get("extension") != "djvu" and actual_bytes < LARGE_BYTES:
+    ranged = "page_start" in item or "page_end" in item
+    if item.get("extension") != "djvu" and actual_bytes < LARGE_BYTES and not ranged:
         output = bundle / object_dir / "linearized.pdf"
         output.parent.mkdir(parents=True, exist_ok=True)
         _run(["qpdf", "--linearize", str(source), str(output)])
@@ -205,14 +208,18 @@ def build_item(item: dict, source: Path, bundle: Path) -> dict:
                 "pdf": {"source_bytes": actual_bytes, "output_bytes": output_bytes}}
 
     pages = _pages(source, str(item.get("extension") or "pdf"))
+    page_start = int(item.get("page_start", 1))
+    page_end = int(item.get("page_end", pages))
+    if not 1 <= page_start <= page_end <= pages:
+        raise ValueError("invalid PDF page range")
     with tempfile.TemporaryDirectory(dir=bundle) as temp:
-        sample = sorted(set([1, max(1, pages // 2), pages]))[:max(1, SAMPLE_PAGES)]
+        sample = sorted(set([page_start, (page_start + page_end) // 2, page_end]))[:max(1, SAMPLE_PAGES)]
         sample_sizes = []
-        sample_end = min(pages, max(sample))
+        sample_end = max(sample)
         if item.get("extension") == "djvu":
             classification = "djvu-image"
         else:
-            text = _run(["pdftotext", "-f", "1", "-l", str(sample_end), str(source), "-"], text=True)
+            text = _run(["pdftotext", "-f", str(page_start), "-l", str(sample_end), str(source), "-"], text=True)
             classification = "native-text" if len("".join(text.split())) >= max(100, sample_end * 40) else "scan"
         metadata = {"pages": pages, "classification": classification, "sample_pages": sample}
         if classification == "native-text":
@@ -220,14 +227,15 @@ def build_item(item: dict, source: Path, bundle: Path) -> dict:
                     "strategy": "native-text", "pdf": metadata}
         for page in sample:
             sample_sizes.append(_render(source, page, Path(temp), str(item.get("extension") or "pdf")).stat().st_size)
-        estimated = int(round(sum(sample_sizes) / len(sample_sizes) * pages))
+        range_pages = page_end - page_start + 1
+        estimated = int(round(sum(sample_sizes) / len(sample_sizes) * range_pages))
         metadata.update({"sample_webp_bytes": sample_sizes,
                     "estimated_webp_bytes": estimated})
         if item.get("extension") != "djvu" and estimated > actual_bytes * WEBP_MAX_RATIO:
             return {**base, "status": "skipped", "reason": "estimated-webp-over-90-percent",
                     "strategy": "sampled-webp", "pdf": metadata}
         page_entries = []
-        for page in range(1, pages + 1):
+        for page in range(page_start, page_end + 1):
             rendered = _render(source, page, Path(temp), str(item.get("extension") or "pdf"))
             page_sha, page_bytes = digest(rendered)
             destination = bundle / object_dir / "pages" / f"page-{page:06d}.webp"
@@ -239,6 +247,9 @@ def build_item(item: dict, source: Path, bundle: Path) -> dict:
         "version": 1, "kind": "pdf-pages", "source_sha256": source_sha,
         "profile": PDF_PROFILE, "pages": page_entries,
     }
+    if ranged:
+        return {**base, "path": "", "status": "ready", "strategy": "sampled-webp", "pdf": metadata,
+                "pages": page_entries}
     manifest_path = bundle / object_dir / "page-manifest.json"
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(json.dumps(page_manifest, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
@@ -258,7 +269,7 @@ def build_publish(manifest: dict, results: list[dict], bundle: Path) -> tuple[di
     files = dict(manifest.get("files", {}))
     artifacts = {}
     for result in results:
-        entry = {k: v for k, v in result.items() if k != "key"}
+        entry = {k: v for k, v in result.items() if k not in {"key", "task_key", "page_start", "page_end", "range_page_count"}}
         if result["status"] == "ready":
             paths = [result["path"]] if result.get("path") else [page["path"] for page in result["pages"]]
             if result.get("page_manifest"):
@@ -454,13 +465,14 @@ def main() -> int:
             elif not args.source_dir:
                 source = download_hf_source(item["repo"], item["path"], item["source_revision"], os.environ.get("HF_TOKEN"))
             source_sha, source_bytes = digest(source)
-            if source_sha in built_by_sha:
+            if source_sha in built_by_sha and "page_start" not in item:
                 result = {**built_by_sha[source_sha], **item,
                           "source_sha256": source_sha, "source_bytes": source_bytes}
             else:
                 result = build_item(item, source, args.bundle)
-                built_by_sha[source_sha] = {k: v for k, v in result.items()
-                                            if k not in {"key", "repo", "path", "source_revision", "source_url"}}
+                if "page_start" not in item:
+                    built_by_sha[source_sha] = {k: v for k, v in result.items()
+                                                if k not in {"key", "repo", "path", "source_revision", "source_url"}}
             results.append(result)
         except (OSError, subprocess.CalledProcessError, ValueError, RuntimeError):
             source_sha = ""

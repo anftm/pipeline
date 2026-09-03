@@ -35,11 +35,22 @@ def plan(records: list[dict], source_dir: Path | None, assets_repo: str, shard_c
 
     with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
         selected = list(executor.map(inspect, records))
-    shards = pdf_assets.weighted_shards(selected, shard_count)
+    tasks = []
+    for item in selected:
+        if item["page_count"] <= pdf_assets.MAX_PAGES_PER_TASK:
+            tasks.append(item)
+            continue
+        for start in range(1, item["page_count"] + 1, pdf_assets.MAX_PAGES_PER_TASK):
+            end = min(item["page_count"], start + pdf_assets.MAX_PAGES_PER_TASK - 1)
+            tasks.append({**item, "task_key": f"{item['key']}#pages-{start:06d}-{end:06d}",
+                          "page_start": start, "page_end": end,
+                          "range_page_count": end - start + 1})
+    shards = pdf_assets.weighted_shards(tasks, shard_count)
     return {"version": 1, "kind": "pdf-assets-queue", "shard_count": shard_count,
-            "total_records": len(selected),
+            "total_records": len(selected), "total_tasks": len(tasks),
             "total_pages": sum(item["page_count"] for item in selected),
-            "shards": [{"index": index, "page_count": sum(item["page_count"] for item in shard),
+            "shards": [{"index": index, "page_count": sum(item.get("range_page_count", item["page_count"])
+                                                               for item in shard),
                         "records": shard} for index, shard in enumerate(shards)]}
 
 

@@ -50,6 +50,19 @@ class PdfAssetsTests(unittest.TestCase):
         shards = pdf_assets.weighted_shards(records, 2)
         self.assertEqual([[item["key"] for item in shard] for shard in shards], [["a", "c"], ["b"]])
 
+    def test_plan_splits_only_oversized_pdfs_into_deterministic_ranges(self):
+        records = [{"key": "r\0large.pdf", "repo": "r", "path": "large.pdf"},
+                   {"key": "r\0normal.pdf", "repo": "r", "path": "normal.pdf"}]
+        with patch.object(plan_pdf_assets.pdf_assets, "_pages", side_effect=[2501, 1000]), patch.object(
+                plan_pdf_assets, "source_path", side_effect=[Path("large.pdf"), Path("normal.pdf")]):
+            planned = plan_pdf_assets.plan(records, None, "assets", 10, workers=1)
+        tasks = [task for shard in planned["shards"] for task in shard["records"]]
+        ranges = sorted((task["page_start"], task["page_end"]) for task in tasks
+                        if task["key"] == "r\0large.pdf")
+        self.assertEqual(ranges, [(1, 1000), (1001, 2000), (2001, 2501)])
+        self.assertEqual(len([task for task in tasks if task["key"] == "r\0normal.pdf"]), 1)
+        self.assertEqual((planned["total_records"], planned["total_tasks"]), (2, 4))
+
     def test_object_root_is_unique_per_source_entry(self):
         self.assertNotEqual(
             pdf_assets.object_root("a" * 64, "repo\0first.pdf"),
@@ -96,6 +109,41 @@ class PdfAssetsTests(unittest.TestCase):
             _, operations = pdf_assets.build_publish(pdf_assets.empty_manifest(), merged_results, merged)
         self.assertEqual([result["key"] for result in merged_results], ["r\0a.pdf"])
         self.assertIn("objects/a/page.webp", {operation.path_in_repo for operation in operations})
+
+    def test_merge_bundles_aggregates_complete_ranges_to_one_manifest_result(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            bundles = []
+            for index, (start, end) in enumerate(((1, 1000), (1001, 1200))):
+                bundle = root / f"bundle-{index}"
+                bundle.mkdir()
+                object_path = f"objects/sha/pages/page-{start:06d}.webp"
+                (bundle / object_path).parent.mkdir(parents=True)
+                (bundle / object_path).write_bytes(f"{start}".encode())
+                result = {"key": "r\0large.pdf", "task_key": f"task-{index}", "status": "ready",
+                          "strategy": "sampled-webp", "source_revision": "1", "source_sha256": "a" * 64,
+                          "source_extension": "pdf", "profile": "p", "page_count": 1200,
+                          "page_start": start, "page_end": end, "range_page_count": end - start + 1,
+                          "pages": [{"page": page, "path": object_path} for page in range(start, end + 1)]}
+                (bundle / "bundle.json").write_text(json.dumps({"version": 1, "results": [result]}), encoding="utf-8")
+                bundles.append(bundle)
+            results = publish_pdf_assets.merge_bundles(bundles, root / "merged")
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["key"], "r\0large.pdf")
+        self.assertTrue(results[0]["page_manifest"]["path"].endswith("page-manifest.json"))
+
+    def test_merge_bundles_rejects_overlapping_ranges(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            bundle = root / "bundle"
+            bundle.mkdir()
+            results = [{"key": "r\0large.pdf", "status": "ready", "source_sha256": "a" * 64,
+                        "page_count": 1200, "page_start": 1, "page_end": 1000, "pages": []},
+                       {"key": "r\0large.pdf", "status": "ready", "source_sha256": "a" * 64,
+                        "page_count": 1200, "page_start": 1000, "page_end": 1200, "pages": []}]
+            (bundle / "bundle.json").write_text(json.dumps({"version": 1, "results": results}), encoding="utf-8")
+            with self.assertRaises(ValueError):
+                publish_pdf_assets.merge_bundles([bundle], root / "merged")
 
     def test_result_chunks_are_stable_and_bounded(self):
         results = [{"key": str(index)} for index in range(5)]
