@@ -7,7 +7,7 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from huggingface_hub import hf_hub_download
+from huggingface_hub import HfApi, hf_hub_download
 
 try:
     from . import pdf_assets
@@ -18,7 +18,8 @@ except ImportError:
 def source_path(item: dict, source_dir: Path | None, assets_repo: str) -> Path:
     if item.get("source_kind") == "generated":
         return Path(hf_hub_download(item["reader_assets_repo"], item["reader_assets_path"],
-                                    repo_type="dataset", token=os.environ.get("HF_TOKEN")))
+                                    repo_type="dataset", revision=item["reader_assets_revision"],
+                                    token=os.environ.get("HF_TOKEN")))
     if source_dir:
         return source_dir / item["repo"] / item["path"]
     return Path(hf_hub_download(item["repo"], item["path"], repo_type="dataset",
@@ -27,6 +28,9 @@ def source_path(item: dict, source_dir: Path | None, assets_repo: str) -> Path:
 
 def plan(records: list[dict], source_dir: Path | None, assets_repo: str, shard_count: int,
          workers: int = 8) -> dict:
+    if shard_count != 10:
+        raise ValueError("ordinary PDF shard count must be 10")
+
     def inspect(item: dict) -> dict:
         pages = pdf_assets._pages(source_path(item, source_dir, assets_repo))
         if pages < 1:
@@ -35,22 +39,27 @@ def plan(records: list[dict], source_dir: Path | None, assets_repo: str, shard_c
 
     with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
         selected = list(executor.map(inspect, records))
-    tasks = []
+    ordinary = []
+    range_tasks = []
     for item in selected:
         if item["page_count"] <= pdf_assets.MAX_PAGES_PER_TASK:
-            tasks.append(item)
+            ordinary.append(item)
             continue
         for start in range(1, item["page_count"] + 1, pdf_assets.MAX_PAGES_PER_TASK):
             end = min(item["page_count"], start + pdf_assets.MAX_PAGES_PER_TASK - 1)
-            tasks.append({**item, "task_key": f"{item['key']}#pages-{start:06d}-{end:06d}",
-                          "page_start": start, "page_end": end,
-                          "range_page_count": end - start + 1})
-    shards = pdf_assets.weighted_shards(tasks, shard_count)
-    return {"version": 1, "kind": "pdf-assets-queue", "shard_count": shard_count,
-            "total_records": len(selected), "total_tasks": len(tasks),
+            range_tasks.append({**item, "task_key": f"{item['key']}#pages-{start:06d}-{end:06d}",
+                                "page_start": start, "page_end": end,
+                                "range_page_count": end - start + 1})
+    shards = pdf_assets.weighted_shards(ordinary, shard_count)
+    shards.extend([[task] for task in range_tasks])
+    dynamic_shard_count = len(shards)
+    return {"version": 1, "kind": "pdf-assets-queue", "shard_count": dynamic_shard_count,
+            "shard_ids": list(range(dynamic_shard_count)),
+            "ordinary_shard_count": shard_count,
+            "total_records": len(selected), "total_tasks": len(ordinary) + len(range_tasks),
             "total_pages": sum(item["page_count"] for item in selected),
             "shards": [{"index": index, "page_count": sum(item.get("range_page_count", item["page_count"])
-                                                               for item in shard),
+                                                                for item in shard),
                         "records": shard} for index, shard in enumerate(shards)]}
 
 
@@ -89,11 +98,15 @@ def main() -> int:
     if args.source in {"upstream", "all"}:
         records.extend(pdf_assets.load_records(args.search_data, args.revisions, args.repo, "pdf"))
     if args.source in {"generated", "all"}:
+        reader_assets_revision = HfApi(token=os.environ.get("HF_TOKEN")).repo_info(
+            repo_id=args.assets_repo, repo_type="dataset").sha
         if not args.reader_assets_manifest:
             manifest = hf_hub_download(args.assets_repo, "manifest.json", repo_type="dataset",
+                                       revision=reader_assets_revision,
                                        token=os.environ.get("HF_TOKEN"))
             args.reader_assets_manifest = Path(manifest)
-        records.extend(pdf_assets.load_generated_records(args.reader_assets_manifest, args.assets_repo, args.repo))
+        records.extend(pdf_assets.load_generated_records(
+            args.reader_assets_manifest, args.assets_repo, args.repo, reader_assets_revision))
     records.sort(key=lambda item: (0 if item.get("source_extension") in {"caj", "kdh"} else 1,
                                    item["repo"], item["path"], item["source_kind"]))
     try:
@@ -107,7 +120,7 @@ def main() -> int:
     planned = plan(selected, args.source_dir, args.assets_repo, args.shard_count, args.workers)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(planned, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
-    print(f"planned {planned['total_records']} PDF asset(s) across {args.shard_count} shard(s)")
+    print(f"planned {planned['total_records']} PDF asset(s) across {planned['shard_count']} shard(s)")
     return 0
 
 

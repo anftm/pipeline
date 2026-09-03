@@ -13,6 +13,9 @@ jobs:
   plan:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    outputs:
+      shard-count: ${{ steps.shards.outputs.shard-count }}
+      shard-ids: ${{ steps.shards.outputs.shard-ids }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -47,6 +50,11 @@ jobs:
              --shard-count 10 \
              --workers 8 \
              --output output/pdf-assets/queue.json
+      - name: Export dynamic shard matrix
+        id: shards
+        run: |
+          echo "shard-count=$(jq -r '.shard_count' output/pdf-assets/queue.json)" >> "$GITHUB_OUTPUT"
+          echo "shard-ids=$(jq -c '.shard_ids' output/pdf-assets/queue.json)" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v7
         with:
           name: pdf-assets-queue
@@ -59,7 +67,7 @@ jobs:
       fail-fast: false
       max-parallel: 10
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+        shard: ${{ fromJSON(needs.plan.outputs.shard-ids) }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -81,7 +89,7 @@ jobs:
           READER_ASSETS_REPO: vomebook/Reader-Assets
           FORCE_SYNC: "true"
         run: |
-          args=(--source "all" --shard-count 10 --shard-index "${{ matrix.shard }}" --extension pdf --queue-file output/pdf-assets/queue.json --build-only)
+          args=(--source "all" --shard-count "${{ needs.plan.outputs.shard-count }}" --shard-index "${{ matrix.shard }}" --extension pdf --queue-file output/pdf-assets/queue.json --build-only)
           python scripts/pdf_assets.py "${args[@]}" --bundle "output/pdf-assets/bundle"
       - uses: actions/upload-artifact@v7
         with:

@@ -3,6 +3,7 @@ import requests
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from huggingface_hub.errors import HfHubHTTPError
@@ -62,6 +63,63 @@ class PdfAssetsTests(unittest.TestCase):
         self.assertEqual(ranges, [(1, 1000), (1001, 2000), (2001, 2501)])
         self.assertEqual(len([task for task in tasks if task["key"] == "r\0normal.pdf"]), 1)
         self.assertEqual((planned["total_records"], planned["total_tasks"]), (2, 4))
+        self.assertEqual(planned["ordinary_shard_count"], 10)
+        self.assertEqual(planned["shard_count"], 13)
+        self.assertEqual(planned["shard_ids"], list(range(13)))
+        self.assertEqual(
+            [shard["index"] for shard in planned["shards"]
+             if any("page_start" in task for task in shard["records"])],
+            [10, 11, 12],
+        )
+        self.assertTrue(all(len(shard["records"]) == 1 for shard in planned["shards"][10:]))
+        self.assertEqual(len({task["task_key"] for task in tasks if "task_key" in task}), 3)
+        self.assertTrue(all(
+            "page_start" not in task
+            for shard in planned["shards"][:10]
+            for task in shard["records"]
+        ))
+
+    def test_plan_requires_exactly_ten_ordinary_shards(self):
+        with self.assertRaisesRegex(ValueError, "ordinary PDF shard count must be 10"):
+            plan_pdf_assets.plan([], None, "assets", 9)
+
+    def test_generated_records_pin_reader_assets_revision(self):
+        manifest = {"files": {"r\0book.caj": {
+            "status": "ready", "reader_mode": "pdf", "path": "objects/a/document.pdf",
+            "bytes": pdf_assets.MIN_BYTES, "source_revision": "source-rev",
+        }}}
+        records = pdf_assets.load_generated_records(manifest, "reader-assets", assets_revision="assets-rev")
+        self.assertEqual(records[0]["reader_assets_revision"], "assets-rev")
+
+    def test_generated_source_path_uses_pinned_revision(self):
+        item = {"source_kind": "generated", "reader_assets_repo": "reader-assets",
+                "reader_assets_path": "objects/a/document.pdf", "reader_assets_revision": "assets-rev"}
+        with patch.object(plan_pdf_assets, "hf_hub_download", return_value="/tmp/document.pdf") as download:
+            self.assertEqual(plan_pdf_assets.source_path(item, None, "reader-assets"), Path("/tmp/document.pdf"))
+        self.assertEqual(download.call_args.kwargs["revision"], "assets-rev")
+
+    def test_download_failure_does_not_reuse_previous_source(self):
+        records = [
+            {"key": "r\0first.pdf", "source_kind": "generated", "reader_assets_repo": "assets",
+             "reader_assets_path": "first.pdf", "reader_assets_revision": "rev", "source_bytes": 1},
+            {"key": "r\0second.pdf", "source_kind": "generated", "reader_assets_repo": "assets",
+             "reader_assets_path": "second.pdf", "reader_assets_revision": "rev", "source_bytes": 2},
+        ]
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            source = root / "first.pdf"
+            source.write_bytes(b"first")
+            args = SimpleNamespace(queue_file=root / "queue.json", shard_count=1, shard_index=0,
+                                   bundle=root / "bundle", dry_run=False, build_only=True)
+            with patch.object(pdf_assets, "parse_args", return_value=args), patch.object(
+                    pdf_assets, "load_planned_shard", return_value=records), patch.object(
+                    pdf_assets, "download_hf_source", side_effect=[source, OSError("download failed")]), patch.object(
+                    pdf_assets, "build_item", return_value={"key": records[0]["key"], "status": "skipped",
+                                                             "strategy": "none", "source_sha256": "first-sha"}):
+                self.assertEqual(pdf_assets.main(), 0)
+            results = json.loads((args.bundle / "bundle.json").read_text(encoding="utf-8"))["results"]
+        self.assertEqual(results[1]["source_sha256"], "")
+        self.assertEqual(results[1]["source_bytes"], 2)
 
     def test_object_root_is_unique_per_source_entry(self):
         self.assertNotEqual(
@@ -124,7 +182,8 @@ class PdfAssetsTests(unittest.TestCase):
                           "strategy": "sampled-webp", "source_revision": "1", "source_sha256": "a" * 64,
                           "source_extension": "pdf", "profile": "p", "page_count": 1200,
                           "page_start": start, "page_end": end, "range_page_count": end - start + 1,
-                          "pages": [{"page": page, "path": object_path} for page in range(start, end + 1)]}
+                          "pages": [{"page": page, "path": f"objects/sha/pages/page-{page:06d}.webp"}
+                                    for page in range(start, end + 1)]}
                 (bundle / "bundle.json").write_text(json.dumps({"version": 1, "results": [result]}), encoding="utf-8")
                 bundles.append(bundle)
             results = publish_pdf_assets.merge_bundles(bundles, root / "merged")
@@ -143,6 +202,20 @@ class PdfAssetsTests(unittest.TestCase):
                         "page_count": 1200, "page_start": 1000, "page_end": 1200, "pages": []}]
             (bundle / "bundle.json").write_text(json.dumps({"version": 1, "results": results}), encoding="utf-8")
             with self.assertRaises(ValueError):
+                publish_pdf_assets.merge_bundles([bundle], root / "merged")
+
+    def test_merge_bundles_rejects_colliding_range_artifact_paths(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            bundle = root / "bundle"
+            bundle.mkdir()
+            result = {"key": "r\0large.pdf", "status": "ready", "source_sha256": "a" * 64,
+                      "page_count": 2, "page_start": 1, "page_end": 2,
+                      "pages": [{"page": 1, "path": "objects/sha/page.webp"},
+                                {"page": 2, "path": "objects/sha/page.webp"}]}
+            (bundle / "bundle.json").write_text(
+                json.dumps({"version": 1, "results": [result]}), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "conflicting PDF page artifact paths"):
                 publish_pdf_assets.merge_bundles([bundle], root / "merged")
 
     def test_result_chunks_are_stable_and_bounded(self):

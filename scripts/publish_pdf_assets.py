@@ -76,6 +76,9 @@ def merge_bundles(bundle_paths: list[Path], output: Path) -> list[dict]:
             expected = end + 1
         if expected != total + 1:
             raise ValueError(f"incomplete PDF page ranges: {key}")
+        page_paths = [page.get("path") for page in pages]
+        if None in page_paths or len(set(page_paths)) != len(page_paths):
+            raise ValueError(f"conflicting PDF page artifact paths: {key}")
         result = {k: v for k, v in ordered[0].items()
                   if k not in {"task_key", "page_start", "page_end", "range_page_count", "pages", "page_manifest"}}
         result["pages"] = pages

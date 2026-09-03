@@ -89,7 +89,7 @@ def load_records(search_data: Path, revisions: Path, repo: str = "", extension: 
 
 
 def load_generated_records(manifest: Path | dict, assets_repo: str = READER_ASSETS_REPO,
-                           repo: str = "") -> list[dict]:
+                           repo: str = "", assets_revision: str = "main") -> list[dict]:
     data = manifest if isinstance(manifest, dict) else json.loads(manifest.read_text(encoding="utf-8"))
     selected = []
     for key, entry in data.get("files", {}).items():
@@ -107,6 +107,7 @@ def load_generated_records(manifest: Path | dict, assets_repo: str = READER_ASSE
             "source_extension": Path(source_path).suffix.lower().lstrip("."),
             "source_kind": "generated", "profile": SOURCE_PROFILES["generated"],
             "reader_assets_repo": assets_repo, "reader_assets_path": artifact,
+            "reader_assets_revision": assets_revision,
         })
     selected.sort(key=lambda item: (0 if item.get("source_extension") in {"caj", "kdh"} else 1,
                                     item["repo"], item["path"]))
@@ -431,13 +432,17 @@ def main() -> int:
         if args.source in {"upstream", "all"}:
             records.extend(load_records(args.search_data, args.revisions, args.repo, args.extension))
         if args.source in {"generated", "all"}:
+            token = os.environ.get("HF_TOKEN")
+            reader_assets_revision = HfApi(token=token).repo_info(
+                repo_id=args.assets_repo, repo_type="dataset").sha
             if args.reader_assets_manifest:
                 manifest_path = args.reader_assets_manifest
             else:
                 from huggingface_hub import hf_hub_download
                 manifest_path = Path(hf_hub_download(args.assets_repo, "manifest.json", repo_type="dataset",
-                                                     token=os.environ.get("HF_TOKEN")))
-            records.extend(load_generated_records(manifest_path, args.assets_repo, args.repo))
+                                                     revision=reader_assets_revision, token=token))
+            records.extend(load_generated_records(
+                manifest_path, args.assets_repo, args.repo, reader_assets_revision))
         records.sort(key=lambda item: (0 if item.get("source_extension") in {"caj", "kdh"} else 1,
                                        item["repo"], item["path"], item["source_kind"]))
         if args.failed_only:
@@ -457,9 +462,12 @@ def main() -> int:
     results = []
     built_by_sha = {}
     for item in records:
+        source = None
         try:
             if item.get("source_kind") == "generated":
-                source = download_hf_source(item["reader_assets_repo"], item["reader_assets_path"], "main", os.environ.get("HF_TOKEN"))
+                source = download_hf_source(
+                    item["reader_assets_repo"], item["reader_assets_path"],
+                    item.get("reader_assets_revision", "main"), os.environ.get("HF_TOKEN"))
             elif args.source_dir:
                 source = args.source_dir / item["repo"] / item["path"]
             elif not args.source_dir:
@@ -477,6 +485,8 @@ def main() -> int:
         except (OSError, subprocess.CalledProcessError, ValueError, RuntimeError):
             source_sha = ""
             try:
+                if source is None:
+                    raise OSError
                 source_sha, source_bytes = digest(source)
             except OSError:
                 source_bytes = item.get("source_bytes", 0)
