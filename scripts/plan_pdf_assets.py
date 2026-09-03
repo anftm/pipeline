@@ -28,8 +28,8 @@ def source_path(item: dict, source_dir: Path | None, assets_repo: str) -> Path:
 
 def plan(records: list[dict], source_dir: Path | None, assets_repo: str, shard_count: int,
          workers: int = 8) -> dict:
-    if shard_count != 10:
-        raise ValueError("ordinary PDF shard count must be 10")
+    if shard_count != 18:
+        raise ValueError("ordinary PDF shard count must be 18")
 
     def inspect(item: dict) -> dict:
         pages = pdf_assets._pages(source_path(item, source_dir, assets_repo))
@@ -89,7 +89,7 @@ def main() -> int:
     parser.add_argument("--assets-repo", default=os.environ.get("READER_ASSETS_REPO", pdf_assets.READER_ASSETS_REPO))
     parser.add_argument("--limit", type=int, required=True, help="Total PDFs in this checkpoint")
     parser.add_argument("--checkpoint", type=int, default=0)
-    parser.add_argument("--shard-count", type=int, default=10)
+    parser.add_argument("--shard-count", type=int, default=18)
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--source-dir", type=Path)
     parser.add_argument("--output", type=Path, default=Path("output/pdf-assets/queue.json"))

@@ -56,32 +56,32 @@ class PdfAssetsTests(unittest.TestCase):
                    {"key": "r\0normal.pdf", "repo": "r", "path": "normal.pdf"}]
         with patch.object(plan_pdf_assets.pdf_assets, "_pages", side_effect=[2501, 1000]), patch.object(
                 plan_pdf_assets, "source_path", side_effect=[Path("large.pdf"), Path("normal.pdf")]):
-            planned = plan_pdf_assets.plan(records, None, "assets", 10, workers=1)
+             planned = plan_pdf_assets.plan(records, None, "assets", 18, workers=1)
         tasks = [task for shard in planned["shards"] for task in shard["records"]]
         ranges = sorted((task["page_start"], task["page_end"]) for task in tasks
                         if task["key"] == "r\0large.pdf")
         self.assertEqual(ranges, [(1, 1000), (1001, 2000), (2001, 2501)])
         self.assertEqual(len([task for task in tasks if task["key"] == "r\0normal.pdf"]), 1)
         self.assertEqual((planned["total_records"], planned["total_tasks"]), (2, 4))
-        self.assertEqual(planned["ordinary_shard_count"], 10)
-        self.assertEqual(planned["shard_count"], 13)
-        self.assertEqual(planned["shard_ids"], list(range(13)))
+        self.assertEqual(planned["ordinary_shard_count"], 18)
+        self.assertEqual(planned["shard_count"], 21)
+        self.assertEqual(planned["shard_ids"], list(range(21)))
         self.assertEqual(
             [shard["index"] for shard in planned["shards"]
              if any("page_start" in task for task in shard["records"])],
-            [10, 11, 12],
+             [18, 19, 20],
         )
-        self.assertTrue(all(len(shard["records"]) == 1 for shard in planned["shards"][10:]))
+        self.assertTrue(all(len(shard["records"]) == 1 for shard in planned["shards"][18:]))
         self.assertEqual(len({task["task_key"] for task in tasks if "task_key" in task}), 3)
         self.assertTrue(all(
             "page_start" not in task
-            for shard in planned["shards"][:10]
+             for shard in planned["shards"][:18]
             for task in shard["records"]
         ))
 
     def test_plan_requires_exactly_ten_ordinary_shards(self):
-        with self.assertRaisesRegex(ValueError, "ordinary PDF shard count must be 10"):
-            plan_pdf_assets.plan([], None, "assets", 9)
+        with self.assertRaisesRegex(ValueError, "ordinary PDF shard count must be 18"):
+            plan_pdf_assets.plan([], None, "assets", 10)
 
     def test_generated_records_pin_reader_assets_revision(self):
         manifest = {"files": {"r\0book.caj": {

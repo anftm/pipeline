@@ -47,7 +47,7 @@ jobs:
             --source "all" \
             --limit "${limit}" \
              --checkpoint "${checkpoint}" \
-             --shard-count 10 \
+             --shard-count 18 \
              --workers 8 \
              --output output/pdf-assets/queue.json
       - name: Export dynamic shard matrix
@@ -65,7 +65,7 @@ jobs:
     timeout-minutes: 360
     strategy:
       fail-fast: false
-      max-parallel: 10
+      max-parallel: 18
       matrix:
         shard: ${{ fromJSON(needs.plan.outputs.shard-ids) }}
     steps:
