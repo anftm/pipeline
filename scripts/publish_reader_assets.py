@@ -210,6 +210,7 @@ def publish_bundle(api: HfApi, repo_id: str, bundle: Path, *, max_attempts: int 
     data = load_json(bundle / "bundle.json")
     result_keys = {result.get("key") for result in data.get("results", []) if result.get("key")}
     baseline = None
+    objects_uploaded = False
     for attempt in range(max_attempts):
         try:
             revision = api.repo_info(repo_id=repo_id, repo_type="dataset").sha
@@ -221,12 +222,21 @@ def publish_bundle(api: HfApi, repo_id: str, bundle: Path, *, max_attempts: int 
                 baseline = current_entries
             elif current_entries != baseline:
                 raise RuntimeError("reader asset key changed during publication retry")
+            if not objects_uploaded and (bundle / "objects").is_dir():
+                api.upload_large_folder(
+                    repo_id=repo_id, folder_path=bundle, repo_type="dataset",
+                    allow_patterns="objects/**", num_workers=2,
+                )
+                revision = api.repo_info(repo_id=repo_id, repo_type="dataset").sha
+                objects_uploaded = True
             manifest, operations = build_publish(api, repo_id, bundle, revision)
+            operations = [operation for operation in operations
+                          if operation.path_in_repo in {MANIFEST_NAME, SIDECAR_NAME}]
             api.create_commit(
                 repo_id=repo_id, repo_type="dataset", operations=operations,
                 commit_message="Update reader assets", parent_commit=revision,
             )
-            return manifest, len(operations) - 2
+            return manifest, len(result_keys)
         except HfHubHTTPError as exc:
             status = getattr(exc.response, "status_code", None)
             if status in {429, 500, 502, 503, 504} and attempt + 1 < max_attempts:

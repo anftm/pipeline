@@ -327,6 +327,19 @@ class PdfAssetsTests(unittest.TestCase):
         pdf_assets.publish(api, "repo", pdf_assets.empty_manifest(), [], Path("/tmp/unused"))
         api.repo_info.assert_not_called()
 
+    def test_publish_can_commit_metadata_after_large_folder_upload(self):
+        result = {"key": "r\0a.pdf", "status": "skipped", "reason": "native-text-pdf",
+                  "strategy": "native-text", "source_revision": "1", "source_sha256": "a" * 64,
+                  "source_extension": "pdf", "profile": "p"}
+        api = Mock()
+        api.repo_info.return_value = Mock(sha="parent")
+        with patch.object(pdf_assets, "remote_manifest", return_value=pdf_assets.empty_manifest()), patch.object(
+                pdf_assets, "remote_sidecar", return_value={"v": 1, "f": {}}):
+            pdf_assets.publish(api, "repo", pdf_assets.empty_manifest(), [result], Path("/tmp/unused"),
+                               include_artifacts=False)
+        paths = [op.path_in_repo for op in api.create_commit.call_args.kwargs["operations"]]
+        self.assertEqual(paths, ["pdf_manifest.json", "reader_assets.json.gz"])
+
     def test_hf_source_download_retries_rate_limit(self):
         response = requests.Response()
         response.status_code = 429

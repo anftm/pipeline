@@ -125,10 +125,13 @@ def main() -> int:
             if not token:
                 raise RuntimeError("HF_TOKEN is required")
             api = HfApi(token=token)
-            chunks = result_chunks(results, args.chunk_results)
-            for index, chunk in enumerate(chunks, 1):
-                print(f"publishing PDF chunk {index}/{len(chunks)} ({len(chunk)} asset(s))")
-                pdf_assets.publish(api, args.assets_repo, manifest, chunk, merged)
+            if (merged / "objects").is_dir():
+                api.upload_large_folder(
+                    repo_id=args.assets_repo, folder_path=merged, repo_type="dataset",
+                    allow_patterns="objects/**", num_workers=4,
+                )
+            pdf_assets.publish(api, args.assets_repo, manifest, results, merged,
+                               include_artifacts=False)
         print(f"published {len(results)} PDF asset(s) to {args.assets_repo}")
     return 0
 

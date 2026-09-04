@@ -375,7 +375,7 @@ def bundle_is_published(manifest: dict, results: list[dict]) -> bool:
 
 
 def publish(api: HfApi, repo: str, manifest: dict, results: list[dict], bundle: Path,
-            max_attempts: int = 20) -> None:
+            max_attempts: int = 20, include_artifacts: bool = True) -> None:
     if not results:
         return
     baseline = None
@@ -400,6 +400,9 @@ def publish(api: HfApi, repo: str, manifest: dict, results: list[dict], bundle: 
         elif current_entries != baseline:
             raise RuntimeError("PDF asset key changed during publication retry")
         updated, operations = build_publish(current, results, bundle)
+        if not include_artifacts:
+            operations = [operation for operation in operations
+                          if operation.path_in_repo in {MANIFEST_NAME, "reader_assets.json.gz"}]
         operations.append(CommitOperationAdd(
             path_in_repo="reader_assets.json.gz",
             path_or_fileobj=update_sidecar(sidecar, results),

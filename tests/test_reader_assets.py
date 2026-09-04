@@ -1697,7 +1697,7 @@ class PublicationTests(unittest.TestCase):
         response.request = requests.Request("POST", "https://huggingface.co/api/datasets/vomebook/Test/commit/main").prepare()
         conflict = HfHubHTTPError("conflict", response=response)
         api = Mock()
-        api.repo_info.side_effect = [Mock(sha="parent-1"), Mock(sha="parent-2")]
+        api.repo_info.side_effect = [Mock(sha="parent-1"), Mock(sha="uploaded-1"), Mock(sha="parent-2")]
         api.file_exists.return_value = False
         api.create_commit.side_effect = [conflict, None]
         with tempfile.TemporaryDirectory() as root:
@@ -1708,7 +1708,7 @@ class PublicationTests(unittest.TestCase):
         self.assertEqual(api.create_commit.call_count, 2)
         self.assertEqual(
             [call.kwargs["parent_commit"] for call in api.create_commit.call_args_list],
-            ["parent-1", "parent-2"],
+            ["uploaded-1", "parent-2"],
         )
 
     def test_transient_upload_error_rebuilds_commit_with_fresh_signature(self):
@@ -1721,7 +1721,7 @@ class PublicationTests(unittest.TestCase):
         response.status_code = 503
         response.request = requests.Request("POST", "https://huggingface.co/api/datasets/vomebook/Test/commit/main").prepare()
         api = Mock()
-        api.repo_info.side_effect = [Mock(sha="parent-1"), Mock(sha="parent-2")]
+        api.repo_info.side_effect = [Mock(sha="parent-1"), Mock(sha="uploaded-1"), Mock(sha="parent-2")]
         api.file_exists.return_value = False
         api.create_commit.side_effect = [HfHubHTTPError("unavailable", response=response), None]
         with tempfile.TemporaryDirectory() as root:
@@ -1732,7 +1732,7 @@ class PublicationTests(unittest.TestCase):
         self.assertEqual(api.create_commit.call_count, 2)
         self.assertEqual(
             [call.kwargs["parent_commit"] for call in api.create_commit.call_args_list],
-            ["parent-1", "parent-2"],
+            ["uploaded-1", "parent-2"],
         )
 
     def test_transient_preflight_error_is_retried(self):
@@ -1746,7 +1746,7 @@ class PublicationTests(unittest.TestCase):
         response.status_code = 429
         response.request = requests.Request("GET", "https://huggingface.co/api/datasets/vomebook/Test").prepare()
         api = Mock()
-        api.repo_info.side_effect = [HfHubHTTPError("rate limited", response=response), Mock(sha="parent-1")]
+        api.repo_info.side_effect = [HfHubHTTPError("rate limited", response=response), Mock(sha="parent-1"), Mock(sha="uploaded-1")]
         api.file_exists.return_value = True
         with tempfile.TemporaryDirectory() as root, patch.object(publish_reader_assets.time, "sleep"):
             remote = Path(root) / "remote.json"
@@ -1755,7 +1755,7 @@ class PublicationTests(unittest.TestCase):
             bundle = self.make_bundle(root, result)
             _, count = publish_reader_assets.publish_bundle(api, "vomebook/Test", bundle)
         self.assertEqual(count, 1)
-        self.assertEqual(api.repo_info.call_count, 2)
+        self.assertEqual(api.repo_info.call_count, 3)
 
     def test_transient_error_after_remote_commit_is_idempotent(self):
         result = {
@@ -1768,7 +1768,7 @@ class PublicationTests(unittest.TestCase):
         response.status_code = 504
         response.request = requests.Request("POST", "https://huggingface.co/api/datasets/vomebook/Test/commit/main").prepare()
         api = Mock()
-        api.repo_info.side_effect = [Mock(sha="parent-1"), Mock(sha="parent-2")]
+        api.repo_info.side_effect = [Mock(sha="parent-1"), Mock(sha="uploaded-1"), Mock(sha="parent-2")]
         api.file_exists.return_value = True
         with tempfile.TemporaryDirectory() as root:
             bundle = self.make_bundle(root, result)
@@ -1792,7 +1792,7 @@ class PublicationTests(unittest.TestCase):
         response.status_code = 412
         response.request = requests.Request("POST", "https://huggingface.co/api/datasets/vomebook/Test/commit/main").prepare()
         api = Mock()
-        api.repo_info.side_effect = [Mock(sha="parent-1"), Mock(sha="parent-2")]
+        api.repo_info.side_effect = [Mock(sha="parent-1"), Mock(sha="uploaded-1"), Mock(sha="parent-2")]
         api.file_exists.return_value = True
         with tempfile.TemporaryDirectory() as root:
             first = Path(root) / "first.json"
