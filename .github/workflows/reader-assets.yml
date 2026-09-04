@@ -250,7 +250,9 @@ jobs:
         run: |
           queue="output/reader-assets/queue-${SHARD_INDEX}.json"
           count=$(python -c 'import json, sys; print(len(json.load(open(sys.argv[1]))["items"]))' "${queue}")
-          [[ "${count}" == "0" ]] && exit 0
+          if [[ "${count}" == "0" ]]; then
+            exit 0
+          fi
           echo "Shard ${SHARD_INDEX}: ${count} ${EXTENSION} asset(s)"
           bundle="output/reader-assets/bundle-${SHARD_INDEX}-1"
           conversion_status=0

@@ -1917,6 +1917,11 @@ class PublicationTests(unittest.TestCase):
         self.assertIn("current", files)
         self.assertNotIn("linear", files)
 
+    def test_reader_workflow_uses_explicit_empty_queue_guard_under_errexit(self):
+        workflow = (Path(__file__).parents[1] / ".github/workflows/reader-assets.yml").read_text(encoding="utf-8")
+        self.assertIn('if [[ "${count}" == "0" ]]; then\n            exit 0\n          fi', workflow)
+        self.assertNotIn('[[ "${count}" == "0" ]] && exit 0', workflow)
+
 
 class SearchIndexPublicationTests(unittest.TestCase):
     def test_pages_publish_copies_only_sidecar_and_pushes(self):
