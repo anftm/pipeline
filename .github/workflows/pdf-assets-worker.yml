@@ -127,3 +127,22 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           READER_ASSETS_REPO: vomebook/Reader-Assets
         run: python scripts/publish_pdf_assets.py --chunk-results 1 --bundles output/pdf-assets/bundles/* --skipped output/pdf-assets/skipped.json
+  sync-pages:
+    needs: publish
+    if: needs.publish.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Install Python dependencies
+        run: pip install -r scripts/requirements.txt
+      - name: Sync Reader Assets sidecar to GitHub Pages
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          PAGES_TOKEN: ${{ secrets.PAGES_TOKEN }}
+          PAGES_REPO: ${{ secrets.PAGES_REPO }}
+          READER_ASSETS_REPO: vomebook/Reader-Assets
+        run: python scripts/publish_search_reader_index.py
