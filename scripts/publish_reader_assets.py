@@ -223,9 +223,9 @@ def publish_bundle(api: HfApi, repo_id: str, bundle: Path, *, max_attempts: int 
             elif current_entries != baseline:
                 raise RuntimeError("reader asset key changed during publication retry")
             if not objects_uploaded and (bundle / "objects").is_dir():
-                api.upload_large_folder(
+                api.upload_folder(
                     repo_id=repo_id, folder_path=bundle, repo_type="dataset",
-                    allow_patterns="objects/**", num_workers=2,
+                    allow_patterns="objects/**", commit_message="Upload Reader Asset objects",
                 )
                 revision = api.repo_info(repo_id=repo_id, repo_type="dataset").sha
                 objects_uploaded = True

@@ -323,7 +323,6 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           READER_ASSETS_REPO: vomebook/Reader-Assets
-          HF_HUB_DISABLE_XET: "1"
         run: |
           shopt -s nullglob
           for archive in output/reader-assets/bundles/*.tgz output/reader-assets/bundles/*/*.tgz; do
