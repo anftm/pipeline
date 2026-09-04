@@ -1897,6 +1897,7 @@ class PublicationTests(unittest.TestCase):
         self.assertEqual(files["book"]["m"], "e")
         self.assertEqual(files["scan"], {
             "s": 2, "m": "p", "p": "objects/bb/" + "b" * 64 + "/page-manifest.json",
+            "b": "vomebook/pdf-pages",
         })
         self.assertNotIn("text", files)
 

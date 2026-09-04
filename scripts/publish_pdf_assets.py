@@ -9,6 +9,7 @@ import tempfile
 from pathlib import Path
 
 from huggingface_hub import HfApi
+from huggingface_hub import sync_bucket
 
 try:
     from . import pdf_assets
@@ -126,10 +127,8 @@ def main() -> int:
                 raise RuntimeError("HF_TOKEN is required")
             api = HfApi(token=token)
             if (merged / "objects").is_dir():
-                api.upload_large_folder(
-                    repo_id=args.assets_repo, folder_path=merged, repo_type="dataset",
-                    allow_patterns="objects/**", num_workers=4,
-                )
+                sync_bucket(str(merged), "hf://buckets/vomebook/pdf-pages",
+                            include=["objects/**"], token=token, quiet=False)
             pdf_assets.publish(api, args.assets_repo, manifest, results, merged,
                                include_artifacts=False)
         print(f"published {len(results)} PDF asset(s) to {args.assets_repo}")

@@ -351,7 +351,8 @@ def update_sidecar(sidecar: dict, results: list[dict]) -> bytes:
         path = result.get("path") or result.get("page_manifest", {}).get("path")
         if not path:
             continue
-        updated["f"][result["key"]] = {"s": 2, "m": "p", "p": path}
+        updated["f"][result["key"]] = {"s": 2, "m": "p", "p": path,
+                                        "b": "vomebook/pdf-pages"}
     payload = json.dumps(updated, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
     return gzip.compress(payload, compresslevel=9, mtime=0)
 

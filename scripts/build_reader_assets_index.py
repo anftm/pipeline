@@ -40,7 +40,8 @@ def build_index(manifest: dict, pdf_manifest: dict | None = None) -> dict:
             continue
         path = entry.get("path") or entry.get("page_manifest", {}).get("path")
         if path:
-            files[key] = {"s": 2, "m": "p", "p": path}
+            files[key] = {"s": 2, "m": "p", "p": path,
+                          "b": "vomebook/pdf-pages"}
     return {"v": 1, "f": dict(sorted(files.items()))}
 
 
