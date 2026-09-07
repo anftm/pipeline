@@ -132,15 +132,20 @@ class PdfAssetsTests(unittest.TestCase):
                          [(1, 250), (251, 500), (501, 600)])
         self.assertEqual(planned["shard_count"], 21)
 
-    def test_plan_rejects_a_matrix_larger_than_github_limit(self):
+    def test_plan_caps_range_shards_at_github_matrix_limit(self):
         records = [{"key": "r\0too-large.pdf", "repo": "r", "path": "too-large.pdf",
                     "extension": "pdf", "source_extension": "pdf"}]
         with patch.object(plan_pdf_assets.pdf_assets, "_pages", return_value=128500), patch.object(
                 plan_pdf_assets, "source_path", return_value=Path("too-large.pdf")), patch.object(
                 plan_pdf_assets.pdf_assets, "digest", return_value=("a" * 64, pdf_assets.LARGE_BYTES)), patch.object(
                 plan_pdf_assets.pdf_assets, "classify_pdf", return_value="scan"):
-            with self.assertRaisesRegex(ValueError, "exceeds GitHub Actions matrix limit 240"):
-                plan_pdf_assets.plan(records, None, "assets", 18, workers=1)
+            planned = plan_pdf_assets.plan(records, None, "assets", 18, workers=1)
+        self.assertEqual(planned["shard_count"], plan_pdf_assets.MAX_GITHUB_MATRIX_SHARDS)
+        self.assertEqual(planned["total_tasks"], 257)
+        self.assertEqual(
+            sum(len(shard["records"]) for shard in planned["shards"]),
+            planned["total_tasks"],
+        )
 
     def test_plan_splits_large_caj_into_deterministic_ranges(self):
         records = [{"key": "r\0large.caj", "repo": "r", "path": "large.caj", "source_extension": "caj"},
