@@ -97,11 +97,11 @@
       "patch_layout": "2"
     },
     "2": {
-      "config": "27b6f3c3a83c81658696af3f7f91b790d4885d83",
+      "config": "76d8730b48edda5f590659d276e1597fdf0bd228",
       "helper": "50ba1b1703a224e9e64961ae6e555d9a32517b33",
       "main": "bdbc0b1fbf906f03dc6f94b792d79155e36a2ed4",
       "ocr_cache": "07e210d5332c776352cceb07d23d0deeba5c876f",
-      "ocr_patch": "7c1f25bae0274c8b6bd96d964ff00160d8400739",
+      "ocr_patch": "8e3187f5b389fadb05e8896423847f0a87675824",
       "patch_layout": "2"
     },
     "20": {
