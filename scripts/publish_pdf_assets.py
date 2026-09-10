@@ -6,15 +6,45 @@ import json
 import os
 import shutil
 import tempfile
+import time
 from pathlib import Path
 
 from huggingface_hub import HfApi
 from huggingface_hub import sync_bucket
+from huggingface_hub.errors import HfHubHTTPError
 
 try:
     from . import pdf_assets
 except ImportError:
     import pdf_assets
+
+
+def _link_or_copy(source: Path, destination: Path) -> None:
+    try:
+        os.link(source, destination)
+    except OSError:
+        shutil.copyfile(source, destination)
+
+
+def _sync_bucket_with_retry(local_dir: str, bucket: str, token: str | None,
+                             max_attempts: int = 6) -> None:
+    for attempt in range(max_attempts):
+        try:
+            sync_bucket(local_dir, bucket, include=["objects/**"], token=token, quiet=False)
+            return
+        except HfHubHTTPError as exc:
+            status = getattr(exc.response, "status_code", None)
+            retryable = status is None or status == 429 or 500 <= status < 600
+            if not retryable or attempt + 1 == max_attempts:
+                raise
+        except (ConnectionError, OSError) as exc:
+            if attempt + 1 == max_attempts:
+                raise
+        delay = min(300, 5 * (2 ** attempt))
+        print(f"transient bucket sync error; retrying in {delay}s "
+              f"(attempt {attempt + 1}/{max_attempts})", flush=True)
+        time.sleep(delay)
+    raise RuntimeError("bucket sync retry limit reached")
 
 
 def merge_bundles(bundle_paths: list[Path], output: Path) -> list[dict]:
@@ -39,7 +69,7 @@ def merge_bundles(bundle_paths: list[Path], output: Path) -> list[dict]:
                 if destination.read_bytes() != source.read_bytes():
                     raise ValueError(f"conflicting PDF asset artifact: {relative}")
             else:
-                shutil.copyfile(source, destination)
+                _link_or_copy(source, destination)
     results = []
     for key, entries in sorted(grouped.items()):
         ranged = [entry for entry in entries if "page_start" in entry or "page_end" in entry]
@@ -115,7 +145,9 @@ def main() -> int:
     parser.add_argument("--skipped", type=Path, help="JSON file with skipped entries from plan step")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
-    with tempfile.TemporaryDirectory() as root:
+    workspace = Path("output/pdf-assets")
+    workspace.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=workspace) as root:
         merged = Path(root)
         results = merge_bundles(args.bundles, merged)
         if args.skipped and args.skipped.is_file():
@@ -130,8 +162,7 @@ def main() -> int:
                 raise RuntimeError("HF_TOKEN is required")
             api = HfApi(token=token)
             if (merged / "objects").is_dir():
-                sync_bucket(str(merged), "hf://buckets/vomebook/pdf-pages",
-                            include=["objects/**"], token=token, quiet=False)
+                _sync_bucket_with_retry(str(merged), "hf://buckets/vomebook/pdf-pages", token)
             pdf_assets.publish(api, args.assets_repo, manifest, results, merged,
                                include_artifacts=False)
         print(f"published {len(results)} PDF asset(s) to {args.assets_repo}")

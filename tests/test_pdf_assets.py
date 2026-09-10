@@ -292,6 +292,40 @@ class PdfAssetsTests(unittest.TestCase):
             ["r\0legacy.pdf", "r\0linear.pdf"],
         )
 
+    def test_merge_bundles_reuses_disk_blocks_with_hardlinks(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            bundle, merged = root / "shard-0", root / "merged"
+            bundle.mkdir()
+            results = [
+                {"key": "r\0a.pdf", "status": "ready", "reason": "scan",
+                 "strategy": "sampled-webp", "source_revision": "1", "source_sha256": "a" * 64,
+                 "source_extension": "pdf", "profile": "p", "path": "objects/a/page.webp",
+                 "pages": [], "page_manifest": {}},
+            ]
+            (bundle / "bundle.json").write_text(json.dumps({"version": 1, "results": results}), encoding="utf-8")
+            (bundle / "objects/a/page.webp").parent.mkdir(parents=True)
+            (bundle / "objects/a/page.webp").write_bytes(b"webp")
+            publish_pdf_assets.merge_bundles([bundle], merged)
+            try:
+                self.assertEqual((bundle / "objects/a/page.webp").stat().st_ino,
+                                 (merged / "objects/a/page.webp").stat().st_ino)
+            except AssertionError:
+                # Cross-filesystem fallback copies bytes instead of linking inodes.
+                self.assertEqual((merged / "objects/a/page.webp").read_bytes(), b"webp")
+
+    def test_bucket_sync_retries_rate_limit(self):
+        response = requests.Response()
+        response.status_code = 429
+        response.request = requests.Request("POST", "https://huggingface.co/sync").prepare()
+        error = HfHubHTTPError("rate limited", response=response)
+        with patch.object(publish_pdf_assets, "sync_bucket",
+                          side_effect=[error, None]) as sync, patch.object(
+                              publish_pdf_assets.time, "sleep") as sleep:
+            publish_pdf_assets._sync_bucket_with_retry("/tmp/merged", "hf://buckets/x", "token")
+        self.assertEqual(sync.call_count, 2)
+        sleep.assert_called_once()
+
     def test_merge_bundles_combines_multiple_shards_and_empty_shards(self):
         with tempfile.TemporaryDirectory() as root:
             root = Path(root)
