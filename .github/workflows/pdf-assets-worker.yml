@@ -34,10 +34,10 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           READER_ASSETS_REPO: vomebook/Reader-Assets
-          PDF_PUBLISH_BATCH_SIZE: "30"
+          PDF_PUBLISH_BATCH_SIZE: "50"
           PDF_PUBLISH_BATCH_DELAY: "5"
         run: |
-          limit=30
+          limit=50
           checkpoint=0
           python scripts/plan_pdf_assets.py \
             --repo "" \
