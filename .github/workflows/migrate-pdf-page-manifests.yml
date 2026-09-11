@@ -1,0 +1,61 @@
+name: Migrate PDF Page Manifests
+
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: Number of manifests to process (1-100)
+        required: true
+        default: "100"
+        type: string
+      batches:
+        description: Maximum sequential batches (1-25)
+        required: true
+        default: "20"
+        type: string
+      apply:
+        description: Apply bucket and dataset updates
+        required: true
+        default: false
+        type: boolean
+
+concurrency:
+  group: reader-assets-pdf
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Install Python dependencies
+        run: pip install -r scripts/requirements.txt
+      - name: Migrate bounded page-manifest batch
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          READER_ASSETS_REPO: vomebook/Reader-Assets
+          MIGRATION_LIMIT: ${{ inputs.limit }}
+          MIGRATION_BATCHES: ${{ inputs.batches }}
+        run: |
+          set -euo pipefail
+          limit="${MIGRATION_LIMIT}"
+          batches="${MIGRATION_BATCHES}"
+          [[ "${limit}" =~ ^[0-9]+$ && "${batches}" =~ ^[0-9]+$ ]]
+          ((limit >= 1 && limit <= 100))
+          ((batches >= 1 && batches <= 25))
+          for ((batch = 1; batch <= batches; batch++)); do
+            revision=$(python -c 'import os; from huggingface_hub import HfApi; print(HfApi(token=os.environ["HF_TOKEN"]).repo_info(os.environ["READER_ASSETS_REPO"], repo_type="dataset").sha)')
+            echo "Migration batch ${batch}/${batches} at ${revision}"
+            args=(--revision "${revision}" --limit "${limit}")
+            if [[ "${{ inputs.apply }}" == "true" ]]; then
+              args+=(--apply)
+            fi
+            python scripts/migrate_pdf_page_manifests.py "${args[@]}"
+            if [[ "${{ inputs.apply }}" != "true" ]]; then
+              break
+            fi
+          done

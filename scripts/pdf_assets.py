@@ -23,6 +23,8 @@ except ImportError:
 
 MANIFEST_NAME = "pdf_manifest.json"
 MANIFEST_VERSION = 1
+PAGE_MANIFEST_VERSION = 2
+PAGE_MANIFEST_NAME = "page-manifest.json"
 MI = 1024 * 1024
 MIN_BYTES = 50 * MI
 LARGE_BYTES = 100 * MI
@@ -61,6 +63,27 @@ def download_hf_source(repo: str, path: str, revision: str, token: str | None) -
 def object_root(source_sha: str, key: str) -> Path:
     key_sha = hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
     return Path("objects") / source_sha[:2] / source_sha / key_sha
+
+
+def compact_page_manifest(source_sha: str, profile: str, pages: list[dict],
+                          toc: list[dict] | None = None, manifest_dir: Path | None = None) -> dict:
+    if not pages:
+        raise ValueError("PDF page manifest must contain at least one page")
+    manifest_dir = manifest_dir or Path(str(pages[0].get("path") or "")).parent.parent
+    for number, page in enumerate(pages, 1):
+        expected = (manifest_dir / "pages" / f"page-{number:06d}.webp").as_posix()
+        if page.get("page") != number or page.get("path") != expected:
+            raise ValueError("PDF pages do not match derived manifest paths")
+    manifest = {
+        "version": PAGE_MANIFEST_VERSION,
+        "kind": "pdf-pages",
+        "source_sha256": source_sha,
+        "profile": profile,
+        "page_count": len(pages),
+    }
+    if toc:
+        manifest["toc"] = toc
+    return manifest
 
 
 def digest(path: Path) -> tuple[str, int]:
@@ -312,25 +335,22 @@ def build_item(item: dict, source: Path, bundle: Path) -> dict:
             shutil.copyfile(rendered, destination)
             page_entries.append({"page": page, "path": (object_dir / "pages" / destination.name).as_posix(),
                                  "sha256": page_sha, "bytes": page_bytes})
-    page_manifest = {
-        "version": 1, "kind": "pdf-pages", "source_sha256": source_sha,
-        "profile": PDF_PROFILE, "pages": page_entries,
-    }
-    if outline:
-        page_manifest["toc"] = outline
     if ranged:
         return {**base, "path": "", "status": "ready", "strategy": "sampled-webp", "pdf": metadata,
                 "render_profile": PDF_PROFILE, "decision_profile": PDF_DECISION_PROFILE,
                 "pages": page_entries, "outline": outline}
-    manifest_path = bundle / object_dir / "page-manifest.json"
+    page_manifest = compact_page_manifest(
+        source_sha, PDF_PROFILE, page_entries, outline, object_dir)
+    manifest_path = bundle / object_dir / PAGE_MANIFEST_NAME
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(json.dumps(page_manifest, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
     manifest_sha, manifest_bytes = digest(manifest_path)
     return {**base, "path": "", "status": "ready", "strategy": "sampled-webp", "pdf": metadata,
             "render_profile": PDF_PROFILE, "decision_profile": PDF_DECISION_PROFILE,
             "pages": page_entries, "outline": outline, "page_manifest": {
-                "path": (object_dir / "page-manifest.json").as_posix(),
+                "path": (object_dir / PAGE_MANIFEST_NAME).as_posix(),
                 "sha256": manifest_sha, "bytes": manifest_bytes,
+                "version": PAGE_MANIFEST_VERSION,
             }}
 
 
@@ -342,7 +362,8 @@ def build_publish(manifest: dict, results: list[dict], bundle: Path) -> tuple[di
     files = dict(manifest.get("files", {}))
     artifacts = {}
     for result in results:
-        entry = {k: v for k, v in result.items() if k not in {"key", "task_key", "page_start", "page_end", "range_page_count"}}
+        entry = {k: v for k, v in result.items()
+                 if k not in {"key", "task_key", "page_start", "page_end", "range_page_count", "pages", "outline"}}
         if result["status"] == "ready":
             paths = [result["path"]] if result.get("path") else [page["path"] for page in result["pages"]]
             if result.get("page_manifest"):

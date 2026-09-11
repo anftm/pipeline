@@ -116,17 +116,17 @@ def merge_bundles(bundle_paths: list[Path], output: Path) -> list[dict]:
                   if k not in {"task_key", "page_start", "page_end", "range_page_count", "pages", "page_manifest"}}
         result["pages"] = pages
         object_dir = pdf_assets.object_root(result["source_sha256"], key)
-        manifest = {"version": 1, "kind": "pdf-pages", "source_sha256": result["source_sha256"],
-                    "profile": pdf_assets.PDF_PROFILE, "pages": pages}
-        if ordered[0].get("outline"):
-            manifest["toc"] = ordered[0]["outline"]
-        manifest_path = output / object_dir / "page-manifest.json"
+        manifest = pdf_assets.compact_page_manifest(
+            result["source_sha256"], pdf_assets.PDF_PROFILE, pages,
+            ordered[0].get("outline"), object_dir)
+        manifest_path = output / object_dir / pdf_assets.PAGE_MANIFEST_NAME
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
                                  encoding="utf-8")
         manifest_sha, manifest_bytes = pdf_assets.digest(manifest_path)
-        result["page_manifest"] = {"path": (object_dir / "page-manifest.json").as_posix(),
-                                    "sha256": manifest_sha, "bytes": manifest_bytes}
+        result["page_manifest"] = {"path": (object_dir / pdf_assets.PAGE_MANIFEST_NAME).as_posix(),
+                                    "sha256": manifest_sha, "bytes": manifest_bytes,
+                                    "version": pdf_assets.PAGE_MANIFEST_VERSION}
         results.append(result)
     return results
 

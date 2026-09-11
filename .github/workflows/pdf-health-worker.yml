@@ -1,0 +1,95 @@
+name: Audit PDF Health Worker
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: reader-assets-pdf
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      shard-ids: ${{ steps.queue.outputs.shard-ids }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - run: pip install -r scripts/requirements.txt
+      - name: Install PDF tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends poppler-utils qpdf
+      - run: python scripts/fetch_and_parse.py
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          FORCE_SYNC: "true"
+      - id: queue
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          READER_ASSETS_REPO: vomebook/Reader-Assets
+        run: |
+          python scripts/plan_pdf_health.py --output output/pdf-health/queue.json
+          echo "shard-ids=$(jq -c '.shard_ids' output/pdf-health/queue.json)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: pdf-health-queue
+          path: output/pdf-health/queue.json
+  audit:
+    needs: plan
+    if: needs.plan.outputs.shard-ids != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 18
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.shard-ids) }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - run: pip install -r scripts/requirements.txt
+      - name: Install PDF tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends poppler-utils qpdf
+      - uses: actions/download-artifact@v8
+        with:
+          name: pdf-health-queue
+          path: output/pdf-health
+      - name: Audit shard
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: python scripts/pdf_health.py --queue output/pdf-health/queue.json --shard-index ${{ matrix.shard }} --bundle output/pdf-health/bundle-${{ matrix.shard }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: pdf-health-bundle-${{ matrix.shard }}
+          path: output/pdf-health/bundle-${{ matrix.shard }}
+  publish:
+    needs: audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - run: pip install -r scripts/requirements.txt
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: pdf-health-bundle-*
+          path: output/pdf-health/bundles
+          merge-multiple: false
+      - name: Publish report
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: python scripts/publish_pdf_health.py --bundles output/pdf-health/bundles/*
+      - uses: actions/upload-artifact@v7
+        with:
+          name: pdf-health-report
+          path: |
+            output/pdf-health/pdf_health.json.gz
+            output/pdf-health/bundles/**/bundle.json
