@@ -11,7 +11,6 @@ from huggingface_hub.errors import HfHubHTTPError
 from pypdf import PdfWriter
 
 from scripts import pdf_assets
-from scripts import migrate_pdf_page_manifests
 from scripts import plan_pdf_assets
 from scripts import publish_pdf_assets
 from scripts import retire_pdf_assets
@@ -421,85 +420,6 @@ class PdfAssetsTests(unittest.TestCase):
             self.assertNotIn("pages", manifest)
             self.assertEqual(results[0]["page_manifest"]["version"], 2)
             self.assertEqual(manifest["toc"], [{"title": "第一章", "page": 1, "depth": 0}])
-
-    def test_manifest_migration_is_dry_run_by_default_and_downloads_no_images(self):
-        entry = {"status": "ready", "strategy": "sampled-webp", "source_sha256": "a" * 64,
-                 "render_profile": "profile", "page_manifest": {
-                     "path": "objects/aa/book/page-manifest.json", "sha256": "old", "bytes": 999}}
-        dataset = {"version": 1, "files": {"r\0book.pdf": entry}}
-        v1 = {"version": 1, "kind": "pdf-pages", "source_sha256": "a" * 64,
-              "profile": "profile", "pages": [
-                  {"page": 1, "path": "objects/aa/book/pages/page-000001.webp", "sha256": "b", "bytes": 10}]}
-        api = Mock()
-        api.repo_info.return_value = Mock(sha="revision")
-
-        def download(_bucket, files, **_kwargs):
-            self.assertEqual([source for source, _target in files], ["objects/aa/book/page-manifest.json"])
-            Path(files[0][1]).write_text(json.dumps(v1), encoding="utf-8")
-
-        with patch.object(migrate_pdf_page_manifests, "load_manifest", return_value=dataset), patch.object(
-                migrate_pdf_page_manifests, "download_bucket_files", side_effect=download) as bucket_download, patch.object(
-                migrate_pdf_page_manifests, "batch_bucket_files") as bucket_upload:
-            count = migrate_pdf_page_manifests.migrate(
-                api, "repo", "revision", 10, False, None)
-        self.assertEqual(count, 1)
-        bucket_download.assert_called_once()
-        bucket_upload.assert_not_called()
-        api.create_commit.assert_not_called()
-
-    def test_manifest_migration_uploads_before_pinned_dataset_update_and_is_resumable(self):
-        entry = {"status": "ready", "strategy": "sampled-webp", "source_sha256": "a" * 64,
-                 "render_profile": "profile", "page_manifest": {
-                     "path": "objects/aa/book/page-manifest.json", "sha256": "old", "bytes": 999}}
-        dataset = {"version": 1, "files": {"r\0book.pdf": entry}}
-        v1 = {"version": 1, "kind": "pdf-pages", "source_sha256": "a" * 64,
-              "profile": "profile", "pages": [
-                  {"page": 1, "path": "objects/aa/book/pages/page-000001.webp"}]}
-        api = Mock()
-        api.repo_info.return_value = Mock(sha="revision")
-        calls = []
-
-        def download(_bucket, files, **_kwargs):
-            Path(files[0][1]).write_text(json.dumps(v1), encoding="utf-8")
-
-        def upload(*_args, **_kwargs):
-            calls.append("bucket")
-
-        def commit(**kwargs):
-            calls.append("dataset")
-            payload = json.loads(kwargs["operations"][0].path_or_fileobj)
-            self.assertEqual(payload["version"], 1)
-            self.assertEqual(payload["files"]["r\0book.pdf"]["page_manifest"]["version"], 2)
-            self.assertEqual(kwargs["parent_commit"], "revision")
-
-        api.create_commit.side_effect = commit
-        with patch.object(migrate_pdf_page_manifests, "load_manifest", return_value=dataset), patch.object(
-                migrate_pdf_page_manifests, "download_bucket_files", side_effect=download), patch.object(
-                migrate_pdf_page_manifests, "batch_bucket_files", side_effect=upload):
-            migrate_pdf_page_manifests.migrate(api, "repo", "revision", 1, True, "token")
-        self.assertEqual(calls, ["bucket", "dataset"])
-        self.assertEqual(api.repo_info.call_count, 3)
-        self.assertEqual(migrate_pdf_page_manifests.select_batch({"version": 1, "files": {
-            "r\0book.pdf": {**entry, "page_manifest": {**entry["page_manifest"], "version": 2}},
-        }}, 1), [])
-
-    def test_manifest_migration_rejects_unbounded_limit_and_revision_change(self):
-        with self.assertRaisesRegex(ValueError, "between 1 and 100"):
-            migrate_pdf_page_manifests.select_batch({"version": 1, "files": {}}, 101)
-        api = Mock()
-        api.repo_info.return_value = Mock(sha="other")
-        with self.assertRaisesRegex(RuntimeError, "dataset revision changed"):
-            migrate_pdf_page_manifests.migrate(api, "repo", "revision", 1, False, None)
-
-    def test_manifest_migration_retries_transient_bucket_operations(self):
-        response = requests.Response()
-        response.status_code = 503
-        error = HfHubHTTPError("unavailable", response=response)
-        operation = Mock(side_effect=[error, "ok"])
-        with patch.object(migrate_pdf_page_manifests.time, "sleep") as sleep:
-            self.assertEqual(migrate_pdf_page_manifests._retry(operation, "bucket upload"), "ok")
-        self.assertEqual(operation.call_count, 2)
-        sleep.assert_called_once_with(1)
 
     def test_merge_bundles_rejects_overlapping_ranges(self):
         with tempfile.TemporaryDirectory() as root:
