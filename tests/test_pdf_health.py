@@ -38,6 +38,26 @@ class PdfHealthTests(unittest.TestCase):
         self.assertEqual(queue["pending_records"], 1)
         self.assertEqual(queue["shard_count"], 18)
 
+    def test_planner_skips_unchanged_healthy_content_but_retries_transient_and_corrupt(self):
+        records = [
+            {"key": "r\0healthy.pdf", "source_revision": "two", "declared_bytes": 10},
+            {"key": "r\0corrupt.pdf", "source_revision": "two", "declared_bytes": 20},
+            {"key": "r\0transient.pdf", "source_revision": "one", "declared_bytes": 30},
+        ]
+        report = {"version": 1, "files": {
+            "r\0healthy.pdf": {"source_revision": "one", "declared_bytes": 10, "status": "healthy"},
+            "r\0corrupt.pdf": {"source_revision": "one", "declared_bytes": 20, "status": "corrupt"},
+            "r\0transient.pdf": {"source_revision": "one", "declared_bytes": 30, "status": "download-failed"},
+        }}
+        self.assertEqual([item["key"] for item in pdf_health.pending_records(records, report)],
+                         ["r\0corrupt.pdf", "r\0transient.pdf"])
+
+    def test_merge_report_prunes_removed_files(self):
+        remote = {"version": 1, "files": {"keep": {"status": "healthy"},
+                                            "removed": {"status": "corrupt"}}}
+        merged = pdf_health.merge_report(remote, [], {"keep"})
+        self.assertEqual(set(merged["files"]), {"keep"})
+
     def test_plan_caps_batch_without_hiding_pending_total_and_weights_by_size(self):
         records = [{"key": f"r\0{x:03}.pdf", "source_revision": "one", "declared_bytes": x + 1}
                    for x in range(501)]
@@ -82,6 +102,11 @@ class PdfHealthTests(unittest.TestCase):
         missing = self.inspect_with_tools(qpdf=(127, "qpdf not found"))
         self.assertEqual((missing["status"], missing["reason"]), ("tool-error", "qpdf-unavailable"))
 
+    def test_nonzero_pdfinfo_is_never_healthy(self):
+        result = self.inspect_with_tools(info=(1, "Pages: 3\nEncrypted: no\nPDF version: 1.7\nsyntax warning"))
+        self.assertEqual(result["status"], "warning")
+        self.assertIn("pdfinfo-check-failed", result["reasons"])
+
     def test_diagnostics_are_bounded(self):
         result = self.inspect_with_tools(qpdf=(0, "\n".join("x" * 1000 + str(i) for i in range(30))))
         self.assertLessEqual(len(result["diagnostics"]), pdf_health.MAX_DIAGNOSTICS)
@@ -115,7 +140,7 @@ class PdfHealthTests(unittest.TestCase):
         root = Path(__file__).parents[1]
         worker = (root / ".github/workflows/pdf-health-worker.yml").read_text(encoding="utf-8")
         controller = (root / ".github/workflows/scheduled-pdf-health.yml").read_text(encoding="utf-8")
-        self.assertIn("group: reader-assets-pdf", worker)
+        self.assertIn("group: reader-assets-pdf-health", worker)
         self.assertIn("max-parallel: 18", worker)
         self.assertIn("poppler-utils qpdf", worker)
         self.assertNotIn("pdftocairo", worker)

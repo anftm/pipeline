@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import gzip
 import json
 import os
 from pathlib import Path
@@ -15,6 +16,7 @@ def main() -> int:
     parser.add_argument("--report", type=Path)
     parser.add_argument("--assets-repo", default=os.environ.get("READER_ASSETS_REPO", "vomebook/Reader-Assets"))
     parser.add_argument("--output", type=Path, default=Path("output/pdf-health/queue.json"))
+    parser.add_argument("--keys-output", type=Path, default=Path("output/pdf-health/current-keys.json.gz"))
     args = parser.parse_args()
     report = args.report
     if report is None:
@@ -24,9 +26,13 @@ def main() -> int:
         except Exception as exc:
             if getattr(getattr(exc, "response", None), "status_code", None) != 404:
                 raise
-    queue = plan(records_from_sources(args.search_data, args.revisions), load_report(report))
+    records = records_from_sources(args.search_data, args.revisions)
+    queue = plan(records, load_report(report))
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(queue, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    args.keys_output.parent.mkdir(parents=True, exist_ok=True)
+    keys = json.dumps([record["key"] for record in records], ensure_ascii=False, separators=(",", ":")).encode()
+    args.keys_output.write_bytes(gzip.compress(keys, compresslevel=9, mtime=0))
     print(f"planned {queue['selected_records']} of {queue['pending_records']} pending PDF(s)")
     return 0
 

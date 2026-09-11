@@ -95,10 +95,18 @@ def encode_report(report: dict) -> bytes:
 
 def pending_records(records: list[dict], report: dict) -> list[dict]:
     files = report.get("files", {})
-    return [record for record in records
-            if not (isinstance(files.get(record["key"]), dict)
-                    and files[record["key"]].get("source_revision") == record["source_revision"]
-                    and files[record["key"]].get("status") in {"healthy", "warning", "encrypted", "corrupt"})]
+    pending = []
+    for record in records:
+        current = files.get(record["key"])
+        if not isinstance(current, dict) or current.get("status") in {"download-failed", "tool-error"}:
+            pending.append(record)
+            continue
+        same_revision = current.get("source_revision") == record["source_revision"]
+        unchanged_healthy = (current.get("status") in {"healthy", "warning", "encrypted"}
+                             and current.get("declared_bytes") == record.get("declared_bytes"))
+        if not same_revision and not unchanged_healthy:
+            pending.append(record)
+    return pending
 
 
 def weighted_shards(records: list[dict], count: int = SHARD_COUNT) -> list[list[dict]]:
@@ -116,12 +124,12 @@ def weighted_shards(records: list[dict], count: int = SHARD_COUNT) -> list[list[
 def plan(records: list[dict], report: dict) -> dict:
     pending = pending_records(records, report)
     selected = pending[:BATCH_SIZE]
-    shards = weighted_shards(selected) if selected else []
+    shards = weighted_shards(selected) if selected else [[]]
     return {"version": REPORT_VERSION, "kind": "pdf-health-queue",
             "batch_size": BATCH_SIZE, "shard_count": SHARD_COUNT,
             "total_records": len(records), "pending_records": len(pending),
             "selected_records": len(selected), "remaining_after_batch": max(0, len(pending) - len(selected)),
-            "shard_ids": list(range(SHARD_COUNT)) if selected else [],
+            "shard_ids": list(range(SHARD_COUNT)) if selected else [0],
             "shards": [{"index": i, "declared_bytes": sum(int(r.get("declared_bytes") or 0) for r in shard),
                         "records": shard} for i, shard in enumerate(shards)]}
 
@@ -230,8 +238,9 @@ def audit_record(record: dict, source: Path, timeout: int = COMMAND_TIMEOUT) -> 
     return {**record, **result}
 
 
-def merge_report(remote: dict, results: list[dict]) -> dict:
-    files = dict(remote.get("files", {}))
+def merge_report(remote: dict, results: list[dict], current_keys: set[str] | None = None) -> dict:
+    files = {key: value for key, value in remote.get("files", {}).items()
+             if current_keys is None or key in current_keys}
     for result in results:
         files[result["key"]] = {key: value for key, value in result.items() if key != "key"}
     return {"version": REPORT_VERSION, "files": dict(sorted(files.items()))}
@@ -247,13 +256,17 @@ def remote_report(api: HfApi, repo: str) -> dict:
     return load_report(Path(path))
 
 
-def publish(api: HfApi, repo: str, results: list[dict], max_attempts: int = 8) -> dict:
-    if not results:
+def publish(api: HfApi, repo: str, results: list[dict], current_keys: set[str] | None = None,
+            max_attempts: int = 8) -> dict:
+    if not results and current_keys is None:
         return remote_report(api, repo)
     for attempt in range(max_attempts):
         try:
             info = api.repo_info(repo_id=repo, repo_type="dataset")
-            merged = merge_report(remote_report(api, repo), results)
+            remote = remote_report(api, repo)
+            merged = merge_report(remote, results, current_keys)
+            if merged == remote:
+                return remote
             api.create_commit(repo_id=repo, repo_type="dataset", parent_commit=info.sha,
                               commit_message="Publish PDF health audit",
                               operations=[CommitOperationAdd(path_in_repo=REPORT_NAME,
