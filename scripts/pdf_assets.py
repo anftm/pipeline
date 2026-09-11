@@ -21,17 +21,20 @@ try:
 except ImportError:
     from reader_assets import READER_ASSETS_REPO, decode_search_payload, relative_path, source_url
 
+try:
+    from . import shared
+except ImportError:
+    import shared
+
 MANIFEST_NAME = "pdf_manifest.json"
 MANIFEST_VERSION = 1
 PAGE_MANIFEST_VERSION = 2
 PAGE_MANIFEST_NAME = "page-manifest.json"
 MI = 1024 * 1024
-MIN_BYTES = 50 * MI
 LARGE_BYTES = 100 * MI
 WEBP_QUALITY = int(os.environ.get("PDF_WEBP_QUALITY", "85"))
 WEBP_MAX_DIMENSION = int(os.environ.get("PDF_WEBP_MAX_DIMENSION", "1800"))
 SAMPLE_PAGES = int(os.environ.get("PDF_SAMPLE_PAGES", "3"))
-WEBP_MAX_RATIO = float(os.environ.get("PDF_WEBP_MAX_RATIO", "0.9"))
 MAX_PAGES_PER_TASK = 500
 VERY_LARGE_MAX_PAGES_PER_TASK = 250
 VERY_LARGE_BYTES = 500 * MI
@@ -87,13 +90,7 @@ def compact_page_manifest(source_sha: str, profile: str, pages: list[dict],
 
 
 def digest(path: Path) -> tuple[str, int]:
-    h = hashlib.sha256()
-    size = 0
-    with path.open("rb") as stream:
-        while chunk := stream.read(1024 * 1024):
-            h.update(chunk)
-            size += len(chunk)
-    return h.hexdigest(), size
+    return shared.hash_file(path)
 
 
 def extract_pdf_outline(path: Path, page_count: int) -> list[dict]:
@@ -202,21 +199,16 @@ def shard_records(records: list[dict], shard_count: int, shard_index: int) -> li
     if shard_count < 1 or not 0 <= shard_index < shard_count:
         raise ValueError("invalid PDF asset shard")
     return [item for item in records
-             if int.from_bytes(hashlib.sha256(item["key"].encode()).digest()[:8], "big") % shard_count == shard_index]
+              if shared.hash_for_key(item["key"], shard_count) == shard_index]
 
 
 def weighted_shards(records: list[dict], shard_count: int = 10) -> list[list[dict]]:
     """Assign records to the least-loaded shard, using page counts as weight."""
-    if shard_count < 1:
-        raise ValueError("shard_count must be positive")
-    shards = [[] for _ in range(shard_count)]
-    loads = [0] * shard_count
-    for item in sorted(records, key=lambda value: (-int(value.get("range_page_count", value["page_count"])),
-                                                   value.get("task_key", value["key"]))):
-        shard = min(range(shard_count), key=lambda index: (loads[index], index))
-        shards[shard].append(item)
-        loads[shard] += int(item.get("range_page_count", item["page_count"]))
-    return shards
+    return shared.weighted_shards(
+        records, shard_count,
+        weight=lambda item: int(item.get("range_page_count", item["page_count"])),
+        order=lambda value: (-int(value.get("range_page_count", value["page_count"])),
+                             value.get("task_key", value["key"])))
 
 
 def load_planned_shard(queue_file: Path, shard_count: int, shard_index: int) -> list[dict]:
@@ -427,8 +419,7 @@ def update_sidecar(sidecar: dict, results: list[dict]) -> bytes:
         path = result.get("path") or result.get("page_manifest", {}).get("path")
         if not path:
             continue
-        updated["f"][result["key"]] = {"s": 2, "m": "p", "p": path,
-                                        "b": "vomebook/pdf-pages"}
+        updated["f"][result["key"]] = shared.pdf_pages_sidecar_entry(path)
     payload = json.dumps(updated, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
     return gzip.compress(payload, compresslevel=9, mtime=0)
 
@@ -491,12 +482,11 @@ def publish(api: HfApi, repo: str, manifest: dict, results: list[dict], bundle: 
             )
             return
         except HfHubHTTPError as exc:
-            status = getattr(exc.response, "status_code", None)
-            if status not in {409, 412} and not (status == 429 or 500 <= (status or 0) < 600):
+            if not shared.is_retryable_hf_status(shared.hf_status_code(exc)):
                 raise
             if attempt + 1 == max_attempts:
                 raise
-            time.sleep(min(60, 2 ** min(attempt, 5)))
+            time.sleep(shared.hf_retry_delay(attempt))
     raise RuntimeError("PDF asset publication retry limit reached")
 
 
@@ -569,7 +559,7 @@ def main() -> int:
                     item.get("reader_assets_revision", "main"), os.environ.get("HF_TOKEN"))
             elif args.source_dir:
                 source = args.source_dir / item["repo"] / item["path"]
-            elif not args.source_dir:
+            else:
                 source = download_hf_source(item["repo"], item["path"], item["source_revision"], os.environ.get("HF_TOKEN"))
             source_sha, source_bytes = digest(source)
             if source_sha in built_by_sha and "page_start" not in item:

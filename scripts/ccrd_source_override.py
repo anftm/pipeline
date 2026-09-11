@@ -12,6 +12,11 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+try:
+    from . import shared
+except ImportError:
+    import shared
+
 
 UPSTREAM_REPO = "https://raw.githubusercontent.com/ProletRevDicta/Prolet"
 UPSTREAM_REF = "master"
@@ -31,11 +36,7 @@ def source_urls() -> tuple[str, ...]:
 
 
 def sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    return shared.hash_file(path)[0]
 
 
 def download_override(destination: Path) -> dict[str, str | int]:

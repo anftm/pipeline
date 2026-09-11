@@ -13,7 +13,6 @@ from pypdf import PdfWriter
 from scripts import pdf_assets
 from scripts import plan_pdf_assets
 from scripts import publish_pdf_assets
-from scripts import retire_pdf_assets
 
 
 class PdfAssetsTests(unittest.TestCase):
@@ -34,7 +33,7 @@ class PdfAssetsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             root = Path(root)
             source = root / "x.pdf"
-            source.write_bytes(b"x" * (pdf_assets.MIN_BYTES - 1))
+            source.write_bytes(b"x" * (pdf_assets.LARGE_BYTES - 1))
             item = {"key": "r\0x.pdf", "repo": "r", "path": "x.pdf", "source_revision": "rev"}
             with patch.object(pdf_assets, "_run") as run:
                 result = pdf_assets.build_item(item, source, root / "bundle")
@@ -448,13 +447,6 @@ class PdfAssetsTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "conflicting PDF page artifact paths"):
                 publish_pdf_assets.merge_bundles([bundle], root / "merged")
 
-    def test_result_chunks_are_stable_and_bounded(self):
-        results = [{"key": str(index)} for index in range(5)]
-        self.assertEqual(
-            publish_pdf_assets.result_chunks(results, 2),
-            [[results[0], results[1]], [results[2], results[3]], [results[4]]],
-        )
-
     def test_publish_retries_parent_race_and_reuses_successful_commit(self):
         result = {"key": "r\0a.pdf", "status": "skipped", "reason": "native-text-pdf",
                   "strategy": "native-text", "source_revision": "1", "source_sha256": "a" * 64,
@@ -524,29 +516,6 @@ class PdfAssetsTests(unittest.TestCase):
                 merged_results.extend(skipped_data)
             self.assertEqual(len(merged_results), 1)
             self.assertEqual(merged_results[0]["key"], "r\0native.pdf")
-
-    def test_retire_removes_linearized_and_legacy_streams_but_keeps_current_streams(self):
-        old_root = "objects/aa/" + "a" * 64
-        current_root = "objects/bb/" + "b" * 64
-        pdf_manifest = {"version": 1, "files": {
-            "linear": {"status": "ready", "strategy": "linearized-pdf",
-                       "path": "objects/cc/" + "c" * 64 + "/linearized.pdf"},
-            "legacy": {"status": "ready", "strategy": "sampled-webp",
-                       "page_manifest": {"path": old_root + "/page-manifest.json"}},
-            "current": {"status": "ready", "strategy": "sampled-webp",
-                        "render_profile": pdf_assets.PDF_PROFILE,
-                        "decision_profile": pdf_assets.PDF_DECISION_PROFILE,
-                        "page_manifest": {"path": current_root + "/page-manifest.json"}},
-        }}
-        updated, _, deletes = retire_pdf_assets.retire({"version": 1, "files": {}}, pdf_manifest)
-        self.assertEqual(updated["files"]["linear"]["status"], "retired")
-        self.assertEqual(updated["files"]["legacy"]["status"], "retired")
-        self.assertEqual(updated["files"]["current"]["status"], "ready")
-        paths = {operation.path_in_repo for operation in deletes}
-        self.assertIn(old_root + "/page-manifest.json", paths)
-        self.assertIn(old_root + "/pages", paths)
-        self.assertNotIn(current_root + "/page-manifest.json", paths)
-
 
 if __name__ == "__main__":
     unittest.main()

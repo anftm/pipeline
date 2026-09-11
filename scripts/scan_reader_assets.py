@@ -2,7 +2,6 @@
 """Build a deterministic queue for changed files requiring reader conversion."""
 
 import argparse
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -23,6 +22,11 @@ except ImportError:
         validate_manifest,
     )
 
+try:
+    from . import shared
+except ImportError:
+    import shared
+
 
 def remote_manifest(api: HfApi, repo_id: str) -> dict:
     try:
@@ -35,7 +39,7 @@ def remote_manifest(api: HfApi, repo_id: str) -> dict:
 
 
 def shard_for_key(key: str, shard_count: int) -> int:
-    return int.from_bytes(hashlib.sha256(key.encode("utf-8")).digest()[:8], "big") % shard_count
+    return shared.hash_for_key(key, shard_count)
 
 
 def build_queue(records, revisions, manifest, *, repo="", extension="", exact_path="", limit=0,

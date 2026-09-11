@@ -45,6 +45,14 @@ try:
 except ImportError:
     import mirror_source_files as mirror
 
+try:
+    from scripts import shared
+except ImportError:
+    try:
+        from . import shared
+    except ImportError:
+        import shared
+
 HF_REPO = mirror.HF_REPO
 HF_TOKEN = mirror.HF_TOKEN
 MANIFEST_NAME = mirror.MANIFEST_NAME
@@ -122,13 +130,7 @@ def optimized_path(archive_id: int, digest: str, suffix: str) -> str:
 
 
 def sha256_of(path: Path) -> tuple[str, int]:
-    digest = hashlib.sha256()
-    size = 0
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-            size += len(chunk)
-    return digest.hexdigest(), size
+    return shared.hash_file(path)
 
 
 def looks_like_pdf(path: Path) -> bool:

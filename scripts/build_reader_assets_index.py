@@ -9,9 +9,11 @@ from pathlib import Path
 try:
     from .reader_assets import load_json, validate_manifest
     from .pdf_assets import PDF_DECISION_PROFILE, PDF_PROFILE
+    from . import shared
 except ImportError:
     from reader_assets import load_json, validate_manifest
     from pdf_assets import PDF_DECISION_PROFILE, PDF_PROFILE
+    import shared
 
 STATUS = {"ready": 2, "failed": 4}
 MODE = {"pdf": "p", "epub": "e", "foliate": "e", "docx": "d", "html": "h", "audio": "a", "video": "v"}
@@ -40,8 +42,7 @@ def build_index(manifest: dict, pdf_manifest: dict | None = None) -> dict:
             continue
         path = entry.get("path") or entry.get("page_manifest", {}).get("path")
         if path:
-            files[key] = {"s": 2, "m": "p", "p": path,
-                          "b": "vomebook/pdf-pages"}
+            files[key] = shared.pdf_pages_sidecar_entry(path)
     return {"v": 1, "f": dict(sorted(files.items()))}
 
 

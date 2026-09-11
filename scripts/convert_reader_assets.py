@@ -44,6 +44,11 @@ except ImportError:
         source_password, validate_object_path,
     )
 
+try:
+    from . import shared
+except ImportError:
+    import shared
+
 MAX_SOURCE_BYTES = 2 * 1024 * 1024 * 1024
 MAX_HTML_RESOURCE_BYTES = 16 * 1024 * 1024
 MAX_HTML_RESOURCE_TOTAL_BYTES = 64 * 1024 * 1024
@@ -351,11 +356,7 @@ def download_existing(url: str, target: Path, expected_sha256: str) -> None:
 
 
 def file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        while chunk := handle.read(1024 * 1024):
-            digest.update(chunk)
-    return digest.hexdigest()
+    return shared.hash_file(path)[0]
 
 
 def artifact_lock(path: Path) -> threading.Lock:
@@ -980,13 +981,6 @@ def validate_pdf_content(path: Path, work: Path) -> None:
         raise RuntimeError("converted PDF has no visible page content")
     if page_count >= 4 and not any(page > page_count // 2 for page in content_pages):
         raise RuntimeError("converted PDF has no visible content after its midpoint")
-
-
-def validate_pdf_structure(path: Path) -> None:
-    info = command_output(["pdfinfo", str(path)])
-    match = re.search(r"^Pages:\s+(\d+)\s*$", info, re.MULTILINE)
-    if not match or int(match.group(1)) < 1:
-        raise RuntimeError("converted PDF has no pages")
 
 
 def rasterize_pdf(path: Path, work: Path) -> None:

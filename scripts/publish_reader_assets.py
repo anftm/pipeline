@@ -2,7 +2,6 @@
 """Atomically publish converted Reader Assets and their manifest."""
 
 import argparse
-import hashlib
 import os
 import random
 import time
@@ -24,6 +23,11 @@ except ImportError:
         MANIFEST_NAME, READER_ASSETS_REPO, canonical_json, empty_manifest, load_json,
         reusable_object_key, validate_manifest, validate_object_path,
     )
+
+try:
+    from . import shared
+except ImportError:
+    import shared
 
 SIDECAR_NAME = "reader_assets.json.gz"
 
@@ -55,11 +59,7 @@ def orphan_entry(entry: dict) -> dict:
 
 
 def file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        while chunk := handle.read(1024 * 1024):
-            digest.update(chunk)
-    return digest.hexdigest()
+    return shared.hash_file(path)[0]
 
 
 def remote_manifest(api: HfApi, repo_id: str, revision: str | None = None) -> dict:
@@ -238,9 +238,9 @@ def publish_bundle(api: HfApi, repo_id: str, bundle: Path, *, max_attempts: int 
             )
             return manifest, len(result_keys)
         except HfHubHTTPError as exc:
-            status = getattr(exc.response, "status_code", None)
+            status = shared.hf_status_code(exc)
             if status in {429, 500, 502, 503, 504} and attempt + 1 < max_attempts:
-                delay = min(60.0, 2.0 ** min(attempt, 5)) + random.uniform(0, 2)
+                delay = shared.hf_retry_delay(attempt) + random.uniform(0, 2)
                 print(f"transient Hugging Face upload error ({status}); retrying in {delay:.1f}s")
                 time.sleep(delay)
                 continue

@@ -126,7 +126,7 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           READER_ASSETS_REPO: vomebook/Reader-Assets
-        run: python scripts/publish_pdf_assets.py --chunk-results 1 --bundles output/pdf-assets/bundles/* --skipped output/pdf-assets/skipped.json
+        run: python scripts/publish_pdf_assets.py --bundles output/pdf-assets/bundles/* --skipped output/pdf-assets/skipped.json
   sync-pages:
     needs: publish
     if: needs.publish.result == 'success'

@@ -3,7 +3,6 @@
 
 import argparse
 import gzip
-import hashlib
 import json
 import os
 import subprocess
@@ -15,8 +14,10 @@ from huggingface_hub.errors import HfHubHTTPError
 
 try:
     from . import pdf_assets
+    from . import shared
 except ImportError:
     import pdf_assets
+    import shared
 
 REPORT_NAME = "pdf_health.json.gz"
 REPORT_VERSION = 1
@@ -112,13 +113,10 @@ def pending_records(records: list[dict], report: dict) -> list[dict]:
 def weighted_shards(records: list[dict], count: int = SHARD_COUNT) -> list[list[dict]]:
     if count != SHARD_COUNT:
         raise ValueError("PDF health requires exactly 18 shards")
-    shards = [[] for _ in range(count)]
-    loads = [0] * count
-    for record in sorted(records, key=lambda item: (-int(item.get("declared_bytes") or 0), item["key"])):
-        index = min(range(count), key=lambda value: (loads[value], value))
-        shards[index].append(record)
-        loads[index] += int(record.get("declared_bytes") or 0)
-    return shards
+    return shared.weighted_shards(
+        records, count,
+        weight=lambda item: int(item.get("declared_bytes") or 0),
+        order=lambda item: (-int(item.get("declared_bytes") or 0), item["key"]))
 
 
 def plan(records: list[dict], report: dict) -> dict:
@@ -273,16 +271,15 @@ def publish(api: HfApi, repo: str, results: list[dict], current_keys: set[str] |
                                                              path_or_fileobj=encode_report(merged))])
             return merged
         except HfHubHTTPError as exc:
-            status = getattr(exc.response, "status_code", None)
-            if status not in {409, 412, 429} and not (status and 500 <= status < 600):
+            if not shared.is_retryable_hf_status(shared.hf_status_code(exc), frozenset({409, 412, 429})):
                 raise
             if attempt + 1 == max_attempts:
                 raise
-            time.sleep(min(60, 2 ** attempt))
+            time.sleep(shared.hf_retry_delay(attempt, max_shift=10))
         except (ConnectionError, OSError):
             if attempt + 1 == max_attempts:
                 raise
-            time.sleep(min(60, 2 ** attempt))
+            time.sleep(shared.hf_retry_delay(attempt, max_shift=10))
     raise RuntimeError("PDF health publication retry limit reached")
 
 

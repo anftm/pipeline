@@ -22,6 +22,11 @@ from huggingface_hub import batch_bucket_files, download_bucket_files, list_buck
 
 from ccrd_source_override import CORPUS_PATH, download_override
 
+try:
+    from . import shared
+except ImportError:
+    import shared
+
 
 SOURCE_ARCHIVE_URL = "https://github.com/anftm/pipeline/releases/download/ccrd/ccrd-corpus.tar.gz"
 SOURCE_ARCHIVE_SHA256 = "a6b1615054303740e892e535e3c9a6d4f4805ac572f7f1577b10685249a862f1"
@@ -34,11 +39,7 @@ CURRENT_PATH = "current.json"
 
 
 def sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    return shared.hash_file(path)[0]
 
 
 def download(url: str, destination: Path) -> None:
