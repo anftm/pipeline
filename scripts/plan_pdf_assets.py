@@ -31,11 +31,17 @@ def source_path(item: dict, source_dir: Path | None, assets_repo: str) -> Path:
 
 
 def plan(records: list[dict], source_dir: Path | None, assets_repo: str, shard_count: int,
-         workers: int = 8) -> dict:
+         workers: int = 8, quarantine: set[tuple[str, str]] | None = None) -> dict:
     if shard_count != 18:
         raise ValueError("ordinary PDF shard count must be 18")
+    quarantined = quarantine or set()
 
     def inspect(item: dict) -> dict:
+        if (item["key"], str(item.get("source_revision") or "")) in quarantined:
+            return {**item, "page_count": 0, "source_sha256": "",
+                    "source_bytes": int(item.get("source_bytes") or 0), "classification": "failed",
+                    "decision_profile": pdf_assets.PDF_DECISION_PROFILE,
+                    "status": "failed", "reason": "tool-error", "strategy": "none"}
         source = None
         try:
             source = source_path(item, source_dir, assets_repo)
@@ -105,7 +111,7 @@ def plan(records: list[dict], source_dir: Path | None, assets_repo: str, shard_c
 def pending_records(records: list[dict], manifest: dict) -> list[dict]:
     done = {}
     for key, entry in manifest.get("files", {}).items():
-        if isinstance(entry, dict) and entry.get("status") in {"ready", "skipped"}:
+        if isinstance(entry, dict) and entry.get("status") in {"ready", "skipped", "failed"}:
             done[key] = entry
     pending = []
     for item in records:
@@ -116,6 +122,8 @@ def pending_records(records: list[dict], manifest: dict) -> list[dict]:
              and current.get("decision_profile") == pdf_assets.PDF_DECISION_PROFILE)
             or (current.get("status") == "skipped" and current.get("reason") == "native-text-pdf"
                 and current.get("decision_profile") == pdf_assets.PDF_DECISION_PROFILE)
+            or (current.get("status") == "failed"
+                and current.get("source_revision") == item.get("source_revision"))
         )
         if item.get("source_kind") == "generated":
             if not complete:
@@ -165,7 +173,11 @@ def main() -> int:
         pdf_manifest = {"files": {}}
     records = pending_records(records, pdf_manifest)
     selected = pdf_assets.queue(records, args.limit, args.checkpoint)
-    planned = plan(selected, args.source_dir, args.assets_repo, args.shard_count, args.workers)
+    quarantine = {(key, str(entry.get("source_revision") or ""))
+                  for key, entry in pdf_manifest.get("files", {}).items()
+                  if isinstance(entry, dict) and entry.get("status") == "failed"}
+    planned = plan(selected, args.source_dir, args.assets_repo, args.shard_count, args.workers,
+                   quarantine=quarantine)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(planned, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
     print(f"planned {planned['total_records']} PDF asset(s) across {planned['shard_count']} shard(s)")

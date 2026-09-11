@@ -292,6 +292,33 @@ class PdfAssetsTests(unittest.TestCase):
             ["r\0legacy.pdf", "r\0linear.pdf"],
         )
 
+    def test_pending_records_quarantine_recorded_failures_until_source_changes(self):
+        records = [
+            {"key": "r\0broken.pdf", "source_kind": "upstream", "source_bytes": pdf_assets.LARGE_BYTES,
+             "source_revision": "rev-1"},
+            {"key": "r\0fixed.pdf", "source_kind": "upstream", "source_bytes": pdf_assets.LARGE_BYTES,
+             "source_revision": "rev-2"},
+        ]
+        manifest = {"files": {
+            "r\0broken.pdf": {"status": "failed", "reason": "tool-error", "source_revision": "rev-1"},
+            "r\0fixed.pdf": {"status": "failed", "reason": "tool-error", "source_revision": "rev-1"},
+        }}
+        self.assertEqual([item["key"] for item in plan_pdf_assets.pending_records(records, manifest)],
+                         ["r\0fixed.pdf"])
+
+    def test_plan_quarantine_marks_failed_without_downloading(self):
+        records = [{"key": "r\0broken.pdf", "repo": "r", "path": "broken.pdf",
+                    "extension": "pdf", "source_extension": "pdf", "source_revision": "rev-1",
+                    "source_bytes": pdf_assets.LARGE_BYTES}]
+        quarantine = {("r\0broken.pdf", "rev-1")}
+        with patch.object(plan_pdf_assets, "source_path",
+                          side_effect=AssertionError("must not download")):
+            planned = plan_pdf_assets.plan(records, None, "assets", 18, workers=1,
+                                           quarantine=quarantine)
+        self.assertEqual(planned["total_tasks"], 0)
+        self.assertEqual(planned["skipped"][0]["status"], "failed")
+        self.assertEqual(planned["skipped"][0]["source_revision"], "rev-1")
+
     def test_merge_bundles_reuses_disk_blocks_with_hardlinks(self):
         with tempfile.TemporaryDirectory() as root:
             root = Path(root)
