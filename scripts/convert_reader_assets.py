@@ -35,13 +35,13 @@ from PIL import Image, ImageSequence
 
 try:
     from .reader_assets import (
-        PASSWORD_RE, canonical_json, load_json, object_profile_path, reusable_object_key,
-        source_password, validate_object_path,
+        EPUB_CHAPTER_BUNDLE_DIR, PASSWORD_RE, canonical_json, load_json, needs_epub_chapters,
+        object_profile_path, reusable_object_key, source_password, validate_object_path,
     )
 except ImportError:
     from reader_assets import (
-        PASSWORD_RE, canonical_json, load_json, object_profile_path, reusable_object_key,
-        source_password, validate_object_path,
+        EPUB_CHAPTER_BUNDLE_DIR, PASSWORD_RE, canonical_json, load_json, needs_epub_chapters,
+        object_profile_path, reusable_object_key, source_password, validate_object_path,
     )
 
 try:
@@ -1450,6 +1450,21 @@ def convert_item(item: dict, bundle: Path, reusable: dict | None = None) -> dict
                 validate_reader_content(target, item, work)
                 if existing and file_sha256(target) != existing["sha256"]:
                     raise RuntimeError("reusable reader artifact digest mismatch")
+        chapter_manifest_path = None
+        if needs_epub_chapters(item["extension"], item["reader_mode"], source_bytes):
+            try:
+                try:
+                    from . import epub_chapters
+                except ImportError:
+                    import epub_chapters
+                chapter_dir = bundle / Path(object_path).parent / EPUB_CHAPTER_BUNDLE_DIR
+                if not (chapter_dir / "chapter-manifest.json").is_file():
+                    epub_chapters.build_bundle(target, chapter_dir)
+                chapter_manifest_path = (Path(object_path).parent / EPUB_CHAPTER_BUNDLE_DIR
+                                         / "chapter-manifest.json").as_posix()
+            except Exception as exc:
+                print(f"warning: {item['repo']}/{item['path']}: EPUB chapter bundle skipped: "
+                      f"{type(exc).__name__}: {exc}")
         result = {
             "key": item["key"], "status": "ready", "source_revision": item["source_revision"],
             "source_sha256": digest, "source_bytes": source_bytes,
@@ -1459,6 +1474,8 @@ def convert_item(item: dict, bundle: Path, reusable: dict | None = None) -> dict
         }
         if item["extension"] == "epub" and item["reader_mode"] == "pdf":
             result["fallback_path"] = object_path
+        if chapter_manifest_path:
+            result["chapter_manifest"] = chapter_manifest_path
         return result
 
 

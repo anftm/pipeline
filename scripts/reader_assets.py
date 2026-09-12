@@ -12,6 +12,8 @@ MANIFEST_VERSION = 1
 CHAPTER_MANIFEST_VERSION = 1
 READER_ASSETS_REPO = "vomebook/Reader-Assets"
 MANIFEST_NAME = "manifest.json"
+EPUB_CHAPTER_SPLIT_BYTES = 32 * 1024 * 1024
+EPUB_CHAPTER_BUNDLE_DIR = "epub-chapters"
 CONVERTIBLE_EXTENSIONS = {
     "doc": ("libreoffice-docx-v2", "docx", "document.docx"),
     "docx": ("docx-native-v2", "docx", "document.docx"),
@@ -72,6 +74,12 @@ KNOWN_SOURCE_PASSWORDS = {
 
 def conversion_contract(extension: str, key: str = "") -> tuple[str, str, str]:
     return CONVERTIBLE_EXTENSIONS[extension]
+
+
+def needs_epub_chapters(extension: str, reader_mode: str, source_bytes: int) -> bool:
+    """Whether a foliate EPUB is large enough to earn an independent chapter bundle."""
+    return (extension == "epub" and reader_mode == "foliate"
+            and int(source_bytes or 0) >= EPUB_CHAPTER_SPLIT_BYTES)
 
 
 def source_password(repo: str, path: str) -> str:

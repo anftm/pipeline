@@ -183,6 +183,14 @@ class ReaderAssetContractTests(unittest.TestCase):
                     ValueError, "resource budget"):
                 epub_chapters.build_bundle(epub, Path(root) / "bundle")
 
+    def test_epub_chapter_split_threshold(self):
+        self.assertTrue(reader_assets.needs_epub_chapters(
+            "epub", "foliate", reader_assets.EPUB_CHAPTER_SPLIT_BYTES))
+        self.assertFalse(reader_assets.needs_epub_chapters(
+            "epub", "foliate", reader_assets.EPUB_CHAPTER_SPLIT_BYTES - 1))
+        self.assertFalse(reader_assets.needs_epub_chapters("mobi", "foliate", 10 ** 9))
+        self.assertFalse(reader_assets.needs_epub_chapters("epub", "pdf", 10 ** 9))
+
     def test_chapter_bundle_can_publish_text_without_resources(self):
         with tempfile.TemporaryDirectory() as root:
             root, epub, output = Path(root), Path(root) / "book.epub", Path(root) / "bundle"
@@ -207,6 +215,53 @@ class ScannerTests(unittest.TestCase):
         ]
         self.revisions = {"VoiceOfML/Test": "rev1"}
 
+    def test_large_epub_conversion_builds_chapter_bundle(self):
+        item = {
+            "key": "VoiceOfML/Test\0Big.epub", "extension": "epub", "repo": "VoiceOfML/Test",
+            "path": "Big.epub", "source_url": "https://example.test/Big.epub",
+            "source_revision": "rev1", "profile": "foliate-original-v1",
+            "reader_mode": "foliate", "output_name": "document.epub",
+        }
+        with tempfile.TemporaryDirectory() as root:
+            bundle = Path(root)
+
+            def download(_url, target):
+                with zipfile.ZipFile(target, "w") as archive:
+                    archive.writestr("mimetype", "application/epub+zip")
+                    archive.writestr("META-INF/container.xml", '<container><rootfiles><rootfile full-path="content.opf"/></rootfiles></container>')
+                    archive.writestr("content.opf", '<package><manifest><item id="a" href="a.xhtml" media-type="application/xhtml+xml"/><item id="b" href="b.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="a"/><itemref idref="b"/></spine></package>')
+                    archive.writestr("a.xhtml", "<html><body><p>chapter one</p></body></html>")
+                    archive.writestr("b.xhtml", "<html><body><p>chapter two</p></body></html>")
+                return hashlib.sha256(target.read_bytes()).hexdigest(), reader_assets.EPUB_CHAPTER_SPLIT_BYTES + 1
+
+            with patch.object(convert_reader_assets, "download_source", side_effect=download):
+                result = convert_reader_assets.convert_item(item, bundle)
+            self.assertEqual(result["status"], "ready")
+            self.assertTrue(result["path"].endswith("/document.epub"))
+            manifest_path = result["chapter_manifest"]
+            self.assertTrue(manifest_path.endswith("/epub-chapters/chapter-manifest.json"))
+            self.assertTrue((bundle / manifest_path).is_file())
+            parent = Path(manifest_path).parent
+            self.assertTrue((bundle / parent / "chapters" / "chapter-0001.xhtml").is_file())
+            self.assertTrue((bundle / parent / "epub-search-index.json.gz").is_file())
+            self.assertIn("chapter one", (bundle / parent / "chapters" / "chapter-0001.xhtml").read_text())
+
+    def test_small_epub_conversion_skips_chapter_bundle(self):
+        item = {
+            "key": "VoiceOfML/Test\0Small.epub", "extension": "epub", "repo": "VoiceOfML/Test",
+            "path": "Small.epub", "source_url": "https://example.test/Small.epub",
+            "source_revision": "rev1", "profile": "foliate-original-v1",
+            "reader_mode": "foliate", "output_name": "document.epub",
+        }
+        with tempfile.TemporaryDirectory() as root:
+            def download(_url, target):
+                target.write_bytes(b"small epub")
+                return hashlib.sha256(b"small epub").hexdigest(), 10
+            with patch.object(convert_reader_assets, "download_source", side_effect=download):
+                result = convert_reader_assets.convert_item(item, Path(root))
+            self.assertEqual(result["status"], "ready")
+            self.assertNotIn("chapter_manifest", result)
+
     def test_queues_only_supported_changed_files(self):
         queue = scan_reader_assets.build_queue(
             self.records, self.revisions, reader_assets.empty_manifest()
@@ -215,6 +270,35 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(queue[0]["path"], "A/Book.docx")
         self.assertEqual(queue[0]["profile"], "docx-native-v2")
         self.assertEqual(queue[0]["reader_mode"], "docx")
+
+    def test_large_epub_without_chapters_is_requeued_for_upgrade(self):
+        records = [{
+            "Repo": "VoiceOfML/Test", "File": "Big", "Extension": "epub", "Folder": [],
+            "Size": reader_assets.EPUB_CHAPTER_SPLIT_BYTES + 1,
+        }]
+        revisions = {"VoiceOfML/Test": "rev1"}
+        ready = {"status": "ready", "profile": "foliate-original-v1", "reader_mode": "foliate"}
+        manifest = reader_assets.empty_manifest()
+        manifest["files"] = {"VoiceOfML/Test\0Big.epub": dict(ready)}
+        queue = scan_reader_assets.build_queue(records, revisions, manifest)
+        self.assertEqual([item["path"] for item in queue], ["Big.epub"])
+        manifest["files"]["VoiceOfML/Test\0Big.epub"]["chapter_manifest"] = (
+            "objects/aa/" + "b" * 64 + "/foliate-original-v1/epub-chapters/chapter-manifest.json")
+        self.assertEqual(scan_reader_assets.build_queue(records, revisions, manifest), [])
+
+    def test_small_epub_and_non_epub_skip_chapter_upgrade(self):
+        revisions = {"VoiceOfML/Test": "rev1"}
+        manifest = reader_assets.empty_manifest()
+        manifest["files"] = {
+            "VoiceOfML/Test\0Small.epub": {"status": "ready", "profile": "foliate-original-v1"},
+            "VoiceOfML/Test\0Big.mobi": {"status": "ready", "profile": "foliate-original-v1"},
+        }
+        records = [
+            {"Repo": "VoiceOfML/Test", "File": "Small", "Extension": "epub", "Folder": [], "Size": 10},
+            {"Repo": "VoiceOfML/Test", "File": "Big", "Extension": "mobi", "Folder": [],
+             "Size": reader_assets.EPUB_CHAPTER_SPLIT_BYTES + 1},
+        ]
+        self.assertEqual(scan_reader_assets.build_queue(records, revisions, manifest), [])
 
     def test_html_resource_fragments_are_not_reader_documents(self):
         records = [{
