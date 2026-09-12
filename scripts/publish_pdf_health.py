@@ -15,6 +15,7 @@ def main() -> int:
     parser.add_argument("--assets-repo", default=os.environ.get("READER_ASSETS_REPO", "vomebook/Reader-Assets"))
     parser.add_argument("--output", type=Path, default=Path("output/pdf-health/pdf_health.json.gz"))
     parser.add_argument("--current-keys", type=Path)
+    parser.add_argument("--queue", type=Path)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     results = []
@@ -29,7 +30,12 @@ def main() -> int:
         current_keys = None
         if args.current_keys:
             current_keys = set(json.loads(gzip.decompress(args.current_keys.read_bytes())))
-        report = publish(HfApi(token=os.environ.get("HF_TOKEN")), args.assets_repo, results, current_keys)
+        ready_entries = None
+        if args.queue:
+            queue = json.loads(args.queue.read_text(encoding="utf-8"))
+            ready_entries = queue.get("_conversion_ready_entries")
+        report = publish(HfApi(token=os.environ.get("HF_TOKEN")), args.assets_repo, results,
+                         current_keys, ready_entries)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_bytes(encode_report(report))
     write_summary(report)

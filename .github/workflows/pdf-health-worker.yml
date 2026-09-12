@@ -92,7 +92,7 @@ jobs:
       - name: Publish report
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: python scripts/publish_pdf_health.py --current-keys output/pdf-health/current-keys.json.gz --bundles output/pdf-health/bundles/*
+        run: python scripts/publish_pdf_health.py --current-keys output/pdf-health/current-keys.json.gz --queue output/pdf-health/queue.json --bundles output/pdf-health/bundles/*
       - uses: actions/upload-artifact@v7
         with:
           name: pdf-health-report

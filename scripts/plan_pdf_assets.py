@@ -117,9 +117,7 @@ def pending_records(records: list[dict], manifest: dict) -> list[dict]:
     for item in records:
         current = done.get(item["key"])
         complete = current and (
-            (current.get("status") == "ready" and current.get("strategy") == "sampled-webp"
-             and current.get("render_profile") == pdf_assets.PDF_PROFILE
-             and current.get("decision_profile") == pdf_assets.PDF_DECISION_PROFILE)
+            pdf_assets.is_current_ready(current)
             or (current.get("status") == "skipped" and current.get("reason") == "native-text-pdf"
                 and current.get("decision_profile") == pdf_assets.PDF_DECISION_PROFILE)
             or (current.get("status") == "failed"

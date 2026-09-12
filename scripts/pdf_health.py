@@ -94,10 +94,29 @@ def encode_report(report: dict) -> bytes:
     return gzip.compress(payload, compresslevel=9, mtime=0)
 
 
-def pending_records(records: list[dict], report: dict) -> list[dict]:
+def conversion_ready_entry(record: dict, pdf_manifest: dict | None) -> dict | None:
+    """Proof that the conversion workflow fully rendered this exact source revision.
+
+    A current-profile ready entry means every page was rasterized to WebP, which
+    is a stronger readability signal than re-downloading the file for qpdf.
+    """
+    if not isinstance(pdf_manifest, dict):
+        return None
+    entry = pdf_manifest.get("files", {}).get(record["key"])
+    if not pdf_assets.is_current_ready(entry, record.get("source_revision")):
+        return None
+    return {"key": record["key"], "status": "healthy", "reason": "conversion-ready",
+            "source_revision": record.get("source_revision"),
+            "render_profile": pdf_assets.PDF_PROFILE,
+            "decision_profile": pdf_assets.PDF_DECISION_PROFILE}
+
+
+def pending_records(records: list[dict], report: dict, pdf_manifest: dict | None = None) -> list[dict]:
     files = report.get("files", {})
     pending = []
     for record in records:
+        if conversion_ready_entry(record, pdf_manifest) is not None:
+            continue
         current = files.get(record["key"])
         if not isinstance(current, dict) or current.get("status") in {"download-failed", "tool-error"}:
             pending.append(record)
@@ -119,17 +138,21 @@ def weighted_shards(records: list[dict], count: int = SHARD_COUNT) -> list[list[
         order=lambda item: (-int(item.get("declared_bytes") or 0), item["key"]))
 
 
-def plan(records: list[dict], report: dict) -> dict:
-    pending = pending_records(records, report)
+def plan(records: list[dict], report: dict, pdf_manifest: dict | None = None) -> dict:
+    pending = pending_records(records, report, pdf_manifest)
     selected = pending[:BATCH_SIZE]
     shards = weighted_shards(selected) if selected else [[]]
+    conversion_ready = [entry for record in records
+                        if (entry := conversion_ready_entry(record, pdf_manifest)) is not None]
     return {"version": REPORT_VERSION, "kind": "pdf-health-queue",
             "batch_size": BATCH_SIZE, "shard_count": SHARD_COUNT,
             "total_records": len(records), "pending_records": len(pending),
             "selected_records": len(selected), "remaining_after_batch": max(0, len(pending) - len(selected)),
+            "conversion_ready": len(conversion_ready),
             "shard_ids": list(range(SHARD_COUNT)) if selected else [0],
             "shards": [{"index": i, "declared_bytes": sum(int(r.get("declared_bytes") or 0) for r in shard),
-                        "records": shard} for i, shard in enumerate(shards)]}
+                        "records": shard} for i, shard in enumerate(shards)],
+            "_conversion_ready_entries": conversion_ready}
 
 
 def inspect_pdf(path: Path, declared_bytes: int, timeout: int = COMMAND_TIMEOUT) -> dict:
@@ -255,14 +278,19 @@ def remote_report(api: HfApi, repo: str) -> dict:
 
 
 def publish(api: HfApi, repo: str, results: list[dict], current_keys: set[str] | None = None,
-            max_attempts: int = 8) -> dict:
-    if not results and current_keys is None:
+            ready_entries: list[dict] | None = None, max_attempts: int = 8) -> dict:
+    if not results and current_keys is None and not ready_entries:
         return remote_report(api, repo)
     for attempt in range(max_attempts):
         try:
             info = api.repo_info(repo_id=repo, repo_type="dataset")
             remote = remote_report(api, repo)
             merged = merge_report(remote, results, current_keys)
+            if ready_entries:
+                files = merged["files"]
+                for entry in ready_entries:
+                    files[entry["key"]] = {k: v for k, v in entry.items() if k != "key"}
+                merged = {"version": REPORT_VERSION, "files": dict(sorted(files.items()))}
             if merged == remote:
                 return remote
             api.create_commit(repo_id=repo, repo_type="dataset", parent_commit=info.sha,

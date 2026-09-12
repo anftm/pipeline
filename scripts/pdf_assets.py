@@ -89,6 +89,20 @@ def compact_page_manifest(source_sha: str, profile: str, pages: list[dict],
     return manifest
 
 
+def is_current_ready(entry: dict, source_revision: str | None = None) -> bool:
+    """Whether a manifest entry is a successful build with the current profiles.
+
+    When source_revision is given it must also match (used by the health audit
+    to prove a specific source revision was fully rendered); planners that reuse
+    ready artifacts across revisions pass None.
+    """
+    return (isinstance(entry, dict) and entry.get("status") == "ready"
+            and entry.get("strategy") == "sampled-webp"
+            and entry.get("render_profile") == PDF_PROFILE
+            and entry.get("decision_profile") == PDF_DECISION_PROFILE
+            and (source_revision is None or entry.get("source_revision") == source_revision))
+
+
 def digest(path: Path) -> tuple[str, int]:
     return shared.hash_file(path)
 

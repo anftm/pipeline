@@ -27,13 +27,22 @@ def main() -> int:
             if getattr(getattr(exc, "response", None), "status_code", None) != 404:
                 raise
     records = records_from_sources(args.search_data, args.revisions)
-    queue = plan(records, load_report(report))
+    try:
+        pdf_manifest_path = hf_hub_download(args.assets_repo, "pdf_manifest.json", repo_type="dataset",
+                                            token=os.environ.get("HF_TOKEN"))
+        pdf_manifest = json.loads(Path(pdf_manifest_path).read_text(encoding="utf-8"))
+    except Exception as exc:
+        if getattr(getattr(exc, "response", None), "status_code", None) not in (None, 404):
+            raise
+        pdf_manifest = None
+    queue = plan(records, load_report(report), pdf_manifest)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(queue, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
     args.keys_output.parent.mkdir(parents=True, exist_ok=True)
     keys = json.dumps([record["key"] for record in records], ensure_ascii=False, separators=(",", ":")).encode()
     args.keys_output.write_bytes(gzip.compress(keys, compresslevel=9, mtime=0))
-    print(f"planned {queue['selected_records']} of {queue['pending_records']} pending PDF(s)")
+    print(f"planned {queue['selected_records']} of {queue['pending_records']} pending PDF(s), "
+          f"{queue.get('conversion_ready', 0)} proven by conversion")
     return 0
 
 

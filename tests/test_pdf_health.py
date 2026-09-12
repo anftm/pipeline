@@ -52,6 +52,48 @@ class PdfHealthTests(unittest.TestCase):
         self.assertEqual([item["key"] for item in pdf_health.pending_records(records, report)],
                          ["r\0corrupt.pdf", "r\0transient.pdf"])
 
+    def test_conversion_ready_records_skip_audit_and_refresh_report(self):
+        from scripts import pdf_assets
+        ready = {"status": "ready", "strategy": "sampled-webp", "source_revision": "one",
+                 "render_profile": pdf_assets.PDF_PROFILE,
+                 "decision_profile": pdf_assets.PDF_DECISION_PROFILE}
+        manifest = {"version": 1, "files": {
+            "r\0proven.pdf": dict(ready),
+            "r\0changed.pdf": {**ready, "source_revision": "old"},
+            "r\0legacy.pdf": {**ready, "render_profile": "pdf-pages-v1"},
+        }}
+        records = [
+            {"key": "r\0proven.pdf", "source_revision": "one", "declared_bytes": 10},
+            {"key": "r\0changed.pdf", "source_revision": "one", "declared_bytes": 20},
+            {"key": "r\0legacy.pdf", "source_revision": "one", "declared_bytes": 30},
+            {"key": "r\0fresh.pdf", "source_revision": "one", "declared_bytes": 40},
+        ]
+        report = {"version": 1, "files": {
+            "r\0proven.pdf": {"source_revision": "one", "status": "tool-error", "reason": "qpdf-timeout"},
+        }}
+        queue = pdf_health.plan(records, report, manifest)
+        selected = [item["key"] for shard in queue["shards"] for item in shard["records"]]
+        self.assertNotIn("r\0proven.pdf", selected)
+        self.assertIn("r\0changed.pdf", selected)
+        self.assertIn("r\0legacy.pdf", selected)
+        self.assertIn("r\0fresh.pdf", selected)
+        self.assertEqual(queue["conversion_ready"], 1)
+        entries = queue["_conversion_ready_entries"]
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["key"], "r\0proven.pdf")
+        self.assertEqual(entries[0]["status"], "healthy")
+        self.assertEqual(entries[0]["reason"], "conversion-ready")
+        api = Mock()
+        api.repo_info.return_value = Mock(sha="parent")
+        stale = {"version": 1, "files": {
+            "r\0proven.pdf": {"source_revision": "one", "status": "tool-error", "reason": "qpdf-timeout"}}}
+        with patch.object(pdf_health, "remote_report", return_value=stale), \
+                patch.object(pdf_health.time, "sleep"):
+            merged = pdf_health.publish(api, "repo", [], {"r\0proven.pdf"}, entries)
+        self.assertEqual(merged["files"]["r\0proven.pdf"]["status"], "healthy")
+        self.assertEqual(merged["files"]["r\0proven.pdf"]["reason"], "conversion-ready")
+        self.assertEqual(api.create_commit.call_count, 1)
+
     def test_merge_report_prunes_removed_files(self):
         remote = {"version": 1, "files": {"keep": {"status": "healthy"},
                                             "removed": {"status": "corrupt"}}}
