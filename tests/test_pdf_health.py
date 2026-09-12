@@ -59,13 +59,14 @@ class PdfHealthTests(unittest.TestCase):
         self.assertEqual(set(merged["files"]), {"keep"})
 
     def test_plan_caps_batch_without_hiding_pending_total_and_weights_by_size(self):
+        total = pdf_health.BATCH_SIZE + 1
         records = [{"key": f"r\0{x:03}.pdf", "source_revision": "one", "declared_bytes": x + 1}
-                   for x in range(501)]
+                   for x in range(total)]
         queue = pdf_health.plan(records, {"version": 1, "files": {}})
-        self.assertEqual(queue["selected_records"], 500)
-        self.assertEqual(queue["pending_records"], 501)
+        self.assertEqual(queue["selected_records"], pdf_health.BATCH_SIZE)
+        self.assertEqual(queue["pending_records"], total)
         self.assertEqual(queue["remaining_after_batch"], 1)
-        self.assertEqual(sum(len(shard["records"]) for shard in queue["shards"]), 500)
+        self.assertEqual(sum(len(shard["records"]) for shard in queue["shards"]), pdf_health.BATCH_SIZE)
 
     def inspect_with_tools(self, qpdf=(0, "No syntax errors"), info=None, text=(0, ""), payload=None):
         info = info or (0, "Pages: 3\nEncrypted: no\nPDF version: 1.7\n")
