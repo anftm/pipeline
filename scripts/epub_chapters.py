@@ -35,6 +35,10 @@ def _zip_path(base: str, href: str) -> str:
     return result
 
 
+def _safe_resource_path(path: str) -> str:
+    return re.sub(r"[\x00-\x1f\x7f]", lambda match: f"_x{ord(match.group()):02x}_", path)
+
+
 class _TextExtractor(HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
@@ -109,7 +113,8 @@ def build_bundle(epub: Path, output: Path, *, fallback: str | None = None,
                 if resource not in archive.namelist() or resource.lower().endswith((".xhtml", ".html", ".htm")):
                     return match.group(0)
                 resources.add(resource)
-                return f'{match.group(1)}="../resources/chapter-{chapter_index:04d}/{resource}"'
+                safe_resource = _safe_resource_path(resource)
+                return f'{match.group(1)}="../resources/chapter-{chapter_index:04d}/{safe_resource}"'
             clean = re.sub(r'((?:src|href))=["\']([^"\'#]+)["\']', rewrite, clean, flags=re.I)
             if include_resources:
                 resource_bytes = sum(archive.getinfo(resource).file_size for resource in resources)
@@ -117,7 +122,7 @@ def build_bundle(epub: Path, output: Path, *, fallback: str | None = None,
                         or resource_bytes > MAX_CHAPTER_RESOURCE_BYTES):
                     raise ValueError("EPUB chapter resource budget exceeded")
                 for resource in sorted(resources):
-                    target = output / "resources" / f"chapter-{chapter_index:04d}" / resource
+                    target = output / "resources" / f"chapter-{chapter_index:04d}" / _safe_resource_path(resource)
                     target.parent.mkdir(parents=True, exist_ok=True)
                     data = archive.read(resource)
                     if resource.lower().endswith(".css"):
