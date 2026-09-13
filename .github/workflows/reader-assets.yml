@@ -200,7 +200,7 @@ jobs:
             doc|docx|ppt|pptx|pps|odp|xls|xlsx|csv|ods|wps) packages=(libreoffice qpdf fontconfig fonts-noto-cjk fonts-wqy-microhei ghostscript poppler-utils tesseract-ocr tesseract-ocr-chi-sim) ;;
             htm|html) packages=() ;;
             epub) packages=(calibre qpdf) ;;
-            mobi|azw3|fb2) packages=() ;;
+            mobi|azw3|fb2) packages=(calibre) ;;
             odt) packages=(libreoffice) ;;
             rtf) packages=(calibre libreoffice fontconfig fonts-noto-cjk fonts-wqy-microhei) ;;
             chm) packages=(calibre p7zip-full) ;;
