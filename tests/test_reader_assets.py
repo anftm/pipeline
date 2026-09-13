@@ -188,7 +188,8 @@ class ReaderAssetContractTests(unittest.TestCase):
             "epub", "foliate", reader_assets.EPUB_CHAPTER_SPLIT_BYTES))
         self.assertFalse(reader_assets.needs_epub_chapters(
             "epub", "foliate", reader_assets.EPUB_CHAPTER_SPLIT_BYTES - 1))
-        self.assertFalse(reader_assets.needs_epub_chapters("mobi", "foliate", 10 ** 9))
+        self.assertTrue(reader_assets.needs_epub_chapters("mobi", "foliate", 10 ** 9))
+        self.assertTrue(reader_assets.needs_epub_chapters("azw3", "foliate", 10 ** 9))
         self.assertFalse(reader_assets.needs_epub_chapters("epub", "pdf", 10 ** 9))
 
     def test_chapter_bundle_can_publish_text_without_resources(self):
@@ -285,17 +286,16 @@ class ScannerTests(unittest.TestCase):
         manifest["files"]["VoiceOfML/Test\0Big.epub"]["chapter_bundle_profile"] = reader_assets.EPUB_CHAPTER_PROFILE
         self.assertEqual(scan_reader_assets.build_queue(records, revisions, manifest), [])
 
-    def test_small_epub_and_non_epub_skip_chapter_upgrade(self):
+    def test_small_epub_and_small_non_epub_skip_chapter_upgrade(self):
         revisions = {"VoiceOfML/Test": "rev1"}
         manifest = reader_assets.empty_manifest()
         manifest["files"] = {
             "VoiceOfML/Test\0Small.epub": {"status": "ready", "profile": "foliate-original-v1"},
-            "VoiceOfML/Test\0Big.mobi": {"status": "ready", "profile": "foliate-original-v1"},
+            "VoiceOfML/Test\0Small.mobi": {"status": "ready", "profile": "foliate-original-v1"},
         }
         records = [
             {"Repo": "VoiceOfML/Test", "File": "Small", "Extension": "epub", "Folder": [], "Size": 10},
-            {"Repo": "VoiceOfML/Test", "File": "Big", "Extension": "mobi", "Folder": [],
-             "Size": reader_assets.EPUB_CHAPTER_SPLIT_BYTES + 1},
+            {"Repo": "VoiceOfML/Test", "File": "Small", "Extension": "mobi", "Folder": [], "Size": 10},
         ]
         self.assertEqual(scan_reader_assets.build_queue(records, revisions, manifest), [])
 

@@ -1458,9 +1458,15 @@ def convert_item(item: dict, bundle: Path, reusable: dict | None = None) -> dict
                     from . import epub_chapters
                 except ImportError:
                     import epub_chapters
+                chapter_source = target
+                if item["extension"] in {"mobi", "azw3", "fb2"}:
+                    chapter_source = work / "chapter-source.epub"
+                    run_checked(["ebook-convert", str(source), str(chapter_source), "--flow-size", "0"],
+                                timeout_seconds=EPUB_COMMAND_TIMEOUT_SECONDS)
+                    validate_output(chapter_source, "epub")
                 chapter_dir = bundle / Path(object_path).parent / EPUB_CHAPTER_BUNDLE_DIR
                 if not (chapter_dir / "chapter-manifest.json").is_file():
-                    epub_chapters.build_bundle(target, chapter_dir)
+                    epub_chapters.build_bundle(chapter_source, chapter_dir)
                 chapter_manifest_path = (Path(object_path).parent / EPUB_CHAPTER_BUNDLE_DIR
                                          / "chapter-manifest.json").as_posix()
             except Exception as exc:

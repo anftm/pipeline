@@ -78,8 +78,10 @@ def conversion_contract(extension: str, key: str = "") -> tuple[str, str, str]:
 
 
 def needs_epub_chapters(extension: str, reader_mode: str, source_bytes: int) -> bool:
-    """Whether a foliate EPUB is large enough to earn an independent chapter bundle."""
-    return (extension == "epub" and reader_mode == "foliate"
+    """Whether a large book should receive an independently fetched chapter bundle."""
+    return (extension in {"epub", "mobi", "azw3", "fb2"} and reader_mode == "foliate"
+            and int(source_bytes or 0) >= EPUB_CHAPTER_SPLIT_BYTES) or (
+                extension == "chm" and reader_mode == "epub"
             and int(source_bytes or 0) >= EPUB_CHAPTER_SPLIT_BYTES)
 
 
