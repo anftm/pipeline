@@ -87,6 +87,11 @@ def migrate(api: HfApi, repo: str, *, limit: int = 0, checkpoint: int = 0,
             path = entry["page_manifest"]["path"]
             try:
                 old = read_bucket_manifest(fs, path)
+                if old.get("version") == pdf_assets.PAGE_MANIFEST_VERSION:
+                    converted.append({"key": key, "path": path,
+                                      "page_count": old.get("page_count"),
+                                      "already_v2": True})
+                    continue
                 new = migrate_manifest(old)
                 target = root_path / path
                 target.parent.mkdir(parents=True, exist_ok=True)

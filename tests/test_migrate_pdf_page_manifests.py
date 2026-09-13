@@ -51,6 +51,20 @@ class PdfManifestMigrationTests(unittest.TestCase):
         sync.assert_called_once()
         self.assertEqual(sync.call_args.kwargs["include"], ["objects/a/page-manifest.json"])
 
+    def test_already_v2_is_idempotent(self):
+        api = Mock()
+        pdf_manifest = {"version": 1, "files": {
+            "r\0a.pdf": {"status": "ready", "page_manifest": {"path": "objects/a/page-manifest.json", "version": 1}},
+        }}
+        v2 = {"version": 2, "kind": "pdf-pages", "page_count": 4}
+        with patch.object(migration, "load_pdf_manifest", return_value=pdf_manifest), \
+                patch.object(migration, "read_bucket_manifest", return_value=v2), \
+                patch.object(migration, "sync_bucket") as sync:
+            report = migration.migrate(api, "repo", apply=True)
+        self.assertEqual(report["skipped"], [])
+        self.assertEqual(report["converted"][0]["already_v2"], True)
+        sync.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
