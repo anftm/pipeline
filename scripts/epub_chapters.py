@@ -17,10 +17,10 @@ MAX_CHAPTER_RESOURCES = 2000
 MAX_CHAPTER_RESOURCE_BYTES = 512 * 1024 * 1024
 
 try:
-    from .convert_reader_assets import sanitize_css, sanitize_xml_document
+    from .convert_reader_assets import sanitize_css, sanitize_html, sanitize_xml_document
     from .reader_assets import canonical_json, validate_chapter_manifest
 except ImportError:
-    from convert_reader_assets import sanitize_css, sanitize_xml_document
+    from convert_reader_assets import sanitize_css, sanitize_html, sanitize_xml_document
     from reader_assets import canonical_json, validate_chapter_manifest
 
 
@@ -90,7 +90,14 @@ def build_bundle(epub: Path, output: Path, *, fallback: str | None = None,
             source_path = _zip_path(base, item.get("href", ""))
             if source_path not in archive.namelist():
                 raise ValueError("EPUB spine resource is missing")
-            clean = sanitize_xml_document(archive.read(source_path).decode("utf-8", "replace"))
+            document = archive.read(source_path).decode("utf-8", "replace")
+            try:
+                clean = sanitize_xml_document(document)
+            except RuntimeError as exc:
+                if str(exc) != "EPUB XML content is malformed":
+                    raise
+                # Some EPUBs label HTML as XHTML but contain recoverable HTML.
+                clean = sanitize_html(document, allow_relative=True)
             def rewrite(match):
                 value = match.group(2)
                 try:
