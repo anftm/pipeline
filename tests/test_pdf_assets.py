@@ -298,7 +298,7 @@ class PdfAssetsTests(unittest.TestCase):
 
     def test_pending_records_exclude_completed_and_small_sources(self):
         records = [
-            {"key": "r\0small.pdf", "source_kind": "upstream", "source_bytes": pdf_assets.LARGE_BYTES - 1},
+            {"key": "r\0small.pdf", "source_kind": "upstream", "source_bytes": pdf_assets.RISK_PDF_MIN_BYTES - 1},
             {"key": "r\0done.pdf", "source_kind": "upstream", "source_bytes": pdf_assets.LARGE_BYTES},
             {"key": "r\0new.pdf", "source_kind": "upstream", "source_bytes": pdf_assets.LARGE_BYTES},
         ]
@@ -308,6 +308,12 @@ class PdfAssetsTests(unittest.TestCase):
                              "decision_profile": pdf_assets.PDF_DECISION_PROFILE},
         }})
         self.assertEqual([item["key"] for item in pending], ["r\0new.pdf"])
+
+    def test_pending_records_include_medium_pdfs_for_range_risk_classification(self):
+        item = {"key": "r\0medium.pdf", "source_kind": "upstream",
+                "source_bytes": pdf_assets.RISK_PDF_MIN_BYTES}
+        pending = plan_pdf_assets.pending_records([item], {"files": {}})
+        self.assertEqual([record["key"] for record in pending], ["r\0medium.pdf"])
 
     def test_pending_records_rebuild_old_streams_and_linearized_pdfs(self):
         records = [

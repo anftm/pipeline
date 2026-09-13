@@ -133,7 +133,7 @@ def pending_records(records: list[dict], manifest: dict) -> list[dict]:
             if not complete:
                 pending.append(item)
             continue
-        if (int(item.get("source_bytes") or 0) >= pdf_assets.LARGE_BYTES
+        if (int(item.get("source_bytes") or 0) >= pdf_assets.RISK_PDF_MIN_BYTES
                 and not complete):
             pending.append(item)
     return pending
