@@ -165,7 +165,7 @@ class ReaderAssetContractTests(unittest.TestCase):
             manifest = epub_chapters.build_bundle(epub, output)
             self.assertEqual([item["index"] for item in manifest["chapters"]], [1, 2])
             self.assertNotIn("script", (output / "chapters/chapter-0001.xhtml").read_text())
-            self.assertTrue((output / "resources/OEBPS/images/x.png").is_file())
+            self.assertTrue((output / "resources/chapter-0001/OEBPS/images/x.png").is_file())
             self.assertTrue((output / "epub-search-index.json.gz").is_file())
             self.assertEqual(manifest["search_index"]["bytes"], (output / "epub-search-index.json.gz").stat().st_size)
 
@@ -180,7 +180,7 @@ class ReaderAssetContractTests(unittest.TestCase):
                 archive.writestr("image.png", b"image")
 
             with patch.object(epub_chapters, "MAX_CHAPTER_RESOURCE_BYTES", 1), self.assertRaisesRegex(
-                    ValueError, "resource budget"):
+                    ValueError, "chapter resource budget"):
                 epub_chapters.build_bundle(epub, Path(root) / "bundle")
 
     def test_epub_chapter_split_threshold(self):
@@ -203,7 +203,7 @@ class ReaderAssetContractTests(unittest.TestCase):
                 archive.writestr("image.png", b"x" * 10)
             manifest = epub_chapters.build_bundle(epub, output, include_resources=False)
             self.assertTrue((output / "epub-search-index.json.gz").is_file())
-            self.assertFalse((output / "resources/image.png").exists())
+            self.assertFalse((output / "resources/chapter-0001/image.png").exists())
             self.assertNotIn("resources", manifest)
 
 

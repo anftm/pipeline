@@ -82,7 +82,6 @@ def build_bundle(epub: Path, output: Path, *, fallback: str | None = None,
                 manifest[node.attrib.get("id", "")] = node.attrib
         chapters = []
         search_chapters = []
-        resources = set()
         for number, ref in enumerate((n for n in opf.iter() if n.tag.rsplit("}", 1)[-1] == "itemref"), 1):
             item = manifest.get(ref.attrib.get("idref"))
             if not item or item.get("media-type", "").lower() not in {"application/xhtml+xml", "text/html"}:
@@ -99,6 +98,8 @@ def build_bundle(epub: Path, output: Path, *, fallback: str | None = None,
                     raise
                 # Some EPUBs label HTML as XHTML but contain recoverable HTML.
                 clean = sanitize_html(document, allow_relative=True)
+            chapter_index = len(chapters) + 1
+            resources = set()
             def rewrite(match):
                 value = match.group(2)
                 try:
@@ -107,30 +108,29 @@ def build_bundle(epub: Path, output: Path, *, fallback: str | None = None,
                     return match.group(0)
                 if resource not in archive.namelist() or resource.lower().endswith((".xhtml", ".html", ".htm")):
                     return match.group(0)
-                return f'{match.group(1)}="../resources/{resource}"'
+                resources.add(resource)
+                return f'{match.group(1)}="../resources/chapter-{chapter_index:04d}/{resource}"'
             clean = re.sub(r'((?:src|href))=["\']([^"\'#]+)["\']', rewrite, clean, flags=re.I)
-            target = output / "chapters" / f"chapter-{len(chapters) + 1:04d}.xhtml"
+            if include_resources:
+                resource_bytes = sum(archive.getinfo(resource).file_size for resource in resources)
+                if (len(resources) > MAX_CHAPTER_RESOURCES
+                        or resource_bytes > MAX_CHAPTER_RESOURCE_BYTES):
+                    raise ValueError("EPUB chapter resource budget exceeded")
+                for resource in sorted(resources):
+                    target = output / "resources" / f"chapter-{chapter_index:04d}" / resource
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    data = archive.read(resource)
+                    if resource.lower().endswith(".css"):
+                        data = sanitize_css(data.decode("utf-8", "replace")).encode("utf-8")
+                    target.write_bytes(data)
+            target = output / "chapters" / f"chapter-{chapter_index:04d}.xhtml"
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(clean, encoding="utf-8")
             data = target.read_bytes()
             chapters.append({"index": len(chapters) + 1, "title": f"章节 {number}", "path": target.relative_to(output).as_posix(), "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()})
             search_chapters.append({"index": len(chapters), "title": f"章节 {number}", "path": target.relative_to(output).as_posix(), "text": _chapter_text(clean)})
-            for match in re.finditer(r"(?:src|href)=[\"']\.\./resources/([^\"'#]+)", clean, re.I):
-                resources.add(posixpath.normpath(match.group(1)))
         if not chapters:
             raise ValueError("EPUB spine has no readable chapters")
-        if include_resources:
-            resource_bytes = sum(archive.getinfo(resource).file_size for resource in resources)
-            if (len(resources) > MAX_CHAPTER_RESOURCES
-                    or resource_bytes > MAX_CHAPTER_RESOURCE_BYTES):
-                raise ValueError("EPUB chapter bundle resource budget exceeded")
-            for resource in sorted(resources):
-                target = output / "resources" / resource
-                target.parent.mkdir(parents=True, exist_ok=True)
-                data = archive.read(resource)
-                if resource.lower().endswith(".css"):
-                    data = sanitize_css(data.decode("utf-8", "replace")).encode("utf-8")
-                target.write_bytes(data)
     search_data = canonical_json({"version": 1, "kind": "epub-search-index", "chapters": search_chapters})
     search_bytes = gzip.compress(search_data, mtime=0)
     search_target = output / "epub-search-index.json.gz"
