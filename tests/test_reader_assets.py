@@ -282,8 +282,7 @@ class ScannerTests(unittest.TestCase):
         manifest["files"] = {"VoiceOfML/Test\0Big.epub": dict(ready)}
         queue = scan_reader_assets.build_queue(records, revisions, manifest)
         self.assertEqual([item["path"] for item in queue], ["Big.epub"])
-        manifest["files"]["VoiceOfML/Test\0Big.epub"]["chapter_manifest"] = (
-            "objects/aa/" + "b" * 64 + "/foliate-original-v1/epub-chapters/chapter-manifest.json")
+        manifest["files"]["VoiceOfML/Test\0Big.epub"]["chapter_bundle_profile"] = reader_assets.EPUB_CHAPTER_PROFILE
         self.assertEqual(scan_reader_assets.build_queue(records, revisions, manifest), [])
 
     def test_small_epub_and_non_epub_skip_chapter_upgrade(self):

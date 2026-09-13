@@ -11,13 +11,13 @@ from huggingface_hub.errors import RepositoryNotFoundError
 
 try:
     from .reader_assets import (
-        MANIFEST_NAME, READER_ASSETS_REPO, asset_key, canonical_json, decode_search_payload,
+        EPUB_CHAPTER_PROFILE, MANIFEST_NAME, READER_ASSETS_REPO, asset_key, canonical_json, decode_search_payload,
         empty_manifest, load_json, needs_epub_chapters, relative_path, reusable_object_key,
         source_conversion_contract, source_url, validate_manifest,
     )
 except ImportError:
     from reader_assets import (
-        MANIFEST_NAME, READER_ASSETS_REPO, asset_key, canonical_json, decode_search_payload,
+        EPUB_CHAPTER_PROFILE, MANIFEST_NAME, READER_ASSETS_REPO, asset_key, canonical_json, decode_search_payload,
         empty_manifest, load_json, needs_epub_chapters, relative_path, reusable_object_key,
         source_conversion_contract, source_url, validate_manifest,
     )
@@ -85,7 +85,7 @@ def build_queue(records, revisions, manifest, *, repo="", extension="", exact_pa
             )
             missing_chapters = (
                 needs_epub_chapters(ext, reader_mode, int(record.get("Size") or 0))
-                and not existing.get("chapter_manifest")
+                and existing.get("chapter_bundle_profile") != EPUB_CHAPTER_PROFILE
             )
             if not retryable_update and not missing_chapters:
                 continue

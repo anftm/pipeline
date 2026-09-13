@@ -14,7 +14,7 @@ import xml.etree.ElementTree as ET
 from html.parser import HTMLParser
 
 MAX_CHAPTER_RESOURCES = 2000
-MAX_CHAPTER_RESOURCE_BYTES = 256 * 1024 * 1024
+MAX_CHAPTER_RESOURCE_BYTES = 512 * 1024 * 1024
 
 try:
     from .convert_reader_assets import sanitize_css, sanitize_xml_document

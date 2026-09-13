@@ -35,12 +35,12 @@ from PIL import Image, ImageSequence
 
 try:
     from .reader_assets import (
-        EPUB_CHAPTER_BUNDLE_DIR, PASSWORD_RE, canonical_json, load_json, needs_epub_chapters,
+        EPUB_CHAPTER_BUNDLE_DIR, EPUB_CHAPTER_PROFILE, PASSWORD_RE, canonical_json, load_json, needs_epub_chapters,
         object_profile_path, reusable_object_key, source_password, validate_object_path,
     )
 except ImportError:
     from reader_assets import (
-        EPUB_CHAPTER_BUNDLE_DIR, PASSWORD_RE, canonical_json, load_json, needs_epub_chapters,
+        EPUB_CHAPTER_BUNDLE_DIR, EPUB_CHAPTER_PROFILE, PASSWORD_RE, canonical_json, load_json, needs_epub_chapters,
         object_profile_path, reusable_object_key, source_password, validate_object_path,
     )
 
@@ -1451,6 +1451,7 @@ def convert_item(item: dict, bundle: Path, reusable: dict | None = None) -> dict
                 if existing and file_sha256(target) != existing["sha256"]:
                     raise RuntimeError("reusable reader artifact digest mismatch")
         chapter_manifest_path = None
+        chapter_bundle_error = None
         if needs_epub_chapters(item["extension"], item["reader_mode"], source_bytes):
             try:
                 try:
@@ -1463,8 +1464,9 @@ def convert_item(item: dict, bundle: Path, reusable: dict | None = None) -> dict
                 chapter_manifest_path = (Path(object_path).parent / EPUB_CHAPTER_BUNDLE_DIR
                                          / "chapter-manifest.json").as_posix()
             except Exception as exc:
+                chapter_bundle_error = f"{type(exc).__name__}: {exc}"
                 print(f"warning: {item['repo']}/{item['path']}: EPUB chapter bundle skipped: "
-                      f"{type(exc).__name__}: {exc}")
+                      f"{chapter_bundle_error}")
         result = {
             "key": item["key"], "status": "ready", "source_revision": item["source_revision"],
             "source_sha256": digest, "source_bytes": source_bytes,
@@ -1476,6 +1478,10 @@ def convert_item(item: dict, bundle: Path, reusable: dict | None = None) -> dict
             result["fallback_path"] = object_path
         if chapter_manifest_path:
             result["chapter_manifest"] = chapter_manifest_path
+            result["chapter_bundle_profile"] = EPUB_CHAPTER_PROFILE
+        elif needs_epub_chapters(item["extension"], item["reader_mode"], source_bytes):
+            result["chapter_bundle_profile"] = EPUB_CHAPTER_PROFILE
+            result["chapter_bundle_error"] = chapter_bundle_error or "chapter bundle was not produced"
         return result
 
 
