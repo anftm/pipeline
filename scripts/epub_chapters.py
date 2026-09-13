@@ -89,7 +89,8 @@ def build_bundle(epub: Path, output: Path, *, fallback: str | None = None,
                 continue
             source_path = _zip_path(base, item.get("href", ""))
             if source_path not in archive.namelist():
-                raise ValueError("EPUB spine resource is missing")
+                # Keep readable chapters when a broken package has one stale spine entry.
+                continue
             document = archive.read(source_path).decode("utf-8", "replace")
             try:
                 clean = sanitize_xml_document(document)
