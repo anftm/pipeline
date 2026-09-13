@@ -36,7 +36,11 @@ def _zip_path(base: str, href: str) -> str:
 
 
 def _safe_resource_path(path: str) -> str:
-    return re.sub(r"[\x00-\x1f\x7f]", lambda match: f"_x{ord(match.group()):02x}_", path)
+    def replace(match):
+        value = match.group()
+        return "_x00_" if value.lower() == "x00" else f"_x{ord(value):02x}_"
+
+    return re.sub(r"x00|[\x00-\x1f\x7f]", replace, path, flags=re.IGNORECASE)
 
 
 class _TextExtractor(HTMLParser):
