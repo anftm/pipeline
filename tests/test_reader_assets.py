@@ -235,7 +235,11 @@ class ScannerTests(unittest.TestCase):
                     archive.writestr("b.xhtml", "<html><body><p>chapter two</p></body></html>")
                 return hashlib.sha256(target.read_bytes()).hexdigest(), reader_assets.EPUB_CHAPTER_SPLIT_BYTES + 1
 
-            with patch.object(convert_reader_assets, "download_source", side_effect=download):
+            def normalize(command, **_kwargs):
+                Path(command[2]).write_bytes(Path(command[1]).read_bytes())
+
+            with patch.object(convert_reader_assets, "download_source", side_effect=download), \
+                    patch.object(convert_reader_assets, "run_checked", side_effect=normalize):
                 result = convert_reader_assets.convert_item(item, bundle)
             self.assertEqual(result["status"], "ready")
             self.assertTrue(result["path"].endswith("/document.epub"))

@@ -1459,7 +1459,7 @@ def convert_item(item: dict, bundle: Path, reusable: dict | None = None) -> dict
                 except ImportError:
                     import epub_chapters
                 chapter_source = target
-                if item["extension"] in {"mobi", "azw3", "fb2"}:
+                if item["extension"] in {"epub", "mobi", "azw3", "fb2"}:
                     chapter_source = work / "chapter-source.epub"
                     run_checked(["ebook-convert", str(source), str(chapter_source), "--flow-size", "0"],
                                 timeout_seconds=EPUB_COMMAND_TIMEOUT_SECONDS)
