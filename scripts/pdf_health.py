@@ -94,7 +94,8 @@ def encode_report(report: dict) -> bytes:
     return gzip.compress(payload, compresslevel=9, mtime=0)
 
 
-def conversion_ready_entry(record: dict, pdf_manifest: dict | None) -> dict | None:
+def conversion_ready_entry(record: dict, pdf_manifest: dict | None,
+                           current: dict | None = None) -> dict | None:
     """Proof that the conversion workflow fully rendered this exact source revision.
 
     A current-profile ready entry means every page was rasterized to WebP, which
@@ -103,7 +104,13 @@ def conversion_ready_entry(record: dict, pdf_manifest: dict | None) -> dict | No
     if not isinstance(pdf_manifest, dict):
         return None
     entry = pdf_manifest.get("files", {}).get(record["key"])
-    if not pdf_assets.is_current_ready(entry, record.get("source_revision")):
+    if not pdf_assets.is_current_ready(entry):
+        return None
+    same_revision = entry.get("source_revision") == record.get("source_revision")
+    same_content = (isinstance(current, dict)
+                    and current.get("sha256") == entry.get("source_sha256")
+                    and current.get("declared_bytes") == entry.get("source_bytes"))
+    if not same_revision and not same_content:
         return None
     return {"key": record["key"], "status": "healthy", "reason": "conversion-ready",
             "source_revision": record.get("source_revision"),
@@ -115,9 +122,9 @@ def pending_records(records: list[dict], report: dict, pdf_manifest: dict | None
     files = report.get("files", {})
     pending = []
     for record in records:
-        if conversion_ready_entry(record, pdf_manifest) is not None:
-            continue
         current = files.get(record["key"])
+        if conversion_ready_entry(record, pdf_manifest, current) is not None:
+            continue
         if not isinstance(current, dict) or current.get("status") in {"download-failed", "tool-error"}:
             pending.append(record)
             continue
@@ -139,11 +146,13 @@ def weighted_shards(records: list[dict], count: int = SHARD_COUNT) -> list[list[
 
 
 def plan(records: list[dict], report: dict, pdf_manifest: dict | None = None) -> dict:
+    files = report.get("files", {})
     pending = pending_records(records, report, pdf_manifest)
     selected = pending[:BATCH_SIZE]
     shards = weighted_shards(selected) if selected else [[]]
     conversion_ready = [entry for record in records
-                        if (entry := conversion_ready_entry(record, pdf_manifest)) is not None]
+                        if (entry := conversion_ready_entry(record, pdf_manifest,
+                                                            files.get(record["key"]))) is not None]
     return {"version": REPORT_VERSION, "kind": "pdf-health-queue",
             "batch_size": BATCH_SIZE, "shard_count": SHARD_COUNT,
             "total_records": len(records), "pending_records": len(pending),

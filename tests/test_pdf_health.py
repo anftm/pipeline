@@ -94,6 +94,25 @@ class PdfHealthTests(unittest.TestCase):
         self.assertEqual(merged["files"]["r\0proven.pdf"]["reason"], "conversion-ready")
         self.assertEqual(api.create_commit.call_count, 1)
 
+    def test_conversion_ready_reuses_same_content_across_source_revision(self):
+        from scripts import pdf_assets
+        manifest = {"version": 1, "files": {
+            "r\0proven.pdf": {
+                "status": "ready", "strategy": "sampled-webp", "source_revision": "old",
+                "source_sha256": "same", "source_bytes": 100,
+                "render_profile": pdf_assets.PDF_PROFILE,
+                "decision_profile": pdf_assets.PDF_DECISION_PROFILE,
+            }
+        }}
+        records = [{"key": "r\0proven.pdf", "source_revision": "new", "declared_bytes": 100}]
+        report = {"version": 1, "files": {
+            "r\0proven.pdf": {"source_revision": "new", "sha256": "same", "declared_bytes": 100,
+                               "status": "tool-error", "reason": "qpdf-timeout"}
+        }}
+        self.assertEqual(pdf_health.pending_records(records, report, manifest), [])
+        report["files"]["r\0proven.pdf"]["sha256"] = "different"
+        self.assertEqual(pdf_health.pending_records(records, report, manifest), records)
+
     def test_merge_report_prunes_removed_files(self):
         remote = {"version": 1, "files": {"keep": {"status": "healthy"},
                                             "removed": {"status": "corrupt"}}}
