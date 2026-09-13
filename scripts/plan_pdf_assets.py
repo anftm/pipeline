@@ -51,8 +51,12 @@ def plan(records: list[dict], source_dir: Path | None, assets_repo: str, shard_c
             source_sha, source_bytes = pdf_assets.digest(source)
             classification = pdf_assets.classify_pdf(source, pages)
             outline = [] if classification == "native-text" else pdf_assets.extract_pdf_outline(source, pages)
+            risk_candidate = (pdf_assets.RISK_PDF_MIN_BYTES <= source_bytes < pdf_assets.LARGE_BYTES
+                              and pages >= pdf_assets.RISK_PDF_MIN_PAGES
+                              and classification == "scan")
             return {**item, "page_count": pages, "source_sha256": source_sha,
                     "source_bytes": source_bytes, "classification": classification,
+                    "range_risk_candidate": risk_candidate,
                     "outline": outline,
                     "decision_profile": pdf_assets.PDF_DECISION_PROFILE}
         except (OSError, subprocess.CalledProcessError, ValueError, RuntimeError):
@@ -116,8 +120,10 @@ def pending_records(records: list[dict], manifest: dict) -> list[dict]:
     pending = []
     for item in records:
         current = done.get(item["key"])
+        expected_profile = (pdf_assets.PDF_RISK_DECISION_PROFILE
+                            if item.get("range_risk_candidate") else pdf_assets.PDF_DECISION_PROFILE)
         complete = current and (
-            pdf_assets.is_current_ready(current)
+            pdf_assets.is_current_ready(current, decision_profile=expected_profile)
             or (current.get("status") == "skipped" and current.get("reason") == "native-text-pdf"
                 and current.get("decision_profile") == pdf_assets.PDF_DECISION_PROFILE)
             or (current.get("status") == "failed"

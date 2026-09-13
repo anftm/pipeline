@@ -32,6 +32,8 @@ PAGE_MANIFEST_VERSION = 2
 PAGE_MANIFEST_NAME = "page-manifest.json"
 MI = 1024 * 1024
 LARGE_BYTES = 100 * MI
+RISK_PDF_MIN_BYTES = 32 * MI
+RISK_PDF_MIN_PAGES = 300
 WEBP_QUALITY = int(os.environ.get("PDF_WEBP_QUALITY", "85"))
 WEBP_MAX_DIMENSION = int(os.environ.get("PDF_WEBP_MAX_DIMENSION", "1800"))
 SAMPLE_PAGES = int(os.environ.get("PDF_SAMPLE_PAGES", "3"))
@@ -43,6 +45,7 @@ MAX_PDF_OUTLINE_TITLE_CHARS = 500
 MAX_PDF_OUTLINE_DEPTH = 32
 PDF_PROFILE = f"pdf-pages-v3-{WEBP_QUALITY}-{WEBP_MAX_DIMENSION}-no-upscale-toc"
 PDF_DECISION_PROFILE = f"pdf-large-v2-{LARGE_BYTES}-whole-book-{SAMPLE_PAGES}"
+PDF_RISK_DECISION_PROFILE = f"pdf-range-risk-v1-{RISK_PDF_MIN_BYTES}-{RISK_PDF_MIN_PAGES}-{SAMPLE_PAGES}"
 SOURCE_PROFILES = {
     "upstream": "pdf-assets-upstream-v1",
     "generated": "pdf-assets-reader-generated-v1",
@@ -89,7 +92,8 @@ def compact_page_manifest(source_sha: str, profile: str, pages: list[dict],
     return manifest
 
 
-def is_current_ready(entry: dict, source_revision: str | None = None) -> bool:
+def is_current_ready(entry: dict, source_revision: str | None = None,
+                     decision_profile: str | None = None) -> bool:
     """Whether a manifest entry is a successful build with the current profiles.
 
     When source_revision is given it must also match (used by the health audit
@@ -99,7 +103,7 @@ def is_current_ready(entry: dict, source_revision: str | None = None) -> bool:
     return (isinstance(entry, dict) and entry.get("status") == "ready"
             and entry.get("strategy") == "sampled-webp"
             and entry.get("render_profile") == PDF_PROFILE
-            and entry.get("decision_profile") == PDF_DECISION_PROFILE
+            and entry.get("decision_profile") == (decision_profile or PDF_DECISION_PROFILE)
             and (source_revision is None or entry.get("source_revision") == source_revision))
 
 
@@ -304,7 +308,8 @@ def _render(pdf: Path, page: int, directory: Path, extension: str = "pdf") -> Pa
 def build_item(item: dict, source: Path, bundle: Path) -> dict:
     source_sha, actual_bytes = digest(source)
     base = {**item, "source_sha256": source_sha, "source_bytes": actual_bytes}
-    if actual_bytes < LARGE_BYTES:
+    risk_candidate = bool(item.get("range_risk_candidate"))
+    if actual_bytes < LARGE_BYTES and not risk_candidate:
         return {**base, "status": "skipped", "reason": "below-minimum-100-mib", "strategy": "none",
                 "decision_profile": PDF_DECISION_PROFILE}
     object_dir = object_root(source_sha, str(item.get("key") or ""))
@@ -322,10 +327,12 @@ def build_item(item: dict, source: Path, bundle: Path) -> dict:
         sample_sizes = []
         sample_end = max(sample)
         classification = str(item.get("classification") or classify_pdf(source, pages))
-        metadata = {"pages": pages, "classification": classification, "sample_pages": sample}
+        decision_profile = PDF_RISK_DECISION_PROFILE if risk_candidate else PDF_DECISION_PROFILE
+        metadata = {"pages": pages, "classification": classification, "sample_pages": sample,
+                    "range_risk_candidate": risk_candidate}
         if classification == "native-text":
             return {**base, "status": "skipped", "reason": "native-text-pdf",
-                    "strategy": "native-text", "decision_profile": PDF_DECISION_PROFILE, "pdf": metadata}
+                    "strategy": "native-text", "decision_profile": decision_profile, "pdf": metadata}
         for page in sample:
             sample_sizes.append(_render(source, page, Path(temp), str(item.get("extension") or "pdf")).stat().st_size)
         range_pages = page_end - page_start + 1
@@ -343,7 +350,7 @@ def build_item(item: dict, source: Path, bundle: Path) -> dict:
                                  "sha256": page_sha, "bytes": page_bytes})
     if ranged:
         return {**base, "path": "", "status": "ready", "strategy": "sampled-webp", "pdf": metadata,
-                "render_profile": PDF_PROFILE, "decision_profile": PDF_DECISION_PROFILE,
+                "render_profile": PDF_PROFILE, "decision_profile": decision_profile,
                 "pages": page_entries, "outline": outline}
     page_manifest = compact_page_manifest(
         source_sha, PDF_PROFILE, page_entries, outline, object_dir)
@@ -352,7 +359,7 @@ def build_item(item: dict, source: Path, bundle: Path) -> dict:
     manifest_path.write_text(json.dumps(page_manifest, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
     manifest_sha, manifest_bytes = digest(manifest_path)
     return {**base, "path": "", "status": "ready", "strategy": "sampled-webp", "pdf": metadata,
-            "render_profile": PDF_PROFILE, "decision_profile": PDF_DECISION_PROFILE,
+        "render_profile": PDF_PROFILE, "decision_profile": decision_profile,
             "pages": page_entries, "outline": outline, "page_manifest": {
                 "path": (object_dir / PAGE_MANIFEST_NAME).as_posix(),
                 "sha256": manifest_sha, "bytes": manifest_bytes,

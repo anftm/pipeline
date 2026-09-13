@@ -274,6 +274,28 @@ class PdfAssetsTests(unittest.TestCase):
                 {"page": 1, "path": "objects/aa/book/pages/wrong.webp"},
             ])
 
+    def test_range_risk_candidate_allows_scan_pdf_below_large_threshold(self):
+        self.assertLess(pdf_assets.RISK_PDF_MIN_BYTES, pdf_assets.LARGE_BYTES)
+        self.assertTrue(pdf_assets.RISK_PDF_MIN_PAGES >= 300)
+        with tempfile.TemporaryDirectory() as root:
+            source = Path(root) / "risk.pdf"
+            bundle = Path(root) / "bundle"
+            bundle.mkdir()
+            source.write_bytes(b"%PDF-1.7\n" + b"x" * (pdf_assets.RISK_PDF_MIN_BYTES + 1))
+            item = {
+                "key": "r\0risk.pdf", "extension": "pdf", "range_risk_candidate": True,
+                "classification": "scan", "page_start": 1, "page_end": 1,
+            }
+            rendered = bundle / "rendered.webp"
+            rendered.parent.mkdir(parents=True, exist_ok=True)
+            rendered.write_bytes(b"webp")
+            with patch.object(pdf_assets, "digest", return_value=("a" * 64, pdf_assets.RISK_PDF_MIN_BYTES + 1)), \
+                    patch.object(pdf_assets, "_pages", return_value=1), \
+                    patch.object(pdf_assets, "extract_pdf_outline", return_value=[]), \
+                    patch.object(pdf_assets, "_render", return_value=rendered):
+                result = pdf_assets.build_item(item, source, bundle)
+            self.assertNotEqual(result["reason"] if "reason" in result else None, "below-minimum-100-mib")
+
     def test_pending_records_exclude_completed_and_small_sources(self):
         records = [
             {"key": "r\0small.pdf", "source_kind": "upstream", "source_bytes": pdf_assets.LARGE_BYTES - 1},
