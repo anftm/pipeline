@@ -85,7 +85,11 @@ def build_queue(records, revisions, manifest, *, repo="", extension="", exact_pa
             )
             missing_chapters = (
                 needs_epub_chapters(ext, reader_mode, int(record.get("Size") or 0))
-                and existing.get("chapter_bundle_profile") != EPUB_CHAPTER_PROFILE
+                and (
+                    existing.get("chapter_bundle_profile") != EPUB_CHAPTER_PROFILE
+                    or not existing.get("chapter_manifest")
+                    or existing.get("chapter_bundle_error")
+                )
             )
             if not retryable_update and not missing_chapters:
                 continue
