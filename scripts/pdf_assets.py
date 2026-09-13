@@ -34,6 +34,7 @@ MI = 1024 * 1024
 LARGE_BYTES = 100 * MI
 RISK_PDF_MIN_BYTES = 32 * MI
 RISK_PDF_MIN_PAGES = 300
+RANGE_RISK_ENABLED = os.environ.get("PDF_RANGE_RISK_ENABLED", "0").lower() in {"1", "true", "yes"}
 WEBP_QUALITY = int(os.environ.get("PDF_WEBP_QUALITY", "85"))
 WEBP_MAX_DIMENSION = int(os.environ.get("PDF_WEBP_MAX_DIMENSION", "1800"))
 SAMPLE_PAGES = int(os.environ.get("PDF_SAMPLE_PAGES", "3"))

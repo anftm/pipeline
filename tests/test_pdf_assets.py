@@ -312,7 +312,8 @@ class PdfAssetsTests(unittest.TestCase):
     def test_pending_records_include_medium_pdfs_for_range_risk_classification(self):
         item = {"key": "r\0medium.pdf", "source_kind": "upstream",
                 "source_bytes": pdf_assets.RISK_PDF_MIN_BYTES}
-        pending = plan_pdf_assets.pending_records([item], {"files": {}})
+        with patch.object(pdf_assets, "RANGE_RISK_ENABLED", True):
+            pending = plan_pdf_assets.pending_records([item], {"files": {}})
         self.assertEqual([record["key"] for record in pending], ["r\0medium.pdf"])
 
     def test_pending_records_rebuild_old_streams_and_linearized_pdfs(self):
