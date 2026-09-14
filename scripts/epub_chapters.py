@@ -121,6 +121,32 @@ class _TextExtractor(HTMLParser):
             self.parts.append(data)
 
 
+class _TitleExtractor(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts = []
+        self.capture = False
+
+    def handle_starttag(self, tag, attrs):
+        if tag.lower() in {"title", "h1", "h2", "h3"} and not self.parts:
+            self.capture = True
+
+    def handle_endtag(self, tag):
+        if tag.lower() in {"title", "h1", "h2", "h3"}:
+            self.capture = False
+
+    def handle_data(self, data):
+        if self.capture:
+            self.parts.append(data)
+
+
+def _document_title(document: str) -> str:
+    parser = _TitleExtractor()
+    parser.feed(document)
+    parser.close()
+    return re.sub(r"\s+", " ", html.unescape(" ".join(parser.parts))).strip()
+
+
 def _chapter_text(document: str) -> str:
     parser = _TextExtractor()
     parser.feed(document)
@@ -155,7 +181,8 @@ def build_bundle(epub: Path, output: Path, *, fallback: str | None = None,
         toc_titles = _toc_titles(archive, opf_path, manifest, names)
         for number, ref in enumerate((n for n in opf.iter() if _local_name(n) == "itemref"), 1):
             item = manifest.get(ref.attrib.get("idref"))
-            if not item or item.get("media-type", "").lower() not in {"application/xhtml+xml", "text/html"}:
+            if (not item or "nav" in item.get("properties", "").split()
+                    or item.get("media-type", "").lower() not in {"application/xhtml+xml", "text/html"}):
                 continue
             source_path = _zip_path(base, item.get("href", ""))
             if source_path not in names:
@@ -183,7 +210,7 @@ def build_bundle(epub: Path, output: Path, *, fallback: str | None = None,
                 safe_resource = _safe_resource_path(resource)
                 return f'{match.group(1)}="../resources/__CHAPTER_RESOURCE__/{safe_resource}"'
             clean = re.sub(r'((?:src|href))=["\']([^"\'#]+)["\']', rewrite, clean, flags=re.I)
-            title = toc_titles.get(source_path) or f"章节 {number}"
+            title = toc_titles.get(source_path) or _document_title(clean) or f"章节 {number}"
             chapter_records.append({"index": chapter_index, "title": title, "clean": clean, "resources": resources})
             resource_usage.update(resources)
         if not chapter_records:
