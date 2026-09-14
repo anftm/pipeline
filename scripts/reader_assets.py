@@ -60,6 +60,19 @@ CONVERTIBLE_EXTENSIONS = {
     "wmv": ("ffmpeg-video-mp4-h264-aac-v1", "video", "video.mp4"),
 }
 PROTECTED_PDF_CONTRACT = ("qpdf-decrypted-v1", "pdf", "document.pdf")
+GBK_PDF_CONTRACT = ("gbk-font-repair-v1", "pdf", "document.pdf")
+GBK_PDF_FOLDER = "A4 毛泽东主席/03-03 建国以来毛泽东文稿 林一章版"
+KNOWN_GBK_PDFS = {
+    ("VoiceOfML/Teachers", f"{GBK_PDF_FOLDER}/{name}.pdf")
+    for name in (
+        "合订本", "第1册 (1949.9-1950.12)", "第2册 (1951.1-1951.12)",
+        "第3册 (1952.1-1952.12)", "第4册 (1953.1-1954.12)",
+        "第5册 (1955.1-1955.12)", "第6册 (1956.1-1957.12)",
+        "第7册 (1958.1-1958.12)", "第8册 (1959.1-1959.12)",
+        "第9册 (1960.1-1961.12)", "第10册 (1962.1-1963.12)",
+        "第11册 (1964.1-1965.12)",
+    )
+}
 PASSWORD_RE = re.compile(
     r"(?:密码|口令|password|passwd)\s*(?:[：:=]\s*|(?=[A-Za-z0-9]))"
     r"([^\s\]〕】）)},，；;]+)",
@@ -153,6 +166,8 @@ def validate_chapter_manifest(manifest: dict) -> dict:
 def source_conversion_contract(repo: str, path: str, extension: str, source_bytes: int = 0):
     if extension in CONVERTIBLE_EXTENSIONS:
         return CONVERTIBLE_EXTENSIONS[extension]
+    if extension == "pdf" and (repo, path) in KNOWN_GBK_PDFS:
+        return GBK_PDF_CONTRACT
     if extension == "pdf" and source_password(repo, path):
         return PROTECTED_PDF_CONTRACT
     return None

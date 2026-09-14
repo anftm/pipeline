@@ -35,12 +35,12 @@ from PIL import Image, ImageSequence
 
 try:
     from .reader_assets import (
-        EPUB_CHAPTER_BUNDLE_DIR, EPUB_CHAPTER_PROFILE, PASSWORD_RE, canonical_json, load_json, needs_epub_chapters,
+        EPUB_CHAPTER_BUNDLE_DIR, EPUB_CHAPTER_PROFILE, GBK_PDF_CONTRACT, PASSWORD_RE, canonical_json, load_json, needs_epub_chapters,
         object_profile_path, reusable_object_key, source_password, validate_object_path,
     )
 except ImportError:
     from reader_assets import (
-        EPUB_CHAPTER_BUNDLE_DIR, EPUB_CHAPTER_PROFILE, PASSWORD_RE, canonical_json, load_json, needs_epub_chapters,
+        EPUB_CHAPTER_BUNDLE_DIR, EPUB_CHAPTER_PROFILE, GBK_PDF_CONTRACT, PASSWORD_RE, canonical_json, load_json, needs_epub_chapters,
         object_profile_path, reusable_object_key, source_password, validate_object_path,
     )
 
@@ -1139,6 +1139,13 @@ def convert_file(item: dict, source: Path, target: Path, work: Path) -> None:
                     document.decrypt(decrypted)
                 source = decrypted_source
     if ext == "pdf":
+        if item.get("profile") == GBK_PDF_CONTRACT[0]:
+            try:
+                from .repair_gbk_pdf import repair_pdf
+            except ImportError:
+                from repair_gbk_pdf import repair_pdf
+            repair_pdf(source, target)
+            return
         if not password:
             raise RuntimeError("protected PDF has no known password")
         run_checked(["qpdf", f"--password={password}", "--decrypt", str(source), str(target)])
