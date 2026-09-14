@@ -1,0 +1,100 @@
+name: Optimize PDF Layouts
+
+on:
+  schedule:
+    - cron: "37 * * * *"
+  workflow_run:
+    workflows: [Build Reader Assets]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: Exact source repository (requires path), blank for incremental backlog
+        type: string
+        default: ""
+      path:
+        description: Exact source path (requires repo)
+        type: string
+        default: ""
+      limit:
+        description: PDFs assessed per checkpoint
+        type: string
+        default: "10"
+      checkpoints:
+        description: Maximum incremental checkpoints
+        type: string
+        default: "6"
+      retry_failed:
+        description: Retry failed assessments for unchanged inputs
+        type: boolean
+        default: false
+      dry_run:
+        description: Inspect the queue without downloading PDFs or publishing
+        type: boolean
+        default: false
+
+concurrency:
+  group: pdf-range-assets
+  cancel-in-progress: false
+
+jobs:
+  optimize:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+      - name: Install pinned assessment tools
+        run: |
+          pip install -r scripts/requirements-pdf-range.txt
+          python -m playwright install --with-deps chromium
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qpdf
+          npm install --prefix "$RUNNER_TEMP/pdf-range-engine" --ignore-scripts --no-audit --no-fund pdfjs-dist@6.3.289
+      - name: Fetch source inventory
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          FORCE_SYNC: "true"
+        run: python scripts/fetch_and_parse.py
+      - name: Assess and publish incremental checkpoints
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          SOURCE_REPO: ${{ inputs.repo || '' }}
+          SOURCE_PATH: ${{ inputs.path || '' }}
+          BATCH_LIMIT: ${{ inputs.limit || '10' }}
+          CHECKPOINTS: ${{ inputs.checkpoints || '6' }}
+          RETRY_FAILED: ${{ inputs.retry_failed || 'false' }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+        run: |
+          [[ "$BATCH_LIMIT" =~ ^[0-9]+$ ]] && ((10#$BATCH_LIMIT >= 1 && 10#$BATCH_LIMIT <= 100)) || exit 1
+          [[ "$CHECKPOINTS" =~ ^[0-9]+$ ]] && ((10#$CHECKPOINTS >= 1 && 10#$CHECKPOINTS <= 20)) || exit 1
+          args=(--limit "$BATCH_LIMIT" --workers 2 --clean-published --repo "$SOURCE_REPO" --path "$SOURCE_PATH" --vendor "$RUNNER_TEMP/pdf-range-engine/node_modules/pdfjs-dist")
+          if [[ "$RETRY_FAILED" == true ]]; then args+=(--retry-failed); fi
+          if [[ "$DRY_RUN" == true ]]; then args+=(--dry-run); fi
+          for ((checkpoint=0; checkpoint<10#$CHECKPOINTS; checkpoint++)); do
+            python scripts/pdf_range_assets.py "${args[@]}" --bundle "output/pdf-range/$checkpoint"
+            if [[ "$DRY_RUN" == true || -n "$SOURCE_PATH" ]]; then break; fi
+            if python -c 'import json,sys; sys.exit(bool(json.load(open(sys.argv[1]))))' "output/pdf-range/$checkpoint/results.json"; then break; fi
+          done
+      - name: Sync published reader mappings
+        if: inputs.dry_run != true
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          PAGES_TOKEN: ${{ secrets.PAGES_TOKEN }}
+          PAGES_REPO: ${{ secrets.PAGES_REPO }}
+          READER_ASSETS_REPO: vomebook/Reader-Assets
+        run: python scripts/publish_search_reader_index.py
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: pdf-range-assessments
+          path: |
+            output/pdf-range/**/results.json
+            output/pdf-range/**/plan.json
+          retention-days: 14

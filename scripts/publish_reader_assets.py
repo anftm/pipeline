@@ -13,12 +13,14 @@ from huggingface_hub.errors import HfHubHTTPError, RepositoryNotFoundError
 
 try:
     from .build_reader_assets_index import encode_index
+    from .pdf_range_state import remote_state
     from .reader_assets import (
         MANIFEST_NAME, READER_ASSETS_REPO, canonical_json, empty_manifest, load_json,
         reusable_object_key, validate_manifest, validate_object_path,
     )
 except ImportError:
     from build_reader_assets_index import encode_index
+    from pdf_range_state import remote_state
     from reader_assets import (
         MANIFEST_NAME, READER_ASSETS_REPO, canonical_json, empty_manifest, load_json,
         reusable_object_key, validate_manifest, validate_object_path,
@@ -90,7 +92,7 @@ def remote_pdf_manifest(api: HfApi, repo_id: str, revision: str | None = None) -
     return data
 
 
-def build_publish(api: HfApi, repo_id: str, bundle: Path, revision: str | None = None):
+def build_publish(api: HfApi, repo_id: str, bundle: Path, revision: str | None = None, range_manifest: dict | None = None):
     data = load_json(bundle / "bundle.json")
     if data.get("version") != 1 or not isinstance(data.get("results"), list):
         raise ValueError("invalid reader asset bundle")
@@ -202,7 +204,7 @@ def build_publish(api: HfApi, repo_id: str, bundle: Path, revision: str | None =
     ]
     operations.append(CommitOperationAdd(path_in_repo=MANIFEST_NAME, path_or_fileobj=canonical_json(updated, pretty=True)))
     operations.append(CommitOperationAdd(
-        path_in_repo=SIDECAR_NAME, path_or_fileobj=encode_index(updated, pdf_manifest)))
+        path_in_repo=SIDECAR_NAME, path_or_fileobj=encode_index(updated, pdf_manifest, range_manifest)))
     return updated, operations
 
 
@@ -229,7 +231,8 @@ def publish_bundle(api: HfApi, repo_id: str, bundle: Path, *, max_attempts: int 
                 )
                 revision = api.repo_info(repo_id=repo_id, repo_type="dataset").sha
                 objects_uploaded = True
-            manifest, operations = build_publish(api, repo_id, bundle, revision)
+            range_manifest = remote_state(api, repo_id, revision)
+            manifest, operations = build_publish(api, repo_id, bundle, revision, range_manifest)
             operations = [operation for operation in operations
                           if operation.path_in_repo in {MANIFEST_NAME, SIDECAR_NAME}]
             api.create_commit(

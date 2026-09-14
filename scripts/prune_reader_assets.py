@@ -9,10 +9,12 @@ from huggingface_hub import CommitOperationAdd, CommitOperationDelete, HfApi
 
 try:
     from .build_reader_assets_index import encode_index
+    from .pdf_range_state import remote_state
     from .publish_reader_assets import remote_manifest, remote_pdf_manifest
     from .reader_assets import MANIFEST_NAME, READER_ASSETS_REPO, canonical_json
 except ImportError:
     from build_reader_assets_index import encode_index
+    from pdf_range_state import remote_state
     from publish_reader_assets import remote_manifest, remote_pdf_manifest
     from reader_assets import MANIFEST_NAME, READER_ASSETS_REPO, canonical_json
 
@@ -35,7 +37,7 @@ def expired_orphans(manifest: dict, today: date, grace_days: int, limit: int) ->
     return expired[:limit]
 
 
-def build_prune(manifest: dict, paths: list[str], pdf_manifest: dict | None = None):
+def build_prune(manifest: dict, paths: list[str], pdf_manifest: dict | None = None, range_manifest: dict | None = None):
     updated = {
         "version": manifest["version"],
         "files": manifest["files"],
@@ -44,7 +46,7 @@ def build_prune(manifest: dict, paths: list[str], pdf_manifest: dict | None = No
     operations = [CommitOperationDelete(path_in_repo=path) for path in paths]
     operations.extend([
         CommitOperationAdd(path_in_repo=MANIFEST_NAME, path_or_fileobj=canonical_json(updated, pretty=True)),
-        CommitOperationAdd(path_in_repo=SIDECAR_NAME, path_or_fileobj=encode_index(updated, pdf_manifest)),
+        CommitOperationAdd(path_in_repo=SIDECAR_NAME, path_or_fileobj=encode_index(updated, pdf_manifest, range_manifest)),
     ])
     return updated, operations
 
@@ -69,13 +71,14 @@ def main() -> int:
     revision = api.repo_info(repo_id=args.assets_repo, repo_type="dataset").sha
     manifest = remote_manifest(api, args.assets_repo, revision)
     pdf_manifest = remote_pdf_manifest(api, args.assets_repo, revision)
+    range_manifest = remote_state(api, args.assets_repo, revision)
     paths = expired_orphans(manifest, date.today(), args.grace_days, args.limit)
     print(f"found {len(paths)} Reader Asset orphan(s) eligible for deletion")
     for path in paths:
         print(path)
     if not args.apply or not paths:
         return 0
-    _, operations = build_prune(manifest, paths, pdf_manifest)
+    _, operations = build_prune(manifest, paths, pdf_manifest, range_manifest)
     api.create_commit(
         repo_id=args.assets_repo,
         repo_type="dataset",

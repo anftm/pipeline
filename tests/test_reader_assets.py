@@ -1554,6 +1554,10 @@ class PublicationTests(unittest.TestCase):
             publish_reader_assets, "remote_pdf_manifest", return_value={"version": 1, "files": {}})
         patcher.start()
         self.addCleanup(patcher.stop)
+        range_patcher = patch.object(
+            publish_reader_assets, "remote_state", return_value={"version": 1, "files": {}})
+        range_patcher.start()
+        self.addCleanup(range_patcher.stop)
 
     def make_bundle(self, root: str, result: dict) -> Path:
         bundle = Path(root)
