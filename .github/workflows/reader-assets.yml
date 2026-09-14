@@ -332,6 +332,7 @@ jobs:
             tar -xzf "${archive}" -C "${destination}"
             for bundle in "${destination}"/bundle-*; do
               python scripts/publish_reader_assets.py --bundle "${bundle}"
+              sleep 5
             done
             rm -rf "${destination}" "${archive}"
           done
