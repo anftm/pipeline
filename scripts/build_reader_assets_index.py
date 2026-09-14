@@ -10,16 +10,18 @@ try:
     from .reader_assets import load_json, validate_manifest
     from .pdf_assets import PDF_DECISION_PROFILE, PDF_PROFILE
     from . import shared
+    from .pdf_range_state import apply_optimized
 except ImportError:
     from reader_assets import load_json, validate_manifest
     from pdf_assets import PDF_DECISION_PROFILE, PDF_PROFILE
     import shared
+    from pdf_range_state import apply_optimized
 
 STATUS = {"ready": 2, "failed": 4}
 MODE = {"pdf": "p", "epub": "e", "foliate": "e", "docx": "d", "html": "h", "audio": "a", "video": "v"}
 
 
-def build_index(manifest: dict, pdf_manifest: dict | None = None) -> dict:
+def build_index(manifest: dict, pdf_manifest: dict | None = None, range_manifest: dict | None = None) -> dict:
     files = {}
     for key, entry in manifest["files"].items():
         status = entry.get("status")
@@ -33,6 +35,7 @@ def build_index(manifest: dict, pdf_manifest: dict | None = None) -> dict:
             if entry.get("fallback_path"):
                 compact["f"] = entry["fallback_path"]
         files[key] = compact
+    apply_optimized(files, manifest, range_manifest)
     for key, entry in (pdf_manifest or {}).get("files", {}).items():
         if entry.get("status") != "ready":
             continue
@@ -46,8 +49,8 @@ def build_index(manifest: dict, pdf_manifest: dict | None = None) -> dict:
     return {"v": 1, "f": dict(sorted(files.items()))}
 
 
-def encode_index(manifest: dict, pdf_manifest: dict | None = None) -> bytes:
-    payload = json.dumps(build_index(manifest, pdf_manifest), ensure_ascii=False, sort_keys=True,
+def encode_index(manifest: dict, pdf_manifest: dict | None = None, range_manifest: dict | None = None) -> bytes:
+    payload = json.dumps(build_index(manifest, pdf_manifest, range_manifest), ensure_ascii=False, sort_keys=True,
                          separators=(",", ":")).encode()
     return gzip.compress(payload, compresslevel=9, mtime=0)
 
@@ -56,13 +59,15 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("manifest", type=Path)
     parser.add_argument("--pdf-manifest", type=Path)
+    parser.add_argument("--range-manifest", type=Path)
     parser.add_argument("--output", type=Path, default=Path("output/reader_assets.json.gz"))
     args = parser.parse_args()
     manifest = validate_manifest(load_json(args.manifest))
     pdf_manifest = load_json(args.pdf_manifest) if args.pdf_manifest else None
-    index = build_index(manifest, pdf_manifest)
+    range_manifest = load_json(args.range_manifest) if args.range_manifest else None
+    index = build_index(manifest, pdf_manifest, range_manifest)
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_bytes(encode_index(manifest, pdf_manifest))
+    args.output.write_bytes(encode_index(manifest, pdf_manifest, range_manifest))
     print(f"wrote {len(index['f'])} reader asset mapping(s)")
     return 0
 
