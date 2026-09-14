@@ -102,6 +102,13 @@ def plan(items, state, tool_version, limit, exact_key="", retry_failed=False):
                 and previous.get("input_repo") == item.get("input_repo")):
             item = {**item, **{field: previous[field] for field in ("input_revision", "source_revision")
                               if field in previous}}
+        size = item.get("source_bytes", pdf_range.MIN_BYTES)
+        if size < pdf_range.MIN_BYTES or size > 2 * 1024 * pdf_range.MI:
+            # Metadata-only decisions must not consume expensive assessment slots.
+            files[key] = {**item, "identity": fingerprint,
+                          "status": "unchanged" if size < pdf_range.MIN_BYTES else "unsupported",
+                          "reason": "below-4-mib" if size < pdf_range.MIN_BYTES else "source-exceeds-2-gib"}
+            continue
         if previous.get("identity") == fingerprint:
             current = {**previous, **item}
             if previous.get("status") != "pending" and not (retry_failed and previous.get("status") == "failed"):

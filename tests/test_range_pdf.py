@@ -34,6 +34,15 @@ class RangePdfTests(unittest.TestCase):
         _, retries = pdf_range_assets.plan(items, {"files": files}, "qpdf-test", 3, retry_failed=True)
         self.assertEqual(len(retries), 3)
 
+    def test_small_files_do_not_starve_the_assessment_budget(self):
+        items = {str(i): {"key": str(i), "input_token": str(i), "input_profile": "upstream",
+                          "source_bytes": 1000} for i in range(20)}
+        items["large"] = {"key": "large", "input_token": "large", "input_profile": "upstream",
+                          "source_bytes": 80 * pdf_range.MI}
+        files, pending = pdf_range_assets.plan(items, {"files": {}}, "qpdf", 1)
+        self.assertEqual([row["key"] for row in pending], ["large"])
+        self.assertEqual(files["0"]["status"], "unchanged")
+
     def test_tool_upgrade_keeps_same_content_route_until_reassessment(self):
         item = {"key": "book", "input_token": "sha256:aaa", "input_profile": "upstream"}
         previous = {**item, "identity": pdf_range_assets.identity(item, "old"), "status": "optimized",
