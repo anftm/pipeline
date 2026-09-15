@@ -19,11 +19,11 @@ on:
       limit:
         description: PDFs assessed per checkpoint
         type: string
-        default: "10"
+        default: "30"
       checkpoints:
         description: Maximum incremental checkpoints
         type: string
-        default: "6"
+        default: "4"
       retry_failed:
         description: Retry failed assessments for unchanged inputs
         type: boolean
@@ -67,14 +67,14 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           SOURCE_REPO: ${{ inputs.repo || '' }}
           SOURCE_PATH: ${{ inputs.path || '' }}
-          BATCH_LIMIT: ${{ inputs.limit || '10' }}
-          CHECKPOINTS: ${{ inputs.checkpoints || '6' }}
+          BATCH_LIMIT: ${{ inputs.limit || '30' }}
+          CHECKPOINTS: ${{ inputs.checkpoints || '4' }}
           RETRY_FAILED: ${{ inputs.retry_failed || 'false' }}
           DRY_RUN: ${{ inputs.dry_run || 'false' }}
         run: |
           [[ "$BATCH_LIMIT" =~ ^[0-9]+$ ]] && ((10#$BATCH_LIMIT >= 1 && 10#$BATCH_LIMIT <= 100)) || exit 1
           [[ "$CHECKPOINTS" =~ ^[0-9]+$ ]] && ((10#$CHECKPOINTS >= 1 && 10#$CHECKPOINTS <= 20)) || exit 1
-          args=(--limit "$BATCH_LIMIT" --workers 2 --clean-published --repo "$SOURCE_REPO" --path "$SOURCE_PATH" --vendor "$RUNNER_TEMP/pdf-range-engine/node_modules/pdfjs-dist")
+          args=(--limit "$BATCH_LIMIT" --workers 3 --clean-published --repo "$SOURCE_REPO" --path "$SOURCE_PATH" --vendor "$RUNNER_TEMP/pdf-range-engine/node_modules/pdfjs-dist")
           if [[ "$RETRY_FAILED" == true ]]; then args+=(--retry-failed); fi
           if [[ "$DRY_RUN" == true ]]; then args+=(--dry-run); fi
           for ((checkpoint=0; checkpoint<10#$CHECKPOINTS; checkpoint++)); do

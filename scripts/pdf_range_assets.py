@@ -256,8 +256,8 @@ def main():
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--clean-published", action="store_true", help="Remove this bundle's uploaded objects after successful publication")
     args = parser.parse_args()
-    if not 1 <= args.limit <= 100 or not 1 <= args.workers <= 2:
-        parser.error("limit must be 1..100 and workers 1..2")
+    if not 1 <= args.limit <= 100 or not 1 <= args.workers <= 4:
+        parser.error("limit must be 1..100 and workers 1..4")
     if bool(args.repo) != bool(args.path):
         parser.error("repo and path must be provided together")
     api = HfApi(token=os.environ.get("HF_TOKEN"))
