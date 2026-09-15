@@ -124,6 +124,15 @@ class RangePdfTests(unittest.TestCase):
         with patch.dict("os.environ", {"PDF_RANGE_TRY_HEAVY": "0"}):
             self.assertEqual(list(pdf_range.candidate_methods()), ["objects"])
 
+    def test_qpdf_exit_three_is_deferred_to_pdf_validation(self):
+        completed = subprocess.CompletedProcess(["qpdf"], 3, b"", b"WARNING: repaired input")
+        with patch.object(pdf_range.subprocess, "run", return_value=completed):
+            self.assertIn("repaired input", pdf_range.run_qpdf(["qpdf"], timeout=1))
+        failed = subprocess.CompletedProcess(["qpdf"], 2, b"", b"fatal")
+        with patch.object(pdf_range.subprocess, "run", return_value=failed):
+            with self.assertRaises(subprocess.CalledProcessError):
+                pdf_range.run_qpdf(["qpdf"], timeout=1)
+
     @unittest.skipUnless(shutil.which("qpdf"), "qpdf is required")
     def test_conversion_preserves_content_images_geometry_and_outline(self):
         with tempfile.TemporaryDirectory() as directory:
