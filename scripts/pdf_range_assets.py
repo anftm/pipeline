@@ -258,8 +258,8 @@ def main():
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--clean-published", action="store_true", help="Remove this bundle's uploaded objects after successful publication")
     args = parser.parse_args()
-    if not 1 <= args.limit <= 100 or not 1 <= args.workers <= 4:
-        parser.error("limit must be 1..100 and workers 1..4")
+    if not 1 <= args.limit <= 2000 or not 1 <= args.workers <= 4:
+        parser.error("limit must be 1..2000 and workers 1..4")
     if not 1 <= args.shard_count <= 16 or not 0 <= args.shard_index < args.shard_count:
         parser.error("shard-count must be 1..16 and shard-index must be in range")
     if bool(args.repo) != bool(args.path):
