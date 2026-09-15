@@ -62,13 +62,17 @@ def main():
     bundle, results = merge_results(args.bundles)
     state = {"version": 1, "files": dict(baseline.get("files", {})),
              "inventories": dict(baseline.get("inventories", {}))}
+    fresh_results = []
     for result in results:
         previous = state["files"].get(result["key"])
         if previous and previous.get("identity") != result.get("identity"):
-            raise RuntimeError(f"PDF range result became stale while shards ran: {result['key']}")
+            # Another run already assessed this key. Do not overwrite its newer
+            # state or fail the rest of an otherwise valid parallel batch.
+            continue
         state["files"][result["key"]] = result
-    published = pdf_range_assets.publish(api, args.assets_repo, baseline, state, bundle, results)
-    print(f"published {len(results)} PDF range result(s) at {published}", flush=True)
+        fresh_results.append(result)
+    published = pdf_range_assets.publish(api, args.assets_repo, baseline, state, bundle, fresh_results)
+    print(f"published {len(fresh_results)} PDF range result(s) at {published}; skipped {len(results) - len(fresh_results)} stale result(s)", flush=True)
     shutil.rmtree(bundle, ignore_errors=True)
 
 
