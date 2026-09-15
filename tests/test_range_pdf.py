@@ -118,6 +118,12 @@ class RangePdfTests(unittest.TestCase):
         self.assertTrue(pdf_range.strong_improvement(before, strong, 90 * pdf_range.MI, 90 * pdf_range.MI))
         self.assertFalse(pdf_range.strong_improvement(before, ordinary, 90 * pdf_range.MI, 90 * pdf_range.MI))
 
+    def test_heavy_candidates_are_opt_in(self):
+        with patch.dict("os.environ", {}, clear=True):
+            self.assertEqual(list(pdf_range.candidate_methods()), ["objects"])
+        with patch.dict("os.environ", {"PDF_RANGE_TRY_HEAVY": "1"}):
+            self.assertEqual(list(pdf_range.candidate_methods()), list(pdf_range.METHODS))
+
     @unittest.skipUnless(shutil.which("qpdf"), "qpdf is required")
     def test_conversion_preserves_content_images_geometry_and_outline(self):
         with tempfile.TemporaryDirectory() as directory:

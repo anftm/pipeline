@@ -2,6 +2,7 @@
 import hashlib
 import http.server
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -28,6 +29,13 @@ EARLY_ACCEPT_SIZE_RATIO = 1.02
 
 class UnsupportedPDF(ValueError):
     pass
+
+
+def candidate_methods() -> dict[str, list[str]]:
+    """Keep expensive linearization experiments opt-in for routine backfill."""
+    if os.environ.get("PDF_RANGE_TRY_HEAVY", "0").lower() in {"1", "true", "yes"}:
+        return METHODS
+    return {"objects": METHODS["objects"]}
 
 
 def content_signature(path: Path) -> dict:
@@ -331,7 +339,9 @@ def assess(source: Path, work: Path, vendor: Path) -> tuple[dict, Path | None]:
                 return report, None
             report.update(status="no-gain", reason="no-passing-candidate", candidates={})
             passing = []
-            for method, options in METHODS.items():
+            methods = candidate_methods()
+            report["candidate_policy"] = "heavy-opt-in" if len(methods) > 1 else "objects-only"
+            for method, options in methods.items():
                 target = work / (method + ".pdf")
                 try:
                     subprocess.run(["qpdf", *options, "--stream-data=preserve", str(source), str(target)],
