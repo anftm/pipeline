@@ -337,7 +337,7 @@ def assess(source: Path, work: Path, vendor: Path) -> tuple[dict, Path | None]:
             report.update(status="no-gain", reason="no-passing-candidate", candidates={})
             passing = []
             methods = candidate_methods()
-            report["candidate_policy"] = "heavy-opt-in" if len(methods) > 1 else "objects-only"
+            report["candidate_policy"] = "full" if len(methods) > 1 else "objects-only"
             for method, options in methods.items():
                 target = work / (method + ".pdf")
                 try:
