@@ -22,6 +22,8 @@ METHODS = {
     "linearized": ["--linearize"],
     "objects-linearized": ["--object-streams=generate", "--linearize"],
 }
+EARLY_ACCEPT_STARTUP_RATIO = 0.50
+EARLY_ACCEPT_SIZE_RATIO = 1.02
 
 
 class UnsupportedPDF(ValueError):
@@ -102,6 +104,22 @@ def content_signature(path: Path) -> dict:
             "metadata": normalize(dict(reader.metadata or {})),
             "catalog": normalize({k: v for k, v in root.items()
                                   if k not in {"/Pages", "/Outlines"}})}
+
+
+def check_supported_structure(path: Path) -> None:
+    """Reject structures we cannot prove lossless before starting PDF.js."""
+    reader = PdfReader(path)
+    if reader.is_encrypted:
+        raise UnsupportedPDF("encrypted input; use its existing decrypted asset")
+    supported = {"/Type", "/Pages", "/Outlines", "/PageMode", "/PageLayout", "/Version",
+                 "/ViewerPreferences", "/Metadata", "/Lang", "/MarkInfo", "/OpenAction", "/PageLabels"}
+    extra = set(reader.trailer["/Root"]) - supported
+    if extra:
+        raise UnsupportedPDF("catalog structures require additional equivalence checks: " +
+                             ",".join(sorted(extra)))
+    for page in reader.pages:
+        if page.get("/Annots"):
+            raise UnsupportedPDF("annotations require additional equivalence checks")
 
 
 SCENE = """async () => {
@@ -289,13 +307,20 @@ def improvement(before: dict, after: dict, source_size: int, output_size: int) -
             and b["final"]["bytes"] == b["jump"]["bytes"])
 
 
+def strong_improvement(before: dict, after: dict, source_size: int, output_size: int) -> bool:
+    return (improvement(before, after, source_size, output_size)
+            and after["snapshots"]["startup"]["bytes"] <=
+            before["snapshots"]["startup"]["bytes"] * EARLY_ACCEPT_STARTUP_RATIO
+            and output_size <= source_size * EARLY_ACCEPT_SIZE_RATIO)
+
+
 def assess(source: Path, work: Path, vendor: Path) -> tuple[dict, Path | None]:
     size = source.stat().st_size
     if size < MIN_BYTES:
         return {"status": "unchanged", "reason": "below-4-mib"}, None
     if size > 2 * 1024 * MI:
         return {"status": "unsupported", "reason": "source-exceeds-2-gib"}, None
-    signature = content_signature(source)
+    check_supported_structure(source)
     from playwright.sync_api import sync_playwright
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True, args=["--no-sandbox"])
@@ -315,16 +340,23 @@ def assess(source: Path, work: Path, vendor: Path) -> tuple[dict, Path | None]:
                     if "--linearize" in options:
                         subprocess.run(["qpdf", "--check-linearization", str(target)],
                                        check=True, capture_output=True, timeout=60)
-                    if content_signature(target) != signature:
-                        raise ValueError("document content or resource signature differs")
                     after = benchmark(target, vendor, browser)
                     accepted = improvement(before, after, size, target.stat().st_size)
-                    report["candidates"][method] = {"accepted": accepted, "bytes": target.stat().st_size,
-                                                    "measurement": after}
                     if accepted:
+                        # Full graph comparison is only needed for a candidate that
+                        # already demonstrated a measurable Reader improvement.
+                        signature = content_signature(source)
+                        if content_signature(target) != signature:
+                            raise ValueError("document content or resource signature differs")
                         passing.append((after["snapshots"]["startup"]["bytes"],
                                         after["snapshots"]["startup"]["requests"],
                                         after["snapshots"]["jump"]["bytes"], method, target))
+                    report["candidates"][method] = {"accepted": accepted, "bytes": target.stat().st_size,
+                                                    "measurement": after}
+                    if method == "objects" and strong_improvement(before, after, size, target.stat().st_size):
+                        report["candidates"][method]["early_stop"] = True
+                        report.update(status="optimized", reason="measured-improvement", method=method)
+                        return report, target
                 except Exception as error:
                     if isinstance(error, subprocess.CalledProcessError):
                         detail = (error.stderr or error.stdout or b"")

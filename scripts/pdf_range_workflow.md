@@ -44,6 +44,10 @@
 2. `qpdf --linearize --stream-data=preserve`
 3. `qpdf --object-streams=generate --linearize --stream-data=preserve`
 
+对象流候选如果已经把启动读取量降到原件的 50% 以下、产物体积不超过原件 2%，
+并通过完整内容签名，会直接结束该文件的候选搜索。否则继续评测线性化候选。
+这不是跳过校验，而是避免在已经明显达标的文件上重复运行通常更慢的两个实验。
+
 全部保留原始图像、字体和内容流。线性化还需通过 `--check-linearization`，但格式
 有效不等同于加载更快。与原件对比，通过候选必须同时满足：
 
