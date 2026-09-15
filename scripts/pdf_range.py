@@ -23,8 +23,7 @@ METHODS = {
     "linearized": ["--linearize"],
     "objects-linearized": ["--object-streams=generate", "--linearize"],
 }
-EARLY_ACCEPT_STARTUP_RATIO = 0.50
-EARLY_ACCEPT_SIZE_RATIO = 1.02
+EARLY_ACCEPT_STARTUP_BYTES = MI
 
 
 class UnsupportedPDF(ValueError):
@@ -32,10 +31,10 @@ class UnsupportedPDF(ValueError):
 
 
 def candidate_methods() -> dict[str, list[str]]:
-    """Keep expensive linearization experiments opt-in for routine backfill."""
-    if os.environ.get("PDF_RANGE_TRY_HEAVY", "0").lower() in {"1", "true", "yes"}:
-        return METHODS
-    return {"objects": METHODS["objects"]}
+    """Run all candidates by default; allow explicit lightweight diagnostics."""
+    if os.environ.get("PDF_RANGE_TRY_HEAVY", "1").lower() in {"0", "false", "no"}:
+        return {"objects": METHODS["objects"]}
+    return METHODS
 
 
 def content_signature(path: Path) -> dict:
@@ -317,9 +316,7 @@ def improvement(before: dict, after: dict, source_size: int, output_size: int) -
 
 def strong_improvement(before: dict, after: dict, source_size: int, output_size: int) -> bool:
     return (improvement(before, after, source_size, output_size)
-            and after["snapshots"]["startup"]["bytes"] <=
-            before["snapshots"]["startup"]["bytes"] * EARLY_ACCEPT_STARTUP_RATIO
-            and output_size <= source_size * EARLY_ACCEPT_SIZE_RATIO)
+            and after["snapshots"]["startup"]["bytes"] < EARLY_ACCEPT_STARTUP_BYTES)
 
 
 def assess(source: Path, work: Path, vendor: Path) -> tuple[dict, Path | None]:
