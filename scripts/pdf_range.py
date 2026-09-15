@@ -319,6 +319,20 @@ def strong_improvement(before: dict, after: dict, source_size: int, output_size:
             and after["snapshots"]["startup"]["bytes"] < EARLY_ACCEPT_STARTUP_BYTES)
 
 
+def run_qpdf(args: list[str], *, timeout: int) -> str:
+    """Run qpdf while treating exit 3 as a warning pending later validation."""
+    completed = subprocess.run(args, capture_output=True, timeout=timeout)
+    if completed.returncode not in {0, 3}:
+        raise subprocess.CalledProcessError(
+            completed.returncode, args, output=completed.stdout, stderr=completed.stderr)
+    if completed.returncode == 3:
+        detail = completed.stderr or completed.stdout or b"qpdf warning"
+        if isinstance(detail, bytes):
+            detail = detail.decode("utf-8", "replace")
+        return detail[:2000]
+    return ""
+
+
 def assess(source: Path, work: Path, vendor: Path) -> tuple[dict, Path | None]:
     size = source.stat().st_size
     if size < MIN_BYTES:
@@ -341,12 +355,20 @@ def assess(source: Path, work: Path, vendor: Path) -> tuple[dict, Path | None]:
             for method, options in methods.items():
                 target = work / (method + ".pdf")
                 try:
-                    subprocess.run(["qpdf", *options, "--stream-data=preserve", str(source), str(target)],
-                                   check=True, capture_output=True, timeout=120)
-                    subprocess.run(["qpdf", "--check", str(target)], check=True, capture_output=True, timeout=60)
+                    warnings = []
+                    warning = run_qpdf(["qpdf", *options, "--stream-data=preserve", str(source), str(target)],
+                                       timeout=120)
+                    if warning:
+                        warnings.append(warning)
+                    if not target.is_file() or target.stat().st_size == 0:
+                        raise RuntimeError("qpdf produced no candidate PDF")
+                    warning = run_qpdf(["qpdf", "--check", str(target)], timeout=60)
+                    if warning:
+                        warnings.append(warning)
                     if "--linearize" in options:
-                        subprocess.run(["qpdf", "--check-linearization", str(target)],
-                                       check=True, capture_output=True, timeout=60)
+                        warning = run_qpdf(["qpdf", "--check-linearization", str(target)], timeout=60)
+                        if warning:
+                            warnings.append(warning)
                     after = benchmark(target, vendor, browser)
                     accepted = improvement(before, after, size, target.stat().st_size)
                     if accepted:
@@ -360,6 +382,8 @@ def assess(source: Path, work: Path, vendor: Path) -> tuple[dict, Path | None]:
                                         after["snapshots"]["jump"]["bytes"], method, target))
                     report["candidates"][method] = {"accepted": accepted, "bytes": target.stat().st_size,
                                                     "measurement": after}
+                    if warnings:
+                        report["candidates"][method]["qpdf_warnings"] = warnings
                     if method == "objects" and strong_improvement(before, after, size, target.stat().st_size):
                         report["candidates"][method]["early_stop"] = True
                         report.update(status="optimized", reason="measured-improvement", method=method)
