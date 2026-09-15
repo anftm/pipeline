@@ -12,7 +12,11 @@ MANIFEST_VERSION = 1
 CHAPTER_MANIFEST_VERSION = 1
 READER_ASSETS_REPO = "vomebook/Reader-Assets"
 MANIFEST_NAME = "manifest.json"
-EPUB_CHAPTER_SPLIT_BYTES = 32 * 1024 * 1024
+# Chapter manifests make multi-file books cheap to open: the Reader fetches the
+# manifest and nearby chapters instead of downloading the complete archive.
+# Production inventory: 28 books are >=32 MiB; lowering this to 16 MiB adds
+# about 37 candidates without expanding ordinary small-book packaging.
+EPUB_CHAPTER_SPLIT_BYTES = 16 * 1024 * 1024
 EPUB_CHAPTER_BUNDLE_DIR = "epub-chapters"
 EPUB_CHAPTER_PROFILE = "epub-chapters-v4"
 CONVERTIBLE_EXTENSIONS = {
