@@ -249,6 +249,8 @@ def main():
     parser.add_argument("--vendor", type=Path, default=Path(os.environ.get("PDF_RANGE_VENDOR", "node_modules/pdfjs-dist")))
     parser.add_argument("--limit", type=int, default=10)
     parser.add_argument("--workers", type=int, default=2)
+    parser.add_argument("--shard-count", type=int, default=1)
+    parser.add_argument("--shard-index", type=int, default=0)
     parser.add_argument("--repo", default="")
     parser.add_argument("--path", default="")
     parser.add_argument("--retry-failed", action="store_true")
@@ -258,6 +260,8 @@ def main():
     args = parser.parse_args()
     if not 1 <= args.limit <= 100 or not 1 <= args.workers <= 4:
         parser.error("limit must be 1..100 and workers 1..4")
+    if not 1 <= args.shard_count <= 16 or not 0 <= args.shard_index < args.shard_count:
+        parser.error("shard-count must be 1..16 and shard-index must be in range")
     if bool(args.repo) != bool(args.path):
         parser.error("repo and path must be provided together")
     api = HfApi(token=os.environ.get("HF_TOKEN"))
@@ -274,7 +278,8 @@ def main():
     items, inventories = discover(records, revisions, base, images, api, baseline, args.assets_repo, revision, bool(args.repo))
     version = subprocess.check_output(["qpdf", "--version"], text=True).splitlines()[0]
     key = reader_assets.asset_key(args.repo, args.path) if args.repo else ""
-    files, pending = plan(items, baseline, version, args.limit, key, args.retry_failed)
+    files, pending = plan(items, baseline, version, args.limit * args.shard_count, key, args.retry_failed)
+    pending = pending[args.shard_index::args.shard_count]
     if args.repo:
         files = {**baseline.get("files", {}), **files}
     args.bundle.mkdir(parents=True, exist_ok=True)

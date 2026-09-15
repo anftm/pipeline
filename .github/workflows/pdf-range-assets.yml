@@ -17,11 +17,11 @@ on:
         type: string
         default: ""
       limit:
-        description: PDFs assessed per checkpoint
+        description: PDFs assessed per Runner
         type: string
         default: "30"
       checkpoints:
-        description: Maximum incremental checkpoints
+        description: Maximum checkpoint rounds
         type: string
         default: "4"
       retry_failed:
@@ -38,31 +38,56 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  optimize:
+  prepare:
     if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
-    timeout-minutes: 330
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
-      - uses: actions/setup-node@v6
+      - name: Install metadata tools
+        run: pip install -r scripts/requirements.txt
+      - name: Fetch source inventory
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          FORCE_SYNC: "true"
+        run: python scripts/fetch_and_parse.py
+      - uses: actions/upload-artifact@v7
         with:
-          node-version: "22"
-      - name: Install pinned assessment tools
+          name: pdf-range-plan
+          path: |
+            output/search_data.json
+            state/commits.json
+          retention-days: 1
+
+  build:
+    needs: prepare
+    if: inputs.dry_run != true
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - uses: actions/download-artifact@v8
+        with:
+          name: pdf-range-plan
+      - name: Install assessment tools
         run: |
           pip install -r scripts/requirements-pdf-range.txt
           python -m playwright install --with-deps chromium
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends qpdf
           npm install --prefix "$RUNNER_TEMP/pdf-range-engine" --ignore-scripts --no-audit --no-fund pdfjs-dist@6.3.289
-      - name: Fetch source inventory
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          FORCE_SYNC: "true"
-        run: python scripts/fetch_and_parse.py
-      - name: Assess and publish incremental checkpoints
+      - name: Assess assigned PDF shard
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           SOURCE_REPO: ${{ inputs.repo || '' }}
@@ -70,31 +95,49 @@ jobs:
           BATCH_LIMIT: ${{ inputs.limit || '30' }}
           CHECKPOINTS: ${{ inputs.checkpoints || '4' }}
           RETRY_FAILED: ${{ inputs.retry_failed || 'false' }}
-          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+          SHARD_INDEX: ${{ matrix.shard }}
         run: |
           [[ "$BATCH_LIMIT" =~ ^[0-9]+$ ]] && ((10#$BATCH_LIMIT >= 1 && 10#$BATCH_LIMIT <= 100)) || exit 1
           [[ "$CHECKPOINTS" =~ ^[0-9]+$ ]] && ((10#$CHECKPOINTS >= 1 && 10#$CHECKPOINTS <= 20)) || exit 1
-          args=(--limit "$BATCH_LIMIT" --workers 3 --clean-published --repo "$SOURCE_REPO" --path "$SOURCE_PATH" --vendor "$RUNNER_TEMP/pdf-range-engine/node_modules/pdfjs-dist")
+          args=(--limit "$BATCH_LIMIT" --workers 3 --shard-count 4 --shard-index "$SHARD_INDEX" --clean-published --build-only --repo "$SOURCE_REPO" --path "$SOURCE_PATH" --vendor "$RUNNER_TEMP/pdf-range-engine/node_modules/pdfjs-dist")
           if [[ "$RETRY_FAILED" == true ]]; then args+=(--retry-failed); fi
-          if [[ "$DRY_RUN" == true ]]; then args+=(--dry-run); fi
           for ((checkpoint=0; checkpoint<10#$CHECKPOINTS; checkpoint++)); do
             python scripts/pdf_range_assets.py "${args[@]}" --bundle "output/pdf-range/$checkpoint"
-            if [[ "$DRY_RUN" == true || -n "$SOURCE_PATH" ]]; then break; fi
+            if [[ -n "$SOURCE_PATH" ]]; then break; fi
             if python -c 'import json,sys; sys.exit(bool(json.load(open(sys.argv[1]))))' "output/pdf-range/$checkpoint/results.json"; then break; fi
           done
+      - uses: actions/upload-artifact@v7
+        with:
+          name: pdf-range-bundle-${{ matrix.shard }}
+          path: output/pdf-range
+          retention-days: 1
+
+  publish:
+    needs: build
+    if: inputs.dry_run != true
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Install publish tools
+        run: pip install -r scripts/requirements.txt
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: pdf-range-bundle-*
+          path: output/pdf-range/bundles
+          merge-multiple: false
+      - name: Publish merged PDF results
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          READER_ASSETS_REPO: vomebook/Reader-Assets
+        run: python scripts/publish_pdf_range_shards.py --bundles output/pdf-range/bundles/*
       - name: Sync published reader mappings
-        if: inputs.dry_run != true
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           PAGES_TOKEN: ${{ secrets.PAGES_TOKEN }}
           PAGES_REPO: ${{ secrets.PAGES_REPO }}
           READER_ASSETS_REPO: vomebook/Reader-Assets
         run: python scripts/publish_search_reader_index.py
-      - uses: actions/upload-artifact@v7
-        if: always()
-        with:
-          name: pdf-range-assessments
-          path: |
-            output/pdf-range/**/results.json
-            output/pdf-range/**/plan.json
-          retention-days: 14
