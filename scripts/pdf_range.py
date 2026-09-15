@@ -159,7 +159,7 @@ SCENE = """async () => {
 }"""
 
 
-def benchmark(path: Path, vendor: Path) -> dict:
+def benchmark(path: Path, vendor: Path, browser=None) -> dict:
     from playwright.sync_api import sync_playwright
     modules = {
         "/vendor/pdf.mjs": next(iter(sorted((vendor / "build").glob("pdf.min.mjs"))), None)
@@ -238,24 +238,31 @@ def benchmark(path: Path, vendor: Path) -> dict:
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
+    def run_page(active_browser):
+        page = active_browser.new_page(service_workers="block")
+        try:
+            errors = []
+            page.on("pageerror", lambda error: errors.append(str(error)))
+            page.on("console", lambda msg: errors.append(msg.text) if msg.type == "error" else None)
+            origin = f"http://127.0.0.1:{server.server_port}"
+            page.route("**/*", lambda route: route.continue_() if route.request.url.startswith(origin + "/")
+                       else route.abort())
+            page.goto(origin)
+            result = page.evaluate(SCENE)
+            if errors:
+                raise RuntimeError("PDF rendering errors: " + "; ".join(errors)[:500])
+            return result
+        finally:
+            page.close()
     try:
+        if browser is not None:
+            return run_page(browser)
         with sync_playwright() as playwright:
-            browser = playwright.chromium.launch(headless=True, args=["--no-sandbox"])
+            active_browser = playwright.chromium.launch(headless=True, args=["--no-sandbox"])
             try:
-                page = browser.new_page(service_workers="block")
-                errors = []
-                page.on("pageerror", lambda error: errors.append(str(error)))
-                page.on("console", lambda msg: errors.append(msg.text) if msg.type == "error" else None)
-                origin = f"http://127.0.0.1:{server.server_port}"
-                page.route("**/*", lambda route: route.continue_() if route.request.url.startswith(origin + "/")
-                           else route.abort())
-                page.goto(origin)
-                result = page.evaluate(SCENE)
-                if errors:
-                    raise RuntimeError("PDF rendering errors: " + "; ".join(errors)[:500])
-                return result
+                return run_page(active_browser)
             finally:
-                browser.close()
+                active_browser.close()
     finally:
         server.shutdown()
         server.server_close()
@@ -289,42 +296,48 @@ def assess(source: Path, work: Path, vendor: Path) -> tuple[dict, Path | None]:
     if size > 2 * 1024 * MI:
         return {"status": "unsupported", "reason": "source-exceeds-2-gib"}, None
     signature = content_signature(source)
-    before = benchmark(source, vendor)
-    report = {"status": "unchanged", "reason": "startup-within-budget", "before": before}
-    if not needs_optimization(before, size):
-        return report, None
-    report.update(status="no-gain", reason="no-passing-candidate", candidates={})
-    passing = []
-    for method, options in METHODS.items():
-        target = work / (method + ".pdf")
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True, args=["--no-sandbox"])
         try:
-            subprocess.run(["qpdf", *options, "--stream-data=preserve", str(source), str(target)],
-                           check=True, capture_output=True, timeout=120)
-            subprocess.run(["qpdf", "--check", str(target)], check=True, capture_output=True, timeout=60)
-            if "--linearize" in options:
-                subprocess.run(["qpdf", "--check-linearization", str(target)],
-                               check=True, capture_output=True, timeout=60)
-            if content_signature(target) != signature:
-                raise ValueError("document content or resource signature differs")
-            after = benchmark(target, vendor)
-            accepted = improvement(before, after, size, target.stat().st_size)
-            report["candidates"][method] = {"accepted": accepted, "bytes": target.stat().st_size,
-                                            "measurement": after}
-            if accepted:
-                passing.append((after["snapshots"]["startup"]["bytes"],
-                                after["snapshots"]["startup"]["requests"],
-                                after["snapshots"]["jump"]["bytes"], method, target))
-        except Exception as error:
-            if isinstance(error, subprocess.CalledProcessError):
-                detail = (error.stderr or error.stdout or b"")
-                if isinstance(detail, bytes):
-                    detail = detail.decode("utf-8", "replace")
-                error = RuntimeError(f"qpdf exit {error.returncode}: {detail[:1200]}")
-            report["candidates"][method] = {"accepted": False, "error": type(error).__name__ + ": " + str(error)[:300]}
-    if not passing:
-        if any("error" in value for value in report["candidates"].values()):
-            report.update(status="failed", reason="candidate-assessment-incomplete")
-        return report, None
-    chosen = min(passing)
-    report.update(status="optimized", reason="measured-improvement", method=chosen[3])
-    return report, chosen[4]
+            before = benchmark(source, vendor, browser)
+            report = {"status": "unchanged", "reason": "startup-within-budget", "before": before}
+            if not needs_optimization(before, size):
+                return report, None
+            report.update(status="no-gain", reason="no-passing-candidate", candidates={})
+            passing = []
+            for method, options in METHODS.items():
+                target = work / (method + ".pdf")
+                try:
+                    subprocess.run(["qpdf", *options, "--stream-data=preserve", str(source), str(target)],
+                                   check=True, capture_output=True, timeout=120)
+                    subprocess.run(["qpdf", "--check", str(target)], check=True, capture_output=True, timeout=60)
+                    if "--linearize" in options:
+                        subprocess.run(["qpdf", "--check-linearization", str(target)],
+                                       check=True, capture_output=True, timeout=60)
+                    if content_signature(target) != signature:
+                        raise ValueError("document content or resource signature differs")
+                    after = benchmark(target, vendor, browser)
+                    accepted = improvement(before, after, size, target.stat().st_size)
+                    report["candidates"][method] = {"accepted": accepted, "bytes": target.stat().st_size,
+                                                    "measurement": after}
+                    if accepted:
+                        passing.append((after["snapshots"]["startup"]["bytes"],
+                                        after["snapshots"]["startup"]["requests"],
+                                        after["snapshots"]["jump"]["bytes"], method, target))
+                except Exception as error:
+                    if isinstance(error, subprocess.CalledProcessError):
+                        detail = (error.stderr or error.stdout or b"")
+                        if isinstance(detail, bytes):
+                            detail = detail.decode("utf-8", "replace")
+                        error = RuntimeError(f"qpdf exit {error.returncode}: {detail[:1200]}")
+                    report["candidates"][method] = {"accepted": False, "error": type(error).__name__ + ": " + str(error)[:300]}
+            if not passing:
+                if any("error" in value for value in report["candidates"].values()):
+                    report.update(status="failed", reason="candidate-assessment-incomplete")
+                return report, None
+            chosen = min(passing)
+            report.update(status="optimized", reason="measured-improvement", method=chosen[3])
+            return report, chosen[4]
+        finally:
+            browser.close()
