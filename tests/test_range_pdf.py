@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from pypdf import PdfReader, PdfWriter
-from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject, NumberObject
+from pypdf.generic import ArrayObject, DecodedStreamObject, DictionaryObject, NameObject, NumberObject
 
 from scripts import pdf_range, pdf_range_assets, build_reader_assets_index, pdf_range_state
 
@@ -42,6 +42,18 @@ class RangePdfTests(unittest.TestCase):
         files, pending = pdf_range_assets.plan(items, {"files": {}}, "qpdf", 1)
         self.assertEqual([row["key"] for row in pending], ["large"])
         self.assertEqual(files["0"]["status"], "unchanged")
+
+    def test_generated_and_original_repositories_share_backfill_slots(self):
+        items = {f"A/{i}": {"key": f"A/{i}", "repo": "A", "source_kind": "upstream",
+                             "input_token": f"a{i}", "input_profile": "upstream"} for i in range(10)}
+        items["Z/book"] = {"key": "Z/book", "repo": "Z", "source_kind": "generated",
+                           "input_token": "generated", "input_profile": "djvu"}
+        files, pending = pdf_range_assets.plan(items, {"files": {}}, "v", 2)
+        self.assertEqual({row["source_kind"] for row in pending}, {"upstream", "generated"})
+        files["Z/book"]["status"] = "unchanged"
+        _, next_batch = pdf_range_assets.plan(items, {"files": files}, "v", 2)
+        self.assertEqual(len(next_batch), 2)
+        self.assertTrue(all(row["source_kind"] == "upstream" for row in next_batch))
 
     def test_tool_upgrade_keeps_same_content_route_until_reassessment(self):
         item = {"key": "book", "input_token": "sha256:aaa", "input_profile": "upstream"}
@@ -156,6 +168,30 @@ class RangePdfTests(unittest.TestCase):
         self.assertEqual(items[key]["input_token"], "sha256:abc")
         self.assertEqual(items[key]["input_path"], base["files"][key]["path"])
         self.assertEqual(items[key]["source_path"], path)
+
+    @unittest.skipUnless(shutil.which("qpdf"), "qpdf is required")
+    def test_local_open_action_and_page_labels_survive_object_renumbering(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source, target, changed = [Path(directory) / name for name in ("source.pdf", "target.pdf", "changed.pdf")]
+            writer = PdfWriter()
+            for _ in range(3):
+                writer.add_blank_page(width=400, height=600)
+            action = DictionaryObject({NameObject("/S"): NameObject("/GoTo"),
+                NameObject("/D"): ArrayObject([writer.pages[2].indirect_reference, NameObject("/Fit")])})
+            writer._root_object[NameObject("/OpenAction")] = writer._add_object(action)
+            writer._root_object[NameObject("/PageLabels")] = DictionaryObject({NameObject("/Nums"):
+                ArrayObject([NumberObject(0), DictionaryObject({NameObject("/S"): NameObject("/r")})])})
+            writer.write(source)
+            for options in (["--object-streams=generate"], ["--linearize"]):
+                subprocess.run(["qpdf", *options, str(source), str(target)], check=True, capture_output=True)
+                self.assertEqual(pdf_range.content_signature(source), pdf_range.content_signature(target))
+            action[NameObject("/D")][0] = writer.pages[0].indirect_reference
+            writer.write(changed)
+            self.assertNotEqual(pdf_range.content_signature(source), pdf_range.content_signature(changed))
+            action[NameObject("/S")] = NameObject("/JavaScript")
+            writer.write(changed)
+            with self.assertRaisesRegex(pdf_range.UnsupportedPDF, "non-local opening"):
+                pdf_range.content_signature(changed)
 
     def test_upstream_inventory_cache_tracks_actual_file_fingerprint(self):
         from scripts import reader_assets

@@ -2,6 +2,7 @@
 """Incrementally assess original and generated PDFs; atomically publish winners."""
 import argparse
 import concurrent.futures
+from collections import Counter, defaultdict, deque
 import hashlib
 import json
 import os
@@ -129,9 +130,25 @@ def plan(items, state, tool_version, limit, exact_key="", retry_failed=False):
             files[key] = current
         if not exact_key or key == exact_key:
             pending.append(current)
-    # Stable ordering, with unprocessed records ahead of explicit failed retries.
-    pending.sort(key=lambda row: (row.get("status") == "failed", row["key"]))
-    return files, pending[:limit]
+    # Interleave repositories and generated/original inputs. Lexicographic source
+    # order otherwise postpones generated assets behind tens of thousands of PDFs.
+    group = lambda row: (row.get("source_kind", "upstream"), row.get("repo", ""))
+    completed = Counter(group(row) for row in files.values()
+                        if row.get("status") not in {"pending"}
+                        and row.get("reason") not in {"below-4-mib", "source-exceeds-2-gib"})
+    selected = []
+    for retry in (False, True):
+        groups = defaultdict(deque)
+        for row in sorted(pending, key=lambda row: row["key"]):
+            if (row.get("status") == "failed") == retry:
+                groups[group(row)].append(row)
+        while groups and len(selected) < limit:
+            bucket = min(groups, key=lambda key: (completed[key], key))
+            selected.append(groups[bucket].popleft())
+            completed[bucket] += 1
+            if not groups[bucket]:
+                del groups[bucket]
+    return files, selected
 
 
 def compact_report(report):

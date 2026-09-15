@@ -14,7 +14,7 @@ from pypdf.generic import IndirectObject, StreamObject
 
 ENGINE = "6.3.289"
 PROFILE = "pdf-range-v1"
-ASSESSMENT = "pdfjs-6.3.289-range-1m-scene-v1-policy-v1"
+ASSESSMENT = "pdfjs-6.3.289-range-1m-scene-v1-policy-v2"
 MI = 1024 * 1024
 MIN_BYTES = 4 * MI
 METHODS = {
@@ -39,15 +39,31 @@ def content_signature(path: Path) -> dict:
         raise UnsupportedPDF("encrypted input; use its existing decrypted asset")
     root = reader.trailer["/Root"]
     supported = {"/Type", "/Pages", "/Outlines", "/PageMode", "/PageLayout", "/Version",
-                 "/ViewerPreferences", "/Metadata", "/Lang", "/MarkInfo"}
+                 "/ViewerPreferences", "/Metadata", "/Lang", "/MarkInfo", "/OpenAction", "/PageLabels"}
     if set(root) - supported:
         raise UnsupportedPDF("catalog structures require additional equivalence checks: " +
                              ",".join(sorted(set(root) - supported)))
     memo, active = {}, set()
+    page_numbers = {(page.indirect_reference.idnum, page.indirect_reference.generation): number
+                    for number, page in enumerate(reader.pages)}
+    opening = root.get("/OpenAction")
+    if opening is not None:
+        opening = opening.get_object()
+        if isinstance(opening, dict):
+            if opening.get("/S") != "/GoTo" or set(opening) - {"/S", "/D", "/Type"}:
+                raise UnsupportedPDF("non-local opening action requires additional equivalence checks")
+            opening = opening.get("/D")
+            opening = opening.get_object() if opening is not None else None
+        if (not isinstance(opening, list) or len(opening) < 2
+                or not isinstance(opening[0], IndirectObject)
+                or (opening[0].idnum, opening[0].generation) not in page_numbers):
+            raise UnsupportedPDF("opening action is not an explicit local page destination")
 
     def normalize(value):
         if isinstance(value, IndirectObject):
             key = (value.idnum, value.generation)
+            if key in page_numbers:
+                return {"page_index": page_numbers[key]}
             if key in active:
                 raise UnsupportedPDF("cyclic resource structure")
             if key not in memo:
@@ -299,6 +315,11 @@ def assess(source: Path, work: Path, vendor: Path) -> tuple[dict, Path | None]:
                                 after["snapshots"]["startup"]["requests"],
                                 after["snapshots"]["jump"]["bytes"], method, target))
         except Exception as error:
+            if isinstance(error, subprocess.CalledProcessError):
+                detail = (error.stderr or error.stdout or b"")
+                if isinstance(detail, bytes):
+                    detail = detail.decode("utf-8", "replace")
+                error = RuntimeError(f"qpdf exit {error.returncode}: {detail[:1200]}")
             report["candidates"][method] = {"accepted": False, "error": type(error).__name__ + ": " + str(error)[:300]}
     if not passing:
         if any("error" in value for value in report["candidates"].values()):
