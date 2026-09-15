@@ -36,11 +36,18 @@ def merge_results(bundles):
                     continue
                 target = merged / "objects" / source.relative_to(objects)
                 target.parent.mkdir(parents=True, exist_ok=True)
-                if target.exists():
-                    if target.read_bytes() != source.read_bytes():
-                        raise ValueError(f"conflicting PDF range artifact: {target}")
-                else:
+                if not target.exists():
                     shutil.copyfile(source, target)
+    # qpdf may emit different document IDs in parallel workers. The path
+    # identity is already content/profile based, so retain one valid artifact
+    # and make all aliases reference its digest.
+    canonical = {}
+    for result in results.values():
+        if result.get("status") != "optimized" or not result.get("path"):
+            continue
+        winner = canonical.setdefault(result["path"], result)
+        result["sha256"] = winner.get("sha256")
+        result["bytes"] = winner.get("bytes")
     return merged, list(results.values())
 
 

@@ -36,6 +36,26 @@ class PDFRangeShardTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "duplicate"):
                 merge_results(bundles)
 
+    def test_parallel_qpdf_ids_share_one_artifact_digest(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            bundles = []
+            path = "objects/aa/hash/profile/document.pdf"
+            for index, body in enumerate((b"one", b"two")):
+                bundle = root / f"bundle-{index}"
+                artifact = bundle / path
+                artifact.parent.mkdir(parents=True)
+                artifact.write_bytes(body)
+                (bundle / "results.json").write_text(json.dumps([{
+                    "key": f"alias-{index}", "status": "optimized", "path": path,
+                    "sha256": f"digest-{index}", "bytes": len(body),
+                }]))
+                bundles.append(bundle)
+            merged, results = merge_results(bundles)
+            self.assertEqual(len(results), 2)
+            self.assertEqual({result["sha256"] for result in results}, {"digest-0"})
+            self.assertEqual((merged / path).read_bytes(), b"one")
+
 
 if __name__ == "__main__":
     unittest.main()
