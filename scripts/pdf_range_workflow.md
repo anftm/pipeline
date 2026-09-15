@@ -2,7 +2,7 @@
 
 `pdf-range-assets.yml` 每小时第 37 分钟运行，并在 `Build Reader Assets` 成功结束后运行。
 默认每个 checkpoint 检查 30 个输入，每次最多 4 个 checkpoint，最多 3 个文件并行。
-工作流还会把每个 checkpoint 分成 4 个独立 Runner；每个 Runner 构建互不重复的
+工作流还会把每个 checkpoint 分成 15 个独立 Runner；每个 Runner 构建互不重复的
 结果 bundle，最后由单个 publish Runner 合并并提交。这只并行计算，不并行修改
 Reader Assets manifest，因此不会因为多个实例同时提交而互相覆盖。
 规划按来源仓库和原始/生成类型分组，让已处理较少的组优先轮流获得额度，避免
@@ -45,11 +45,16 @@ Reader Assets manifest，因此不会因为多个实例同时提交而互相覆�
 
 1. `qpdf --object-streams=generate --stream-data=preserve`
 2. `qpdf --linearize --stream-data=preserve`
-3. `qpdf --object-streams=generate --linearize --stream-data=preserve`
+3. `qpdf --object-streams=generate --linearize --stream-data=preserve`（仅重型诊断）
 
 对象流候选如果已经把启动读取量降到原件的 50% 以下、产物体积不超过原件 2%，
-并通过完整内容签名，会直接结束该文件的候选搜索。否则继续评测线性化候选。
+并通过完整内容签名，会直接结束该文件的候选搜索。重型诊断模式下，收益不够时
+才继续评测线性化候选。
 这不是跳过校验，而是避免在已经明显达标的文件上重复运行通常更慢的两个实验。
+
+常规自动回填默认只运行对象流候选，避免数万文件重复执行线性化和组合实验。
+设置 `PDF_RANGE_TRY_HEAVY=1` 才会恢复线性化及组合候选，适合针对单个文件或小批量
+诊断；已发布对象流资源不会因此被自动替换。
 
 全部保留原始图像、字体和内容流。线性化还需通过 `--check-linearization`，但格式
 有效不等同于加载更快。与原件对比，通过候选必须同时满足：

@@ -69,9 +69,9 @@ jobs:
     timeout-minutes: 330
     strategy:
       fail-fast: false
-      max-parallel: 4
+      max-parallel: 15
       matrix:
-        shard: [0, 1, 2, 3]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -99,7 +99,7 @@ jobs:
         run: |
           [[ "$BATCH_LIMIT" =~ ^[0-9]+$ ]] && ((10#$BATCH_LIMIT >= 1 && 10#$BATCH_LIMIT <= 100)) || exit 1
           [[ "$CHECKPOINTS" =~ ^[0-9]+$ ]] && ((10#$CHECKPOINTS >= 1 && 10#$CHECKPOINTS <= 20)) || exit 1
-          args=(--limit "$BATCH_LIMIT" --workers 3 --shard-count 4 --shard-index "$SHARD_INDEX" --clean-published --build-only --repo "$SOURCE_REPO" --path "$SOURCE_PATH" --vendor "$RUNNER_TEMP/pdf-range-engine/node_modules/pdfjs-dist")
+          args=(--limit "$BATCH_LIMIT" --workers 3 --shard-count 15 --shard-index "$SHARD_INDEX" --clean-published --build-only --repo "$SOURCE_REPO" --path "$SOURCE_PATH" --vendor "$RUNNER_TEMP/pdf-range-engine/node_modules/pdfjs-dist")
           if [[ "$RETRY_FAILED" == true ]]; then args+=(--retry-failed); fi
           for ((checkpoint=0; checkpoint<10#$CHECKPOINTS; checkpoint++)); do
             python scripts/pdf_range_assets.py "${args[@]}" --bundle "output/pdf-range/$checkpoint"
