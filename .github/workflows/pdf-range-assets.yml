@@ -99,13 +99,10 @@ jobs:
         run: |
           [[ "$BATCH_LIMIT" =~ ^[0-9]+$ ]] && ((10#$BATCH_LIMIT >= 1 && 10#$BATCH_LIMIT <= 100)) || exit 1
           [[ "$CHECKPOINTS" =~ ^[0-9]+$ ]] && ((10#$CHECKPOINTS >= 1 && 10#$CHECKPOINTS <= 20)) || exit 1
-          args=(--limit "$BATCH_LIMIT" --workers 3 --shard-count 15 --shard-index "$SHARD_INDEX" --clean-published --build-only --repo "$SOURCE_REPO" --path "$SOURCE_PATH" --vendor "$RUNNER_TEMP/pdf-range-engine/node_modules/pdfjs-dist")
+          total_limit=$((10#$BATCH_LIMIT * 10#$CHECKPOINTS))
+          args=(--limit "$total_limit" --workers 3 --shard-count 15 --shard-index "$SHARD_INDEX" --clean-published --build-only --repo "$SOURCE_REPO" --path "$SOURCE_PATH" --vendor "$RUNNER_TEMP/pdf-range-engine/node_modules/pdfjs-dist")
           if [[ "$RETRY_FAILED" == true ]]; then args+=(--retry-failed); fi
-          for ((checkpoint=0; checkpoint<10#$CHECKPOINTS; checkpoint++)); do
-            python scripts/pdf_range_assets.py "${args[@]}" --bundle "output/pdf-range/$checkpoint"
-            if [[ -n "$SOURCE_PATH" ]]; then break; fi
-            if python -c 'import json,sys; sys.exit(bool(json.load(open(sys.argv[1]))))' "output/pdf-range/$checkpoint/results.json"; then break; fi
-          done
+          python scripts/pdf_range_assets.py "${args[@]}" --bundle "output/pdf-range"
       - uses: actions/upload-artifact@v7
         with:
           name: pdf-range-bundle-${{ matrix.shard }}

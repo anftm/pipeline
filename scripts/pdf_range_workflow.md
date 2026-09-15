@@ -2,7 +2,7 @@
 
 `pdf-range-assets.yml` 每小时第 37 分钟运行，并在 `Build Reader Assets` 成功结束后运行。
 默认每个 checkpoint 检查 30 个输入，每次最多 4 个 checkpoint，最多 3 个文件并行。
-工作流还会把每个 checkpoint 分成 15 个独立 Runner；每个 Runner 构建互不重复的
+工作流会把一个批次的全部 checkpoint 合并规划，再分成 15 个独立 Runner；每个 Runner 构建互不重复的
 结果 bundle，最后由单个 publish Runner 合并并提交。这只并行计算，不并行修改
 Reader Assets manifest，因此不会因为多个实例同时提交而互相覆盖。
 规划按来源仓库和原始/生成类型分组，让已处理较少的组优先轮流获得额度，避免
