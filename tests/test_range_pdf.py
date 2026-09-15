@@ -107,6 +107,17 @@ class RangePdfTests(unittest.TestCase):
             output_size = 100 * pdf_range.MI if mutation == "growth" else 89 * pdf_range.MI
             self.assertFalse(pdf_range.improvement(before, candidate, 90 * pdf_range.MI, output_size))
 
+    def test_strong_gain_can_end_candidate_search_early(self):
+        def report(amount, requests):
+            metric = {"bytes": amount, "requests": requests}
+            return {"renders": ["same"], "pages": 10, "outline_entries": 1,
+                    "snapshots": {key: dict(metric) for key in ("startup", "idle", "jump", "final")}}
+        before = report(80 * pdf_range.MI, 80)
+        strong = report(20 * pdf_range.MI, 20)
+        ordinary = report(60 * pdf_range.MI, 70)
+        self.assertTrue(pdf_range.strong_improvement(before, strong, 90 * pdf_range.MI, 90 * pdf_range.MI))
+        self.assertFalse(pdf_range.strong_improvement(before, ordinary, 90 * pdf_range.MI, 90 * pdf_range.MI))
+
     @unittest.skipUnless(shutil.which("qpdf"), "qpdf is required")
     def test_conversion_preserves_content_images_geometry_and_outline(self):
         with tempfile.TemporaryDirectory() as directory:
