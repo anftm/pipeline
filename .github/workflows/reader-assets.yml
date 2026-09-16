@@ -120,39 +120,7 @@ jobs:
           if [[ "${{ inputs.retry_failed }}" == "true" ]]; then args+=(--retry-failed); fi
           if [[ "${{ inputs.force }}" == "true" ]]; then args+=(--force); fi
           retry_reader_command python scripts/scan_reader_assets.py "${args[@]}"
-          python - <<'PY'
-          import json
-          import os
-          from pathlib import Path
-          from scripts import scan_reader_assets
-
-          queue_path = Path("output/reader-assets/queue.json")
-          queue = json.loads(queue_path.read_text(encoding="utf-8"))
-          items = queue["items"]
-          extension = items[0]["extension"] if items else ""
-          items = [item for item in items if item["extension"] == extension]
-          queue["items"] = items
-          queue_path.write_text(json.dumps(queue, ensure_ascii=False, indent=2), encoding="utf-8")
-          shard_count = 1 if os.environ.get("FORCE_REBUILD") == "true" or os.environ.get("INPUT_PATH") else 10
-          for shard in range(shard_count):
-              shard_items = [
-                  item for item in items
-                  if scan_reader_assets.shard_for_key(item["key"], shard_count) == shard
-              ]
-              Path(f"output/reader-assets/queue-{shard}.json").write_text(
-                  json.dumps({**queue, "items": shard_items}, ensure_ascii=False, indent=2),
-                  encoding="utf-8",
-              )
-          Path("output/reader-assets/snapshot.json").write_text(
-              json.dumps({**queue, "items": []}, ensure_ascii=False, indent=2), encoding="utf-8",
-          )
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-              output.write(f"extension={extension}\n")
-              output.write(f"count={len(items)}\n")
-              output.write(f"stale_count={len(queue.get('stale_keys', []))}\n")
-              output.write(f"authoritative={str(queue.get('authoritative_snapshot') is True).lower()}\n")
-              output.write(f"shards={'[0]' if os.environ.get('FORCE_REBUILD') == 'true' or os.environ.get('INPUT_PATH') else '[0,1,2,3,4,5,6,7,8,9]'}\n")
-          PY
+           python scripts/prepare_reader_assets_plan.py
       - name: Package conversion plan
         if: inputs.dry_run != true
         run: tar -czf output/reader-assets/plan.tgz output/search_data.json state/commits.json output/reader-assets/snapshot.json output/reader-assets/queue-*.json
