@@ -4,7 +4,7 @@
 
 线上状态来自 `vomebook/Reader-Assets` 固定 revision
 `33db8c051a01182c1ed0ec567f37d8da240f2e8a`。这是调查起点，不能把后面的本地样本结果
-当作线上已经更新的计数。此修复尚未发布；本地 qpdf 为 10.6.3，PDF.js 为 6.3.289，
+当作线上已经更新的计数。调查阶段修复尚未发布；后续发布记录见文末。本地 qpdf 为 10.6.3，PDF.js 为 6.3.289，
 pypdf 为 6.14.2。Runner 的 qpdf 版本可能不同，身份指纹包含实际工具版本。
 
 | 线上状态 | 文件数 |
@@ -116,3 +116,43 @@ python3 -B scripts/audit_pdf_range_failures.py \
 `--retry-blocked --limit 10 --workers 2 --build-only` 先生成候选。新规则版本使旧身份进入
 重评；定向重试仅选择旧 failed/unsupported。发布后需要再次查询固定线上 revision 的
 状态、校验 sidecar 与 Reader/Range 入口，不能以这份本地报告代替部署验收。
+
+## 上线验收（2026-09-16 UTC）
+
+- 修复提交：`anftm/pipeline@6ef6128d9577b7e40007df65fb2a20e4923bb62a`。
+  独立发布检出与远端基线逐文件核对后测试 218 项通过；原工作区 Git worktree 引用损坏，
+  因而没有在该工作区改写历史。远端随后合入的电子书章节变更保留。
+- 已验证的 22 条结果及 8 份产物发布至 Reader-Assets
+  `26747b64356e7dc35171946ade8f441d420e23fe`，当前源文件指纹、8 条映射变化及远端结果均核对通过。
+- 定向重试运行 `https://github.com/anftm/pipeline/actions/runs/35152997679`，
+  参数 `retry_blocked=true, limit=10, checkpoints=1`，15 个分片共 150 份。
+  首次一个 Runner 安装依赖遭遇 Microsoft apt 源 403，重跑失败任务后整个工作流成功。
+  结果：60 optimized、66 unchanged、3 no-gain、20 unsupported、1 failed；发布 150 条，跳过 0 条。
+- 重试产物发布至 Reader-Assets `2b1222d25fbed64acbdc96d2f2c492176a624bc3`。
+  独立比较前后 manifest，恰好 150 条变化，全部来自旧 failed/unsupported；60 份新产物的
+  远端 SHA-256、大小与映射逐条一致。本轮累计新增优化产物为 68 份。
+- GitHub Pages 最终映射提交 `885bbe9abe1f08bc851483b88823edc3879afaa6`，部署运行
+  `https://github.com/vomebook/search/actions/runs/35153793505` 成功。
+  实际线上 sidecar 与固定 HF revision 的字节完全相同，SHA-256 为
+  `5256b5bba75d64a70ef68a5779021fc2f1090b81446a554eb2b4180bc117abba`。
+- 最初 8 份产物的线上 Reader resolve、原始下载链接、首尾各 1024 字节 Range 全部通过；
+  重试新增产物又抽查 2 份，结果相同。两站各实测《民国外债档案史料06》（631 页）和
+  《论法的精神（大字版）》（1,735 页）的首页、第 10 页、中间页、末页，无页面脚本异常。
+  HF 生产冒烟 4 项通过，GitHub Pages 生产冒烟通过。
+
+最终固定 revision `2b1222d...` 的全库状态如下，后续定时工作流可能继续改变计数：
+
+| 状态 | 文件数 |
+| --- | ---: |
+| optimized | 3,451 |
+| unchanged | 26,366 |
+| no-gain | 346 |
+| unsupported | 4,208 |
+| failed | 202 |
+| pending | 39,386 |
+
+本批剩余失败为 `VoiceOfML/A-Historical-Learning-Data` 的
+`苏俄（联）革命/革命联盟《资本主义是怎样在苏联复辟的》.pdf`：对象流候选内容签名不同，
+其他候选未通过收益门槛，继续保留原件。尚未完成所有失败/受限文件的全库重试。
+本机 `final-publication-verification.json`、`retry-results.json`、`remaining-failures.json`
+和 `workflow-results.json` 保存于上述调查目录，可复核本批结果及剩余逐文件清单。
