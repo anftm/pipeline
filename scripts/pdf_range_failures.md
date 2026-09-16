@@ -156,3 +156,29 @@ python3 -B scripts/audit_pdf_range_failures.py \
 其他候选未通过收益门槛，继续保留原件。尚未完成所有失败/受限文件的全库重试。
 本机 `final-publication-verification.json`、`retry-results.json`、`remaining-failures.json`
 和 `workflow-results.json` 保存于上述调查目录，可复核本批结果及剩余逐文件清单。
+
+## 后续回填与疑难样本（2026-09-16 UTC）
+
+连续回填增加 `retry_stale_blocked`，按输入、规则、工具身份排除已经重评的结果。
+针对队列推进、失败重试、输入变化的 31 项 PDF 快测通过。提交 `9a6af2a` 已上线；
+运行 `https://github.com/anftm/pipeline/actions/runs/35155084024` 使用
+`retry_stale_blocked=true, limit=100, checkpoints=3`，15 个 Runner 总容量 4,500。
+提交时状态为 pending，等待现有 Build Reader Assets 共享锁；不能把排队视为完成。
+
+固定 Reader-Assets revision `648ed93e56c033cd7340b411c8adf43f05e1e8d7` 中，失败/受限
+仍为 4,410 条。按上一批 Runner 的 `qpdf version 11.9.0` 和状态内输入指纹规划，21 条
+已使用当前规则、4,389 条需要重评。工作流开始时重新发现源文件与生成产物，实际队列
+仍以 Runner 当时的输入身份为准。本机 `continuation-queue.json` 保存规划依据。
+
+补充调查了两份真实源文件（本机 qpdf 10.6.3）：
+
+- `革命联盟《资本主义是怎样在苏联复辟的》.pdf`：368 页；对象流候选的图差异为加密
+  过滤器 `/CFM` 从 `/V2`（RC4）变为 `/AESV2`。`--copy-encryption` 和
+  `--allow-weak-crypto` 两个诊断方案均未保持原算法。当前精确保留加密参数的约束下
+  继续拒绝，不把它误报成页面内容损坏，也不放宽加密校验。
+- `000516/1870520043_6115_马克思__恩格斯__列宁论社会主义经济.pdf`：页面树声明
+  907 页，qpdf/pdfinfo 也报告 907；直接树遍历得到 1,810 个叶引用，仅 942 个不同
+  页面对象，存在重复引用。qpdf 重写后 pypdf 仍报循环页面引用，并有内容流结构警告。
+  不能据此任意去重或截取前 907 页，需要可信源版本确认页数及页序。
+
+原件、qpdf 候选、结构差异与页面树诊断保存在 `/tmp/opencode/pdf-recovery-followup/`。
