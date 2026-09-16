@@ -91,17 +91,21 @@ def identity(item, tool_version):
     return hashlib.sha256(json.dumps(value, separators=(",", ":")).encode()).hexdigest()
 
 
-def plan(items, state, tool_version, limit, exact_key="", retry_failed=False, retry_blocked=False):
+def plan(items, state, tool_version, limit, exact_key="", retry_failed=False, retry_blocked=False,
+         retry_stale_blocked=False):
     files, pending = {}, []
     reusable = {entry.get("identity"): entry for entry in state.get("files", {}).values()
                 if entry.get("status") in {"optimized", "unchanged", "no-gain", "unsupported"}}
     for key, item in sorted(items.items()):
         fingerprint = identity(item, tool_version)
         previous = state.get("files", {}).get(key, {})
-        if retry_blocked and previous.get("status") not in {"failed", "unsupported"}:
+        if (retry_blocked or retry_stale_blocked) and previous.get("status") not in {"failed", "unsupported"}:
             files[key] = previous or {**item, "identity": fingerprint, "status": "pending"}
             continue
-        retry_requested = retry_blocked or (retry_failed and previous.get("status") == "failed")
+        if retry_stale_blocked and previous.get("identity") == fingerprint:
+            files[key] = {**previous, **item}
+            continue
+        retry_requested = retry_blocked or retry_stale_blocked or (retry_failed and previous.get("status") == "failed")
         if (previous.get("input_token") == item["input_token"]
                 and previous.get("input_path") == item.get("input_path")
                 and previous.get("input_repo") == item.get("input_repo")):
@@ -266,6 +270,8 @@ def main():
     parser.add_argument("--retry-failed", action="store_true")
     parser.add_argument("--retry-blocked", action="store_true",
                         help="Assess only previously failed/unsupported PDFs, including unchanged inputs")
+    parser.add_argument("--retry-stale-blocked", action="store_true",
+                        help="Assess only failed/unsupported PDFs whose input or validation identity changed")
     parser.add_argument("--build-only", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--clean-published", action="store_true", help="Remove this bundle's uploaded objects after successful publication")
@@ -291,7 +297,7 @@ def main():
     version = subprocess.check_output(["qpdf", "--version"], text=True).splitlines()[0]
     key = reader_assets.asset_key(args.repo, args.path) if args.repo else ""
     files, pending = plan(items, baseline, version, args.limit * args.shard_count, key,
-                          args.retry_failed, args.retry_blocked)
+                          args.retry_failed, args.retry_blocked, args.retry_stale_blocked)
     pending = pending[args.shard_index::args.shard_count]
     if args.repo:
         files = {**baseline.get("files", {}), **files}

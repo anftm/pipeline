@@ -32,6 +32,10 @@ on:
         description: Assess only previously failed or unsupported PDFs with current validation rules
         type: boolean
         default: false
+      retry_stale_blocked:
+        description: Resume blocked-file recovery, skipping results already assessed with current inputs and rules
+        type: boolean
+        default: false
       dry_run:
         description: Inspect the queue without downloading PDFs or publishing
         type: boolean
@@ -100,6 +104,7 @@ jobs:
           CHECKPOINTS: ${{ inputs.checkpoints || '4' }}
           RETRY_FAILED: ${{ inputs.retry_failed || 'false' }}
           RETRY_BLOCKED: ${{ inputs.retry_blocked || 'false' }}
+          RETRY_STALE_BLOCKED: ${{ inputs.retry_stale_blocked || 'false' }}
           SHARD_INDEX: ${{ matrix.shard }}
         run: |
           [[ "$BATCH_LIMIT" =~ ^[0-9]+$ ]] && ((10#$BATCH_LIMIT >= 1 && 10#$BATCH_LIMIT <= 100)) || exit 1
@@ -108,6 +113,7 @@ jobs:
           args=(--limit "$total_limit" --workers 3 --shard-count 15 --shard-index "$SHARD_INDEX" --clean-published --build-only --repo "$SOURCE_REPO" --path "$SOURCE_PATH" --vendor "$RUNNER_TEMP/pdf-range-engine/node_modules/pdfjs-dist")
           if [[ "$RETRY_FAILED" == true ]]; then args+=(--retry-failed); fi
           if [[ "$RETRY_BLOCKED" == true ]]; then args+=(--retry-blocked); fi
+          if [[ "$RETRY_STALE_BLOCKED" == true ]]; then args+=(--retry-stale-blocked); fi
           python scripts/pdf_range_assets.py "${args[@]}" --bundle "output/pdf-range"
       - uses: actions/upload-artifact@v7
         with:

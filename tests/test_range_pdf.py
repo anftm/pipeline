@@ -47,6 +47,25 @@ class RangePdfTests(unittest.TestCase):
             for row in pending:
                 self.assertEqual(row["_previous_identity"], previous[row["key"]]["identity"])
 
+    def test_stale_blocked_retry_advances_past_terminal_results(self):
+        items = {key: {"key": key, "input_token": key, "input_profile": "upstream"}
+                 for key in ("old-failed", "old-unsupported", "current-failed", "current-unsupported", "pending", "optimized")}
+        previous = {key: {**item, "identity": pdf_range_assets.identity(item, "old" if key.startswith("old-") else "current"),
+                          "status": key.split("-")[-1]}
+                    for key, item in items.items()}
+        _, batch = pdf_range_assets.plan(items, {"files": previous}, "current", 1, retry_stale_blocked=True)
+        self.assertEqual(len(batch), 1)
+        first = batch[0]
+        previous[first["key"]] = {**first, "status": "unsupported"}
+        _, following = pdf_range_assets.plan(items, {"files": previous}, "current", 1, retry_stale_blocked=True)
+        self.assertEqual(len(following), 1)
+        self.assertNotEqual(following[0]["key"], first["key"])
+        previous[following[0]["key"]] = {**following[0], "status": "failed"}
+        self.assertFalse(pdf_range_assets.plan(items, {"files": previous}, "current", 10, retry_stale_blocked=True)[1])
+        items["current-failed"]["input_token"] = "changed-content"
+        _, changed = pdf_range_assets.plan(items, {"files": previous}, "current", 10, retry_stale_blocked=True)
+        self.assertEqual([row["key"] for row in changed], ["current-failed"])
+
     def test_retry_does_not_keep_old_candidate_diagnostics_or_output_paths(self):
         item = {"key": "book", "source_bytes": 10, "status": "failed", "path": "old.pdf",
                 "candidates": {"objects": {"error": "old error"}}, "sha256": "old-hash"}

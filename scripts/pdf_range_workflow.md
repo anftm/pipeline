@@ -111,6 +111,9 @@ qpdf 退出码 3 仅表示有警告，保留警告后继续验证；退出码 2 
 失败的相同输入不会每小时无限重试；修复工具后使用 retry_failed，或变更评测版本。
 retry_blocked 只选择先前 failed/unsupported 的输入，并允许相同身份重新评测，适合此次
 规则升级的定向回填。常规增量执行仍会按新的 ASSESSMENT 对规则变化后的输入重评。
+连续回填使用 `retry_stale_blocked=true`（CLI `--retry-stale-blocked`），只选择输入或验证
+身份已变化的 failed/unsupported；已经按当前规则处理后仍失败/受限的文件不再占用下一批。
+显式排查同一身份的暂时失败仍可使用原有 `retry_failed` 或 `retry_blocked`。
 每个分片结果携带规划时的旧身份；发布器只在远端仍是该身份时接受升级结果，避免
 把合法规则升级误判为过期，同时继续阻止旧任务覆盖后来的新输入/评测。
 计划只读取源清单与文件指纹，不会因 dry-run 下载 PDF 或发布状态。
