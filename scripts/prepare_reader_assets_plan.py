@@ -5,7 +5,10 @@ import json
 import os
 from pathlib import Path
 
-from scripts import scan_reader_assets
+try:
+    from . import scan_reader_assets
+except ImportError:
+    import scan_reader_assets
 
 
 def prepare(queue_path: Path = Path("output/reader-assets/queue.json")) -> tuple[str, int, int, bool]:
