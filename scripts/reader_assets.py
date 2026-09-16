@@ -14,9 +14,9 @@ READER_ASSETS_REPO = "vomebook/Reader-Assets"
 MANIFEST_NAME = "manifest.json"
 # Chapter manifests make multi-file books cheap to open: the Reader fetches the
 # manifest and nearby chapters instead of downloading the complete archive.
-# Production inventory: 28 books are >=32 MiB; lowering this to 16 MiB adds
-# about 37 candidates without expanding ordinary small-book packaging.
-EPUB_CHAPTER_SPLIT_BYTES = 16 * 1024 * 1024
+# Native ebook chapter bundles include an on-demand full-text search index.
+EPUB_CHAPTER_SPLIT_BYTES = 8 * 1024 * 1024
+CHM_CHAPTER_SPLIT_BYTES = 16 * 1024 * 1024
 EPUB_CHAPTER_BUNDLE_DIR = "epub-chapters"
 EPUB_CHAPTER_PROFILE = "epub-chapters-v4"
 CONVERTIBLE_EXTENSIONS = {
@@ -99,7 +99,7 @@ def needs_epub_chapters(extension: str, reader_mode: str, source_bytes: int) -> 
     return (extension in {"epub", "mobi", "azw3", "fb2"} and reader_mode == "foliate"
             and int(source_bytes or 0) >= EPUB_CHAPTER_SPLIT_BYTES) or (
                 extension == "chm" and reader_mode == "epub"
-            and int(source_bytes or 0) >= EPUB_CHAPTER_SPLIT_BYTES)
+            and int(source_bytes or 0) >= CHM_CHAPTER_SPLIT_BYTES)
 
 
 def source_password(repo: str, path: str) -> str:

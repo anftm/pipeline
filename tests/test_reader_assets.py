@@ -195,10 +195,14 @@ class ReaderAssetContractTests(unittest.TestCase):
         self.assertFalse(reader_assets.needs_epub_chapters("epub", "pdf", 10 ** 9))
 
     def test_mid_sized_epub_is_split_for_on_demand_loading(self):
-        self.assertTrue(reader_assets.needs_epub_chapters(
-            "epub", "foliate", 16 * 1024 * 1024))
-        self.assertFalse(reader_assets.needs_epub_chapters(
-            "epub", "foliate", 16 * 1024 * 1024 - 1))
+        for extension in ("epub", "mobi", "azw3", "fb2"):
+            with self.subTest(extension=extension):
+                self.assertTrue(reader_assets.needs_epub_chapters(
+                    extension, "foliate", 8 * 1024 * 1024))
+                self.assertFalse(reader_assets.needs_epub_chapters(
+                    extension, "foliate", 8 * 1024 * 1024 - 1))
+        self.assertTrue(reader_assets.needs_epub_chapters("chm", "epub", 16 * 1024 * 1024))
+        self.assertFalse(reader_assets.needs_epub_chapters("chm", "epub", 16 * 1024 * 1024 - 1))
 
     def test_chapter_bundle_can_publish_text_without_resources(self):
         with tempfile.TemporaryDirectory() as root:
