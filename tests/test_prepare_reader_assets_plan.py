@@ -28,6 +28,9 @@ class PrepareReaderAssetsPlanTests(unittest.TestCase):
             self.assertEqual((extension, count, stale, authoritative), ("pdf", 1, 1, True))
             self.assertEqual(json.loads((root / "queue.json").read_text())["items"], [{"extension": "pdf", "key": "a"}])
 
+    def test_script_imports_when_executed_from_scripts_directory(self):
+        self.assertTrue(prepare_reader_assets_plan.scan_reader_assets)
+
 
 if __name__ == "__main__":
     unittest.main()
