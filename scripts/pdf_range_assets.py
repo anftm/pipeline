@@ -91,13 +91,17 @@ def identity(item, tool_version):
     return hashlib.sha256(json.dumps(value, separators=(",", ":")).encode()).hexdigest()
 
 
-def plan(items, state, tool_version, limit, exact_key="", retry_failed=False):
+def plan(items, state, tool_version, limit, exact_key="", retry_failed=False, retry_blocked=False):
     files, pending = {}, []
     reusable = {entry.get("identity"): entry for entry in state.get("files", {}).values()
                 if entry.get("status") in {"optimized", "unchanged", "no-gain", "unsupported"}}
     for key, item in sorted(items.items()):
         fingerprint = identity(item, tool_version)
         previous = state.get("files", {}).get(key, {})
+        if retry_blocked and previous.get("status") not in {"failed", "unsupported"}:
+            files[key] = previous or {**item, "identity": fingerprint, "status": "pending"}
+            continue
+        retry_requested = retry_blocked or (retry_failed and previous.get("status") == "failed")
         if (previous.get("input_token") == item["input_token"]
                 and previous.get("input_path") == item.get("input_path")
                 and previous.get("input_repo") == item.get("input_repo")):
@@ -112,10 +116,10 @@ def plan(items, state, tool_version, limit, exact_key="", retry_failed=False):
             continue
         if previous.get("identity") == fingerprint:
             current = {**previous, **item}
-            if previous.get("status") != "pending" and not (retry_failed and previous.get("status") == "failed"):
+            if previous.get("status") != "pending" and not retry_requested:
                 files[key] = current
                 continue
-        elif fingerprint in reusable:
+        elif fingerprint in reusable and not retry_requested:
             cached = reusable[fingerprint]
             files[key] = {**cached, **item, "input_sha256": cached.get("input_sha256", item.get("input_sha256", ""))}
             continue
@@ -129,7 +133,7 @@ def plan(items, state, tool_version, limit, exact_key="", retry_failed=False):
         else:
             files[key] = current
         if not exact_key or key == exact_key:
-            pending.append(current)
+            pending.append({**current, "_previous_identity": previous.get("identity")})
     # Interleave repositories and generated/original inputs. Lexicographic source
     # order otherwise postpones generated assets behind tens of thousands of PDFs.
     group = lambda row: (row.get("source_kind", "upstream"), row.get("repo", ""))
@@ -165,7 +169,12 @@ def compact_report(report):
 
 
 def process(item, bundle, vendor, api):
-    result = dict(item)
+    # A retry starts with input identity only. Otherwise an unchanged/unsupported
+    # result can accidentally retain candidates or output paths from its failure.
+    input_fields = ("key", "repo", "source_path", "source_kind", "input_repo", "input_path",
+                    "input_revision", "input_token", "input_sha256", "input_profile",
+                    "source_bytes", "source_revision", "identity", "_previous_identity")
+    result = {field: item[field] for field in input_fields if field in item}
     if item["source_bytes"] < pdf_range.MIN_BYTES:
         return {**result, "status": "unchanged", "reason": "below-4-mib"}
     if item["source_bytes"] > 2 * 1024 * pdf_range.MI:
@@ -201,7 +210,8 @@ def process(item, bundle, vendor, api):
     except pdf_range.UnsupportedPDF as error:
         result.update(status="unsupported", reason=str(error)[:400])
     except Exception as error:
-        result.update(status="failed", reason=type(error).__name__ + ": " + str(error)[:400])
+        details = pdf_range.failure_details(error)
+        result.update(status="failed", reason=details["error"], error_category=details["error_category"])
     finally:
         download_cache.cleanup()
     return result
@@ -254,6 +264,8 @@ def main():
     parser.add_argument("--repo", default="")
     parser.add_argument("--path", default="")
     parser.add_argument("--retry-failed", action="store_true")
+    parser.add_argument("--retry-blocked", action="store_true",
+                        help="Assess only previously failed/unsupported PDFs, including unchanged inputs")
     parser.add_argument("--build-only", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--clean-published", action="store_true", help="Remove this bundle's uploaded objects after successful publication")
@@ -278,7 +290,8 @@ def main():
     items, inventories = discover(records, revisions, base, images, api, baseline, args.assets_repo, revision, bool(args.repo))
     version = subprocess.check_output(["qpdf", "--version"], text=True).splitlines()[0]
     key = reader_assets.asset_key(args.repo, args.path) if args.repo else ""
-    files, pending = plan(items, baseline, version, args.limit * args.shard_count, key, args.retry_failed)
+    files, pending = plan(items, baseline, version, args.limit * args.shard_count, key,
+                          args.retry_failed, args.retry_blocked)
     pending = pending[args.shard_index::args.shard_count]
     if args.repo:
         files = {**baseline.get("files", {}), **files}
@@ -300,10 +313,11 @@ def main():
             for alias in futures[future]:
                 inputs = {field: alias[field] for field in (
                     "key", "repo", "source_path", "source_kind", "input_repo", "input_path",
-                    "input_revision", "input_token", "input_profile", "source_revision", "identity") if field in alias}
+                    "input_revision", "input_token", "input_profile", "source_revision", "identity",
+                    "_previous_identity") if field in alias}
                 resolved = {**result, **inputs}
                 results.append(resolved)
-                files[alias["key"]] = resolved
+                files[alias["key"]] = {k: v for k, v in resolved.items() if k != "_previous_identity"}
             print(json.dumps({"file": result["source_path"], "status": result["status"],
                               "reason": result.get("reason"), "method": result.get("method")}, ensure_ascii=False), flush=True)
     state = {"version": 1, "files": files, "inventories": inventories}

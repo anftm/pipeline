@@ -3,10 +3,28 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from scripts.publish_pdf_range_shards import merge_results
+from scripts.publish_pdf_range_shards import apply_results, merge_results
 
 
 class PDFRangeShardTests(unittest.TestCase):
+    def test_rule_upgrade_publishes_only_against_the_assessed_identity(self):
+        state = {"files": {"upgrade": {"identity": "old"}, "stale": {"identity": "newer"}}}
+        results = [{"key": "upgrade", "identity": "new", "_previous_identity": "old", "status": "optimized"},
+                   {"key": "stale", "identity": "new", "_previous_identity": "old"},
+                   {"key": "deleted", "identity": "new", "_previous_identity": "old"},
+                   {"key": "fresh", "identity": "new", "_previous_identity": None}]
+        accepted = apply_results(state, results)
+        self.assertEqual([row["key"] for row in accepted], ["upgrade", "fresh"])
+        self.assertEqual(state["files"]["stale"]["identity"], "newer")
+        self.assertNotIn("deleted", state["files"])
+        self.assertNotIn("_previous_identity", state["files"]["upgrade"])
+
+    def test_legacy_bundles_still_require_matching_identity(self):
+        state = {"files": {"current": {"identity": "same"}, "stale": {"identity": "newer"}}}
+        accepted = apply_results(state, [{"key": "current", "identity": "same"},
+                                         {"key": "stale", "identity": "old"}])
+        self.assertEqual([row["key"] for row in accepted], ["current"])
+
     def test_merges_results_and_deduplicates_artifacts(self):
         with tempfile.TemporaryDirectory() as root:
             root = Path(root)

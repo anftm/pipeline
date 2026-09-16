@@ -35,17 +35,35 @@ Reader Assets manifest，因此不会因为多个实例同时提交而互相覆�
 
 低于 4 MiB 输入记录 unchanged，不下载/转换。大于 2 GiB 输入记录 unsupported。
 这些元数据即可决定的状态在规划阶段批量记录，不占用每个 checkpoint 的浏览器评测额度。
-其他输入先进行全页内容与结构签名校验；当前支持普通页面、资源、裁剪/旋转、元数据、
-目录、显式本地页面打开目标及页码标签。打开目标中的页面引用按页序比较，防止对象
-重新编号影响判断，并能检测目标页被改变。脚本、外部跳转等打开动作继续拒绝处理。
-含加密、注释、表单、命名目标、复杂标签结构等尚未支持比较的文档记录 unsupported，
-继续使用现有可读资源，不悄悄丢弃这些结构。
+其他输入先进行全页内容与结构签名校验。使用按稳定遍历顺序编号的对象图比较页面、
+资源、裁剪/旋转、元数据、原始目录树、页码标签、标签结构、注释、普通 AcroForm、
+命名目标、输出色彩配置、可选内容组和已支持的扩展字典。保留父子循环及共享关系，
+避免递归展开循环，也不依赖 qpdf 重排后的对象编号。页面引用按页序比较；显式及
+可解析的命名本地打开目标均受检查。未知 catalog 扩展继续记录 unsupported。
+
+XMP XML 元数据比较解码后的精确字节，允许 qpdf 解压元数据而不误报内容变化；
+图像、字体和页面内容流仍比较原始流字节及过滤器。字典中的 null 按 PDF 语义视为
+缺省，数组中的 null 保留位置；只忽略流字典的 /Length，不忽略普通字典同名字段。
+
+空打开密码的加密 PDF 可以评测，但 qpdf 必须保留加密。完整比较加密字典、32 位权限
+位图和永久文档 ID；任何权限、密钥、加密过滤器变化或移除加密均不能通过。
+需要打开密码的文件优先使用已有解密资产。数字签名、XFA、自动动作、脚本、附件和
+尚未支持的外部动作继续记录 unsupported，保留现有可读资源；不删除这些结构来换取通过。
+
+目录中已有的非页面目标会记录为 invalid_destinations，继续完成页面渲染和测量。
+候选必须保留相同位置的坏目标及完整目录图，不能新增、删除或改变它们。这不修复坏链接，
+也不豁免页面渲染异常；其他 PDF.js 异常仍失败，并保存 worker 的 message/details。
 
 启动读取量大于 8 MiB，或至少 4 MiB 且超过整本 25%，会依次生成并评测：
 
 1. `qpdf --object-streams=generate --stream-data=preserve`
 2. `qpdf --linearize --stream-data=preserve`
 3. `qpdf --object-streams=generate --linearize --stream-data=preserve`（仅重型诊断）
+
+如果常规候选全部未通过，且存在 qpdf 严重错误，可以对未加密输入尝试一次 pypdf
+独立重建。重建进程限 120 秒；重建中间件必须通过 qpdf 检查且与原件完整结构签名一致，
+随后再运行上述候选，记录为 `reconstructed-*`。每个最终候选仍与最初原件比较渲染、文字、
+结构和读取量。它仅用于可证明无损的索引/对象重建，不能补回损坏的图像或内容流。
 
 对象流候选如果已经通过完整内容签名，且首屏读取量严格低于 1 MiB，
 会直接结束该文件的候选搜索。否则继续评测线性化候选。
@@ -54,7 +72,8 @@ Reader Assets manifest，因此不会因为多个实例同时提交而互相覆�
 常规自动回填默认运行全部候选。只有明确设置 `PDF_RANGE_TRY_HEAVY=0` 才会只运行
 对象流候选，适合临时快速诊断；已发布对象流资源不会因此被自动替换。
 
-全部保留原始图像、字体和内容流。线性化还需通过 `--check-linearization`，但格式
+qpdf 退出码 3 仅表示有警告，保留警告后继续验证；退出码 2 仍失败。全部保留原始图像、
+字体和内容流。线性化还需通过 `--check-linearization`，但格式
 有效不等同于加载更快。与原件对比，通过候选必须同时满足：
 
 - 启动字节量至少下降 30%，至少节省 1 MiB，产物体积不增长超过 5%。
@@ -64,7 +83,7 @@ Reader Assets manifest，因此不会因为多个实例同时提交而互相覆�
 
 多个候选通过时，依次选择启动字节最少、启动请求最少、跳页累计字节最少的版本。
 没有收益则记录 no-gain；候选测量不完整且没有通过结果时记录 failed，供显式重试。
-每次浏览器测量限 90 秒，qpdf 转换限 120 秒；超时不是成功，也不把截断数据当成精确总量。
+每次浏览器测量限 90 秒，qpdf 转换及独立重建各限 120 秒；超时不是成功，也不把截断数据当成精确总量。
 本地读取量不能直接换算成用户网络中的提速倍数；上线后还需原入口和代理验收。
 
 ## 状态、映射和发布
@@ -88,8 +107,12 @@ Reader Assets manifest，因此不会因为多个实例同时提交而互相覆�
 
 ## 运行与验证
 
-工作流支持 repo/path 精确定位、每批 limit、checkpoint 数量、retry_failed 和 dry_run。
+工作流支持 repo/path 精确定位、每批 limit、checkpoint 数量、retry_failed、retry_blocked 和 dry_run。
 失败的相同输入不会每小时无限重试；修复工具后使用 retry_failed，或变更评测版本。
+retry_blocked 只选择先前 failed/unsupported 的输入，并允许相同身份重新评测，适合此次
+规则升级的定向回填。常规增量执行仍会按新的 ASSESSMENT 对规则变化后的输入重评。
+每个分片结果携带规划时的旧身份；发布器只在远端仍是该身份时接受升级结果，避免
+把合法规则升级误判为过期，同时继续阻止旧任务覆盖后来的新输入/评测。
 计划只读取源清单与文件指纹，不会因 dry-run 下载 PDF 或发布状态。
 
 ```bash
@@ -97,10 +120,13 @@ python3 -m pip install -r scripts/requirements-pdf-range.txt
 python3 -m playwright install chromium
 npm install --ignore-scripts --no-audit --no-fund pdfjs-dist@6.3.289
 python3 -B scripts/pdf_range_assets.py --limit 10 --workers 2 --build-only
-python3 -B -m unittest tests.test_range_pdf tests.test_reader_assets tests.test_pdf_assets tests.test_repair_gbk_pdf -q
+python3 -B -m unittest tests.test_range_pdf tests.test_pdf_range_shards tests.test_reader_assets tests.test_pdf_assets tests.test_repair_gbk_pdf -q
+python3 -B scripts/audit_pdf_range_failures.py --output output/pdf-range-audit.json
+python3 -B scripts/pdf_range_assets.py --retry-blocked --limit 10 --workers 2 --build-only
 ```
 
 前两个输入文件默认为现有源解析器生成的 `output/search_data.json` 和 `state/commits.json`；
 使用 `--vendor` 可指定固定 pdfjs-dist 或现有 Reader vendor 路径。`--build-only` 完成
 生成与校验但不发布，`--dry-run` 仅输出计划。浏览器实测属于显式重型验收，默认测试
 命令离线且无需浏览器；第 17 册的真实测量及完整 Reader 验收见 `range_pdf.md`。
+2026-09-16 的失败分类、真实样本验收和剩余限制见 `pdf_range_failures.md`。
