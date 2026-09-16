@@ -19,8 +19,9 @@ def prepare(queue_path: Path = Path("output/reader-assets/queue.json")) -> tuple
     queue_path.write_text(json.dumps(queue, ensure_ascii=False, indent=2), encoding="utf-8")
 
     force_rebuild = os.environ.get("FORCE_REBUILD") == "true"
-    exact_path = bool(os.environ.get("INPUT_PATH"))
-    shard_count = 1 if force_rebuild or exact_path else 10
+    scoped = bool(os.environ.get("INPUT_PATH") or os.environ.get("INPUT_REPO")
+                  or os.environ.get("INPUT_EXTENSION"))
+    shard_count = 1 if force_rebuild or scoped else 10
     for shard in range(shard_count):
         shard_items = [
             item for item in items
@@ -39,7 +40,9 @@ def prepare(queue_path: Path = Path("output/reader-assets/queue.json")) -> tuple
 
 def main() -> int:
     extension, count, stale_count, authoritative = prepare()
-    shard_count = 1 if os.environ.get("FORCE_REBUILD") == "true" or os.environ.get("INPUT_PATH") else 10
+    shard_count = 1 if (os.environ.get("FORCE_REBUILD") == "true"
+                        or os.environ.get("INPUT_PATH") or os.environ.get("INPUT_REPO")
+                        or os.environ.get("INPUT_EXTENSION")) else 10
     with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
         output.write(f"extension={extension}\n")
         output.write(f"count={count}\n")
