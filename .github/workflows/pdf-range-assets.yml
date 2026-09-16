@@ -34,7 +34,7 @@ on:
         default: false
 
 concurrency:
-  group: pdf-range-assets
+  group: reader-assets
   cancel-in-progress: false
 
 jobs:

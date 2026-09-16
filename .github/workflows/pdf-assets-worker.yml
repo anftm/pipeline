@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: reader-assets-pdf
+  group: reader-assets
   cancel-in-progress: false
 
 jobs:
