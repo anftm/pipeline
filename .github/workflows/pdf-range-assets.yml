@@ -40,10 +40,15 @@ on:
         description: Inspect the queue without downloading PDFs or publishing
         type: boolean
         default: false
+      followups:
+        description: Additional batches to start after successful publication (0..20)
+        type: string
+        default: "0"
 
 concurrency:
-  group: reader-assets
+  group: pdf-layout-assessments
   cancel-in-progress: false
+  queue: max
 
 jobs:
   prepare:
@@ -51,6 +56,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
+      - name: Validate continuation budget
+        env:
+          FOLLOWUPS: ${{ inputs.followups || '0' }}
+        run: '[[ "$FOLLOWUPS" =~ ^[0-9]+$ ]] && ((10#$FOLLOWUPS <= 20))'
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
@@ -116,16 +125,26 @@ jobs:
           if [[ "$RETRY_STALE_BLOCKED" == true ]]; then args+=(--retry-stale-blocked); fi
           python scripts/pdf_range_assets.py "${args[@]}" --bundle "output/pdf-range"
       - uses: actions/upload-artifact@v7
+        if: ${{ always() && hashFiles('output/pdf-range/results.json') != '' }}
         with:
           name: pdf-range-bundle-${{ matrix.shard }}
-          path: output/pdf-range
+          path: |
+            output/pdf-range/results.json
+            output/pdf-range/objects
           retention-days: 1
 
   publish:
     needs: build
-    if: inputs.dry_run != true
+    if: ${{ always() && !cancelled() && inputs.dry_run != true && needs.build.result != 'skipped' }}
+    concurrency:
+      group: reader-assets
+      cancel-in-progress: false
+      queue: max
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    permissions:
+      contents: read
+      actions: write
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -150,3 +169,17 @@ jobs:
           PAGES_REPO: ${{ secrets.PAGES_REPO }}
           READER_ASSETS_REPO: vomebook/Reader-Assets
         run: python scripts/publish_search_reader_index.py
+      - name: Continue bounded recovery batches
+        if: ${{ inputs.followups != '' && inputs.followups != '0' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          FOLLOWUPS: ${{ inputs.followups }}
+          SOURCE_REPO: ${{ inputs.repo || '' }}
+          SOURCE_PATH: ${{ inputs.path || '' }}
+          BATCH_LIMIT: ${{ inputs.limit || '30' }}
+          CHECKPOINTS: ${{ inputs.checkpoints || '4' }}
+          RETRY_FAILED: ${{ inputs.retry_failed || 'false' }}
+          RETRY_BLOCKED: ${{ inputs.retry_blocked || 'false' }}
+          RETRY_STALE_BLOCKED: ${{ inputs.retry_stale_blocked || 'false' }}
+        run: python scripts/continue_pdf_range.py --bundles output/pdf-range/bundles

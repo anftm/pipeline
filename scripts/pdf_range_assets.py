@@ -8,7 +8,9 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -147,13 +149,20 @@ def plan(items, state, tool_version, limit, exact_key="", retry_failed=False, re
     selected = []
     for retry in (False, True):
         groups = defaultdict(deque)
-        for row in sorted(pending, key=lambda row: row["key"]):
+        lane_load = Counter()
+        for row in sorted(pending, key=lambda row: (
+                state.get("files", {}).get(row["key"], {}).get("status") not in {"failed", "unsupported"}, row["key"])):
             if (row.get("status") == "failed") == retry:
-                groups[group(row)].append(row)
+                # A policy upgrade must not make the entire completed corpus
+                # jump ahead of files that have never been assessed.
+                previous_status = state.get("files", {}).get(row["key"], {}).get("status", "pending")
+                lane = 0 if previous_status == "pending" else 1
+                groups[(lane, *group(row))].append(row)
         while groups and len(selected) < limit:
-            bucket = min(groups, key=lambda key: (completed[key], key))
+            bucket = min(groups, key=lambda key: (lane_load[key[0]], key[0], completed[key[1:]], key))
             selected.append(groups[bucket].popleft())
-            completed[bucket] += 1
+            completed[bucket[1:]] += 1
+            lane_load[bucket[0]] += 1
             if not groups[bucket]:
                 del groups[bucket]
     return files, selected
@@ -201,7 +210,7 @@ def process(item, bundle, vendor, api):
         result.update(input_sha256=digest, source_bytes=size)
         with tempfile.TemporaryDirectory(dir=bundle) as temporary:
             work = Path(temporary)
-            report, chosen = pdf_range.assess(source, work, vendor)
+            report, chosen = assess_isolated(source, work, vendor)
             result.update(compact_report(report))
             if chosen:
                 output_sha, output_bytes = shared.hash_file(chosen)
@@ -219,6 +228,32 @@ def process(item, bundle, vendor, api):
     finally:
         download_cache.cleanup()
     return result
+
+
+def assess_isolated(source, work, vendor, timeout=900):
+    """Bound the entire assessment, including parser loops and browser teardown."""
+    command = [sys.executable, str(Path(__file__).with_name("pdf_range_worker.py")),
+               "--source", str(source.resolve()), "--work", str(work.resolve()), "--vendor", str(vendor.resolve())]
+    with (work / "assessment.log").open("wb") as log:
+        process = subprocess.Popen(command, stdout=log, stderr=log, start_new_session=True)
+        try:
+            process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+            return {"status": "failed", "reason": "assessment-total-timeout",
+                    "error_category": "timeout", "timeout_seconds": timeout}, None
+    report_path = work / "assessment.json"
+    if process.returncode or not report_path.is_file():
+        with (work / "assessment.log").open("rb") as log:
+            log.seek(max(0, log.seek(0, 2) - 1600))
+            detail = log.read().decode("utf-8", "replace")
+        raise RuntimeError(f"PDF assessment worker exit {process.returncode}: {detail}")
+    report = json.loads(report_path.read_text())
+    chosen = work / (report["method"] + ".pdf") if report["status"] == "optimized" else None
+    if chosen is not None and (chosen.parent != work or not chosen.is_file()):
+        raise ValueError("assessment worker returned an invalid artifact")
+    return report, chosen
 
 
 def publish(api, repo, baseline, state, bundle, results):
@@ -307,6 +342,7 @@ def main():
         (args.bundle / "plan.json").write_bytes(reader_assets.canonical_json(pending, pretty=True))
         return
     results = []
+    (args.bundle / "results.json").write_bytes(reader_assets.canonical_json(results, pretty=True))
     workers = 1 if any(item["source_bytes"] > 256 * pdf_range.MI for item in pending) else args.workers
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
         grouped = {}
@@ -325,7 +361,10 @@ def main():
                 results.append(resolved)
                 files[alias["key"]] = {k: v for k, v in resolved.items() if k != "_previous_identity"}
             print(json.dumps({"file": result["source_path"], "status": result["status"],
-                              "reason": result.get("reason"), "method": result.get("method")}, ensure_ascii=False), flush=True)
+                               "reason": result.get("reason"), "method": result.get("method")}, ensure_ascii=False), flush=True)
+            checkpoint = args.bundle / "results.json.tmp"
+            checkpoint.write_bytes(reader_assets.canonical_json(results, pretty=True))
+            checkpoint.replace(args.bundle / "results.json")
     state = {"version": 1, "files": files, "inventories": inventories}
     (args.bundle / "results.json").write_bytes(reader_assets.canonical_json(results, pretty=True))
     (args.bundle / pdf_range_state.MANIFEST_NAME).write_bytes(reader_assets.canonical_json(state, pretty=True))

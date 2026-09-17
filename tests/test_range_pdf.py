@@ -4,6 +4,7 @@ import tempfile
 import unittest
 import copy
 import subprocess
+import sys
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -65,6 +66,51 @@ class RangePdfTests(unittest.TestCase):
         items["current-failed"]["input_token"] = "changed-content"
         _, changed = pdf_range_assets.plan(items, {"files": previous}, "current", 10, retry_stale_blocked=True)
         self.assertEqual([row["key"] for row in changed], ["current-failed"])
+
+    def test_policy_upgrade_shares_capacity_with_never_assessed_inputs(self):
+        items = {key: {"key": key, "input_token": key, "input_profile": "upstream", "repo": "repo"}
+                 for key in ("a-old-1", "a-old-2", "z-new-1", "z-new-2")}
+        state = {"files": {key: {**row, "status": "unchanged" if key.startswith("a") else "pending",
+                                  "identity": pdf_range_assets.identity(row, "old-tool")}
+                           for key, row in items.items()}}
+        _, batch = pdf_range_assets.plan(items, state, "new-tool", 2)
+        self.assertEqual([row["key"] for row in batch], ["z-new-1", "a-old-1"])
+        for row in batch:
+            state["files"][row["key"]] = {**row, "status": "unchanged"}
+        _, following = pdf_range_assets.plan(items, state, "new-tool", 2)
+        self.assertEqual([row["key"] for row in following], ["z-new-2", "a-old-2"])
+
+    def test_isolated_assessment_reports_unsupported_without_starting_browser(self):
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            source = work / "source.pdf"
+            writer = PdfWriter()
+            writer.add_blank_page(width=400, height=600)
+            writer._root_object[NameObject("/UnknownCatalog")] = NumberObject(1)
+            writer.write(source)
+            with source.open("ab") as output:
+                output.write(b" " * pdf_range.MIN_BYTES)
+            report, chosen = pdf_range_assets.assess_isolated(source, work, work)
+            self.assertEqual(report["status"], "unsupported")
+            self.assertIn("/UnknownCatalog", report["reason"])
+            self.assertIsNone(chosen)
+
+    def test_isolated_assessment_kills_a_stuck_process(self):
+        real_popen = subprocess.Popen
+        children = []
+
+        def stuck(*args, **kwargs):
+            child = real_popen([sys.executable, "-c", "import time; time.sleep(60)"], **kwargs)
+            children.append(child)
+            return child
+
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(pdf_range_assets.subprocess, "Popen", side_effect=stuck):
+            work = Path(directory)
+            report, chosen = pdf_range_assets.assess_isolated(work / "source.pdf", work, work, timeout=.1)
+            self.assertEqual(report["reason"], "assessment-total-timeout")
+            self.assertIsNone(chosen)
+            self.assertIsNotNone(children[0].poll())
 
     def test_retry_does_not_keep_old_candidate_diagnostics_or_output_paths(self):
         item = {"key": "book", "source_bytes": 10, "status": "failed", "path": "old.pdf",
