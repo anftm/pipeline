@@ -230,3 +230,33 @@ optimized 的增加量衡量计算次数，也不能宣称这段时间在持续�
 完整依据保存在本机 `throughput-audit.json`、`throughput-acceptance-*.json` 和
 `throughput-results-*.json`；下载的一次本地 manifest 解析失败经重新读取、远端 SHA-256
 核对及二次差分验证排除，不将其归为线上生成数据损坏。
+
+## 全部输入结算与复用发布修复（2026-09-18 UTC）
+
+远端 `8fade77d317b13a4f2b74211904b9fb66e033dc1` 有 73,959 条记录，其中 pending
+2,090 条。运行 `35340981310` 实际日志为 inventory 73,959、batch 0、published 0。
+对固定状态规划确认这 2,090 条均能复用已验证的同内容结果；分片 bundle 原先仅写入
+新计算结果，遗漏规划阶段终态，导致重复空跑并保留错误的 pending 状态。
+
+`9557513b5c48e7b505cffd1a7d89e924ca3f5d74` 将规划终态唯一分配至各分片，复用优化
+对象要求基线身份/路径/摘要/大小一致，并重新核对父 revision 的远端 LFS 元数据。
+已有复用引用与新建对象共享路径时，以实际上传对象的摘要为准。
+
+运行 `35349227971` 于 13:23:42 成功结束，发布 HF revision
+`a0bc6baf88ff48bbaf1757ba515b432b0a1fe245`：
+
+| 状态 | 数量 |
+| --- | ---: |
+| optimized | 6,541 |
+| unchanged | 64,280 |
+| no-gain | 1,047 |
+| unsupported | 1,868 |
+| failed | 223 |
+| pending | 0 |
+
+原 pending 的 2,090 条结算为 unchanged 1,819、optimized 127、no-gain 11、unsupported
+133。此批还结算旧终态的规划变更；全部 291 条发生变化的 optimized 记录均通过远端
+产物大小/SHA-256 和映射检查。HF API 与 Pages 线上完整映射均与该 revision 一致，
+压缩 sidecar SHA-256 为 `2c82910f1dd8b149aa11d2338b6df9b657f7576eef60cea5b029f42dd320ff14`。
+自动核验续跑 `35349951680` 已启动；该快照待处理归零不等于受限/失败输入已修复，
+也不意味着低于大小阈值或复用记录都独立运行了浏览器评测。
