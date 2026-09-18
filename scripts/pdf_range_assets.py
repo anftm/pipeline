@@ -87,9 +87,9 @@ def discover(records, revisions, manifest, pdf_manifest, api, state, assets_repo
     return items, inventories
 
 
-def identity(item, tool_version):
+def identity(item, tool_version, assessment=None):
     value = [item["input_token"], item["input_profile"], pdf_range.PROFILE,
-             pdf_range.ASSESSMENT, tool_version]
+             assessment or pdf_range.ASSESSMENT, tool_version]
     return hashlib.sha256(json.dumps(value, separators=(",", ":")).encode()).hexdigest()
 
 
@@ -101,6 +101,14 @@ def plan(items, state, tool_version, limit, exact_key="", retry_failed=False, re
     for key, item in sorted(items.items()):
         fingerprint = identity(item, tool_version)
         previous = state.get("files", {}).get(key, {})
+        # v4 admits additional passive structures without changing the criteria
+        # for already completed v3 measurements. Only blocked inputs need retry.
+        if (pdf_range.ASSESSMENT == "pdfjs-6.3.289-range-1m-scene-v2-policy-v4"
+                and previous.get("status") in {"optimized", "unchanged", "no-gain"}
+                and previous.get("identity") == identity(item, tool_version,
+                    "pdfjs-6.3.289-range-1m-scene-v2-policy-v3")):
+            files[key] = previous
+            continue
         if (retry_blocked or retry_stale_blocked) and previous.get("status") not in {"failed", "unsupported"}:
             files[key] = previous or {**item, "identity": fingerprint, "status": "pending"}
             continue

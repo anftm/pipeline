@@ -398,18 +398,96 @@ class RangePdfTests(unittest.TestCase):
                 with self.assertRaises(pdf_range.UnsupportedPDF):
                     pdf_range.content_signature(source)
 
+    @unittest.skipUnless(shutil.which("qpdf"), "qpdf is required")
+    def test_attachments_preserve_payload_names_and_shared_filespecs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source, target, changed = [Path(directory) / name for name in ("source.pdf", "target.pdf", "changed.pdf")]
+            writer = PdfWriter(); writer.add_blank_page(width=400, height=600)
+            stream = DecodedStreamObject(); stream.set_data(b"original archive\x00\xff")
+            stream[NameObject("/Type")] = NameObject("/EmbeddedFile")
+            stream_ref = writer._add_object(stream)
+            file = DictionaryObject({NameObject("/Type"): NameObject("/Filespec"),
+                NameObject("/F"): TextStringObject("archive.zip"), NameObject("/UF"): TextStringObject("archive.zip"),
+                NameObject("/EF"): DictionaryObject({NameObject("/F"): stream_ref, NameObject("/UF"): stream_ref})})
+            file_ref = writer._add_object(file)
+            leaf = DictionaryObject({NameObject("/Names"): ArrayObject([TextStringObject("archive.zip"), file_ref])})
+            writer._root_object[NameObject("/Names")] = DictionaryObject({NameObject("/EmbeddedFiles"):
+                DictionaryObject({NameObject("/Kids"): ArrayObject([writer._add_object(leaf)])})})
+            writer.write(source)
+            original = pdf_range.content_signature(source)
+            for options in pdf_range.METHODS.values():
+                subprocess.run(["qpdf", *options, "--stream-data=preserve", str(source), str(target)],check=True,capture_output=True)
+                self.assertEqual(original, pdf_range.content_signature(target))
+            for obj, key, value in [(file, "/UF", TextStringObject("changed.zip")),
+                                     (leaf, "/Names", ArrayObject([]))]:
+                old = obj.raw_get(key); obj[NameObject(key)] = value; writer.write(changed)
+                self.assertNotEqual(original, pdf_range.content_signature(changed)); obj[NameObject(key)] = old
+            stream.set_data(b"changed archive\x00\xff"); writer.write(changed)
+            self.assertNotEqual(original, pdf_range.content_signature(changed))
+            file[NameObject("/AA")] = DictionaryObject(); writer.write(changed)
+            with self.assertRaises(pdf_range.UnsupportedPDF): pdf_range.content_signature(changed)
+
+    @unittest.skipUnless(shutil.which("qpdf"), "qpdf is required")
+    def test_passive_catalog_and_orphan_page_destination_remain_exact(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source, target, changed = [Path(directory) / name for name in ("source.pdf", "target.pdf", "changed.pdf")]
+            writer = PdfWriter(); page = writer.add_blank_page(width=400, height=600)
+            orphan = DictionaryObject({NameObject("/Type"): NameObject("/Page"),
+                NameObject("/MediaBox"): ArrayObject([NumberObject(0), NumberObject(0), NumberObject(200), NumberObject(300)])})
+            orphan_ref = writer._add_object(orphan)
+            writer._root_object[NameObject("/OpenAction")] = ArrayObject([page.indirect_reference, NameObject("/Fit")])
+            spider = DictionaryObject({NameObject("/V"): NumberObject(1)})
+            writer._root_object[NameObject("/SpiderInfo")] = spider
+            color = ArrayObject([NameObject("/CalGray"), DictionaryObject({NameObject("/Gamma"): NumberObject(2)})])
+            writer._root_object[NameObject("/DefaultGray")] = color
+            thread = DictionaryObject(); thread_ref = writer._add_object(thread)
+            bead = DictionaryObject({NameObject("/T"): thread_ref, NameObject("/P"): page.indirect_reference,
+                NameObject("/R"): ArrayObject([NumberObject(i) for i in [0,0,200,300]])})
+            bead_ref = writer._add_object(bead)
+            bead[NameObject("/N")] = bead_ref; bead[NameObject("/V")] = bead_ref
+            thread[NameObject("/F")] = bead_ref
+            writer._root_object[NameObject("/Threads")] = ArrayObject([thread_ref])
+            writer.write(source); original = pdf_range.content_signature(source)
+            for options in pdf_range.METHODS.values():
+                subprocess.run(["qpdf", *options, "--stream-data=preserve", str(source), str(target)],check=True,capture_output=True)
+                self.assertEqual(original, pdf_range.content_signature(target))
+            for obj, key, value in [(spider, "/V", NumberObject(2)), (bead, "/P", orphan_ref),
+                                     (color[1], "/Gamma", NumberObject(3)),
+                                     (writer._root_object, "/OpenAction", ArrayObject([orphan_ref, NameObject("/Fit")]))]:
+                old=obj.raw_get(key);obj[NameObject(key)]=value;writer.write(changed)
+                self.assertNotEqual(original,pdf_range.content_signature(changed));obj[NameObject(key)]=old
+            writer._root_object[NameObject("/OpenAction")] = ArrayObject([orphan_ref, NameObject("/Fit")])
+            writer.write(source); original=pdf_range.content_signature(source)
+            subprocess.run(["qpdf", "--object-streams=generate", "--stream-data=preserve", str(source), str(target)],check=True,capture_output=True)
+            self.assertEqual(original,pdf_range.content_signature(target))
+            writer._root_object[NameObject("/OpenAction")] = ArrayObject([NullObject(), NameObject("/Fit")])
+            writer.write(changed)
+            with self.assertRaises(pdf_range.UnsupportedPDF): pdf_range.content_signature(changed)
+
+    def test_passive_structure_upgrade_preserves_only_unchanged_completed_inputs(self):
+        item = {"key":"book", "input_token":"same", "input_profile":"upstream", "source_bytes":10*pdf_range.MI}
+        old = pdf_range_assets.identity(item,"qpdf","pdfjs-6.3.289-range-1m-scene-v2-policy-v3")
+        for status in ["optimized","unchanged","no-gain","failed","unsupported"]:
+            state={"files":{"book":{**item,"identity":old,"status":status}}}
+            _,queue=pdf_range_assets.plan({"book":item},state,"qpdf",10)
+            self.assertEqual(bool(queue), status in {"failed","unsupported"})
+            if status in {"optimized","unchanged","no-gain"}:
+                self.assertTrue(pdf_range_assets.plan({"book":{**item,"input_token":"changed"}},state,"qpdf",10)[1])
+                self.assertTrue(pdf_range_assets.plan({"book":item},state,"new-qpdf",10)[1])
     def test_null_dictionary_entries_are_absent_but_array_slots_and_lengths_matter(self):
         with tempfile.TemporaryDirectory() as directory:
             source, changed = [Path(directory) / name for name in ("source.pdf", "changed.pdf")]
             writer = PdfWriter()
             writer.add_blank_page(width=400, height=600)
             writer._root_object[NameObject("/Metadata")] = NullObject()
+            writer._root_object[NameObject("/OpenAction")] = NullObject()
             properties = DictionaryObject({NameObject("/Length"): NumberObject(4),
                 NameObject("/Items"): ArrayObject([NullObject(), NumberObject(5)])})
             writer._root_object[NameObject("/PieceInfo")] = properties
             writer.write(source)
             original = pdf_range.content_signature(source)
             del writer._root_object["/Metadata"]
+            del writer._root_object["/OpenAction"]
             writer.write(changed)
             self.assertEqual(original, pdf_range.content_signature(changed))
             properties[NameObject("/Length")] = NumberObject(3)

@@ -16,7 +16,7 @@ from pypdf.generic import IndirectObject, NullObject, StreamObject
 
 ENGINE = "6.3.289"
 PROFILE = "pdf-range-v1"
-ASSESSMENT = "pdfjs-6.3.289-range-1m-scene-v2-policy-v3"
+ASSESSMENT = "pdfjs-6.3.289-range-1m-scene-v2-policy-v4"
 MI = 1024 * 1024
 MIN_BYTES = 4 * MI
 METHODS = {
@@ -56,15 +56,16 @@ def content_signature(path: Path) -> dict:
     supported = {"/Type", "/Pages", "/Outlines", "/PageMode", "/PageLayout", "/Version",
                  "/ViewerPreferences", "/Metadata", "/Lang", "/MarkInfo", "/OpenAction", "/PageLabels",
                  "/StructTreeRoot", "/AcroForm", "/Names", "/Dests", "/OutputIntents",
-                 "/OCProperties", "/PieceInfo", "/Extensions", "/LastModified", "/URI"}
+                 "/OCProperties", "/PieceInfo", "/Extensions", "/LastModified", "/URI",
+                 "/SpiderInfo", "/Threads", "/DefaultGray", "/DefaultRGB", "/DefaultCMYK"}
     if set(root) - supported:
         raise UnsupportedPDF("catalog structures require additional equivalence checks: " +
                              ",".join(sorted(set(root) - supported)))
     page_numbers = {(page.indirect_reference.idnum, page.indirect_reference.generation): number
                     for number, page in enumerate(reader.pages)}
     opening = root.get("/OpenAction")
-    if opening is not None:
-        opening = opening.get_object()
+    if opening is not None and not isinstance(resolve(opening), NullObject):
+        opening = resolve(opening)
         if isinstance(opening, dict):
             if resolve(opening.get("/S")) != "/GoTo" or set(opening) - {"/S", "/D", "/Type"}:
                 raise UnsupportedPDF("non-local opening action requires additional equivalence checks")
@@ -76,8 +77,11 @@ def content_signature(path: Path) -> dict:
                 raise UnsupportedPDF("opening action has an unresolved named destination")
         elif (not isinstance(opening, list) or len(opening) < 2
               or not isinstance(opening[0], IndirectObject)
-              or (opening[0].idnum, opening[0].generation) not in page_numbers):
+              or not isinstance(resolve(opening[0]), dict)
+              or resolve(resolve(opening[0]).get("/Type")) != "/Page"):
             raise UnsupportedPDF("opening action is not an explicit local page destination")
+        # Orphan /Page destinations occur in merged books. Keep their complete
+        # reachable graph below, rather than dropping or redirecting the action.
 
     nodes, pending, references = [], [], {}
 
@@ -133,7 +137,7 @@ def content_signature(path: Path) -> dict:
         if (resolve(value.get("/FT")) == "/Sig" or object_type in ("/Sig", "/DocTimeStamp")
                 or "/ByteRange" in value):
             raise UnsupportedPDF("digital signatures require the original file bytes")
-        active_keys = sorted(set(value) & {"/XFA", "/AA", "/JavaScript", "/EmbeddedFiles"})
+        active_keys = sorted(set(value) & {"/XFA", "/AA", "/JavaScript"})
         if active_keys:
             raise UnsupportedPDF("active content or embedded files require additional equivalence checks: " +
                                  ",".join(active_keys))
@@ -204,8 +208,12 @@ SCENE = """async () => {
         if (dest && typeof dest[0] === 'object') {
           try { await pdf.getPageIndex(dest[0]); }
           catch (error) {
-            if (!String(error?.message).includes('The reference does not point to a /Page dictionary.')) throw error;
-            invalidDestinations.push(location);
+            const message = String(error?.message);
+            const known = ['The reference does not point to a /Page dictionary.',
+              "Kid reference not found in parent's kids.",
+              'Page dictionary kid reference points to wrong type of object.'];
+            if (!known.includes(message)) throw error;
+            invalidDestinations.push({location,message});
           }
         }
         await walk(item.items,location);
