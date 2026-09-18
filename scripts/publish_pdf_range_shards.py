@@ -16,6 +16,7 @@ except ImportError:
 
 def merge_results(bundles):
     results = {}
+    canonical = {}
     merged = Path(tempfile.mkdtemp(prefix="pdf-range-merge-"))
     for bundle in sorted(bundles):
         result_files = sorted(bundle.rglob("results.json"))
@@ -28,6 +29,9 @@ def merge_results(bundles):
                 if not key or key in results:
                     raise ValueError(f"duplicate PDF range result: {key}")
                 results[key] = result
+                if (result.get("status") == "optimized" and result.get("path") and
+                        (result_file.parent / result["path"]).is_file()):
+                    canonical.setdefault(result["path"], result)
             objects = result_file.parent / "objects"
             if not objects.is_dir():
                 continue
@@ -41,7 +45,6 @@ def merge_results(bundles):
     # qpdf may emit different document IDs in parallel workers. The path
     # identity is already content/profile based, so retain one valid artifact
     # and make all aliases reference its digest.
-    canonical = {}
     for result in results.values():
         if result.get("status") != "optimized" or not result.get("path"):
             continue

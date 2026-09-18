@@ -181,6 +181,19 @@ def compact_report(report):
     return result
 
 
+def planned_results(files, baseline, assessment_keys, shard_count=1, shard_index=0):
+    """Publish terminal metadata decisions and reused assessments exactly once."""
+    results = []
+    for key, row in sorted(files.items()):
+        previous = baseline.get("files", {}).get(key, {})
+        if key in assessment_keys or row.get("status") == "pending":
+            continue
+        if (previous.get("status"), previous.get("identity")) == (row.get("status"), row.get("identity")):
+            continue
+        results.append({**row, "_previous_identity": previous.get("identity")})
+    return results[shard_index::shard_count]
+
+
 def process(item, bundle, vendor, api):
     # A retry starts with input identity only. Otherwise an unchanged/unsupported
     # result can accidentally retain candidates or output paths from its failure.
@@ -258,10 +271,20 @@ def assess_isolated(source, work, vendor, timeout=900):
 
 def publish(api, repo, baseline, state, bundle, results):
     """Rebuild all routes against the commit parent; keep unrelated publisher work."""
-    artifacts = {}
+    artifacts, reused = {}, {}
+    artifact_fields = ("identity", "path", "sha256", "bytes")
+    accepted_artifacts = {tuple(row.get(key) for key in artifact_fields)
+                          for row in baseline.get("files", {}).values() if row.get("status") == "optimized"}
     for result in results:
         if result.get("status") == "optimized":
             path = bundle / result["path"]
+            if not path.is_file():
+                # Reuse only an artifact already accepted in this exact baseline.
+                signature = tuple(result.get(key) for key in artifact_fields)
+                if signature not in accepted_artifacts:
+                    raise ValueError("optimized artifact missing from bundle and baseline")
+                reused[result["path"]] = result
+                continue
             if shared.hash_file(path) != (result["sha256"], result["bytes"]):
                 raise ValueError("optimized artifact digest mismatch")
             artifacts[result["path"]] = CommitOperationAdd(path_in_repo=result["path"], path_or_fileobj=str(path))
@@ -272,6 +295,14 @@ def publish(api, repo, baseline, state, bundle, results):
             return revision
         if current != baseline:
             raise RuntimeError("PDF range state changed concurrently; rerun from current state")
+        if reused:
+            remote = {file.path: file for file in api.get_paths_info(
+                repo_id=repo, paths=list(reused), repo_type="dataset", revision=revision)}
+            for path, result in reused.items():
+                file = remote.get(path)
+                if (not file or file.size != result["bytes"] or
+                        getattr(getattr(file, "lfs", None), "sha256", None) != result["sha256"]):
+                    raise ValueError("reused optimized artifact digest mismatch")
         base = remote_manifest(api, repo, revision)
         images = remote_pdf_manifest(api, repo, revision)
         operations = [*artifacts.values(),
@@ -333,15 +364,15 @@ def main():
     key = reader_assets.asset_key(args.repo, args.path) if args.repo else ""
     files, pending = plan(items, baseline, version, args.limit * args.shard_count, key,
                           args.retry_failed, args.retry_blocked, args.retry_stale_blocked)
+    results = planned_results(files, baseline, {row["key"] for row in pending}, args.shard_count, args.shard_index)
     pending = pending[args.shard_index::args.shard_count]
     if args.repo:
         files = {**baseline.get("files", {}), **files}
     args.bundle.mkdir(parents=True, exist_ok=True)
-    print(f"PDF layout inventory {len(items)}; batch {len(pending)}", flush=True)
+    print(f"PDF layout inventory {len(items)}; batch {len(pending)}; planned results {len(results)}", flush=True)
     if args.dry_run:
         (args.bundle / "plan.json").write_bytes(reader_assets.canonical_json(pending, pretty=True))
         return
-    results = []
     (args.bundle / "results.json").write_bytes(reader_assets.canonical_json(results, pretty=True))
     workers = 1 if any(item["source_bytes"] > 256 * pdf_range.MI for item in pending) else args.workers
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
