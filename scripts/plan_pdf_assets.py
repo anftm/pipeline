@@ -4,11 +4,14 @@
 import argparse
 import json
 import os
+import random
 import subprocess
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from huggingface_hub import HfApi, hf_hub_download
+from huggingface_hub.errors import HfHubHTTPError
 
 try:
     from . import pdf_assets
@@ -17,17 +20,37 @@ except ImportError:
 
 
 MAX_GITHUB_MATRIX_SHARDS = 240
+HF_METADATA_RETRIES = 6
+
+
+def hf_retry_call(operation, description):
+    """Retry transient Hub throttling before failing the plan."""
+    for attempt in range(HF_METADATA_RETRIES):
+        try:
+            return operation()
+        except HfHubHTTPError as error:
+            status = getattr(error.response, "status_code", None)
+            if status not in {429, 500, 502, 503, 504} or attempt + 1 == HF_METADATA_RETRIES:
+                raise
+            delay = min(60, 2 ** attempt) + random.uniform(0, 2)
+            print(f"transient Hub error while {description} ({status}); retrying in {delay:.1f}s",
+                  flush=True)
+            time.sleep(delay)
 
 
 def source_path(item: dict, source_dir: Path | None, assets_repo: str) -> Path:
     if item.get("source_kind") == "generated":
-        return Path(hf_hub_download(item["reader_assets_repo"], item["reader_assets_path"],
-                                    repo_type="dataset", revision=item["reader_assets_revision"],
-                                    token=os.environ.get("HF_TOKEN")))
+        return Path(hf_retry_call(
+            lambda: hf_hub_download(item["reader_assets_repo"], item["reader_assets_path"],
+                                     repo_type="dataset", revision=item["reader_assets_revision"],
+                                     token=os.environ.get("HF_TOKEN")),
+            "downloading generated PDF"))
     if source_dir:
         return source_dir / item["repo"] / item["path"]
-    return Path(hf_hub_download(item["repo"], item["path"], repo_type="dataset",
-                                revision=item["source_revision"], token=os.environ.get("HF_TOKEN")))
+    return Path(hf_retry_call(
+        lambda: hf_hub_download(item["repo"], item["path"], repo_type="dataset",
+                                 revision=item["source_revision"], token=os.environ.get("HF_TOKEN")),
+        "downloading source PDF"))
 
 
 def plan(records: list[dict], source_dir: Path | None, assets_repo: str, shard_count: int,
@@ -94,10 +117,12 @@ def plan(records: list[dict], source_dir: Path | None, assets_repo: str, shard_c
             range_tasks.append({**item, "task_key": f"{item['key']}#pages-{start:06d}-{end:06d}",
                                 "page_start": start, "page_end": end,
                                 "range_page_count": end - start + 1})
-    shards = pdf_assets.weighted_shards(ordinary, shard_count)
     if range_tasks:
+        shards = pdf_assets.weighted_shards(ordinary, shard_count)
         range_shard_count = min(MAX_GITHUB_MATRIX_SHARDS - len(shards), len(range_tasks))
         shards.extend(pdf_assets.weighted_shards(range_tasks, range_shard_count))
+    else:
+        shards = pdf_assets.weighted_shards(ordinary, shard_count) if ordinary else []
     dynamic_shard_count = len(shards)
     if dynamic_shard_count > MAX_GITHUB_MATRIX_SHARDS:
         raise ValueError(f"PDF shard count {dynamic_shard_count} exceeds GitHub Actions matrix limit {MAX_GITHUB_MATRIX_SHARDS}")
@@ -160,22 +185,32 @@ def main() -> int:
     if args.source in {"upstream", "all"}:
         records.extend(pdf_assets.load_records(args.search_data, args.revisions, args.repo, "pdf"))
     if args.source in {"generated", "all"}:
-        reader_assets_revision = HfApi(token=os.environ.get("HF_TOKEN")).repo_info(
-            repo_id=args.assets_repo, repo_type="dataset").sha
+        reader_assets_revision = hf_retry_call(
+            lambda: HfApi(token=os.environ.get("HF_TOKEN")).repo_info(
+                repo_id=args.assets_repo, repo_type="dataset").sha,
+            "reading Reader-Assets revision")
         if not args.reader_assets_manifest:
-            manifest = hf_hub_download(args.assets_repo, "manifest.json", repo_type="dataset",
-                                       revision=reader_assets_revision,
-                                       token=os.environ.get("HF_TOKEN"))
+            manifest = hf_retry_call(
+                lambda: hf_hub_download(args.assets_repo, "manifest.json", repo_type="dataset",
+                                         revision=reader_assets_revision,
+                                         token=os.environ.get("HF_TOKEN")),
+                "downloading Reader-Assets manifest")
             args.reader_assets_manifest = Path(manifest)
         records.extend(pdf_assets.load_generated_records(
             args.reader_assets_manifest, args.assets_repo, args.repo, reader_assets_revision))
     records.sort(key=lambda item: (0 if item.get("source_extension") in {"caj", "kdh"} else 1,
                                    item["repo"], item["path"], item["source_kind"]))
     try:
-        manifest_path = hf_hub_download(args.assets_repo, "pdf_manifest.json", repo_type="dataset",
-                                        token=os.environ.get("HF_TOKEN"))
+        manifest_path = hf_retry_call(
+            lambda: hf_hub_download(args.assets_repo, "pdf_manifest.json", repo_type="dataset",
+                                    token=os.environ.get("HF_TOKEN")),
+            "downloading PDF asset manifest")
         pdf_manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
-    except Exception:
+    except HfHubHTTPError as error:
+        if getattr(error.response, "status_code", None) != 404:
+            raise
+        pdf_manifest = {"files": {}}
+    except (OSError, ValueError, json.JSONDecodeError):
         pdf_manifest = {"files": {}}
     records = pending_records(records, pdf_manifest)
     selected = pdf_assets.queue(records, args.limit, args.checkpoint)

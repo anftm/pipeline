@@ -16,6 +16,30 @@ from scripts import publish_pdf_assets
 
 
 class PdfAssetsTests(unittest.TestCase):
+    def test_empty_pdf_queue_exports_no_shards(self):
+        planned = plan_pdf_assets.plan([], None, "assets", 18, workers=1)
+        self.assertEqual(planned["total_records"], 0)
+        self.assertEqual(planned["total_tasks"], 0)
+        self.assertEqual(planned["shard_count"], 0)
+        self.assertEqual(planned["shard_ids"], [])
+        self.assertEqual(planned["shards"], [])
+
+    def test_hf_metadata_retry_recovers_from_rate_limit(self):
+        response = requests.Response()
+        response.status_code = 429
+        response.request = requests.Request("GET", "https://huggingface.co/api").prepare()
+        error = HfHubHTTPError("rate limited", response=response)
+        with patch.object(plan_pdf_assets.time, "sleep") as sleep:
+            calls = iter([error, "ok"])
+            def operation():
+                value = next(calls)
+                if isinstance(value, BaseException):
+                    raise value
+                return value
+            result = plan_pdf_assets.hf_retry_call(operation, "test metadata")
+        self.assertEqual(result, "ok")
+        sleep.assert_called_once()
+
     def test_compact_records_are_decoded_and_queue_is_stable(self):
         with tempfile.TemporaryDirectory() as root:
             root = Path(root)

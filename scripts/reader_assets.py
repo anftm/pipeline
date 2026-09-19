@@ -12,9 +12,13 @@ MANIFEST_VERSION = 1
 CHAPTER_MANIFEST_VERSION = 1
 READER_ASSETS_REPO = "vomebook/Reader-Assets"
 MANIFEST_NAME = "manifest.json"
-EPUB_CHAPTER_SPLIT_BYTES = 32 * 1024 * 1024
+# Chapter manifests make multi-file books cheap to open: the Reader fetches the
+# manifest and nearby chapters instead of downloading the complete archive.
+# Native ebook chapter bundles include an on-demand full-text search index.
+EPUB_CHAPTER_SPLIT_BYTES = 8 * 1024 * 1024
+CHM_CHAPTER_SPLIT_BYTES = 16 * 1024 * 1024
 EPUB_CHAPTER_BUNDLE_DIR = "epub-chapters"
-EPUB_CHAPTER_PROFILE = "epub-chapters-v3"
+EPUB_CHAPTER_PROFILE = "epub-chapters-v4"
 CONVERTIBLE_EXTENSIONS = {
     "doc": ("libreoffice-docx-v2", "docx", "document.docx"),
     "docx": ("docx-native-v2", "docx", "document.docx"),

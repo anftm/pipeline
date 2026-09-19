@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import random
 import shutil
 import signal
 import subprocess
@@ -94,7 +95,7 @@ def identity(item, tool_version, assessment=None):
 
 
 def plan(items, state, tool_version, limit, exact_key="", retry_failed=False, retry_blocked=False,
-         retry_stale_blocked=False):
+         retry_stale_blocked=False, retry_reason=""):
     files, pending = {}, []
     reusable = {entry.get("identity"): entry for entry in state.get("files", {}).values()
                 if entry.get("status") in {"optimized", "unchanged", "no-gain", "unsupported"}}
@@ -109,13 +110,19 @@ def plan(items, state, tool_version, limit, exact_key="", retry_failed=False, re
                     "pdfjs-6.3.289-range-1m-scene-v2-policy-v3")):
             files[key] = previous
             continue
-        if (retry_blocked or retry_stale_blocked) and previous.get("status") not in {"failed", "unsupported"}:
+        reason_matches = not retry_reason or retry_reason in previous.get("reason", "")
+        if retry_reason and previous.get("status") in {"failed", "unsupported"} and not reason_matches:
+            files[key] = {**previous, **item}
+            continue
+        if ((retry_blocked or retry_stale_blocked) and reason_matches
+                and previous.get("status") not in {"failed", "unsupported"}):
             files[key] = previous or {**item, "identity": fingerprint, "status": "pending"}
             continue
         if retry_stale_blocked and previous.get("identity") == fingerprint:
             files[key] = {**previous, **item}
             continue
-        retry_requested = retry_blocked or retry_stale_blocked or (retry_failed and previous.get("status") == "failed")
+        retry_requested = ((retry_blocked or retry_stale_blocked) and reason_matches) or (
+            retry_failed and previous.get("status") == "failed")
         if (previous.get("input_token") == item["input_token"]
                 and previous.get("input_path") == item.get("input_path")
                 and previous.get("input_repo") == item.get("input_repo")):
@@ -187,6 +194,23 @@ def compact_report(report):
                                                      if "measurement" in value else {})}
                                 for key, value in report["candidates"].items()}
     return result
+
+
+def remote_snapshot(api, repo):
+    """Read the shared baseline, retrying transient HF throttling per Runner."""
+    for attempt in range(6):
+        try:
+            revision = api.repo_info(repo_id=repo, repo_type="dataset").sha
+            state = pdf_range_state.remote_state(api, repo, revision)
+            manifest = remote_manifest(api, repo, revision)
+            pdf_manifest = remote_pdf_manifest(api, repo, revision)
+            return revision, state, manifest, pdf_manifest
+        except HfHubHTTPError as error:
+            if not shared.is_retryable_hf_status(shared.hf_status_code(error)) or attempt == 5:
+                raise
+            delay = shared.hf_retry_delay(attempt) + random.uniform(0, 2)
+            print(f"HF metadata retry after {shared.hf_status_code(error)}; sleeping {delay:.1f}s", flush=True)
+            time.sleep(delay)
 
 
 def planned_results(files, baseline, assessment_keys, shard_count=1, shard_index=0):
@@ -346,6 +370,10 @@ def main():
                         help="Assess only previously failed/unsupported PDFs, including unchanged inputs")
     parser.add_argument("--retry-stale-blocked", action="store_true",
                         help="Assess only failed/unsupported PDFs whose input or validation identity changed")
+    parser.add_argument("--retry-reason", default="",
+                        help="Assess only records whose previous reason contains this text")
+    parser.add_argument("--tool-version", default="",
+                        help="Assessment tool version for planning; defaults to qpdf --version")
     parser.add_argument("--build-only", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--clean-published", action="store_true", help="Remove this bundle's uploaded objects after successful publication")
@@ -357,9 +385,7 @@ def main():
     if bool(args.repo) != bool(args.path):
         parser.error("repo and path must be provided together")
     api = HfApi(token=os.environ.get("HF_TOKEN"))
-    revision = api.repo_info(repo_id=args.assets_repo, repo_type="dataset").sha
-    baseline = pdf_range_state.remote_state(api, args.assets_repo, revision)
-    base, images = remote_manifest(api, args.assets_repo, revision), remote_pdf_manifest(api, args.assets_repo, revision)
+    revision, baseline, base, images = remote_snapshot(api, args.assets_repo)
     records = reader_assets.decode_search_payload(json.loads(args.search_data.read_text()))
     revisions = json.loads(args.revisions.read_text())
     if args.repo:
@@ -368,10 +394,11 @@ def main():
         if not records:
             parser.error("requested source is absent from this inventory")
     items, inventories = discover(records, revisions, base, images, api, baseline, args.assets_repo, revision, bool(args.repo))
-    version = subprocess.check_output(["qpdf", "--version"], text=True).splitlines()[0]
+    version = args.tool_version or subprocess.check_output(["qpdf", "--version"], text=True).splitlines()[0]
     key = reader_assets.asset_key(args.repo, args.path) if args.repo else ""
     files, pending = plan(items, baseline, version, args.limit * args.shard_count, key,
-                          args.retry_failed, args.retry_blocked, args.retry_stale_blocked)
+                          args.retry_failed, args.retry_blocked, args.retry_stale_blocked,
+                          args.retry_reason)
     results = planned_results(files, baseline, {row["key"] for row in pending}, args.shard_count, args.shard_index)
     pending = pending[args.shard_index::args.shard_count]
     if args.repo:

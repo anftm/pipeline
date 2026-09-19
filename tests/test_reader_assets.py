@@ -158,7 +158,7 @@ class ReaderAssetContractTests(unittest.TestCase):
             with zipfile.ZipFile(epub, "w") as archive:
                 archive.writestr("mimetype", "application/epub+zip")
                 archive.writestr("META-INF/container.xml", '<container><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>')
-                archive.writestr("OEBPS/content.opf", '<package><manifest><item id="a" href="a.xhtml" media-type="application/xhtml+xml"/><item id="b" href="b.xhtml" media-type="application/xhtml+xml"/><item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/><item id="i" href="images/x.png" media-type="image/png"/></manifest><spine><itemref idref="a"/><itemref idref="b"/></spine></package>')
+                archive.writestr("OEBPS/content.opf", '<package><manifest><item id="a" href="a.xhtml" media-type="application/xhtml+xml"/><item id="b" href="b.xhtml" media-type="application/xhtml+xml"/><item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/><item id="i" href="images/x.png" media-type="image/png"/></manifest><spine><itemref idref="nav"/><itemref idref="a"/><itemref idref="b"/></spine></package>')
                 archive.writestr("OEBPS/nav.xhtml", '<html xmlns:epub="http://www.idpf.org/2007/ops"><body><nav epub:type="toc"><ol><li><a href="a.xhtml">第一章：开始</a></li><li><a href="b.xhtml">第二章：继续</a></li></ol></nav></body></html>')
                 archive.writestr("OEBPS/a.xhtml", '<html><body><script>bad()</script><img src="images/x.png"/><p>one</p></body></html>')
                 archive.writestr("OEBPS/b.xhtml", '<html><body><img src="images/x.png"/><p>two</p></body></html>')
@@ -193,6 +193,16 @@ class ReaderAssetContractTests(unittest.TestCase):
         self.assertTrue(reader_assets.needs_epub_chapters("mobi", "foliate", 10 ** 9))
         self.assertTrue(reader_assets.needs_epub_chapters("azw3", "foliate", 10 ** 9))
         self.assertFalse(reader_assets.needs_epub_chapters("epub", "pdf", 10 ** 9))
+
+    def test_mid_sized_epub_is_split_for_on_demand_loading(self):
+        for extension in ("epub", "mobi", "azw3", "fb2"):
+            with self.subTest(extension=extension):
+                self.assertTrue(reader_assets.needs_epub_chapters(
+                    extension, "foliate", 8 * 1024 * 1024))
+                self.assertFalse(reader_assets.needs_epub_chapters(
+                    extension, "foliate", 8 * 1024 * 1024 - 1))
+        self.assertFalse(reader_assets.needs_epub_chapters("chm", "epub", 16 * 1024 * 1024))
+        self.assertFalse(reader_assets.needs_epub_chapters("chm", "epub", 16 * 1024 * 1024 - 1))
 
     def test_chapter_bundle_can_publish_text_without_resources(self):
         with tempfile.TemporaryDirectory() as root:
