@@ -1125,6 +1125,36 @@ aW1hZ2U=
             self.assertIn("color: red", result)
             self.assertNotIn('href="style.css"', result)
 
+    def test_generated_html_resolves_local_resources_case_insensitively(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            (root / "Images").mkdir()
+            (root / "Images" / "screen.PNG").write_bytes(b"png")
+            result = convert_reader_assets.inline_local_html_resources(
+                '<p><img src="images/SCREEN.png">正文</p>', root, root,
+            )
+            self.assertIn("data:image/png;base64", result)
+
+    def test_chm_epub_repair_adds_case_insensitive_source_images(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            source = root / "source.chm"
+            epub = root / "book.epub"
+            with zipfile.ZipFile(source, "w") as archive:
+                archive.writestr("crack.htm", '<html><body><p>正文</p><img src="Images/screen.jpg"></body></html>')
+                archive.writestr("images/screen.jpg", b"JPEG")
+            with zipfile.ZipFile(epub, "w") as archive:
+                archive.writestr("mimetype", "application/epub+zip")
+                archive.writestr("META-INF/container.xml", '<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>')
+                archive.writestr("OEBPS/content.opf", '<package xmlns="http://www.idpf.org/2007/opf"><manifest><item id="chapter" href="crack.htm" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="chapter"/></spine></package>')
+                archive.writestr("OEBPS/crack.htm", '<html xmlns="http://www.w3.org/1999/xhtml"><body><p>正文</p><img src="Images/screen.jpg"/></body></html>')
+            report = convert_reader_assets.repair_chm_epub_images(source, epub, root / "work")
+            self.assertEqual(len(report["added"]), 1)
+            self.assertEqual(report["missing"], [])
+            with zipfile.ZipFile(epub) as archive:
+                self.assertEqual(archive.read("OEBPS/Images/screen.jpg"), b"JPEG")
+                self.assertIn("chm-image-1", archive.read("OEBPS/content.opf").decode())
+
     def test_generated_html_expands_static_writes_and_drops_dynamic_scripts(self):
         result = convert_reader_assets.inline_local_html_resources(
             "<script>document.write('<p>生成正文</p>');</script>"
