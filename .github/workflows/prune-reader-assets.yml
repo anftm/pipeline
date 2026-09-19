@@ -24,6 +24,7 @@ on:
 concurrency:
   group: reader-assets
   cancel-in-progress: false
+  queue: max
 
 jobs:
   prune:

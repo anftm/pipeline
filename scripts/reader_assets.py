@@ -26,7 +26,7 @@ CONVERTIBLE_EXTENSIONS = {
     "fb2": ("foliate-original-v1", "foliate", "document.fb2"),
     "odt": ("calibre-odt-html-v1", "html", "document.html"),
     "rtf": ("calibre-rtf-html-v1", "html", "document.html"),
-    "chm": ("calibre-chm-epub-v2", "epub", "document.epub"),
+    "chm": ("calibre-chm-epub-v3", "epub", "document.epub"),
     "tif": ("pillow-pdf-v2", "pdf", "document.pdf"),
     "tiff": ("pillow-pdf-v2", "pdf", "document.pdf"),
     "djvu": ("djvulibre-pdf-v2", "pdf", "document.pdf"),
@@ -92,9 +92,9 @@ def conversion_contract(extension: str, key: str = "") -> tuple[str, str, str]:
 
 def needs_epub_chapters(extension: str, reader_mode: str, source_bytes: int) -> bool:
     """Whether a large book should receive an independently fetched chapter bundle."""
+    # CHM navigation includes groups and repeated fragment targets. The flat
+    # chapter bundle cannot represent that tree; keep its repaired native EPUB.
     return (extension in {"epub", "mobi", "azw3", "fb2"} and reader_mode == "foliate"
-            and int(source_bytes or 0) >= EPUB_CHAPTER_SPLIT_BYTES) or (
-                extension == "chm" and reader_mode == "epub"
             and int(source_bytes or 0) >= EPUB_CHAPTER_SPLIT_BYTES)
 
 

@@ -6,16 +6,17 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import threading
 import time
 import urllib.parse
 
 from pypdf import PdfReader
-from pypdf.generic import IndirectObject, StreamObject
+from pypdf.generic import IndirectObject, NullObject, StreamObject
 
 ENGINE = "6.3.289"
 PROFILE = "pdf-range-v1"
-ASSESSMENT = "pdfjs-6.3.289-range-1m-scene-v1-policy-v2"
+ASSESSMENT = "pdfjs-6.3.289-range-1m-scene-v2-policy-v4"
 MI = 1024 * 1024
 MIN_BYTES = 4 * MI
 METHODS = {
@@ -38,95 +39,133 @@ def candidate_methods() -> dict[str, list[str]]:
 
 
 def content_signature(path: Path) -> dict:
-    """Compare every page/resource without depending on renumbered object IDs.
+    """Compare the reachable graph, including cycles, independent of PDF object IDs.
 
-    Complex interactive documents stay on their existing readable version until
-    a corresponding equivalence check is implemented.
+    Assign graph IDs in deterministic traversal order. A flat object table keeps
+    parent/child cycles and shared resources intact without recursive expansion.
+    Only XMP compression is normalized; image/font/content bytes stay exact.
     """
     reader = PdfReader(path)
-    if reader.is_encrypted:
-        raise UnsupportedPDF("encrypted input; use its existing decrypted asset")
+    if reader.is_encrypted and not reader.decrypt(""):
+        raise UnsupportedPDF("password required; use its existing decrypted asset")
+
+    def resolve(value):
+        return value.get_object() if isinstance(value, IndirectObject) else value
+
     root = reader.trailer["/Root"]
     supported = {"/Type", "/Pages", "/Outlines", "/PageMode", "/PageLayout", "/Version",
-                 "/ViewerPreferences", "/Metadata", "/Lang", "/MarkInfo", "/OpenAction", "/PageLabels"}
+                 "/ViewerPreferences", "/Metadata", "/Lang", "/MarkInfo", "/OpenAction", "/PageLabels",
+                 "/StructTreeRoot", "/AcroForm", "/Names", "/Dests", "/OutputIntents",
+                 "/OCProperties", "/PieceInfo", "/Extensions", "/LastModified", "/URI",
+                 "/SpiderInfo", "/Threads", "/DefaultGray", "/DefaultRGB", "/DefaultCMYK"}
     if set(root) - supported:
         raise UnsupportedPDF("catalog structures require additional equivalence checks: " +
                              ",".join(sorted(set(root) - supported)))
-    memo, active = {}, set()
     page_numbers = {(page.indirect_reference.idnum, page.indirect_reference.generation): number
                     for number, page in enumerate(reader.pages)}
     opening = root.get("/OpenAction")
-    if opening is not None:
-        opening = opening.get_object()
+    if opening is not None and not isinstance(resolve(opening), NullObject):
+        opening = resolve(opening)
         if isinstance(opening, dict):
-            if opening.get("/S") != "/GoTo" or set(opening) - {"/S", "/D", "/Type"}:
+            if resolve(opening.get("/S")) != "/GoTo" or set(opening) - {"/S", "/D", "/Type"}:
                 raise UnsupportedPDF("non-local opening action requires additional equivalence checks")
             opening = opening.get("/D")
             opening = opening.get_object() if opening is not None else None
-        if (not isinstance(opening, list) or len(opening) < 2
-                or not isinstance(opening[0], IndirectObject)
-                or (opening[0].idnum, opening[0].generation) not in page_numbers):
+        if isinstance(opening, str):
+            destination = reader.named_destinations.get(opening)
+            if destination is None or reader.get_destination_page_number(destination) is None:
+                raise UnsupportedPDF("opening action has an unresolved named destination")
+        elif (not isinstance(opening, list) or len(opening) < 2
+              or not isinstance(opening[0], IndirectObject)
+              or not isinstance(resolve(opening[0]), dict)
+              or resolve(resolve(opening[0]).get("/Type")) != "/Page"):
             raise UnsupportedPDF("opening action is not an explicit local page destination")
+        # Orphan /Page destinations occur in merged books. Keep their complete
+        # reachable graph below, rather than dropping or redirecting the action.
+
+    nodes, pending, references = [], [], {}
 
     def normalize(value):
         if isinstance(value, IndirectObject):
             key = (value.idnum, value.generation)
             if key in page_numbers:
                 return {"page_index": page_numbers[key]}
-            if key in active:
-                raise UnsupportedPDF("cyclic resource structure")
-            if key not in memo:
-                active.add(key)
-                memo[key] = normalize(value.get_object())
-                active.remove(key)
-            return memo[key]
-        if isinstance(value, dict):
-            result = {str(k): normalize(v) for k, v in value.items() if k != "/Length"}
-            if isinstance(value, StreamObject):
-                result["stream_sha256"] = hashlib.sha256(value._data).hexdigest()
-            return result
-        if isinstance(value, list):
-            return [normalize(v) for v in value]
+            value = value.get_object()
+        # PDF specifies missing indirect objects as null; qpdf writes an
+        # explicit null when repairing such a reference.
+        if value is None or isinstance(value, NullObject):
+            return None
+        if isinstance(value, (dict, list)):
+            key = id(value)
+            if key not in references:
+                references[key] = len(nodes)
+                nodes.append(None)
+                pending.append(value)  # Also retain direct objects for stable id().
+            return {"node": references[key]}
         if isinstance(value, bytes):
             return {"bytes": value.hex()}
-        return str(value)
+        return {"type": type(value).__name__, "value": str(value)}
 
     pages = []
     for page in reader.pages:
-        if page.get("/Annots"):
-            raise UnsupportedPDF("annotations require additional equivalence checks")
         # PdfReader resolves inherited resources/boxes while flattening pages.
         pages.append({"page": normalize({k: v for k, v in page.items()
-                                         if k not in {"/Parent", "/Annots"}}),
+                                          if k != "/Parent"}),
                       "crop": list(map(str, page.cropbox)),
                       "media": list(map(str, page.mediabox)), "rotate": page.rotation})
 
-    def outline(items):
-        return [outline(item) if isinstance(item, list) else {
-            "page": reader.get_destination_page_number(item),
-            "destination": normalize({k: v for k, v in item.items() if k != "/Page"}),
-        } for item in items]
-
-    return {"pages": pages, "outline": outline(reader.outline),
-            "metadata": normalize(dict(reader.metadata or {})),
-            "catalog": normalize({k: v for k, v in root.items()
-                                  if k not in {"/Pages", "/Outlines"}})}
+    signature = {"pages": pages, "metadata": normalize(dict(reader.metadata or {})),
+                 "catalog": normalize({k: v for k, v in root.items() if k != "/Pages"}),
+                 "nodes": nodes}
+    if reader.is_encrypted:
+        # qpdf preserves encryption by default. Verify the full encryption
+        # dictionary (permissions, recipients/keys, crypt filters) and the
+        # permanent document ID, which is part of older encryption keys.
+        encryption = dict(reader.trailer["/Encrypt"])
+        if "/P" in encryption:
+            # The permissions are a 32-bit bitmask; writers may spell the
+            # identical bits as a signed or unsigned PDF integer.
+            encryption["/P"] = int(encryption["/P"]) & 0xffffffff
+        signature["encryption"] = normalize(encryption)
+        signature["permanent_id"] = normalize(reader.trailer["/ID"][0])
+    for number, value in enumerate(pending):
+        if isinstance(value, list):
+            nodes[number] = [normalize(v) for v in value]
+            continue
+        object_type = resolve(value.get("/Type"))
+        action = resolve(value.get("/S"))
+        if (resolve(value.get("/FT")) == "/Sig" or object_type in ("/Sig", "/DocTimeStamp")
+                or "/ByteRange" in value):
+            raise UnsupportedPDF("digital signatures require the original file bytes")
+        active_keys = sorted(set(value) & {"/XFA", "/AA", "/JavaScript"})
+        if active_keys:
+            raise UnsupportedPDF("active content or embedded files require additional equivalence checks: " +
+                                 ",".join(active_keys))
+        if action in ("/JavaScript", "/Launch", "/SubmitForm", "/ImportData", "/GoToR", "/GoToE"):
+            raise UnsupportedPDF("non-local action requires additional equivalence checks: " + str(action))
+        is_stream = isinstance(value, StreamObject)
+        is_xmp = is_stream and object_type == "/Metadata" and resolve(value.get("/Subtype")) == "/XML"
+        omitted = {"/Length"} if is_stream else set()
+        if is_xmp:
+            omitted |= {"/Filter", "/DecodeParms"}
+        result = {}
+        for key in sorted(value):
+            if key in omitted:
+                continue
+            child = normalize(value.raw_get(key) if hasattr(value, "raw_get") else value[key])
+            # A null dictionary entry is absent under PDF semantics. Null
+            # array elements retain their position, including broken targets.
+            if child is not None:
+                result[str(key)] = child
+        if is_stream:
+            result["stream_sha256"] = hashlib.sha256(value.get_data() if is_xmp else value._data).hexdigest()
+        nodes[number] = result
+    return signature
 
 
 def check_supported_structure(path: Path) -> None:
     """Reject structures we cannot prove lossless before starting PDF.js."""
-    reader = PdfReader(path)
-    if reader.is_encrypted:
-        raise UnsupportedPDF("encrypted input; use its existing decrypted asset")
-    supported = {"/Type", "/Pages", "/Outlines", "/PageMode", "/PageLayout", "/Version",
-                 "/ViewerPreferences", "/Metadata", "/Lang", "/MarkInfo", "/OpenAction", "/PageLabels"}
-    extra = set(reader.trailer["/Root"]) - supported
-    if extra:
-        raise UnsupportedPDF("catalog structures require additional equivalence checks: " +
-                             ",".join(sorted(extra)))
-    for page in reader.pages:
-        if page.get("/Annots"):
-            raise UnsupportedPDF("annotations require additional equivalence checks")
+    content_signature(path)
 
 
 SCENE = """async () => {
@@ -159,13 +198,25 @@ SCENE = """async () => {
     await render(1); snapshots.first = await snap();
     for (let n=2;n<=Math.min(3,pdf.numPages);n++) await render(n);
     const outline = await pdf.getOutline(); let entries = 0;
-    async function walk(items) {
-      for (const item of items || []) {
+    const invalidDestinations = [];
+    async function walk(items, parents=[]) {
+      for (const [index,item] of (items || []).entries()) {
+        const location = [...parents,index];
         entries++;
         let dest = item.dest;
         if (typeof dest === 'string') dest = await pdf.getDestination(dest);
-        if (dest && typeof dest[0] === 'object') await pdf.getPageIndex(dest[0]);
-        await walk(item.items);
+        if (dest && typeof dest[0] === 'object') {
+          try { await pdf.getPageIndex(dest[0]); }
+          catch (error) {
+            const message = String(error?.message);
+            const known = ['The reference does not point to a /Page dictionary.',
+              "Kid reference not found in parent's kids.",
+              'Page dictionary kid reference points to wrong type of object.'];
+            if (!known.includes(message)) throw error;
+            invalidDestinations.push({location,message});
+          }
+        }
+        await walk(item.items,location);
       }
     }
     await walk(outline); snapshots.startup = await snap();
@@ -175,12 +226,16 @@ SCENE = """async () => {
     }
     snapshots.jump = await snap();
     await new Promise(r=>setTimeout(r,750)); snapshots.final = await snap();
-    return {pages:pdf.numPages,outline_entries:entries,renders,snapshots};
+    return {pages:pdf.numPages,outline_entries:entries,invalid_destinations:invalidDestinations,renders,snapshots};
   };
   let timer;
   try { return await Promise.race([work(),new Promise((_,reject)=>{
     timer=setTimeout(()=>reject(Error('PDF assessment deadline')),90000);
-  })]); } finally { clearTimeout(timer); await task.destroy(); }
+  })]); } catch (error) {
+    // PDF.js worker exceptions are plain objects; Playwright otherwise drops
+    // their useful message/details and reports only UnknownErrorException.
+    throw new Error([error?.name,error?.message,error?.details].filter(Boolean).join(': '));
+  } finally { clearTimeout(timer); await task.destroy(); }
 }"""
 
 
@@ -304,6 +359,8 @@ def improvement(before: dict, after: dict, source_size: int, output_size: int) -
         return False
     if before["outline_entries"] != after["outline_entries"]:
         return False
+    if before.get("invalid_destinations", []) != after.get("invalid_destinations", []):
+        return False
     saved = a["startup"]["bytes"] - b["startup"]["bytes"]
     return (saved >= MI and b["startup"]["bytes"] <= a["startup"]["bytes"] * .7
             and output_size <= source_size * 1.05
@@ -333,13 +390,46 @@ def run_qpdf(args: list[str], *, timeout: int) -> str:
     return ""
 
 
+def failure_details(error: Exception) -> dict:
+    """Keep actionable diagnostics instead of losing subprocess/worker details."""
+    detail = type(error).__name__ + ": " + str(error)
+    if isinstance(error, subprocess.CalledProcessError):
+        output = error.stderr or error.stdout or b""
+        if isinstance(output, bytes):
+            output = output.decode("utf-8", "replace")
+        detail = f"qpdf exit {error.returncode}: {output}"
+        category = "qpdf-error"
+    elif isinstance(error, subprocess.TimeoutExpired) or "deadline" in detail.lower() or "Timeout" in detail:
+        category = "timeout"
+    elif "document content or resource signature differs" in detail:
+        category = "content-mismatch"
+    elif "cyclic page" in detail.lower():
+        category = "cyclic-page-tree"
+    elif "Page.evaluate" in detail or "PDF rendering errors" in detail:
+        category = "pdfjs-error"
+    else:
+        category = "assessment-error"
+    return {"error_category": category, "error": detail[:1600]}
+
+
+def reconstruct_pdf(source: Path, target: Path) -> None:
+    """Use the independent parser in a bounded process; callers must prove equality."""
+    command = [sys.executable, "-c",
+               "import sys; from pypdf import PdfWriter; "
+               "writer = PdfWriter(clone_from=sys.argv[1]); "
+               "writer.write(sys.argv[2]); writer.close()", str(source), str(target)]
+    result = subprocess.run(command, capture_output=True, timeout=120)
+    if result.returncode:
+        raise RuntimeError("PDF reconstruction failed: " + result.stderr.decode("utf-8", "replace")[-1200:])
+
+
 def assess(source: Path, work: Path, vendor: Path) -> tuple[dict, Path | None]:
     size = source.stat().st_size
     if size < MIN_BYTES:
         return {"status": "unchanged", "reason": "below-4-mib"}, None
     if size > 2 * 1024 * MI:
         return {"status": "unsupported", "reason": "source-exceeds-2-gib"}, None
-    check_supported_structure(source)
+    signature = content_signature(source)
     from playwright.sync_api import sync_playwright
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True, args=["--no-sandbox"])
@@ -352,11 +442,13 @@ def assess(source: Path, work: Path, vendor: Path) -> tuple[dict, Path | None]:
             passing = []
             methods = candidate_methods()
             report["candidate_policy"] = "full" if len(methods) > 1 else "objects-only"
-            for method, options in methods.items():
+
+            def evaluate(method, options, conversion_source):
                 target = work / (method + ".pdf")
+                warnings = []
+                after = None
                 try:
-                    warnings = []
-                    warning = run_qpdf(["qpdf", *options, "--stream-data=preserve", str(source), str(target)],
+                    warning = run_qpdf(["qpdf", *options, "--stream-data=preserve", str(conversion_source), str(target)],
                                        timeout=120)
                     if warning:
                         warnings.append(warning)
@@ -374,7 +466,6 @@ def assess(source: Path, work: Path, vendor: Path) -> tuple[dict, Path | None]:
                     if accepted:
                         # Full graph comparison is only needed for a candidate that
                         # already demonstrated a measurable Reader improvement.
-                        signature = content_signature(source)
                         if content_signature(target) != signature:
                             raise ValueError("document content or resource signature differs")
                         passing.append((after["snapshots"]["startup"]["bytes"],
@@ -384,17 +475,41 @@ def assess(source: Path, work: Path, vendor: Path) -> tuple[dict, Path | None]:
                                                     "measurement": after}
                     if warnings:
                         report["candidates"][method]["qpdf_warnings"] = warnings
-                    if method == "objects" and strong_improvement(before, after, size, target.stat().st_size):
+                    if (method in {"objects", "reconstructed-objects"}
+                            and strong_improvement(before, after, size, target.stat().st_size)):
                         report["candidates"][method]["early_stop"] = True
                         report.update(status="optimized", reason="measured-improvement", method=method)
-                        return report, target
+                        return target
                 except Exception as error:
-                    if isinstance(error, subprocess.CalledProcessError):
-                        detail = (error.stderr or error.stdout or b"")
-                        if isinstance(detail, bytes):
-                            detail = detail.decode("utf-8", "replace")
-                        error = RuntimeError(f"qpdf exit {error.returncode}: {detail[:1200]}")
-                    report["candidates"][method] = {"accepted": False, "error": type(error).__name__ + ": " + str(error)[:300]}
+                    candidate = {"accepted": False, **failure_details(error)}
+                    if warnings:
+                        candidate["qpdf_warnings"] = warnings
+                    if after is not None:
+                        candidate["measurement"] = after
+                    report["candidates"][method] = candidate
+                return None
+
+            for method, options in methods.items():
+                chosen = evaluate(method, options, source)
+                if chosen:
+                    return report, chosen
+            if (not passing and "encryption" not in signature and
+                    any(value.get("error_category") == "qpdf-error" for value in report["candidates"].values())):
+                repaired = work / "reconstructed.pdf"
+                try:
+                    reconstruct_pdf(source, repaired)
+                    warning = run_qpdf(["qpdf", "--check", str(repaired)], timeout=60)
+                    if content_signature(repaired) != signature:
+                        raise ValueError("document content or resource signature differs after reconstruction")
+                    report["reconstruction"] = {"validated": True}
+                    if warning:
+                        report["reconstruction"]["qpdf_warnings"] = [warning]
+                    for method, options in methods.items():
+                        chosen = evaluate("reconstructed-" + method, options, repaired)
+                        if chosen:
+                            return report, chosen
+                except Exception as error:
+                    report["reconstruction"] = {"validated": False, **failure_details(error)}
             if not passing:
                 if any("error" in value for value in report["candidates"].values()):
                     report.update(status="failed", reason="candidate-assessment-incomplete")

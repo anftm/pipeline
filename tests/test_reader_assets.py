@@ -53,7 +53,7 @@ class ReaderAssetContractTests(unittest.TestCase):
             "fb2": ("foliate-original-v1", "foliate", "document.fb2"),
             "odt": ("calibre-odt-html-v1", "html", "document.html"),
             "rtf": ("calibre-rtf-html-v1", "html", "document.html"),
-            "chm": ("calibre-chm-epub-v2", "epub", "document.epub"),
+            "chm": ("calibre-chm-epub-v3", "epub", "document.epub"),
             "tif": ("pillow-pdf-v2", "pdf", "document.pdf"),
             "tiff": ("pillow-pdf-v2", "pdf", "document.pdf"),
             "djvu": ("djvulibre-pdf-v2", "pdf", "document.pdf"),
@@ -996,6 +996,37 @@ aW1hZ2U=
             with self.assertRaisesRegex(RuntimeError, "active content"):
                 convert_reader_assets.validate_chm_epub(epub)
 
+    def test_chm_document_write_literals_are_expanded_without_execution(self):
+        document, expanded = convert_reader_assets.expand_document_writes(
+            "document.write(\"<p>第一段</p>\" + '<p>第二段\\x21</p>');"
+        )
+        self.assertTrue(expanded)
+        self.assertEqual(document, "<p>第一段</p><p>第二段!</p>")
+
+    def test_chm_document_write_rejects_dynamic_expressions(self):
+        document, expanded = convert_reader_assets.expand_document_writes(
+            "document.write('<p>' + userInput + '</p>');"
+        )
+        self.assertFalse(expanded)
+        self.assertEqual(document, "document.write('<p>' + userInput + '</p>');")
+
+    def test_chm_static_writes_follow_javascript_escaping_and_skip_inactive_code(self):
+        text, found = convert_reader_assets.expand_document_writes(
+            '/* document.write("wrong") */ function unused(){document.write("wrong");}'
+            'if(false){document.write("wrong");}'
+            'document.write("<p>\\u4e2d\\x21<\\/p>"); document.write(userInput);'
+            'document.writeln("next", " page");'
+        )
+        self.assertTrue(found)
+        self.assertEqual(text, '<p>中!</p>next page\n')
+
+    def test_xml_sanitizer_preserves_legacy_container_text_and_removed_element_tails(self):
+        root = convert_reader_assets.ET.fromstring(convert_reader_assets.sanitize_xml_document(
+            '<html><body>before<font color="red">text<b>bold</b>tail</font>after'
+            '<script>discard()</script>keep<center>center</center>end</body></html>'
+        ))
+        self.assertEqual(''.join(root.find('body').itertext()), 'beforetextboldtailafterkeepcenterend')
+
     def test_small_epub_direct_copy_uses_foliate(self):
         with tempfile.TemporaryDirectory() as root:
             work = Path(root)
@@ -1083,6 +1114,46 @@ aW1hZ2U=
             self.assertIn("data:image/png;base64", result)
             self.assertIn("color: red", result)
             self.assertNotIn('href="style.css"', result)
+
+    def test_generated_html_resolves_local_resources_case_insensitively(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            (root / "Images").mkdir()
+            (root / "Images" / "screen.PNG").write_bytes(b"png")
+            result = convert_reader_assets.inline_local_html_resources(
+                '<p><img src="images/SCREEN.png">正文</p>', root, root,
+            )
+            self.assertIn("data:image/png;base64", result)
+
+    def test_chm_epub_repair_adds_case_insensitive_source_images(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            source = root / "source.chm"
+            epub = root / "book.epub"
+            with zipfile.ZipFile(source, "w") as archive:
+                archive.writestr("crack.htm", '<html><body><p>正文</p><img src="Images/screen.jpg"></body></html>')
+                archive.writestr("images/screen.jpg", b"JPEG")
+            with zipfile.ZipFile(epub, "w") as archive:
+                archive.writestr("mimetype", "application/epub+zip")
+                archive.writestr("META-INF/container.xml", '<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>')
+                archive.writestr("OEBPS/content.opf", '<package xmlns="http://www.idpf.org/2007/opf"><manifest><item id="chapter" href="crack.htm" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="chapter"/></spine></package>')
+                archive.writestr("OEBPS/crack.htm", '<html xmlns="http://www.w3.org/1999/xhtml"><body><p>正文</p><img src="Images/screen.jpg"/></body></html>')
+            report = convert_reader_assets.repair_chm_epub_images(source, epub, root / "work")
+            self.assertEqual(len(report["added"]), 1)
+            self.assertEqual(report["missing"], [])
+            with zipfile.ZipFile(epub) as archive:
+                self.assertEqual(archive.read("OEBPS/Images/screen.jpg"), b"JPEG")
+                self.assertIn("chm-image-1", archive.read("OEBPS/content.opf").decode())
+
+    def test_generated_html_expands_static_writes_and_drops_dynamic_scripts(self):
+        result = convert_reader_assets.inline_local_html_resources(
+            "<script>document.write('<p>生成正文</p>');</script>"
+            "<script>document.write('<p>' + dynamicValue + '</p>');</script>",
+            Path("/tmp"), Path("/tmp"),
+        )
+        self.assertIn("生成正文", result)
+        self.assertNotIn("dynamicValue", result)
+        self.assertNotIn("document.write", result)
 
     def test_html_conversion_removes_active_and_remote_content(self):
         with tempfile.TemporaryDirectory() as root:

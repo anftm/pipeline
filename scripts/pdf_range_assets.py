@@ -8,7 +8,9 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -85,19 +87,35 @@ def discover(records, revisions, manifest, pdf_manifest, api, state, assets_repo
     return items, inventories
 
 
-def identity(item, tool_version):
+def identity(item, tool_version, assessment=None):
     value = [item["input_token"], item["input_profile"], pdf_range.PROFILE,
-             pdf_range.ASSESSMENT, tool_version]
+             assessment or pdf_range.ASSESSMENT, tool_version]
     return hashlib.sha256(json.dumps(value, separators=(",", ":")).encode()).hexdigest()
 
 
-def plan(items, state, tool_version, limit, exact_key="", retry_failed=False):
+def plan(items, state, tool_version, limit, exact_key="", retry_failed=False, retry_blocked=False,
+         retry_stale_blocked=False):
     files, pending = {}, []
     reusable = {entry.get("identity"): entry for entry in state.get("files", {}).values()
                 if entry.get("status") in {"optimized", "unchanged", "no-gain", "unsupported"}}
     for key, item in sorted(items.items()):
         fingerprint = identity(item, tool_version)
         previous = state.get("files", {}).get(key, {})
+        # v4 admits additional passive structures without changing the criteria
+        # for already completed v3 measurements. Only blocked inputs need retry.
+        if (pdf_range.ASSESSMENT == "pdfjs-6.3.289-range-1m-scene-v2-policy-v4"
+                and previous.get("status") in {"optimized", "unchanged", "no-gain"}
+                and previous.get("identity") == identity(item, tool_version,
+                    "pdfjs-6.3.289-range-1m-scene-v2-policy-v3")):
+            files[key] = previous
+            continue
+        if (retry_blocked or retry_stale_blocked) and previous.get("status") not in {"failed", "unsupported"}:
+            files[key] = previous or {**item, "identity": fingerprint, "status": "pending"}
+            continue
+        if retry_stale_blocked and previous.get("identity") == fingerprint:
+            files[key] = {**previous, **item}
+            continue
+        retry_requested = retry_blocked or retry_stale_blocked or (retry_failed and previous.get("status") == "failed")
         if (previous.get("input_token") == item["input_token"]
                 and previous.get("input_path") == item.get("input_path")
                 and previous.get("input_repo") == item.get("input_repo")):
@@ -112,10 +130,10 @@ def plan(items, state, tool_version, limit, exact_key="", retry_failed=False):
             continue
         if previous.get("identity") == fingerprint:
             current = {**previous, **item}
-            if previous.get("status") != "pending" and not (retry_failed and previous.get("status") == "failed"):
+            if previous.get("status") != "pending" and not retry_requested:
                 files[key] = current
                 continue
-        elif fingerprint in reusable:
+        elif fingerprint in reusable and not retry_requested:
             cached = reusable[fingerprint]
             files[key] = {**cached, **item, "input_sha256": cached.get("input_sha256", item.get("input_sha256", ""))}
             continue
@@ -129,7 +147,7 @@ def plan(items, state, tool_version, limit, exact_key="", retry_failed=False):
         else:
             files[key] = current
         if not exact_key or key == exact_key:
-            pending.append(current)
+            pending.append({**current, "_previous_identity": previous.get("identity")})
     # Interleave repositories and generated/original inputs. Lexicographic source
     # order otherwise postpones generated assets behind tens of thousands of PDFs.
     group = lambda row: (row.get("source_kind", "upstream"), row.get("repo", ""))
@@ -139,13 +157,20 @@ def plan(items, state, tool_version, limit, exact_key="", retry_failed=False):
     selected = []
     for retry in (False, True):
         groups = defaultdict(deque)
-        for row in sorted(pending, key=lambda row: row["key"]):
+        lane_load = Counter()
+        for row in sorted(pending, key=lambda row: (
+                state.get("files", {}).get(row["key"], {}).get("status") not in {"failed", "unsupported"}, row["key"])):
             if (row.get("status") == "failed") == retry:
-                groups[group(row)].append(row)
+                # A policy upgrade must not make the entire completed corpus
+                # jump ahead of files that have never been assessed.
+                previous_status = state.get("files", {}).get(row["key"], {}).get("status", "pending")
+                lane = 0 if previous_status == "pending" else 1
+                groups[(lane, *group(row))].append(row)
         while groups and len(selected) < limit:
-            bucket = min(groups, key=lambda key: (completed[key], key))
+            bucket = min(groups, key=lambda key: (lane_load[key[0]], key[0], completed[key[1:]], key))
             selected.append(groups[bucket].popleft())
-            completed[bucket] += 1
+            completed[bucket[1:]] += 1
+            lane_load[bucket[0]] += 1
             if not groups[bucket]:
                 del groups[bucket]
     return files, selected
@@ -164,8 +189,26 @@ def compact_report(report):
     return result
 
 
+def planned_results(files, baseline, assessment_keys, shard_count=1, shard_index=0):
+    """Publish terminal metadata decisions and reused assessments exactly once."""
+    results = []
+    for key, row in sorted(files.items()):
+        previous = baseline.get("files", {}).get(key, {})
+        if key in assessment_keys or row.get("status") == "pending":
+            continue
+        if (previous.get("status"), previous.get("identity")) == (row.get("status"), row.get("identity")):
+            continue
+        results.append({**row, "_previous_identity": previous.get("identity")})
+    return results[shard_index::shard_count]
+
+
 def process(item, bundle, vendor, api):
-    result = dict(item)
+    # A retry starts with input identity only. Otherwise an unchanged/unsupported
+    # result can accidentally retain candidates or output paths from its failure.
+    input_fields = ("key", "repo", "source_path", "source_kind", "input_repo", "input_path",
+                    "input_revision", "input_token", "input_sha256", "input_profile",
+                    "source_bytes", "source_revision", "identity", "_previous_identity")
+    result = {field: item[field] for field in input_fields if field in item}
     if item["source_bytes"] < pdf_range.MIN_BYTES:
         return {**result, "status": "unchanged", "reason": "below-4-mib"}
     if item["source_bytes"] > 2 * 1024 * pdf_range.MI:
@@ -188,7 +231,7 @@ def process(item, bundle, vendor, api):
         result.update(input_sha256=digest, source_bytes=size)
         with tempfile.TemporaryDirectory(dir=bundle) as temporary:
             work = Path(temporary)
-            report, chosen = pdf_range.assess(source, work, vendor)
+            report, chosen = assess_isolated(source, work, vendor)
             result.update(compact_report(report))
             if chosen:
                 output_sha, output_bytes = shared.hash_file(chosen)
@@ -201,18 +244,55 @@ def process(item, bundle, vendor, api):
     except pdf_range.UnsupportedPDF as error:
         result.update(status="unsupported", reason=str(error)[:400])
     except Exception as error:
-        result.update(status="failed", reason=type(error).__name__ + ": " + str(error)[:400])
+        details = pdf_range.failure_details(error)
+        result.update(status="failed", reason=details["error"], error_category=details["error_category"])
     finally:
         download_cache.cleanup()
     return result
 
 
+def assess_isolated(source, work, vendor, timeout=900):
+    """Bound the entire assessment, including parser loops and browser teardown."""
+    command = [sys.executable, str(Path(__file__).with_name("pdf_range_worker.py")),
+               "--source", str(source.resolve()), "--work", str(work.resolve()), "--vendor", str(vendor.resolve())]
+    with (work / "assessment.log").open("wb") as log:
+        process = subprocess.Popen(command, stdout=log, stderr=log, start_new_session=True)
+        try:
+            process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+            return {"status": "failed", "reason": "assessment-total-timeout",
+                    "error_category": "timeout", "timeout_seconds": timeout}, None
+    report_path = work / "assessment.json"
+    if process.returncode or not report_path.is_file():
+        with (work / "assessment.log").open("rb") as log:
+            log.seek(max(0, log.seek(0, 2) - 1600))
+            detail = log.read().decode("utf-8", "replace")
+        raise RuntimeError(f"PDF assessment worker exit {process.returncode}: {detail}")
+    report = json.loads(report_path.read_text())
+    chosen = work / (report["method"] + ".pdf") if report["status"] == "optimized" else None
+    if chosen is not None and (chosen.parent != work or not chosen.is_file()):
+        raise ValueError("assessment worker returned an invalid artifact")
+    return report, chosen
+
+
 def publish(api, repo, baseline, state, bundle, results):
     """Rebuild all routes against the commit parent; keep unrelated publisher work."""
-    artifacts = {}
+    artifacts, reused = {}, {}
+    artifact_fields = ("identity", "path", "sha256", "bytes")
+    accepted_artifacts = {tuple(row.get(key) for key in artifact_fields)
+                          for row in baseline.get("files", {}).values() if row.get("status") == "optimized"}
     for result in results:
         if result.get("status") == "optimized":
             path = bundle / result["path"]
+            if not path.is_file():
+                # Reuse only an artifact already accepted in this exact baseline.
+                signature = tuple(result.get(key) for key in artifact_fields)
+                if signature not in accepted_artifacts:
+                    raise ValueError("optimized artifact missing from bundle and baseline")
+                reused[result["path"]] = result
+                continue
             if shared.hash_file(path) != (result["sha256"], result["bytes"]):
                 raise ValueError("optimized artifact digest mismatch")
             artifacts[result["path"]] = CommitOperationAdd(path_in_repo=result["path"], path_or_fileobj=str(path))
@@ -223,6 +303,14 @@ def publish(api, repo, baseline, state, bundle, results):
             return revision
         if current != baseline:
             raise RuntimeError("PDF range state changed concurrently; rerun from current state")
+        if reused:
+            remote = {file.path: file for file in api.get_paths_info(
+                repo_id=repo, paths=list(reused), repo_type="dataset", revision=revision)}
+            for path, result in reused.items():
+                file = remote.get(path)
+                if (not file or file.size != result["bytes"] or
+                        getattr(getattr(file, "lfs", None), "sha256", None) != result["sha256"]):
+                    raise ValueError("reused optimized artifact digest mismatch")
         base = remote_manifest(api, repo, revision)
         images = remote_pdf_manifest(api, repo, revision)
         operations = [*artifacts.values(),
@@ -254,6 +342,10 @@ def main():
     parser.add_argument("--repo", default="")
     parser.add_argument("--path", default="")
     parser.add_argument("--retry-failed", action="store_true")
+    parser.add_argument("--retry-blocked", action="store_true",
+                        help="Assess only previously failed/unsupported PDFs, including unchanged inputs")
+    parser.add_argument("--retry-stale-blocked", action="store_true",
+                        help="Assess only failed/unsupported PDFs whose input or validation identity changed")
     parser.add_argument("--build-only", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--clean-published", action="store_true", help="Remove this bundle's uploaded objects after successful publication")
@@ -278,16 +370,18 @@ def main():
     items, inventories = discover(records, revisions, base, images, api, baseline, args.assets_repo, revision, bool(args.repo))
     version = subprocess.check_output(["qpdf", "--version"], text=True).splitlines()[0]
     key = reader_assets.asset_key(args.repo, args.path) if args.repo else ""
-    files, pending = plan(items, baseline, version, args.limit * args.shard_count, key, args.retry_failed)
+    files, pending = plan(items, baseline, version, args.limit * args.shard_count, key,
+                          args.retry_failed, args.retry_blocked, args.retry_stale_blocked)
+    results = planned_results(files, baseline, {row["key"] for row in pending}, args.shard_count, args.shard_index)
     pending = pending[args.shard_index::args.shard_count]
     if args.repo:
         files = {**baseline.get("files", {}), **files}
     args.bundle.mkdir(parents=True, exist_ok=True)
-    print(f"PDF layout inventory {len(items)}; batch {len(pending)}", flush=True)
+    print(f"PDF layout inventory {len(items)}; batch {len(pending)}; planned results {len(results)}", flush=True)
     if args.dry_run:
         (args.bundle / "plan.json").write_bytes(reader_assets.canonical_json(pending, pretty=True))
         return
-    results = []
+    (args.bundle / "results.json").write_bytes(reader_assets.canonical_json(results, pretty=True))
     workers = 1 if any(item["source_bytes"] > 256 * pdf_range.MI for item in pending) else args.workers
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
         grouped = {}
@@ -300,12 +394,16 @@ def main():
             for alias in futures[future]:
                 inputs = {field: alias[field] for field in (
                     "key", "repo", "source_path", "source_kind", "input_repo", "input_path",
-                    "input_revision", "input_token", "input_profile", "source_revision", "identity") if field in alias}
+                    "input_revision", "input_token", "input_profile", "source_revision", "identity",
+                    "_previous_identity") if field in alias}
                 resolved = {**result, **inputs}
                 results.append(resolved)
-                files[alias["key"]] = resolved
+                files[alias["key"]] = {k: v for k, v in resolved.items() if k != "_previous_identity"}
             print(json.dumps({"file": result["source_path"], "status": result["status"],
-                              "reason": result.get("reason"), "method": result.get("method")}, ensure_ascii=False), flush=True)
+                               "reason": result.get("reason"), "method": result.get("method")}, ensure_ascii=False), flush=True)
+            checkpoint = args.bundle / "results.json.tmp"
+            checkpoint.write_bytes(reader_assets.canonical_json(results, pretty=True))
+            checkpoint.replace(args.bundle / "results.json")
     state = {"version": 1, "files": files, "inventories": inventories}
     (args.bundle / "results.json").write_bytes(reader_assets.canonical_json(results, pretty=True))
     (args.bundle / pdf_range_state.MANIFEST_NAME).write_bytes(reader_assets.canonical_json(state, pretty=True))

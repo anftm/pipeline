@@ -4,11 +4,13 @@ import tempfile
 import unittest
 import copy
 import subprocess
+import sys
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from pypdf import PdfReader, PdfWriter
-from pypdf.generic import ArrayObject, DecodedStreamObject, DictionaryObject, NameObject, NumberObject
+from pypdf.generic import (ArrayObject, DecodedStreamObject, DictionaryObject, NameObject,
+                          NullObject, NumberObject, TextStringObject)
 
 from scripts import pdf_range, pdf_range_assets, build_reader_assets_index, pdf_range_state
 
@@ -33,6 +35,97 @@ class RangePdfTests(unittest.TestCase):
         self.assertNotEqual(following[0]["key"], pending[0]["key"])
         _, retries = pdf_range_assets.plan(items, {"files": files}, "qpdf-test", 3, retry_failed=True)
         self.assertEqual(len(retries), 3)
+
+    def test_blocked_retry_is_scoped_and_bypasses_unsupported_cache(self):
+        items = {status: {"key": status, "input_token": status, "input_profile": "upstream"}
+                 for status in ("failed", "unsupported", "optimized", "unchanged", "pending")}
+        previous = {key: {**item, "identity": pdf_range_assets.identity(item, "qpdf"), "status": key}
+                    for key, item in items.items()}
+        for version in ("qpdf", "upgraded-qpdf"):
+            files, pending = pdf_range_assets.plan(items, {"files": previous}, version, 10, retry_blocked=True)
+            self.assertEqual({row["key"] for row in pending}, {"failed", "unsupported"})
+            self.assertEqual(files["optimized"], previous["optimized"])
+            for row in pending:
+                self.assertEqual(row["_previous_identity"], previous[row["key"]]["identity"])
+
+    def test_stale_blocked_retry_advances_past_terminal_results(self):
+        items = {key: {"key": key, "input_token": key, "input_profile": "upstream"}
+                 for key in ("old-failed", "old-unsupported", "current-failed", "current-unsupported", "pending", "optimized")}
+        previous = {key: {**item, "identity": pdf_range_assets.identity(item, "old" if key.startswith("old-") else "current"),
+                          "status": key.split("-")[-1]}
+                    for key, item in items.items()}
+        _, batch = pdf_range_assets.plan(items, {"files": previous}, "current", 1, retry_stale_blocked=True)
+        self.assertEqual(len(batch), 1)
+        first = batch[0]
+        previous[first["key"]] = {**first, "status": "unsupported"}
+        _, following = pdf_range_assets.plan(items, {"files": previous}, "current", 1, retry_stale_blocked=True)
+        self.assertEqual(len(following), 1)
+        self.assertNotEqual(following[0]["key"], first["key"])
+        previous[following[0]["key"]] = {**following[0], "status": "failed"}
+        self.assertFalse(pdf_range_assets.plan(items, {"files": previous}, "current", 10, retry_stale_blocked=True)[1])
+        items["current-failed"]["input_token"] = "changed-content"
+        _, changed = pdf_range_assets.plan(items, {"files": previous}, "current", 10, retry_stale_blocked=True)
+        self.assertEqual([row["key"] for row in changed], ["current-failed"])
+
+    def test_policy_upgrade_shares_capacity_with_never_assessed_inputs(self):
+        items = {key: {"key": key, "input_token": key, "input_profile": "upstream", "repo": "repo"}
+                 for key in ("a-old-1", "a-old-2", "z-new-1", "z-new-2")}
+        state = {"files": {key: {**row, "status": "unchanged" if key.startswith("a") else "pending",
+                                  "identity": pdf_range_assets.identity(row, "old-tool")}
+                           for key, row in items.items()}}
+        _, batch = pdf_range_assets.plan(items, state, "new-tool", 2)
+        self.assertEqual([row["key"] for row in batch], ["z-new-1", "a-old-1"])
+        for row in batch:
+            state["files"][row["key"]] = {**row, "status": "unchanged"}
+        _, following = pdf_range_assets.plan(items, state, "new-tool", 2)
+        self.assertEqual([row["key"] for row in following], ["z-new-2", "a-old-2"])
+
+    def test_isolated_assessment_reports_unsupported_without_starting_browser(self):
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            source = work / "source.pdf"
+            writer = PdfWriter()
+            writer.add_blank_page(width=400, height=600)
+            writer._root_object[NameObject("/UnknownCatalog")] = NumberObject(1)
+            writer.write(source)
+            with source.open("ab") as output:
+                output.write(b" " * pdf_range.MIN_BYTES)
+            report, chosen = pdf_range_assets.assess_isolated(source, work, work)
+            self.assertEqual(report["status"], "unsupported")
+            self.assertIn("/UnknownCatalog", report["reason"])
+            self.assertIsNone(chosen)
+
+    def test_isolated_assessment_kills_a_stuck_process(self):
+        real_popen = subprocess.Popen
+        children = []
+
+        def stuck(*args, **kwargs):
+            child = real_popen([sys.executable, "-c", "import time; time.sleep(60)"], **kwargs)
+            children.append(child)
+            return child
+
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(pdf_range_assets.subprocess, "Popen", side_effect=stuck):
+            work = Path(directory)
+            report, chosen = pdf_range_assets.assess_isolated(work / "source.pdf", work, work, timeout=.1)
+            self.assertEqual(report["reason"], "assessment-total-timeout")
+            self.assertIsNone(chosen)
+            self.assertIsNotNone(children[0].poll())
+
+    def test_retry_does_not_keep_old_candidate_diagnostics_or_output_paths(self):
+        item = {"key": "book", "source_bytes": 10, "status": "failed", "path": "old.pdf",
+                "candidates": {"objects": {"error": "old error"}}, "sha256": "old-hash"}
+        result = pdf_range_assets.process(item, None, None, None)
+        self.assertEqual(result, {"key": "book", "source_bytes": 10,
+                                  "status": "unchanged", "reason": "below-4-mib"})
+
+    def test_failure_details_preserve_actionable_qpdf_output(self):
+        error = subprocess.CalledProcessError(2, ["qpdf"], stderr=b"page 49: errors while decoding content stream")
+        detail = pdf_range.failure_details(error)
+        self.assertEqual(detail["error_category"], "qpdf-error")
+        self.assertIn("page 49", detail["error"])
+        self.assertEqual(pdf_range.failure_details(ValueError("document content or resource signature differs"))[
+            "error_category"], "content-mismatch")
 
     def test_small_files_do_not_starve_the_assessment_budget(self):
         items = {str(i): {"key": str(i), "input_token": str(i), "input_profile": "upstream",
@@ -117,6 +210,10 @@ class RangePdfTests(unittest.TestCase):
         ordinary = report(60 * pdf_range.MI, 70)
         self.assertTrue(pdf_range.strong_improvement(before, strong, 90 * pdf_range.MI, 90 * pdf_range.MI))
         self.assertFalse(pdf_range.strong_improvement(before, ordinary, 90 * pdf_range.MI, 90 * pdf_range.MI))
+        before["invalid_destinations"] = [[0, 2]]
+        self.assertFalse(pdf_range.improvement(before, strong, 90 * pdf_range.MI, 90 * pdf_range.MI))
+        strong["invalid_destinations"] = [[0, 2]]
+        self.assertTrue(pdf_range.improvement(before, strong, 90 * pdf_range.MI, 90 * pdf_range.MI))
 
     def test_heavy_candidates_are_opt_in(self):
         with patch.dict("os.environ", {}, clear=True):
@@ -218,6 +315,182 @@ class RangePdfTests(unittest.TestCase):
             writer.write(changed)
             with self.assertRaisesRegex(pdf_range.UnsupportedPDF, "non-local opening"):
                 pdf_range.content_signature(changed)
+
+    @unittest.skipUnless(shutil.which("qpdf"), "qpdf is required")
+    def test_xmp_compression_is_normalized_but_metadata_changes_are_detected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source, target, changed = [Path(directory) / name for name in ("source.pdf", "target.pdf", "changed.pdf")]
+            writer = PdfWriter()
+            writer.add_blank_page(width=400, height=600)
+            stream = DecodedStreamObject()
+            stream.set_data(b'<x:xmpmeta xmlns:x="adobe:ns:meta/">original</x:xmpmeta>')
+            stream.update({NameObject("/Type"): NameObject("/Metadata"), NameObject("/Subtype"): NameObject("/XML")})
+            writer._root_object[NameObject("/Metadata")] = writer._add_object(stream.flate_encode())
+            writer.write(source)
+            subprocess.run(["qpdf", "--object-streams=generate", "--stream-data=preserve", str(source), str(target)],
+                           check=True, capture_output=True)
+            self.assertEqual(pdf_range.content_signature(source), pdf_range.content_signature(target))
+            stream.set_data(b'<x:xmpmeta xmlns:x="adobe:ns:meta/">changed</x:xmpmeta>')
+            writer._root_object[NameObject("/Metadata")] = writer._add_object(stream)
+            writer.write(changed)
+            self.assertNotEqual(pdf_range.content_signature(source), pdf_range.content_signature(changed))
+
+    @unittest.skipUnless(shutil.which("qpdf"), "qpdf is required")
+    def test_cyclic_tags_annotations_forms_and_named_destinations_remain_exact(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source, target, changed = [Path(directory) / name for name in ("source.pdf", "target.pdf", "changed.pdf")]
+            writer = PdfWriter()
+            for _ in range(3):
+                writer.add_blank_page(width=400, height=600)
+            tag_root = DictionaryObject({NameObject("/Type"): NameObject("/StructTreeRoot")})
+            tag_ref = writer._add_object(tag_root)
+            tag = DictionaryObject({NameObject("/Type"): NameObject("/StructElem"), NameObject("/S"): NameObject("/P"),
+                NameObject("/P"): tag_ref, NameObject("/Pg"): writer.pages[0].indirect_reference,
+                NameObject("/Alt"): TextStringObject("original tag")})
+            tag_root[NameObject("/K")] = ArrayObject([writer._add_object(tag)])
+            writer._root_object[NameObject("/StructTreeRoot")] = tag_ref
+            annotation = DictionaryObject({NameObject("/Type"): NameObject("/Annot"),
+                NameObject("/Subtype"): NameObject("/Text"), NameObject("/Contents"): TextStringObject("original note"),
+                NameObject("/P"): writer.pages[1].indirect_reference})
+            writer.pages[1][NameObject("/Annots")] = ArrayObject([writer._add_object(annotation)])
+            field = DictionaryObject({NameObject("/FT"): NameObject("/Tx"), NameObject("/T"): TextStringObject("name"),
+                NameObject("/V"): TextStringObject("original value")})
+            writer._root_object[NameObject("/AcroForm")] = DictionaryObject({NameObject("/Fields"):
+                ArrayObject([writer._add_object(field)])})
+            writer.add_named_destination("chapter", 2)
+            writer._root_object[NameObject("/OpenAction")] = TextStringObject("chapter")
+            writer.add_outline_item("third", 2)
+            writer.write(source)
+            original = pdf_range.content_signature(source)
+            for options in pdf_range.METHODS.values():
+                subprocess.run(["qpdf", *options, "--stream-data=preserve", str(source), str(target)],
+                               check=True, capture_output=True)
+                self.assertEqual(original, pdf_range.content_signature(target))
+            for obj, key, value in ((tag, "/Alt", TextStringObject("changed tag")),
+                                    (tag, "/Pg", writer.pages[2].indirect_reference),
+                                    (annotation, "/Contents", TextStringObject("changed note")),
+                                    (field, "/V", TextStringObject("changed value"))):
+                old = obj.raw_get(key)
+                obj[NameObject(key)] = value
+                writer.write(changed)
+                self.assertNotEqual(original, pdf_range.content_signature(changed), key)
+                obj[NameObject(key)] = old
+            destination = writer.get_named_dest_root()[1].get_object()["/D"]
+            destination[0] = writer.pages[0].indirect_reference
+            writer.write(changed)
+            self.assertNotEqual(original, pdf_range.content_signature(changed))
+
+    def test_signature_fields_and_active_content_are_still_blocked(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.pdf"
+            for field in (DictionaryObject({NameObject("/FT"): NameObject("/Sig")}),
+                          DictionaryObject({NameObject("/S"): NameObject("/JavaScript"),
+                                            NameObject("/JS"): TextStringObject("app.alert('x')")})):
+                writer = PdfWriter()
+                page = writer.add_blank_page(width=400, height=600)
+                page[NameObject("/Annots")] = ArrayObject([writer._add_object(field)])
+                writer.write(source)
+                with self.assertRaises(pdf_range.UnsupportedPDF):
+                    pdf_range.content_signature(source)
+                key = "/FT" if "/FT" in field else "/S"
+                field[NameObject(key)] = writer._add_object(field[key])
+                writer.write(source)
+                with self.assertRaises(pdf_range.UnsupportedPDF):
+                    pdf_range.content_signature(source)
+
+    def test_null_dictionary_entries_are_absent_but_array_slots_and_lengths_matter(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source, changed = [Path(directory) / name for name in ("source.pdf", "changed.pdf")]
+            writer = PdfWriter()
+            writer.add_blank_page(width=400, height=600)
+            writer._root_object[NameObject("/Metadata")] = NullObject()
+            properties = DictionaryObject({NameObject("/Length"): NumberObject(4),
+                NameObject("/Items"): ArrayObject([NullObject(), NumberObject(5)])})
+            writer._root_object[NameObject("/PieceInfo")] = properties
+            writer.write(source)
+            original = pdf_range.content_signature(source)
+            del writer._root_object["/Metadata"]
+            writer.write(changed)
+            self.assertEqual(original, pdf_range.content_signature(changed))
+            properties[NameObject("/Length")] = NumberObject(3)
+            writer.write(changed)
+            self.assertNotEqual(original, pdf_range.content_signature(changed))
+            properties[NameObject("/Length")] = NumberObject(4)
+            properties["/Items"].pop(0)
+            writer.write(changed)
+            self.assertNotEqual(original, pdf_range.content_signature(changed))
+
+    @unittest.skipUnless(shutil.which("qpdf"), "qpdf is required")
+    def test_passwordless_encryption_preserves_permissions_and_keys(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source, target = [Path(directory) / name for name in ("source.pdf", "target.pdf")]
+            writer = PdfWriter()
+            writer.add_blank_page(width=400, height=600)
+            writer.encrypt("", "owner-secret", algorithm="AES-128")
+            writer.write(source)
+            original = pdf_range.content_signature(source)
+            for options in pdf_range.METHODS.values():
+                subprocess.run(["qpdf", *options, "--stream-data=preserve", str(source), str(target)],
+                               check=True, capture_output=True)
+                self.assertEqual(original, pdf_range.content_signature(target))
+                self.assertTrue(PdfReader(target).is_encrypted)
+            subprocess.run(["qpdf", "--decrypt", str(source), str(target)], check=True, capture_output=True)
+            self.assertNotEqual(original, pdf_range.content_signature(target))
+            writer.encrypt("reader-secret", "owner-secret", algorithm="AES-256")
+            writer.write(source)
+            with self.assertRaisesRegex(pdf_range.UnsupportedPDF, "password required"):
+                pdf_range.content_signature(source)
+
+    @unittest.skipUnless(shutil.which("qpdf"), "qpdf is required")
+    def test_reconstruction_fallback_requires_original_graph_and_render_equivalence(self):
+        def measurement(amount):
+            return {"renders": ["same pixels and text"], "pages": 1, "outline_entries": 0,
+                    "snapshots": {key: {"bytes": amount, "requests": 1}
+                                  for key in ("startup", "idle", "jump", "final")}}
+
+        real_qpdf, real_reconstruct = pdf_range.run_qpdf, pdf_range.reconstruct_pdf
+        for changed in (False, True):
+            with self.subTest(changed=changed), tempfile.TemporaryDirectory() as directory:
+                work = Path(directory)
+                source = work / "source.pdf"
+                writer = PdfWriter()
+                page = writer.add_blank_page(width=400, height=600)
+                contents = DecodedStreamObject()
+                contents.set_data(b" " * pdf_range.MIN_BYTES)
+                page[NameObject("/Contents")] = writer._add_object(contents)
+                writer.write(source)
+                original_bytes = source.read_bytes()
+
+                def qpdf(args, *, timeout):
+                    if args[-2] == str(source):
+                        raise subprocess.CalledProcessError(2, args, stderr=b"invalid object in page tree")
+                    return real_qpdf(args, timeout=timeout)
+
+                def reconstruct(source, target):
+                    if not changed:
+                        return real_reconstruct(source, target)
+                    altered = PdfWriter()
+                    altered.add_blank_page(width=401, height=600)
+                    altered.write(target)
+
+                with patch.dict("os.environ", {"PDF_RANGE_TRY_HEAVY": "0"}), \
+                        patch("playwright.sync_api.sync_playwright"), \
+                        patch.object(pdf_range, "run_qpdf", side_effect=qpdf), \
+                        patch.object(pdf_range, "reconstruct_pdf", side_effect=reconstruct), \
+                        patch.object(pdf_range, "benchmark", side_effect=[measurement(4 * pdf_range.MI),
+                                     measurement(pdf_range.MI // 2)]) as benchmark:
+                    report, chosen = pdf_range.assess(source, work, work)
+                self.assertEqual(source.read_bytes(), original_bytes)
+                if changed:
+                    self.assertIsNone(chosen)
+                    self.assertFalse(report["reconstruction"]["validated"])
+                    self.assertEqual(report["reconstruction"]["error_category"], "content-mismatch")
+                    self.assertEqual(benchmark.call_count, 1)
+                else:
+                    self.assertEqual(report["status"], "optimized")
+                    self.assertTrue(report["reconstruction"]["validated"])
+                    self.assertEqual(report["method"], "reconstructed-objects")
+                    self.assertEqual(pdf_range.content_signature(source), pdf_range.content_signature(chosen))
 
     def test_upstream_inventory_cache_tracks_actual_file_fingerprint(self):
         from scripts import reader_assets

@@ -16,6 +16,7 @@ except ImportError:
 
 def merge_results(bundles):
     results = {}
+    canonical = {}
     merged = Path(tempfile.mkdtemp(prefix="pdf-range-merge-"))
     for bundle in sorted(bundles):
         result_files = sorted(bundle.rglob("results.json"))
@@ -28,6 +29,9 @@ def merge_results(bundles):
                 if not key or key in results:
                     raise ValueError(f"duplicate PDF range result: {key}")
                 results[key] = result
+                if (result.get("status") == "optimized" and result.get("path") and
+                        (result_file.parent / result["path"]).is_file()):
+                    canonical.setdefault(result["path"], result)
             objects = result_file.parent / "objects"
             if not objects.is_dir():
                 continue
@@ -41,7 +45,6 @@ def merge_results(bundles):
     # qpdf may emit different document IDs in parallel workers. The path
     # identity is already content/profile based, so retain one valid artifact
     # and make all aliases reference its digest.
-    canonical = {}
     for result in results.values():
         if result.get("status") != "optimized" or not result.get("path"):
             continue
@@ -49,6 +52,22 @@ def merge_results(bundles):
         result["sha256"] = winner.get("sha256")
         result["bytes"] = winner.get("bytes")
     return merged, list(results.values())
+
+
+def apply_results(state, results):
+    """Accept a rule upgrade only if the state assessed by that worker is current."""
+    fresh = []
+    for result in results:
+        previous = state["files"].get(result["key"])
+        if "_previous_identity" in result:
+            if (previous or {}).get("identity") != result["_previous_identity"]:
+                continue
+        elif previous and previous.get("identity") != result.get("identity"):
+            continue
+        result = {k: v for k, v in result.items() if k != "_previous_identity"}
+        state["files"][result["key"]] = result
+        fresh.append(result)
+    return fresh
 
 
 def main():
@@ -62,15 +81,7 @@ def main():
     bundle, results = merge_results(args.bundles)
     state = {"version": 1, "files": dict(baseline.get("files", {})),
              "inventories": dict(baseline.get("inventories", {}))}
-    fresh_results = []
-    for result in results:
-        previous = state["files"].get(result["key"])
-        if previous and previous.get("identity") != result.get("identity"):
-            # Another run already assessed this key. Do not overwrite its newer
-            # state or fail the rest of an otherwise valid parallel batch.
-            continue
-        state["files"][result["key"]] = result
-        fresh_results.append(result)
+    fresh_results = apply_results(state, results)
     published = pdf_range_assets.publish(api, args.assets_repo, baseline, state, bundle, fresh_results)
     print(f"published {len(fresh_results)} PDF range result(s) at {published}; skipped {len(results) - len(fresh_results)} stale result(s)", flush=True)
     shutil.rmtree(bundle, ignore_errors=True)

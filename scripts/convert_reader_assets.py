@@ -30,6 +30,7 @@ from pathlib import Path
 
 import bleach
 import tinycss2
+import esprima
 from bleach.css_sanitizer import CSSSanitizer
 from PIL import Image, ImageSequence
 
@@ -202,6 +203,42 @@ def decode_html_source(source: Path) -> str:
     return best_text
 
 
+def expand_document_writes(document: str) -> tuple[str, bool]:
+    """Extract top-level literal writes without executing or retaining script code."""
+    if "document" not in document or "write" not in document:
+        return document, False
+    try:
+        tree = esprima.parseScript(document)
+    except (esprima.Error, RecursionError):
+        return document, False
+
+    def literal(node):
+        if node.type == "Literal" and isinstance(node.value, str):
+            return node.value
+        if node.type == "BinaryExpression" and node.operator == "+":
+            left, right = literal(node.left), literal(node.right)
+            if left is not None and right is not None:
+                return left + right
+        return None
+
+    output = []
+    for statement in tree.body:
+        if statement.type != "ExpressionStatement":
+            continue
+        call = statement.expression
+        if call.type != "CallExpression":
+            continue
+        callee = call.callee
+        if (callee.type != "MemberExpression" or callee.computed
+                or callee.object.type != "Identifier" or callee.object.name != "document"
+                or callee.property.name not in {"write", "writeln"}):
+            continue
+        values = [literal(argument) for argument in call.arguments]
+        if values and all(value is not None for value in values):
+            output.append("".join(values) + ("\n" if callee.property.name == "writeln" else ""))
+    return ("".join(output), True) if output else (document, False)
+
+
 def inline_html_resources(source: Path, source_url: str, work: Path) -> Path:
     """Inline safe same-tree images and stylesheets before the HTML is published."""
     text = decode_html_source(source)
@@ -301,17 +338,48 @@ def inline_local_html_resources(document: str, root: Path, base: Path, *, allow_
     """Inline local images and stylesheets before sanitizing a generated HTML file."""
     cache = {}
 
+    def resolve_resource(raw: str) -> Path | None:
+        value = urllib.parse.unquote(raw)
+        path = (base / value).resolve()
+        root_path = root.resolve()
+        try:
+            relative = path.relative_to(root_path)
+        except ValueError:
+            return None
+        if path.is_file():
+            return path
+        current = root_path
+        for part in relative.parts:
+            try:
+                matches = [child for child in current.iterdir() if child.name.casefold() == part.casefold()]
+            except OSError:
+                return None
+            if len(matches) != 1:
+                return None
+            current = matches[0]
+        return current if current.is_file() else None
+
+    def script_body(match):
+        expanded, was_static = expand_document_writes(match.group(1))
+        return expanded if was_static else ""
+
+    # Bleach's strip mode removes a script element but may keep its text. Drop
+    # dynamic script bodies entirely, while retaining safe HTML produced by
+    # literal document.write calls.
+    document = re.sub(
+        r"<script\b[^>]*>(.*?)</script\s*>", script_body, document,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
     def resource(raw: str, *, css: bool = False) -> str | None:
         value = html.unescape(raw).strip().split("#", 1)[0]
         if not value or re.match(r"^(?:data:|https?:|//|#|javascript:)", value, re.IGNORECASE):
             return None
-        path = (base / urllib.parse.unquote(value)).resolve()
-        try:
-            path.relative_to(root.resolve())
-        except ValueError:
+        path = resolve_resource(value)
+        if path is None:
             return None
         try:
-            if not path.is_file() or path.stat().st_size > MAX_HTML_RESOURCE_BYTES:
+            if path.stat().st_size > MAX_HTML_RESOURCE_BYTES:
                 return None
         except OSError:
             return None
@@ -657,6 +725,27 @@ def sanitize_xml_document(document: str) -> str:
         for child in list(parent):
             local_tag = child.tag.rsplit("}", 1)[-1].lower() if isinstance(child.tag, str) else ""
             if local_tag not in allowed_tags:
+                # Removing an element must not remove the following text node.
+                # Legacy presentational containers are unwrapped, active ones
+                # are discarded together with their contents.
+                index = list(parent).index(child)
+                if root_kind != "svg" and local_tag in {"font", "center", "big", "tt", "strike"}:
+                    clean(child)
+                    if child.text:
+                        if index:
+                            previous = parent[index - 1]
+                            previous.tail = (previous.tail or "") + child.text
+                        else:
+                            parent.text = (parent.text or "") + child.text
+                    for grandchild in list(child):
+                        parent.insert(index, grandchild)
+                        index += 1
+                if child.tail:
+                    if index:
+                        previous = parent[index - 1]
+                        previous.tail = (previous.tail or "") + child.tail
+                    else:
+                        parent.text = (parent.text or "") + child.tail
                 parent.remove(child)
                 continue
             clean(child)
@@ -698,9 +787,7 @@ def sanitize_chm_epub(path: Path, work: Path) -> None:
         for info in infos:
             data = source.read(info.filename)
             suffix = Path(info.filename).suffix.lower()
-            if suffix == ".opf":
-                data = re.sub(rb'(\blinear\s*=\s*["\'])no(["\'])', rb'\1yes\2', data, flags=re.IGNORECASE)
-            elif suffix in {".htm", ".html", ".xhtml", ".css", ".svg"}:
+            if suffix in {".htm", ".html", ".xhtml", ".css", ".svg"}:
                 text = data.decode("utf-8", "replace")
                 if suffix == ".css":
                     text = sanitize_css(text)
@@ -713,17 +800,151 @@ def sanitize_chm_epub(path: Path, work: Path) -> None:
     shutil.move(rewritten, path)
 
 
+def repair_chm_epub_images(source: Path, path: Path, work: Path) -> dict:
+    """Add CHM images omitted by Calibre because Windows paths are case-insensitive."""
+    extracted = work / "chm-image-assets"
+    extracted.mkdir(parents=True, exist_ok=True)
+    run_checked(
+        ["7z", "x", "-y", f"-o{extracted}", str(source)],
+        timeout_seconds=CHM_COMMAND_TIMEOUT_SECONDS,
+    )
+    source_files = {
+        item.relative_to(extracted).as_posix().casefold(): item
+        for item in extracted.rglob("*") if item.is_file()
+    }
+    source_pages = {
+        key: item for key, item in source_files.items()
+        if item.suffix.lower() in {".htm", ".html", ".xhtml"}
+    }
+    with zipfile.ZipFile(path) as archive:
+        entries = {info.filename: archive.read(info.filename) for info in archive.infolist()}
+        infos = {info.filename: info for info in archive.infolist()}
+    names_casefold = {name.casefold(): name for name in entries}
+    documents = [name for name in entries if name.lower().endswith((".htm", ".html", ".xhtml"))]
+    added = []
+    missing = []
+    changed_documents = {}
+
+    def source_page(document: str) -> Path | None:
+        direct = source_pages.get(document.casefold())
+        if direct:
+            return direct
+        candidates = [item for item in source_pages.values() if item.name.casefold() == Path(document).name.casefold()]
+        return candidates[0] if len(candidates) == 1 else None
+
+    def source_image(document: str, raw: str) -> Path | None:
+        page = source_page(document)
+        parsed = urllib.parse.urlsplit(urllib.parse.unquote(raw))
+        relative = parsed.path.replace("\\", "/").lstrip("/")
+        candidates = []
+        if page:
+            candidates.append(posixpath.normpath(posixpath.join(page.parent.relative_to(extracted).as_posix(), relative)))
+        candidates.append(posixpath.normpath(relative))
+        for candidate in candidates:
+            item = source_files.get(candidate.casefold())
+            if item and item.suffix.lower() in {".gif", ".jpeg", ".jpg", ".png", ".svg", ".webp"}:
+                return item
+        basename = Path(relative).name.casefold()
+        matches = [item for item in source_files.values() if item.name.casefold() == basename]
+        return matches[0] if len(matches) == 1 else None
+
+    image_pattern = re.compile(
+        r"(<(?:[A-Za-z_][\w.-]*:)?img\b[^>]*?\bsrc\s*=\s*)([\"'])([^\"']+)(\2)",
+        re.IGNORECASE,
+    )
+    for document in documents:
+        text = entries[document].decode("utf-8", "replace")
+
+        def replace_image(match):
+            raw = html.unescape(match.group(3)).strip()
+            parsed = urllib.parse.urlsplit(raw)
+            if not raw or parsed.scheme or parsed.netloc or parsed.fragment or raw.lower().startswith("data:"):
+                return match.group(0)
+            target = posixpath.normpath(posixpath.join(posixpath.dirname(document), parsed.path.replace("\\", "/")))
+            if target.startswith("../"):
+                return match.group(0)
+            existing = names_casefold.get(target.casefold())
+            if existing:
+                if existing != target:
+                    relative = posixpath.relpath(existing, posixpath.dirname(document) or ".")
+                    return match.group(1) + match.group(2) + relative + match.group(4)
+                return match.group(0)
+            image = source_image(document, raw)
+            if image is None:
+                missing.append({"document": document, "src": raw})
+                return match.group(0)
+            entries[target] = image.read_bytes()
+            names_casefold[target.casefold()] = target
+            added.append({"document": document, "src": raw, "path": target})
+            return match.group(0)
+
+        rewritten = image_pattern.sub(replace_image, text)
+        if rewritten != text:
+            changed_documents[document] = rewritten.encode("utf-8")
+
+    if not added and not changed_documents:
+        return {"added": [], "missing": missing}
+
+    container_name = "META-INF/container.xml"
+    container = ET.fromstring(entries[container_name])
+    rootfile = container.find(".//{*}rootfile")
+    if rootfile is None or not rootfile.attrib.get("full-path"):
+        raise RuntimeError("CHM EPUB has no package document")
+    opf_name = rootfile.attrib["full-path"]
+    package = ET.fromstring(entries[opf_name])
+    manifest = package.find(".//{*}manifest")
+    if manifest is None:
+        raise RuntimeError("CHM EPUB has no manifest")
+    existing_ids = {item.attrib.get("id") for item in manifest.findall("{*}item")}
+    existing_hrefs = {item.attrib.get("href") for item in manifest.findall("{*}item")}
+    manifest_namespace = manifest.tag.rsplit("}", 1)[0] + "}" if "}" in manifest.tag else ""
+    opf_dir = posixpath.dirname(opf_name)
+    for index, item in enumerate(added, start=1):
+        target = item["path"]
+        href = posixpath.relpath(target, opf_dir or ".")
+        if href in existing_hrefs:
+            continue
+        item_id = f"chm-image-{index}"
+        while item_id in existing_ids:
+            index += 1
+            item_id = f"chm-image-{index}"
+        media_type = mimetypes.guess_type(target)[0] or "application/octet-stream"
+        manifest.append(ET.Element(f"{manifest_namespace}item", {"id": item_id, "href": href, "media-type": media_type}))
+        existing_ids.add(item_id)
+        existing_hrefs.add(href)
+    entries.update(changed_documents)
+    entries[opf_name] = ET.tostring(package, encoding="utf-8", xml_declaration=False)
+    rewritten = work / "repaired-chm.epub"
+    with zipfile.ZipFile(rewritten, "w") as target_archive:
+        for name, data in entries.items():
+            info = infos.get(name)
+            if info is None:
+                target_archive.writestr(name, data, compress_type=zipfile.ZIP_DEFLATED)
+            else:
+                if name == "mimetype":
+                    info.compress_type = zipfile.ZIP_STORED
+                target_archive.writestr(info, data)
+    shutil.move(rewritten, path)
+    return {"added": added, "missing": missing}
+
+
 def convert_chm(source: Path, target: Path, work: Path) -> None:
+    try:
+        from .chm_navigation import repair_conversion
+    except ImportError:
+        from chm_navigation import repair_conversion
     try:
         run_checked(
             ["ebook-convert", str(source), str(target), "--flow-size", "0"],
             timeout_seconds=CHM_COMMAND_TIMEOUT_SECONDS,
         )
         sanitize_chm_epub(target, work)
+        if target.exists():
+            repair_conversion(source, target, work)
         validate_output(target, "epub")
         validate_chm_epub(target)
         return
-    except (RuntimeError, FileNotFoundError, zipfile.BadZipFile, KeyError) as exc:
+    except (RuntimeError, ValueError, FileNotFoundError, zipfile.BadZipFile, KeyError) as exc:
         initial_error = exc
     source_html = work / "chm-fallback.html"
     try:
@@ -736,6 +957,17 @@ def convert_chm(source: Path, target: Path, work: Path) -> None:
         timeout_seconds=CHM_COMMAND_TIMEOUT_SECONDS,
     )
     sanitize_chm_epub(target, work)
+    if target.exists():
+        try:
+            repair_conversion(source, target, work)
+        except ValueError:
+            # Dynamic menu templates can hide chapters from Calibre entirely.
+            # The recovery path parses static data and verifies every page's text.
+            try:
+                from .recover_chm import recover
+            except ImportError:
+                from recover_chm import recover
+            recover(source, target, source.stem)
     validate_output(target, "epub")
     validate_chm_epub(target)
 
@@ -767,10 +999,19 @@ def convert_chm_to_html(source: Path, target: Path, work: Path) -> None:
     text_pages = sorted(path for path in extracted.rglob("*") if path.is_file() and path.suffix.lower() == ".txt")
     mhtml = sorted(path for path in extracted.rglob("*") if path.is_file() and path.suffix.lower() in {".mht", ".mhtml"})
     hhc = sorted(path for path in extracted.rglob("*") if path.is_file() and path.suffix.lower() == ".hhc")
-    documents = [(path.relative_to(extracted).as_posix(), inline_local_html_resources(
-        decode_html_source(path), extracted, path.parent, allow_relative=True)) for path in pages]
-    documents.extend((path.relative_to(extracted).as_posix(), f"<pre>{html.escape(decode_html_source(path))}</pre>")
-                     for path in text_pages)
+    documents = []
+    for path in pages:
+        document = decode_html_source(path)
+        documents.append((path.relative_to(extracted).as_posix(), inline_local_html_resources(
+            document, extracted, path.parent, allow_relative=True)))
+    for path in text_pages:
+        document = decode_html_source(path)
+        expanded, was_script = expand_document_writes(document)
+        if was_script:
+            documents.append((path.relative_to(extracted).as_posix(), inline_local_html_resources(
+                expanded, extracted, path.parent, allow_relative=True)))
+        else:
+            documents.append((path.relative_to(extracted).as_posix(), f"<pre>{html.escape(document)}</pre>"))
     for index, path in enumerate(mhtml):
         if path.stat().st_size > MAX_MHTML_SOURCE_BYTES:
             raise RuntimeError("CHM MHTML source exceeds size limit")
@@ -853,6 +1094,9 @@ def convert_chm_to_html(source: Path, target: Path, work: Path) -> None:
 
     collect_toc_order(toc_nodes)
     if ordered_indices:
+        # A partial .hhc describes order, not the complete inventory of pages.
+        listed = set(ordered_indices)
+        ordered_indices.extend(index for index in range(len(documents)) if index not in listed)
         ordered = [documents[index] for index in ordered_indices]
         documents = ordered
         page_map = {path.lower(): index for index, (path, _) in enumerate(documents)}

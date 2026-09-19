@@ -3,10 +3,45 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from scripts.publish_pdf_range_shards import merge_results
+from scripts.publish_pdf_range_shards import apply_results, merge_results
+from scripts.continue_pdf_range import continuation_command
 
 
 class PDFRangeShardTests(unittest.TestCase):
+    def test_continuation_is_bounded_and_stops_for_an_empty_batch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            result = root / "results.json"
+            result.write_text("[]")
+            self.assertIsNone(continuation_command(root, {"FOLLOWUPS": "3"}))
+            result.write_text('[{"status":"failed"}]')
+            self.assertIsNone(continuation_command(root, {"FOLLOWUPS": "0"}))
+            command = continuation_command(root, {"FOLLOWUPS": "3", "SOURCE_PATH": "a book.pdf",
+                                                  "RETRY_STALE_BLOCKED": "true", "BATCH_LIMIT": "100"})
+            self.assertIn("followups=2", command)
+            self.assertIn("path=a book.pdf", command)
+            self.assertIn("retry_stale_blocked=true", command)
+            with self.assertRaises(ValueError):
+                continuation_command(root, {"FOLLOWUPS": "21"})
+
+    def test_rule_upgrade_publishes_only_against_the_assessed_identity(self):
+        state = {"files": {"upgrade": {"identity": "old"}, "stale": {"identity": "newer"}}}
+        results = [{"key": "upgrade", "identity": "new", "_previous_identity": "old", "status": "optimized"},
+                   {"key": "stale", "identity": "new", "_previous_identity": "old"},
+                   {"key": "deleted", "identity": "new", "_previous_identity": "old"},
+                   {"key": "fresh", "identity": "new", "_previous_identity": None}]
+        accepted = apply_results(state, results)
+        self.assertEqual([row["key"] for row in accepted], ["upgrade", "fresh"])
+        self.assertEqual(state["files"]["stale"]["identity"], "newer")
+        self.assertNotIn("deleted", state["files"])
+        self.assertNotIn("_previous_identity", state["files"]["upgrade"])
+
+    def test_legacy_bundles_still_require_matching_identity(self):
+        state = {"files": {"current": {"identity": "same"}, "stale": {"identity": "newer"}}}
+        accepted = apply_results(state, [{"key": "current", "identity": "same"},
+                                         {"key": "stale", "identity": "old"}])
+        self.assertEqual([row["key"] for row in accepted], ["current"])
+
     def test_merges_results_and_deduplicates_artifacts(self):
         with tempfile.TemporaryDirectory() as root:
             root = Path(root)
