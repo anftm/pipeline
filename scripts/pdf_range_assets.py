@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import random
 import shutil
 import signal
 import subprocess
@@ -195,6 +196,23 @@ def compact_report(report):
     return result
 
 
+def remote_snapshot(api, repo):
+    """Read the shared baseline, retrying transient HF throttling per Runner."""
+    for attempt in range(6):
+        try:
+            revision = api.repo_info(repo_id=repo, repo_type="dataset").sha
+            state = pdf_range_state.remote_state(api, repo, revision)
+            manifest = remote_manifest(api, repo, revision)
+            pdf_manifest = remote_pdf_manifest(api, repo, revision)
+            return revision, state, manifest, pdf_manifest
+        except HfHubHTTPError as error:
+            if not shared.is_retryable_hf_status(shared.hf_status_code(error)) or attempt == 5:
+                raise
+            delay = shared.hf_retry_delay(attempt) + random.uniform(0, 2)
+            print(f"HF metadata retry after {shared.hf_status_code(error)}; sleeping {delay:.1f}s", flush=True)
+            time.sleep(delay)
+
+
 def planned_results(files, baseline, assessment_keys, shard_count=1, shard_index=0):
     """Publish terminal metadata decisions and reused assessments exactly once."""
     results = []
@@ -365,9 +383,7 @@ def main():
     if bool(args.repo) != bool(args.path):
         parser.error("repo and path must be provided together")
     api = HfApi(token=os.environ.get("HF_TOKEN"))
-    revision = api.repo_info(repo_id=args.assets_repo, repo_type="dataset").sha
-    baseline = pdf_range_state.remote_state(api, args.assets_repo, revision)
-    base, images = remote_manifest(api, args.assets_repo, revision), remote_pdf_manifest(api, args.assets_repo, revision)
+    revision, baseline, base, images = remote_snapshot(api, args.assets_repo)
     records = reader_assets.decode_search_payload(json.loads(args.search_data.read_text()))
     revisions = json.loads(args.revisions.read_text())
     if args.repo:
