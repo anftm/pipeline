@@ -117,10 +117,12 @@ def plan(records: list[dict], source_dir: Path | None, assets_repo: str, shard_c
             range_tasks.append({**item, "task_key": f"{item['key']}#pages-{start:06d}-{end:06d}",
                                 "page_start": start, "page_end": end,
                                 "range_page_count": end - start + 1})
-    shards = pdf_assets.weighted_shards(ordinary, shard_count)
     if range_tasks:
+        shards = pdf_assets.weighted_shards(ordinary, shard_count)
         range_shard_count = min(MAX_GITHUB_MATRIX_SHARDS - len(shards), len(range_tasks))
         shards.extend(pdf_assets.weighted_shards(range_tasks, range_shard_count))
+    else:
+        shards = pdf_assets.weighted_shards(ordinary, shard_count) if ordinary else []
     dynamic_shard_count = len(shards)
     if dynamic_shard_count > MAX_GITHUB_MATRIX_SHARDS:
         raise ValueError(f"PDF shard count {dynamic_shard_count} exceeds GitHub Actions matrix limit {MAX_GITHUB_MATRIX_SHARDS}")

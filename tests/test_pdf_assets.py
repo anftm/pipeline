@@ -16,6 +16,14 @@ from scripts import publish_pdf_assets
 
 
 class PdfAssetsTests(unittest.TestCase):
+    def test_empty_pdf_queue_exports_no_shards(self):
+        planned = plan_pdf_assets.plan([], None, "assets", 18, workers=1)
+        self.assertEqual(planned["total_records"], 0)
+        self.assertEqual(planned["total_tasks"], 0)
+        self.assertEqual(planned["shard_count"], 0)
+        self.assertEqual(planned["shard_ids"], [])
+        self.assertEqual(planned["shards"], [])
+
     def test_hf_metadata_retry_recovers_from_rate_limit(self):
         response = requests.Response()
         response.status_code = 429
