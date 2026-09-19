@@ -13,8 +13,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     outputs:
-      shard-count: ${{ steps.shards.outputs.shard-count }}
-      shard-ids: ${{ steps.shards.outputs.shard-ids }}
+      shard_count: ${{ steps.shards.outputs.shard_count }}
+      shard_ids: ${{ steps.shards.outputs.shard_ids }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -51,8 +51,8 @@ jobs:
       - name: Export dynamic shard matrix
         id: shards
         run: |
-          echo "shard-count=$(jq -r '.shard_count' output/pdf-assets/queue.json)" >> "$GITHUB_OUTPUT"
-          echo "shard-ids=$(jq -c '.shard_ids' output/pdf-assets/queue.json)" >> "$GITHUB_OUTPUT"
+          echo "shard_count=$(jq -r '.shard_count' output/pdf-assets/queue.json)" >> "$GITHUB_OUTPUT"
+          echo "shard_ids=$(jq -c '.shard_ids' output/pdf-assets/queue.json)" >> "$GITHUB_OUTPUT"
           jq -c '.skipped // []' output/pdf-assets/queue.json > output/pdf-assets/skipped.json
       - uses: actions/upload-artifact@v7
         with:
@@ -64,13 +64,14 @@ jobs:
           path: output/pdf-assets/skipped.json
   build:
     needs: plan
+    if: ${{ needs.plan.outputs.shard_count != '0' }}
     runs-on: ubuntu-latest
     timeout-minutes: 360
     strategy:
       fail-fast: false
       max-parallel: 18
       matrix:
-        shard: ${{ fromJSON(needs.plan.outputs.shard-ids) }}
+        shard: ${{ fromJSON(needs.plan.outputs.shard_ids) }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -92,7 +93,7 @@ jobs:
           READER_ASSETS_REPO: vomebook/Reader-Assets
           FORCE_SYNC: "true"
         run: |
-          args=(--source "all" --shard-count "${{ needs.plan.outputs.shard-count }}" --shard-index "${{ matrix.shard }}" --extension pdf --queue-file output/pdf-assets/queue.json --build-only)
+          args=(--source "all" --shard-count "${{ needs.plan.outputs.shard_count }}" --shard-index "${{ matrix.shard }}" --extension pdf --queue-file output/pdf-assets/queue.json --build-only)
           python scripts/pdf_assets.py "${args[@]}" --bundle "output/pdf-assets/bundle"
       - uses: actions/upload-artifact@v7
         with:

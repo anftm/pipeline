@@ -29,6 +29,16 @@ class ReaderAssetConcurrencyTests(unittest.TestCase):
         self.assertEqual(upload["with"]["path"].splitlines(),
                          ["output/pdf-range/results.json", "output/pdf-range/objects"])
 
+    def test_pdf_worker_skips_empty_dynamic_matrix(self):
+        import yaml
+        workflow = yaml.safe_load((ROOT / "pdf-assets-worker.yml").read_text())
+        plan = workflow["jobs"]["plan"]
+        build = workflow["jobs"]["build"]
+        self.assertIn("shard_count", plan["outputs"])
+        self.assertIn("shard_ids", plan["outputs"])
+        self.assertEqual(build["if"], "${{ needs.plan.outputs.shard_count != '0' }}")
+        self.assertIn("fromJSON(needs.plan.outputs.shard_ids)", build["strategy"]["matrix"]["shard"])
+
 
 if __name__ == "__main__":
     unittest.main()
