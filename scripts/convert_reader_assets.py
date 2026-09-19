@@ -30,6 +30,7 @@ from pathlib import Path
 
 import bleach
 import tinycss2
+import esprima
 from bleach.css_sanitizer import CSSSanitizer
 from PIL import Image, ImageSequence
 
@@ -202,6 +203,42 @@ def decode_html_source(source: Path) -> str:
     return best_text
 
 
+def expand_document_writes(document: str) -> tuple[str, bool]:
+    """Extract top-level literal writes without executing or retaining script code."""
+    if "document" not in document or "write" not in document:
+        return document, False
+    try:
+        tree = esprima.parseScript(document)
+    except (esprima.Error, RecursionError):
+        return document, False
+
+    def literal(node):
+        if node.type == "Literal" and isinstance(node.value, str):
+            return node.value
+        if node.type == "BinaryExpression" and node.operator == "+":
+            left, right = literal(node.left), literal(node.right)
+            if left is not None and right is not None:
+                return left + right
+        return None
+
+    output = []
+    for statement in tree.body:
+        if statement.type != "ExpressionStatement":
+            continue
+        call = statement.expression
+        if call.type != "CallExpression":
+            continue
+        callee = call.callee
+        if (callee.type != "MemberExpression" or callee.computed
+                or callee.object.type != "Identifier" or callee.object.name != "document"
+                or callee.property.name not in {"write", "writeln"}):
+            continue
+        values = [literal(argument) for argument in call.arguments]
+        if values and all(value is not None for value in values):
+            output.append("".join(values) + ("\n" if callee.property.name == "writeln" else ""))
+    return ("".join(output), True) if output else (document, False)
+
+
 def inline_html_resources(source: Path, source_url: str, work: Path) -> Path:
     """Inline safe same-tree images and stylesheets before the HTML is published."""
     text = decode_html_source(source)
@@ -300,6 +337,18 @@ def inline_html_resources(source: Path, source_url: str, work: Path) -> Path:
 def inline_local_html_resources(document: str, root: Path, base: Path, *, allow_relative: bool = False) -> str:
     """Inline local images and stylesheets before sanitizing a generated HTML file."""
     cache = {}
+
+    def script_body(match):
+        expanded, was_static = expand_document_writes(match.group(1))
+        return expanded if was_static else ""
+
+    # Bleach's strip mode removes a script element but may keep its text. Drop
+    # dynamic script bodies entirely, while retaining safe HTML produced by
+    # literal document.write calls.
+    document = re.sub(
+        r"<script\b[^>]*>(.*?)</script\s*>", script_body, document,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
 
     def resource(raw: str, *, css: bool = False) -> str | None:
         value = html.unescape(raw).strip().split("#", 1)[0]
@@ -657,6 +706,27 @@ def sanitize_xml_document(document: str) -> str:
         for child in list(parent):
             local_tag = child.tag.rsplit("}", 1)[-1].lower() if isinstance(child.tag, str) else ""
             if local_tag not in allowed_tags:
+                # Removing an element must not remove the following text node.
+                # Legacy presentational containers are unwrapped, active ones
+                # are discarded together with their contents.
+                index = list(parent).index(child)
+                if root_kind != "svg" and local_tag in {"font", "center", "big", "tt", "strike"}:
+                    clean(child)
+                    if child.text:
+                        if index:
+                            previous = parent[index - 1]
+                            previous.tail = (previous.tail or "") + child.text
+                        else:
+                            parent.text = (parent.text or "") + child.text
+                    for grandchild in list(child):
+                        parent.insert(index, grandchild)
+                        index += 1
+                if child.tail:
+                    if index:
+                        previous = parent[index - 1]
+                        previous.tail = (previous.tail or "") + child.tail
+                    else:
+                        parent.text = (parent.text or "") + child.tail
                 parent.remove(child)
                 continue
             clean(child)
@@ -767,10 +837,19 @@ def convert_chm_to_html(source: Path, target: Path, work: Path) -> None:
     text_pages = sorted(path for path in extracted.rglob("*") if path.is_file() and path.suffix.lower() == ".txt")
     mhtml = sorted(path for path in extracted.rglob("*") if path.is_file() and path.suffix.lower() in {".mht", ".mhtml"})
     hhc = sorted(path for path in extracted.rglob("*") if path.is_file() and path.suffix.lower() == ".hhc")
-    documents = [(path.relative_to(extracted).as_posix(), inline_local_html_resources(
-        decode_html_source(path), extracted, path.parent, allow_relative=True)) for path in pages]
-    documents.extend((path.relative_to(extracted).as_posix(), f"<pre>{html.escape(decode_html_source(path))}</pre>")
-                     for path in text_pages)
+    documents = []
+    for path in pages:
+        document = decode_html_source(path)
+        documents.append((path.relative_to(extracted).as_posix(), inline_local_html_resources(
+            document, extracted, path.parent, allow_relative=True)))
+    for path in text_pages:
+        document = decode_html_source(path)
+        expanded, was_script = expand_document_writes(document)
+        if was_script:
+            documents.append((path.relative_to(extracted).as_posix(), inline_local_html_resources(
+                expanded, extracted, path.parent, allow_relative=True)))
+        else:
+            documents.append((path.relative_to(extracted).as_posix(), f"<pre>{html.escape(document)}</pre>"))
     for index, path in enumerate(mhtml):
         if path.stat().st_size > MAX_MHTML_SOURCE_BYTES:
             raise RuntimeError("CHM MHTML source exceeds size limit")
@@ -853,6 +932,9 @@ def convert_chm_to_html(source: Path, target: Path, work: Path) -> None:
 
     collect_toc_order(toc_nodes)
     if ordered_indices:
+        # A partial .hhc describes order, not the complete inventory of pages.
+        listed = set(ordered_indices)
+        ordered_indices.extend(index for index in range(len(documents)) if index not in listed)
         ordered = [documents[index] for index in ordered_indices]
         documents = ordered
         page_map = {path.lower(): index for index, (path, _) in enumerate(documents)}

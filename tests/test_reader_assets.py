@@ -1006,6 +1006,37 @@ aW1hZ2U=
             with self.assertRaisesRegex(RuntimeError, "active content"):
                 convert_reader_assets.validate_chm_epub(epub)
 
+    def test_chm_document_write_literals_are_expanded_without_execution(self):
+        document, expanded = convert_reader_assets.expand_document_writes(
+            "document.write(\"<p>第一段</p>\" + '<p>第二段\\x21</p>');"
+        )
+        self.assertTrue(expanded)
+        self.assertEqual(document, "<p>第一段</p><p>第二段!</p>")
+
+    def test_chm_document_write_rejects_dynamic_expressions(self):
+        document, expanded = convert_reader_assets.expand_document_writes(
+            "document.write('<p>' + userInput + '</p>');"
+        )
+        self.assertFalse(expanded)
+        self.assertEqual(document, "document.write('<p>' + userInput + '</p>');")
+
+    def test_chm_static_writes_follow_javascript_escaping_and_skip_inactive_code(self):
+        text, found = convert_reader_assets.expand_document_writes(
+            '/* document.write("wrong") */ function unused(){document.write("wrong");}'
+            'if(false){document.write("wrong");}'
+            'document.write("<p>\\u4e2d\\x21<\\/p>"); document.write(userInput);'
+            'document.writeln("next", " page");'
+        )
+        self.assertTrue(found)
+        self.assertEqual(text, '<p>中!</p>next page\n')
+
+    def test_xml_sanitizer_preserves_legacy_container_text_and_removed_element_tails(self):
+        root = convert_reader_assets.ET.fromstring(convert_reader_assets.sanitize_xml_document(
+            '<html><body>before<font color="red">text<b>bold</b>tail</font>after'
+            '<script>discard()</script>keep<center>center</center>end</body></html>'
+        ))
+        self.assertEqual(''.join(root.find('body').itertext()), 'beforetextboldtailafterkeepcenterend')
+
     def test_small_epub_direct_copy_uses_foliate(self):
         with tempfile.TemporaryDirectory() as root:
             work = Path(root)
@@ -1093,6 +1124,16 @@ aW1hZ2U=
             self.assertIn("data:image/png;base64", result)
             self.assertIn("color: red", result)
             self.assertNotIn('href="style.css"', result)
+
+    def test_generated_html_expands_static_writes_and_drops_dynamic_scripts(self):
+        result = convert_reader_assets.inline_local_html_resources(
+            "<script>document.write('<p>生成正文</p>');</script>"
+            "<script>document.write('<p>' + dynamicValue + '</p>');</script>",
+            Path("/tmp"), Path("/tmp"),
+        )
+        self.assertIn("生成正文", result)
+        self.assertNotIn("dynamicValue", result)
+        self.assertNotIn("document.write", result)
 
     def test_html_conversion_removes_active_and_remote_content(self):
         with tempfile.TemporaryDirectory() as root:
