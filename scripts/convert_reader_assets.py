@@ -338,6 +338,27 @@ def inline_local_html_resources(document: str, root: Path, base: Path, *, allow_
     """Inline local images and stylesheets before sanitizing a generated HTML file."""
     cache = {}
 
+    def resolve_resource(raw: str) -> Path | None:
+        value = urllib.parse.unquote(raw)
+        path = (base / value).resolve()
+        root_path = root.resolve()
+        try:
+            relative = path.relative_to(root_path)
+        except ValueError:
+            return None
+        if path.is_file():
+            return path
+        current = root_path
+        for part in relative.parts:
+            try:
+                matches = [child for child in current.iterdir() if child.name.casefold() == part.casefold()]
+            except OSError:
+                return None
+            if len(matches) != 1:
+                return None
+            current = matches[0]
+        return current if current.is_file() else None
+
     def script_body(match):
         expanded, was_static = expand_document_writes(match.group(1))
         return expanded if was_static else ""
@@ -354,13 +375,11 @@ def inline_local_html_resources(document: str, root: Path, base: Path, *, allow_
         value = html.unescape(raw).strip().split("#", 1)[0]
         if not value or re.match(r"^(?:data:|https?:|//|#|javascript:)", value, re.IGNORECASE):
             return None
-        path = (base / urllib.parse.unquote(value)).resolve()
-        try:
-            path.relative_to(root.resolve())
-        except ValueError:
+        path = resolve_resource(value)
+        if path is None:
             return None
         try:
-            if not path.is_file() or path.stat().st_size > MAX_HTML_RESOURCE_BYTES:
+            if path.stat().st_size > MAX_HTML_RESOURCE_BYTES:
                 return None
         except OSError:
             return None
@@ -768,9 +787,7 @@ def sanitize_chm_epub(path: Path, work: Path) -> None:
         for info in infos:
             data = source.read(info.filename)
             suffix = Path(info.filename).suffix.lower()
-            if suffix == ".opf":
-                data = re.sub(rb'(\blinear\s*=\s*["\'])no(["\'])', rb'\1yes\2', data, flags=re.IGNORECASE)
-            elif suffix in {".htm", ".html", ".xhtml", ".css", ".svg"}:
+            if suffix in {".htm", ".html", ".xhtml", ".css", ".svg"}:
                 text = data.decode("utf-8", "replace")
                 if suffix == ".css":
                     text = sanitize_css(text)
@@ -785,15 +802,21 @@ def sanitize_chm_epub(path: Path, work: Path) -> None:
 
 def convert_chm(source: Path, target: Path, work: Path) -> None:
     try:
+        from .chm_navigation import repair_conversion
+    except ImportError:
+        from chm_navigation import repair_conversion
+    try:
         run_checked(
             ["ebook-convert", str(source), str(target), "--flow-size", "0"],
             timeout_seconds=CHM_COMMAND_TIMEOUT_SECONDS,
         )
         sanitize_chm_epub(target, work)
+        if target.exists():
+            repair_conversion(source, target, work)
         validate_output(target, "epub")
         validate_chm_epub(target)
         return
-    except (RuntimeError, FileNotFoundError, zipfile.BadZipFile, KeyError) as exc:
+    except (RuntimeError, ValueError, FileNotFoundError, zipfile.BadZipFile, KeyError) as exc:
         initial_error = exc
     source_html = work / "chm-fallback.html"
     try:
@@ -806,6 +829,17 @@ def convert_chm(source: Path, target: Path, work: Path) -> None:
         timeout_seconds=CHM_COMMAND_TIMEOUT_SECONDS,
     )
     sanitize_chm_epub(target, work)
+    if target.exists():
+        try:
+            repair_conversion(source, target, work)
+        except ValueError:
+            # Dynamic menu templates can hide chapters from Calibre entirely.
+            # The recovery path parses static data and verifies every page's text.
+            try:
+                from .recover_chm import recover
+            except ImportError:
+                from recover_chm import recover
+            recover(source, target, source.stem)
     validate_output(target, "epub")
     validate_chm_epub(target)
 

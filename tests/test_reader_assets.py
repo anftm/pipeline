@@ -53,7 +53,7 @@ class ReaderAssetContractTests(unittest.TestCase):
             "fb2": ("foliate-original-v1", "foliate", "document.fb2"),
             "odt": ("calibre-odt-html-v1", "html", "document.html"),
             "rtf": ("calibre-rtf-html-v1", "html", "document.html"),
-            "chm": ("calibre-chm-epub-v2", "epub", "document.epub"),
+            "chm": ("calibre-chm-epub-v3", "epub", "document.epub"),
             "tif": ("pillow-pdf-v2", "pdf", "document.pdf"),
             "tiff": ("pillow-pdf-v2", "pdf", "document.pdf"),
             "djvu": ("djvulibre-pdf-v2", "pdf", "document.pdf"),
@@ -201,7 +201,7 @@ class ReaderAssetContractTests(unittest.TestCase):
                     extension, "foliate", 8 * 1024 * 1024))
                 self.assertFalse(reader_assets.needs_epub_chapters(
                     extension, "foliate", 8 * 1024 * 1024 - 1))
-        self.assertTrue(reader_assets.needs_epub_chapters("chm", "epub", 16 * 1024 * 1024))
+        self.assertFalse(reader_assets.needs_epub_chapters("chm", "epub", 16 * 1024 * 1024))
         self.assertFalse(reader_assets.needs_epub_chapters("chm", "epub", 16 * 1024 * 1024 - 1))
 
     def test_chapter_bundle_can_publish_text_without_resources(self):

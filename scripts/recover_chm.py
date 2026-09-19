@@ -29,7 +29,7 @@ try:
 except ImportError:
     import convert_reader_assets as converter
 
-PROFILE = "manual-chm-complete-v1"
+PROFILE = "manual-chm-complete-v2"
 
 
 def normalized(text):
@@ -61,7 +61,14 @@ def source_pages(root, work):
         if not path.is_file():
             continue
         suffix = path.suffix.lower()
-        if suffix not in {".htm", ".html", ".xhtml", ".txt", ".mht", ".mhtml"}:
+        script_content = None
+        if suffix == '.js':
+            try:
+                from .chm_static_navigation import script_page
+            except ImportError:
+                from chm_static_navigation import script_page
+            script_content = script_page(converter.decode_html_source(path), allow_writes=path.parent.name.lower()=='txt')
+        if suffix not in {".htm", ".html", ".xhtml", ".txt", ".mht", ".mhtml"} and script_content is None:
             continue
         if path.stat().st_size > converter.MAX_EPUB_MEMBER_BYTES:
             raise ValueError("CHM page exceeds size limit")
@@ -71,6 +78,8 @@ def source_pages(root, work):
             text = temporary.read_text()
         else:
             text = converter.decode_html_source(path)
+        if script_content is not None:
+            text = '<html><head><title>'+html.escape(script_content[0])+'</title></head><body>'+script_content[1]+'</body></html>'
         # Old Windows HTML commonly declares Latin-1 while using Windows-1252
         # punctuation. Preserve the visible punctuation rather than C1 controls.
         def windows_punctuation(match):
@@ -241,7 +250,13 @@ def recover(source, target, title):
                 text = normalized("".join(body.itertext()))
                 if hashlib.sha256(text.encode()).hexdigest() != check["text_sha256"]:
                     raise ValueError(f"EPUB changes page text: {check['source']}")
-        return {"source_sha256": source_sha, "profile": PROFILE, "chapters": checks,
+        try:
+            from . import chm_navigation
+        except ImportError:
+            import chm_navigation
+        navigation = chm_navigation.repair_epub(target, root,
+            {check['source']: ['EPUB/' + check['chapter']] for check in checks})
+        return {"source_sha256": source_sha, "profile": PROFILE, "chapters": checks, "navigation": navigation,
                 "images": len(resource_names), "missing_images": missing_images,
                 "sha256": hashlib.sha256(target.read_bytes()).hexdigest(), "bytes": target.stat().st_size}
 
