@@ -57,6 +57,8 @@ concurrency:
 jobs:
   prepare:
     if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    outputs:
+      pending_count: ${{ steps.pdf_queue.outputs.pending_count }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -75,6 +77,37 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           FORCE_SYNC: "true"
         run: python scripts/fetch_and_parse.py
+      - name: Plan PDF queue
+        id: pdf_queue
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          SOURCE_REPO: ${{ inputs.repo || '' }}
+          SOURCE_PATH: ${{ inputs.path || '' }}
+          BATCH_LIMIT: ${{ inputs.limit || '30' }}
+          CHECKPOINTS: ${{ inputs.checkpoints || '4' }}
+          RETRY_FAILED: ${{ inputs.retry_failed || 'false' }}
+          RETRY_BLOCKED: ${{ inputs.retry_blocked || 'false' }}
+          RETRY_STALE_BLOCKED: ${{ inputs.retry_stale_blocked || 'false' }}
+          RETRY_REASON: ${{ inputs.retry_reason || '' }}
+        run: |
+          [[ "$BATCH_LIMIT" =~ ^[0-9]+$ ]] && ((10#$BATCH_LIMIT >= 1 && 10#$BATCH_LIMIT <= 100)) || exit 1
+          [[ "$CHECKPOINTS" =~ ^[0-9]+$ ]] && ((10#$CHECKPOINTS >= 1 && 10#$CHECKPOINTS <= 20)) || exit 1
+          total_limit=$((10#$BATCH_LIMIT * 10#$CHECKPOINTS))
+          args=(--limit "$total_limit" --workers 1 --shard-count 1 --shard-index 0 --dry-run --tool-version "qpdf version 11.9.0" --repo "$SOURCE_REPO" --path "$SOURCE_PATH" --bundle output/pdf-range-plan)
+          if [[ "$RETRY_FAILED" == true ]]; then args+=(--retry-failed); fi
+          if [[ "$RETRY_BLOCKED" == true ]]; then args+=(--retry-blocked); fi
+          if [[ "$RETRY_STALE_BLOCKED" == true ]]; then args+=(--retry-stale-blocked); fi
+          if [[ -n "$RETRY_REASON" ]]; then args+=(--retry-reason "$RETRY_REASON"); fi
+          python scripts/pdf_range_assets.py "${args[@]}" | tee output/pdf-range-plan.log
+          pending_count=$(python3 - <<'PY'
+          import re
+          from pathlib import Path
+          text = Path("output/pdf-range-plan.log").read_text()
+          matches = re.findall(r"batch (\d+); planned results", text)
+          print(matches[-1] if matches else "0")
+          PY
+          )
+          echo "pending_count=${pending_count}" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v7
         with:
           name: pdf-range-plan
@@ -85,7 +118,7 @@ jobs:
 
   build:
     needs: prepare
-    if: inputs.dry_run != true
+    if: inputs.dry_run != true && needs.prepare.outputs.pending_count != '0'
     runs-on: ubuntu-latest
     timeout-minutes: 330
     strategy:

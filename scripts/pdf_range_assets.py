@@ -372,6 +372,8 @@ def main():
                         help="Assess only failed/unsupported PDFs whose input or validation identity changed")
     parser.add_argument("--retry-reason", default="",
                         help="Assess only records whose previous reason contains this text")
+    parser.add_argument("--tool-version", default="",
+                        help="Assessment tool version for planning; defaults to qpdf --version")
     parser.add_argument("--build-only", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--clean-published", action="store_true", help="Remove this bundle's uploaded objects after successful publication")
@@ -392,7 +394,7 @@ def main():
         if not records:
             parser.error("requested source is absent from this inventory")
     items, inventories = discover(records, revisions, base, images, api, baseline, args.assets_repo, revision, bool(args.repo))
-    version = subprocess.check_output(["qpdf", "--version"], text=True).splitlines()[0]
+    version = args.tool_version or subprocess.check_output(["qpdf", "--version"], text=True).splitlines()[0]
     key = reader_assets.asset_key(args.repo, args.path) if args.repo else ""
     files, pending = plan(items, baseline, version, args.limit * args.shard_count, key,
                           args.retry_failed, args.retry_blocked, args.retry_stale_blocked,
