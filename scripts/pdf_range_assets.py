@@ -94,7 +94,7 @@ def identity(item, tool_version, assessment=None):
 
 
 def plan(items, state, tool_version, limit, exact_key="", retry_failed=False, retry_blocked=False,
-         retry_stale_blocked=False):
+         retry_stale_blocked=False, retry_reason=""):
     files, pending = {}, []
     reusable = {entry.get("identity"): entry for entry in state.get("files", {}).values()
                 if entry.get("status") in {"optimized", "unchanged", "no-gain", "unsupported"}}
@@ -109,13 +109,19 @@ def plan(items, state, tool_version, limit, exact_key="", retry_failed=False, re
                     "pdfjs-6.3.289-range-1m-scene-v2-policy-v3")):
             files[key] = previous
             continue
-        if (retry_blocked or retry_stale_blocked) and previous.get("status") not in {"failed", "unsupported"}:
+        reason_matches = not retry_reason or retry_reason in previous.get("reason", "")
+        if retry_reason and previous.get("status") in {"failed", "unsupported"} and not reason_matches:
+            files[key] = {**previous, **item}
+            continue
+        if ((retry_blocked or retry_stale_blocked) and reason_matches
+                and previous.get("status") not in {"failed", "unsupported"}):
             files[key] = previous or {**item, "identity": fingerprint, "status": "pending"}
             continue
         if retry_stale_blocked and previous.get("identity") == fingerprint:
             files[key] = {**previous, **item}
             continue
-        retry_requested = retry_blocked or retry_stale_blocked or (retry_failed and previous.get("status") == "failed")
+        retry_requested = ((retry_blocked or retry_stale_blocked) and reason_matches) or (
+            retry_failed and previous.get("status") == "failed")
         if (previous.get("input_token") == item["input_token"]
                 and previous.get("input_path") == item.get("input_path")
                 and previous.get("input_repo") == item.get("input_repo")):
@@ -346,6 +352,8 @@ def main():
                         help="Assess only previously failed/unsupported PDFs, including unchanged inputs")
     parser.add_argument("--retry-stale-blocked", action="store_true",
                         help="Assess only failed/unsupported PDFs whose input or validation identity changed")
+    parser.add_argument("--retry-reason", default="",
+                        help="Assess only records whose previous reason contains this text")
     parser.add_argument("--build-only", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--clean-published", action="store_true", help="Remove this bundle's uploaded objects after successful publication")
@@ -371,7 +379,8 @@ def main():
     version = subprocess.check_output(["qpdf", "--version"], text=True).splitlines()[0]
     key = reader_assets.asset_key(args.repo, args.path) if args.repo else ""
     files, pending = plan(items, baseline, version, args.limit * args.shard_count, key,
-                          args.retry_failed, args.retry_blocked, args.retry_stale_blocked)
+                          args.retry_failed, args.retry_blocked, args.retry_stale_blocked,
+                          args.retry_reason)
     results = planned_results(files, baseline, {row["key"] for row in pending}, args.shard_count, args.shard_index)
     pending = pending[args.shard_index::args.shard_count]
     if args.repo:

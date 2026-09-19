@@ -11,6 +11,24 @@ from scripts import pdf_range_assets as assets
 
 
 class PDFRangeShardTests(unittest.TestCase):
+    def test_retry_reason_limits_blocked_queue(self):
+        items = {
+            "open": {"key": "open", "input_token": "open", "input_profile": "upstream",
+                     "source_bytes": 10 * 1024 ** 2},
+            "script": {"key": "script", "input_token": "script", "input_profile": "upstream",
+                       "source_bytes": 10 * 1024 ** 2},
+        }
+        state = {"files": {
+            "open": {**items["open"], "status": "unsupported",
+                     "reason": "opening action is not an explicit local page destination"},
+            "script": {**items["script"], "status": "unsupported",
+                       "reason": "non-local action requires additional equivalence checks: /JavaScript"},
+        }}
+        planned, queue = assets.plan(items, state, "qpdf-test", 20, retry_blocked=True,
+                                     retry_reason="opening action")
+        self.assertEqual([row["key"] for row in queue], ["open"])
+        self.assertEqual(planned["script"]["status"], "unsupported")
+
     def test_empty_compute_batch_exports_reused_and_metadata_results(self):
         item = {"key": "alias", "repo": "source", "source_path": "alias.pdf", "input_token": "same",
                 "input_profile": "upstream", "source_bytes": 10 * 1024 ** 2}
