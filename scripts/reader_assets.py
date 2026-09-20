@@ -18,7 +18,7 @@ MANIFEST_NAME = "manifest.json"
 EPUB_CHAPTER_SPLIT_BYTES = 8 * 1024 * 1024
 CHM_CHAPTER_SPLIT_BYTES = 16 * 1024 * 1024
 EPUB_CHAPTER_BUNDLE_DIR = "epub-chapters"
-EPUB_CHAPTER_PROFILE = "epub-chapters-v4"
+EPUB_CHAPTER_PROFILE = "epub-chapters-v5"
 CONVERTIBLE_EXTENSIONS = {
     "doc": ("libreoffice-docx-v2", "docx", "document.docx"),
     "docx": ("docx-native-v2", "docx", "document.docx"),

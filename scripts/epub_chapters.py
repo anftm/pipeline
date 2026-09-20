@@ -211,13 +211,36 @@ def build_bundle(epub: Path, output: Path, *, fallback: str | None = None,
                 return f'{match.group(1)}="../resources/__CHAPTER_RESOURCE__/{safe_resource}"'
             clean = re.sub(r'((?:src|href))=["\']([^"\'#]+)["\']', rewrite, clean, flags=re.I)
             title = toc_titles.get(source_path) or _document_title(clean) or f"章节 {number}"
-            chapter_records.append({"index": chapter_index, "title": title, "clean": clean, "resources": resources})
+            chapter_records.append({"index": chapter_index, "source_path": source_path,
+                                    "title": title, "clean": clean, "resources": resources})
             resource_usage.update(resources)
         if not chapter_records:
             raise ValueError("EPUB spine has no readable chapters")
+        # Resolve links only after every readable spine item has its final name.
+        # Original filenames cannot be used after chapters move into the bundle.
+        chapter_paths = {}
+        for record in chapter_records:
+            chapter_paths.setdefault(record["source_path"], f'chapter-{record["index"]:04d}.xhtml')
         for record in chapter_records:
             chapter_index = record["index"]
             clean = record["clean"]
+            def rewrite_chapter_link(match):
+                value = html.unescape(match.group(2))
+                if value.startswith("#"):
+                    return match.group(0)
+                try:
+                    original = _zip_path(posixpath.dirname(record["source_path"]), value)
+                    fragment = urlsplit(value).fragment
+                except ValueError:
+                    return match.group(0)
+                target = chapter_paths.get(original)
+                if target is None:
+                    return match.group(0)
+                if fragment:
+                    target += "#" + fragment
+                return f'{match.group(1)}="{html.escape(target, quote=True)}"'
+            clean = re.sub(r'(?<![\w:-])(href)\s*=\s*["\']([^"\']*)["\']',
+                           rewrite_chapter_link, clean, flags=re.I)
             resources = record["resources"]
             if include_resources:
                 resource_bytes = sum(archive.getinfo(resource).file_size for resource in resources)
@@ -241,7 +264,7 @@ def build_bundle(epub: Path, output: Path, *, fallback: str | None = None,
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(clean, encoding="utf-8")
             data = target.read_bytes()
-            chapters.append({"index": chapter_index, "title": record["title"], "path": target.relative_to(output).as_posix(), "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()})
+            chapters.append({"index": chapter_index, "title": record["title"], "source_path": record["source_path"], "path": target.relative_to(output).as_posix(), "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()})
             search_chapters.append({"index": chapter_index, "title": record["title"], "path": target.relative_to(output).as_posix(), "text": _chapter_text(clean)})
     search_data = canonical_json({"version": 1, "kind": "epub-search-index", "chapters": search_chapters})
     search_bytes = gzip.compress(search_data, mtime=0)

@@ -65,7 +65,7 @@ HTML_TAGS = {
     "caption", "cite", "code", "col", "colgroup", "dd", "del", "details", "dfn", "div", "dl", "dt",
     "em", "figcaption", "figure", "footer", "h1", "h2", "h3", "h4", "h5", "h6", "head", "header",
     "hgroup", "hr", "html", "i", "img", "ins", "kbd", "li", "link", "main", "mark", "meta", "nav",
-    "ol", "p", "picture", "pre", "q", "rp", "rt", "ruby", "s", "samp", "section", "small", "source",
+    "ol", "p", "picture", "pre", "q", "rb", "rp", "rt", "rtc", "ruby", "s", "samp", "section", "small", "source",
     "span", "strong", "style", "sub", "summary", "sup", "table", "tbody", "td", "tfoot", "th", "thead",
     "time", "title", "tr", "u", "ul", "var", "wbr",
 }
@@ -680,6 +680,10 @@ def safe_embedded_url(name: str, value: str, *, allow_relative: bool) -> bool:
 
 
 def sanitize_html(document: str, *, allow_relative: bool = False) -> str:
+    # HTML accepts numeric references without a semicolon; Bleach otherwise
+    # escapes the ampersand and turns a source space into visible entity text.
+    document = re.sub(r"&#[xX][0-9a-fA-F]+(?![0-9a-fA-F;])|&#[0-9]+(?![0-9;])",
+                      lambda match: match.group(0) + ";", document)
     styles = []
 
     def extract_style(match):
@@ -725,6 +729,17 @@ def sanitize_xml_document(document: str) -> str:
         for child in list(parent):
             local_tag = child.tag.rsplit("}", 1)[-1].lower() if isinstance(child.tag, str) else ""
             if local_tag not in allowed_tags:
+                if (root_kind != "svg"
+                        and local_tag not in {"script", "style", "noscript", "iframe", "object", "embed",
+                                              "applet", "form", "input", "button", "select", "textarea",
+                                              "template", "base", "svg", "math",
+                                              "font", "center", "big", "tt", "strike"}):
+                    # Malformed books can wrap prose in passive custom tags.
+                    # Preserve their text/anchors in an inert HTML container.
+                    namespace = child.tag.rsplit("}", 1)[0] + "}" if "}" in child.tag else ""
+                    child.tag = namespace + "span"
+                    clean(child)
+                    continue
                 # Removing an element must not remove the following text node.
                 # Legacy presentational containers are unwrapped, active ones
                 # are discarded together with their contents.
@@ -1715,10 +1730,14 @@ def convert_item(item: dict, bundle: Path, reusable: dict | None = None) -> dict
                     run_checked(["ebook-convert", str(source), str(chapter_source), "--flow-size", "0"],
                                 timeout_seconds=EPUB_COMMAND_TIMEOUT_SECONDS)
                     validate_output(chapter_source, "epub")
-                chapter_dir = bundle / Path(object_path).parent / EPUB_CHAPTER_BUNDLE_DIR
+                # Bundles have immutable HTTP caching. A new generator profile
+                # must use fresh URLs even when the original ebook is reused.
+                chapter_parent = Path(object_path).parent.with_name(
+                    f"{Path(object_path).parent.name}-{EPUB_CHAPTER_PROFILE}")
+                chapter_dir = bundle / chapter_parent / EPUB_CHAPTER_BUNDLE_DIR
                 if not (chapter_dir / "chapter-manifest.json").is_file():
                     epub_chapters.build_bundle(chapter_source, chapter_dir)
-                chapter_manifest_path = (Path(object_path).parent / EPUB_CHAPTER_BUNDLE_DIR
+                chapter_manifest_path = (chapter_parent / EPUB_CHAPTER_BUNDLE_DIR
                                          / "chapter-manifest.json").as_posix()
             except Exception as exc:
                 chapter_bundle_error = f"{type(exc).__name__}: {exc}"

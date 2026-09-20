@@ -8,6 +8,7 @@ import unittest
 import urllib.error
 import urllib.request
 import zipfile
+import xml.etree.ElementTree as ET
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
@@ -185,6 +186,47 @@ class ReaderAssetContractTests(unittest.TestCase):
                     ValueError, "chapter resource budget"):
                 epub_chapters.build_bundle(epub, Path(root) / "bundle")
 
+    def test_chapter_bundle_rewrites_original_paths_and_footnote_roundtrip(self):
+        with tempfile.TemporaryDirectory() as root:
+            epub, output = Path(root) / "book.epub", Path(root) / "bundle"
+            with zipfile.ZipFile(epub, "w") as archive:
+                archive.writestr("META-INF/container.xml", '<container><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>')
+                archive.writestr("OEBPS/content.opf", '<package><manifest><item id="nav" href="nav.xhtml" properties="nav" media-type="application/xhtml+xml"/><item id="missing" href="missing.html" media-type="text/html"/><item id="a" href="Text/part0010.html" media-type="application/xhtml+xml"/><item id="b" href="Notes/note%20one.html" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="nav"/><itemref idref="missing"/><itemref idref="a"/><itemref idref="b"/></spine></package>')
+                archive.writestr("OEBPS/Text/part0010.html", '<html xmlns="http://www.w3.org/1999/xhtml"><body id="chapter-root"><a id="back" href="../Notes/note%20one.html#%E6%B3%A8%E9%87%8A">注释</a><a href="part0010.html#chapter-root">本章</a><a href="#back">本页</a><a href="missing.html#absent">缺失</a></body></html>')
+                archive.writestr("OEBPS/Notes/note one.html", '<html xmlns="http://www.w3.org/1999/xhtml"><body><p id="注释">注释正文</p><a href="../Text/part0010.html#back">返回</a></body></html>')
+            manifest = epub_chapters.build_bundle(epub, output)
+            self.assertEqual(len(manifest["chapters"]), 2)
+            documents = [ET.parse(output / chapter["path"]) for chapter in manifest["chapters"]]
+            links = [[node.get("href") for node in doc.iter() if node.tag.endswith("}a")]
+                     for doc in documents]
+            self.assertEqual(links, [["chapter-0002.xhtml#%E6%B3%A8%E9%87%8A",
+                                     "chapter-0001.xhtml#chapter-root", "#back", "missing.html#absent"],
+                                    ["chapter-0001.xhtml#back"]])
+            self.assertEqual(next(node for node in documents[0].iter() if node.tag.endswith("}body")).get("id"), "chapter-root")
+            for chapter in manifest["chapters"]:
+                data = (output / chapter["path"]).read_bytes()
+                self.assertEqual(chapter["bytes"], len(data))
+                self.assertEqual(chapter["sha256"], hashlib.sha256(data).hexdigest())
+
+    def test_xml_sanitizer_preserves_ruby_base_text_and_footnote_anchors(self):
+        document = '<html xmlns="http://www.w3.org/1999/xhtml"><body><ruby><rb>朝露<a id="w3"/><a href="#m3">[3]</a></rb><rtc><rt>zhāo lù</rt></rtc></ruby><p id="m3"><a href="#w3">返回</a></p></body></html>'
+        clean = ET.fromstring(convert_reader_assets.sanitize_xml_document(document))
+        self.assertEqual(''.join(clean.itertext()), '朝露[3]zhāo lù返回')
+        self.assertIn('w3', {node.get('id') for node in clean.iter()})
+
+    def test_xml_sanitizer_preserves_prose_inside_passive_unknown_tags(self):
+        document = '<html xmlns="http://www.w3.org/1999/xhtml"><body>前文<instruction id="code" onclick="bad()"><destination>解释<source/>正文<script>bad()</script>尾文</destination></instruction><iframe>active</iframe>后文</body></html>'
+        clean = ET.fromstring(convert_reader_assets.sanitize_xml_document(document))
+        self.assertEqual(''.join(clean.itertext()), '前文解释正文尾文后文')
+        anchor = next(node for node in clean.iter() if node.get('id') == 'code')
+        self.assertEqual(anchor.tag.rsplit('}', 1)[-1], 'span')
+        self.assertNotIn('onclick', anchor.attrib)
+
+    def test_html_sanitizer_keeps_unterminated_numeric_space_references(self):
+        clean = convert_reader_assets.sanitize_html('<p>甲&#12288乙&#x3000丙</p>')
+        self.assertNotIn('&amp;#', clean)
+        self.assertIn('甲', clean)
+
     def test_epub_chapter_split_threshold(self):
         self.assertTrue(reader_assets.needs_epub_chapters(
             "epub", "foliate", reader_assets.EPUB_CHAPTER_SPLIT_BYTES))
@@ -257,6 +299,8 @@ class ScannerTests(unittest.TestCase):
             self.assertTrue(result["path"].endswith("/document.epub"))
             manifest_path = result["chapter_manifest"]
             self.assertTrue(manifest_path.endswith("/epub-chapters/chapter-manifest.json"))
+            self.assertIn(f'/foliate-original-v1-{reader_assets.EPUB_CHAPTER_PROFILE}/', manifest_path)
+            reader_assets.validate_object_path(manifest_path)
             self.assertTrue((bundle / manifest_path).is_file())
             parent = Path(manifest_path).parent
             self.assertTrue((bundle / parent / "chapters" / "chapter-0001.xhtml").is_file())
@@ -302,6 +346,8 @@ class ScannerTests(unittest.TestCase):
         manifest["files"]["VoiceOfML/Test\0Big.epub"]["chapter_bundle_profile"] = reader_assets.EPUB_CHAPTER_PROFILE
         manifest["files"]["VoiceOfML/Test\0Big.epub"]["chapter_manifest"] = "objects/a/chapter-manifest.json"
         self.assertEqual(scan_reader_assets.build_queue(records, revisions, manifest), [])
+        manifest["files"]["VoiceOfML/Test\0Big.epub"]["chapter_bundle_profile"] = "epub-chapters-v4"
+        self.assertEqual([item["path"] for item in scan_reader_assets.build_queue(records, revisions, manifest)], ["Big.epub"])
 
     def test_small_epub_and_small_non_epub_skip_chapter_upgrade(self):
         revisions = {"VoiceOfML/Test": "rev1"}
@@ -1672,6 +1718,17 @@ class PublicationTests(unittest.TestCase):
             {operation.path_in_repo for operation in operations},
             {result["path"], "manifest.json", "reader_assets.json.gz"},
         )
+
+    def test_retry_does_not_mistake_old_chapter_bundle_for_published_upgrade(self):
+        key = "VoiceOfML/Test\0Book.epub"
+        old = dict(status="ready", path="objects/aa/book/document.epub", sha256="a" * 64,
+                   bytes=10, chapter_manifest="objects/aa/v4/epub-chapters/chapter-manifest.json",
+                   chapter_bundle_profile="epub-chapters-v4")
+        updated = dict(old, chapter_manifest="objects/aa/v5/epub-chapters/chapter-manifest.json",
+                       chapter_bundle_profile=reader_assets.EPUB_CHAPTER_PROFILE)
+        data = {"results": [dict(updated, key=key)]}
+        self.assertFalse(publish_reader_assets.bundle_is_published({"files": {key: old}}, data))
+        self.assertTrue(publish_reader_assets.bundle_is_published({"files": {key: updated}}, data))
 
     def test_failed_retry_does_not_replace_existing_ready_asset(self):
         key = "VoiceOfML/Test\0A/Book.docx"

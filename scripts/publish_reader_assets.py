@@ -44,7 +44,8 @@ def bundle_is_published(manifest: dict, data: dict) -> bool:
             return False
         if result.get("status") == "ready":
             for field in ("source_revision", "source_sha256", "source_extension", "profile",
-                          "reader_mode", "path", "bytes", "sha256"):
+                          "reader_mode", "path", "bytes", "sha256", "chapter_manifest",
+                          "chapter_bundle_profile", "chapter_bundle_error", "fallback_path"):
                 if current.get(field) != result.get(field):
                     return False
         elif current.get("error") != result.get("error"):
