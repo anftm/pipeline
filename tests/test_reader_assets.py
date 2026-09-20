@@ -289,23 +289,33 @@ class ScannerTests(unittest.TestCase):
                     archive.writestr("b.xhtml", "<html><body><p>chapter two</p></body></html>")
                 return hashlib.sha256(target.read_bytes()).hexdigest(), reader_assets.EPUB_CHAPTER_SPLIT_BYTES + 1
 
-            def normalize(command, **_kwargs):
-                Path(command[2]).write_bytes(Path(command[1]).read_bytes())
-
             with patch.object(convert_reader_assets, "download_source", side_effect=download), \
-                    patch.object(convert_reader_assets, "run_checked", side_effect=normalize):
+                    patch.object(convert_reader_assets, "run_checked") as command:
                 result = convert_reader_assets.convert_item(item, bundle)
+            command.assert_not_called()
             self.assertEqual(result["status"], "ready")
             self.assertTrue(result["path"].endswith("/document.epub"))
             manifest_path = result["chapter_manifest"]
             self.assertTrue(manifest_path.endswith("/epub-chapters/chapter-manifest.json"))
             self.assertIn(f'/foliate-original-v1-{reader_assets.EPUB_CHAPTER_PROFILE}/', manifest_path)
+            self.assertEqual(Path(manifest_path).parts[3], epub_chapters.bundle_version((bundle / manifest_path).parent))
             reader_assets.validate_object_path(manifest_path)
             self.assertTrue((bundle / manifest_path).is_file())
             parent = Path(manifest_path).parent
             self.assertTrue((bundle / parent / "chapters" / "chapter-0001.xhtml").is_file())
             self.assertTrue((bundle / parent / "epub-search-index.json.gz").is_file())
             self.assertIn("chapter one", (bundle / parent / "chapters" / "chapter-0001.xhtml").read_text())
+
+    def test_bundle_version_changes_when_only_resource_bytes_change(self):
+        with tempfile.TemporaryDirectory() as root:
+            output = Path(root)
+            (output / 'chapter-manifest.json').write_text('{"chapters": []}')
+            resource = output / 'style.css'
+            resource.write_text('p { color: red; }')
+            before = epub_chapters.bundle_version(output)
+            self.assertEqual(before, epub_chapters.bundle_version(output))
+            resource.write_text('p { color: blue; }')
+            self.assertNotEqual(before, epub_chapters.bundle_version(output))
 
     def test_small_epub_conversion_skips_chapter_bundle(self):
         item = {

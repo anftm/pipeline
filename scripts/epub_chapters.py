@@ -36,6 +36,15 @@ def _zip_path(base: str, href: str) -> str:
     return result
 
 
+def bundle_version(output: Path) -> str:
+    """Include chapters and every resource in an immutable bundle identity."""
+    digest = hashlib.sha256()
+    for path in sorted(file for file in output.rglob('*') if file.is_file()):
+        digest.update(path.relative_to(output).as_posix().encode('utf-8') + b'\0')
+        digest.update(hashlib.sha256(path.read_bytes()).digest())
+    return digest.hexdigest()[:16]
+
+
 def _safe_resource_path(path: str) -> str:
     def replace(match):
         value = match.group()

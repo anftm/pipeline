@@ -1725,18 +1725,28 @@ def convert_item(item: dict, bundle: Path, reusable: dict | None = None) -> dict
                 except ImportError:
                     import epub_chapters
                 chapter_source = target
-                if item["extension"] in {"epub", "mobi", "azw3", "fb2"}:
+                if item["extension"] == "epub":
+                    # Preserve the original spine, text and links. Normalizing
+                    # an EPUB again can split chapters and alter source text.
+                    chapter_source = source
+                elif item["extension"] in {"mobi", "azw3", "fb2"}:
                     chapter_source = work / "chapter-source.epub"
                     run_checked(["ebook-convert", str(source), str(chapter_source), "--flow-size", "0"],
                                 timeout_seconds=EPUB_COMMAND_TIMEOUT_SECONDS)
                     validate_output(chapter_source, "epub")
-                # Bundles have immutable HTTP caching. A new generator profile
-                # must use fresh URLs even when the original ebook is reused.
-                chapter_parent = Path(object_path).parent.with_name(
-                    f"{Path(object_path).parent.name}-{EPUB_CHAPTER_PROFILE}")
+                # Calibre versions can produce different bytes under one
+                # profile. Hash all resources so those builds never overwrite
+                # each other's immutable URLs.
+                staged_chapters = work / "chapter-bundle"
+                epub_chapters.build_bundle(chapter_source, staged_chapters)
+                chapter_parent = (Path(*Path(object_path).parts[:3])
+                                  / epub_chapters.bundle_version(staged_chapters)
+                                  / f"{Path(object_path).parent.name}-{EPUB_CHAPTER_PROFILE}")
                 chapter_dir = bundle / chapter_parent / EPUB_CHAPTER_BUNDLE_DIR
-                if not (chapter_dir / "chapter-manifest.json").is_file():
-                    epub_chapters.build_bundle(chapter_source, chapter_dir)
+                with artifact_lock(chapter_dir):
+                    if not (chapter_dir / "chapter-manifest.json").is_file():
+                        chapter_dir.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.move(staged_chapters, chapter_dir)
                 chapter_manifest_path = (chapter_parent / EPUB_CHAPTER_BUNDLE_DIR
                                          / "chapter-manifest.json").as_posix()
             except Exception as exc:
