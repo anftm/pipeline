@@ -55,7 +55,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--assets-repo", default=os.environ.get("READER_ASSETS_REPO", READER_ASSETS_REPO))
     parser.add_argument("--grace-days", type=int, default=30)
-    parser.add_argument("--limit", type=int, default=100)
+    parser.add_argument("--limit", type=int, default=1000)
     parser.add_argument("--apply", action="store_true")
     return parser.parse_args()
 

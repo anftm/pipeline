@@ -2,7 +2,7 @@ name: Prune Reader Assets
 
 on:
   schedule:
-    - cron: "43 3 * * 0"
+    - cron: "43 3 * * *"
   workflow_dispatch:
     inputs:
       apply:
@@ -18,7 +18,7 @@ on:
       limit:
         description: Maximum objects deleted in one run
         required: true
-        default: "100"
+        default: "1000"
         type: string
 
 concurrency:
@@ -39,6 +39,6 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          args=(--grace-days "${{ inputs.grace_days || '30' }}" --limit "${{ inputs.limit || '100' }}")
+          args=(--grace-days "${{ inputs.grace_days || '30' }}" --limit "${{ inputs.limit || '1000' }}")
           if [[ "${{ github.event_name }}" == "schedule" || "${{ inputs.apply }}" == "true" ]]; then args+=(--apply); fi
           python scripts/prune_reader_assets.py "${args[@]}"
