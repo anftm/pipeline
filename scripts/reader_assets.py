@@ -18,7 +18,7 @@ MANIFEST_NAME = "manifest.json"
 EPUB_CHAPTER_SPLIT_BYTES = 8 * 1024 * 1024
 CHM_CHAPTER_SPLIT_BYTES = 16 * 1024 * 1024
 EPUB_CHAPTER_BUNDLE_DIR = "epub-chapters"
-EPUB_CHAPTER_PROFILE = "epub-chapters-v5"
+EPUB_CHAPTER_PROFILE = "epub-chapters-v6"
 CONVERTIBLE_EXTENSIONS = {
     "doc": ("libreoffice-docx-v2", "docx", "document.docx"),
     "docx": ("docx-native-v2", "docx", "document.docx"),
@@ -153,6 +153,18 @@ def validate_chapter_manifest(manifest: dict) -> dict:
             raise ValueError("invalid EPUB chapter metadata")
         if not re.fullmatch(r"[0-9a-f]{64}", str(chapter.get("sha256", ""))):
             raise ValueError("invalid EPUB chapter digest")
+    toc = manifest.get("toc")
+    if toc is not None:
+        if not isinstance(toc, list):
+            raise ValueError("invalid EPUB TOC")
+        for entry in toc:
+            if (not isinstance(entry, dict) or not isinstance(entry.get("title"), str)
+                    or not entry["title"].strip()
+                    or type(entry.get("chapter")) is not int
+                    or not 1 <= entry["chapter"] <= len(chapters)
+                    or type(entry.get("depth")) is not int or not 0 <= entry["depth"] <= 64
+                    or not isinstance(entry.get("fragment"), str)):
+                raise ValueError("invalid EPUB TOC entry")
     search_index = manifest.get("search_index")
     if search_index is not None:
         if not isinstance(search_index, dict):

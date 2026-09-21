@@ -61,12 +61,13 @@ def _node_text(node) -> str:
     return re.sub(r"\s+", " ", " ".join(node.itertext())).strip()
 
 
-def _toc_titles(archive: zipfile.ZipFile, opf_path: str, manifest: dict, names: set[str]) -> dict[str, str]:
-    titles = {}
+def _toc_entries(archive: zipfile.ZipFile, opf_path: str, manifest: dict, names: set[str]) -> list[dict]:
+    """Read the navigation tree, independently of physical spine splits."""
     base = posixpath.dirname(opf_path)
-    for item in manifest.values():
+    candidates = sorted(manifest.values(), key=lambda item: "nav" not in item.get("properties", "").split())
+    for item in candidates:
         media_type = item.get("media-type", "").lower()
-        if media_type not in {"application/x-dtbncx+xml", "application/xhtml+xml", "text/html"}:
+        if media_type != "application/x-dtbncx+xml" and "nav" not in item.get("properties", "").split():
             continue
         try:
             toc_path = _zip_path(base, item.get("href", ""))
@@ -78,30 +79,116 @@ def _toc_titles(archive: zipfile.ZipFile, opf_path: str, manifest: dict, names: 
             root = ET.fromstring(archive.read(toc_path))
         except ET.ParseError:
             continue
+        entries = []
+        def add(label, href, depth):
+            if not href:
+                return
+            target = _zip_path(posixpath.dirname(toc_path), href)
+            entries.append({"title": label, "source_path": target,
+                            "fragment": unquote(urlsplit(href).fragment), "depth": depth})
+        def ncx(parent, depth=0):
+            for node in parent:
+                if _local_name(node) != "navpoint":
+                    continue
+                content = next((child for child in node if _local_name(child) == "content"), None)
+                label = next((child for child in node if _local_name(child) == "navlabel"), None)
+                if content is not None:
+                    add(_node_text(label) if label is not None else "", content.get("src"), depth)
+                ncx(node, depth + 1)
+        def nav_list(parent, depth=0):
+            for li in parent:
+                if _local_name(li) != "li":
+                    continue
+                anchor = next((child for child in li if _local_name(child) in {"a", "span"}), None)
+                nested = [child for child in li if _local_name(child) == "ol"]
+                if anchor is not None:
+                    href = anchor.get("href")
+                    # An unlinked group shares its first child's destination.
+                    if not href:
+                        first = next((child for ol in nested for child in ol.iter()
+                                      if _local_name(child) == "a" and child.get("href")), None)
+                        href = first.get("href") if first is not None else None
+                    add(_node_text(anchor), href, depth)
+                for ol in nested:
+                    nav_list(ol, depth + 1)
         if media_type == "application/x-dtbncx+xml":
-            for node in (node for node in root.iter() if _local_name(node) == "navpoint"):
-                content = next((child for child in node.iter() if _local_name(child) == "content"), None)
-                label = next((child for child in node.iter() if _local_name(child) == "text"), None)
-                if content is None or label is None:
-                    continue
-                try:
-                    target = _zip_path(posixpath.dirname(toc_path), content.attrib.get("src", ""))
-                except ValueError:
-                    continue
-                title = _node_text(label)
-                if title:
-                    titles.setdefault(target, title)
-            continue
-        for nav in (node for node in root.iter() if _local_name(node) == "nav"):
-            for anchor in (node for node in nav.iter() if _local_name(node) == "a"):
-                try:
-                    target = _zip_path(posixpath.dirname(toc_path), anchor.attrib.get("href", ""))
-                except ValueError:
-                    continue
-                title = _node_text(anchor)
-                if title:
-                    titles.setdefault(target, title)
-    return titles
+            for node in root.iter():
+                if _local_name(node) == "navmap":
+                    ncx(node)
+        else:
+            for nav in root.iter():
+                kinds = nav.get("{http://www.idpf.org/2007/ops}type", "").split()
+                if _local_name(nav) == "nav" and ("toc" in kinds or nav.get("role") == "doc-toc"):
+                    for ol in nav:
+                        if _local_name(ol) == "ol":
+                            nav_list(ol)
+        if entries:
+            return entries
+    return []
+
+
+def _placeholder_title(title: str) -> bool:
+    return not title.strip() or title.strip().lower() in {"unknown text", "untitled", "unknown", "无标题"}
+
+
+def _target_title(document: str, fragment: str = "", *, root=None) -> str:
+    if root is None:
+        try:
+            root = ET.fromstring(document)
+        except ET.ParseError:
+            return _document_title(document)
+    body = next((node for node in root.iter() if _local_name(node) == "body"), root)
+    nodes = list(body.iter())
+    start = 0
+    if fragment:
+        start = next((i for i, node in enumerate(nodes)
+                      if node.get("id") == fragment or node.get("name") == fragment), -1)
+        if start < 0:
+            return ""
+        text = _node_text(nodes[start])
+        if text and len(text) <= 500 and not _placeholder_title(text):
+            return text
+    for node in nodes[start:]:
+        if _local_name(node) in {"h1", "h2", "h3", "h4", "h5", "h6", "p"}:
+            text = _node_text(node)
+            if text and len(text) <= 500 and not _placeholder_title(text):
+                return text
+    if not fragment:
+        title = next((_node_text(node) for node in root.iter() if _local_name(node) == "title"), "")
+        if not _placeholder_title(title):
+            return title
+    return ""
+
+
+def bundle_toc(entries: list[dict], records: list[dict]) -> list[dict]:
+    by_source = {record["source_path"]: record for record in reversed(records)}
+    toc = []
+    documents = {}
+    for entry in entries:
+        record = by_source.get(entry["source_path"])
+        if record is None:
+            raise ValueError(f'EPUB TOC target is outside readable spine: {entry["source_path"]}')
+        if entry["source_path"] not in documents:
+            try:
+                documents[entry["source_path"]] = ET.fromstring(record["clean"])
+            except ET.ParseError:
+                documents[entry["source_path"]] = None
+        title = entry["title"]
+        if _placeholder_title(title):
+            title = _target_title(record["clean"], entry["fragment"], root=documents[entry["source_path"]])
+        if _placeholder_title(title):
+            raise ValueError(f'EPUB TOC title cannot be recovered: {entry["source_path"]}#{entry["fragment"]}')
+        fragment = entry["fragment"]
+        root = documents.get(entry["source_path"])
+        if fragment and root is not None and not any(
+                node.get("id") == fragment or node.get("name") == fragment
+                for node in root.iter()):
+            # Keep a usable chapter destination when the source TOC points at
+            # an anchor omitted by the source document or its sanitizer.
+            fragment = ""
+        toc.append({"title": title, "chapter": record["index"],
+                    "fragment": fragment, "depth": entry["depth"]})
+    return toc
 
 
 def _can_share_resource(path: str) -> bool:
@@ -137,11 +224,11 @@ class _TitleExtractor(HTMLParser):
         self.capture = False
 
     def handle_starttag(self, tag, attrs):
-        if tag.lower() in {"title", "h1", "h2", "h3"} and not self.parts:
+        if tag.rsplit(":", 1)[-1].lower() in {"title", "h1", "h2", "h3"} and not self.parts:
             self.capture = True
 
     def handle_endtag(self, tag):
-        if tag.lower() in {"title", "h1", "h2", "h3"}:
+        if tag.rsplit(":", 1)[-1].lower() in {"title", "h1", "h2", "h3"}:
             self.capture = False
 
     def handle_data(self, data):
@@ -187,7 +274,11 @@ def build_bundle(epub: Path, output: Path, *, fallback: str | None = None,
         search_chapters = []
         chapter_records = []
         resource_usage = Counter()
-        toc_titles = _toc_titles(archive, opf_path, manifest, names)
+        toc_entries = _toc_entries(archive, opf_path, manifest, names)
+        toc_titles = {}
+        for entry in toc_entries:
+            if not _placeholder_title(entry["title"]):
+                toc_titles.setdefault(entry["source_path"], entry["title"])
         for number, ref in enumerate((n for n in opf.iter() if _local_name(n) == "itemref"), 1):
             item = manifest.get(ref.attrib.get("idref"))
             if (not item or "nav" in item.get("properties", "").split()
@@ -219,12 +310,13 @@ def build_bundle(epub: Path, output: Path, *, fallback: str | None = None,
                 safe_resource = _safe_resource_path(resource)
                 return f'{match.group(1)}="../resources/__CHAPTER_RESOURCE__/{safe_resource}"'
             clean = re.sub(r'((?:src|href))=["\']([^"\'#]+)["\']', rewrite, clean, flags=re.I)
-            title = toc_titles.get(source_path) or _document_title(clean) or f"章节 {number}"
+            title = toc_titles.get(source_path) or _target_title(clean) or _document_title(clean) or f"章节 {number}"
             chapter_records.append({"index": chapter_index, "source_path": source_path,
                                     "title": title, "clean": clean, "resources": resources})
             resource_usage.update(resources)
         if not chapter_records:
             raise ValueError("EPUB spine has no readable chapters")
+        toc = bundle_toc(toc_entries, chapter_records)
         # Resolve links only after every readable spine item has its final name.
         # Original filenames cannot be used after chapters move into the bundle.
         chapter_paths = {}
@@ -280,6 +372,7 @@ def build_bundle(epub: Path, output: Path, *, fallback: str | None = None,
     search_target = output / "epub-search-index.json.gz"
     search_target.write_bytes(search_bytes)
     result = {"version": 1, "kind": "epub-chapters", "chapters": chapters, "search_index": {"path": search_target.relative_to(output).as_posix(), "bytes": len(search_bytes), "sha256": hashlib.sha256(search_bytes).hexdigest()}}
+    result["toc"] = toc
     if fallback:
         result["fallback"] = fallback
     validate_chapter_manifest(result)
