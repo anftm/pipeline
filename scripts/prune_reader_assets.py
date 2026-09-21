@@ -54,7 +54,7 @@ def build_prune(manifest: dict, paths: list[str], pdf_manifest: dict | None = No
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--assets-repo", default=os.environ.get("READER_ASSETS_REPO", READER_ASSETS_REPO))
-    parser.add_argument("--grace-days", type=int, default=30)
+    parser.add_argument("--grace-days", type=int, default=14)
     parser.add_argument("--limit", type=int, default=1000)
     parser.add_argument("--apply", action="store_true")
     return parser.parse_args()

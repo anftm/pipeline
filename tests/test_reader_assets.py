@@ -2248,7 +2248,7 @@ class WorkflowContractTests(unittest.TestCase):
     def test_prune_workflow_uses_shared_concurrency_and_bounded_grace(self):
         workflow = Path(".github/workflows/prune-reader-assets.yml").read_text(encoding="utf-8")
         self.assertIn("group: reader-assets", workflow)
-        self.assertIn('default: "30"', workflow)
+        self.assertIn('default: "14"', workflow)
         self.assertIn('default: "1000"', workflow)
         self.assertIn('cron: "43 3 * * *"', workflow)
         self.assertIn("python scripts/prune_reader_assets.py", workflow)
