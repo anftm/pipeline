@@ -21,7 +21,8 @@ STATUS = {"ready": 2, "failed": 4}
 MODE = {"pdf": "p", "epub": "e", "foliate": "e", "docx": "d", "html": "h", "audio": "a", "video": "v"}
 
 
-def build_index(manifest: dict, pdf_manifest: dict | None = None, range_manifest: dict | None = None) -> dict:
+def build_index(manifest: dict, pdf_manifest: dict | None = None, range_manifest: dict | None = None,
+                ocr_manifest: dict | None = None) -> dict:
     files = {}
     for key, entry in manifest["files"].items():
         status = entry.get("status")
@@ -45,12 +46,19 @@ def build_index(manifest: dict, pdf_manifest: dict | None = None, range_manifest
             continue
         path = entry.get("path") or entry.get("page_manifest", {}).get("path")
         if path:
-            files[key] = shared.pdf_pages_sidecar_entry(path)
+            files[key] = {**files.get(key, {}), **shared.pdf_pages_sidecar_entry(path)}
+    for key, entry in (ocr_manifest or {}).get("files", {}).items():
+        if entry.get("status") != "ready" or not isinstance(entry.get("ocr_manifest"), str):
+            continue
+        merged = shared.merge_pdf_ocr_sidecar_entry(files.get(key), entry)
+        if merged:
+            files[key] = merged
     return {"v": 1, "f": dict(sorted(files.items()))}
 
 
-def encode_index(manifest: dict, pdf_manifest: dict | None = None, range_manifest: dict | None = None) -> bytes:
-    payload = json.dumps(build_index(manifest, pdf_manifest, range_manifest), ensure_ascii=False, sort_keys=True,
+def encode_index(manifest: dict, pdf_manifest: dict | None = None, range_manifest: dict | None = None,
+                 ocr_manifest: dict | None = None) -> bytes:
+    payload = json.dumps(build_index(manifest, pdf_manifest, range_manifest, ocr_manifest), ensure_ascii=False, sort_keys=True,
                          separators=(",", ":")).encode()
     return gzip.compress(payload, compresslevel=9, mtime=0)
 
@@ -60,14 +68,16 @@ def main() -> int:
     parser.add_argument("manifest", type=Path)
     parser.add_argument("--pdf-manifest", type=Path)
     parser.add_argument("--range-manifest", type=Path)
+    parser.add_argument("--ocr-manifest", type=Path)
     parser.add_argument("--output", type=Path, default=Path("output/reader_assets.json.gz"))
     args = parser.parse_args()
     manifest = validate_manifest(load_json(args.manifest))
     pdf_manifest = load_json(args.pdf_manifest) if args.pdf_manifest else None
     range_manifest = load_json(args.range_manifest) if args.range_manifest else None
-    index = build_index(manifest, pdf_manifest, range_manifest)
+    ocr_manifest = load_json(args.ocr_manifest) if args.ocr_manifest else None
+    index = build_index(manifest, pdf_manifest, range_manifest, ocr_manifest)
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_bytes(encode_index(manifest, pdf_manifest, range_manifest))
+    args.output.write_bytes(encode_index(manifest, pdf_manifest, range_manifest, ocr_manifest))
     print(f"wrote {len(index['f'])} reader asset mapping(s)")
     return 0
 

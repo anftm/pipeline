@@ -2,16 +2,18 @@
 """Merge parallel PDF assessment bundles and publish one atomic state update."""
 import argparse
 import json
+import os
 from pathlib import Path
 import shutil
 import tempfile
 
-from huggingface_hub import HfApi
+from huggingface_hub import HfApi, sync_bucket
 
 try:
-    from . import pdf_range_assets, pdf_range_state, reader_assets
+    from . import pdf_range_assets, pdf_range_state, reader_assets, shared
 except ImportError:
     import pdf_range_assets, pdf_range_state, reader_assets
+    import shared
 
 
 def merge_results(bundles):
@@ -70,6 +72,17 @@ def apply_results(state, results):
     return fresh
 
 
+def upload_objects(bundle: Path, token: str | None = None) -> bool:
+    """Upload structure-optimized objects before publishing their mappings."""
+    objects = bundle / "objects"
+    if not objects.is_dir() or not any(objects.rglob("*")):
+        return False
+    sync_bucket(str(bundle), f"hf://buckets/{shared.PDF_RANGE_BUCKET}",
+                token=token or os.environ.get("HF_TOKEN"),
+                include=["objects/**"], quiet=False)
+    return True
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--bundles", type=Path, nargs="+", required=True)
@@ -78,10 +91,16 @@ def main():
     api = HfApi()
     revision = api.repo_info(repo_id=args.assets_repo, repo_type="dataset").sha
     baseline = pdf_range_state.remote_state(api, args.assets_repo, revision)
+    if pdf_range_state.has_legacy_artifacts(baseline):
+        raise RuntimeError(
+            "legacy PDF range objects are still in Reader-Assets; run "
+            "migrate-pdf-range-bucket.yml before publishing new results")
     bundle, results = merge_results(args.bundles)
     state = {"version": 1, "files": dict(baseline.get("files", {})),
+             "artifact_bucket": shared.PDF_RANGE_BUCKET,
              "inventories": dict(baseline.get("inventories", {}))}
     fresh_results = apply_results(state, results)
+    upload_objects(bundle)
     published = pdf_range_assets.publish(api, args.assets_repo, baseline, state, bundle, fresh_results)
     print(f"published {len(fresh_results)} PDF range result(s) at {published}; skipped {len(results) - len(fresh_results)} stale result(s)", flush=True)
     shutil.rmtree(bundle, ignore_errors=True)

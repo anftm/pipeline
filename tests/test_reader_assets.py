@@ -1635,6 +1635,10 @@ class PublicationTests(unittest.TestCase):
             publish_reader_assets, "remote_pdf_manifest", return_value={"version": 1, "files": {}})
         patcher.start()
         self.addCleanup(patcher.stop)
+        ocr_patcher = patch.object(
+            publish_reader_assets, "remote_pdf_ocr_manifest", return_value={"version": 1, "files": {}})
+        ocr_patcher.start()
+        self.addCleanup(ocr_patcher.stop)
         range_patcher = patch.object(
             publish_reader_assets, "remote_state", return_value={"version": 1, "files": {}})
         range_patcher.start()
@@ -2075,6 +2079,22 @@ class PublicationTests(unittest.TestCase):
             "b": "vomebook/pdf-pages",
         })
         self.assertNotIn("text", files)
+
+    def test_sidecar_preserves_pdf_ocr_when_reader_assets_change(self):
+        manifest = {"version": 1, "files": {
+            "scan": {"status": "ready", "reader_mode": "pdf",
+                      "path": "objects/aa/source/document.pdf"},
+        }}
+        ocr = {"version": 1, "files": {
+            "scan": {"status": "ready", "profile": "pdf-ocr-profile",
+                      "classification": "scan",
+                      "ocr_manifest": "objects/aa/" + "a" * 64 + "/" + "b" * 16 + "/ocr-manifest.json"},
+        }}
+        self.assertEqual(build_reader_assets_index.build_index(manifest, ocr_manifest=ocr)["f"]["scan"], {
+            "s": 2, "m": "p", "p": "objects/aa/source/document.pdf",
+            "o": ocr["files"]["scan"]["ocr_manifest"], "om": "scan",
+            "ob": "vomebook/pdf-pages",
+        })
 
     def test_sidecar_excludes_legacy_streams_and_linearized_pdfs(self):
         manifest = {"version": 1, "files": {}}

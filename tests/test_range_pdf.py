@@ -600,11 +600,22 @@ class RangePdfTests(unittest.TestCase):
             (bundle / "bundle.json").write_text(json.dumps({"version": 1, "results": []}))
             with patch.object(publish_reader_assets, "remote_manifest", return_value=base), \
                  patch.object(publish_reader_assets, "remote_pdf_manifest", return_value=base), \
+                 patch.object(publish_reader_assets, "remote_pdf_ocr_manifest", return_value={"version": 1, "files": {}}), \
                  patch.object(publish_reader_assets, "remote_state", return_value=state):
                 publish_reader_assets.publish_bundle(api, "assets", bundle)
         operations = api.create_commit.call_args.kwargs["operations"]
         sidecar = next(op.path_or_fileobj for op in operations if op.path_in_repo == "reader_assets.json.gz")
         self.assertEqual(json.loads(gzip.decompress(sidecar))["f"]["scan"]["p"], state["files"]["scan"]["path"])
+
+    def test_new_range_state_routes_optimized_pdf_to_dedicated_bucket(self):
+        from scripts import build_reader_assets_index, pdf_range_state, shared
+        state = {"version": 1, "artifact_bucket": shared.PDF_RANGE_BUCKET, "files": {
+            "scan": {"status": "optimized", "path": "objects/aa/" + "a" * 64
+                      + "/pdf-range-v1-document/document.pdf"}
+        }}
+        index = build_reader_assets_index.build_index({"files": {}}, range_manifest=state)
+        self.assertEqual(index["f"]["scan"]["b"], shared.PDF_RANGE_BUCKET)
+        self.assertEqual(pdf_range_state.empty_state()["artifact_bucket"], shared.PDF_RANGE_BUCKET)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,181 @@
+name: Build PDF OCR Assets
+
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: Maximum PDF books inspected in this run
+        required: true
+        default: "20"
+        type: string
+      checkpoint:
+        description: Source checkpoint after already published books
+        required: true
+        default: "0"
+        type: string
+      generate_jxl:
+        description: Also encode optional JPEG XL page streams
+        required: true
+        default: false
+        type: boolean
+      retry_failed:
+        description: Retry books previously marked failed for the same source revision
+        required: true
+        default: false
+        type: boolean
+  schedule:
+    - cron: "13 * * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pdf-ocr-assets
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    outputs:
+      shard_count: ${{ steps.plan.outputs.shard_count }}
+      shard_ids: ${{ steps.plan.outputs.shard_ids }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Install planning dependencies
+        run: pip install -r scripts/requirements.txt
+      - name: Fetch current source metadata
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          FORCE_SYNC: "true"
+        run: python scripts/fetch_and_parse.py
+      - name: Fetch current Reader Assets manifests
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          ASSETS_REPO: vomebook/Reader-Assets
+        run: |
+          mkdir -p output/pdf-ocr
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          from huggingface_hub import hf_hub_download
+          token = os.environ.get("HF_TOKEN")
+          repo = os.environ["ASSETS_REPO"]
+          for name, fallback in (("manifest.json", {"version": 1, "files": {}}), ("pdf_ocr_manifest.json", {"version": 1, "files": {}}), ("pdf_range_manifest.json", {"version": 1, "files": {}})):
+              try:
+                  source = Path(hf_hub_download(repo, name, repo_type="dataset", token=token))
+                  target = Path("output/pdf-ocr") / name
+                  target.write_bytes(source.read_bytes())
+              except Exception as exc:
+                  if "404" not in str(exc): raise
+                  (Path("output/pdf-ocr") / name).write_text(json.dumps(fallback), encoding="utf-8")
+          PY
+      - name: Plan pending PP-OCRv6 pages
+        id: plan
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          PDF_JXL_ENABLED: ${{ inputs.generate_jxl || 'false' }}
+        run: |
+          [[ "${{ inputs.limit || '20' }}" =~ ^[0-9]+$ ]] && ((10#${{ inputs.limit || '20' }} >= 1 && 10#${{ inputs.limit || '20' }} <= 100)) || exit 1
+          [[ "${{ inputs.checkpoint || '0' }}" =~ ^[0-9]+$ ]] || exit 1
+          python scripts/plan_pdf_ocr.py \
+            --assets-manifest output/pdf-ocr/manifest.json \
+            --ocr-manifest output/pdf-ocr/pdf_ocr_manifest.json \
+            --range-manifest output/pdf-ocr/pdf_range_manifest.json \
+            ${{ inputs.retry_failed == true && '--retry-failed' || '' }} \
+            --limit "${{ inputs.limit || '20' }}" \
+            --checkpoint "${{ inputs.checkpoint || '0' }}" \
+            --workers 4 \
+            --output output/pdf-ocr/queue.json
+          echo "shard_count=$(jq -r '.shard_count' output/pdf-ocr/queue.json)" >> "$GITHUB_OUTPUT"
+          echo "shard_ids=$(jq -c '.shard_ids' output/pdf-ocr/queue.json)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: pdf-ocr-queue
+          path: output/pdf-ocr/queue.json
+          retention-days: 1
+
+  build:
+    needs: plan
+    if: needs.plan.outputs.shard_count != '0'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.shard_ids) }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Install PP-OCRv6 CPU dependencies
+        run: pip install -r scripts/requirements-pdf-ocr.txt
+      - name: Cache PP-OCRv6 model files
+        uses: actions/cache@v4
+        with:
+          path: .cache/paddlex
+          key: paddlex-ppocrv6-${{ runner.os }}-${{ hashFiles('scripts/requirements-pdf-ocr.txt') }}
+      - name: Install rendering tools
+        env:
+          GENERATE_JXL: ${{ inputs.generate_jxl || 'false' }}
+        run: |
+          packages=(poppler-utils)
+          if [[ "${GENERATE_JXL}" == "true" ]]; then packages+=(libjxl-tools); fi
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends "${packages[@]}"
+      - uses: actions/download-artifact@v8
+        with:
+          name: pdf-ocr-queue
+          path: output/pdf-ocr
+      - name: Build and upload immutable OCR objects
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          PDF_JXL_ENABLED: ${{ inputs.generate_jxl || 'false' }}
+          PADDLE_PDX_CACHE_HOME: ${{ github.workspace }}/.cache/paddlex
+        run: |
+          python scripts/run_pdf_ocr.py --queue output/pdf-ocr/queue.json --shard "${{ matrix.shard }}" \
+            --output output/pdf-ocr/bundle --sync-bucket
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: pdf-ocr-results-${{ matrix.shard }}
+          path: output/pdf-ocr/bundle/results.json
+          retention-days: 1
+          if-no-files-found: error
+
+  publish:
+    needs: [plan, build]
+    if: always() && needs.plan.result == 'success' && needs.plan.outputs.shard_count != '0'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Install publication dependencies
+        run: pip install -r scripts/requirements.txt
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: pdf-ocr-results-*
+          path: output/pdf-ocr/results
+          merge-multiple: false
+      - name: Publish verified OCR metadata
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          READER_ASSETS_REPO: vomebook/Reader-Assets
+          PDF_JXL_ENABLED: ${{ inputs.generate_jxl || 'false' }}
+        run: python scripts/publish_pdf_ocr_assets.py --results output/pdf-ocr/results/*/results.json
+      - name: Publish Reader sidecar to Pages
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          PAGES_TOKEN: ${{ secrets.PAGES_TOKEN }}
+          PAGES_REPO: ${{ secrets.PAGES_REPO }}
+          READER_ASSETS_REPO: vomebook/Reader-Assets
+        run: python scripts/publish_search_reader_index.py

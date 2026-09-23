@@ -1,6 +1,8 @@
 # PDF 结构整理和线性化自动化
 
 `pdf-range-assets.yml` 每小时第 37 分钟运行，并在 `Build Reader Assets` 成功结束后运行。
+结构优化 PDF 存放在专用 `vomebook/pdf-optimized` Bucket；`Reader-Assets` 只保存
+`pdf_range_manifest.json`、普通资产和 sidecar 映射。
 默认每个 checkpoint 检查 30 个输入，每次最多 4 个 checkpoint，最多 3 个文件并行。
 工作流会把一个批次的全部 checkpoint 合并规划，再分成 15 个独立 Runner；每个 Runner 构建互不重复的
 结果 bundle，最后由单个 publish Runner 合并并提交。这只并行计算，不并行修改
@@ -77,10 +79,13 @@ Reader Assets manifest，因此不会因为多个实例同时提交而互相覆�
 扫描后停用旧映射并重新排队。工具版本升级而输入内容未变时，保留已有可读优化版
 直至重评完成。失败不覆盖新上游修复产物；源文件删除会从范围状态移除。
 
-候选文件、评测状态和共享 sidecar 在同一父 revision 保护的提交中发布。并发常规
+候选文件会先上传并校验到专用 Bucket，再提交评测状态和共享 sidecar；Reader-Assets
+提交不再携带结构优化 PDF。并发常规
 转换的提交冲突会重读其最新 manifest 后重建 sidecar；范围状态并发变化则停止并重跑。
 发布响应丢失但远端状态已一致时按成功处理。同一状态不会因仓库无关提交不断重写。
-旧产物不会在发布时立即删除。原阅读 ID 和原始格式的下载 URL 保留。
+旧产物不会在普通发布时立即删除。首次切换使用手动的 `migrate-pdf-range-bucket.yml`：
+它按原 SHA-256 和大小校验 Reader-Assets 旧对象，上传后从 Bucket 回读校验，最后在同一
+父 revision 中删除 Reader-Assets 旧对象并更新 sidecar。原阅读 ID 和原始格式的下载 URL 保留。
 
 其他格式新生成的 PDF 会在原转换工作流完成后被此工作流发现；首次回填也处理已存在
 的 PDF 产物。采用独立任务以避免浏览器评测阻塞原格式转换，当前会下载固定资产版本
@@ -89,6 +94,8 @@ Reader Assets manifest，因此不会因为多个实例同时提交而互相覆�
 ## 运行与验证
 
 工作流支持 repo/path 精确定位、每批 limit、checkpoint 数量、retry_failed 和 dry_run。
+如果检测到尚未迁移的旧结构优化对象，发布会停止并提示先运行迁移工作流，避免新旧
+Bucket 路由混用。
 失败的相同输入不会每小时无限重试；修复工具后使用 retry_failed，或变更评测版本。
 计划只读取源清单与文件指纹，不会因 dry-run 下载 PDF 或发布状态。
 

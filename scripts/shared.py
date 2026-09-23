@@ -8,6 +8,7 @@ from typing import TypeVar
 
 CHUNK_BYTES = 1024 * 1024
 PDF_PAGES_BUCKET = "vomebook/pdf-pages"
+PDF_RANGE_BUCKET = "vomebook/pdf-optimized"
 
 T = TypeVar("T")
 
@@ -62,3 +63,29 @@ def hf_retry_delay(attempt: int, cap: int = 60, max_shift: int = 5) -> int:
 def pdf_pages_sidecar_entry(path: str) -> dict:
     """Compact search-sidecar entry for a published PDF page stream."""
     return {"s": 2, "m": "p", "p": path, "b": PDF_PAGES_BUCKET}
+
+
+def merge_pdf_ocr_sidecar_entry(current: dict | None, result: dict) -> dict | None:
+    """Merge OCR metadata without losing an existing Reader asset mapping."""
+    entry = dict(current or {})
+    if result.get("status") == "ready":
+        page_manifest = result.get("page_manifest")
+        if (not entry.get("p") and isinstance(page_manifest, dict)
+                and isinstance(page_manifest.get("path"), str)):
+            entry.update(pdf_pages_sidecar_entry(page_manifest["path"]))
+        entry.update({
+            "o": result["ocr_manifest"],
+            "om": result.get("classification", ""),
+        })
+        if entry.get("p") and str(entry["p"]).endswith("/page-manifest.json"):
+            entry["b"] = PDF_PAGES_BUCKET
+        elif entry.get("p"):
+            entry["ob"] = PDF_PAGES_BUCKET
+        else:
+            entry.update({"s": 3, "m": "p", "b": PDF_PAGES_BUCKET})
+        return entry
+    if entry.get("s") == 3:
+        return None
+    for field in ("o", "om", "op", "ob"):
+        entry.pop(field, None)
+    return entry or None

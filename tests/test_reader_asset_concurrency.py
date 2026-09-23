@@ -10,6 +10,7 @@ class ReaderAssetConcurrencyTests(unittest.TestCase):
         for filename in (
             "reader-assets.yml", "prune-reader-assets.yml", "pdf-assets-worker.yml",
             "migrate-pdf-page-manifests.yml", "pdf-range-assets.yml",
+            "migrate-pdf-range-bucket.yml",
         ):
             workflow = (ROOT / filename).read_text(encoding="utf-8")
             self.assertIn("group: reader-assets", workflow, filename)
