@@ -59,6 +59,7 @@ jobs:
     if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     outputs:
       pending_count: ${{ steps.pdf_queue.outputs.pending_count }}
+      planned_count: ${{ steps.pdf_queue.outputs.planned_count }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -107,7 +108,16 @@ jobs:
           print(matches[-1] if matches else "0")
           PY
           )
+          planned_count=$(python3 - <<'PY'
+          import re
+          from pathlib import Path
+          text = Path("output/pdf-range-plan.log").read_text()
+          matches = re.findall(r"planned results (\d+)", text)
+          print(matches[-1] if matches else "0")
+          PY
+          )
           echo "pending_count=${pending_count}" >> "$GITHUB_OUTPUT"
+          echo "planned_count=${planned_count}" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v7
         with:
           name: pdf-range-plan
@@ -118,7 +128,7 @@ jobs:
 
   build:
     needs: prepare
-    if: inputs.dry_run != true && needs.prepare.outputs.pending_count != '0'
+    if: inputs.dry_run != true && (needs.prepare.outputs.pending_count != '0' || needs.prepare.outputs.planned_count != '0')
     runs-on: ubuntu-latest
     timeout-minutes: 330
     strategy:

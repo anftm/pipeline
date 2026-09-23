@@ -1,0 +1,6 @@
+# CPU-only OCR environment for the long-running PDF OCR workflow.
+# Keep this separate from the Reader conversion environment: Paddle/PaddleX
+# changes are deliberately not allowed to alter the existing converters.
+paddlepaddle==3.2.0
+paddleocr==3.7.0
+paddlex==3.7.0

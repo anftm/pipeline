@@ -3,11 +3,25 @@ import json
 from pathlib import Path
 from huggingface_hub.errors import HfHubHTTPError
 
+try:
+    from . import shared
+except ImportError:
+    import shared
+
 MANIFEST_NAME = "pdf_range_manifest.json"
 
 
 def empty_state():
-    return {"version": 1, "files": {}, "inventories": {}}
+    return {"version": 1, "artifact_bucket": shared.PDF_RANGE_BUCKET, "files": {}, "inventories": {}}
+
+
+def artifact_bucket(state: dict, entry: dict) -> str:
+    return entry.get("artifact_bucket") or state.get("artifact_bucket") or "vomebook/Reader-Assets"
+
+
+def has_legacy_artifacts(state: dict) -> bool:
+    return any(entry.get("status") == "optimized" and artifact_bucket(state, entry) != shared.PDF_RANGE_BUCKET
+               for entry in (state or {}).get("files", {}).values() if isinstance(entry, dict))
 
 
 def remote_state(api, repo, revision=None):
@@ -40,3 +54,5 @@ def apply_optimized(files, manifest, state):
         path = entry.get("path", "")
         if path.startswith("objects/") and path.endswith("/document.pdf") and ".." not in path.split("/"):
             files[key] = {"s": 2, "m": "p", "p": path}
+            if artifact_bucket(state or {}, entry) == shared.PDF_RANGE_BUCKET:
+                files[key]["b"] = shared.PDF_RANGE_BUCKET

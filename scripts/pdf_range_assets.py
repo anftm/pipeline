@@ -15,17 +15,17 @@ import sys
 import tempfile
 import time
 
-from huggingface_hub import CommitOperationAdd, HfApi
+from huggingface_hub import CommitOperationAdd, HfApi, HfFileSystem
 from huggingface_hub.errors import HfHubHTTPError
 
 try:
     from . import pdf_range, pdf_range_state, reader_assets, shared
     from .build_reader_assets_index import build_index, encode_index
-    from .publish_reader_assets import remote_manifest, remote_pdf_manifest
+    from .publish_reader_assets import remote_manifest, remote_pdf_manifest, remote_pdf_ocr_manifest
 except ImportError:
     import pdf_range, pdf_range_state, reader_assets, shared
     from build_reader_assets_index import build_index, encode_index
-    from publish_reader_assets import remote_manifest, remote_pdf_manifest
+    from publish_reader_assets import remote_manifest, remote_pdf_manifest, remote_pdf_ocr_manifest
 
 
 def discover(records, revisions, manifest, pdf_manifest, api, state, assets_repo, assets_revision, exact=False):
@@ -196,6 +196,17 @@ def compact_report(report):
     return result
 
 
+def verify_bucket_object(fs: HfFileSystem, path: str, expected_sha: str, expected_bytes: int) -> None:
+    digest = hashlib.sha256()
+    size = 0
+    with fs.open(f"hf://buckets/{shared.PDF_RANGE_BUCKET}/{path}", "rb") as stream:
+        while chunk := stream.read(shared.CHUNK_BYTES):
+            digest.update(chunk)
+            size += len(chunk)
+    if digest.hexdigest() != expected_sha or size != expected_bytes:
+        raise ValueError("reused optimized artifact digest mismatch")
+
+
 def remote_snapshot(api, repo):
     """Read the shared baseline, retrying transient HF throttling per Runner."""
     for attempt in range(6):
@@ -319,7 +330,9 @@ def publish(api, repo, baseline, state, bundle, results):
                 continue
             if shared.hash_file(path) != (result["sha256"], result["bytes"]):
                 raise ValueError("optimized artifact digest mismatch")
-            artifacts[result["path"]] = CommitOperationAdd(path_in_repo=result["path"], path_or_fileobj=str(path))
+            # The shard publisher uploads structure-optimized PDFs to the
+            # dedicated Bucket before this metadata commit. Keep Reader-Assets
+            # free of these large immutable delivery objects.
     for attempt in range(6):
         revision = api.repo_info(repo_id=repo, repo_type="dataset").sha
         current = pdf_range_state.remote_state(api, repo, revision)
@@ -328,20 +341,26 @@ def publish(api, repo, baseline, state, bundle, results):
         if current != baseline:
             raise RuntimeError("PDF range state changed concurrently; rerun from current state")
         if reused:
-            remote = {file.path: file for file in api.get_paths_info(
-                repo_id=repo, paths=list(reused), repo_type="dataset", revision=revision)}
-            for path, result in reused.items():
-                file = remote.get(path)
-                if (not file or file.size != result["bytes"] or
-                        getattr(getattr(file, "lfs", None), "sha256", None) != result["sha256"]):
-                    raise ValueError("reused optimized artifact digest mismatch")
+            if state.get("artifact_bucket") == shared.PDF_RANGE_BUCKET:
+                fs = HfFileSystem(token=os.environ.get("HF_TOKEN"))
+                for path, result in reused.items():
+                    verify_bucket_object(fs, path, result["sha256"], result["bytes"])
+            else:
+                remote = {file.path: file for file in api.get_paths_info(
+                    repo_id=repo, paths=list(reused), repo_type="dataset", revision=revision)}
+                for path, result in reused.items():
+                    file = remote.get(path)
+                    if (not file or file.size != result["bytes"] or
+                            getattr(getattr(file, "lfs", None), "sha256", None) != result["sha256"]):
+                        raise ValueError("reused optimized artifact digest mismatch")
         base = remote_manifest(api, repo, revision)
         images = remote_pdf_manifest(api, repo, revision)
+        ocr = remote_pdf_ocr_manifest(api, repo, revision)
         operations = [*artifacts.values(),
                       CommitOperationAdd(path_in_repo=pdf_range_state.MANIFEST_NAME,
                                          path_or_fileobj=reader_assets.canonical_json(state, pretty=True)),
                       CommitOperationAdd(path_in_repo="reader_assets.json.gz",
-                                         path_or_fileobj=encode_index(base, images, state))]
+                                         path_or_fileobj=encode_index(base, images, state, ocr))]
         try:
             commit = api.create_commit(repo_id=repo, repo_type="dataset", operations=operations,
                                        commit_message="Optimize PDF layouts after range verification", parent_commit=revision)
@@ -431,7 +450,8 @@ def main():
             checkpoint = args.bundle / "results.json.tmp"
             checkpoint.write_bytes(reader_assets.canonical_json(results, pretty=True))
             checkpoint.replace(args.bundle / "results.json")
-    state = {"version": 1, "files": files, "inventories": inventories}
+    state = {"version": 1, "artifact_bucket": shared.PDF_RANGE_BUCKET,
+             "files": files, "inventories": inventories}
     (args.bundle / "results.json").write_bytes(reader_assets.canonical_json(results, pretty=True))
     (args.bundle / pdf_range_state.MANIFEST_NAME).write_bytes(reader_assets.canonical_json(state, pretty=True))
     if not args.build_only and state != baseline:

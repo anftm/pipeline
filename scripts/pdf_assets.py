@@ -172,7 +172,8 @@ def load_records(search_data: Path, revisions: Path, repo: str = "", extension: 
 
 
 def load_generated_records(manifest: Path | dict, assets_repo: str = READER_ASSETS_REPO,
-                           repo: str = "", assets_revision: str = "main") -> list[dict]:
+                           repo: str = "", assets_revision: str = "main",
+                           min_bytes: int = LARGE_BYTES) -> list[dict]:
     data = manifest if isinstance(manifest, dict) else json.loads(manifest.read_text(encoding="utf-8"))
     selected = []
     for key, entry in data.get("files", {}).items():
@@ -181,7 +182,7 @@ def load_generated_records(manifest: Path | dict, assets_repo: str = READER_ASSE
         artifact_bytes = entry.get("bytes") if isinstance(entry, dict) else None
         if (not separator or (repo and source_repo != repo) or entry.get("status", "ready") != "ready"
                 or entry.get("reader_mode") != "pdf" or not artifact.endswith("/document.pdf")
-                or not isinstance(artifact_bytes, int) or artifact_bytes < LARGE_BYTES):
+                or not isinstance(artifact_bytes, int) or artifact_bytes < min_bytes):
             continue
         selected.append({
             "key": key, "repo": source_repo, "path": source_path,

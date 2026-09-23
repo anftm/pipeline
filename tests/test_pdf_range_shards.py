@@ -52,6 +52,7 @@ class PDFRangeShardTests(unittest.TestCase):
                         patch.object(assets.pdf_range_state, "remote_state", return_value=baseline), \
                         patch.object(assets, "remote_manifest", return_value={}), \
                         patch.object(assets, "remote_pdf_manifest", return_value={}), \
+                        patch.object(assets, "remote_pdf_ocr_manifest", return_value={}), \
                         patch.object(assets, "discover", return_value=(items, {})), \
                         patch.object(assets.subprocess, "check_output", return_value="qpdf-test\n"), \
                         patch.object(assets, "process") as process:
@@ -81,7 +82,8 @@ class PDFRangeShardTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, \
                 patch.object(assets.pdf_range_state, "remote_state", return_value=baseline), \
                 patch.object(assets, "remote_manifest", return_value={}), \
-                patch.object(assets, "remote_pdf_manifest", return_value={}), \
+                        patch.object(assets, "remote_pdf_manifest", return_value={}), \
+                        patch.object(assets, "remote_pdf_ocr_manifest", return_value={}), \
                 patch.object(assets, "encode_index", return_value=b"index"):
             self.assertEqual(assets.publish(api, "assets", baseline, state, Path(directory), [result]), "published")
             operations = api.create_commit.call_args.kwargs["operations"]
