@@ -10,14 +10,11 @@ before its object is present there.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
-import shutil
-import tempfile
 from pathlib import Path
 
-from huggingface_hub import HfApi, HfFileSystem, hf_hub_download, sync_bucket
+from huggingface_hub import HfApi
 
 try:
     from . import pdf_range_state, shared
@@ -31,15 +28,6 @@ except ImportError:
     from publish_reader_assets import remote_manifest, remote_pdf_manifest, remote_pdf_ocr_manifest
     from reader_assets import READER_ASSETS_REPO, canonical_json
     from huggingface_hub import CommitOperationAdd, CommitOperationDelete
-
-
-def _digest_stream(stream) -> tuple[str, int]:
-    digest = hashlib.sha256()
-    size = 0
-    while chunk := stream.read(shared.CHUNK_BYTES):
-        digest.update(chunk)
-        size += len(chunk)
-    return digest.hexdigest(), size
 
 
 def legacy_objects(state: dict, manifest: dict, limit: int, checkpoint: int) -> list[dict]:
@@ -64,15 +52,6 @@ def legacy_objects(state: dict, manifest: dict, limit: int, checkpoint: int) -> 
     return values[start:start + limit if limit else None]
 
 
-def verify_bucket(fs: HfFileSystem, path: str, expected_sha: str | None, expected_bytes: int | None) -> None:
-    with fs.open(f"hf://buckets/{shared.PDF_RANGE_BUCKET}/{path}", "rb") as stream:
-        digest, size = _digest_stream(stream)
-    if expected_sha and digest != expected_sha:
-        raise ValueError(f"Bucket SHA-256 mismatch: {path}")
-    if isinstance(expected_bytes, int) and size != expected_bytes:
-        raise ValueError(f"Bucket byte-size mismatch: {path}")
-
-
 def migrate(api: HfApi, repo: str, *, limit: int = 100, checkpoint: int = 0,
             apply: bool = False) -> dict:
     revision = api.repo_info(repo_id=repo, repo_type="dataset").sha
@@ -86,28 +65,31 @@ def migrate(api: HfApi, repo: str, *, limit: int = 100, checkpoint: int = 0,
     token = os.environ.get("HF_TOKEN")
     if not token:
         raise RuntimeError("HF_TOKEN is required for migration")
-    with tempfile.TemporaryDirectory(prefix="pdf-range-migration-") as root:
-        root_path = Path(root)
-        include = []
-        for item in selected:
-            local = Path(hf_hub_download(repo_id=repo, repo_type="dataset",
-                                          filename=item["path"], revision=revision, token=token))
-            with local.open("rb") as stream:
-                digest, size = _digest_stream(stream)
-            if item.get("sha256") and digest != item["sha256"]:
-                raise ValueError(f"Reader-Assets SHA-256 mismatch: {item['path']}")
-            if isinstance(item.get("bytes"), int) and size != item["bytes"]:
-                raise ValueError(f"Reader-Assets byte-size mismatch: {item['path']}")
-            target = root_path / item["path"]
-            target.parent.mkdir(parents=True, exist_ok=True)
-            with local.open("rb") as source, target.open("wb") as destination:
-                shutil.copyfileobj(source, destination, length=shared.CHUNK_BYTES)
-            include.append(item["path"])
-        sync_bucket(str(root_path), f"hf://buckets/{shared.PDF_RANGE_BUCKET}",
-                    include=include, token=token, quiet=False)
-    fs = HfFileSystem(token=token)
+    source_files = {
+        file.path: file for file in api.get_paths_info(
+            repo_id=repo, paths=[item["path"] for item in selected],
+            repo_type="dataset", revision=revision, token=token)
+    }
+    copies = []
     for item in selected:
-        verify_bucket(fs, item["path"], item.get("sha256"), item.get("bytes"))
+        file = source_files.get(item["path"])
+        lfs = getattr(file, "lfs", None) if file else None
+        xet_hash = getattr(file, "xet_hash", None) if file else None
+        if (not file or not xet_hash or getattr(file, "size", None) != item.get("bytes")
+                or (item.get("sha256") and getattr(lfs, "sha256", None) != item["sha256"])):
+            raise ValueError(f"source metadata mismatch or missing Xet hash: {item['path']}")
+        copies.append(("dataset", repo, xet_hash, item["path"]))
+    api.batch_bucket_files(shared.PDF_RANGE_BUCKET, copy=copies, token=token)
+    bucket_files = {
+        file.path: file for file in api.get_bucket_paths_info(
+            shared.PDF_RANGE_BUCKET, [item["path"] for item in selected], token=token)
+    }
+    for item in selected:
+        source = source_files[item["path"]]
+        target = bucket_files.get(item["path"])
+        if (not target or target.size != source.size
+                or target.xet_hash != source.xet_hash):
+            raise ValueError(f"Bucket Xet verification mismatch: {item['path']}")
 
     current_revision = api.repo_info(repo_id=repo, repo_type="dataset").sha
     if current_revision != revision:
