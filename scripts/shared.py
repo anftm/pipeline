@@ -68,6 +68,8 @@ def pdf_pages_sidecar_entry(path: str) -> dict:
 def merge_pdf_ocr_sidecar_entry(current: dict | None, result: dict) -> dict | None:
     """Merge OCR metadata without losing an existing Reader asset mapping."""
     entry = dict(current or {})
+    if result.get("status") == "failed":
+        return entry or {"s": 4, "om": "failed", "oe": result.get("error", "OCR failed")}
     if result.get("status") == "ready":
         page_manifest = result.get("page_manifest")
         if (not entry.get("p") and isinstance(page_manifest, dict)

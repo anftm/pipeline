@@ -57,6 +57,7 @@ OCR_OBJECT_PATH_RE = re.compile(
 
 def asset_profile() -> str:
     return (f"{OCR_PROFILE}-dpi-{OCR_DPI}-webp-{WEBP_QUALITY}-{WEBP_MAX_DIMENSION}"
+            f"-native-{MIN_NATIVE_PAGE_CHARS}-{NATIVE_PAGE_RATIO:g}"
             f"-jxl-{int(JXL_ENABLED)}-{JXL_DISTANCE:g}-{JXL_EFFORT}")
 
 
@@ -65,7 +66,7 @@ def ocr_profile_without_jxl(profile: str) -> str:
 
 
 def object_root(source_sha: str, key: str) -> Path:
-    key_sha = hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
+    key_sha = hashlib.sha256(f"{key}\0{asset_profile()}".encode("utf-8")).hexdigest()[:16]
     return Path("objects") / source_sha[:2] / source_sha / key_sha
 
 
@@ -174,7 +175,7 @@ def probe_pdf(path: Path) -> dict:
             page_chars.append(0)
     native_pages = sum(chars >= MIN_NATIVE_PAGE_CHARS for chars in page_chars)
     ratio = native_pages / page_count
-    if ratio >= NATIVE_PAGE_RATIO:
+    if native_pages == page_count:
         classification = "native-text"
     elif native_pages == 0:
         classification = "scan"
@@ -358,6 +359,9 @@ def read_bucket_gzip_json(path: str) -> dict:
 
 def build_item(item: dict, source: Path, bundle: Path) -> dict:
     source_sha, source_bytes = shared.hash_file(source)
+    if item.get("source_sha256") and item["source_sha256"] != source_sha:
+        raise ValueError("PDF source changed after planning")
+    bundle.mkdir(parents=True, exist_ok=True)
     probe = item.get("probe") or probe_pdf(source)
     pages = int(probe["page_count"])
     root = object_root(source_sha, item["key"])
@@ -382,11 +386,23 @@ def build_item(item: dict, source: Path, bundle: Path) -> dict:
     if reuse_previous:
         try:
             previous_manifest = read_bucket_json(previous["ocr_manifest"])
-            if (previous_manifest.get("page_count") != pages
-                    or not isinstance(previous_manifest.get("pages"), list)):
-                reuse_previous = False
-            elif previous_manifest.get("book_text", {}).get("path"):
-                previous_book = read_bucket_gzip_json(previous_manifest["book_text"]["path"])
+            old_pages = previous_manifest.get("pages")
+            if (previous_manifest.get("source_sha256") != source_sha
+                    or previous_manifest.get("page_count") != pages
+                    or not isinstance(old_pages, list) or len(old_pages) != pages
+                    or not previous_manifest.get("page_manifest")):
+                raise ValueError("incomplete previous OCR manifest")
+            for number, old in enumerate(old_pages, 1):
+                if old.get("p") != number:
+                    raise ValueError("invalid previous OCR page order")
+                for field, suffix in (("o", ".json.gz"), ("w", ".webp")):
+                    validate_ocr_object_path(old.get(field))
+                    if not old[field].endswith(f"page-{number:06d}{suffix}"):
+                        raise ValueError("invalid previous OCR page path")
+            previous_book = read_bucket_gzip_json(previous_manifest["book_text"]["path"])
+            if (previous_book.get("kind") != "pdf-ocr-book-text"
+                    or len(previous_book.get("pages", [])) != pages):
+                raise ValueError("incomplete previous OCR book text")
         except Exception:
             # A missing or stale old manifest is recoverable: fall back to a full OCR build.
             reuse_previous = False
@@ -405,11 +421,12 @@ def build_item(item: dict, source: Path, bundle: Path) -> dict:
                         for field in ("j", "js", "jb"):
                             page_entry.pop(field, None)
                     elif reencode_jxl:
-                        rendered, width, height = render_page(source, page, temp)
-                        jxl_path = bundle / root / "pages" / f"page-{page:06d}.jxl"
-                        jxl_sha, jxl_bytes = encode_jxl(rendered, jxl_path)
-                        page_entry.update({"j": (root / "pages" / jxl_path.name).as_posix(),
-                                           "js": jxl_sha, "jb": jxl_bytes})
+                        with tempfile.TemporaryDirectory(dir=temp) as page_temp:
+                            rendered, width, height = render_page(source, page, Path(page_temp))
+                            jxl_path = bundle / root / "pages" / f"page-{page:06d}.jxl"
+                            jxl_sha, jxl_bytes = encode_jxl(rendered, jxl_path)
+                            page_entry.update({"j": (root / "pages" / jxl_path.name).as_posix(),
+                                               "js": jxl_sha, "jb": jxl_bytes})
                 page_results.append(page_entry)
                 continue
             native_chars = int(probe.get("page_chars", [0] * pages)[page - 1])
@@ -426,8 +443,7 @@ def build_item(item: dict, source: Path, bundle: Path) -> dict:
                 else:
                     blocks = ocr_page(rendered, width, height)
                     page_text = "\n".join(block["t"] for block in blocks).strip()
-                if source_kind == "ocr" and not blocks:
-                    raise RuntimeError(f"page {page} OCR returned no text")
+                # Empty recognition is a valid page result (blank/image-only pages).
                 if probe["classification"] != "native-text":
                     webp_path = bundle / root / "pages" / f"page-{page:06d}.webp"
                     webp_path.parent.mkdir(parents=True, exist_ok=True)
@@ -456,6 +472,8 @@ def build_item(item: dict, source: Path, bundle: Path) -> dict:
                     page_entry.update({"j": (root / "pages" / jxl_path.name).as_posix(),
                                        "js": jxl_sha, "jb": jxl_bytes})
             page_results.append(page_entry)
+            for suffix in (".png", ".webp"):
+                (temp / f"page-{page:06d}{suffix}").unlink(missing_ok=True)
     # Keep the searchable representation compact and derive it from page files.
     if reuse_previous and previous_book:
         book_text = previous_book
@@ -467,12 +485,12 @@ def build_item(item: dict, source: Path, bundle: Path) -> dict:
                      "pages": book_pages}
         book_path = bundle / root / "ocr" / "book-text.json.gz"
         book_sha, book_bytes = write_gzip_json(book_path, book_text)
-    page_manifest_meta = None
+    page_manifest_meta = previous_manifest["page_manifest"] if reuse_previous else None
     image_pages = [
         {"page": entry["p"], "path": entry["w"], "sha256": entry["ws"], "bytes": entry["wb"]}
         for entry in page_results if entry.get("w")
     ]
-    if image_pages:
+    if image_pages and not reuse_previous:
         page_manifest = pdf_assets.compact_page_manifest(
             source_sha, asset_profile(), image_pages, manifest_dir=root,
         )
@@ -489,7 +507,7 @@ def build_item(item: dict, source: Path, bundle: Path) -> dict:
         "source_revision": item.get("source_revision", ""), "profile": asset_profile(),
         "engine": OCR_ENGINE, "dpi": OCR_DPI, "classification": probe["classification"],
         "page_count": pages, "complete": True, "pages": page_results,
-        "book_text": {"path": (root / "ocr" / book_path.name).as_posix(),
+        "book_text": {"path": previous_manifest["book_text"]["path"] if reuse_previous else (root / "ocr" / book_path.name).as_posix(),
                        "sha256": book_sha, "bytes": book_bytes},
     }
     if page_manifest_meta:
@@ -522,7 +540,7 @@ def load_manifest(path: Path | None) -> dict:
 def is_current(entry: dict | None, item: dict) -> bool:
     return bool(
         isinstance(entry, dict) and entry.get("status") == "ready"
-        and entry.get("profile") == OCR_PROFILE
+        and entry.get("profile") == asset_profile()
         and entry.get("source_revision") == item.get("source_revision")
         and entry.get("source_sha256") == item.get("source_sha256")
     )
