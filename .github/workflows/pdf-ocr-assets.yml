@@ -48,6 +48,10 @@ jobs:
           python-version: "3.11"
       - name: Install planning dependencies
         run: pip install -r scripts/requirements.txt
+      - name: Install PDF inspection tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends poppler-utils
       - name: Fetch current source metadata
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
