@@ -57,7 +57,7 @@ OCR_OBJECT_PATH_RE = re.compile(
 
 def asset_profile() -> str:
     return (f"{OCR_PROFILE}-dpi-{OCR_DPI}-webp-{WEBP_QUALITY}-{WEBP_MAX_DIMENSION}"
-            f"-native-{MIN_NATIVE_PAGE_CHARS}-{NATIVE_PAGE_RATIO:g}"
+            f"-native-{MIN_NATIVE_PAGE_CHARS}-{NATIVE_PAGE_RATIO:g}-maxpix-{MAX_PAGE_PIXELS}"
             f"-jxl-{int(JXL_ENABLED)}-{JXL_DISTANCE:g}-{JXL_EFFORT}")
 
 
@@ -275,10 +275,27 @@ def get_ocr_engine():
     return _OCR_ENGINE_INSTANCE
 
 
+def _page_render_dpi(path: Path, page: int) -> int:
+    """Choose a DPI that keeps unusually large PDF pages within the OCR budget."""
+    try:
+        info = _run(["pdfinfo", "-f", str(page), "-l", str(page), "-box", str(path)])
+        match = re.search(r"Page size:\s*([0-9.]+)\s+x\s+([0-9.]+)\s+pts", info)
+        if not match:
+            return OCR_DPI
+        width_points, height_points = (float(value) for value in match.groups())
+        area = width_points * height_points
+        if area <= 0:
+            return OCR_DPI
+        max_dpi = int(72 * (MAX_PAGE_PIXELS / area) ** 0.5)
+        return max(24, min(OCR_DPI, max_dpi))
+    except Exception:
+        return OCR_DPI
+
+
 def render_page(path: Path, page: int, directory: Path) -> tuple[Path, int, int]:
     prefix = directory / f"page-{page:06d}"
     _run([
-        "pdftocairo", "-png", "-singlefile", "-r", str(OCR_DPI),
+        "pdftocairo", "-png", "-singlefile", "-r", str(_page_render_dpi(path, page)),
         "-f", str(page), "-l", str(page), str(path), str(prefix),
     ], timeout=COMMAND_TIMEOUT)
     png = prefix.with_suffix(".png")
@@ -287,9 +304,12 @@ def render_page(path: Path, page: int, directory: Path) -> tuple[Path, int, int]
     from PIL import Image
     with Image.open(png) as image:
         width, height = image.size
-        if width * height > MAX_PAGE_PIXELS:
-            raise RuntimeError(f"page {page} exceeds pixel budget")
         rgb = image.convert("RGB")
+        if width * height > MAX_PAGE_PIXELS:
+            scale = (MAX_PAGE_PIXELS / (width * height)) ** 0.5
+            rgb = rgb.resize((max(1, round(width * scale)), max(1, round(height * scale))))
+            width, height = rgb.size
+            rgb.save(png, "PNG")
         if WEBP_MAX_DIMENSION and max(width, height) > WEBP_MAX_DIMENSION:
             scale = WEBP_MAX_DIMENSION / max(width, height)
             rgb = rgb.resize((max(1, round(width * scale)), max(1, round(height * scale))))
