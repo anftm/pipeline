@@ -1,5 +1,7 @@
 import gzip
 import json
+import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -69,6 +71,42 @@ class PdfOcrContractTests(unittest.TestCase):
 
     def test_jxl_is_part_of_the_profile_identity(self):
         self.assertIn("-jxl-", pdf_ocr.asset_profile())
+
+    def test_language_selects_supported_model_without_changing_render_profile(self):
+        root = Path(__file__).resolve().parents[1]
+        script = "from scripts import pdf_ocr; print(pdf_ocr.OCR_VERSION); print(pdf_ocr.asset_profile()); print(pdf_ocr.OCR_ENGINE)"
+        for language, version in (("en", "PP-OCRv6"), ("japan", "PP-OCRv6"),
+                                  ("ar", "PP-OCRv5"), ("fa", "PP-OCRv5"), ("korean", "PP-OCRv5")):
+            with self.subTest(language=language):
+                env = {**os.environ, "PDF_OCR_LANG": language}
+                output = subprocess.check_output(["python3", "-c", script], cwd=root, env=env, text=True)
+                lines = output.splitlines()
+                self.assertEqual(lines[0], version)
+                self.assertIn(f"-lang-{language}-", lines[1])
+                self.assertIn(language, lines[2])
+
+        for backend in ("paddle_onnxruntime", "rapidocr_onnxruntime"):
+            env = {**os.environ, "PDF_OCR_BACKEND": backend}
+            output = subprocess.check_output(["python3", "-c", script], cwd=root, env=env, text=True)
+            self.assertIn(f"-backend-{backend.replace('_', '-')}", output.splitlines()[1])
+
+        invalid = {**os.environ, "PDF_OCR_LANG": "fa", "PDF_OCR_VERSION": "PP-OCRv6"}
+        result = subprocess.run(["python3", "-c", "from scripts import pdf_ocr"], cwd=root,
+                                env=invalid, capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        invalid_backend = {**os.environ, "PDF_OCR_LANG": "fa", "PDF_OCR_BACKEND": "rapidocr_onnxruntime"}
+        result = subprocess.run(["python3", "-c", "from scripts import pdf_ocr"], cwd=root,
+                                env=invalid_backend, capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_rapidocr_result_uses_shared_block_contract(self):
+        result = type("RapidResult", (), {
+            "boxes": [[[0, 0], [50, 0], [50, 20], [0, 20]]],
+            "txts": ("English",), "scores": (0.95,),
+        })()
+        blocks = pdf_ocr.normalize_rapid_result(result, 100, 100)
+        self.assertEqual(blocks[0]["t"], "English")
+        self.assertEqual(blocks[0]["b"], [0.0, 0.0, 0.5, 0.2])
 
     def test_manifest_accepts_published_jxl_layout_from_separate_ocr_worker(self):
         current = pdf_ocr.asset_profile()

@@ -408,8 +408,10 @@ def assemble_render_book(book, descriptors, bundle):
 
 def recognition_identity(entry, options):
     digest = hashlib.sha256(json.dumps(options, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:16]
-    base = entry["profile"].split("-layout-", 1)[0]
-    return f"{base}-{ocr_layout.VERSION}-{digest}"
+    # Recognition language/model belongs to the OCR worker. A language change
+    # must reuse the published PNG render instead of forcing PDF rendering.
+    base = pdf_ocr.asset_profile()
+    return f"{base}-layout-{ocr_layout.VERSION}-{digest}"
 
 
 def generation_for(book):
@@ -462,7 +464,8 @@ def plan_images(rendered, current, progress, limit=20, target=500, overrides=Non
     count = min(256, len(tasks), max(1, math.ceil(sum(len(t["pages"]) for t in tasks) / target)))
     shards = shared.weighted_shards(tasks, count, weight=lambda t: len(t["pages"]),
                                    order=lambda t: (-len(t["pages"]), t["key"], t["pages"][0]["p"])) if tasks else []
-    return {"version": 1, "kind": "pdf-image-ocr-queue", "books": books,
+    return {"version": 1, "kind": "pdf-image-ocr-queue", "language": pdf_ocr.OCR_LANG,
+            "ocr_version": pdf_ocr.OCR_VERSION, "backend": pdf_ocr.OCR_BACKEND, "books": books,
             "target_pages_per_shard": target, "total_ocr_pages": sum(len(t["pages"]) for t in tasks),
             "shard_count": len(shards), "shard_ids": list(range(len(shards))), "shards": shards}
 
@@ -565,19 +568,23 @@ def assemble_book(book, saved, bundle):
     root = root_for(book["source_sha256"], book["key"], book["render_manifest"]["sha256"] + book["profile"])
     text_path = bundle / root / "ocr" / "book-text.json.gz"
     pdf_ocr.write_gzip_json(text_path, {"version": 2, "kind": "pdf-book-text", "complete": True,
-                                     "source_sha256": book["source_sha256"], "page_count": book["page_count"],
-                                     "offset_unit": "unicode-codepoint", "profile": book["profile"], "pages": texts})
+                                      "source_sha256": book["source_sha256"], "page_count": book["page_count"],
+                                      "offset_unit": "unicode-codepoint", "profile": book["profile"],
+                                      "language": pdf_ocr.OCR_LANG, "ocr_version": pdf_ocr.OCR_VERSION,
+                                      "pages": texts})
     manifest_path = bundle / root / "ocr-manifest.json"
     pdf_ocr.write_json(manifest_path, {
         "version": 1, "kind": "pdf-ocr", "complete": True, "profile": book["profile"],
-        "engine": pdf_ocr.OCR_ENGINE, "source_sha256": book["source_sha256"],
+        "engine": pdf_ocr.OCR_ENGINE, "language": pdf_ocr.OCR_LANG,
+        "ocr_version": pdf_ocr.OCR_VERSION, "source_sha256": book["source_sha256"],
         "source_bytes": book["source_bytes"], "source_revision": book.get("source_revision", ""),
         "classification": book["classification"], "page_count": book["page_count"],
         "dpi": pdf_ocr.OCR_DPI, "pages": pages, "book_text": metadata(text_path, bundle),
         **({"page_manifest": book["page_manifest"]} if book.get("page_manifest") else {}),
     })
     meta = metadata(manifest_path, bundle)
-    return {**base, "status": "ready", "stream": bool(book.get("page_manifest")), "ocr_manifest": meta["path"],
+    return {**base, "status": "ready", "language": pdf_ocr.OCR_LANG,
+            "ocr_version": pdf_ocr.OCR_VERSION, "stream": bool(book.get("page_manifest")), "ocr_manifest": meta["path"],
             "ocr_manifest_sha256": meta["sha256"], "ocr_manifest_bytes": meta["bytes"]}
 
 
