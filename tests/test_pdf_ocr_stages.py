@@ -186,6 +186,23 @@ class PdfOcrStagesTests(unittest.TestCase):
         self.assertEqual(stages.pending_render([item], {}, {item["key"]: old}), [item])
         self.assertEqual(stages.pending_render([item], {}, {item["key"]: {**old, "ocr_manifest": ""}}), [item])
 
+    def test_failed_books_do_not_starve_untouched_backlog(self):
+        failed = {**self.item(), "key": "repo\0a.pdf", "path": "a.pdf"}
+        untouched = {**self.item(), "key": "repo\0z.pdf", "path": "z.pdf"}
+        rendered = {failed["key"]: {**failed, "render_profile": stages.render_profile(), "status": "failed"}}
+        self.assertEqual([x["key"] for x in stages.pending_render(
+            [failed, untouched], rendered, {}, retry_failed=True)],
+            [untouched["key"], failed["key"]])
+
+        with patch.object(stages, "read_object", return_value=b"{}"), \
+                patch.object(stages, "validate_render", return_value={"pages": []}):
+            entries = {key: {**record, "status": "ready", "render_profile": "current", "profile": "p",
+                             "source_sha256": "a" * 64, "page_count": 0,
+                             "render_manifest": {"sha256": "b" * 64}}
+                       for key, record in [(failed["key"], failed), (untouched["key"], untouched)]}
+            queue = stages.plan_images(entries, {failed["key"]: {"status": "failed"}}, {}, limit=1)
+        self.assertEqual(queue["books"][0]["key"], untouched["key"])
+
     def test_native_only_pdf_builds_complete_book_without_png_or_ocr_worker(self):
         source = self.root / "native.pdf"
         source.write_bytes(b"%PDF-native")

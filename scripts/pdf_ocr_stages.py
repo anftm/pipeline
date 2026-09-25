@@ -184,7 +184,12 @@ def pending_render(records, rendered, ocr, retry_failed=False):
             if previous.get("status") == "failed" and not retry_failed:
                 continue
         pending.append(item)
-    return pending
+    # Repeatedly failed PDFs must not monopolize the first checkpoint and
+    # prevent untouched books from entering later batches.
+    return sorted(pending, key=lambda item: (
+        rendered.get(item["key"], {}).get("status") == "failed",
+        item["repo"], item["path"], item["source_kind"],
+    ))
 
 
 def render_book(item: dict, source: Path, bundle: Path) -> dict:
@@ -305,7 +310,8 @@ def plan_images(rendered, current, progress, limit=20, target=500, overrides=Non
     if limit < 1 or target < 1:
         raise ValueError("limit and target must be positive")
     books, tasks = [], []
-    for key, entry in sorted(rendered.items()):
+    for key, entry in sorted(rendered.items(), key=lambda pair: (
+            current.get(pair[0], {}).get("status") == "failed", pair[0])):
         if entry.get("status") not in {"ready", "skipped"}:
             continue
         options = layout_options(overrides or {}, key)
