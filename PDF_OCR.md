@@ -49,6 +49,11 @@ the shared `reader-assets` publication lock.
   keep their page progress and their already published Reader stream.
 - JSON/text and page images retain the existing Reader wire format. Turning on
   JXL is a render-workflow input, not an OCR-worker operation.
+- The published per-book text file is now strict `version: 2`, `kind:
+  pdf-book-text`, and `complete: true`. It contains every page, ordered text,
+  `text_spans`, normalized layout metadata, source SHA-256, page count, and
+  Unicode-codepoint offsets. Readers and the API reject the old v1
+  `pdf-ocr-book-text` file; source books are requeued until the v2 index exists.
 
 ## API quota
 
