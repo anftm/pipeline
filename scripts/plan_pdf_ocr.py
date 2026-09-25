@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -19,6 +20,27 @@ except ImportError:
     import pdf_assets
     import pdf_ocr
     import shared
+
+
+MAX_OCR_SHARDS = 20
+DEFAULT_OCR_TARGET_PAGES_PER_SHARD = 500
+
+
+def ocr_target_pages_per_shard() -> int:
+    value = os.environ.get("PDF_OCR_TARGET_PAGES_PER_SHARD", str(DEFAULT_OCR_TARGET_PAGES_PER_SHARD))
+    try:
+        return max(1, int(value))
+    except ValueError as exc:
+        raise ValueError("PDF_OCR_TARGET_PAGES_PER_SHARD must be a positive integer") from exc
+
+
+def recommended_ocr_shard_count(records: list[dict]) -> int:
+    """Choose enough book-level shards to amortize runner/model startup overhead."""
+    if not records:
+        return 0
+    total_pages = sum(max(1, int(item.get("page_count", 0))) for item in records)
+    target = ocr_target_pages_per_shard()
+    return max(1, min(MAX_OCR_SHARDS, len(records), math.ceil(total_pages / target)))
 
 
 def retry(operation, label: str):
@@ -69,10 +91,11 @@ def plan(records: list[dict], workers: int = 4, current: dict | None = None,
     with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
         selected = list(executor.map(inspect, records))
     ready = [item for item in selected if item.get("status") == "planned"]
-    shards = pdf_ocr_shards(ready, max(1, min(20, len(ready)))) if ready else []
+    shards = pdf_ocr_shards(ready, recommended_ocr_shard_count(ready)) if ready else []
     return {
         "version": 1, "kind": "pdf-ocr-queue", "profile": pdf_ocr.asset_profile(),
         "total_records": len(selected), "total_pages": sum(item["page_count"] for item in ready),
+        "target_pages_per_shard": ocr_target_pages_per_shard(),
         "shard_count": len(shards), "shard_ids": list(range(len(shards))),
         "failed": [item for item in selected if item.get("status") == "failed"],
         "shards": [{"index": index, "page_count": sum(x["page_count"] for x in shard),

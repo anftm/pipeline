@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from scripts import pdf_ocr
-from scripts.plan_pdf_ocr import pdf_ocr_shards
+from scripts.plan_pdf_ocr import pdf_ocr_shards, recommended_ocr_shard_count
 
 
 class PdfOcrContractTests(unittest.TestCase):
@@ -44,6 +44,16 @@ class PdfOcrContractTests(unittest.TestCase):
                          sorted(item["key"] for item in records))
         self.assertLessEqual(max(sum(item["page_count"] for item in shard) for shard in first)
                              - min(sum(item["page_count"] for item in shard) for shard in first), 100)
+
+    def test_recommended_shards_amortize_startup_for_page_weighted_queue(self):
+        records = [{"key": f"book-{index}", "page_count": pages}
+                   for index, pages in enumerate((557, 313, 302, 295, 280, 163, 107, 101, 89, 80,
+                                                  79, 70, 40, 40, 33, 27, 25, 24, 22, 17))]
+        self.assertEqual(recommended_ocr_shard_count(records), 6)
+
+    def test_recommended_shards_keep_large_book_as_one_record(self):
+        records = [{"key": "large", "page_count": 557}, {"key": "small", "page_count": 10}]
+        self.assertEqual(recommended_ocr_shard_count(records), 2)
 
     def test_manifest_rejects_non_object_paths(self):
         manifest = {"version": 1, "files": {"x": {
