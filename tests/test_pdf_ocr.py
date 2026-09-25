@@ -94,10 +94,9 @@ class PdfOcrContractTests(unittest.TestCase):
         result = subprocess.run(["python3", "-c", "from scripts import pdf_ocr"], cwd=root,
                                 env=invalid, capture_output=True, text=True)
         self.assertNotEqual(result.returncode, 0)
-        invalid_backend = {**os.environ, "PDF_OCR_LANG": "fa", "PDF_OCR_BACKEND": "rapidocr_onnxruntime"}
-        result = subprocess.run(["python3", "-c", "from scripts import pdf_ocr"], cwd=root,
-                                env=invalid_backend, capture_output=True, text=True)
-        self.assertNotEqual(result.returncode, 0)
+        automatic_fa = {**os.environ, "PDF_OCR_LANG": "fa", "PDF_OCR_BACKEND": "rapidocr_onnxruntime"}
+        output = subprocess.check_output(["python3", "-c", script], cwd=root, env=automatic_fa, text=True)
+        self.assertIn("paddle-onnxruntime", output)
 
     def test_rapidocr_result_uses_shared_block_contract(self):
         result = type("RapidResult", (), {
@@ -107,6 +106,19 @@ class PdfOcrContractTests(unittest.TestCase):
         blocks = pdf_ocr.normalize_rapid_result(result, 100, 100)
         self.assertEqual(blocks[0]["t"], "English")
         self.assertEqual(blocks[0]["b"], [0.0, 0.0, 0.5, 0.2])
+
+    def test_auto_language_detection_selects_per_book_backend(self):
+        cases = (
+            ("repo\0中国历史.pdf", "ch", "rapidocr_onnxruntime"),
+            ("repo\0Iran Persian تاریخ ایران.pdf", "fa", "paddle_onnxruntime"),
+            ("repo\0Arabic كتاب.pdf", "ar", "paddle_onnxruntime"),
+            ("repo\0한국어.pdf", "korean", "paddle_onnxruntime"),
+            ("repo\0English book.pdf", "en", "rapidocr_onnxruntime"),
+        )
+        for key, language, backend in cases:
+            with self.subTest(key=key):
+                self.assertEqual(pdf_ocr.detect_language(key), language)
+                self.assertEqual(pdf_ocr.book_ocr_config({"key": key}), (language, backend))
 
     def test_manifest_accepts_published_jxl_layout_from_separate_ocr_worker(self):
         current = pdf_ocr.asset_profile()
@@ -123,13 +135,11 @@ class PdfOcrContractTests(unittest.TestCase):
             pdf_ocr.validate_manifest({"version": 1, "files": {"book": {**entry, "profile": other + "-layout-"}}})
 
     def test_manifest_accepts_other_language_and_backend_profiles(self):
-        base = pdf_ocr.asset_profile()
-        for profile in (
-            base.replace("pp-ocrv6-medium", "pp-ocrv5-medium-lang-fa")
-                 .replace("-dpi-", "-backend-paddle-onnxruntime-dpi-"),
-            base.replace("pp-ocrv6-medium", "pp-ocrv6-medium-lang-en")
-                 .replace("-dpi-", "-backend-rapidocr-onnxruntime-dpi-"),
-        ):
+        profiles = (
+            "pdf-ocr-v1-pp-ocrv5-medium-lang-fa-backend-paddle-onnxruntime-dpi-300-webp-85-1800-native-48-0.9-maxpix-50000000-jxl-0-1.5-7",
+            "pdf-ocr-v1-pp-ocrv6-medium-lang-en-backend-rapidocr-onnxruntime-dpi-300-webp-85-1800-native-48-0.9-maxpix-50000000-jxl-0-1.5-7",
+        )
+        for profile in profiles:
             entry = {"status": "ready", "profile": profile, "source_sha256": "c" * 64,
                      "page_count": 1, "ocr_manifest": "objects/cc/" + "c" * 64 + "/" + "d" * 16 + "/ocr-manifest.json"}
             self.assertTrue(pdf_ocr.valid_published_profile(profile))
