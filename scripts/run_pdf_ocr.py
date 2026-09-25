@@ -20,6 +20,41 @@ except ImportError:
     import pdf_ocr
 
 
+def _bucket_retry_delay(error: HfHubHTTPError, attempt: int) -> int:
+    response = getattr(error, "response", None)
+    headers = getattr(response, "headers", {}) or {}
+    retry_after = headers.get("Retry-After") or headers.get("retry-after")
+    if retry_after:
+        try:
+            return max(0, min(300, int(float(retry_after))))
+        except (TypeError, ValueError):
+            pass
+    return min(300, 5 * (2 ** attempt))
+
+
+def _sync_bucket_with_retry(local_dir: str, bucket: str, token: str | None,
+                            max_attempts: int = 8) -> None:
+    """Upload immutable OCR objects without turning temporary Hub throttling into a failed book."""
+    for attempt in range(max_attempts):
+        try:
+            sync_bucket(local_dir, bucket, include=["objects/**"], token=token, quiet=False)
+            return
+        except HfHubHTTPError as exc:
+            status = getattr(exc.response, "status_code", None)
+            retryable = status is None or status == 429 or 500 <= status < 600
+            if not retryable or attempt + 1 == max_attempts:
+                raise
+            delay = _bucket_retry_delay(exc, attempt)
+        except (ConnectionError, OSError) as exc:
+            if attempt + 1 == max_attempts:
+                raise
+            delay = min(300, 5 * (2 ** attempt))
+        print(f"transient bucket sync error; retrying in {delay}s "
+              f"(attempt {attempt + 1}/{max_attempts})", flush=True)
+        time.sleep(delay)
+    raise RuntimeError("bucket sync retry limit reached")
+
+
 def source_path(item: dict) -> Path:
     for attempt in range(6):
         try:
@@ -53,8 +88,8 @@ def build_queue(queue_path: Path, shard: int, output: Path, sync_objects: bool =
             result = pdf_ocr.build_item(item, source_path(item), book)
             result["bundle_root"] = book.name
             if sync_objects and result.get("status") == "ready":
-                sync_bucket(str(book), "hf://buckets/vomebook/pdf-pages",
-                            token=os.environ.get("HF_TOKEN"), include=["objects/**"], quiet=False)
+                _sync_bucket_with_retry(
+                    str(book), "hf://buckets/vomebook/pdf-pages", os.environ.get("HF_TOKEN"))
         except Exception as exc:
             result = {**item, "status": "failed", "profile": pdf_ocr.asset_profile(),
                       "error": f"{type(exc).__name__}: {exc}"[:1000]}
