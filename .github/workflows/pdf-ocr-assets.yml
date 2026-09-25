@@ -87,7 +87,7 @@ jobs:
         if: always()
         with:
           name: pdf-image-ocr-results-${{ matrix.shard }}
-          path: output/pdf-ocr/bundle/results.json
+          path: output/pdf-ocr/bundle/results-*.json
           retention-days: 7
           if-no-files-found: warn
   publish:
@@ -117,9 +117,7 @@ jobs:
       - name: Save page progress and publish complete books
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: |
-          shopt -s nullglob
-          python scripts/pdf_ocr_stages.py publish-ocr --results output/pdf-ocr/results/*/results.json
+        run: python scripts/pdf_ocr_stages.py publish-ocr --results-dir output/pdf-ocr/results
       - name: Publish Reader sidecar to Pages
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}

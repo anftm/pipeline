@@ -203,7 +203,9 @@ def normalize_blocks(blocks, width: float, height: float) -> list[dict]:
         y1 = max(y0, min(1.0, float(block.get("y1", 0)) / height))
         output.append({"t": text, "b": [x0, y0, x1, y1],
                        "c": round(max(0.0, min(1.0, float(block.get("confidence", 1)))), 4),
-                       "s": block.get("source", "ocr")})
+                       "s": block.get("source", "ocr"),
+                       **({"q": [[max(0, min(1, x / width)), max(0, min(1, y / height))]
+                                 for x, y in block["polygon"]]} if block.get("polygon") else {})})
     output.sort(key=lambda item: (item["b"][1], item["b"][0]))
     return output
 
@@ -234,15 +236,26 @@ def normalize_ocr_result(result, width: int, height: int) -> list[dict]:
         raw = raw["res"]
     if not isinstance(raw, dict):
         raise RuntimeError("PP-OCRv6 returned an invalid result")
-    texts = raw.get("rec_texts") or raw.get("rec_text") or []
-    scores = raw.get("rec_scores") or raw.get("rec_scores") or []
-    polys = raw.get("rec_polys") or raw.get("dt_polys") or raw.get("rec_boxes") or []
+    def sequence(*names):
+        for name in names:
+            value = raw.get(name)
+            if hasattr(value, "tolist"):
+                value = value.tolist()
+            if value is not None and len(value):
+                return [value] if isinstance(value, str) else value
+        return []
+    texts = sequence("rec_texts", "rec_text")
+    scores = sequence("rec_scores")
+    polys = sequence("rec_polys", "dt_polys", "rec_boxes")
     blocks = []
     for index, text in enumerate(texts):
         text = clean_text(text)
         if not text:
             continue
         polygon = polys[index] if index < len(polys) else []
+        if len(polygon) == 4 and all(isinstance(v, (float, int)) for v in polygon):
+            x0, y0, x1, y1 = polygon
+            polygon = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
         points = []
         for point in polygon or []:
             if isinstance(point, (list, tuple)) and len(point) >= 2:
@@ -254,7 +267,7 @@ def normalize_ocr_result(result, width: int, height: int) -> list[dict]:
             x0 = y0 = x1 = y1 = 0
         confidence = scores[index] if index < len(scores) else 0.0
         blocks.append({"text": text, "x0": x0, "y0": y0, "x1": x1, "y1": y1,
-                       "confidence": confidence, "source": "ocr"})
+                       "confidence": confidence, "source": "ocr", "polygon": points})
     return normalize_blocks(blocks, width, height)
 
 
@@ -594,7 +607,8 @@ def validate_manifest(manifest: dict) -> dict:
             validate_ocr_object_path(entry["render_manifest"]["path"], "/render-manifest.json")
             validate_ocr_object_path(entry["page_manifest"]["path"], "/page-manifest.json")
         if entry.get("status") == "ready":
-            if entry.get("profile") not in {OCR_PROFILE, asset_profile()} or not re.fullmatch(r"[0-9a-f]{64}", str(entry.get("source_sha256", ""))):
+            if (entry.get("profile") not in {OCR_PROFILE, asset_profile()}
+                    and not str(entry.get("profile", "")).startswith(asset_profile() + "-layout-v1-")) or not re.fullmatch(r"[0-9a-f]{64}", str(entry.get("source_sha256", ""))):
                 raise ValueError("invalid PDF OCR ready entry")
             if not isinstance(entry.get("page_count"), int) or entry["page_count"] < 1:
                 raise ValueError("invalid PDF OCR page count")

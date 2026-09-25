@@ -19,11 +19,16 @@ on:
         description: Retry failed rendering for unchanged sources
         default: true
         type: boolean
+      recover_run:
+        description: Publish existing render artifacts from this main-branch render run (no rendering)
+        default: ""
+        type: string
   schedule:
     - cron: "13 * * * *"
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: pdf-render-inputs
@@ -48,11 +53,13 @@ jobs:
       - run: pip install -r scripts/requirements.txt
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends poppler-utils
       - name: Fetch source metadata
+        if: inputs.recover_run == ''
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           FORCE_SYNC: "true"
         run: python scripts/fetch_and_parse.py
       - name: Plan PNG rendering without a PDF size threshold
+        if: inputs.recover_run == ''
         id: plan
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -68,13 +75,14 @@ jobs:
           echo "shard_count=$(jq -r '.shard_count' output/pdf-ocr/queue.json)" >> "$GITHUB_OUTPUT"
           echo "shard_ids=$(jq -c '.shard_ids' output/pdf-ocr/queue.json)" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v7
+        if: inputs.recover_run == ''
         with:
           name: pdf-render-queue
           path: output/pdf-ocr/queue.json
           retention-days: 7
   build:
     needs: plan
-    if: needs.plan.outputs.shard_count != '0'
+    if: inputs.recover_run == '' && needs.plan.outputs.shard_count != '0'
     runs-on: ubuntu-24.04
     timeout-minutes: 350
     strategy:
@@ -106,7 +114,7 @@ jobs:
         if: always()
         with:
           name: pdf-render-results-${{ matrix.shard }}
-          path: output/pdf-ocr/bundle/results.json
+          path: output/pdf-ocr/bundle/results-*.json
           retention-days: 7
           if-no-files-found: warn
   publish:
@@ -124,21 +132,32 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install -r scripts/requirements.txt
+      - name: Validate recovery run identity
+        if: inputs.recover_run != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RECOVER_RUN: ${{ inputs.recover_run }}
+        run: |
+          [[ "$RECOVER_RUN" =~ ^[0-9]+$ ]] || exit 1
+          gh api "repos/${{ github.repository }}/actions/runs/$RECOVER_RUN" > "$RUNNER_TEMP/recover-run.json"
+          jq -e '.head_branch == "main" and .path == ".github/workflows/pdf-render-inputs.yml" and .status == "completed"' "$RUNNER_TEMP/recover-run.json"
       - uses: actions/download-artifact@v8
         with:
           name: pdf-render-queue
           path: output/pdf-ocr
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.recover_run || github.run_id }}
       - uses: actions/download-artifact@v8
-        if: needs.build.result != 'skipped'
+        if: needs.build.result != 'skipped' || inputs.recover_run != ''
         with:
           pattern: pdf-render-results-*
           path: output/pdf-ocr/results
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.recover_run || github.run_id }}
       - name: Publish complete image inputs and Reader streams
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: |
-          shopt -s nullglob
-          python scripts/pdf_ocr_stages.py publish-render --results output/pdf-ocr/results/*/results.json
+        run: python scripts/pdf_ocr_stages.py publish-render --results-dir output/pdf-ocr/results
       - name: Publish Reader sidecar to Pages
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}

@@ -238,6 +238,28 @@ class PdfOcrStagesTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "generation"):
             stages.collect_progress(queue, [{"key": result["key"], "generation": "old", "pages": []}])
 
+    def test_result_discovery_handles_one_flat_artifact_and_multiple_nested_artifacts(self):
+        results = self.root / "results"
+        results.mkdir()
+        flat = results / "results-0.json"
+        flat.write_text('{"version":1,"results":[]}')
+        nested = results / "artifact-1" / "results-1.json"
+        nested.parent.mkdir()
+        nested.write_text('{"version":1,"results":[]}')
+        self.assertEqual(set(stages.result_paths([], results, True)), {flat, nested})
+        with self.assertRaisesRegex(ValueError, "no result artifacts"):
+            stages.result_paths([], self.root / "missing", True)
+
+    def test_layout_change_invalidates_saved_recognition_not_rendered_png(self):
+        entry = self.render_fixture()
+        with patch.object(stages, "read_object", side_effect=self.read):
+            first = stages.plan_images({entry["key"]: entry}, {}, {})
+            changed = stages.plan_images({entry["key"]: entry}, {}, {}, overrides={entry["key"]: {
+                "default": {"writing_mode": "vertical-rl"}, "pages": {"1": {"rotation": 90}}}})
+        self.assertNotEqual(first["books"][0]["profile"], changed["books"][0]["profile"])
+        self.assertNotEqual(stages.generation_for(first["books"][0]), stages.generation_for(changed["books"][0]))
+        self.assertEqual(first["books"][0]["render_manifest"], changed["books"][0]["render_manifest"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -27,6 +27,10 @@ the shared `reader-assets` publication lock.
 - Upload objects first, then atomically publish rendering metadata and the
   Reader stream mapping. OCR state `rendered` makes that stream survive other
   publishers rebuilding the sidecar. It does not advertise an OCR text layer.
+- Result discovery handles both flat single-artifact downloads and nested
+  multi-artifact downloads; a planned run with no result files fails explicitly.
+  `recover_run` republishes validated artifacts from a completed main-branch
+  render run without recomputing or reuploading its PNG images.
 
 ## Recognition
 
@@ -59,12 +63,64 @@ per-page `HfFileSystem` metadata lookups. These changes reduce API requests;
 they do not guarantee zero rate limits, particularly when other workflows use
 the same account. Legacy large-PDF publishers still have separate upload code.
 
+## Reading order and search mapping
+
+`ocr_layout.py` emits `text`, `blocks`, `raw_blocks`, `text_spans` and `layout`.
+Tall text columns can be ordered vertically (right column first by default);
+horizontal columns use whitespace cuts, with separated spanning headings
+handled before the column body. These geometric rules are conservative
+heuristics, not a trained document-layout classifier. Flags in `layout.review`
+indicate assumed directions and unverified within-block character order.
+
+`state/pdf_ocr_layout.json` provides book/page overrides keyed by the same
+`repo\u0000path` identifier as the manifests. For example:
+
+```json
+{
+  "namespace/dataset\u0000old-book.pdf": {
+    "default": {"writing_mode": "vertical-rl", "join_soft_lines": true},
+    "pages": {
+      "1": {"writing_mode": "horizontal-rtl"},
+      "2": {"rotation": 90},
+      "3": {"regions": [
+        {"box": [0, 0, 1, 0.15], "writing_mode": "horizontal-ltr"},
+        {"box": [0, 0.15, 1, 1], "writing_mode": "vertical-rl"}
+      ]}
+    }
+  }
+}
+```
+
+Rotation is clockwise, applied to the PNG before recognition. Region boxes
+are normalized coordinates on that oriented image; emitted boxes/polygons
+are mapped back to the original PNG. Automatic 90-degree page orientation is
+not enabled. Right-to-left overrides order boxes, never blindly reverse the
+characters inside a recognized string.
+
+Soft-line joining requires compatible geometry and CJK characters on both
+sides; punctuation is never removed. Region/paragraph gaps and indentation
+retain separators. `join_soft_lines: false` disables joining where a book's
+layout is ambiguous. All joins are recorded in `layout.boundaries`.
+
+Text offsets use **Unicode code points**, not JavaScript UTF-16 code units.
+Each span maps a character range to a real OCR block/polygon, with
+`precision: block`. These are not fabricated per-character boxes. A Reader
+must consume that offset contract before claiming exact character highlights;
+the existing Reader implementation is outside this pipeline change.
+
+Layout version/options participate in the OCR identity and progress generation,
+so changing them reruns recognition from saved PNGs without rerendering PDFs.
+Synthetic vertical/RTL/multicolumn fixtures verify ordering and punctuation;
+actual old-book recognition accuracy still requires a representative labeled
+scan set. The live end-to-end smoke validates the transfer/recognition/publication
+chain, not all layout classes.
+
 ## Verification
 
 Fast, offline, no model download:
 
 ```sh
-python3 -m unittest -v tests/test_pdf_ocr.py tests/test_run_pdf_ocr.py tests/test_pdf_ocr_stages.py tests/test_reader_asset_concurrency.py
+python3 -m unittest -v tests/test_pdf_ocr.py tests/test_run_pdf_ocr.py tests/test_pdf_ocr_stages.py tests/test_ocr_layout.py tests/test_reader_asset_concurrency.py
 ```
 
 Explicit local Poppler integration (Pillow and `pdftocairo`/`pdftotext` required):
