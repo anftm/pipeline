@@ -19,7 +19,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: pdf-ocr-assets
+  group: pdf-image-ocr-assets
   cancel-in-progress: false
   queue: max
 

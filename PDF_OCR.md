@@ -5,6 +5,9 @@ for `Build PDF OCR Assets` (`pdf-ocr-assets.yml`). The latter also runs on rende
 workflow completion and can be dispatched independently to drain its backlog.
 The existing large-PDF WebP worker is not the supplier of OCR images: its
 100 MiB policy and lossy delivery images are unsuitable for that purpose.
+The image OCR concurrency group is `pdf-image-ocr-assets`; legacy monolithic
+runs may finish independently. New rendering/OCR publication jobs both use
+the shared `reader-assets` publication lock.
 
 ## Rendering
 
