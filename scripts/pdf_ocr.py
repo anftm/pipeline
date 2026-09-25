@@ -105,15 +105,19 @@ def asset_profile() -> str:
 
 
 def valid_published_profile(profile: str) -> bool:
-    if profile == OCR_PROFILE:
-        return True
     candidate = str(profile or "")
     base, separator, layout = candidate.partition("-layout-")
     if separator and not re.fullmatch(r"v1-[0-9a-f]{16}", layout):
         return False
-    prefix = ocr_profile_without_jxl(asset_profile())
-    return base in {f"{prefix}-jxl-{enabled}-{JXL_DISTANCE:g}-{JXL_EFFORT}"
-                    for enabled in (0, 1)}
+    return bool(re.fullmatch(
+        r"pdf-ocr-v1-pp-ocrv[56]-medium"
+        r"(?:-lang-[a-z0-9_]+)?"
+        r"(?:-backend-(?:paddle-onnxruntime|rapidocr-onnxruntime))?"
+        r"-dpi-[0-9]+-webp-[0-9]+-[0-9]+"
+        r"-native-[0-9]+(?:\.[0-9]+)?-[0-9]+(?:\.[0-9]+)?"
+        r"-maxpix-[0-9]+-jxl-[01]-[0-9]+(?:\.[0-9]+)?-[0-9]+",
+        base,
+    ))
 
 
 def ocr_profile_without_jxl(profile: str) -> str:

@@ -122,6 +122,19 @@ class PdfOcrContractTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             pdf_ocr.validate_manifest({"version": 1, "files": {"book": {**entry, "profile": other + "-layout-"}}})
 
+    def test_manifest_accepts_other_language_and_backend_profiles(self):
+        base = pdf_ocr.asset_profile()
+        for profile in (
+            base.replace("pp-ocrv6-medium", "pp-ocrv5-medium-lang-fa")
+                 .replace("-dpi-", "-backend-paddle-onnxruntime-dpi-"),
+            base.replace("pp-ocrv6-medium", "pp-ocrv6-medium-lang-en")
+                 .replace("-dpi-", "-backend-rapidocr-onnxruntime-dpi-"),
+        ):
+            entry = {"status": "ready", "profile": profile, "source_sha256": "c" * 64,
+                     "page_count": 1, "ocr_manifest": "objects/cc/" + "c" * 64 + "/" + "d" * 16 + "/ocr-manifest.json"}
+            self.assertTrue(pdf_ocr.valid_published_profile(profile))
+            self.assertIsNotNone(pdf_ocr.validate_manifest({"version": 1, "files": {"book": entry}}))
+
 
 if __name__ == "__main__":
     unittest.main()
