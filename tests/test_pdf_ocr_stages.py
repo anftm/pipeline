@@ -243,6 +243,16 @@ class PdfOcrStagesTests(unittest.TestCase):
         self.assertEqual(render["jobs"]["publish"]["concurrency"]["group"],
                          ocr["jobs"]["publish"]["concurrency"]["group"])
 
+    def test_scheduled_render_drains_pending_in_jxl_batches(self):
+        root = Path(__file__).resolve().parents[1]
+        text = (root / ".github/workflows/pdf-render-inputs.yml").read_text()
+        workflow = yaml.safe_load(text)
+        inputs = workflow[True]["workflow_dispatch"]["inputs"]
+        self.assertEqual(inputs["limit"]["default"], "100")
+        self.assertTrue(inputs["generate_jxl"]["default"])
+        self.assertIn("github.event_name == 'schedule'", workflow["env"]["PDF_JXL_ENABLED"])
+        self.assertEqual(workflow["jobs"]["plan"]["steps"][5]["env"]["CHECKPOINT"], "${{ inputs.checkpoint || '0' }}")
+
     def test_render_registry_stream_and_pending_ocr_are_committed_together(self):
         result = self.render_fixture()
         sidecar_path = self.root / "reader.json.gz"

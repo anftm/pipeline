@@ -5,7 +5,7 @@ on:
     inputs:
       limit:
         description: Maximum pending PDFs inspected (all sizes)
-        default: "20"
+        default: "100"
         type: string
       checkpoint:
         description: Checkpoint in the pending PDF queue
@@ -13,7 +13,7 @@ on:
         type: string
       generate_jxl:
         description: Encode JXL directly from the high quality PNG as well as WebP
-        default: false
+        default: true
         type: boolean
       retry_failed:
         description: Retry failed rendering for unchanged sources
@@ -36,7 +36,7 @@ concurrency:
   queue: max
 
 env:
-  PDF_JXL_ENABLED: ${{ inputs.generate_jxl || 'false' }}
+  PDF_JXL_ENABLED: ${{ github.event_name == 'schedule' || inputs.generate_jxl == true }}
 
 jobs:
   plan:
@@ -63,7 +63,7 @@ jobs:
         id: plan
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          LIMIT: ${{ inputs.limit || '20' }}
+          LIMIT: ${{ inputs.limit || '100' }}
           CHECKPOINT: ${{ inputs.checkpoint || '0' }}
           RETRY_FAILED: ${{ github.event_name == 'schedule' || inputs.retry_failed }}
         run: |
