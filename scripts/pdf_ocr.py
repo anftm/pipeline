@@ -51,6 +51,7 @@ OCR_OBJECT_PATH_RE = re.compile(
     r"^objects/[0-9a-f]{2}/[0-9a-f]{64}/[0-9a-f]{16}/"
     r"(?:ocr-manifest\.json|page-manifest\.json|"
     r"pages/page-[0-9]{6}\.(?:webp|jxl)|"
+    r"ocr-input/page-[0-9]{6}\.png|"
     r"ocr/page-[0-9]{6}\.json\.gz|ocr/book-text\.json\.gz)$"
 )
 
@@ -415,7 +416,9 @@ def build_item(item: dict, source: Path, bundle: Path) -> dict:
             for number, old in enumerate(old_pages, 1):
                 if old.get("p") != number:
                     raise ValueError("invalid previous OCR page order")
-                for field, suffix in (("o", ".json.gz"), ("w", ".webp")):
+                for field, suffix in (("o", ".json.gz"), ("w", ".webp"), ("i", ".png")):
+                    if field not in old:
+                        continue
                     validate_ocr_object_path(old.get(field))
                     if not old[field].endswith(f"page-{number:06d}{suffix}"):
                         raise ValueError("invalid previous OCR page path")
@@ -452,6 +455,7 @@ def build_item(item: dict, source: Path, bundle: Path) -> dict:
             native_chars = int(probe.get("page_chars", [0] * pages)[page - 1])
             source_kind = "native" if native_chars >= MIN_NATIVE_PAGE_CHARS else "ocr"
             webp_path = None
+            input_png_path = None
             if probe["classification"] != "native-text":
                 rendered, width, height = render_page(source, page, temp)
                 if source_kind == "native":
@@ -468,6 +472,14 @@ def build_item(item: dict, source: Path, bundle: Path) -> dict:
                     webp_path = bundle / root / "pages" / f"page-{page:06d}.webp"
                     webp_path.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copyfile(temp / f"page-{page:06d}.webp", webp_path)
+                if source_kind == "ocr":
+                    # Keep the high-quality PNG used by PaddleOCR so a later
+                    # OCR-only workflow can consume it without downloading or
+                    # rendering the source PDF again.  WebP remains the
+                    # Reader delivery image; PNG is an internal OCR input.
+                    input_png_path = bundle / root / "ocr-input" / f"page-{page:06d}.png"
+                    input_png_path.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(rendered, input_png_path)
             else:
                 native = native_page(source, page)
                 width, height, blocks = native["width"], native["height"], native["blocks"]
@@ -491,6 +503,10 @@ def build_item(item: dict, source: Path, bundle: Path) -> dict:
                     jxl_sha, jxl_bytes = encode_jxl(rendered, jxl_path)
                     page_entry.update({"j": (root / "pages" / jxl_path.name).as_posix(),
                                        "js": jxl_sha, "jb": jxl_bytes})
+            if input_png_path:
+                input_sha, input_bytes = shared.hash_file(input_png_path)
+                page_entry.update({"i": (root / "ocr-input" / input_png_path.name).as_posix(),
+                                   "is": input_sha, "ib": input_bytes})
             page_results.append(page_entry)
             for suffix in (".png", ".webp"):
                 (temp / f"page-{page:06d}{suffix}").unlink(missing_ok=True)

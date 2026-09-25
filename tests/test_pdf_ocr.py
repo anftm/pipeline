@@ -63,6 +63,10 @@ class PdfOcrContractTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             pdf_ocr.validate_manifest(manifest)
 
+    def test_manifest_accepts_persisted_ocr_input_png(self):
+        path = "objects/aa/" + "a" * 64 + "/" + "b" * 16 + "/ocr-input/page-000001.png"
+        self.assertEqual(pdf_ocr.validate_ocr_object_path(path, ".png"), path)
+
     def test_jxl_is_part_of_the_profile_identity(self):
         self.assertIn("-jxl-", pdf_ocr.asset_profile())
 
