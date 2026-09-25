@@ -28,9 +28,18 @@ the shared `reader-assets` publication lock.
   Reader stream mapping. OCR state `rendered` makes that stream survive other
   publishers rebuilding the sidecar. It does not advertise an OCR text layer.
 - Result discovery handles both flat single-artifact downloads and nested
-  multi-artifact downloads; a planned run with no result files fails explicitly.
+  multi-artifact downloads. Legacy runs with no result files fail explicitly;
+  range runs record incomplete books and retry missing ranges on the next run.
   `recover_run` republishes validated artifacts from a completed main-branch
   render run without recomputing or reuploading its PNG images.
+- Books over 500 pages are scheduled in 250-page ranges; smaller books remain
+  single tasks. Six render workers may run concurrently. Each range uploads
+  its immutable pages and checksummed range descriptor before the worker writes
+  its result artifact. `pdf_render_progress.json` tracks completed ranges by
+  source SHA, profile and book identity. Later batches validate and reuse those
+  descriptors, rerendering only missing/invalid ranges. A whole-book manifest
+  and Reader mapping are published only when all ranges form a contiguous,
+  verified book. Partial books remain pending without exposing partial streams.
 
 ## Recognition
 

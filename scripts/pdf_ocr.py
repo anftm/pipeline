@@ -50,6 +50,7 @@ MI = 1024 * 1024
 OCR_OBJECT_PATH_RE = re.compile(
     r"^objects/[0-9a-f]{2}/[0-9a-f]{64}/[0-9a-f]{16}/"
     r"(?:ocr-manifest\.json|page-manifest\.json|render-manifest\.json|"
+    r"render-range-[0-9]{6}-[0-9]{6}\.json|"
     r"pages/page-[0-9]{6}\.(?:webp|jxl)|"
     r"ocr-input/page-[0-9]{6}\.png|"
     r"ocr/page-[0-9]{6}\.json\.gz|ocr/book-text\.json\.gz)$"

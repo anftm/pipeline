@@ -33,6 +33,9 @@ except ImportError:
 
 RENDER_REGISTRY = "pdf_render_manifest.json"
 PROGRESS_REGISTRY = "pdf_ocr_progress.json"
+RENDER_PROGRESS_REGISTRY = "pdf_render_progress.json"
+RENDER_RANGE_PAGES = 250
+RENDER_RANGE_THRESHOLD = 500
 BUCKET = "hf://buckets/vomebook/pdf-pages"
 
 
@@ -192,11 +195,75 @@ def pending_render(records, rendered, ocr, retry_failed=False):
     ))
 
 
+def range_id(start, end):
+    return f"{start:06d}-{end:06d}"
+
+
+def render_ranges(book):
+    count = book["page_count"]
+    size = RENDER_RANGE_PAGES if count > RENDER_RANGE_THRESHOLD else count
+    return [(start, min(start + size - 1, count)) for start in range(1, count + 1, size)]
+
+
+def range_identity(book):
+    return {field: book[field] for field in ("key", "source_sha256", "source_revision",
+                                           "source_kind", "render_profile", "page_count")}
+
+
+def validate_range(book, start, end, descriptor):
+    name = f"/render-range-{range_id(start, end)}.json"
+    root = root_for(book["source_sha256"], book["key"], book["render_profile"])
+    if descriptor.get("path") != (root / name.lstrip("/")).as_posix():
+        raise ValueError("render range path mismatch")
+    payload = json.loads(read_object(descriptor, name))
+    if (payload.get("version") != 1 or payload.get("kind") != "pdf-render-range"
+            or any(payload.get(field) != value for field, value in range_identity(book).items())
+            or payload.get("start") != start or payload.get("end") != end):
+        raise ValueError("render range identity mismatch")
+    pages = payload.get("pages")
+    if not isinstance(pages, list) or [p.get("p") for p in pages] != list(range(start, end + 1)):
+        raise ValueError("incomplete render range")
+    validate_render({**book, "page_manifest": None}, {**book, "version": 1, "kind": "pdf-render",
+                                                    "complete": True, "page_manifest": None, "pages": pages,
+                                                    "classification": book["probe"]["classification"]},
+                    page_numbers=range(start, end + 1))
+    return pages
+
+
+def plan_render_ranges(queue, progress):
+    books = [{**item, "render_profile": render_profile()}
+             for shard in queue["shards"] for item in shard["records"]]
+    tasks, saved = [], {}
+    for book in books:
+        prior = progress.get(book["key"], {})
+        existing = prior.get("ranges", {}) if all(prior.get(k) == v for k, v in range_identity(book).items()) else {}
+        for start, end in render_ranges(book):
+            key = range_id(start, end)
+            descriptor = existing.get(key)
+            if descriptor:
+                try:
+                    validate_range(book, start, end, descriptor)
+                    saved.setdefault(book["key"], {})[key] = descriptor
+                    continue
+                except (ValueError, KeyError, TypeError, OSError, json.JSONDecodeError):
+                    pass
+            tasks.append({**book, "start": start, "end": end})
+    count = min(256, len(tasks), max(1, math.ceil(sum(t["end"] - t["start"] + 1 for t in tasks) / 500)))
+    shards = shared.weighted_shards(tasks, count, weight=lambda t: t["end"] - t["start"] + 1,
+                                    order=lambda t: (-(t["end"] - t["start"] + 1), t["key"], t["start"])) if tasks else []
+    return {**queue, "books": books, "saved_ranges": saved,
+            "shard_count": len(shards), "shard_ids": list(range(len(shards))),
+            "shards": [{"index": i, "page_count": sum(t["end"] - t["start"] + 1 for t in shard),
+                        "records": shard} for i, shard in enumerate(shards)]}
+
+
 def render_book(item: dict, source: Path, bundle: Path) -> dict:
     source_sha, source_bytes = shared.hash_file(source)
     if item.get("source_sha256") and item["source_sha256"] != source_sha:
         raise ValueError("PDF source changed after planning")
     probe = item.get("probe") or pdf_ocr.probe_pdf(source)
+    if "start" in item and not 1 <= item["start"] <= item["end"] <= probe["page_count"]:
+        raise ValueError("invalid render page range")
     base = {**public_item(item), "source_sha256": source_sha, "source_bytes": source_bytes,
             "render_profile": render_profile(), "profile": pdf_ocr.asset_profile(),
             "page_count": probe["page_count"], "classification": probe["classification"]}
@@ -204,7 +271,7 @@ def render_book(item: dict, source: Path, bundle: Path) -> dict:
     bundle.mkdir(parents=True, exist_ok=True)
     pages = []
     with tempfile.TemporaryDirectory(dir=bundle) as temp:
-        for number in range(1, probe["page_count"] + 1):
+        for number in range(item.get("start", 1), item.get("end", probe["page_count"]) + 1):
             if probe["classification"] == "native-text":
                 text = pdf_ocr.native_page(source, number)
                 payload = pdf_ocr.page_payload(number, text["width"], text["height"], text["blocks"], "native")
@@ -245,6 +312,15 @@ def render_book(item: dict, source: Path, bundle: Path) -> dict:
                              "text_spans": payload["text_spans"], "layout": payload["layout"]})
             pages.append(page)
             print(f"rendered {number}/{probe['page_count']}: {item['key']}", flush=True)
+    if "start" in item:
+        start, end = item["start"], item["end"]
+        if not 1 <= start <= end <= probe["page_count"] or len(pages) != end - start + 1:
+            raise ValueError("invalid render page range")
+        descriptor = bundle / root / f"render-range-{range_id(start, end)}.json"
+        pdf_ocr.write_json(descriptor, {**range_identity(base), "version": 1, "kind": "pdf-render-range",
+                                        "start": start, "end": end, "pages": pages})
+        return {**range_identity(base), "status": "range", "start": start, "end": end,
+                "descriptor": metadata(descriptor, bundle)}
     image_pages = [{"page": p["p"], **page_meta(p, "w")} for p in pages if "w" in p]
     page_manifest_meta = None
     if image_pages:
@@ -260,7 +336,7 @@ def render_book(item: dict, source: Path, bundle: Path) -> dict:
             "page_manifest": page_manifest_meta, "ocr_pages": sum(p["source"] == "ocr" for p in pages)}
 
 
-def validate_render(item, manifest):
+def validate_render(item, manifest, page_numbers=None):
     if (manifest.get("version") != 1 or manifest.get("kind") != "pdf-render"
             or manifest.get("complete") is not True):
         raise ValueError("invalid render manifest")
@@ -268,21 +344,66 @@ def validate_render(item, manifest):
         if manifest.get(field) != item.get(field):
             raise ValueError(f"render identity mismatch: {field}")
     pages = manifest.get("pages", [])
-    if len(pages) != item["page_count"] or [p["p"] for p in pages] != list(range(1, item["page_count"] + 1)):
+    expected = list(page_numbers) if page_numbers is not None else list(range(1, item["page_count"] + 1))
+    if len(pages) != len(expected) or [p["p"] for p in pages] != expected:
         raise ValueError("incomplete render page sequence")
+    root = root_for(item["source_sha256"], item["key"], item["render_profile"])
     for p in pages:
         if p.get("source") not in {"native", "ocr"} or p["width"] <= 0 or p["height"] <= 0:
             raise ValueError("invalid rendered page")
         for field, suffix in (("i", ".png"), ("w", ".webp"), ("j", ".jxl"), ("o", ".json.gz")):
             if field in {"i", "w"} and manifest["classification"] == "native-text":
                 continue
-            if field == "j" and field not in p or field == "o" and p["source"] != "native":
+            if field == "j" and manifest["classification"] == "native-text":
+                continue
+            if field == "j" and "-jxl-1-" not in item["render_profile"]:
+                continue
+            if field == "o" and p["source"] != "native":
                 continue
             meta = page_meta(p, field)
             pdf_ocr.validate_ocr_object_path(meta["path"], f"page-{p['p']:06d}{suffix}")
+            folder = {"i": "ocr-input", "w": "pages", "j": "pages", "o": "ocr"}[field]
+            if meta["path"] != (root / folder / f"page-{p['p']:06d}{suffix}").as_posix():
+                raise ValueError("rendered page object outside book profile")
             if meta["bytes"] < 1 or len(meta["sha256"]) != 64:
                 raise ValueError("invalid rendered object metadata")
     return manifest
+
+
+def merge_render_ranges(old, new):
+    identity = range_identity(new)
+    ranges = dict(old.get("ranges", {})) if isinstance(old, dict) and all(
+        old.get(key) == value for key, value in identity.items()) else {}
+    ranges.update(new["ranges"])
+    return {**identity, "ranges": ranges}
+
+
+def assemble_render_book(book, descriptors, bundle):
+    pages = []
+    for start, end in render_ranges(book):
+        descriptor = descriptors.get(range_id(start, end))
+        if not descriptor:
+            return None
+        pages.extend(validate_range(book, start, end, descriptor))
+    root = root_for(book["source_sha256"], book["key"], book["render_profile"])
+    image_pages = [{"page": p["p"], **page_meta(p, "w")} for p in pages if "w" in p]
+    page_manifest_meta = None
+    if image_pages:
+        page_manifest = bundle / root / "page-manifest.json"
+        page_manifest.parent.mkdir(parents=True, exist_ok=True)
+        pdf_ocr.write_json(page_manifest, pdf_assets.compact_page_manifest(
+            book["source_sha256"], book["render_profile"], image_pages, manifest_dir=root))
+        page_manifest_meta = {**metadata(page_manifest, bundle), "version": pdf_assets.PAGE_MANIFEST_VERSION}
+    base = {**public_item(book), "classification": book["probe"]["classification"],
+            "render_profile": book["render_profile"], "profile": book["profile"]}
+    manifest = {**base, "version": 1, "kind": "pdf-render", "complete": True,
+                "pages": pages, "page_manifest": page_manifest_meta}
+    output = bundle / root / "render-manifest.json"
+    pdf_ocr.write_json(output, manifest)
+    result = {**base, "status": "ready", "render_manifest": metadata(output, bundle),
+              "page_manifest": page_manifest_meta, "ocr_pages": sum(p["source"] == "ocr" for p in pages)}
+    validate_render(result, manifest)
+    return result
 
 
 def recognition_identity(entry, options):
@@ -479,6 +600,29 @@ def result_paths(paths, directory, expected=False):
     return sorted(found)
 
 
+def publish_legacy_render(queue, results, api, repo):
+    planned = {item["key"]: item for shard in queue["shards"] for item in shard["records"]}
+    for result in results:
+        item = planned.get(result["key"])
+        if not item or result.get("source_sha256") != item.get("source_sha256"):
+            raise ValueError("render result does not match source queue")
+        if result.get("status") == "ready":
+            manifest = validate_render(result, json.loads(read_object(result["render_manifest"], "/render-manifest.json")))
+            if result.get("page_manifest"):
+                images = json.loads(read_object(result["page_manifest"], "/page-manifest.json"))
+                if images.get("page_count") != manifest["page_count"]:
+                    raise ValueError("render page manifest count mismatch")
+    results.extend({**public_item(x), "render_profile": render_profile()} for x in queue.get("failed", []))
+    seen = {r["key"] for r in results}
+    for item in planned.values():
+        if item["key"] not in seen:
+            results.append({**public_item(item), "render_profile": render_profile(),
+                            "status": "failed", "error": "render worker result missing"})
+    save_registry(api, repo, RENDER_REGISTRY, {r["key"]: r for r in results}, publish_streams=True)
+    print(f"render publication: {len(results)} results, "
+          f"{sum(r.get('status') == 'ready' for r in results)} ready", flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("stage", choices=("plan-render", "render", "publish-render", "plan-ocr", "ocr", "publish-ocr"))
@@ -510,6 +654,8 @@ def main():
             selected = pdf_ocr.queue(records, args.limit, args.checkpoint)
             queue = plan_pdf_ocr.plan(selected)
             queue["kind"] = "pdf-render-queue"
+            render_progress = load_registry(api, repo, RENDER_PROGRESS_REGISTRY, revision)["files"]
+            queue = plan_render_ranges(queue, render_progress)
         else:
             progress = load_registry(api, repo, PROGRESS_REGISTRY, revision)["files"]
             overrides = json.loads(args.layout_overrides.read_text(encoding="utf-8")) if args.layout_overrides.is_file() else {}
@@ -521,30 +667,52 @@ def main():
         return 0
     if args.stage == "publish-render":
         queue = json.loads(args.queue.read_text(encoding="utf-8"))
-        results = read_results(result_paths(args.results, args.results_dir, bool(queue["shards"])))
-        planned = {item["key"]: item for shard in queue["shards"] for item in shard["records"]}
+        results = read_results(result_paths(args.results, args.results_dir, False))
+        if "books" not in queue:
+            if queue["shards"] and not results:
+                raise ValueError("planned workers but no result artifacts found; refusing empty publication")
+            publish_legacy_render(queue, results, api, repo)
+            return 0
+        planned = {(item["key"], item["start"], item["end"]): item
+                   for shard in queue["shards"] for item in shard["records"]}
+        books = {item["key"]: item for item in queue["books"]}
+        completed_ranges = {key: dict(value) for key, value in queue.get("saved_ranges", {}).items()}
         for result in results:
-            item = planned.get(result["key"])
-            if not item or result.get("source_sha256") != item.get("source_sha256"):
+            item = planned.get((result["key"], result.get("start"), result.get("end")))
+            if not item or any(result.get(field) != value for field, value in range_identity(item).items()):
                 raise ValueError("render result does not match source queue")
-            if result.get("status") == "ready":
-                manifest = validate_render(result, json.loads(read_object(result["render_manifest"], "/render-manifest.json")))
-                # Check uploaded stage descriptors, not just a successful job flag.
-                if result.get("page_manifest"):
-                    images = json.loads(read_object(result["page_manifest"], "/page-manifest.json"))
-                    if images.get("page_count") != manifest["page_count"]:
-                        raise ValueError("render page manifest count mismatch")
-        results.extend({**public_item(x), "render_profile": render_profile()} for x in queue.get("failed", []))
-        # Successful rendering metadata is published only after upload completes.
-        seen = {r["key"] for r in results}
-        for shard in queue["shards"]:
-            for item in shard["records"]:
-                if item["key"] not in seen:
-                    results.append({**public_item(item), "render_profile": render_profile(),
-                                    "status": "failed", "error": "render worker result missing"})
-        save_registry(api, repo, RENDER_REGISTRY, {r["key"]: r for r in results}, publish_streams=True)
-        print(f"render publication: {len(results)} results, "
-              f"{sum(r.get('status') == 'ready' for r in results)} ready", flush=True)
+            if result.get("status") == "range":
+                start, end = item["start"], item["end"]
+                validate_range(item, start, end, result["descriptor"])
+                saved = completed_ranges.setdefault(item["key"], {})
+                key = range_id(start, end)
+                if key in saved and saved[key] != result["descriptor"]:
+                    raise ValueError("conflicting render range results")
+                saved[key] = result["descriptor"]
+        updates = [{**range_identity(book), "ranges": completed_ranges[key]}
+                   for key, book in books.items() if key in completed_ranges]
+        if updates:
+            save_registry(api, repo, RENDER_PROGRESS_REGISTRY, {r["key"]: r for r in updates},
+                          merge=merge_render_ranges)
+        published = [{**public_item(x), "render_profile": render_profile()} for x in queue.get("failed", [])]
+        for book in books.values():
+            with tempfile.TemporaryDirectory(dir=args.output) as temp:
+                try:
+                    result = assemble_render_book(book, completed_ranges.get(book["key"], {}), Path(temp))
+                    if result:
+                        upload_objects(Path(temp))
+                        validate_render(result, json.loads(read_object(result["render_manifest"], "/render-manifest.json")))
+                        if result.get("page_manifest"):
+                            images = json.loads(read_object(result["page_manifest"], "/page-manifest.json"))
+                            if images.get("page_count") != result["page_count"]:
+                                raise ValueError("render page manifest count mismatch")
+                except Exception as exc:
+                    result = {**public_item(book), "status": "failed", "error": f"{type(exc).__name__}: {exc}"[:1000]}
+                published.append(result or {**public_item(book), "status": "failed",
+                                            "error": "render ranges incomplete; uploaded ranges retained for retry"})
+        save_registry(api, repo, RENDER_REGISTRY, {r["key"]: r for r in published}, publish_streams=True)
+        print(f"render publication: {len(published)} results, "
+              f"{sum(r.get('status') == 'ready' for r in published)} ready", flush=True)
         return 0
     queue = json.loads(args.queue.read_text(encoding="utf-8"))
     expected = "pdf-render-queue" if args.stage == "render" else "pdf-image-ocr-queue"
@@ -593,7 +761,8 @@ def main():
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"[:1000]
             if args.stage == "render":
-                result = {**public_item(task), "render_profile": render_profile(), "status": "failed", "error": error}
+                result = {**range_identity(task), "start": task["start"], "end": task["end"],
+                          "status": "failed", "error": error}
             else:
                 result = {"key": task["key"], "generation": task["generation"], "pages": [], "errors": [{"error": error}]}
             results.append(result)

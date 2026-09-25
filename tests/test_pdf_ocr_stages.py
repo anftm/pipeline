@@ -2,6 +2,7 @@ import copy
 import gzip
 import hashlib
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -147,6 +148,123 @@ class PdfOcrStagesTests(unittest.TestCase):
         self.assertEqual(sorted(numbers), list(range(1, 1202)))
         self.assertEqual(max(len(task["pages"]) for shard in queue["shards"] for task in shard), 500)
 
+    def test_large_render_book_ranges_resume_and_publish_only_when_complete(self):
+        source = self.root / "source.pdf"
+        source.write_bytes(b"%PDF-range-source")
+        sha = hashlib.sha256(source.read_bytes()).hexdigest()
+        item = {**self.item(), "source_sha256": sha, "source_bytes": source.stat().st_size,
+                "probe": {"page_count": 5, "page_chars": [0] * 5, "classification": "scan"},
+                "page_count": 5, "profile": pdf_ocr.asset_profile()}
+        queue = {"version": 1, "kind": "pdf-render-queue", "shards": [{"records": [item]}]}
+        def render(_source, number, directory):
+            path = directory / f"page-{number:06d}.png"
+            with Image.new("RGB", (200, 300), "white") as image:
+                image.save(path)
+                image.save(path.with_suffix(".webp"))
+            return path, 200, 300
+        with patch.object(stages, "RENDER_RANGE_THRESHOLD", 2), \
+                patch.object(stages, "RENDER_RANGE_PAGES", 2), \
+                patch.object(pdf_ocr, "JXL_ENABLED", False), \
+                patch.object(pdf_ocr, "render_page", side_effect=render):
+            planned = stages.plan_render_ranges(queue, {})
+            tasks = [task for shard in planned["shards"] for task in shard["records"]]
+            self.assertEqual([(task["start"], task["end"]) for task in sorted(tasks, key=lambda t: t["start"])],
+                             [(1, 2), (3, 4), (5, 5)])
+            book = planned["books"][0]
+            descriptors = {}
+            for task in tasks[:2]:
+                bundle = self.root / f"range-{task['start']}"
+                result = stages.render_book(task, source, bundle)
+                self.store(bundle)
+                descriptors[stages.range_id(task["start"], task["end"])] = result["descriptor"]
+            with patch.object(stages, "read_object", side_effect=self.read):
+                self.assertIsNone(stages.assemble_render_book(book, descriptors, self.root / "incomplete"))
+                progress = {book["key"]: {**stages.range_identity(book), "ranges": descriptors}}
+                resumed = stages.plan_render_ranges(queue, progress)
+                remaining = [task for shard in resumed["shards"] for task in shard["records"]]
+                self.assertEqual([(t["start"], t["end"]) for t in remaining], [(5, 5)])
+            bundle = self.root / "range-last"
+            final_range = stages.render_book(remaining[0], source, bundle)
+            self.store(bundle)
+            descriptors[stages.range_id(5, 5)] = final_range["descriptor"]
+            with patch.object(stages, "read_object", side_effect=self.read):
+                final_bundle = self.root / "render-final"
+                result = stages.assemble_render_book(book, descriptors, final_bundle)
+                self.store(final_bundle)
+                manifest = json.loads(self.read(result["render_manifest"]))
+                stages.validate_render(result, manifest)
+                self.assertEqual([p["p"] for p in manifest["pages"]], list(range(1, 6)))
+                self.assertEqual(manifest["page_manifest"]["version"], 2)
+                with self.assertRaises(ValueError):
+                    stages.validate_range(book, 3, 4, descriptors[stages.range_id(1, 2)])
+                self.objects[descriptors[stages.range_id(3, 4)]["path"]] = b"damaged"
+                retry = stages.plan_render_ranges(queue, {book["key"]: {
+                    **stages.range_identity(book), "ranges": descriptors}})
+                missing = [task for shard in retry["shards"] for task in shard["records"]]
+                self.assertEqual([(t["start"], t["end"]) for t in missing], [(3, 4)])
+
+    def test_render_plan_balances_very_large_books_by_page_range(self):
+        book = {**self.item(), "source_sha256": "a" * 64, "page_count": 2001,
+                "profile": pdf_ocr.asset_profile()}
+        queue = stages.plan_render_ranges({"shards": [{"records": [book]}]}, {})
+        tasks = [t for shard in queue["shards"] for t in shard["records"]]
+        self.assertEqual(len(tasks), 9)
+        self.assertEqual(sum(t["end"] - t["start"] + 1 for t in tasks), 2001)
+        self.assertGreater(queue["shard_count"], 1)
+        self.assertLessEqual(max(s["page_count"] for s in queue["shards"]), 500)
+
+    def test_render_publication_saves_partial_progress_then_only_complete_book(self):
+        previous = self.render_fixture()
+        manifest = json.loads(self.read(previous["render_manifest"]))
+        book = {**self.item(), "source_sha256": previous["source_sha256"],
+                "source_bytes": previous["source_bytes"], "page_count": 2,
+                "profile": previous["profile"], "render_profile": previous["render_profile"],
+                "probe": {"classification": "scan", "page_count": 2, "page_chars": [0, 0]}}
+        descriptors = {}
+        range_bundle = self.root / "range-descriptors"
+        root = stages.root_for(book["source_sha256"], book["key"], book["render_profile"])
+        for page in manifest["pages"]:
+            number = page["p"]
+            destination = range_bundle / root / f"render-range-{stages.range_id(number, number)}.json"
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            pdf_ocr.write_json(destination, {**stages.range_identity(book), "version": 1,
+                                             "kind": "pdf-render-range", "start": number, "end": number,
+                                             "pages": [page]})
+            descriptors[number] = stages.metadata(destination, range_bundle)
+        self.store(range_bundle)
+        updates = []
+        with patch.object(stages, "RENDER_RANGE_THRESHOLD", 1), \
+                patch.object(stages, "RENDER_RANGE_PAGES", 1), \
+                patch.object(stages, "read_object", side_effect=self.read), \
+                patch.object(stages, "upload_objects", side_effect=self.store), \
+                patch.object(stages, "save_registry", side_effect=lambda api, repo, name, data, **kw:
+                             updates.append((name, data))):
+            for selected, saved in ((1, {}), (2, {stages.range_id(1, 1): descriptors[1]})):
+                task = {**book, "start": selected, "end": selected}
+                queue = {"version": 1, "kind": "pdf-render-queue", "books": [book],
+                         "shards": [{"records": [task]}], "saved_ranges": {book["key"]: saved},
+                         "failed": []}
+                location = self.root / f"queue-{selected}.json"
+                pdf_ocr.write_json(location, queue)
+                results_dir = self.root / f"results-{selected}"
+                results_dir.mkdir()
+                pdf_ocr.write_json(results_dir / f"results-{selected}.json", {"version": 1, "results": [{
+                    **stages.range_identity(book), "start": selected, "end": selected,
+                    "status": "range", "descriptor": descriptors[selected]}]})
+                with patch.object(sys, "argv", ["pdf_ocr_stages.py", "publish-render", "--queue", str(location),
+                                                "--results-dir", str(results_dir), "--output", str(self.root)]):
+                    stages.main()
+                state = updates[-1][1][book["key"]]
+                if selected == 1:
+                    self.assertEqual(state["status"], "failed")
+                    self.assertNotIn("page_manifest", state)
+                else:
+                    self.assertEqual(state["status"], "ready")
+                    finished = json.loads(self.read(state["render_manifest"]))
+                    self.assertEqual([page["p"] for page in finished["pages"]], [1, 2])
+        self.assertEqual([name for name, _ in updates], [stages.RENDER_PROGRESS_REGISTRY,
+                          stages.RENDER_REGISTRY, stages.RENDER_PROGRESS_REGISTRY, stages.RENDER_REGISTRY])
+
     def test_missing_native_or_duplicate_page_is_rejected(self):
         result = self.render_fixture(native=True)
         manifest = json.loads(self.read(result["render_manifest"]))
@@ -157,6 +275,16 @@ class PdfOcrStagesTests(unittest.TestCase):
         manifest["pages"][1]["p"] = 1
         with self.assertRaises(ValueError):
             stages.validate_render(result, manifest)
+        manifest = json.loads(self.read(result["render_manifest"]))
+        manifest["pages"][1]["i"] = manifest["pages"][1]["i"].replace(
+            result["source_sha256"], "b" * 64)
+        with self.assertRaisesRegex(ValueError, "outside book profile"):
+            stages.validate_render(result, manifest)
+        jxl = self.render_fixture(jxl=True)
+        manifest = json.loads(self.read(jxl["render_manifest"]))
+        del manifest["pages"][0]["j"]
+        with self.assertRaises(KeyError):
+            stages.validate_render(jxl, manifest)
 
     def test_read_png_uses_resolve_without_api_metadata_lookup(self):
         data = b"image"
