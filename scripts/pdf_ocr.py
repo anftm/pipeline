@@ -605,7 +605,8 @@ def validate_manifest(manifest: dict) -> dict:
             raise ValueError("invalid PDF OCR entry status")
         if entry.get("status") == "rendered":
             validate_ocr_object_path(entry["render_manifest"]["path"], "/render-manifest.json")
-            validate_ocr_object_path(entry["page_manifest"]["path"], "/page-manifest.json")
+            if entry.get("page_manifest"):
+                validate_ocr_object_path(entry["page_manifest"]["path"], "/page-manifest.json")
         if entry.get("status") == "ready":
             if (entry.get("profile") not in {OCR_PROFILE, asset_profile()}
                     and not str(entry.get("profile", "")).startswith(asset_profile() + "-layout-v1-")) or not re.fullmatch(r"[0-9a-f]{64}", str(entry.get("source_sha256", ""))):

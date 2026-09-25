@@ -37,7 +37,7 @@ BUCKET = "hf://buckets/vomebook/pdf-pages"
 
 
 def render_profile() -> str:
-    return (f"pdf-render-v1-png-dpi-{pdf_ocr.OCR_DPI}-maxpix-{pdf_ocr.MAX_PAGE_PIXELS}"
+    return (f"pdf-render-v2-text-png-dpi-{pdf_ocr.OCR_DPI}-maxpix-{pdf_ocr.MAX_PAGE_PIXELS}"
             f"-webp-{pdf_ocr.WEBP_QUALITY}-{pdf_ocr.WEBP_MAX_DIMENSION}"
             f"-native-{pdf_ocr.MIN_NATIVE_PAGE_CHARS}-jxl-{int(pdf_ocr.JXL_ENABLED)}"
             f"-{pdf_ocr.JXL_DISTANCE:g}-{pdf_ocr.JXL_EFFORT}")
@@ -149,7 +149,7 @@ def save_registry(api, repo, name, updates, merge=None, publish_streams=False):
                     if previous.get("status") != "ready":
                         ocr_state["files"][key] = {**value, "status": "rendered"}
                     entry = dict(sidecar["f"].get(key) or {})
-                    if not entry.get("p"):
+                    if value.get("page_manifest") and not entry.get("p"):
                         entry.update(shared.pdf_pages_sidecar_entry(value["page_manifest"]["path"]))
                         sidecar["f"][key] = entry
             operations.append(CommitOperationAdd(path_in_repo=publication.SIDECAR_NAME,
@@ -183,12 +183,6 @@ def pending_render(records, rendered, ocr, retry_failed=False):
                 continue
             if previous.get("status") == "failed" and not retry_failed:
                 continue
-        previous_ocr = ocr.get(item["key"])
-        if (same_source(previous_ocr, item) and previous_ocr.get("status") in {"ready", "skipped"}
-                and previous_ocr.get("profile") == pdf_ocr.asset_profile()):
-            # Already delivered legacy OCR books do not need to be rebuilt just
-            # to populate the new input cache.
-            continue
         pending.append(item)
     return pending
 
@@ -201,13 +195,25 @@ def render_book(item: dict, source: Path, bundle: Path) -> dict:
     base = {**public_item(item), "source_sha256": source_sha, "source_bytes": source_bytes,
             "render_profile": render_profile(), "profile": pdf_ocr.asset_profile(),
             "page_count": probe["page_count"], "classification": probe["classification"]}
-    if probe["classification"] == "native-text":
-        return {**base, "status": "skipped", "reason": "native-text-pdf", "stream": False}
     root = root_for(source_sha, item["key"], render_profile())
     bundle.mkdir(parents=True, exist_ok=True)
     pages = []
     with tempfile.TemporaryDirectory(dir=bundle) as temp:
         for number in range(1, probe["page_count"] + 1):
+            if probe["classification"] == "native-text":
+                text = pdf_ocr.native_page(source, number)
+                payload = pdf_ocr.page_payload(number, text["width"], text["height"], text["blocks"], "native")
+                payload["text"] = text["text"]
+                payload.update(ocr_layout.arrange(payload["blocks"], payload["width"], payload["height"], {}))
+                payload["text"] = text["text"]
+                out = bundle / root / "ocr" / f"page-{number:06d}.json.gz"
+                pdf_ocr.write_gzip_json(out, payload)
+                page = {"p": number, "source": "native", "width": text["width"], "height": text["height"],
+                        "chars": len(payload["text"]), "text": payload["text"],
+                        "text_spans": payload["text_spans"], "layout": payload["layout"]}
+                set_page_meta(page, "o", metadata(out, bundle))
+                pages.append(page)
+                continue
             png, width, height = pdf_ocr.render_page(source, number, Path(temp))
             native = probe["page_chars"][number - 1] >= pdf_ocr.MIN_NATIVE_PAGE_CHARS
             page = {"p": number, "source": "native" if native else "ocr", "width": width, "height": height}
@@ -225,17 +231,22 @@ def render_book(item: dict, source: Path, bundle: Path) -> dict:
                 text = pdf_ocr.native_page(source, number)
                 payload = pdf_ocr.page_payload(number, text["width"], text["height"], text["blocks"], "native")
                 payload["text"] = text["text"]
+                payload.update(ocr_layout.arrange(payload["blocks"], payload["width"], payload["height"], {}))
+                payload["text"] = text["text"]
                 out = bundle / root / "ocr" / f"page-{number:06d}.json.gz"
                 pdf_ocr.write_gzip_json(out, payload)
                 set_page_meta(page, "o", metadata(out, bundle))
-                page["chars"] = len(payload["text"])
+                page.update({"chars": len(payload["text"]), "text": payload["text"],
+                             "text_spans": payload["text_spans"], "layout": payload["layout"]})
             pages.append(page)
             print(f"rendered {number}/{probe['page_count']}: {item['key']}", flush=True)
-    image_pages = [{"page": p["p"], **page_meta(p, "w")} for p in pages]
-    page_manifest = bundle / root / "page-manifest.json"
-    pdf_ocr.write_json(page_manifest, pdf_assets.compact_page_manifest(
-        source_sha, render_profile(), image_pages, manifest_dir=root))
-    page_manifest_meta = {**metadata(page_manifest, bundle), "version": pdf_assets.PAGE_MANIFEST_VERSION}
+    image_pages = [{"page": p["p"], **page_meta(p, "w")} for p in pages if "w" in p]
+    page_manifest_meta = None
+    if image_pages:
+        page_manifest = bundle / root / "page-manifest.json"
+        pdf_ocr.write_json(page_manifest, pdf_assets.compact_page_manifest(
+            source_sha, render_profile(), image_pages, manifest_dir=root))
+        page_manifest_meta = {**metadata(page_manifest, bundle), "version": pdf_assets.PAGE_MANIFEST_VERSION}
     manifest = {**base, "version": 1, "kind": "pdf-render", "complete": True,
                 "pages": pages, "page_manifest": page_manifest_meta}
     manifest_path = bundle / root / "render-manifest.json"
@@ -258,6 +269,8 @@ def validate_render(item, manifest):
         if p.get("source") not in {"native", "ocr"} or p["width"] <= 0 or p["height"] <= 0:
             raise ValueError("invalid rendered page")
         for field, suffix in (("i", ".png"), ("w", ".webp"), ("j", ".jxl"), ("o", ".json.gz")):
+            if field in {"i", "w"} and manifest["classification"] == "native-text":
+                continue
             if field == "j" and field not in p or field == "o" and p["source"] != "native":
                 continue
             meta = page_meta(p, field)
@@ -356,7 +369,8 @@ def recognize_task(task, bundle):
                 payload.update(ocr_layout.restore_coordinates(arranged, rotation))
                 out = bundle / root / "ocr" / f"page-{page['p']:06d}.json.gz"
                 pdf_ocr.write_gzip_json(out, payload)
-                result = {**page, "chars": len(payload["text"])}
+                result = {**page, "chars": len(payload["text"]), "text": payload["text"],
+                          "text_spans": payload["text_spans"], "layout": payload["layout"]}
                 set_page_meta(result, "o", metadata(out, bundle))
                 done.append(result)
                 print(f"OCR page {page['p']}: {task['key']}", flush=True)
@@ -407,12 +421,25 @@ def assemble_book(book, saved, bundle):
         if (payload.get("kind") != "pdf-ocr-page" or payload.get("page") != page["p"]
                 or payload.get("source") != page["source"]):
             raise ValueError("OCR page payload mismatch")
+        if page["source"] == "native":
+            config = book.get("layout_options", {})
+            options = {**config.get("default", {}), **config.get("pages", {}).get(str(page["p"]), {})}
+            # Native extraction is already in original page coordinates.
+            options.pop("rotation", None)
+            if payload["blocks"]:
+                payload.update(ocr_layout.arrange(payload["blocks"], payload["width"], payload["height"], options))
+            else:
+                payload["text_spans"] = []
+                payload["layout"] = {"version": ocr_layout.VERSION, "writing_mode": "auto",
+                                     "review": ["native-text-without-positioned-blocks"] if payload["text"] else [],
+                                     "mapping_precision": "block", "offset_unit": "unicode-codepoint"}
         texts.append({"page": page["p"], "text": payload["text"],
-                      **({"layout": payload["layout"], "text_spans": payload["text_spans"]} if "layout" in payload else {})})
+                      "layout": payload["layout"], "text_spans": payload["text_spans"]})
     root = root_for(book["source_sha256"], book["key"], book["render_manifest"]["sha256"] + book["profile"])
     text_path = bundle / root / "ocr" / "book-text.json.gz"
-    pdf_ocr.write_gzip_json(text_path, {"version": 1, "kind": "pdf-ocr-book-text",
-                                     "profile": pdf_ocr.OCR_PROFILE, "pages": texts})
+    pdf_ocr.write_gzip_json(text_path, {"version": 2, "kind": "pdf-book-text", "complete": True,
+                                     "source_sha256": book["source_sha256"], "page_count": book["page_count"],
+                                     "offset_unit": "unicode-codepoint", "profile": book["profile"], "pages": texts})
     manifest_path = bundle / root / "ocr-manifest.json"
     pdf_ocr.write_json(manifest_path, {
         "version": 1, "kind": "pdf-ocr", "complete": True, "profile": book["profile"],
@@ -420,10 +447,10 @@ def assemble_book(book, saved, bundle):
         "source_bytes": book["source_bytes"], "source_revision": book.get("source_revision", ""),
         "classification": book["classification"], "page_count": book["page_count"],
         "dpi": pdf_ocr.OCR_DPI, "pages": pages, "book_text": metadata(text_path, bundle),
-        "page_manifest": book["page_manifest"],
+        **({"page_manifest": book["page_manifest"]} if book.get("page_manifest") else {}),
     })
     meta = metadata(manifest_path, bundle)
-    return {**base, "status": "ready", "stream": True, "ocr_manifest": meta["path"],
+    return {**base, "status": "ready", "stream": bool(book.get("page_manifest")), "ocr_manifest": meta["path"],
             "ocr_manifest_sha256": meta["sha256"], "ocr_manifest_bytes": meta["bytes"]}
 
 
@@ -497,9 +524,10 @@ def main():
             if result.get("status") == "ready":
                 manifest = validate_render(result, json.loads(read_object(result["render_manifest"], "/render-manifest.json")))
                 # Check uploaded stage descriptors, not just a successful job flag.
-                images = json.loads(read_object(result["page_manifest"], "/page-manifest.json"))
-                if images.get("page_count") != manifest["page_count"]:
-                    raise ValueError("render page manifest count mismatch")
+                if result.get("page_manifest"):
+                    images = json.loads(read_object(result["page_manifest"], "/page-manifest.json"))
+                    if images.get("page_count") != manifest["page_count"]:
+                        raise ValueError("render page manifest count mismatch")
         results.extend({**public_item(x), "render_profile": render_profile()} for x in queue.get("failed", []))
         # Successful rendering metadata is published only after upload completes.
         seen = {r["key"] for r in results}

@@ -105,6 +105,7 @@ class PdfOcrStagesTests(unittest.TestCase):
             self.store(finished)
             manifest = json.loads(self.objects[completed["ocr_manifest"]])
             text = json.loads(gzip.decompress(self.read(manifest["book_text"])))
+            self.assertEqual((text["version"], text["kind"], text["complete"]), (2, "pdf-book-text", True))
             self.assertEqual([p["text"] for p in text["pages"]], ["原生文字", "识别结果"])
             self.assertTrue(manifest["complete"])
             self.assertEqual(manifest["page_manifest"], result["page_manifest"])
@@ -177,11 +178,43 @@ class PdfOcrStagesTests(unittest.TestCase):
         self.assertTrue(call.args[1].endswith(str(Path(result["render_manifest"]["path"]).parent)))
         self.assertNotEqual(call.args[1], stages.BUCKET)
 
-    def test_planner_includes_small_pdf_and_skips_completed_legacy_ocr(self):
+    def test_planner_includes_small_pdf_and_rebuilds_old_ocr_for_v2_index(self):
         item = {**self.item(), "source_bytes": 1024}
         self.assertEqual(stages.pending_render([item], {}, {}), [item])
-        old = {**item, "status": "ready", "profile": pdf_ocr.asset_profile()}
-        self.assertEqual(stages.pending_render([item], {}, {item["key"]: old}), [])
+        old = {**item, "status": "ready", "profile": pdf_ocr.asset_profile(),
+               "ocr_manifest": "objects/aa/" + "a" * 64 + "/" + "b" * 16 + "/ocr-manifest.json"}
+        self.assertEqual(stages.pending_render([item], {}, {item["key"]: old}), [item])
+        self.assertEqual(stages.pending_render([item], {}, {item["key"]: {**old, "ocr_manifest": ""}}), [item])
+
+    def test_native_only_pdf_builds_complete_book_without_png_or_ocr_worker(self):
+        source = self.root / "native.pdf"
+        source.write_bytes(b"%PDF-native")
+        bundle = self.root / "native-render"
+        item = {**self.item(), "probe": {"page_count": 2, "page_chars": [80, 80],
+                                        "classification": "native-text"}}
+        def native(_source, page):
+            return {"width": 500, "height": 700,
+                    "blocks": [{"t": "竖排正文", "b": [.7, .1, .75, .5], "c": 1, "s": "native"}],
+                    "text": f"竖排正文{page}"}
+        with patch.object(pdf_ocr, "render_page", side_effect=AssertionError("native PDF must not render")), \
+                patch.object(pdf_ocr, "native_page", side_effect=native):
+            result = stages.render_book(item, source, bundle)
+        self.assertIsNone(result["page_manifest"])
+        self.store(bundle)
+        with patch.object(stages, "read_object", side_effect=self.read):
+            queue = stages.plan_images({result["key"]: result}, {}, {})
+            self.assertEqual(queue["shard_count"], 0)
+            self.assertEqual(queue["total_ocr_pages"], 0)
+            finished = self.root / "native-finished"
+            completed = stages.assemble_book(queue["books"][0], {}, finished)
+            self.assertTrue(completed["ocr_manifest"])
+            self.assertFalse(completed["stream"])
+            self.store(finished)
+            text = json.loads(gzip.decompress(self.read(json.loads(self.objects[completed["ocr_manifest"]])["book_text"])))
+            self.assertEqual(len(text["pages"]), 2)
+            self.assertEqual((text["version"], text["kind"], text["complete"]), (2, "pdf-book-text", True))
+            self.assertTrue(text["pages"][0]["text_spans"])
+            self.assertIn("text_spans", text["pages"][0])
 
     def test_sidecar_rebuild_preserves_rendered_stream_without_advertising_ocr(self):
         result = self.render_fixture()
