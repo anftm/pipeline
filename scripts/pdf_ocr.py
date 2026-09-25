@@ -62,6 +62,18 @@ def asset_profile() -> str:
             f"-jxl-{int(JXL_ENABLED)}-{JXL_DISTANCE:g}-{JXL_EFFORT}")
 
 
+def valid_published_profile(profile: str) -> bool:
+    if profile == OCR_PROFILE:
+        return True
+    candidate = str(profile or "")
+    base, separator, layout = candidate.partition("-layout-")
+    if separator and not re.fullmatch(r"v1-[0-9a-f]{16}", layout):
+        return False
+    prefix = ocr_profile_without_jxl(asset_profile())
+    return base in {f"{prefix}-jxl-{enabled}-{JXL_DISTANCE:g}-{JXL_EFFORT}"
+                    for enabled in (0, 1)}
+
+
 def ocr_profile_without_jxl(profile: str) -> str:
     return str(profile or "").split("-jxl-", 1)[0]
 
@@ -608,8 +620,8 @@ def validate_manifest(manifest: dict) -> dict:
             if entry.get("page_manifest"):
                 validate_ocr_object_path(entry["page_manifest"]["path"], "/page-manifest.json")
         if entry.get("status") == "ready":
-            if (entry.get("profile") not in {OCR_PROFILE, asset_profile()}
-                    and not str(entry.get("profile", "")).startswith(asset_profile() + "-layout-v1-")) or not re.fullmatch(r"[0-9a-f]{64}", str(entry.get("source_sha256", ""))):
+            if (not valid_published_profile(entry.get("profile"))
+                    or not re.fullmatch(r"[0-9a-f]{64}", str(entry.get("source_sha256", "")))):
                 raise ValueError("invalid PDF OCR ready entry")
             if not isinstance(entry.get("page_count"), int) or entry["page_count"] < 1:
                 raise ValueError("invalid PDF OCR page count")

@@ -70,6 +70,20 @@ class PdfOcrContractTests(unittest.TestCase):
     def test_jxl_is_part_of_the_profile_identity(self):
         self.assertIn("-jxl-", pdf_ocr.asset_profile())
 
+    def test_manifest_accepts_published_jxl_layout_from_separate_ocr_worker(self):
+        current = pdf_ocr.asset_profile()
+        other = current.replace(f"-jxl-{int(pdf_ocr.JXL_ENABLED)}-",
+                                f"-jxl-{int(not pdf_ocr.JXL_ENABLED)}-")
+        entry = {"status": "ready", "profile": other + "-layout-v1-" + "a" * 16,
+                 "source_sha256": "b" * 64, "page_count": 1,
+                 "ocr_manifest": "objects/bb/" + "b" * 64 + "/" + "c" * 16 + "/ocr-manifest.json"}
+        manifest = {"version": 1, "files": {"book": entry}}
+        self.assertIs(pdf_ocr.validate_manifest(manifest), manifest)
+        with self.assertRaises(ValueError):
+            pdf_ocr.validate_manifest({"version": 1, "files": {"book": {**entry, "profile": other + "-layout-v1-bad"}}})
+        with self.assertRaises(ValueError):
+            pdf_ocr.validate_manifest({"version": 1, "files": {"book": {**entry, "profile": other + "-layout-"}}})
+
 
 if __name__ == "__main__":
     unittest.main()
