@@ -107,7 +107,7 @@ class PdfOcrStagesTests(unittest.TestCase):
             manifest = json.loads(self.objects[completed["ocr_manifest"]])
             text = json.loads(gzip.decompress(self.read(manifest["book_text"])))
             self.assertEqual((text["version"], text["kind"], text["complete"]), (2, "pdf-book-text", True))
-            self.assertEqual((text["language"], text["ocr_version"]), (pdf_ocr.OCR_LANG, pdf_ocr.OCR_VERSION))
+            self.assertEqual((text["language"], text["ocr_version"]), pdf_ocr.resolve_ocr_config("ch", "rapidocr_onnxruntime")[:2])
             self.assertEqual([p["text"] for p in text["pages"]], ["原生文字", "识别结果"])
             self.assertTrue(manifest["complete"])
             self.assertEqual(manifest["page_manifest"], result["page_manifest"])
@@ -389,6 +389,8 @@ class PdfOcrStagesTests(unittest.TestCase):
         self.assertIn("PDF_OCR_LANG", ocr_text)
         self.assertIn("backend:", ocr_text)
         self.assertIn("PDF_OCR_BACKEND", ocr_text)
+        self.assertIn('default: "auto"', ocr_text)
+        self.assertIn('default: "rapidocr_onnxruntime"', ocr_text)
         self.assertIn("github.event.workflow_run.conclusion == 'success'", ocr["jobs"]["plan"]["if"])
         self.assertIn("!cancelled()", ocr["jobs"]["publish"]["if"])
         self.assertEqual(render["jobs"]["publish"]["concurrency"]["group"],

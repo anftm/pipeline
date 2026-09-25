@@ -410,7 +410,8 @@ def recognition_identity(entry, options):
     digest = hashlib.sha256(json.dumps(options, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:16]
     # Recognition language/model belongs to the OCR worker. A language change
     # must reuse the published PNG render instead of forcing PDF rendering.
-    base = pdf_ocr.asset_profile()
+    language, backend = pdf_ocr.book_ocr_config(entry)
+    base = pdf_ocr.asset_profile(language, backend)
     return f"{base}-layout-{ocr_layout.VERSION}-{digest}"
 
 
@@ -438,7 +439,19 @@ def plan_images(rendered, current, progress, limit=20, target=500, overrides=Non
         if entry.get("status") not in {"ready", "skipped"}:
             continue
         options = layout_options(overrides or {}, key)
-        entry = {**entry, "profile": recognition_identity(entry, options), "layout_options": options}
+        manifest = None
+        if entry["status"] != "skipped":
+            manifest = validate_render(entry, json.loads(read_object(entry["render_manifest"], "/render-manifest.json")))
+        native_text = "\n".join(str(page.get("text") or "") for page in (manifest or {}).get("pages", []))
+        if pdf_ocr.OCR_LANG != "auto":
+            language, _, backend = pdf_ocr.resolve_ocr_config(pdf_ocr.OCR_LANG, pdf_ocr.OCR_BACKEND)
+        else:
+            language = pdf_ocr.detect_language(native_text) if native_text.strip() else pdf_ocr.book_ocr_config(entry)[0]
+            backend = (pdf_ocr.OCR_BACKEND if pdf_ocr.OCR_BACKEND != "rapidocr_onnxruntime"
+                       else ("rapidocr_onnxruntime" if language in {"ch", "en"} else "paddle_onnxruntime"))
+        entry = {**entry, "ocr_language": language, "ocr_backend": backend,
+                 "profile": recognition_identity({**entry, "ocr_language": language, "ocr_backend": backend}, options),
+                 "layout_options": options}
         old = current.get(key, {})
         if (old.get("status") in {"ready", "skipped"} and same_source(old, entry)
                 and old.get("profile") == entry.get("profile")
@@ -449,7 +462,6 @@ def plan_images(rendered, current, progress, limit=20, target=500, overrides=Non
         if entry["status"] == "skipped":
             books.append(entry)
             continue
-        manifest = validate_render(entry, json.loads(read_object(entry["render_manifest"], "/render-manifest.json")))
         generation = generation_for(entry)
         previous = progress.get(key, {})
         saved = previous.get("pages", {}) if previous.get("generation") == generation else {}
@@ -458,6 +470,7 @@ def plan_images(rendered, current, progress, limit=20, target=500, overrides=Non
         pending = [p for p in manifest["pages"] if p["source"] == "ocr" and str(p["p"]) not in saved]
         for start in range(0, len(pending), target):
             tasks.append({"key": key, "generation": generation, "profile": entry["profile"],
+                          "ocr_language": entry["ocr_language"], "ocr_backend": entry["ocr_backend"],
                           "source_sha256": entry["source_sha256"], "layout_options": options,
                           "pages": pending[start:start + target]})
     # Pack small books together, while large books can span several workers.
@@ -493,7 +506,10 @@ def recognize_task(task, bundle):
                         width, height = rotated.size
                         rotated.save(png)
                         rotated.close()
-                blocks = pdf_ocr.ocr_page(png, width, height)
+                if pdf_ocr.resolve_ocr_config(task["ocr_language"], task["ocr_backend"]) == pdf_ocr.resolve_ocr_config():
+                    blocks = pdf_ocr.ocr_page(png, width, height)
+                else:
+                    blocks = pdf_ocr.ocr_page(png, width, height, task["ocr_language"], task["ocr_backend"])
                 payload = pdf_ocr.page_payload(page["p"], page["width"], page["height"], blocks, "ocr")
                 arranged = ocr_layout.arrange(blocks, width, height, options)
                 payload.update(ocr_layout.restore_coordinates(arranged, rotation))
@@ -565,26 +581,28 @@ def assemble_book(book, saved, bundle):
                                      "mapping_precision": "block", "offset_unit": "unicode-codepoint"}
         texts.append({"page": page["p"], "text": payload["text"],
                       "layout": payload["layout"], "text_spans": payload["text_spans"]})
+    language, backend = pdf_ocr.book_ocr_config(book)
     root = root_for(book["source_sha256"], book["key"], book["render_manifest"]["sha256"] + book["profile"])
     text_path = bundle / root / "ocr" / "book-text.json.gz"
     pdf_ocr.write_gzip_json(text_path, {"version": 2, "kind": "pdf-book-text", "complete": True,
                                       "source_sha256": book["source_sha256"], "page_count": book["page_count"],
                                       "offset_unit": "unicode-codepoint", "profile": book["profile"],
-                                      "language": pdf_ocr.OCR_LANG, "ocr_version": pdf_ocr.OCR_VERSION,
+                                      "language": language, "ocr_version": pdf_ocr.resolve_ocr_config(language, backend)[1],
                                       "pages": texts})
     manifest_path = bundle / root / "ocr-manifest.json"
     pdf_ocr.write_json(manifest_path, {
         "version": 1, "kind": "pdf-ocr", "complete": True, "profile": book["profile"],
-        "engine": pdf_ocr.OCR_ENGINE, "language": pdf_ocr.OCR_LANG,
-        "ocr_version": pdf_ocr.OCR_VERSION, "source_sha256": book["source_sha256"],
+        "engine": f"{backend} / {pdf_ocr.resolve_ocr_config(language, backend)[1]} / CPU / {language}",
+        "language": language, "ocr_version": pdf_ocr.resolve_ocr_config(language, backend)[1],
+        "backend": backend, "source_sha256": book["source_sha256"],
         "source_bytes": book["source_bytes"], "source_revision": book.get("source_revision", ""),
         "classification": book["classification"], "page_count": book["page_count"],
         "dpi": pdf_ocr.OCR_DPI, "pages": pages, "book_text": metadata(text_path, bundle),
         **({"page_manifest": book["page_manifest"]} if book.get("page_manifest") else {}),
     })
     meta = metadata(manifest_path, bundle)
-    return {**base, "status": "ready", "language": pdf_ocr.OCR_LANG,
-            "ocr_version": pdf_ocr.OCR_VERSION, "stream": bool(book.get("page_manifest")), "ocr_manifest": meta["path"],
+    return {**base, "status": "ready", "language": language, "ocr_version": pdf_ocr.resolve_ocr_config(language, backend)[1],
+            "backend": backend, "stream": bool(book.get("page_manifest")), "ocr_manifest": meta["path"],
             "ocr_manifest_sha256": meta["sha256"], "ocr_manifest_bytes": meta["bytes"]}
 
 
