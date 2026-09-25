@@ -46,6 +46,18 @@ the shared `reader-assets` publication lock.
 - The worker consumes only PNG objects from completed render manifests. It
   neither downloads PDFs nor invokes Poppler or cjxl. Path, byte length, digest,
   page number, dimensions, source identity and generation are checked.
+- OCR language is selected by the `lang` input of `Build PDF OCR Assets` and
+  defaults to `ch`. The language and model version participate in the OCR
+  profile and are recorded in the book-text and OCR manifests. PP-OCRv6 is
+  used for its supported Chinese, English, Japanese and Latin-language set;
+  Arabic (`ar`), Persian (`fa`, the primary Iranian language), Korean and
+  Cyrillic languages use PP-OCRv5. Changing language reuses published PNG
+  renders and reruns recognition without rerendering the PDF.
+- The `backend` input selects `paddle_static` (the compatibility default),
+  `paddle_onnxruntime`, or `rapidocr_onnxruntime`. Backend, language and
+  model version are all part of the OCR profile. RapidOCR currently uses its
+  ONNX Runtime path for `ch`/`en`; Paddle's ONNX Runtime path remains the
+  multilingual option for `fa`, `ar`, Korean and other profiles.
 - `target_pages` defaults to **500 actual recognition pages per shard**. Native
   pages do not count. Large books may span workers; small books are packed
   together. Pixel dimensions and text density still affect processing time, so

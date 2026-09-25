@@ -11,6 +11,14 @@ on:
         description: Target actual OCR pages per worker
         default: "500"
         type: string
+      lang:
+        description: PaddleOCR language code, such as ch, en, japan, ar, fa, or ku
+        default: "ch"
+        type: string
+      backend:
+        description: "OCR backend: paddle_static, paddle_onnxruntime, or rapidocr_onnxruntime"
+        default: "paddle_static"
+        type: string
   workflow_run:
     workflows: [Render PDF OCR Inputs]
     types: [completed]
@@ -43,6 +51,8 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           LIMIT: ${{ inputs.limit || '20' }}
           PDF_OCR_TARGET_PAGES_PER_SHARD: ${{ inputs.target_pages || '500' }}
+          PDF_OCR_LANG: ${{ inputs.lang || 'ch' }}
+          PDF_OCR_BACKEND: ${{ inputs.backend || 'paddle_static' }}
         run: |
           [[ "$LIMIT" =~ ^[0-9]+$ ]] && ((10#$LIMIT >= 1 && 10#$LIMIT <= 100)) || exit 1
           [[ "$PDF_OCR_TARGET_PAGES_PER_SHARD" =~ ^[0-9]+$ ]] && ((10#$PDF_OCR_TARGET_PAGES_PER_SHARD >= 1 && 10#$PDF_OCR_TARGET_PAGES_PER_SHARD <= 5000)) || exit 1
@@ -73,7 +83,7 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: .cache/paddlex
-          key: paddlex-ppocrv6-${{ runner.os }}-${{ hashFiles('scripts/requirements-pdf-ocr.txt') }}
+          key: paddlex-${{ inputs.lang || 'ch' }}-${{ inputs.backend || 'paddle_static' }}-${{ runner.os }}-${{ hashFiles('scripts/requirements-pdf-ocr.txt') }}
       - uses: actions/download-artifact@v8
         with:
           name: pdf-image-ocr-queue
@@ -82,6 +92,8 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           PADDLE_PDX_CACHE_HOME: ${{ github.workspace }}/.cache/paddlex
+          PDF_OCR_LANG: ${{ inputs.lang || 'ch' }}
+          PDF_OCR_BACKEND: ${{ inputs.backend || 'paddle_static' }}
         run: python scripts/pdf_ocr_stages.py ocr --shard "${{ matrix.shard }}"
       - uses: actions/upload-artifact@v7
         if: always()
@@ -117,6 +129,8 @@ jobs:
       - name: Save page progress and publish complete books
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          PDF_OCR_LANG: ${{ inputs.lang || 'ch' }}
+          PDF_OCR_BACKEND: ${{ inputs.backend || 'paddle_static' }}
         run: python scripts/pdf_ocr_stages.py publish-ocr --results-dir output/pdf-ocr/results
       - name: Publish Reader sidecar to Pages
         env:

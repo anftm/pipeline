@@ -34,7 +34,44 @@ OCR_MANIFEST_NAME = "ocr-manifest.json"
 OCR_MANIFEST_VERSION = 1
 OCR_PAGE_VERSION = 1
 OCR_PROFILE = "pdf-ocr-v1-pp-ocrv6-medium"
-OCR_ENGINE = "PaddleOCR 3.7.0 / PP-OCRv6 medium / CPU"
+OCR_LANG = os.environ.get("PDF_OCR_LANG", "ch").strip().lower() or "ch"
+OCR_VERSION_OVERRIDE = os.environ.get("PDF_OCR_VERSION", "").strip() or None
+OCR_BACKEND = os.environ.get("PDF_OCR_BACKEND", "paddle_static").strip().lower() or "paddle_static"
+OCR_BACKENDS = frozenset({"paddle_static", "paddle_onnxruntime", "rapidocr_onnxruntime"})
+PP_OCRV6_LANGS = frozenset({
+    "ch", "chinese_cht", "en", "japan", "af", "az", "bs", "ca", "cs", "cy", "da", "de",
+    "es", "et", "eu", "fi", "fr", "ga", "gl", "hr", "hu", "id", "is", "it", "ku", "la",
+    "lb", "lt", "lv", "mi", "ms", "mt", "nl", "no", "oc", "pl", "pt", "qu", "rm", "ro",
+    "rs_latin", "sk", "sl", "sq", "sv", "sw", "tl", "tr", "uz", "vi", "french", "german",
+})
+PP_OCRV5_LANGS = frozenset({
+    "ch", "en", "fr", "de", "japan", "korean", "chinese_cht", "af", "it", "es", "bs", "pt",
+    "cs", "cy", "da", "et", "ga", "hr", "hu", "rs_latin", "id", "oc", "is", "lt", "mi",
+    "ms", "nl", "no", "pl", "sk", "sl", "sq", "sv", "sw", "tl", "tr", "uz", "la", "ru",
+    "be", "uk", "th", "el", "az", "ku", "lv", "mt", "pi", "ro", "vi", "fi", "eu", "gl",
+    "lb", "rm", "ca", "qu", "te", "sr", "bg", "mn", "ab", "ady", "kbd", "av", "dar", "inh",
+    "ce", "lki", "lez", "tab", "kk", "ky", "tg", "mk", "tt", "cv", "ba", "mhr", "mo", "udm",
+    "kv", "os", "bua", "xal", "tyv", "sah", "kaa", "ar", "fa", "ug", "ur", "ps", "sd", "bal",
+    "hi", "mr", "ne", "bh", "mai", "ang", "bho", "mah", "sck", "new", "gom", "sa", "bgc", "ta",
+})
+
+
+def ocr_version() -> str:
+    version = OCR_VERSION_OVERRIDE or ("PP-OCRv6" if OCR_LANG in PP_OCRV6_LANGS else "PP-OCRv5")
+    if version not in {"PP-OCRv5", "PP-OCRv6"}:
+        raise ValueError(f"unsupported PDF_OCR_VERSION: {version}")
+    supported = PP_OCRV6_LANGS if version == "PP-OCRv6" else PP_OCRV5_LANGS
+    if OCR_LANG not in supported:
+        raise ValueError(f"language {OCR_LANG!r} is not supported by {version}")
+    return version
+
+
+if OCR_BACKEND not in OCR_BACKENDS:
+    raise ValueError(f"unsupported PDF_OCR_BACKEND: {OCR_BACKEND}")
+if OCR_BACKEND == "rapidocr_onnxruntime" and OCR_LANG not in {"ch", "en"}:
+    raise ValueError("rapidocr_onnxruntime currently supports only ch and en profiles")
+OCR_VERSION = ocr_version()
+OCR_ENGINE = f"{OCR_BACKEND} / {OCR_VERSION} / CPU / {OCR_LANG}"
 OCR_DPI = int(os.environ.get("PDF_OCR_DPI", "300"))
 WEBP_QUALITY = int(os.environ.get("PDF_WEBP_QUALITY", "85"))
 WEBP_MAX_DIMENSION = int(os.environ.get("PDF_WEBP_MAX_DIMENSION", "1800"))
@@ -58,7 +95,11 @@ OCR_OBJECT_PATH_RE = re.compile(
 
 
 def asset_profile() -> str:
-    return (f"{OCR_PROFILE}-dpi-{OCR_DPI}-webp-{WEBP_QUALITY}-{WEBP_MAX_DIMENSION}"
+    model_profile = OCR_PROFILE if OCR_LANG == "ch" and OCR_VERSION == "PP-OCRv6" and OCR_BACKEND == "paddle_static" else (
+        f"pdf-ocr-v1-{OCR_VERSION.lower()}-medium-lang-{OCR_LANG}")
+    if OCR_BACKEND != "paddle_static":
+        model_profile += f"-backend-{OCR_BACKEND.replace('_', '-')}"
+    return (f"{model_profile}-dpi-{OCR_DPI}-webp-{WEBP_QUALITY}-{WEBP_MAX_DIMENSION}"
             f"-native-{MIN_NATIVE_PAGE_CHARS}-{NATIVE_PAGE_RATIO:g}-maxpix-{MAX_PAGE_PIXELS}"
             f"-jxl-{int(JXL_ENABLED)}-{JXL_DISTANCE:g}-{JXL_EFFORT}")
 
@@ -284,21 +325,61 @@ def normalize_ocr_result(result, width: int, height: int) -> list[dict]:
     return normalize_blocks(blocks, width, height)
 
 
+def normalize_rapid_result(result, width: int, height: int) -> list[dict]:
+    """Adapt RapidOCR's boxes/txts/scores output to the shared OCR contract."""
+    if isinstance(result, tuple):
+        result = result[0]
+    boxes = getattr(result, "boxes", None)
+    texts = getattr(result, "txts", None)
+    scores = getattr(result, "scores", None)
+    if isinstance(result, dict):
+        boxes = result.get("boxes", boxes)
+        texts = result.get("txts", result.get("texts", texts))
+        scores = result.get("scores", scores)
+    if boxes is None or texts is None:
+        raise RuntimeError("RapidOCR returned an invalid result")
+    blocks = []
+    score_values = scores if scores is not None else [1.0] * len(texts)
+    for polygon, text, score in zip(boxes, texts, score_values):
+        points = [[float(point[0]), float(point[1])] for point in polygon]
+        xs = [point[0] for point in points]
+        ys = [point[1] for point in points]
+        blocks.append({"text": text, "x0": min(xs), "y0": min(ys), "x1": max(xs), "y1": max(ys),
+                       "confidence": score, "source": "ocr", "polygon": points})
+    return normalize_blocks(blocks, width, height)
+
+
 _OCR_ENGINE_INSTANCE = None
 
 
 def get_ocr_engine():
     global _OCR_ENGINE_INSTANCE
     if _OCR_ENGINE_INSTANCE is None:
-        try:
-            from paddleocr import PaddleOCR
-        except ImportError as exc:
-            raise RuntimeError("PP-OCRv6 dependencies are not installed") from exc
-        _OCR_ENGINE_INSTANCE = PaddleOCR(
-            lang="ch", ocr_version="PP-OCRv6", device="cpu", engine="paddle_static",
-            use_doc_orientation_classify=False, use_doc_unwarping=False,
-            use_textline_orientation=False,
-        )
+        if OCR_BACKEND == "rapidocr_onnxruntime":
+            try:
+                from rapidocr import EngineType, LangDet, LangRec, OCRVersion, RapidOCR
+            except ImportError as exc:
+                raise RuntimeError("RapidOCR ONNX dependencies are not installed") from exc
+            rapid_version = getattr(OCRVersion, OCR_VERSION.replace("-", "").upper())
+            rapid_det_lang = getattr(LangDet, OCR_LANG.upper())
+            rapid_rec_lang = getattr(LangRec, OCR_LANG.upper())
+            _OCR_ENGINE_INSTANCE = RapidOCR(params={
+                "Det.engine_type": EngineType.ONNXRUNTIME, "Cls.engine_type": EngineType.ONNXRUNTIME,
+                "Rec.engine_type": EngineType.ONNXRUNTIME, "Det.lang_type": rapid_det_lang,
+                "Rec.lang_type": rapid_rec_lang, "Det.ocr_version": rapid_version,
+                "Rec.ocr_version": rapid_version,
+            })
+        else:
+            try:
+                from paddleocr import PaddleOCR
+            except ImportError as exc:
+                raise RuntimeError("PaddleOCR dependencies are not installed") from exc
+            _OCR_ENGINE_INSTANCE = PaddleOCR(
+                lang=OCR_LANG, ocr_version=OCR_VERSION, device="cpu",
+                engine="onnxruntime" if OCR_BACKEND == "paddle_onnxruntime" else "paddle_static",
+                use_doc_orientation_classify=False, use_doc_unwarping=False,
+                use_textline_orientation=False,
+            )
     return _OCR_ENGINE_INSTANCE
 
 
@@ -359,6 +440,11 @@ def encode_jxl(png: Path, destination: Path) -> tuple[str, int]:
 def ocr_page(image: Path, width: int, height: int) -> list[dict]:
     started = time.monotonic()
     engine = get_ocr_engine()
+    if OCR_BACKEND == "rapidocr_onnxruntime":
+        result = normalize_rapid_result(engine(str(image), use_det=True, use_cls=False, use_rec=True), width, height)
+        if time.monotonic() - started > OCR_TIMEOUT:
+            raise RuntimeError("RapidOCR page timeout")
+        return result
     results = list(engine.predict(str(image)))
     if time.monotonic() - started > OCR_TIMEOUT:
         raise RuntimeError("PP-OCRv6 page timeout")
