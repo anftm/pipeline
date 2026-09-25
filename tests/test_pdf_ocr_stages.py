@@ -256,6 +256,7 @@ class PdfOcrStagesTests(unittest.TestCase):
         self.assertNotIn("poppler-utils", ocr_text)
         self.assertNotIn("fetch_and_parse", ocr_text)
         self.assertIn("Render PDF OCR Inputs", ocr_text)
+        self.assertIn("github.event.workflow_run.conclusion == 'success'", ocr["jobs"]["plan"]["if"])
         self.assertIn("!cancelled()", ocr["jobs"]["publish"]["if"])
         self.assertEqual(render["jobs"]["publish"]["concurrency"]["group"],
                          ocr["jobs"]["publish"]["concurrency"]["group"])
