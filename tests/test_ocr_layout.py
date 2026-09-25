@@ -95,6 +95,20 @@ class OcrLayoutTests(unittest.TestCase):
         result = layout.arrange([block("手。机", [.1, .1, .5, .2])], 1000, 1000)
         self.assertEqual(result["text"], "手。机")
 
+    def test_native_words_on_same_row_preserve_phrases_and_latin_spaces(self):
+        blocks = [block("手", [.1, .1, .14, .14]), block("机", [.145, .1, .185, .14]),
+                  block("Hello", [.2, .1, .3, .14]), block("world", [.31, .1, .42, .14])]
+        result = layout.arrange(blocks, 1000, 1000)
+        self.assertEqual(result["text"], "手机 Hello world")
+        self.assertEqual([result["text"][s["start"]:s["end"]] for s in result["text_spans"]],
+                         [b["t"] for b in blocks])
+
+    def test_punctuation_between_native_blocks_is_never_dropped(self):
+        blocks = [block("手。", [.1, .1, .17, .14]), block("机", [.175, .1, .215, .14])]
+        text = layout.arrange(blocks, 1000, 1000)["text"]
+        self.assertIn("手。机", text)
+        self.assertNotIn("手机", text)
+
     def test_rec_boxes_coordinates_are_not_replaced_by_zero_boxes(self):
         blocks = pdf_ocr.normalize_ocr_result({"rec_texts": ["正文"], "rec_scores": [.9],
                                              "rec_boxes": [[10, 20, 30, 40]]}, 100, 100)

@@ -157,6 +157,25 @@ def soft_boundary(previous, current, group, mode):
             and .75 <= ah / max(bh, 1e-9) <= 1.33)
 
 
+def inline_boundary(previous, current, mode, width, height):
+    if mode.startswith("vertical"):
+        return None
+    a, b = previous["b"], current["b"]
+    overlap = min(a[3], b[3]) - max(a[1], b[1])
+    row_height = min(a[3] - a[1], b[3] - b[1])
+    if overlap < .5 * row_height:
+        return None
+    gap = a[0] - b[2] if mode == "horizontal-rtl" else b[0] - a[2]
+    if gap < -.25 * row_height * height / width or gap > 1.5 * row_height * height / width:
+        return None
+    left, right = previous["t"][-1], current["t"][0]
+    if (cjk(left) or left in "，。！？；：、」』）") and cjk(right):
+        return ""
+    if cjk(left) and right in "，。！？；：、」』）":
+        return ""
+    return " "
+
+
 def arrange(blocks, width, height, options=None):
     options = validate_options(options)
     original = copy.deepcopy(blocks)
@@ -194,11 +213,13 @@ def arrange(blocks, width, height, options=None):
             previous = None
             for block in group:
                 if text:
-                    join = bool(previous and options.get("join_soft_lines", True)
+                    inline = inline_boundary(previous, block, partition_mode, width, height) if previous else None
+                    join = bool(inline is None and previous and options.get("join_soft_lines", True)
                                 and soft_boundary(previous, block, group, partition_mode))
-                    separator = "" if join else ("\n" if previous else "\n\n")
-                    boundaries.append({"offset": len(text), "kind": "soft-line" if join else
-                                       ("line" if previous else "region"), "separator": separator})
+                    separator = inline if inline is not None else ("" if join else ("\n" if previous else "\n\n"))
+                    boundaries.append({"offset": len(text), "kind": "inline" if inline is not None else
+                                       ("soft-line" if join else ("line" if previous else "region")),
+                                       "separator": separator})
                     text += separator
                 start = len(text)
                 text += block["t"]
