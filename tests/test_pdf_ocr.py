@@ -106,6 +106,8 @@ class PdfOcrContractTests(unittest.TestCase):
         blocks = pdf_ocr.normalize_rapid_result(result, 100, 100)
         self.assertEqual(blocks[0]["t"], "English")
         self.assertEqual(blocks[0]["b"], [0.0, 0.0, 0.5, 0.2])
+        empty = type("RapidEmpty", (), {"boxes": None, "txts": None, "scores": None})()
+        self.assertEqual(pdf_ocr.normalize_rapid_result(empty, 100, 100), [])
 
     def test_auto_language_detection_selects_per_book_backend(self):
         cases = (

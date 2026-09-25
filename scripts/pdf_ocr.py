@@ -385,7 +385,9 @@ def normalize_rapid_result(result, width: int, height: int) -> list[dict]:
         texts = result.get("txts", result.get("texts", texts))
         scores = result.get("scores", scores)
     if boxes is None or texts is None:
-        raise RuntimeError("RapidOCR returned an invalid result")
+        # RapidOCR reports a normal blank page as an empty detection result.
+        # Keep the page in the v2 index instead of turning it into a failed task.
+        return []
     blocks = []
     score_values = scores if scores is not None else [1.0] * len(texts)
     for polygon, text, score in zip(boxes, texts, score_values):
