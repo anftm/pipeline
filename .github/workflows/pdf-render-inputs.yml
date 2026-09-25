@@ -1,31 +1,40 @@
-name: Build PDF OCR Assets
+name: Render PDF OCR Inputs
 
 on:
   workflow_dispatch:
     inputs:
       limit:
-        description: Maximum rendered books to process
+        description: Maximum pending PDFs inspected (all sizes)
         default: "20"
         type: string
-      target_pages:
-        description: Target actual OCR pages per worker
-        default: "500"
+      checkpoint:
+        description: Checkpoint in the pending PDF queue
+        default: "0"
         type: string
-  workflow_run:
-    workflows: [Render PDF OCR Inputs]
-    types: [completed]
+      generate_jxl:
+        description: Encode JXL directly from the high quality PNG as well as WebP
+        default: false
+        type: boolean
+      retry_failed:
+        description: Retry failed rendering for unchanged sources
+        default: true
+        type: boolean
+  schedule:
+    - cron: "13 * * * *"
 
 permissions:
   contents: read
 
 concurrency:
-  group: pdf-ocr-assets
+  group: pdf-render-inputs
   cancel-in-progress: false
   queue: max
 
+env:
+  PDF_JXL_ENABLED: ${{ inputs.generate_jxl || 'false' }}
+
 jobs:
   plan:
-    if: github.event_name != 'workflow_run' || github.event.workflow_run.head_branch == 'main'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     outputs:
@@ -37,21 +46,30 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install -r scripts/requirements.txt
-      - name: Plan only published high quality PNG inputs
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends poppler-utils
+      - name: Fetch source metadata
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          FORCE_SYNC: "true"
+        run: python scripts/fetch_and_parse.py
+      - name: Plan PNG rendering without a PDF size threshold
         id: plan
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           LIMIT: ${{ inputs.limit || '20' }}
-          PDF_OCR_TARGET_PAGES_PER_SHARD: ${{ inputs.target_pages || '500' }}
+          CHECKPOINT: ${{ inputs.checkpoint || '0' }}
+          RETRY_FAILED: ${{ github.event_name == 'schedule' || inputs.retry_failed }}
         run: |
           [[ "$LIMIT" =~ ^[0-9]+$ ]] && ((10#$LIMIT >= 1 && 10#$LIMIT <= 100)) || exit 1
-          [[ "$PDF_OCR_TARGET_PAGES_PER_SHARD" =~ ^[0-9]+$ ]] && ((10#$PDF_OCR_TARGET_PAGES_PER_SHARD >= 1 && 10#$PDF_OCR_TARGET_PAGES_PER_SHARD <= 5000)) || exit 1
-          python scripts/pdf_ocr_stages.py plan-ocr --limit "$LIMIT"
+          [[ "$CHECKPOINT" =~ ^[0-9]+$ ]] || exit 1
+          args=()
+          if [[ "$RETRY_FAILED" == true ]]; then args+=(--retry-failed); fi
+          python scripts/pdf_ocr_stages.py plan-render --limit "$LIMIT" --checkpoint "$CHECKPOINT" "${args[@]}"
           echo "shard_count=$(jq -r '.shard_count' output/pdf-ocr/queue.json)" >> "$GITHUB_OUTPUT"
           echo "shard_ids=$(jq -c '.shard_ids' output/pdf-ocr/queue.json)" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v7
         with:
-          name: pdf-image-ocr-queue
+          name: pdf-render-queue
           path: output/pdf-ocr/queue.json
           retention-days: 7
   build:
@@ -61,7 +79,7 @@ jobs:
     timeout-minutes: 350
     strategy:
       fail-fast: false
-      max-parallel: 8
+      max-parallel: 4
       matrix:
         shard: ${{ fromJSON(needs.plan.outputs.shard_ids) }}
     steps:
@@ -69,24 +87,25 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
-      - run: pip install -r scripts/requirements-pdf-ocr.txt
-      - uses: actions/cache@v4
-        with:
-          path: .cache/paddlex
-          key: paddlex-ppocrv6-${{ runner.os }}-${{ hashFiles('scripts/requirements-pdf-ocr.txt') }}
+      - run: pip install -r scripts/requirements.txt
+      - name: Install rendering tools
+        run: |
+          packages=(poppler-utils)
+          if [[ "$PDF_JXL_ENABLED" == true ]]; then packages+=(libjxl-tools); fi
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends "${packages[@]}"
       - uses: actions/download-artifact@v8
         with:
-          name: pdf-image-ocr-queue
+          name: pdf-render-queue
           path: output/pdf-ocr
-      - name: Recognize verified PNG pages without PDF rendering
+      - name: Render and upload PNG WebP and optional JXL
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          PADDLE_PDX_CACHE_HOME: ${{ github.workspace }}/.cache/paddlex
-        run: python scripts/pdf_ocr_stages.py ocr --shard "${{ matrix.shard }}"
+        run: python scripts/pdf_ocr_stages.py render --shard "${{ matrix.shard }}"
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: pdf-image-ocr-results-${{ matrix.shard }}
+          name: pdf-render-results-${{ matrix.shard }}
           path: output/pdf-ocr/bundle/results.json
           retention-days: 7
           if-no-files-found: warn
@@ -107,19 +126,19 @@ jobs:
       - run: pip install -r scripts/requirements.txt
       - uses: actions/download-artifact@v8
         with:
-          name: pdf-image-ocr-queue
+          name: pdf-render-queue
           path: output/pdf-ocr
       - uses: actions/download-artifact@v8
         if: needs.build.result != 'skipped'
         with:
-          pattern: pdf-image-ocr-results-*
+          pattern: pdf-render-results-*
           path: output/pdf-ocr/results
-      - name: Save page progress and publish complete books
+      - name: Publish complete image inputs and Reader streams
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           shopt -s nullglob
-          python scripts/pdf_ocr_stages.py publish-ocr --results output/pdf-ocr/results/*/results.json
+          python scripts/pdf_ocr_stages.py publish-render --results output/pdf-ocr/results/*/results.json
       - name: Publish Reader sidecar to Pages
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}

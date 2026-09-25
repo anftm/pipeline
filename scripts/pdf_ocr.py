@@ -49,7 +49,7 @@ OCR_TIMEOUT = int(os.environ.get("PDF_OCR_PAGE_TIMEOUT", "300"))
 MI = 1024 * 1024
 OCR_OBJECT_PATH_RE = re.compile(
     r"^objects/[0-9a-f]{2}/[0-9a-f]{64}/[0-9a-f]{16}/"
-    r"(?:ocr-manifest\.json|page-manifest\.json|"
+    r"(?:ocr-manifest\.json|page-manifest\.json|render-manifest\.json|"
     r"pages/page-[0-9]{6}\.(?:webp|jxl)|"
     r"ocr-input/page-[0-9]{6}\.png|"
     r"ocr/page-[0-9]{6}\.json\.gz|ocr/book-text\.json\.gz)$"
@@ -417,7 +417,7 @@ def build_item(item: dict, source: Path, bundle: Path) -> dict:
                 if old.get("p") != number:
                     raise ValueError("invalid previous OCR page order")
                 for field, suffix in (("o", ".json.gz"), ("w", ".webp"), ("i", ".png")):
-                    if field not in old:
+                    if field == "i" and field not in old:
                         continue
                     validate_ocr_object_path(old.get(field))
                     if not old[field].endswith(f"page-{number:06d}{suffix}"):
@@ -588,8 +588,11 @@ def validate_manifest(manifest: dict) -> dict:
     for key, entry in manifest["files"].items():
         if not isinstance(key, str) or not isinstance(entry, dict):
             raise ValueError("invalid PDF OCR entry")
-        if entry.get("status") not in {"ready", "failed", "skipped"}:
+        if entry.get("status") not in {"ready", "failed", "skipped", "rendered"}:
             raise ValueError("invalid PDF OCR entry status")
+        if entry.get("status") == "rendered":
+            validate_ocr_object_path(entry["render_manifest"]["path"], "/render-manifest.json")
+            validate_ocr_object_path(entry["page_manifest"]["path"], "/page-manifest.json")
         if entry.get("status") == "ready":
             if entry.get("profile") not in {OCR_PROFILE, asset_profile()} or not re.fullmatch(r"[0-9a-f]{64}", str(entry.get("source_sha256", ""))):
                 raise ValueError("invalid PDF OCR ready entry")

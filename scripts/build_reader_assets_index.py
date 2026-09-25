@@ -48,6 +48,12 @@ def build_index(manifest: dict, pdf_manifest: dict | None = None, range_manifest
         if path:
             files[key] = {**files.get(key, {}), **shared.pdf_pages_sidecar_entry(path)}
     for key, entry in (ocr_manifest or {}).get("files", {}).items():
+        # Rendering may finish before recognition (or recognition may fail).
+        # Preserve its complete Reader stream during unrelated sidecar rebuilds.
+        page_path = (entry.get("page_manifest") or {}).get("path")
+        if (entry.get("status") in {"rendered", "failed"} and page_path
+                and entry.get("render_manifest") and not files.get(key, {}).get("p")):
+            files[key] = {**files.get(key, {}), **shared.pdf_pages_sidecar_entry(page_path)}
         if entry.get("status") != "ready" or not isinstance(entry.get("ocr_manifest"), str):
             continue
         merged = shared.merge_pdf_ocr_sidecar_entry(files.get(key), entry)
