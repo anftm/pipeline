@@ -509,14 +509,14 @@ class PdfOcrStagesTests(unittest.TestCase):
         self.assertEqual(render["jobs"]["build"]["strategy"]["max-parallel"], 10)
         self.assertEqual(ocr[True]["workflow_dispatch"]["inputs"]["target_pages"]["default"], "2000")
 
-    def test_scheduled_render_drains_pending_in_jxl_batches(self):
+    def test_scheduled_render_drains_pending_in_webp_batches(self):
         root = Path(__file__).resolve().parents[1]
         text = (root / ".github/workflows/pdf-render-inputs.yml").read_text()
         workflow = yaml.safe_load(text)
         inputs = workflow[True]["workflow_dispatch"]["inputs"]
         self.assertEqual(inputs["limit"]["default"], "100")
-        self.assertTrue(inputs["generate_jxl"]["default"])
-        self.assertIn("github.event_name == 'schedule'", workflow["env"]["PDF_JXL_ENABLED"])
+        self.assertFalse(inputs["generate_jxl"]["default"])
+        self.assertEqual(workflow["env"]["PDF_JXL_ENABLED"], "${{ inputs.generate_jxl == true }}")
         self.assertEqual(workflow["jobs"]["plan"]["steps"][5]["env"]["CHECKPOINT"], "${{ inputs.checkpoint || '0' }}")
 
     def test_render_registry_stream_and_pending_ocr_are_committed_together(self):
@@ -567,6 +567,11 @@ class PdfOcrStagesTests(unittest.TestCase):
                           "render_manifest": {**result["render_manifest"],
                                               "sha256": hashlib.sha256(raw).hexdigest(), "bytes": len(raw)}}
             self.objects[result["render_manifest"]["path"]] = raw
+            jxl_only = {**new_result, "profile": old["profile"].replace("-jxl-0-", "-jxl-1-")}
+            self.assertEqual(set(stages.reuse_recognized_pages(old, jxl_only, manifest["pages"])), {"2"})
+            changed_layout = {**jxl_only, "profile": jxl_only["profile"].rsplit("-layout-", 1)[0]
+                              + "-layout-v1-" + "e" * 16}
+            self.assertEqual(stages.reuse_recognized_pages(old, changed_layout, manifest["pages"]), {})
             queue = stages.plan_images({result["key"]: new_result}, {result["key"]: old}, {})
             self.assertEqual(queue["total_ocr_pages"], 0)
             self.assertEqual(queue["shard_count"], 0)

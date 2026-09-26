@@ -82,6 +82,24 @@ class RealPdfRenderingTests(unittest.TestCase):
                 self.assertEqual(reader.size, webp.size)
                 self.assertEqual(reader.height, 1800)
 
+    def test_reader_quality_uses_clean_scan_only_with_or_without_jxl(self):
+        with Image.new("RGB", (128, 128), "white") as clean, \
+                Image.new("RGB", (128, 128), (196, 166, 115)) as yellowed, \
+                Image.new("RGB", (128, 128), "black") as damaged:
+            self.assertEqual(pdf_ocr.reader_webp_quality(clean, True), 80)
+            self.assertEqual(pdf_ocr.reader_webp_quality(clean, False), 85)
+            self.assertEqual(pdf_ocr.reader_webp_quality(yellowed, True), 85)
+            self.assertEqual(pdf_ocr.reader_webp_quality(damaged, True), 85)
+            with tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                source = root / "clean.pdf"
+                clean.save(source, "PDF", resolution=100)
+                for jxl in (False, True):
+                    with self.subTest(jxl=jxl), patch.object(pdf_ocr, "reader_webp_quality",
+                                                           wraps=pdf_ocr.reader_webp_quality) as select:
+                        pdf_ocr.render_page(source, 1, root, (128, 128), reader_jxl=jxl)
+                        self.assertEqual(select.call_args.args[1], True)
+
 
 if __name__ == "__main__":
     unittest.main()

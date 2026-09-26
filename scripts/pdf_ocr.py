@@ -494,6 +494,22 @@ def scan_reader_images(path: Path, start: int, end: int) -> dict[int, tuple[int,
     return result
 
 
+def reader_webp_quality(image, full_page_scan: bool) -> int:
+    if not full_page_scan:
+        return WEBP_QUALITY
+    sample = image.resize((128, 128))
+    pixels = sample.tobytes()
+    bright = dark = colorful = 0
+    for offset in range(0, len(pixels), 3):
+        r, g, b = pixels[offset:offset + 3]
+        bright += min(r, g, b) > 235
+        dark += max(r, g, b) < 96
+        colorful += max(r, g, b) - min(r, g, b) > 22
+    count = sample.width * sample.height
+    return min(WEBP_QUALITY, 80) if (bright / count >= .7 and dark / count <= .12
+                                    and colorful / count <= .03) else WEBP_QUALITY
+
+
 def render_page(path: Path, page: int, directory: Path,
                 reader_pixels: tuple[int, int] | None = None, reader_jxl: bool = False) -> tuple[Path, int, int]:
     prefix = directory / f"page-{page:06d}"
@@ -533,7 +549,7 @@ def render_page(path: Path, page: int, directory: Path,
                 rgb.close()
                 rgb = resized
         webp = prefix.with_suffix(".webp")
-        rgb.save(webp, "WEBP", quality=WEBP_QUALITY, method=6)
+        rgb.save(webp, "WEBP", quality=reader_webp_quality(rgb, reader_pixels is not None), method=6)
         if reader_jxl and rgb.size != (width, height):
             rgb.save(prefix.with_name(prefix.name + "-reader").with_suffix(".png"), "PNG")
         rgb.close()
