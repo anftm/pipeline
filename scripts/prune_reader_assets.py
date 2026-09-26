@@ -63,8 +63,8 @@ def parse_args():
 
 def main() -> int:
     args = parse_args()
-    if args.grace_days < 1 or args.limit < 1:
-        raise ValueError("grace-days and limit must be positive")
+    if args.grace_days < 0 or args.limit < 1:
+        raise ValueError("grace-days must be non-negative and limit must be positive")
     token = os.environ.get("HF_TOKEN", "")
     if not token:
         raise RuntimeError("HF_TOKEN is required")

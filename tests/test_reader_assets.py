@@ -3,6 +3,7 @@ import gzip
 import hashlib
 import http.client
 import json
+import sys
 import tempfile
 import unittest
 import urllib.error
@@ -2165,6 +2166,24 @@ class PruneTests(unittest.TestCase):
             prune_reader_assets.expired_orphans(manifest, date(2026, 8, 26), 30, 100),
             ["objects/old"],
         )
+
+    def test_zero_day_grace_deletes_today_orphans_but_not_referenced_objects(self):
+        manifest = {"version": 1, "files": {
+            "live": {"status": "ready", "path": "objects/live"},
+        }, "orphans": {
+            "objects/today": {"since": "2026-08-26"},
+            "objects/live": {"since": "2026-01-01"},
+            "objects/invalid": {"since": "unknown"},
+        }}
+        self.assertEqual(
+            prune_reader_assets.expired_orphans(manifest, date(2026, 8, 26), 0, 100),
+            ["objects/today"],
+        )
+
+    def test_prune_cli_accepts_zero_day_grace(self):
+        with patch.object(sys, "argv", ["prune_reader_assets.py", "--grace-days", "0"]):
+            args = prune_reader_assets.parse_args()
+        self.assertEqual(args.grace_days, 0)
 
     def test_prune_deletes_objects_and_republishes_manifest_and_sidecar(self):
         manifest = {"version": 1, "files": {}, "orphans": {
