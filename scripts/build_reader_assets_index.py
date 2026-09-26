@@ -52,8 +52,7 @@ def build_index(manifest: dict, pdf_manifest: dict | None = None, range_manifest
         # Preserve its complete Reader stream during unrelated sidecar rebuilds.
         page_path = (entry.get("page_manifest") or {}).get("path")
         if (entry.get("status") in {"rendered", "failed"} and page_path
-                and entry.get("render_manifest") and (not files.get(key, {}).get("p")
-                or entry.get("range_status") == "failed" and entry.get("classification") == "native-text")):
+                and entry.get("render_manifest")):
             files[key] = {**files.get(key, {}), **shared.pdf_pages_sidecar_entry(page_path)}
         if entry.get("status") != "ready" or not isinstance(entry.get("ocr_manifest"), str):
             continue

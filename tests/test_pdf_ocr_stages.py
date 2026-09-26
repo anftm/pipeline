@@ -477,6 +477,19 @@ class PdfOcrStagesTests(unittest.TestCase):
             self.assertEqual(compact["b"], "vomebook/pdf-pages")
             self.assertNotIn("o", compact)
 
+    def test_completed_ocr_page_stream_replaces_existing_pdf_route(self):
+        result = self.render_fixture()
+        existing = {"s": 2, "m": "p", "p": "objects/old/document.pdf",
+                    "b": "vomebook/pdf-optimized"}
+        base = {"files": {result["key"]: {"status": "ready", "reader_mode": "pdf",
+                                           "path": "ordinary.pdf"}}}
+        ocr = {"files": {result["key"]: {**result, "status": "ready",
+                                           "ocr_manifest": "objects/old/ocr-manifest.json"}}}
+        merged = build_index(base, ocr_manifest=ocr)["f"][result["key"]]
+        self.assertEqual(merged["p"], result["page_manifest"]["path"])
+        self.assertEqual(merged["b"], "vomebook/pdf-pages")
+        self.assertEqual(merged["o"], "objects/old/ocr-manifest.json")
+
     def test_failed_native_optimization_replaces_pdf_route_and_keeps_text(self):
         result = {**self.render_fixture(native_only=True, force_image=True),
                   "range_status": "failed", "classification": "native-text"}
