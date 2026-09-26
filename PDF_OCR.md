@@ -65,6 +65,9 @@ the shared `reader-assets` publication lock.
   pages do not count. Large books may span workers; small books are packed
   together. Pixel dimensions and text density still affect processing time, so
   equal page counts do not guarantee equal duration.
+- Automatic OCR runs now plan up to **100 rendered books** per successful render
+  workflow, matching the render batch size. The 8-worker shard limit remains;
+  this removes the previous 20-book automatic backlog cap.
 - Eight OCR workers may run concurrently. A worker keeps its model loaded and
   checkpoints uploads every 25 pages. Failed pages remain pending and successful
   pages are retained in `pdf_ocr_progress.json`, keyed by render generation.
