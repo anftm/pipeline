@@ -5,7 +5,7 @@ on:
     inputs:
       limit:
         description: Maximum rendered books to process
-        default: "20"
+        default: "100"
         type: string
       target_pages:
         description: Target actual OCR pages per worker
@@ -53,7 +53,7 @@ jobs:
         id: plan
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          LIMIT: ${{ inputs.limit || '20' }}
+          LIMIT: ${{ inputs.limit || '100' }}
           PDF_OCR_TARGET_PAGES_PER_SHARD: ${{ inputs.target_pages || '500' }}
           PDF_OCR_LANG: ${{ inputs.lang || 'auto' }}
           PDF_OCR_BACKEND: ${{ inputs.backend || 'rapidocr_onnxruntime' }}
@@ -113,7 +113,7 @@ jobs:
     needs: [plan, build]
     if: always() && !cancelled() && needs.plan.result == 'success'
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 180
     concurrency:
       group: reader-assets
       cancel-in-progress: false

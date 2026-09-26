@@ -398,6 +398,8 @@ class PdfOcrStagesTests(unittest.TestCase):
         self.assertIn('default: "rapidocr_onnxruntime"', ocr_text)
         self.assertIn("github.event.workflow_run.conclusion == 'success'", ocr["jobs"]["plan"]["if"])
         self.assertIn("!cancelled()", ocr["jobs"]["publish"]["if"])
+        self.assertEqual(ocr[True]["workflow_dispatch"]["inputs"]["limit"]["default"], "100")
+        self.assertIn("inputs.limit || '100'", ocr_text)
         self.assertEqual(render["jobs"]["publish"]["concurrency"]["group"],
                          ocr["jobs"]["publish"]["concurrency"]["group"])
 
