@@ -43,7 +43,7 @@ def render_profile() -> str:
     return (f"pdf-render-v2-text-png-dpi-{pdf_ocr.OCR_DPI}-maxpix-{pdf_ocr.MAX_PAGE_PIXELS}"
             f"-webp-{pdf_ocr.WEBP_QUALITY}-{pdf_ocr.WEBP_MAX_DIMENSION}"
             f"-native-{pdf_ocr.MIN_NATIVE_PAGE_CHARS}-jxl-{int(pdf_ocr.JXL_ENABLED)}"
-            f"-{pdf_ocr.JXL_DISTANCE:g}-{pdf_ocr.JXL_EFFORT}-reader-source-pixels-v1")
+            f"-{pdf_ocr.JXL_DISTANCE:g}-{pdf_ocr.JXL_EFFORT}-reader-source-pixels-v2-clean-webp-80")
 
 
 def root_for(source_sha: str, key: str, identity: str) -> Path:
@@ -458,9 +458,14 @@ def layout_options(overrides, key):
 
 def reuse_recognized_pages(old, entry, pages):
     """Reuse verified OCR when only Reader image objects changed."""
+    old_profile, old_separator, old_layout = str(old.get("profile") or "").partition("-layout-")
+    new_profile, new_separator, new_layout = str(entry.get("profile") or "").partition("-layout-")
+    same_recognition = (bool(old_separator and new_separator) and old_layout == new_layout
+                        and pdf_ocr.ocr_profile_without_jxl(old_profile) ==
+                        pdf_ocr.ocr_profile_without_jxl(new_profile))
     if (old.get("status") != "ready" or not same_source(old, entry)
             or old.get("source_sha256") != entry.get("source_sha256")
-            or old.get("profile") != entry.get("profile")):
+            or not same_recognition):
         return {}
     try:
         metadata = {"path": old["ocr_manifest"], "sha256": old["ocr_manifest_sha256"],
@@ -468,7 +473,7 @@ def reuse_recognized_pages(old, entry, pages):
         previous = json.loads(read_object(metadata, "/ocr-manifest.json"))
         if (previous.get("kind") != "pdf-ocr" or previous.get("complete") is not True
                 or previous.get("source_sha256") != entry["source_sha256"]
-                or previous.get("profile") != entry["profile"]
+                or previous.get("profile") != old["profile"]
                 or previous.get("page_count") != len(pages)):
             return {}
         old_pages = previous.get("pages")

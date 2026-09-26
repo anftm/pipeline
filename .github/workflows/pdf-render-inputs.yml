@@ -12,8 +12,8 @@ on:
         default: "0"
         type: string
       generate_jxl:
-        description: Encode JXL directly from the high quality PNG as well as WebP
-        default: true
+        description: Also encode optional JXL page images (Reader currently uses WebP)
+        default: false
         type: boolean
       retry_failed:
         description: Retry failed rendering for unchanged sources
@@ -36,7 +36,7 @@ concurrency:
   queue: max
 
 env:
-  PDF_JXL_ENABLED: ${{ github.event_name == 'schedule' || inputs.generate_jxl == true }}
+  PDF_JXL_ENABLED: ${{ inputs.generate_jxl == true }}
 
 jobs:
   plan:

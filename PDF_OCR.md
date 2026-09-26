@@ -31,6 +31,16 @@ the shared `reader-assets` publication lock.
   A single full-page image check cannot rule out every vector overlay; such
   pages need visual spot checks. JXL is encoded from
   the resized lossless reader image, never from the lossy WebP.
+- Reader page display loads only WebP, including on browsers with JXL support.
+  Scheduled renders now omit JXL; manual rendering can still enable it via
+  `generate_jxl`. Existing JXL objects remain available for a future explicit
+  switch. The first-page
+  preload and visible-page load resolve to the same WebP URL. On an unambiguous
+  full-page scan with no extracted text, a small image sample must be at least
+  70% near-white, at most 12% dark and at most 3% colored before WebP quality
+  can drop from 85 to 80. All other pages retain quality 85. This rule was
+  checked against clean, yellowed and damaged book pages; compare representative
+  small type visually before widening it.
 - PNG is retained on native pages of mixed books too, for later encoding use.
   No automatic PNG deletion is currently performed.
 - `pdf_render_manifest.json` contains only the descriptors for completed image
@@ -81,9 +91,10 @@ the shared `reader-assets` publication lock.
   workflow, matching the render batch size. The 8-worker shard limit remains;
   this removes the previous 20-book automatic backlog cap.
 - A reader-image-only render-profile change reuses previously recognized page
-  objects when the source, recognition profile and each OCR-input PNG checksum
-  match. The worker refreshes the v2 book index and page paths without rerunning
-  recognition; changed inputs still enter the normal OCR queue.
+  objects when the source, recognition and layout settings (apart from optional
+  JXL encoding) and each OCR-input PNG checksum match. The worker refreshes
+  the v2 book index and page paths without rerunning recognition; changed
+  inputs still enter the normal OCR queue.
 - RapidOCR ONNX tasks use the configured target (2,000 by default). Paddle
   multilingual tasks are capped at 1,200 pages per task because their CPU
   recognition rate is lower. This reduces repeated model downloads without
