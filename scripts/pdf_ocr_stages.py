@@ -471,11 +471,15 @@ def plan_images(rendered, current, progress, limit=20, target=500, overrides=Non
         book = {**entry, "pages": manifest["pages"], "saved": saved}
         books.append(book)
         pending = [p for p in manifest["pages"] if p["source"] == "ocr" and str(p["p"]) not in saved]
-        for start in range(0, len(pending), target):
+        # Fast ONNX recognition benefits from fewer model startups. Keep the
+        # slower multilingual Paddle backend below a conservative task size so
+        # one shard cannot approach the runner timeout.
+        task_target = min(target, 1200) if entry["ocr_backend"] == "paddle_onnxruntime" else target
+        for start in range(0, len(pending), task_target):
             tasks.append({"key": key, "generation": generation, "profile": entry["profile"],
                           "ocr_language": entry["ocr_language"], "ocr_backend": entry["ocr_backend"],
                           "source_sha256": entry["source_sha256"], "layout_options": options,
-                          "pages": pending[start:start + target]})
+                          "pages": pending[start:start + task_target]})
     # Pack small books together, while large books can span several workers.
     count = min(256, len(tasks), max(1, math.ceil(sum(len(t["pages"]) for t in tasks) / target)))
     shards = shared.weighted_shards(tasks, count, weight=lambda t: len(t["pages"]),

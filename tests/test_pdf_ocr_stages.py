@@ -402,6 +402,8 @@ class PdfOcrStagesTests(unittest.TestCase):
         self.assertIn("inputs.limit || '100'", ocr_text)
         self.assertEqual(render["jobs"]["publish"]["concurrency"]["group"],
                          ocr["jobs"]["publish"]["concurrency"]["group"])
+        self.assertEqual(render["jobs"]["build"]["strategy"]["max-parallel"], 10)
+        self.assertEqual(ocr[True]["workflow_dispatch"]["inputs"]["target_pages"]["default"], "2000")
 
     def test_scheduled_render_drains_pending_in_jxl_batches(self):
         root = Path(__file__).resolve().parents[1]

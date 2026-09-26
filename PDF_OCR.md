@@ -61,13 +61,17 @@ the shared `reader-assets` publication lock.
   ONNX Runtime. Backend, language and model version are all part of the OCR
   profile. RapidOCR currently uses its ONNX Runtime path for `ch`/`en`; Paddle's ONNX Runtime path remains the
   multilingual option for `fa`, `ar`, Korean and other profiles.
-- `target_pages` defaults to **500 actual recognition pages per shard**. Native
+- `target_pages` defaults to **2,000 actual recognition pages per shard**. Native
   pages do not count. Large books may span workers; small books are packed
   together. Pixel dimensions and text density still affect processing time, so
   equal page counts do not guarantee equal duration.
 - Automatic OCR runs now plan up to **100 rendered books** per successful render
   workflow, matching the render batch size. The 8-worker shard limit remains;
   this removes the previous 20-book automatic backlog cap.
+- RapidOCR ONNX tasks use the configured target (2,000 by default). Paddle
+  multilingual tasks are capped at 1,200 pages per task because their CPU
+  recognition rate is lower. This reduces repeated model downloads without
+  letting a slow language task approach the runner timeout.
 - Eight OCR workers may run concurrently. A worker keeps its model loaded and
   checkpoints uploads every 25 pages. Failed pages remain pending and successful
   pages are retained in `pdf_ocr_progress.json`, keyed by render generation.
