@@ -151,8 +151,15 @@ def save_registry(api, repo, name, updates, merge=None, publish_streams=False):
                     previous = ocr_state["files"].get(key, {})
                     if previous.get("status") != "ready":
                         ocr_state["files"][key] = {**value, "status": "rendered"}
+                    elif (value.get("range_status") == "failed" and value.get("classification") == "native-text"
+                          and value.get("page_manifest") and same_source(previous, value)
+                          and previous.get("source_sha256") == value.get("source_sha256")):
+                        ocr_state["files"][key] = {**previous, "page_manifest": value["page_manifest"],
+                                                   "render_manifest": value["render_manifest"],
+                                                   "range_status": "failed", "classification": "native-text"}
                     entry = dict(sidecar["f"].get(key) or {})
-                    if value.get("page_manifest") and not entry.get("p"):
+                    if (value.get("page_manifest") and (not entry.get("p") or
+                            value.get("range_status") == "failed" and value.get("classification") == "native-text")):
                         entry.update(shared.pdf_pages_sidecar_entry(value["page_manifest"]["path"]))
                         sidecar["f"][key] = entry
             operations.append(CommitOperationAdd(path_in_repo=publication.SIDECAR_NAME,
@@ -224,6 +231,9 @@ def validate_range(book, start, end, descriptor):
     pages = payload.get("pages")
     if not isinstance(pages, list) or [p.get("p") for p in pages] != list(range(start, end + 1)):
         raise ValueError("incomplete render range")
+    if (book.get("force_image_render") and book["probe"]["classification"] == "native-text"
+            and (not payload.get("image_rendered") or any("w" not in page for page in pages))):
+        raise ValueError("native render range lacks required page images")
     validate_render({**book, "page_manifest": None}, {**book, "version": 1, "kind": "pdf-render",
                                                     "complete": True, "page_manifest": None,
                                                     "image_rendered": payload.get("image_rendered", False), "pages": pages,
@@ -337,7 +347,8 @@ def render_book(item: dict, source: Path, bundle: Path) -> dict:
     manifest_path = bundle / root / "render-manifest.json"
     pdf_ocr.write_json(manifest_path, manifest)
     return {**base, "status": "ready", "render_manifest": metadata(manifest_path, bundle),
-            "page_manifest": page_manifest_meta, "ocr_pages": sum(p["source"] == "ocr" for p in pages)}
+            "page_manifest": page_manifest_meta, "image_rendered": bool(image_pages),
+            "ocr_pages": sum(p["source"] == "ocr" for p in pages)}
 
 
 def validate_render(item, manifest, page_numbers=None):
@@ -351,6 +362,9 @@ def validate_render(item, manifest, page_numbers=None):
     expected = list(page_numbers) if page_numbers is not None else list(range(1, item["page_count"] + 1))
     if len(pages) != len(expected) or [p["p"] for p in pages] != expected:
         raise ValueError("incomplete render page sequence")
+    if (item.get("force_image_render") and manifest.get("classification") == "native-text"
+            and not manifest.get("image_rendered")):
+        raise ValueError("native render lacks required page images")
     root = root_for(item["source_sha256"], item["key"], item["render_profile"])
     for p in pages:
         if p.get("source") not in {"native", "ocr"} or p["width"] <= 0 or p["height"] <= 0:
@@ -405,7 +419,8 @@ def assemble_render_book(book, descriptors, bundle):
     output = bundle / root / "render-manifest.json"
     pdf_ocr.write_json(output, manifest)
     result = {**base, "status": "ready", "render_manifest": metadata(output, bundle),
-              "page_manifest": page_manifest_meta, "ocr_pages": sum(p["source"] == "ocr" for p in pages)}
+              "page_manifest": page_manifest_meta, "image_rendered": bool(image_pages),
+              "ocr_pages": sum(p["source"] == "ocr" for p in pages)}
     validate_render(result, manifest)
     return result
 
@@ -462,7 +477,8 @@ def plan_images(rendered, current, progress, limit=20, target=500, overrides=Non
         old = current.get(key, {})
         if (old.get("status") in {"ready", "skipped"} and same_source(old, entry)
                 and old.get("profile") == entry.get("profile")
-                and old.get("source_sha256") == entry.get("source_sha256")):
+                and old.get("source_sha256") == entry.get("source_sha256")
+                and old.get("page_manifest") == entry.get("page_manifest")):
             continue
         if len(books) >= limit:
             break

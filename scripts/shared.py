@@ -72,7 +72,8 @@ def merge_pdf_ocr_sidecar_entry(current: dict | None, result: dict) -> dict | No
         return entry or {"s": 4, "om": "failed", "oe": result.get("error", "OCR failed")}
     if result.get("status") == "ready":
         page_manifest = result.get("page_manifest")
-        if (not entry.get("p") and isinstance(page_manifest, dict)
+        if ((not entry.get("p") or result.get("range_status") == "failed"
+             and result.get("classification") == "native-text") and isinstance(page_manifest, dict)
                 and isinstance(page_manifest.get("path"), str)):
             entry.update(pdf_pages_sidecar_entry(page_manifest["path"]))
         entry.update({

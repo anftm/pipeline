@@ -16,9 +16,16 @@ the shared `reader-assets` publication lock.
   current; they are not rebuilt solely to populate the PNG cache.
 - Pure native-text PDFs retain their PDF text layer. Mixed PDFs get extracted
   native text JSON on native pages and PNG inputs for recognition on scan pages.
+- When structural PDF optimization has failed, native-text PDFs also receive a
+  Reader page stream while keeping the extracted native text and v2 full-text
+  index; these pages are not sent to OCR. Previously completed text-only render
+  ranges without images are rerendered for this case.
 - Each rendered page retains a high-quality PNG, nominally 300 DPI, bounded by
-  the configured maximum pixel count. The Reader WebP is a separate resized,
-  quality-85 derivative. Optional JXL is encoded directly from the PNG.
+  the configured 50-million-pixel maximum; unusually large pages use a lower
+  rendering DPI. The Reader WebP is a separate quality-85 derivative capped at
+  1800 pixels on its longest edge (no extra upscaling). Optional JXL is encoded
+  directly from the PNG, not the resized WebP. Rasterizing an embedded low-res
+  scan at 300 DPI does not add detail to the source image.
 - PNG is retained on native pages of mixed books too, for later encoding use.
   No automatic PNG deletion is currently performed.
 - `pdf_render_manifest.json` contains only the descriptors for completed image
@@ -33,7 +40,7 @@ the shared `reader-assets` publication lock.
   `recover_run` republishes validated artifacts from a completed main-branch
   render run without recomputing or reuploading its PNG images.
 - Books over 500 pages are scheduled in 250-page ranges; smaller books remain
-  single tasks. Six render workers may run concurrently. Each range uploads
+  single tasks. Ten render workers may run concurrently. Each range uploads
   its immutable pages and checksummed range descriptor before the worker writes
   its result artifact. `pdf_render_progress.json` tracks completed ranges by
   source SHA, profile and book identity. Later batches validate and reuse those
