@@ -430,12 +430,15 @@ def layout_options(overrides, key):
     return {"default": default, "pages": pages}
 
 
-def plan_images(rendered, current, progress, limit=20, target=500, overrides=None):
+def plan_images(rendered, current, progress, limit=20, target=500, overrides=None,
+                retry_failed_only=False):
     if limit < 1 or target < 1:
         raise ValueError("limit and target must be positive")
     books, tasks = [], []
     for key, entry in sorted(rendered.items(), key=lambda pair: (
             current.get(pair[0], {}).get("status") == "failed", pair[0])):
+        if retry_failed_only and current.get(key, {}).get("status") != "failed":
+            continue
         if entry.get("status") not in {"ready", "skipped"}:
             continue
         options = layout_options(overrides or {}, key)
@@ -657,6 +660,7 @@ def main():
     parser.add_argument("--limit", type=int, default=20)
     parser.add_argument("--checkpoint", type=int, default=0)
     parser.add_argument("--retry-failed", action="store_true")
+    parser.add_argument("--retry-failed-only", action="store_true")
     parser.add_argument("--results", type=Path, nargs="*", default=[])
     parser.add_argument("--results-dir", type=Path)
     parser.add_argument("--search-data", type=Path, default=Path("output/search_data.json"))
@@ -685,7 +689,8 @@ def main():
             progress = load_registry(api, repo, PROGRESS_REGISTRY, revision)["files"]
             overrides = json.loads(args.layout_overrides.read_text(encoding="utf-8")) if args.layout_overrides.is_file() else {}
             queue = plan_images(rendered, current, progress, args.limit,
-                                plan_pdf_ocr.ocr_target_pages_per_shard(), overrides)
+                                plan_pdf_ocr.ocr_target_pages_per_shard(), overrides,
+                                retry_failed_only=args.retry_failed_only)
         args.queue.parent.mkdir(parents=True, exist_ok=True)
         pdf_ocr.write_json(args.queue, queue)
         print(f"{args.stage}: {queue['shard_count']} shards", flush=True)
