@@ -23,7 +23,7 @@ except ImportError:
 
 
 MAX_OCR_SHARDS = 20
-DEFAULT_OCR_TARGET_PAGES_PER_SHARD = 500
+DEFAULT_OCR_TARGET_PAGES_PER_SHARD = 2000
 
 
 def ocr_target_pages_per_shard() -> int:

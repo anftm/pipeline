@@ -9,7 +9,7 @@ on:
         type: string
       target_pages:
         description: Target actual OCR pages per worker
-        default: "500"
+        default: "2000"
         type: string
       lang:
         description: auto or a PaddleOCR language code such as ch, en, japan, ar, fa, or ku
@@ -54,7 +54,7 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           LIMIT: ${{ inputs.limit || '100' }}
-          PDF_OCR_TARGET_PAGES_PER_SHARD: ${{ inputs.target_pages || '500' }}
+          PDF_OCR_TARGET_PAGES_PER_SHARD: ${{ inputs.target_pages || '2000' }}
           PDF_OCR_LANG: ${{ inputs.lang || 'auto' }}
           PDF_OCR_BACKEND: ${{ inputs.backend || 'rapidocr_onnxruntime' }}
           RETRY_FAILED_ONLY: ${{ inputs.retry_failed_only || 'false' }}
