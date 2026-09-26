@@ -451,7 +451,51 @@ def _page_render_dpi(path: Path, page: int) -> int:
         return OCR_DPI
 
 
-def render_page(path: Path, page: int, directory: Path) -> tuple[Path, int, int]:
+def scan_reader_images(path: Path, start: int, end: int) -> dict[int, tuple[int, int]]:
+    """Find unambiguous, nearly full-page raster scans and their source pixels."""
+    try:
+        listing = _run(["pdfimages", "-f", str(start), "-l", str(end), "-list", str(path)])
+    except RuntimeError:
+        return {}
+    images: dict[int, list[tuple[int, int, int, int]]] = {}
+    for line in listing.splitlines()[2:]:
+        parts = line.split()
+        if len(parts) < 14 or not parts[0].isdigit():
+            continue
+        page = int(parts[0])
+        if not start <= page <= end:
+            continue
+        if parts[2] != "image":
+            images.setdefault(page, []).append((0, 0, 0, 0))
+            continue
+        try:
+            image = tuple(int(parts[index]) for index in (3, 4, 12, 13))
+        except ValueError:
+            continue
+        images.setdefault(page, []).append(image)
+    result = {}
+    for page, candidates in images.items():
+        if len(candidates) != 1:
+            continue
+        width, height, x_ppi, y_ppi = candidates[0]
+        if min(width, height, x_ppi, y_ppi) < 1:
+            continue
+        try:
+            info = _run(["pdfinfo", "-f", str(page), "-l", str(page), "-box", str(path)])
+            match = re.search(r"Page(?:\s+\d+)? size:\s*([0-9.]+)\s+x\s+([0-9.]+)\s+pts", info)
+            if not match:
+                continue
+            page_width, page_height = (float(value) / 72 for value in match.groups())
+            coverage = (width / x_ppi / page_width, height / y_ppi / page_height)
+            if all(0.85 <= value <= 1.1 for value in coverage):
+                result[page] = (width, height)
+        except (RuntimeError, ZeroDivisionError):
+            continue
+    return result
+
+
+def render_page(path: Path, page: int, directory: Path,
+                reader_pixels: tuple[int, int] | None = None, reader_jxl: bool = False) -> tuple[Path, int, int]:
     prefix = directory / f"page-{page:06d}"
     _run([
         "pdftocairo", "-png", "-singlefile", "-r", str(_page_render_dpi(path, page)),
@@ -469,17 +513,35 @@ def render_page(path: Path, page: int, directory: Path) -> tuple[Path, int, int]
             rgb = rgb.resize((max(1, round(width * scale)), max(1, round(height * scale))))
             width, height = rgb.size
             rgb.save(png, "PNG")
-        if WEBP_MAX_DIMENSION and max(width, height) > WEBP_MAX_DIMENSION:
-            scale = WEBP_MAX_DIMENSION / max(width, height)
-            rgb = rgb.resize((max(1, round(width * scale)), max(1, round(height * scale))))
+        if reader_pixels is None and not reader_jxl:
+            # Preserve the older single-stage profile's delivery bytes.
+            if WEBP_MAX_DIMENSION and max(width, height) > WEBP_MAX_DIMENSION:
+                scale = WEBP_MAX_DIMENSION / max(width, height)
+                resized = rgb.resize((max(1, round(width * scale)), max(1, round(height * scale))))
+                rgb.close()
+                rgb = resized
+        else:
+            scale = min(1.0, WEBP_MAX_DIMENSION / max(width, height)) if WEBP_MAX_DIMENSION else 1.0
+            if reader_pixels:
+                scale = min(scale, reader_pixels[0] / width, reader_pixels[1] / height)
+            if scale < 1:
+                reader_width, reader_height = max(1, int(width * scale)), max(1, int(height * scale))
+                if reader_pixels:
+                    reader_width = min(reader_width, reader_pixels[0])
+                    reader_height = min(reader_height, reader_pixels[1])
+                resized = rgb.resize((reader_width, reader_height), Image.Resampling.LANCZOS)
+                rgb.close()
+                rgb = resized
         webp = prefix.with_suffix(".webp")
         rgb.save(webp, "WEBP", quality=WEBP_QUALITY, method=6)
+        if reader_jxl and rgb.size != (width, height):
+            rgb.save(prefix.with_name(prefix.name + "-reader").with_suffix(".png"), "PNG")
         rgb.close()
     return png, width, height
 
 
 def encode_jxl(png: Path, destination: Path) -> tuple[str, int]:
-    """Encode an optional future-format stream from the lossless OCR render."""
+    """Encode an optional reader stream from a lossless PNG input."""
     destination.parent.mkdir(parents=True, exist_ok=True)
     _run(["cjxl", str(png), str(destination), "-d", str(JXL_DISTANCE), "-e", str(JXL_EFFORT)],
          timeout=COMMAND_TIMEOUT)

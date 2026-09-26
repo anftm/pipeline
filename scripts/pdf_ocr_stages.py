@@ -43,7 +43,7 @@ def render_profile() -> str:
     return (f"pdf-render-v2-text-png-dpi-{pdf_ocr.OCR_DPI}-maxpix-{pdf_ocr.MAX_PAGE_PIXELS}"
             f"-webp-{pdf_ocr.WEBP_QUALITY}-{pdf_ocr.WEBP_MAX_DIMENSION}"
             f"-native-{pdf_ocr.MIN_NATIVE_PAGE_CHARS}-jxl-{int(pdf_ocr.JXL_ENABLED)}"
-            f"-{pdf_ocr.JXL_DISTANCE:g}-{pdf_ocr.JXL_EFFORT}")
+            f"-{pdf_ocr.JXL_DISTANCE:g}-{pdf_ocr.JXL_EFFORT}-reader-source-pixels-v1")
 
 
 def root_for(source_sha: str, key: str, identity: str) -> Path:
@@ -283,6 +283,10 @@ def render_book(item: dict, source: Path, bundle: Path) -> dict:
     bundle.mkdir(parents=True, exist_ok=True)
     pages = []
     force_image_render = bool(item.get("force_image_render"))
+    first, last = item.get("start", 1), item.get("end", probe["page_count"])
+    scan_images = (pdf_ocr.scan_reader_images(source, first, last)
+                   if any(chars == 0 for chars in probe["page_chars"][first - 1:last])
+                   else {})
     with tempfile.TemporaryDirectory(dir=bundle) as temp:
         for number in range(item.get("start", 1), item.get("end", probe["page_count"]) + 1):
             if probe["classification"] == "native-text" and not force_image_render:
@@ -299,8 +303,10 @@ def render_book(item: dict, source: Path, bundle: Path) -> dict:
                 set_page_meta(page, "o", metadata(out, bundle))
                 pages.append(page)
                 continue
-            png, width, height = pdf_ocr.render_page(source, number, Path(temp))
             native = probe["classification"] == "native-text" or probe["page_chars"][number - 1] >= pdf_ocr.MIN_NATIVE_PAGE_CHARS
+            reader_pixels = scan_images.get(number) if not native and probe["page_chars"][number - 1] == 0 else None
+            png, width, height = pdf_ocr.render_page(source, number, Path(temp), reader_pixels,
+                                                     reader_jxl=pdf_ocr.JXL_ENABLED)
             page = {"p": number, "source": "native" if native else "ocr", "width": width, "height": height}
             for field, local, folder in (("i", png, "ocr-input"),
                                          ("w", png.with_suffix(".webp"), "pages")):
@@ -310,7 +316,8 @@ def render_book(item: dict, source: Path, bundle: Path) -> dict:
                 set_page_meta(page, field, metadata(destination, bundle))
             if pdf_ocr.JXL_ENABLED:
                 jxl = bundle / root / "pages" / f"page-{number:06d}.jxl"
-                pdf_ocr.encode_jxl(bundle / page["i"], jxl)
+                reader_png = Path(temp) / f"page-{number:06d}-reader.png"
+                pdf_ocr.encode_jxl(reader_png if reader_png.is_file() else bundle / page["i"], jxl)
                 set_page_meta(page, "j", metadata(jxl, bundle))
             if native:
                 text = pdf_ocr.native_page(source, number)
@@ -449,6 +456,42 @@ def layout_options(overrides, key):
     return {"default": default, "pages": pages}
 
 
+def reuse_recognized_pages(old, entry, pages):
+    """Reuse verified OCR when only Reader image objects changed."""
+    if (old.get("status") != "ready" or not same_source(old, entry)
+            or old.get("source_sha256") != entry.get("source_sha256")
+            or old.get("profile") != entry.get("profile")):
+        return {}
+    try:
+        metadata = {"path": old["ocr_manifest"], "sha256": old["ocr_manifest_sha256"],
+                    "bytes": old["ocr_manifest_bytes"]}
+        previous = json.loads(read_object(metadata, "/ocr-manifest.json"))
+        if (previous.get("kind") != "pdf-ocr" or previous.get("complete") is not True
+                or previous.get("source_sha256") != entry["source_sha256"]
+                or previous.get("profile") != entry["profile"]
+                or previous.get("page_count") != len(pages)):
+            return {}
+        old_pages = previous.get("pages")
+        if not isinstance(old_pages, list) or len(old_pages) != len(pages):
+            return {}
+        saved = {}
+        for page, prior in zip(pages, old_pages):
+            if prior.get("p") != page["p"] or prior.get("source") != page["source"]:
+                return {}
+            if page["source"] != "ocr":
+                continue
+            if (page_meta(prior, "i")["sha256"] != page_meta(page, "i")["sha256"]
+                    or page_meta(prior, "i")["bytes"] != page_meta(page, "i")["bytes"]):
+                return {}
+            output = {**page, **{field: prior[field] for field in
+                                 ("o", "os", "ob", "text", "text_spans", "layout", "chars")}}
+            pdf_ocr.validate_ocr_object_path(output["o"], f"page-{page['p']:06d}.json.gz")
+            saved[str(page["p"])] = output
+        return saved
+    except (KeyError, TypeError, ValueError, OSError, json.JSONDecodeError):
+        return {}
+
+
 def plan_images(rendered, current, progress, limit=20, target=500, overrides=None,
                 retry_failed_only=False):
     if limit < 1 or target < 1:
@@ -487,7 +530,8 @@ def plan_images(rendered, current, progress, limit=20, target=500, overrides=Non
             continue
         generation = generation_for(entry)
         previous = progress.get(key, {})
-        saved = previous.get("pages", {}) if previous.get("generation") == generation else {}
+        saved = previous.get("pages", {}) if previous.get("generation") == generation else reuse_recognized_pages(
+            old, entry, manifest["pages"])
         book = {**entry, "pages": manifest["pages"], "saved": saved}
         books.append(book)
         pending = [p for p in manifest["pages"] if p["source"] == "ocr" and str(p["p"]) not in saved]
