@@ -71,6 +71,9 @@ the shared `reader-assets` publication lock.
 - Publication can proceed after some workers fail. A book is marked `ready`
   only when every native and OCR page is present and verified. Incomplete books
   keep their page progress and their already published Reader stream.
+- Dispatch with `retry_failed_only=true` to resume only books whose published
+  OCR state is `failed`. Normal automatic planning still favors untouched books;
+  recovery reads matching generation progress and retries only missing pages.
 - JSON/text and page images retain the existing Reader wire format. Turning on
   JXL is a render-workflow input, not an OCR-worker operation.
 - The published per-book text file is now strict `version: 2`, `kind:

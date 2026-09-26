@@ -330,7 +330,10 @@ class PdfOcrStagesTests(unittest.TestCase):
                              "render_manifest": {"sha256": "b" * 64}}
                        for key, record in [(failed["key"], failed), (untouched["key"], untouched)]}
             queue = stages.plan_images(entries, {failed["key"]: {"status": "failed"}}, {}, limit=1)
+            recovery = stages.plan_images(entries, {failed["key"]: {"status": "failed"}}, {},
+                                          limit=1, retry_failed_only=True)
         self.assertEqual(queue["books"][0]["key"], untouched["key"])
+        self.assertEqual([book["key"] for book in recovery["books"]], [failed["key"]])
 
     def test_native_only_pdf_builds_complete_book_without_png_or_ocr_worker(self):
         source = self.root / "native.pdf"
@@ -389,6 +392,8 @@ class PdfOcrStagesTests(unittest.TestCase):
         self.assertIn("PDF_OCR_LANG", ocr_text)
         self.assertIn("backend:", ocr_text)
         self.assertIn("PDF_OCR_BACKEND", ocr_text)
+        self.assertFalse(ocr[True]["workflow_dispatch"]["inputs"]["retry_failed_only"]["default"])
+        self.assertIn("--retry-failed-only", ocr_text)
         self.assertIn('default: "auto"', ocr_text)
         self.assertIn('default: "rapidocr_onnxruntime"', ocr_text)
         self.assertIn("github.event.workflow_run.conclusion == 'success'", ocr["jobs"]["plan"]["if"])
