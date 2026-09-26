@@ -11,7 +11,7 @@ from unittest.mock import Mock, patch
 from PIL import Image
 import yaml
 
-from scripts import pdf_ocr, pdf_ocr_stages as stages, plan_pdf_ocr
+from scripts import pdf_ocr, pdf_ocr_stages as stages, plan_pdf_ocr, shared
 from scripts.build_reader_assets_index import build_index
 
 
@@ -467,11 +467,13 @@ class PdfOcrStagesTests(unittest.TestCase):
 
     def test_sidecar_rebuild_preserves_rendered_stream_without_advertising_ocr(self):
         result = self.render_fixture()
+        base = {"files": {result["key"]: {"status": "ready", "reader_mode": "pdf",
+                                         "path": "ordinary.pdf"}}}
         for status in ("rendered", "failed"):
             entry = {**result, "status": status}
             state = {"version": 1, "files": {entry["key"]: entry}}
             pdf_ocr.validate_manifest(state)
-            index = build_index({"files": {}}, ocr_manifest=state)
+            index = build_index(base, ocr_manifest=state)
             compact = index["f"][entry["key"]]
             self.assertEqual(compact["p"], result["page_manifest"]["path"])
             self.assertEqual(compact["b"], "vomebook/pdf-pages")
@@ -489,6 +491,39 @@ class PdfOcrStagesTests(unittest.TestCase):
         self.assertEqual(merged["p"], result["page_manifest"]["path"])
         self.assertEqual(merged["b"], "vomebook/pdf-pages")
         self.assertEqual(merged["o"], "objects/old/ocr-manifest.json")
+        direct = shared.merge_pdf_ocr_sidecar_entry(existing, ocr["files"][result["key"]])
+        self.assertEqual(direct["p"], result["page_manifest"]["path"])
+        self.assertEqual(direct["b"], "vomebook/pdf-pages")
+        self.assertEqual(direct["o"], merged["o"])
+
+    def test_render_refresh_persists_stream_route_with_existing_ready_ocr(self):
+        result = self.render_fixture()
+        old_manifest = {**result["page_manifest"], "path": "objects/old/page-manifest.json"}
+        previous = {**result, "status": "ready", "ocr_manifest": "objects/old/ocr-manifest.json",
+                    "page_manifest": old_manifest}
+        sidecar_path = self.root / "refresh-sidecar.json.gz"
+        sidecar_path.write_bytes(gzip.compress(json.dumps({"v": 1, "f": {
+            result["key"]: {"s": 2, "m": "p", "p": "ordinary.pdf", "b": "vomebook/pdf-optimized",
+                            "o": previous["ocr_manifest"], "ob": "vomebook/pdf-pages"}}}).encode()))
+        api = Mock()
+        api.repo_info.return_value.sha = "pinned-revision"
+        api.hf_hub_download.return_value = str(sidecar_path)
+        def state(_api, _repo, name, _revision):
+            return {"version": 1, "files": {result["key"]: previous}
+                    if name == "pdf_ocr_manifest.json" else {}}
+        with patch.object(stages, "load_registry", side_effect=state):
+            stages.save_registry(api, "test/repo", stages.RENDER_REGISTRY,
+                                 {result["key"]: result}, publish_streams=True)
+        operations = {op.path_in_repo: op.path_or_fileobj for op in api.create_commit.call_args.kwargs["operations"]}
+        stored = json.loads(operations["pdf_ocr_manifest.json"])["files"][result["key"]]
+        self.assertEqual(stored["status"], "ready")
+        self.assertEqual(stored["ocr_manifest"], previous["ocr_manifest"])
+        self.assertEqual(stored["page_manifest"], result["page_manifest"])
+        route = json.loads(gzip.decompress(operations["reader_assets.json.gz"]))["f"][result["key"]]
+        rebuilt = build_index({"files": {}}, ocr_manifest={"files": {result["key"]: stored}})["f"][result["key"]]
+        self.assertEqual(route["p"], rebuilt["p"])
+        self.assertEqual(route["p"], result["page_manifest"]["path"])
+        self.assertEqual(route["o"], rebuilt["o"])
 
     def test_failed_native_optimization_replaces_pdf_route_and_keeps_text(self):
         result = {**self.render_fixture(native_only=True, force_image=True),

@@ -152,12 +152,12 @@ def save_registry(api, repo, name, updates, merge=None, publish_streams=False):
                     previous = ocr_state["files"].get(key, {})
                     if previous.get("status") != "ready":
                         ocr_state["files"][key] = {**value, "status": "rendered"}
-                    elif (value.get("range_status") == "failed" and value.get("classification") == "native-text"
-                          and value.get("page_manifest") and same_source(previous, value)
+                    elif (value.get("page_manifest") and same_source(previous, value)
                           and previous.get("source_sha256") == value.get("source_sha256")):
                         ocr_state["files"][key] = {**previous, "page_manifest": value["page_manifest"],
-                                                   "render_manifest": value["render_manifest"],
-                                                   "range_status": "failed", "classification": "native-text"}
+                                                    "render_manifest": value["render_manifest"],
+                                                    "range_status": value.get("range_status"),
+                                                    "classification": value["classification"]}
                     entry = dict(sidecar["f"].get(key) or {})
                     if value.get("page_manifest"):
                         entry.update(shared.pdf_pages_sidecar_entry(value["page_manifest"]["path"]))
