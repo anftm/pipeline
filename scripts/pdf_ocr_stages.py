@@ -183,7 +183,8 @@ def pending_render(records, rendered, ocr, retry_failed=False):
         previous = rendered.get(item["key"])
         if same_source(previous, item) and previous.get("render_profile") == render_profile():
             if previous.get("status") in {"ready", "skipped"}:
-                continue
+                if not item.get("force_image_render") or previous.get("image_rendered"):
+                    continue
             if previous.get("status") == "failed" and not retry_failed:
                 continue
         pending.append(item)
@@ -224,7 +225,8 @@ def validate_range(book, start, end, descriptor):
     if not isinstance(pages, list) or [p.get("p") for p in pages] != list(range(start, end + 1)):
         raise ValueError("incomplete render range")
     validate_render({**book, "page_manifest": None}, {**book, "version": 1, "kind": "pdf-render",
-                                                    "complete": True, "page_manifest": None, "pages": pages,
+                                                    "complete": True, "page_manifest": None,
+                                                    "image_rendered": payload.get("image_rendered", False), "pages": pages,
                                                     "classification": book["probe"]["classification"]},
                     page_numbers=range(start, end + 1))
     return pages
@@ -270,9 +272,10 @@ def render_book(item: dict, source: Path, bundle: Path) -> dict:
     root = root_for(source_sha, item["key"], render_profile())
     bundle.mkdir(parents=True, exist_ok=True)
     pages = []
+    force_image_render = bool(item.get("force_image_render"))
     with tempfile.TemporaryDirectory(dir=bundle) as temp:
         for number in range(item.get("start", 1), item.get("end", probe["page_count"]) + 1):
-            if probe["classification"] == "native-text":
+            if probe["classification"] == "native-text" and not force_image_render:
                 text = pdf_ocr.native_page(source, number)
                 payload = pdf_ocr.page_payload(number, text["width"], text["height"], text["blocks"], "native")
                 payload["text"] = text["text"]
@@ -287,7 +290,7 @@ def render_book(item: dict, source: Path, bundle: Path) -> dict:
                 pages.append(page)
                 continue
             png, width, height = pdf_ocr.render_page(source, number, Path(temp))
-            native = probe["page_chars"][number - 1] >= pdf_ocr.MIN_NATIVE_PAGE_CHARS
+            native = probe["classification"] == "native-text" or probe["page_chars"][number - 1] >= pdf_ocr.MIN_NATIVE_PAGE_CHARS
             page = {"p": number, "source": "native" if native else "ocr", "width": width, "height": height}
             for field, local, folder in (("i", png, "ocr-input"),
                                          ("w", png.with_suffix(".webp"), "pages")):
@@ -318,6 +321,7 @@ def render_book(item: dict, source: Path, bundle: Path) -> dict:
             raise ValueError("invalid render page range")
         descriptor = bundle / root / f"render-range-{range_id(start, end)}.json"
         pdf_ocr.write_json(descriptor, {**range_identity(base), "version": 1, "kind": "pdf-render-range",
+                                        "image_rendered": any("w" in page for page in pages),
                                         "start": start, "end": end, "pages": pages})
         return {**range_identity(base), "status": "range", "start": start, "end": end,
                 "descriptor": metadata(descriptor, bundle)}
@@ -329,7 +333,7 @@ def render_book(item: dict, source: Path, bundle: Path) -> dict:
             source_sha, render_profile(), image_pages, manifest_dir=root))
         page_manifest_meta = {**metadata(page_manifest, bundle), "version": pdf_assets.PAGE_MANIFEST_VERSION}
     manifest = {**base, "version": 1, "kind": "pdf-render", "complete": True,
-                "pages": pages, "page_manifest": page_manifest_meta}
+                "image_rendered": bool(image_pages), "pages": pages, "page_manifest": page_manifest_meta}
     manifest_path = bundle / root / "render-manifest.json"
     pdf_ocr.write_json(manifest_path, manifest)
     return {**base, "status": "ready", "render_manifest": metadata(manifest_path, bundle),
@@ -352,9 +356,9 @@ def validate_render(item, manifest, page_numbers=None):
         if p.get("source") not in {"native", "ocr"} or p["width"] <= 0 or p["height"] <= 0:
             raise ValueError("invalid rendered page")
         for field, suffix in (("i", ".png"), ("w", ".webp"), ("j", ".jxl"), ("o", ".json.gz")):
-            if field in {"i", "w"} and manifest["classification"] == "native-text":
+            if field in {"i", "w"} and manifest["classification"] == "native-text" and not manifest.get("image_rendered"):
                 continue
-            if field == "j" and manifest["classification"] == "native-text":
+            if field == "j" and manifest["classification"] == "native-text" and not manifest.get("image_rendered"):
                 continue
             if field == "j" and "-jxl-1-" not in item["render_profile"]:
                 continue
@@ -397,7 +401,7 @@ def assemble_render_book(book, descriptors, bundle):
     base = {**public_item(book), "classification": book["probe"]["classification"],
             "render_profile": book["render_profile"], "profile": book["profile"]}
     manifest = {**base, "version": 1, "kind": "pdf-render", "complete": True,
-                "pages": pages, "page_manifest": page_manifest_meta}
+                "image_rendered": bool(image_pages), "pages": pages, "page_manifest": page_manifest_meta}
     output = bundle / root / "render-manifest.json"
     pdf_ocr.write_json(output, manifest)
     result = {**base, "status": "ready", "render_manifest": metadata(output, bundle),
@@ -682,7 +686,8 @@ def main():
         if args.stage == "plan-render":
             assets = load_registry(api, repo, "manifest.json", revision)
             assets["revision"] = revision
-            records = pdf_ocr.source_records(args.search_data, args.revisions, assets)
+            range_state = load_registry(api, repo, "pdf_range_manifest.json", revision)
+            records = pdf_ocr.source_records(args.search_data, args.revisions, assets, range_manifest=range_state)
             records = pending_render(records, rendered, current, args.retry_failed)
             selected = pdf_ocr.queue(records, args.limit, args.checkpoint)
             queue = plan_pdf_ocr.plan(selected)

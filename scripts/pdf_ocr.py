@@ -789,6 +789,13 @@ def source_records(search_data: Path, revisions: Path, assets_manifest: dict | N
             # or reprocessing the range artifact.
             records.append(item)
     records.sort(key=lambda item: (item.get("repo", ""), item.get("path", ""), item.get("source_kind", "")))
+    range_files = (range_manifest or {}).get("files", {})
+    for item in records:
+        range_entry = range_files.get(item["key"], {})
+        if isinstance(range_entry, dict) and range_entry.get("status") == "failed":
+            item["range_status"] = "failed"
+            item["range_reason"] = str(range_entry.get("reason") or "structure optimization failed")[:1000]
+            item["force_image_render"] = True
     return records
 
 
