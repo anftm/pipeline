@@ -11,7 +11,7 @@ from unittest.mock import Mock, patch
 from PIL import Image
 import yaml
 
-from scripts import pdf_ocr, pdf_ocr_stages as stages
+from scripts import pdf_ocr, pdf_ocr_stages as stages, plan_pdf_ocr
 from scripts.build_reader_assets_index import build_index
 
 
@@ -385,6 +385,35 @@ class PdfOcrStagesTests(unittest.TestCase):
                "ocr_manifest": "objects/aa/" + "a" * 64 + "/" + "b" * 16 + "/ocr-manifest.json"}
         self.assertEqual(stages.pending_render([item], {}, {item["key"]: old}), [item])
         self.assertEqual(stages.pending_render([item], {}, {item["key"]: {**old, "ocr_manifest": ""}}), [item])
+
+    def test_render_partitions_keep_small_and_large_files_independent(self):
+        small = {**self.item(), "source_bytes": stages.SMALL_RENDER_MAX_SOURCE_BYTES - 1}
+        large = {**self.item(), "key": "repo\0large.pdf", "path": "large.pdf",
+                 "source_bytes": stages.SMALL_RENDER_MAX_SOURCE_BYTES}
+        self.assertTrue(stages.render_partition_matches(small, "small"))
+        self.assertFalse(stages.render_partition_matches(small, "large"))
+        self.assertFalse(stages.render_partition_matches(large, "small"))
+        self.assertTrue(stages.render_partition_matches(large, "large"))
+        self.assertTrue(stages.render_partition_matches(small, "all"))
+
+    def test_render_workflow_partitions_and_enables_native_text_streams(self):
+        root = Path(__file__).resolve().parents[1]
+        large = (root / ".github/workflows/pdf-render-inputs.yml").read_text()
+        small = (root / ".github/workflows/pdf-render-small-inputs.yml").read_text()
+        self.assertIn("plan-render --partition large --native-text-stream", large)
+        self.assertIn("plan-render --partition small --native-text-stream", small)
+        self.assertIn("group: pdf-render-small-inputs", small)
+        self.assertIn("group: reader-assets", small)
+
+    def test_native_text_stream_plan_marks_pages_for_images_without_ocr(self):
+        item = {**self.item(), "source_bytes": 1024}
+        probe = {"page_count": 2, "page_chars": [80, 80], "classification": "native-text"}
+        with patch.object(plan_pdf_ocr, "download_source", return_value=self.root / "source.pdf"), \
+                patch.object(plan_pdf_ocr.shared, "hash_file", return_value=("a" * 64, 1024)), \
+                patch.object(pdf_ocr, "probe_pdf", return_value=probe):
+            (self.root / "source.pdf").write_bytes(b"pdf")
+            queue = plan_pdf_ocr.plan([item], workers=1, native_text_stream=True)
+        self.assertTrue(queue["shards"][0]["records"][0]["force_image_render"])
 
     def test_failed_books_do_not_starve_untouched_backlog(self):
         failed = {**self.item(), "key": "repo\0a.pdf", "path": "a.pdf"}

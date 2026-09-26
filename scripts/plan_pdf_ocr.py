@@ -68,7 +68,7 @@ def download_source(item: dict) -> Path:
 
 
 def plan(records: list[dict], workers: int = 4, current: dict | None = None,
-         retry_failed: bool = False) -> dict:
+         retry_failed: bool = False, native_text_stream: bool = False) -> dict:
     current_files = (current or {}).get("files", {})
     terminal = {"ready", "failed", "skipped"} if not retry_failed else {"ready", "skipped"}
     records = [item for item in records if not (
@@ -83,7 +83,9 @@ def plan(records: list[dict], workers: int = 4, current: dict | None = None,
             digest, size = shared.hash_file(source)
             probe = pdf_ocr.probe_pdf(source)
             return {**item, "source_sha256": digest, "source_bytes": size, "probe": probe,
-                    "page_count": probe["page_count"], "status": "planned", "profile": pdf_ocr.asset_profile()}
+                    "page_count": probe["page_count"], "status": "planned", "profile": pdf_ocr.asset_profile(),
+                    **({"force_image_render": True} if native_text_stream
+                       and probe["classification"] == "native-text" else {})}
         except Exception as exc:
             return {**item, "status": "failed", "profile": pdf_ocr.asset_profile(),
                     "error": f"{type(exc).__name__}: {exc}"[:1000]}

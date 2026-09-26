@@ -134,6 +134,21 @@ class PdfOcrContractTests(unittest.TestCase):
         self.assertEqual(records[0]["range_status"], "failed")
         self.assertTrue(records[0]["force_image_render"])
 
+    def test_gbk_repaired_reader_pdf_replaces_original_in_ocr_sources(self):
+        repo, path = next(iter(pdf_ocr.reader_assets.KNOWN_GBK_PDFS))
+        original = {"key": repo + "\0" + path, "repo": repo, "path": path,
+                    "source_kind": "upstream", "source_revision": "source"}
+        repaired = {**original, "source_kind": "generated", "reader_assets_path": "objects/repaired/document.pdf",
+                    "reader_assets_repo": "vomebook/Reader-Assets", "reader_assets_revision": "assets"}
+        with patch.object(pdf_ocr.pdf_assets, "load_records", return_value=[original]), \
+                patch.object(pdf_ocr.pdf_assets, "load_generated_records", return_value=[repaired]):
+            records = pdf_ocr.source_records(Path("unused"), Path("unused"), {"revision": "assets"})
+        self.assertEqual(records, [repaired])
+
+        with patch.object(pdf_ocr.pdf_assets, "load_records", return_value=[original]), \
+                patch.object(pdf_ocr.pdf_assets, "load_generated_records", return_value=[]):
+            self.assertEqual(pdf_ocr.source_records(Path("unused"), Path("unused"), {"revision": "assets"}), [])
+
     def test_manifest_accepts_published_jxl_layout_from_separate_ocr_worker(self):
         current = pdf_ocr.asset_profile()
         other = current.replace(f"-jxl-{int(pdf_ocr.JXL_ENABLED)}-",
