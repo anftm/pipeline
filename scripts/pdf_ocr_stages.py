@@ -159,8 +159,7 @@ def save_registry(api, repo, name, updates, merge=None, publish_streams=False):
                                                    "render_manifest": value["render_manifest"],
                                                    "range_status": "failed", "classification": "native-text"}
                     entry = dict(sidecar["f"].get(key) or {})
-                    if (value.get("page_manifest") and (not entry.get("p") or
-                            value.get("range_status") == "failed" and value.get("classification") == "native-text")):
+                    if value.get("page_manifest"):
                         entry.update(shared.pdf_pages_sidecar_entry(value["page_manifest"]["path"]))
                         sidecar["f"][key] = entry
             operations.append(CommitOperationAdd(path_in_repo=publication.SIDECAR_NAME,

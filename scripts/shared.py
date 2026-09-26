@@ -72,9 +72,10 @@ def merge_pdf_ocr_sidecar_entry(current: dict | None, result: dict) -> dict | No
         return entry or {"s": 4, "om": "failed", "oe": result.get("error", "OCR failed")}
     if result.get("status") == "ready":
         page_manifest = result.get("page_manifest")
-        if ((not entry.get("p") or result.get("range_status") == "failed"
-             and result.get("classification") == "native-text") and isinstance(page_manifest, dict)
-                and isinstance(page_manifest.get("path"), str)):
+        # A completed page stream must take precedence over an older optimized
+        # PDF route.  OCR recognition can publish after rendering, so keeping
+        # the PDF in `p` would make Reader ignore the already available pages.
+        if (isinstance(page_manifest, dict) and isinstance(page_manifest.get("path"), str)):
             entry.update(pdf_pages_sidecar_entry(page_manifest["path"]))
         entry.update({
             "o": result["ocr_manifest"],
