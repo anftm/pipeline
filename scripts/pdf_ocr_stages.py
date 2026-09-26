@@ -37,13 +37,14 @@ RENDER_PROGRESS_REGISTRY = "pdf_render_progress.json"
 RENDER_RANGE_PAGES = 250
 RENDER_RANGE_THRESHOLD = 500
 BUCKET = "hf://buckets/vomebook/pdf-pages"
+SMALL_RENDER_MAX_SOURCE_BYTES = 100 * 1024 * 1024
 
 
 def render_profile() -> str:
     return (f"pdf-render-v2-text-png-dpi-{pdf_ocr.OCR_DPI}-maxpix-{pdf_ocr.MAX_PAGE_PIXELS}"
             f"-webp-{pdf_ocr.WEBP_QUALITY}-{pdf_ocr.WEBP_MAX_DIMENSION}"
             f"-native-{pdf_ocr.MIN_NATIVE_PAGE_CHARS}-jxl-{int(pdf_ocr.JXL_ENABLED)}"
-            f"-{pdf_ocr.JXL_DISTANCE:g}-{pdf_ocr.JXL_EFFORT}-reader-source-pixels-v2-clean-webp-80")
+            f"-{pdf_ocr.JXL_DISTANCE:g}-{pdf_ocr.JXL_EFFORT}-reader-source-pixels-v2-clean-webp-80-native-stream-v1")
 
 
 def root_for(source_sha: str, key: str, identity: str) -> Path:
@@ -184,9 +185,21 @@ def same_source(entry, item):
                 and entry.get("reader_assets_path") == item.get("reader_assets_path"))
 
 
-def pending_render(records, rendered, ocr, retry_failed=False):
+def render_partition_matches(item, partition):
+    if partition == "all":
+        return True
+    size = int(item.get("source_bytes") or 0)
+    if not size:
+        return partition == "small"
+    is_small = size < SMALL_RENDER_MAX_SOURCE_BYTES
+    return is_small if partition == "small" else not is_small
+
+
+def pending_render(records, rendered, ocr, retry_failed=False, partition="all"):
     pending = []
     for item in records:
+        if not render_partition_matches(item, partition):
+            continue
         previous = rendered.get(item["key"])
         if same_source(previous, item) and previous.get("render_profile") == render_profile():
             if previous.get("status") in {"ready", "skipped"}:
@@ -733,6 +746,8 @@ def main():
     parser.add_argument("--limit", type=int, default=20)
     parser.add_argument("--checkpoint", type=int, default=0)
     parser.add_argument("--retry-failed", action="store_true")
+    parser.add_argument("--partition", choices=("all", "small", "large"), default="all")
+    parser.add_argument("--native-text-stream", action="store_true")
     parser.add_argument("--retry-failed-only", action="store_true")
     parser.add_argument("--results", type=Path, nargs="*", default=[])
     parser.add_argument("--results-dir", type=Path)
@@ -753,9 +768,9 @@ def main():
             assets["revision"] = revision
             range_state = load_registry(api, repo, "pdf_range_manifest.json", revision)
             records = pdf_ocr.source_records(args.search_data, args.revisions, assets, range_manifest=range_state)
-            records = pending_render(records, rendered, current, args.retry_failed)
+            records = pending_render(records, rendered, current, args.retry_failed, args.partition)
             selected = pdf_ocr.queue(records, args.limit, args.checkpoint)
-            queue = plan_pdf_ocr.plan(selected)
+            queue = plan_pdf_ocr.plan(selected, native_text_stream=args.native_text_stream)
             queue["kind"] = "pdf-render-queue"
             render_progress = load_registry(api, repo, RENDER_PROGRESS_REGISTRY, revision)["files"]
             queue = plan_render_ranges(queue, render_progress)

@@ -62,6 +62,17 @@ the shared `reader-assets` publication lock.
   descriptors, rerendering only missing/invalid ranges. A whole-book manifest
   and Reader mapping are published only when all ranges form a contiguous,
   verified book. Partial books remain pending without exposing partial streams.
+- Rendering is split into independent small and large source-size queues at
+  100 MiB. The large-book workflow no longer reserves a batch slot for small
+  PDFs, while the small-book workflow runs every 15 minutes and publishes its
+  completed books independently. Both workflows share only the final
+  `reader-assets` publication lock, so a long tail shard cannot block small
+  books from being rendered and published.
+- Native-text PDFs can join the page-stream queue without OCR: their extracted
+  native text remains the search index and their raster pages are only for
+  Reader display. The known GBK 林一章版 files are processed only from their
+  `gbk-font-repair-v1` Reader PDFs; the original malformed-font PDFs are not
+  indexed if a repair asset is unavailable.
 
 ## Recognition
 

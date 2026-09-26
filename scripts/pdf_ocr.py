@@ -24,9 +24,10 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 try:
-    from . import pdf_assets, shared
+    from . import pdf_assets, reader_assets, shared
 except ImportError:
     import pdf_assets
+    import reader_assets
     import shared
 
 
@@ -866,6 +867,20 @@ def source_records(search_data: Path, revisions: Path, assets_manifest: dict | N
             # Bucket. OCR the ordinary Reader-Assets PDF instead of downloading
             # or reprocessing the range artifact.
             records.append(item)
+    # A repaired/generated Reader PDF is authoritative for OCR. In particular,
+    # never extract text from the original GBK-encoded 林一章版 PDF when its
+    # repaired asset is available. If the repair is not published yet, wait
+    # for it instead of indexing the known-bad source text.
+    records = [item for item in records if not (
+        item.get("source_kind") == "upstream"
+        and (item.get("repo"), item.get("path")) in reader_assets.KNOWN_GBK_PDFS
+    )]
+    by_key = {}
+    for item in records:
+        key = item["key"]
+        if key not in by_key or item.get("source_kind") == "generated":
+            by_key[key] = item
+    records = list(by_key.values())
     records.sort(key=lambda item: (item.get("repo", ""), item.get("path", ""), item.get("source_kind", "")))
     range_files = (range_manifest or {}).get("files", {})
     for item in records:
