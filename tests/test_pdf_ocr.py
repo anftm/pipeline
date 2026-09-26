@@ -5,6 +5,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts import pdf_ocr
 from scripts.plan_pdf_ocr import DEFAULT_OCR_TARGET_PAGES_PER_SHARD, pdf_ocr_shards, recommended_ocr_shard_count
@@ -124,6 +125,14 @@ class PdfOcrContractTests(unittest.TestCase):
             with self.subTest(key=key):
                 self.assertEqual(pdf_ocr.detect_language(key), language)
                 self.assertEqual(pdf_ocr.book_ocr_config({"key": key}), (language, backend))
+
+    def test_failed_structure_assessment_marks_source_for_image_render(self):
+        item = {"key": "repo\0book.pdf", "repo": "repo", "path": "book.pdf"}
+        with patch.object(pdf_ocr.pdf_assets, "load_records", return_value=[item]):
+            records = pdf_ocr.source_records(Path("unused"), Path("unused"), range_manifest={
+                "files": {item["key"]: {"status": "failed", "reason": "slow PDF"}}})
+        self.assertEqual(records[0]["range_status"], "failed")
+        self.assertTrue(records[0]["force_image_render"])
 
     def test_manifest_accepts_published_jxl_layout_from_separate_ocr_worker(self):
         current = pdf_ocr.asset_profile()

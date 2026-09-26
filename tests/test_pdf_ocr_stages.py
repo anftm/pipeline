@@ -38,7 +38,7 @@ class PdfOcrStagesTests(unittest.TestCase):
         return {"key": "repo\0small.pdf", "repo": "repo", "path": "small.pdf",
                 "source_kind": "upstream", "source_revision": "revision"}
 
-    def render_fixture(self, native=False, jxl=False):
+    def render_fixture(self, native=False, jxl=False, force_image=False):
         source = self.root / "source.pdf"
         source.write_bytes(b"%PDF-test-source")
         bundle = self.root / "render"
@@ -53,7 +53,8 @@ class PdfOcrStagesTests(unittest.TestCase):
                 self.assertEqual(image.size, (200, 300))
             destination.write_bytes(b"jxl")
         item = {**self.item(), "probe": {"page_count": 2, "page_chars": [60 if native else 0, 0],
-                                        "classification": "mixed" if native else "scan"}}
+                                        "classification": "mixed" if native else "scan"},
+                **({"force_image_render": True} if force_image else {})}
         with patch.object(pdf_ocr, "render_page", side_effect=render), \
                 patch.object(pdf_ocr, "JXL_ENABLED", jxl), \
                 patch.object(pdf_ocr, "encode_jxl", side_effect=encode), \
@@ -77,6 +78,26 @@ class PdfOcrStagesTests(unittest.TestCase):
         native = manifest["pages"][0]
         self.assertEqual(json.loads(gzip.decompress(self.read(stages.page_meta(native, "o"))))["text"], "原生文字")
         self.assertNotIn("o", manifest["pages"][1])
+
+    def test_failed_structure_native_pdf_gets_image_stream_and_jxl(self):
+        result = self.render_fixture(native=True, jxl=True, force_image=True)
+        manifest = json.loads(self.read(result["render_manifest"]))
+        self.assertTrue(manifest["image_rendered"])
+        self.assertIsNotNone(result["page_manifest"])
+        for page in manifest["pages"]:
+            for field in ("i", "w", "j"):
+                self.read(stages.page_meta(page, field))
+            if page["source"] == "native":
+                self.read(stages.page_meta(page, "o"))
+
+    def test_failed_structure_native_ready_render_is_rebuilt_for_images(self):
+        item = {**self.item(), "force_image_render": True}
+        previous = {**item, "status": "ready", "render_profile": stages.render_profile(),
+                    "image_rendered": False}
+        self.assertEqual([x["key"] for x in stages.pending_render([item], {item["key"]: previous}, {})],
+                         [item["key"]])
+        previous["image_rendered"] = True
+        self.assertEqual(stages.pending_render([item], {item["key"]: previous}, {}), [])
 
     def test_png_only_ocr_resume_and_complete_book_publication(self):
         result = self.render_fixture(native=True)
@@ -392,6 +413,8 @@ class PdfOcrStagesTests(unittest.TestCase):
         self.assertIn("PDF_OCR_LANG", ocr_text)
         self.assertIn("backend:", ocr_text)
         self.assertIn("PDF_OCR_BACKEND", ocr_text)
+        stages_text = (root / "scripts/pdf_ocr_stages.py").read_text()
+        self.assertIn('load_registry(api, repo, "pdf_range_manifest.json", revision)', stages_text)
         self.assertFalse(ocr[True]["workflow_dispatch"]["inputs"]["retry_failed_only"]["default"])
         self.assertIn("--retry-failed-only", ocr_text)
         self.assertIn('default: "auto"', ocr_text)
