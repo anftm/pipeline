@@ -42,7 +42,7 @@ class PdfOcrStagesTests(unittest.TestCase):
         source = self.root / "source.pdf"
         source.write_bytes(b"%PDF-test-source")
         bundle = self.root / "render"
-        def render(_source, page, directory):
+        def render(_source, page, directory, reader_pixels=None, reader_jxl=False):
             path = directory / f"page-{page:06d}.png"
             with Image.new("RGB", (200, 300), "white") as image:
                 image.save(path)
@@ -120,6 +120,25 @@ class PdfOcrStagesTests(unittest.TestCase):
             queue = stages.plan_render_ranges({"shards": [{"records": [item]}]}, progress)
         self.assertEqual(queue["saved_ranges"], {})
         self.assertEqual(len(queue["shards"][0]["records"]), 1)
+
+    def test_partial_native_text_prevents_source_pixel_cap(self):
+        source = self.root / "mixed-input.pdf"
+        source.write_bytes(b"%PDF-test-source")
+        dimensions = []
+        def render(_source, number, directory, reader_pixels=None, reader_jxl=False):
+            dimensions.append(reader_pixels)
+            path = directory / f"page-{number:06d}.png"
+            with Image.new("RGB", (200, 300), "white") as image:
+                image.save(path)
+                image.save(path.with_suffix(".webp"))
+            return path, 200, 300
+        item = {**self.item(), "probe": {"classification": "scan", "page_count": 2,
+                                        "page_chars": [12, 0]}}
+        with patch.object(pdf_ocr, "scan_reader_images", return_value={1: (100, 150), 2: (100, 150)}), \
+                patch.object(pdf_ocr, "render_page", side_effect=render), \
+                patch.object(pdf_ocr, "JXL_ENABLED", False):
+            stages.render_book(item, source, self.root / "mixed-input-render")
+        self.assertEqual(dimensions, [None, (100, 150)])
 
     def test_failed_structure_native_ready_render_is_rebuilt_for_images(self):
         item = {**self.item(), "force_image_render": True}
@@ -209,7 +228,7 @@ class PdfOcrStagesTests(unittest.TestCase):
                 "probe": {"page_count": 5, "page_chars": [0] * 5, "classification": "scan"},
                 "page_count": 5, "profile": pdf_ocr.asset_profile()}
         queue = {"version": 1, "kind": "pdf-render-queue", "shards": [{"records": [item]}]}
-        def render(_source, number, directory):
+        def render(_source, number, directory, reader_pixels=None, reader_jxl=False):
             path = directory / f"page-{number:06d}.png"
             with Image.new("RGB", (200, 300), "white") as image:
                 image.save(path)
@@ -527,6 +546,45 @@ class PdfOcrStagesTests(unittest.TestCase):
         self.assertEqual(queue["total_ocr_pages"], 2)
         with self.assertRaisesRegex(ValueError, "generation"):
             stages.collect_progress(queue, [{"key": result["key"], "generation": "old", "pages": []}])
+
+    def test_reader_image_refresh_reuses_matching_ocr_png_and_rebuilds_text_index(self):
+        result = self.render_fixture(native=True)
+        with patch.object(stages, "read_object", side_effect=self.read):
+            first = stages.plan_images({result["key"]: result}, {}, {})
+            with patch.object(pdf_ocr, "ocr_page", return_value=[
+                    {"t": "recognized", "b": [0, 0, 1, 1], "c": 1, "s": "ocr"}]):
+                recognized = stages.recognize_task(first["shards"][0][0], self.root / "old-ocr")
+            self.store(self.root / "old-ocr")
+            progress = stages.collect_progress(first, [recognized])
+            old = stages.assemble_book(first["books"][0], progress[result["key"]]["pages"], self.root / "old-text")
+            self.store(self.root / "old-text")
+
+            manifest = json.loads(self.read(result["render_manifest"]))
+            new_manifest = {**result["page_manifest"], "sha256": "f" * 64}
+            manifest["page_manifest"] = new_manifest
+            raw = json.dumps(manifest).encode()
+            new_result = {**result, "page_manifest": new_manifest,
+                          "render_manifest": {**result["render_manifest"],
+                                              "sha256": hashlib.sha256(raw).hexdigest(), "bytes": len(raw)}}
+            self.objects[result["render_manifest"]["path"]] = raw
+            queue = stages.plan_images({result["key"]: new_result}, {result["key"]: old}, {})
+            self.assertEqual(queue["total_ocr_pages"], 0)
+            self.assertEqual(queue["shard_count"], 0)
+            self.assertEqual(queue["books"][0]["saved"]["2"]["i"], manifest["pages"][1]["i"])
+            complete = stages.assemble_book(queue["books"][0], queue["books"][0]["saved"], self.root / "new-text")
+            self.store(self.root / "new-text")
+            index = json.loads(gzip.decompress(self.read(json.loads(self.objects[complete["ocr_manifest"]])["book_text"])))
+            self.assertEqual([page["text"] for page in index["pages"]], ["原生文字", "recognized"])
+            self.assertEqual(json.loads(self.objects[complete["ocr_manifest"]])["page_manifest"], new_manifest)
+
+            changed = copy.deepcopy(manifest)
+            changed["pages"][1]["is"] = "e" * 64
+            raw = json.dumps(changed).encode()
+            self.objects[result["render_manifest"]["path"]] = raw
+            altered = {**new_result, "render_manifest": {**new_result["render_manifest"],
+                       "sha256": hashlib.sha256(raw).hexdigest(), "bytes": len(raw)}}
+            pending = stages.plan_images({result["key"]: altered}, {result["key"]: old}, {})
+            self.assertEqual(pending["total_ocr_pages"], 1)
 
     def test_result_discovery_handles_one_flat_artifact_and_multiple_nested_artifacts(self):
         results = self.root / "results"

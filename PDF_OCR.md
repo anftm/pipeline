@@ -20,12 +20,17 @@ the shared `reader-assets` publication lock.
   Reader page stream while keeping the extracted native text and v2 full-text
   index; these pages are not sent to OCR. Previously completed text-only render
   ranges without images are rerendered for this case.
-- Each rendered page retains a high-quality PNG, nominally 300 DPI, bounded by
+- Each rendered page retains a high-quality OCR PNG, nominally 300 DPI, bounded by
   the configured 50-million-pixel maximum; unusually large pages use a lower
-  rendering DPI. The Reader WebP is a separate quality-85 derivative capped at
-  1800 pixels on its longest edge (no extra upscaling). Optional JXL is encoded
-  directly from the PNG, not the resized WebP. Rasterizing an embedded low-res
-  scan at 300 DPI does not add detail to the source image.
+  rendering DPI. Reader WebP (quality 85) and optional JXL are encoded from a
+  separate reader image capped at 1800 pixels on its longest edge. For pages
+  with no extracted text identified as a single nearly full-page raster scan,
+  both reading formats are also capped at the source image's pixel dimensions
+  on each axis; the high-resolution OCR input is unaffected. Pages with
+  extracted text or multiple embedded images retain the normal reading cap.
+  A single full-page image check cannot rule out every vector overlay; such
+  pages need visual spot checks. JXL is encoded from
+  the resized lossless reader image, never from the lossy WebP.
 - PNG is retained on native pages of mixed books too, for later encoding use.
   No automatic PNG deletion is currently performed.
 - `pdf_render_manifest.json` contains only the descriptors for completed image
@@ -75,6 +80,10 @@ the shared `reader-assets` publication lock.
 - Automatic OCR runs now plan up to **100 rendered books** per successful render
   workflow, matching the render batch size. The 8-worker shard limit remains;
   this removes the previous 20-book automatic backlog cap.
+- A reader-image-only render-profile change reuses previously recognized page
+  objects when the source, recognition profile and each OCR-input PNG checksum
+  match. The worker refreshes the v2 book index and page paths without rerunning
+  recognition; changed inputs still enter the normal OCR queue.
 - RapidOCR ONNX tasks use the configured target (2,000 by default). Paddle
   multilingual tasks are capped at 1,200 pages per task because their CPU
   recognition rate is lower. This reduces repeated model downloads without
@@ -175,9 +184,11 @@ Explicit local Poppler integration (Pillow and `pdftocairo`/`pdftotext` required
 python3 -m unittest -v tests/test_pdf_ocr_render_integration.py
 ```
 
-This creates a small scanned PDF and verifies an actual 300 DPI PNG and WebP
-are produced before OCR. Unit tests use a mocked recognizer, not a performance
-benchmark or validation of the live Paddle model's recognition quality.
+This creates real scanned PDFs at 100 and 150 DPI, verifying that the OCR PNG
+retains its rendering resolution while reader WebP/JXL respect the original
+scan pixels or the reading cap. JXL encoding is mocked unless `cjxl` is
+installed. These tests are not a performance benchmark or a validation of the
+live recognition model's accuracy.
 
 After deployment, confirm the render run publishes `pdf_render_manifest.json`,
 then its triggered OCR run plans from those PNG descriptors. Verify at least
