@@ -155,7 +155,7 @@ def main() -> int:
                 raise RuntimeError("HF_TOKEN is required")
             api = HfApi(token=token)
             if (merged / "objects").is_dir():
-                _sync_bucket_with_retry(str(merged), "hf://buckets/vomebook/pdf-pages", token)
+                _sync_bucket_with_retry(str(merged), f"hf://buckets/{shared.PDF_PAGES_BUCKET}", token)
             pdf_assets.publish(api, args.assets_repo, manifest, results, merged,
                                include_artifacts=False)
         print(f"published {len(results)} PDF asset(s) to {args.assets_repo}")

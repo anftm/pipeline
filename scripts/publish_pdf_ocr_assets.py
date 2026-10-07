@@ -142,8 +142,8 @@ def publish(api: HfApi, repo: str, results: list[dict], attempts: int = 20) -> N
                         encoding="utf-8",
                     )
                     (index_root / "reader_assets.json.gz").write_bytes(encode_sidecar(sidecar))
-                    sync_bucket(root, "hf://buckets/vomebook/pdf-pages",
-                                 include=["reader-index/**"], token=os.environ["HF_TOKEN"], quiet=False)
+                    sync_bucket(root, f"hf://buckets/{shared.PDF_PAGES_BUCKET}",
+                                include=["reader-index/**"], token=os.environ["HF_TOKEN"], quiet=False)
             return
         except HfHubHTTPError as exc:
             status = getattr(exc.response, "status_code", None)

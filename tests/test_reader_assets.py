@@ -3252,7 +3252,7 @@ class PublicationTests(unittest.TestCase):
         self.assertEqual(files["book"]["m"], "e")
         self.assertEqual(files["scan"], {
             "s": 2, "m": "p", "p": "objects/bb/" + "b" * 64 + "/page-manifest.json",
-            "b": "vomebook/pdf-pages",
+             "b": "vomebook/pdf-pages-v2",
         })
         self.assertNotIn("text", files)
 
@@ -3269,7 +3269,7 @@ class PublicationTests(unittest.TestCase):
         self.assertEqual(build_reader_assets_index.build_index(manifest, ocr_manifest=ocr)["f"]["scan"], {
             "s": 2, "m": "p", "p": "objects/aa/source/document.pdf",
             "o": ocr["files"]["scan"]["ocr_manifest"], "om": "scan",
-            "ob": "vomebook/pdf-pages",
+             "ob": "vomebook/pdf-pages-v2",
         })
 
     def test_sidecar_excludes_legacy_streams_and_linearized_pdfs(self):
@@ -3289,10 +3289,10 @@ class PublicationTests(unittest.TestCase):
         self.assertIn("current", files)
         self.assertNotIn("linear", files)
 
-    def test_reader_workflow_uses_explicit_empty_queue_guard_under_errexit(self):
-        workflow = (Path(__file__).parents[1] / ".github/workflows/reader-assets.yml").read_text(encoding="utf-8")
-        self.assertIn('if [[ "${count}" == "0" ]]; then\n            exit 0\n          fi', workflow)
-        self.assertNotIn('[[ "${count}" == "0" ]] && exit 0', workflow)
+    def test_media_workflow_has_explicit_empty_matrix_guard(self):
+        workflow = (Path(__file__).parents[1] / ".github/workflows/reader-media-backfill.yml").read_text(encoding="utf-8")
+        self.assertIn("if: fromJSON(needs.plan.outputs.matrix).include[0] != null", workflow)
+        self.assertIn("python scripts/finalize_media_indexes.py", workflow)
 
 
 class SearchIndexPublicationTests(unittest.TestCase):
@@ -3376,6 +3376,7 @@ class PruneTests(unittest.TestCase):
 
 
 class WorkflowContractTests(unittest.TestCase):
+    @unittest.skip("general reader-assets workflow was replaced by v2-specific workflows")
     def test_workflow_exposes_incremental_controls_and_excludes_pdg(self):
         workflow = Path(".github/workflows/reader-assets.yml").read_text(encoding="utf-8")
         self.assertIn('cron: "23 3 * * 0"', workflow)
@@ -3467,6 +3468,19 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertNotIn("publish_reader_assets.py", convert_section.split("\n  convert:\n", 1)[1])
         self.assertIn('python scripts/publish_reader_assets.py --bundles "${bundles[@]}"', publish_section)
         self.assertIn("timeout-minutes: 360", publish_section)
+
+    def test_current_v2_workflows_use_new_buckets(self):
+        media = Path(".github/workflows/reader-media-backfill.yml").read_text(encoding="utf-8")
+        djvu = Path(".github/workflows/reader-djvu-weekly.yml").read_text(encoding="utf-8")
+        static_pdf = Path(".github/workflows/gc-static-pdf-v2.yml").read_text(encoding="utf-8")
+        djvu_script = Path("scripts/sync_djvu_pdf_derivatives.py").read_text(encoding="utf-8")
+        static_pdf_script = Path("scripts/gc_static_pdf_v2.py").read_text(encoding="utf-8")
+        self.assertIn("vomebook/reader-assets-v2", media)
+        self.assertIn("python scripts/finalize_media_indexes.py", media)
+        self.assertIn("vomebook/pdf-pages-v2", djvu_script)
+        self.assertIn("python scripts/sync_djvu_pdf_derivatives.py", djvu)
+        self.assertIn("vomebook/reader-assets-v2", static_pdf_script)
+        self.assertNotIn("vomebook/pdf-pages\"", djvu)
 
 if __name__ == "__main__":
     unittest.main()

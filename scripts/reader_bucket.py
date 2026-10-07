@@ -28,28 +28,29 @@ def index_path(name: str) -> str:
     return f"{INDEX_PREFIX}/{name}"
 
 
-def bucket_uri(path: str) -> str:
-    return f"hf://buckets/{READER_ASSETS_BUCKET}/{path}"
+def bucket_uri(path: str, bucket: str = READER_ASSETS_BUCKET) -> str:
+    return f"hf://buckets/{bucket}/{path}"
 
 
-def read_bytes(path: str, token: str | None = None) -> bytes:
+def read_bytes(path: str, token: str | None = None, bucket: str = READER_ASSETS_BUCKET) -> bytes:
     fs = HfFileSystem(token=token)
-    with fs.open(bucket_uri(path), "rb") as stream:
+    with fs.open(bucket_uri(path, bucket), "rb") as stream:
         return stream.read()
 
 
-def read_json(path: str, token: str | None = None) -> dict:
-    value = json.loads(read_bytes(path, token).decode("utf-8"))
+def read_json(path: str, token: str | None = None, bucket: str = READER_ASSETS_BUCKET) -> dict:
+    value = json.loads(read_bytes(path, token, bucket).decode("utf-8"))
     if not isinstance(value, dict):
         raise ValueError(f"invalid Reader bucket JSON: {path}")
     return value
 
 
-def materialize(path: str, token: str | None = None, suffix: str = "") -> Path:
+def materialize(path: str, token: str | None = None, suffix: str = "",
+                bucket: str = READER_ASSETS_BUCKET) -> Path:
     descriptor, name = tempfile.mkstemp(prefix="reader-bucket-", suffix=suffix)
     os.close(descriptor)
     target = Path(name)
-    target.write_bytes(read_bytes(path, token))
+    target.write_bytes(read_bytes(path, token, bucket))
     return target
 
 

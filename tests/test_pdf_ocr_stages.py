@@ -589,7 +589,7 @@ class PdfOcrStagesTests(unittest.TestCase):
             index = build_index({"files": {}}, ocr_manifest=state)
             compact = index["f"][entry["key"]]
             self.assertEqual(compact["p"], result["page_manifest"]["path"])
-            self.assertEqual(compact["b"], "vomebook/pdf-pages")
+            self.assertEqual(compact["b"], "vomebook/pdf-pages-v2")
             self.assertNotIn("o", compact)
 
     def test_completed_ocr_page_stream_replaces_existing_pdf_route(self):
@@ -601,7 +601,7 @@ class PdfOcrStagesTests(unittest.TestCase):
                                            "ocr_manifest": "objects/old/ocr-manifest.json"}}}
         merged = build_index(base, ocr_manifest=ocr)["f"][result["key"]]
         self.assertEqual(merged["p"], result["page_manifest"]["path"])
-        self.assertEqual(merged["b"], "vomebook/pdf-pages")
+        self.assertEqual(merged["b"], "vomebook/pdf-pages-v2")
         self.assertEqual(merged["o"], "objects/old/ocr-manifest.json")
 
     def test_failed_native_optimization_replaces_pdf_route_and_keeps_text(self):

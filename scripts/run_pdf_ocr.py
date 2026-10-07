@@ -16,10 +16,11 @@ from huggingface_hub import hf_hub_download, sync_bucket
 from huggingface_hub.errors import HfHubHTTPError
 
 try:
-    from . import pdf_ocr
+    from . import pdf_ocr, shared
     from .reader_bucket import materialize as materialize_bucket
 except ImportError:
     import pdf_ocr
+    import shared
     from reader_bucket import materialize as materialize_bucket
 
 
@@ -62,7 +63,7 @@ def upload_ocr_objects(bundle: Path) -> None:
     """Scope remote listings to each local book/profile, not the whole Bucket."""
     for root in sorted((bundle / "objects").glob("*/*/*")):
         if root.is_dir():
-            destination = f"hf://buckets/vomebook/pdf-pages/{root.relative_to(bundle).as_posix()}"
+            destination = f"hf://buckets/{shared.PDF_PAGES_BUCKET}/{root.relative_to(bundle).as_posix()}"
             _sync_bucket_with_retry(str(root), destination, os.environ.get("HF_TOKEN"))
 
 

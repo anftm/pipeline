@@ -667,14 +667,14 @@ def write_json(path: Path, payload: dict) -> tuple[str, int]:
 
 def read_bucket_json(path: str) -> dict:
     from huggingface_hub import HfFileSystem
-    uri = f"hf://buckets/vomebook/pdf-pages/{path}"
+    uri = f"hf://buckets/{shared.PDF_PAGES_BUCKET}/{path}"
     with HfFileSystem(token=os.environ.get("HF_TOKEN")).open(uri, "rb") as stream:
         return json.loads(stream.read())
 
 
 def read_bucket_gzip_json(path: str) -> dict:
     from huggingface_hub import HfFileSystem
-    uri = f"hf://buckets/vomebook/pdf-pages/{path}"
+    uri = f"hf://buckets/{shared.PDF_PAGES_BUCKET}/{path}"
     with HfFileSystem(token=os.environ.get("HF_TOKEN")).open(uri, "rb") as stream:
         return json.loads(gzip.decompress(stream.read()))
 
