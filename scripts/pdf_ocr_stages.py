@@ -151,6 +151,34 @@ def load_registry(api, repo, name, revision=None):
 def save_registry(api, repo, name, updates, merge=None, publish_streams=False):
     if not updates:
         return
+    if type(api) is HfApi:
+        data = load_registry(api, repo, name)
+        for key, value in updates.items():
+            data["files"][key] = merge(data["files"].get(key), value) if merge else value
+        publish_json(index_path(name), data, os.environ.get("HF_TOKEN"))
+        if publish_streams:
+            ocr_state = load_registry(api, repo, publication.OCR_MANIFEST_NAME)
+            sidecar = publication.load_sidecar(api, repo)
+            for key, value in updates.items():
+                if value.get("status") != "ready":
+                    continue
+                previous = ocr_state["files"].get(key, {})
+                if previous.get("status") != "ready":
+                    ocr_state["files"][key] = {**value, "status": "rendered"}
+                elif (value.get("range_status") == "failed" and value.get("classification") == "native-text"
+                      and value.get("page_manifest") and same_source(previous, value)
+                      and previous.get("source_sha256") == value.get("source_sha256")):
+                    ocr_state["files"][key] = {**previous, "page_manifest": value["page_manifest"],
+                                                "render_manifest": value["render_manifest"],
+                                                "range_status": "failed", "classification": "native-text"}
+                entry = dict(sidecar["f"].get(key) or {})
+                if value.get("page_manifest"):
+                    entry.update(shared.pdf_pages_sidecar_entry(value["page_manifest"]["path"]))
+                    sidecar["f"][key] = entry
+            token = os.environ.get("HF_TOKEN")
+            publish_json(index_path(publication.OCR_MANIFEST_NAME), ocr_state, token)
+            publish_bytes(index_path(publication.SIDECAR_NAME), publication.encode_sidecar(sidecar), token)
+        return
     for attempt in range(20):
         info = retry(lambda: api.repo_info(repo_id=repo, repo_type="dataset"))
         data = load_registry(api, repo, name, info.sha)
@@ -917,11 +945,11 @@ def main():
     repo = args.assets_repo
     args.output.mkdir(parents=True, exist_ok=True)
     if args.stage.startswith("plan-"):
-        revision = retry(lambda: api.repo_info(repo_id=repo, repo_type="dataset")).sha
-        rendered = load_registry(api, repo, RENDER_REGISTRY, revision)["files"]
-        current = load_registry(api, repo, publication.OCR_MANIFEST_NAME, revision)["files"]
+        revision = "reader-assets-v2"
+        rendered = load_registry(api, repo, RENDER_REGISTRY)["files"]
+        current = load_registry(api, repo, publication.OCR_MANIFEST_NAME)["files"]
         if args.stage == "plan-render":
-            assets = load_registry(api, repo, "manifest.json", revision)
+            assets = load_registry(api, repo, "manifest.json")
             assets["revision"] = revision
             records = pdf_ocr.source_records(args.search_data, args.revisions, assets)
             records = pending_render(records, rendered, current, args.retry_failed, args.partition)
