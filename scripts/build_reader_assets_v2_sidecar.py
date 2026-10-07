@@ -90,6 +90,13 @@ def build(fs: HfFileSystem, assets_bucket: str, pdf_bucket: str, derived_path: s
     for extension in ("epub", "mobi", "azw3", "fb2", "chm"):
         payload = read_json(fs, assets_bucket, f"chapters/ebook/{extension}/index.json")
         add_index(files, payload, {extension: "e"}, assets_bucket, chapters=True)
+    image_payload = read_json(fs, assets_bucket, "pages/image/index.json")
+    for entry in image_payload.get("files", []):
+        if not isinstance(entry, dict) or not entry.get("key"):
+            continue
+        manifest = entry.get("manifest")
+        if isinstance(manifest, str):
+            files[entry["key"]] = {"s": 2, "m": "i", "p": manifest, "b": assets_bucket}
     for kind, mode in (("audio", "a"), ("video", "v"), ("swf", "f")):
         payload = read_json(fs, assets_bucket, f"media/{kind}/index.json")
         for entry in payload.get("files", []):
