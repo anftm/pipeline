@@ -48,6 +48,8 @@ def add_index(files: dict, payload: dict, mode_for: dict[str, str], bucket: str,
         path = entry.get("manifest") if chapters else entry.get("object")
         if not isinstance(path, str):
             continue
+        if mode == "d" and path.endswith("/document.html"):
+            mode = "h"
         compact = {"s": 2, "m": mode, "p": path, "b": bucket}
         if chapters:
             compact.update({"c": path, "cb": bucket})
