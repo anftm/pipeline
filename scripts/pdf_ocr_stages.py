@@ -72,17 +72,17 @@ def public_item(item: dict) -> dict:
 
 
 def retry(operation):
-    for attempt in range(8):
+    for attempt in range(15):
         try:
             return operation()
         except HfHubHTTPError as exc:
-            if shared.hf_status_code(exc) not in {408, 429, 500, 502, 503, 504} or attempt == 7:
+            if shared.hf_status_code(exc) not in {408, 429, 500, 502, 503, 504} or attempt == 14:
                 raise
             delay = _bucket_retry_delay(exc, attempt)
         except (httpx.TransportError, ConnectionError, OSError):
-            if attempt == 7:
+            if attempt == 14:
                 raise
-            delay = min(300, 5 * 2 ** attempt)
+            delay = min(600, 5 * 2 ** min(attempt, 7))
         print(f"temporary object transfer failure; retry in {delay}s", flush=True)
         time.sleep(delay)
 
