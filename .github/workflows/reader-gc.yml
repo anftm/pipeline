@@ -37,6 +37,8 @@ jobs:
       - run: pip install -r scripts/requirements.txt
       - name: Read-only reference report for all Reader formats
         env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_INPUT_TOKEN: ${{ secrets.HF_INPUT_TOKEN }}
           HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
           HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
           HF_S3_INPUT_NAMESPACE: melsm

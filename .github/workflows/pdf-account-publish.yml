@@ -1,4 +1,5 @@
 name: Publish Account PDF Worker Results
+run-name: PDF publish ${{ inputs.stage }} / ${{ inputs.worker_repository }} / ${{ inputs.worker_run_id }}
 
 on:
   workflow_dispatch:
