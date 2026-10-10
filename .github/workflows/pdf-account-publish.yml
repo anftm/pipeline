@@ -76,7 +76,7 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_INPUT_TOKEN: ${{ secrets.HF_INPUT_TOKEN }}
           STAGE: ${{ inputs.stage }}
-        run: python scripts/pdf_ocr_stages.py "publish-$STAGE" --results-dir output/pdf-ocr/results
+        run: timeout --signal=TERM --kill-after=5m 150m python -u scripts/pdf_ocr_stages.py "publish-$STAGE" --results-dir output/pdf-ocr/results
       - name: Publish Reader sidecar to Pages
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
