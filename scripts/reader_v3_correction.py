@@ -156,7 +156,7 @@ def model_request(workspace, *, transport=None):
                "input": [{"role": "user", "content": [
                    {"type": "input_text", "text": publication.encode(payload).decode()},
                    {"type": "input_image", "image_url": "data:image/png;base64," + base64.b64encode(image).decode()}]}]}
-    with httpx.Client(timeout=120, follow_redirects=False, transport=transport,
+    with httpx.Client(timeout=httpx.Timeout(300, connect=15, write=30, pool=15), follow_redirects=False, transport=transport,
                       headers={"Authorization": "Bearer " + key, "User-Agent": "opencode/1.0"}) as client:
         with client.stream("POST", endpoint + "/responses", json=request) as response:
             if response.status_code != 200:
@@ -179,12 +179,12 @@ def model_request(workspace, *, transport=None):
     return {"answer": answer, "usage": accounting, "response_id": body.get("id")}
 
 
-def isolated_model(workspace):
+def isolated_model(workspace, *, timeout=330):
     allowed = {"PATH", "LANG", "LC_ALL", "SSL_CERT_FILE", "SSL_CERT_DIR", "SYSTEMROOT",
                "OCR_CORRECTION_API_BASE", "OCR_CORRECTION_API_KEY"}
     env = {k: value for k, value in os.environ.items() if k in allowed}
     process = subprocess.run([sys.executable, "-B", str(Path(__file__).resolve()), "--worker", str(workspace)],
-                             env=env, capture_output=True, timeout=150)
+                             env=env, capture_output=True, timeout=timeout)
     if process.returncode:
         try:
             error = json.loads(process.stderr)
@@ -262,7 +262,7 @@ def correct(store, options, *, apply=False, invoke=None, now=None):
     if type(limit) is not int or not 1 <= limit <= MAX_REQUESTS:
         raise ValueError("correction limit must be 1..20")
     for identity, task in eligible[:limit]:
-        if day["requests"] >= MAX_REQUESTS or time.monotonic() - started > 25 * 60:
+        if day["requests"] >= MAX_REQUESTS or time.monotonic() - started > 24 * 60:
             break
         result = None
         try:
@@ -278,7 +278,8 @@ def correct(store, options, *, apply=False, invoke=None, now=None):
                 day["reserved_output_tokens"] += MAX_OUTPUT_TOKENS
                 task.update(status="running", attempts=task["attempts"] + 1)
                 save(store, state)
-                result = (invoke or isolated_model)(workspace)
+                result = invoke(workspace) if invoke else isolated_model(workspace,
+                    timeout=max(1, min(330, 30 * 60 - (time.monotonic() - started))))
                 proposal = validate_answer(layer, result["answer"])
             proposal.update(task_id=identity, model=MODEL, recipe=RECIPE, evidence=evidence,
                             unresolved=result["answer"]["unresolved"], usage=result.get("usage", {}),
