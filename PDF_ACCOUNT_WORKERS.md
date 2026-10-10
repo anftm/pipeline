@@ -2,8 +2,10 @@
 
 The requested end-to-end redesign is specified in `PDF_READING_CYCLE_V3.md`.
 The account-worker path was deployed and started on 2026-10-09. This file describes
-that render/OCR and binary-preservation implementation. The proposed v3 document
-builder, correction service and deleting GC are not deployed features.
+that render/OCR and binary-preservation implementation. The central v3 document
+builder and both consumers completed single-book production acceptance on
+2026-10-10 (`V3_DEPLOYMENT.md`). Automatic worker-to-v3 admission, the correction
+service and deleting GC remain pending.
 
 ## Ownership
 

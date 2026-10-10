@@ -1,15 +1,46 @@
 # PDF Reading And OCR Cycle v3
 
-Status: proposed architecture, 2026-10-09. This document specifies the requested
-redesign. It is not a deployment report. The local HF/Pages Readers now have a
-hybrid adapter for existing v2 WebP page manifests and an associated PDF. The
-v3 manifest, document builder, unified publication, cross-bucket collector and
-daily correction service below are not yet implemented end to end.
+Status: partial production implementation, 2026-10-10. This document specifies the
+target redesign; `V3_DEPLOYMENT.md` records single-book deployment acceptance.
+The HF/Pages Readers have a hybrid
+adapter for existing v2 WebP page manifests and an associated PDF. Offline v3
+text-layer, partitioned reading-manifest and resumable preview builders exist;
+the central v3 resolver and production promotion now serve one verified 68-page book.
 
 Local progress on 2026-10-09: a read-only three-bucket reference report, durable
 staged-upload protection roots and canonical current-bucket OCR index publication
-are implemented. Deletion, lease retirement/heartbeat and immutable generation
-promotion remain pending. See `TESTING.md` for commands and live inventory limits.
+are implemented. Deletion and lease retirement/heartbeat remain pending. Immutable
+generation promotion was deployed on 2026-10-10. See `TESTING.md` for commands and
+live inventory limits.
+
+Implementation update on 2026-10-10: `pdf_text_layer.py` provides immutable raw
+layers, review tasks and explicitly accepted region corrections. `pdf_reading_v3.py`
+backfills verified OCR objects without recognition, generates PNG/WebP preview
+ranges and builds/verifies 128-page partitions with real PDF geometry. OCR
+assembly now emits these text bundles alongside the compatibility v2 index.
+These changes are local until deployed. Independent text JSON is the primary
+overlay/search/correction source; embedded searchable PDF is optional export.
+Explicit acceptance can now build a new effective text/search bundle while
+retaining its parent generation and raw-resource references. It does not run
+an AI provider or auto-accept model output. A real 68-page local reading candidate
+passed full PDF/preview/text verification; real 68-page native and 97-page OCR
+backfills preserved the published text exactly. Both local Readers now consume
+these manifests and independent text overlays. Offline browser acceptance covers
+direct page-259 partition restoration, preview/PDF handoff, zoom, exact full-book
+search/navigation, damaged-text retry and mobile disposal. A real 68-page candidate
+also passed pinned PDF.js desktop/mobile pixel and text checks on both Readers.
+Actual multilingual recognition accuracy remains pending. Remote publication and
+canonical resolver promotion completed the single-book acceptance below.
+
+Publication implementation update: `publish_reader_v3.py` and central-only
+`reader-v3-publish.yml` now stage verified immutable candidates, merge/promote
+v3 catalogs through a single pointer, generate forward rollback versions and
+check consumer deployment projections before acknowledgment. HF metadata refresh
+and Pages builds consume the pinned catalog. The real-input memory-store rehearsal
+was followed by one production promotion and both consumer acknowledgments. Hub
+has no CAS here: central
+single-writer serialization is mandatory. All candidate/history roots remain
+protected; retirement is still pending. See `V3_PUBLICATION.md`.
 
 ## 1. Product Contract
 
@@ -183,12 +214,13 @@ compares first paint, deep-page demand latency, bytes, memory and handoff drift.
 
 ## 5. PDF Optimization And Searchable PDF
 
-Create two independent candidates rather than tying readable PDF publication
-to OCR completion:
+Use one visual document and an independent text layer. A PDF with embedded OCR
+text is optional export, not a required v3 completion stage:
 
-- `display.pdf`: visual/document optimization without changing recognized text.
-- `searchable.pdf`: the same visual document with a complete accepted invisible
-  text layer where needed. It may become the next primary document generation.
+- `display.pdf`: optional visual/document optimization without changing recognized
+  text. Keep the original if the candidate does not pass acceptance.
+- `searchable.pdf`: optional export from the accepted text generation. The
+  independent per-page JSON remains authoritative for overlays/search/correction.
 
 For vector and bitonal pages, preserve existing drawing/image streams. Do not
 reconstruct the document from preview WebP or OCR PNG. A full RGB raster rebuild
@@ -383,7 +415,7 @@ Initial retention defaults:
 | Current PDF/HTML/preview/text/page map | Protect while current generation references it |
 | Raw OCR, accepted correction and audit | Keep while book is active and policy retains correction history |
 | Active OCR, partial retry or open review evidence | Protect; no age-only deletion |
-| Full PNG inputs after completed OCR and searchable PDF, with no review | 7-day recovery retention, then 14-day orphan grace |
+| Full PNG inputs after completed OCR and no open review or required build | 7-day recovery retention, then 14-day orphan grace; optional searchable PDF does not block release |
 | Low-confidence/complex review crops/context | Retain until review is accepted or explicitly closed, then the same grace |
 | Superseded generation | At least 30 days and both consumer acknowledgments |
 | Abandoned upload | Confirm worker is terminal, retain recoverable checkpoint, then 14-day orphan grace |
@@ -433,13 +465,15 @@ of the number of GitHub tokens; CPU render/OCR account lanes do not grant them.
 
 ## 11. Existing Implementation Gaps
 
-These are local code observations, not production claims:
+The remaining design gaps below include historical local implementation notes;
+`V3_DEPLOYMENT.md` is authoritative for the accepted single-book production subset.
 
-- `static/reader.js` now supports same-shell preview-to-PDF handoff inside the
-  existing `pdf-pages` adapter. It initializes the associated PDF in parallel,
-  verifies page count, keeps demand-range options and provides delayed image
-  backfill. PDF-only and image-only adapters remain distinct. New SVG/PNG stream
-  representations and the v3 partitioned manifest are still pending.
+- Both local `static/reader.js` checkouts consume v3 manifests inside PDF-pages,
+  initialize the primary PDF in parallel and retain demanded PNG/WebP fallback.
+  Independent per-region JSON overlays survive same-shell handoff and full-book
+  Worker search uses its matching complete text index. Page/source identities,
+  hashes, preview dimensions and geometry ratios are checked. SVG/HTML streams,
+  stronger cross-engine coordinate acceptance and corpus-wide migration remain pending.
 - Existing compact sidecars now carry optional `pd` (document path) and `pdb`
   (current bucket), projected as `pdf_document` / `ReaderPdfDocument` through
   API, search/session metadata and direct Reader links. Original PDF streams
@@ -447,9 +481,12 @@ These are local code observations, not production claims:
   Converted inputs require an explicit associated PDF, not the CAJ/DJVU download.
   Only validated current-bucket PDF paths survive backend decoding. The v3
   page-map/digest identity checks are still stronger than this v2 page-count gate.
-- `pdf_ocr_stages.py` currently persists lossless PNG inputs and independent
-  text but builds full WebP page manifests for the non-preserved branch. It has
-  no display/searchable-PDF assembly stage or mixed-codec indexed reading manifest.
+- `pdf_ocr_stages.py` persists lossless PNG inputs and compatibility WebP manifests.
+  Local OCR assembly additionally creates independent text layers, 128-page text
+  partitions and immutable review task manifests. The offline v3 builder generates
+  mixed PNG/WebP preview candidates and verifies them against real PDF page maps.
+  Frontend v3 resolution is deployed for the accepted single-book generation;
+  display-PDF optimization and optional searchable export are not yet connected.
 - `publish_pdf_ocr_assets.py` now publishes OCR registry and sidecar together to
   `reader-assets-v2` for real HF API clients, without dataset fallback or a PDF
   bucket index copy. A matching OCR registry alone no longer skips sidecar repair.
@@ -472,7 +509,7 @@ These are local code observations, not production claims:
  - The GC workflow emits a report artifact and can record first-seen observations
    only after a complete graph. Deletion remains disabled until all producers use
    shared mutation coordination.
-- Account workers and the new binary policy are local changes. There is no
+- Account workers and the new binary policy were deployed on 2026-10-09. There is no
   deployed daily OpenCode correction service or configured provider/model here.
 
 The new report follows existing recorded OCR input dependencies, but cannot prove

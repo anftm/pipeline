@@ -41,7 +41,21 @@ safe order in which they are used.
   `PDF_WORKER_DEPLOYMENT.md` records exact run evidence and completion boundaries.
   `PDF_PROCESSING.md` describes the current stages and lifecycle limitations.
   `PDF_READING_CYCLE_V3.md` specifies the proposed PDF-primary full-coverage stream,
-  OCR/correction and cross-bucket lifecycle redesign; it is not deployed behavior.
+  OCR/correction and cross-bucket lifecycle redesign; only its documented subset
+  is deployed. `V3_DEPLOYMENT.md` records the 2026-10-10 single-book v3 acceptance.
+- `pdf_text_layer.py` and `pdf_reading_v3.py` provide local immutable text layers,
+  explicit correction acceptance, existing-OCR backfill, 128-page partitions and
+  resumable PNG/WebP previews. Central OCR assembly emits companion text bundles
+  alongside v2 book-text locally. The central v3 builder/resolver and both frontend
+  consumers are deployed for one verified 68-page book. Automatic worker companion
+  publication, the correction service and deleting GC remain pending.
+  Embedded searchable PDF is optional export, not a required completion stage.
+- `publish_reader_v3.py` and central-only `reader-v3-publish.yml` now implement
+  candidate upload/readback, immutable catalog promotion, rollback and read-only
+  consumer projection checks. `V3_PUBLICATION.md` documents the single-writer
+  protocol (not Hub CAS); `V3_DEPLOYMENT.md` records promotion and both acknowledgments.
+  Candidate/processing/history
+  retention remains conservative; no deletion or automatic retirement is enabled.
 - `reader_gc_graph.py` now provides the only three-bucket inventory and qualified
   reference graph. It follows render ranges, progress, catalog generations and
   processing roots, but has no deletion stage. Observation recording is allowed

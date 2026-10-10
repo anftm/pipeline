@@ -1,8 +1,9 @@
 # v3 Reading Publication
 
-Local implementation and read-only-input rehearsal: 2026-10-10. The workflow and
-new consumers in this checkout are not yet deployed. No production v3 pointer
-was created by the rehearsal.
+Implementation, rehearsal and single-book production acceptance: 2026-10-10.
+The central workflow and HF/Pages consumers are deployed. One 68-page generation
+was promoted and acknowledged by both surfaces; see `V3_DEPLOYMENT.md` for exact
+workflow and endpoint evidence. The earlier memory rehearsal had no remote writes.
 
 ## Protocol
 

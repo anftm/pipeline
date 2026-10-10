@@ -21,22 +21,48 @@ render/OCR/asset workflows and their planner/publisher entrypoints were removed.
   identities are independent of Reader-image encoding.
 - Central OCR publication assembles every page into a complete `pdf-book-text`
   v2 index, then updates the OCR registry and sidecar in `reader-assets-v2`.
+- Local OCR assembly additionally emits independent versioned text layers with
+  Unicode-codepoint offsets, boxes/quadrilaterals, source/confidence metadata,
+  writing mode, direction, review flags and raw-generation identity. These are
+  intended overlay/correction inputs, not a claim of reviewed OCR accuracy.
 - A content-addressed sidecar snapshot and catalog generation are published
   before releasing the corresponding processing roots. Retrying identical
   publication keeps the same generation and resumes handoff.
 
 ## Lifecycle Limits
 
+`publish_reader_v3.py` provides staged upload/readback, immutable v3 catalogs,
+serialized pointer promotion, rollback generations and deployed-projection
+checks. Its deployed central manual workflow defaults to read-only. HF/Pages
+consumers merge the pinned catalog over v2 routes. One 68-page generation is
+promoted with both production acknowledgments (`V3_DEPLOYMENT.md`). Automatic
+retirement remains pending; see `V3_PUBLICATION.md`. These operations do not
+schedule additional account workers.
+
+`scripts/pdf_reading_v3.py` provides offline text backfill, 128-page partitions,
+resumable PNG/WebP preview generation and full candidate verification. It does
+not publish a v3 resolver pointer. Embedded searchable PDF is optional export;
+independent JSON is the primary text source. The central publication entrypoint
+now promotes validated single-book candidates; remote correction acceptance
+remains pending.
+
+The HF/Pages checkouts now additionally accept v3 reading manifests, demand
+preview/text partitions and render independent text over previews/PDF canvases.
+Complete Worker search uses the matching text generation. Local browser, real
+PDF.js and single-book production checks passed; both surfaces now consume the
+promoted generation. Remote correction acceptance is still pending.
+
 Catalog retention is at least 30 days after supersession and until matching
 replacement acknowledgments exist for both consumers. Uploading an index or
 pushing a Pages commit does not itself establish live deployment acceptance.
-Both acknowledgment flags begin false. The catalog remains supplementary to
-the existing Reader sidecar, not the v3 application resolver.
+Both acknowledgment flags begin false. The older v2 catalog remains supplementary
+to the existing sidecar; the v3 catalog is the actual v3 application resolver.
 
 GC inventories all three current buckets. Complete reports can persist positive
 grace-period orphan observations. No deletion endpoint exists yet: all producers
 need a common remote mutation lock or equivalent conditional protocol, and
-consumer acknowledgment must be wired to production acceptance.
+consumer acknowledgment must cover all relevant producers and consumers. v3's
+two deployed consumer acknowledgments are now wired to production acceptance.
 
 Processing records never expire by age. Failed/cancelled jobs require explicit
 verified recovery or retirement, not a lease timeout interpreted as permission
