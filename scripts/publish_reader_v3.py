@@ -266,7 +266,11 @@ def build_stage(store, spec, workspace, *, apply=False):
     raw_ocr = v3.decode(v3.verified_read(spec["ocr_manifest"], reader))
     if raw_ocr.get("source_sha256") != source:
         raise ValueError("OCR/source identity mismatch")
-    text_ref = v3.backfill_text(raw_ocr, reader, workspace)
+    text_ref = raw_ocr.get("text_layer")
+    if text_ref:
+        v3.verify_text_bundle(text_ref, reader, source, raw_ocr["page_count"])
+    else:
+        text_ref = v3.backfill_text(raw_ocr, reader, workspace)
     reading_spec = {"source_key": key, "source_sha256": source, "primary": spec["primary"],
                     "text_layer": text_ref, "require_complete_preview": True}
     reading_spec = v3.generate_previews(reading_spec, reader, workspace,
@@ -471,7 +475,7 @@ class CentralHubStore(HubBucketStore):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("build-stage", "stage", "promote", "rollback", "ack", "inspect", "project"))
+    parser.add_argument("command", choices=("build-stage", "stage", "promote", "rollback", "ack", "ack-all", "inspect", "project", "auto", "correct", "accept", "reject"))
     parser.add_argument("--resource", type=Path)
     parser.add_argument("--resource-json")
     parser.add_argument("--bundle", type=Path)
@@ -481,12 +485,47 @@ def main():
     parser.add_argument("--surface", choices=("hf", "pages"))
     args = parser.parse_args()
     store = CentralHubStore()
-    if args.command == "build-stage":
+    if args.command == "auto":
+        try:
+            from .reader_v3_automation import run
+        except ImportError:
+            from reader_v3_automation import run
+        options = json.loads(args.resource_json or "{}")
+        priority = options.get("source_sha256")
+        if priority is not None:
+            text.sha(priority)
+        report = run(store, apply=args.apply, priority_source=priority)
+    elif args.command in {"correct", "accept", "reject"}:
+        try:
+            from .reader_v3_correction import operate
+        except ImportError:
+            from reader_v3_correction import operate
+        report = operate(store, args.command, json.loads(args.resource_json or "{}"), apply=args.apply)
+    elif args.command == "build-stage":
         if not args.resource and not args.resource_json:
             parser.error("build-stage requires a pinned single-book spec JSON")
         spec = json.loads(args.resource_json if args.resource_json else args.resource.read_text())
         with tempfile.TemporaryDirectory(prefix="reader-v3-candidate-") as directory:
             report = build_stage(store, spec, Path(directory), apply=args.apply)
+    elif args.command == "ack-all":
+        import httpx
+        import time
+        pending = {"hf", "pages"}
+        report = {"applied": args.apply, "consumers": {}}
+        deadline = time.monotonic() + 1200
+        if current(store)[0] is not None:
+            with httpx.Client(timeout=30, follow_redirects=True) as client:
+                while pending:
+                    for surface in sorted(pending):
+                        try:
+                            receipt = observe_consumer(store, surface, client)
+                            report["consumers"][surface] = acknowledge(store, surface, receipt, apply=args.apply)
+                            pending.remove(surface)
+                        except (ValueError, httpx.HTTPError):
+                            if time.monotonic() >= deadline:
+                                raise RuntimeError("consumer projection acceptance deadline exceeded") from None
+                    if pending:
+                        time.sleep(20)
     elif args.command == "ack":
         if not args.surface:
             parser.error("ack requires --surface")

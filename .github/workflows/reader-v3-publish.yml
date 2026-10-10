@@ -1,12 +1,18 @@
 name: Publish v3 Reading Generation
-run-name: v3 ${{ inputs.operation }} / ${{ inputs.apply && 'apply' || 'verify' }}
+run-name: v3 ${{ inputs.operation || github.event_name }} / ${{ (inputs.apply || github.event_name != 'workflow_dispatch') && 'apply' || 'verify' }}
 
 on:
+  schedule:
+    - cron: '43 */2 * * *'
+    - cron: '37 5 * * *'
+  workflow_run:
+    workflows: [Publish Account PDF Worker Results]
+    types: [completed]
   workflow_dispatch:
     inputs:
       operation:
         type: choice
-        options: [build-stage, stage, promote, rollback, ack, inspect]
+        options: [build-stage, stage, promote, rollback, ack, inspect, auto, correct, accept, reject]
         default: inspect
       resource_json:
         description: Pinned build-stage spec or qualified reading/candidate/rollback resource JSON
@@ -35,12 +41,10 @@ concurrency:
 
 jobs:
   publish:
-    if: github.repository == 'anftm/pipeline'
+    if: github.repository == 'anftm/pipeline' && (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success')
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     env:
-      HF_TOKEN: ${{ secrets.HF_TOKEN }}
-      HF_INPUT_TOKEN: ${{ secrets.HF_INPUT_TOKEN }}
       READER_V3_WRITE_PROTOCOL: central-reader-sidecar-v3-v1
     steps:
       - uses: actions/checkout@v7
@@ -49,16 +53,32 @@ jobs:
           python-version: '3.11'
       - run: pip install -r scripts/requirements.txt
       - name: Verify and execute the central v3 operation
+        id: operation
         env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_INPUT_TOKEN: ${{ secrets.HF_INPUT_TOKEN }}
+          OCR_CORRECTION_API_BASE: ${{ secrets.OCR_CORRECTION_API_BASE }}
+          OCR_CORRECTION_API_KEY: ${{ secrets.OCR_CORRECTION_API_KEY }}
           OPERATION: ${{ inputs.operation }}
           RESOURCE_JSON: ${{ inputs.resource_json }}
           EXPECTED_PARENT: ${{ inputs.expected_parent }}
           SURFACE: ${{ inputs.surface }}
           APPLY: ${{ inputs.apply }}
+          EVENT_NAME: ${{ github.event_name }}
+          SCHEDULE: ${{ github.event.schedule }}
         run: |
+          if [[ "$EVENT_NAME" != workflow_dispatch ]]; then
+            OPERATION=auto
+            APPLY=true
+            if [[ "$SCHEDULE" == '37 5 * * *' ]]; then OPERATION=correct; fi
+          fi
+          echo "operation=$OPERATION" >> "$GITHUB_OUTPUT"
+          echo "apply=$APPLY" >> "$GITHUB_OUTPUT"
+          if [[ -z "$RESOURCE_JSON" ]]; then RESOURCE_JSON='{}'; fi
           args=("$OPERATION" --output output/v3/publication.json)
           case "$OPERATION" in
             build-stage|stage|promote|rollback) args+=(--resource-json "$RESOURCE_JSON" --expected-parent "$EXPECTED_PARENT") ;;
+            auto|correct|accept|reject) args+=(--resource-json "$RESOURCE_JSON") ;;
             ack) args+=(--surface "$SURFACE") ;;
             inspect) ;;
             *) exit 1 ;;
@@ -66,15 +86,22 @@ jobs:
           if [[ "$APPLY" == true ]]; then args+=(--apply); fi
           python scripts/publish_reader_v3.py "${args[@]}"
       - name: Publish the pinned projection to Pages
-        if: inputs.apply && (inputs.operation == 'promote' || inputs.operation == 'rollback')
+        if: steps.operation.outputs.apply == 'true' && contains(fromJSON('["auto","accept","promote","rollback"]'), steps.operation.outputs.operation)
         env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
           PAGES_TOKEN: ${{ secrets.PAGES_TOKEN }}
           PAGES_REPO: ${{ secrets.PAGES_REPO }}
         run: python scripts/publish_search_reader_index.py
+      - name: Confirm both deployed consumer projections
+        if: steps.operation.outputs.apply == 'true' && contains(fromJSON('["auto","accept","promote","rollback"]'), steps.operation.outputs.operation)
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_INPUT_TOKEN: ${{ secrets.HF_INPUT_TOKEN }}
+        run: python scripts/publish_reader_v3.py ack-all --apply --output output/v3/consumers.json
       - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: v3-publication-report
-          path: output/v3/publication.json
+          path: output/v3/*.json
           retention-days: 30
           if-no-files-found: warn

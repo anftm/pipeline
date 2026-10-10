@@ -9,6 +9,7 @@ import gzip
 import hashlib
 import json
 import math
+import re
 from pathlib import Path, PurePosixPath
 
 try:
@@ -26,7 +27,8 @@ def resource(value):
     if not isinstance(value, dict) or value.get("bucket") not in BUCKETS:
         raise ValueError("invalid qualified resource bucket")
     path = value.get("path")
-    if (not isinstance(path, str) or not path.startswith(("objects/", "derived/"))
+    if (not isinstance(path, str) or not (path.startswith(("objects/", "derived/")) or
+            re.fullmatch(r"documents/pdf/[a-z0-9_-]+/[0-9a-f]{64}/document\.pdf", path))
             or "\\" in path or any(part in {"", ".", ".."} for part in path.split("/"))
             or any(ord(c) < 32 for c in path) or "?" in path or "#" in path):
         raise ValueError("invalid qualified resource path")
