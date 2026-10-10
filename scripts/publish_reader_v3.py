@@ -27,6 +27,12 @@ except ImportError:
 ASSETS = shared.READER_ASSETS_BUCKET
 POINTER = "reader-index/v3/current.json"
 PROTOCOL = "central-reader-sidecar-v3-v1"
+
+
+class PublicationReviewRequired(ValueError):
+    pass
+
+
 PUBLIC_OBJECT = re.compile(
     r"objects/[0-9a-f]{2}/[0-9a-f]{64}/[0-9a-f]{16}/(?:document\.pdf|"
     r"reading-manifest\.json|page-map\.json\.gz|text-layer-manifest\.json|"
@@ -271,6 +277,11 @@ def build_stage(store, spec, workspace, *, apply=False):
         v3.verify_text_bundle(text_ref, reader, source, raw_ocr["page_count"])
     else:
         text_ref = v3.backfill_text(raw_ocr, reader, workspace)
+    if spec.get("require_usable_text"):
+        text_index = v3.decode(v3.verified_read(text_ref, reader))
+        book = v3.decode(v3.verified_read(text_index["book_text"], reader))
+        if not any(char.isalnum() for page in book["pages"] for char in page["text"]):
+            raise PublicationReviewRequired("derived document has no usable recognized text; inspect source conversion")
     reading_spec = {"source_key": key, "source_sha256": source, "primary": spec["primary"],
                     "text_layer": text_ref, "require_complete_preview": True}
     reading_spec = v3.generate_previews(reading_spec, reader, workspace,

@@ -43,6 +43,26 @@ class MemoryStore:
 
 
 class ReaderGcGraphTests(unittest.TestCase):
+    def test_v3_automation_and_model_proposals_keep_pinned_inputs(self):
+        store = MemoryStore()
+        primary = "derived/migration-test/" + "a" * 32 + "/document.pdf"
+        source = "objects/aa/source/ocr/page-000001.json.gz"
+        store.put(PDF, primary, b"pdf")
+        store.put(PDF, source, b"raw text")
+        def ref(path):
+            return {"bucket": PDF, "path": path, "sha256": "a" * 64, "bytes": 1, "role": "provenance"}
+        store.put(ASSETS, "reader-index/v3/automation.json", {"version": 1, "kind": "reader-v3-automation",
+            "tasks": {"task": {"spec": {"primary": ref(primary)}}}, "days": {}})
+        store.put(ASSETS, "reader-index/v3/corrections/state.json", {"version": 1, "kind": "reader-v3-correction-state",
+            "tasks": {"task": {"text_layer": ref(source)}}, "days": {}})
+        store.put(ASSETS, "reader-index/v3/corrections/proposals/task/proposal.json", {
+            "version": 1, "kind": "pdf-text-correction", "page": 1,
+            "base_generation": "a" * 64, "raw_sha256": "b" * 64, "page_identity": "c" * 64,
+            "replacements": [], "evidence": {"primary": ref(primary)}})
+        report = gc.ReferenceGraph(store).build()
+        self.assertTrue(report["graph_complete"], report["blockers"])
+        self.assertTrue(all(not value["candidates"] for value in report["buckets"].values()))
+
     def test_pdf_range_only_reference_protects_png_jxl_and_native_text(self):
         store = MemoryStore()
         root = "objects/aa/book/render"

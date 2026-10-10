@@ -85,6 +85,13 @@ class AutomationTests(unittest.TestCase):
         self.assertEqual(result["tasks"], 1)
         self.assertEqual(result["eligible"], 0)
 
+    def test_unusable_converted_text_requires_review_without_repeated_builds(self):
+        builder = Mock(side_effect=publication.PublicationReviewRequired())
+        report = auto.run(self.store, apply=True, build=builder, now=self.now)
+        self.assertEqual(report["processed"][0]["status"], "needs-review")
+        auto.run(self.store, apply=True, build=builder, now=self.now + timedelta(days=1))
+        self.assertEqual(builder.call_count, 1)
+
     def test_explicit_retry_retains_day_charges_and_failure_history(self):
         auto.run(self.store, apply=True, build=Mock(side_effect=OSError()), now=self.now)
         state = auto.load_state(self.store)

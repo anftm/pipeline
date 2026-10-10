@@ -124,6 +124,7 @@ def spec_for(key, entry):
                 r"documents/pdf/[a-z0-9_-]+/[0-9a-f]{64}/document\.pdf", primary["path"])):
             raise ValueError("derived primary path is not published")
         spec["primary"] = primary
+        spec["require_usable_text"] = True
     return spec, count
 
 
@@ -162,7 +163,7 @@ def run(store, *, apply=False, priority_source=None, build=None, now=None):
             task["status"] = "published" if active["source_sha256"] == spec["source_sha256"] else "protected"
             task["active_generation"] = active["reading_generation"]
             continue
-        if task["status"] in {"published", "protected", "failed"}:
+        if task["status"] in {"published", "protected", "failed", "needs-review"}:
             continue
         if not task.get("candidate") and task["attempts"] >= MAX_ATTEMPTS:
             task["status"] = "failed"
@@ -206,7 +207,8 @@ def run(store, *, apply=False, priority_source=None, build=None, now=None):
     except Exception as error:
         task["error_type"] = type(error).__name__
         task["failures"] = task.get("failures", 0) + 1
-        task["status"] = "failed" if task["failures"] >= MAX_ATTEMPTS else "retry"
+        task["status"] = ("needs-review" if isinstance(error, publication.PublicationReviewRequired) else
+                          "failed" if task["failures"] >= MAX_ATTEMPTS else "retry")
         task["retry_at"] = (now + timedelta(hours=2 ** min(task["failures"], 5))).isoformat()
     save_state(store, state)
     report["processed"].append({"id": identity, "status": task["status"], "error_type": task.get("error_type")})

@@ -211,7 +211,28 @@ class ReferenceGraph:
 
     def validate(self, payload: dict, bucket: str, path: str) -> bool:
         if is_root(path):
-            if "lifecycle" in posixpath.basename(path):
+            if payload.get("kind") in {"reader-v3-automation", "reader-v3-correction-state"}:
+                if (payload.get("version") != 1 or not isinstance(payload.get("tasks"), dict)
+                        or not isinstance(payload.get("days"), dict)
+                        or any(not isinstance(task, dict) for task in payload["tasks"].values())):
+                    self.blockers.add(f"invalid v3 task state: {bucket}:{path}")
+                    return False
+            elif payload.get("kind") == "pdf-text-correction":
+                try:
+                    try:
+                        from .pdf_text_layer import sha
+                    except ImportError:
+                        from pdf_text_layer import sha
+                    for field in ("base_generation", "raw_sha256", "page_identity"):
+                        sha(payload.get(field))
+                    if (payload.get("version") != 1 or type(payload.get("page")) is not int
+                            or payload["page"] < 1 or not isinstance(payload.get("replacements"), list)
+                            or not isinstance(payload.get("evidence"), dict)):
+                        raise ValueError("invalid proposal")
+                except (ValueError, TypeError):
+                    self.blockers.add(f"invalid v3 correction proposal: {bucket}:{path}")
+                    return False
+            elif "lifecycle" in posixpath.basename(path):
                 if not isinstance(payload.get("orphans", {}), dict):
                     self.blockers.add(f"invalid lifecycle: {bucket}:{path}")
                     return False
