@@ -285,10 +285,17 @@ def correct(store, options, *, apply=False, invoke=None, now=None):
                     continue
                 if task.get("rejected_result"):
                     cached = publication.read_index(store, task["rejected_result"])
+                    resources = cached.get("resources")
                     if (cached.get("kind") != "reader-v3-rejected-correction" or cached.get("version") != 1
                             or cached.get("task_id") != identity
-                            or cached.get("resources") != [task["reading"], task["text_layer"]]):
+                            or not isinstance(resources, list) or len(resources) != 2
+                            or resources[1] != task["text_layer"]):
                         raise ValueError("cached model result task mismatch")
+                    original = v3.decode(v3.verified_read(resources[0], lambda ref: read(store, ref)))
+                    if (original.get("source_key") != task["source_key"]
+                            or original.get("source_sha256") != task["source_sha256"]
+                            or original.get("primary", {}).get("resource") != evidence["primary"]):
+                        raise ValueError("cached model result visual source changed")
                     result = cached["result"]
                     task["reused_model_result"] = True
                 else:
