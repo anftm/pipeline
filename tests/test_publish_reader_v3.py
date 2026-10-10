@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch, Mock
 
 import pymupdf
 from PIL import Image
@@ -80,6 +81,37 @@ class V3PublicationTests(unittest.TestCase):
         self.assertEqual(pointer["generation"], promoted["generation"])
         self.assertEqual(catalog["files"]["repo\0book.pdf"]["resource"], ref)
         self.assertEqual(self.store.writes[-1], (publish.ASSETS, publish.POINTER))
+
+    def test_pinned_original_import_verifies_identity_size_and_checksum(self):
+        raw = b"pinned original PDF bytes"
+        source = hashlib.sha256(raw).hexdigest()
+        path = f"objects/{source[:2]}/{source}/{'a' * 16}/document.pdf"
+        spec = {"source_key": "VoiceOfML/books\0folder/book.pdf", "source_sha256": source,
+                "primary": publish.metadata(v3.shared.PDF_PAGES_BUCKET, path, raw),
+                "primary_source": {"repo": "VoiceOfML/books", "path": "folder/book.pdf", "revision": "b" * 40}}
+        cached = self.bundle / "cached.pdf"
+        cached.write_bytes(raw)
+        with patch("huggingface_hub.HfApi") as api, patch("huggingface_hub.hf_hub_download", return_value=str(cached)) as download:
+            api.return_value.get_paths_info.return_value = [Mock(size=len(raw))]
+            publish.import_primary(spec, self.bundle)
+            self.assertEqual((self.bundle / path).read_bytes(), raw)
+            download.assert_called_once_with("VoiceOfML/books", "folder/book.pdf", repo_type="dataset", revision="b" * 40)
+            wrong = copy.deepcopy(spec)
+            wrong["primary_source"]["revision"] = "main"
+            with self.assertRaisesRegex(ValueError, "pinned original-source identity"):
+                publish.import_primary(wrong, self.bundle)
+            wrong["primary_source"]["revision"] = "b" * 40
+            wrong["primary_source"]["path"] = "other.pdf"
+            with self.assertRaisesRegex(ValueError, "pinned original-source identity"):
+                publish.import_primary(wrong, self.bundle)
+            api.return_value.get_paths_info.return_value = [Mock(size=len(raw) + 1)]
+            with self.assertRaisesRegex(ValueError, "size mismatch"):
+                publish.import_primary(spec, self.bundle)
+            api.return_value.get_paths_info.return_value = [Mock(size=len(raw))]
+            cached.write_bytes(b"x" * len(raw))
+            with self.assertRaisesRegex(ValueError, "checksum mismatch"):
+                publish.import_primary(spec, self.bundle)
+        self.assertEqual(self.store.writes, [])
 
     def test_two_books_merge_and_stale_parent_cannot_lose_the_first_update(self):
         first = publish.stage(self.store, self.candidate(), self.bundle, apply=True)

@@ -53,6 +53,13 @@ the primary is a public runtime PDF and the OCR manifest is provenance. Optional
 book, not an arbitrary URL or shell command. The workflow has no schedule and
 does not consume additional account runners automatically.
 
+When the public primary PDF does not yet exist, optional `primary_source` supplies
+`{repo,revision,path}` for the original VoiceOfML dataset PDF. The revision must be
+an immutable 40-character commit; the repo/path must exactly match `source_key`.
+The import verifies remote size before download, then exact bytes and source
+SHA-256 before the candidate's ordinary protected upload/readback. Moving refs,
+arbitrary URLs and mismatched source identities are rejected.
+
 For `stage`, supply the qualified reading-manifest resource. The remote workflow
 expects its objects already present; the Python API can stage from a local bundle.
 For `promote`, supply the candidate resource from the stage report and the current

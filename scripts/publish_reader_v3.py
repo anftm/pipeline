@@ -223,12 +223,45 @@ def stage(store, ref, bundle=None, *, apply=False):
     return report
 
 
+def import_primary(spec, workspace):
+    """Materialize an original PDF from its immutable dataset revision."""
+    origin = spec.get("primary_source")
+    if origin is None:
+        return
+    ref = v3.resource(spec["primary"])
+    source = text.sha(spec.get("source_sha256"))
+    if (not isinstance(origin, dict) or not isinstance(origin.get("repo"), str)
+            or not re.fullmatch(r"VoiceOfML/[A-Za-z0-9._-]+", origin["repo"])
+            or not isinstance(origin.get("revision"), str)
+            or not re.fullmatch(r"[0-9a-f]{40}", origin["revision"])
+            or not isinstance(origin.get("path"), str)
+            or any(part in {"", ".", ".."} for part in origin["path"].split("/"))
+            or "\\" in origin["path"] or not origin["path"].lower().endswith(".pdf")
+            or spec.get("source_key") != origin["repo"] + "\0" + origin["path"]
+            or ref["bucket"] != shared.PDF_PAGES_BUCKET or ref["role"] != "runtime"
+            or ref["sha256"] != source or ref["bytes"] > 512 * 1024 * 1024
+            or not re.fullmatch(r"objects/" + source[:2] + "/" + source + r"/[0-9a-f]{16}/document\.pdf", ref["path"])):
+        raise ValueError("primary import requires matching pinned original-source identity")
+    from huggingface_hub import HfApi, hf_hub_download
+    entries = HfApi().get_paths_info(origin["repo"], [origin["path"]], repo_type="dataset", revision=origin["revision"])
+    if len(entries) != 1 or entries[0].size != ref["bytes"]:
+        raise ValueError("pinned primary source size mismatch")
+    cached = hf_hub_download(origin["repo"], origin["path"], repo_type="dataset", revision=origin["revision"])
+    raw = Path(cached).read_bytes()
+    if len(raw) != ref["bytes"] or hashlib.sha256(raw).hexdigest() != source:
+        raise ValueError("pinned primary source checksum mismatch")
+    target = workspace / ref["path"]
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(raw)
+
+
 def build_stage(store, spec, workspace, *, apply=False):
     """Explicit single-book generation from pinned PDF and complete OCR objects."""
     source = text.sha(spec.get("source_sha256"))
     key = spec.get("source_key")
     if not isinstance(key, str) or not key:
         raise ValueError("single-book source key required")
+    import_primary(spec, workspace)
     reader = CandidateReader(store, workspace)
     raw_ocr = v3.decode(v3.verified_read(spec["ocr_manifest"], reader))
     if raw_ocr.get("source_sha256") != source:
