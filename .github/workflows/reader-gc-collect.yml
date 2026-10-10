@@ -1,0 +1,53 @@
+name: Collect Unreferenced Reader Objects
+
+on:
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: Collect objects after all Reader producers have been paused and drained
+        type: boolean
+        default: false
+      grace_days:
+        description: Unreferenced object and superseded catalog retention in days
+        type: string
+        default: "0"
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: reader-sidecar
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  collect:
+    if: github.repository == 'anftm/pipeline'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - run: pip install -r scripts/requirements.txt
+      - name: Verify maintenance window and collect unreferenced objects
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_INPUT_TOKEN: ${{ secrets.HF_INPUT_TOKEN }}
+          GH_TOKEN: ${{ secrets.PDF_WORKER_READ_TOKEN }}
+          APPLY: ${{ inputs.apply }}
+          GRACE_DAYS: ${{ inputs.grace_days }}
+        run: |
+          [[ "$GRACE_DAYS" =~ ^[0-9]+$ ]] || exit 1
+          args=(--grace-days "$GRACE_DAYS" --output output/gc/collection.json)
+          if [[ "$APPLY" == true ]]; then args+=(--apply); fi
+          python -u scripts/reader_gc_collect.py "${args[@]}"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: reader-gc-collection
+          path: output/gc/*.json
+          retention-days: 30
+          if-no-files-found: error

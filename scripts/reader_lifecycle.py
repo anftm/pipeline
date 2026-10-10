@@ -100,9 +100,11 @@ def catalog_generation(sidecar: dict, parent: dict | None = None,
         catalog = {"version": CATALOG_VERSION, "kind": "reader-catalog",
                    "current": parent.get("current"),
                    "generations": dict(parent.get("generations") or {})}
+        if parent.get("retired_generations"):
+            catalog["retired_generations"] = dict(parent["retired_generations"])
     previous = catalog.get("current") or {}
     parent_id = previous.get("generation") if isinstance(previous, dict) else None
-    catalog = compact_catalog(catalog, parent_id, now, 30)
+    catalog = compact_catalog(catalog, parent_id, now, 0)
     refs = sidecar_references(sidecar) if references is None else references
     normalized = sorted({(item["bucket"], item["path"]) for item in refs})
     digest = hashlib.sha256(json.dumps(sidecar, ensure_ascii=False, sort_keys=True,
@@ -146,7 +148,9 @@ def sidecar_references(sidecar: dict) -> list[dict]:
     return references
 
 
-def generation_live(entry: dict, current: str | None, now=None, grace_days: int = 30) -> bool:
+def generation_live(entry: dict, current: str | None, now=None, grace_days: int = 0) -> bool:
+    if grace_days < 0:
+        raise ValueError("generation grace cannot be negative")
     if entry.get("generation") == current or entry.get("status") == "current":
         return True
     if not isinstance(entry.get("superseded_at"), str):
@@ -157,14 +161,15 @@ def generation_live(entry: dict, current: str | None, now=None, grace_days: int 
             return True
     except (TypeError, ValueError):
         return True
-    clock = now or datetime.now(timezone.utc)
+    clock = datetime.fromisoformat(now.replace("Z", "+00:00")) if isinstance(now, str) else (
+        now or datetime.now(timezone.utc))
     if clock - superseded < timedelta(days=grace_days):
         return True
     acks = entry.get("replacement_acks")
     return not (isinstance(acks, dict) and acks.get("hf") is True and acks.get("pages") is True)
 
 
-def compact_catalog(catalog: dict, current: str | None, now=None, grace_days: int = 30) -> dict:
+def compact_catalog(catalog: dict, current: str | None, now=None, grace_days: int = 0) -> dict:
     """Bound catalog history after supersession and both consumer acknowledgments."""
     if catalog.get("version") != CATALOG_VERSION or not isinstance(catalog.get("generations"), dict):
         raise ValueError("invalid Reader catalog")
@@ -172,7 +177,21 @@ def compact_catalog(catalog: dict, current: str | None, now=None, grace_days: in
         generation: entry for generation, entry in catalog["generations"].items()
         if generation == current or generation_live(entry, current, now, grace_days)
     }
-    return {**catalog, "generations": generations}
+    retired = dict(catalog.get("retired_generations") or {})
+    for generation, entry in catalog["generations"].items():
+        if generation not in generations:
+            retired[generation] = {
+                "replacement_generation": current,
+                "replacement_acks": dict(entry["replacement_acks"]),
+                "sidecar_sha256": entry.get("sidecar_sha256"),
+                "snapshot": entry.get("snapshot"),
+                "retired_at": now if isinstance(now, str) else (
+                    now.isoformat() if now else now_iso()),
+            }
+    result = {**catalog, "generations": generations}
+    if retired:
+        result["retired_generations"] = retired
+    return result
 
 
 def asset_record(result: dict) -> dict:

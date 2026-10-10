@@ -23,6 +23,7 @@ class HubBucketStore:
     def __init__(self):
         from huggingface_hub import HfApi
         self.api = HfApi(token=os.environ.get("HF_TOKEN"))
+        self.object_sizes = {}
 
     def token(self, bucket):
         if bucket.startswith("melsm/"):
@@ -30,9 +31,16 @@ class HubBucketStore:
         return os.environ.get("HF_TOKEN")
 
     def list_files(self, bucket: str, prefixes: tuple[str, ...]) -> set[str]:
-        return {item.path for prefix in prefixes for item in self.api.list_bucket_tree(
-            bucket, prefix=prefix or None, recursive=True, token=self.token(bucket))
-                if item.type == "file"}
+        files = set()
+        for prefix in prefixes:
+            for item in self.api.list_bucket_tree(bucket, prefix=prefix or None, recursive=True,
+                                                  token=self.token(bucket)):
+                if item.type == "file":
+                    files.add(item.path)
+                    size = getattr(item, "size", None)
+                    if type(size) is int and size >= 0:
+                        self.object_sizes[(bucket, item.path)] = size
+        return files
 
     def read_bytes(self, bucket: str, path: str) -> bytes:
         from huggingface_hub.utils import get_session, hf_raise_for_status
@@ -53,9 +61,45 @@ class HubBucketStore:
             target.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
             batch_bucket_files(bucket, add=[(str(target), path)], token=self.token(bucket))
 
+    def read_graph_json(self, bucket: str, path: str):
+        from huggingface_hub.utils import get_session, hf_raise_for_status
+        try:
+            from .reader_gc_stream import graph_json
+        except ImportError:
+            from reader_gc_stream import graph_json
+        token = self.token(bucket)
+        with get_session().stream("GET", f"https://huggingface.co/buckets/{bucket}/resolve/{quote(path, safe='/')}",
+                headers={"Authorization": f"Bearer {token}"} if token else {},
+                follow_redirects=True, timeout=120) as response:
+            hf_raise_for_status(response)
+            return graph_json(response.iter_bytes(), path.endswith(".gz"))
+
+    def digest(self, bucket: str, path: str) -> str:
+        import hashlib
+        from huggingface_hub.utils import get_session, hf_raise_for_status
+        token = self.token(bucket)
+        digest = hashlib.sha256()
+        with get_session().stream("GET", f"https://huggingface.co/buckets/{bucket}/resolve/{quote(path, safe='/')}",
+                headers={"Authorization": f"Bearer {token}"} if token else {},
+                follow_redirects=True, timeout=120) as response:
+            hf_raise_for_status(response)
+            for chunk in response.iter_bytes():
+                digest.update(chunk)
+        return digest.hexdigest()
+
     def put_bytes(self, bucket: str, path: str, payload: bytes) -> None:
         from huggingface_hub import batch_bucket_files
         batch_bucket_files(bucket, add=[(payload, path)], token=self.token(bucket))
+
+    def delete(self, bucket: str, paths: list[str]) -> None:
+        from huggingface_hub import batch_bucket_files
+        if bucket not in {"vomebook/reader-assets-v2", "vomebook/pdf-pages-v2", "melsm/pdf-archive-v2"}:
+            raise ValueError("GC deletion must target a current Reader bucket")
+        if any(not path or path.startswith("/") or "\\" in path or "\0" in path
+               or any(part in {"", ".", ".."} for part in path.split("/")) for path in paths):
+            raise ValueError("invalid GC deletion path")
+        if paths:
+            batch_bucket_files(bucket, delete=paths, token=self.token(bucket))
 
 
 class S3BucketStore:

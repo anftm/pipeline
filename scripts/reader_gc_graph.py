@@ -9,6 +9,7 @@ import gzip
 import hashlib
 import json
 import posixpath
+from concurrent.futures import ThreadPoolExecutor
 from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -50,7 +51,7 @@ MANIFEST_KINDS = {
 
 def is_root(path: str) -> bool:
     name = posixpath.basename(path)
-    if path.startswith("reader-index/generations/"):
+    if path.startswith(("reader-index/generations/", "reader-index/gc/")):
         return False
     return (path.startswith("reader-index/") and path.endswith((".json", ".json.gz"))) or (
         name == "index.json" or name.startswith("index-") and name.endswith(".json"))
@@ -69,7 +70,7 @@ def decode(raw: bytes) -> dict:
 
 
 class ReferenceGraph:
-    def __init__(self, store, include_input: bool = True, generation_grace_days: int = 30):
+    def __init__(self, store, include_input: bool = True, generation_grace_days: int = 0):
         self.store = store
         self.include_input = include_input
         self.files = {}
@@ -87,10 +88,13 @@ class ReferenceGraph:
 
     def load(self, ref: tuple[str, str]) -> dict | None:
         try:
-            raw = self.store.read_bytes(*ref)
-            payload = decode(raw)
+            if hasattr(self.store, "read_graph_json"):
+                payload, digest = self.store.read_graph_json(*ref)
+            else:
+                raw = self.store.read_bytes(*ref)
+                payload, digest = decode(raw), hashlib.sha256(raw).hexdigest()
             if is_root(ref[1]):
-                self.root_hashes[ref] = hashlib.sha256(raw).hexdigest()
+                self.root_hashes[ref] = digest
             return payload
         except Exception as error:
             # A permissions/transport failure must never resemble an empty root.
@@ -170,6 +174,10 @@ class ReferenceGraph:
             if origin.startswith("reader-index/processing/") and value.get("status") == "released":
                 generation = value.get("generation")
                 if isinstance(generation, str) and generation in self.catalog.get("generations", {}):
+                    return
+                retired = self.catalog.get("retired_generations", {}).get(generation)
+                if (isinstance(retired, dict) and retired.get("replacement_generation")
+                        and retired.get("replacement_acks") == {"hf": True, "pages": True}):
                     return
                 self.blockers.add(f"released root lacks catalog handoff: {bucket}:{origin}")
             context = value.get("bucket")
@@ -317,15 +325,19 @@ class ReferenceGraph:
                     ref = (bucket, path)
                     self.references.add(ref)
                     self.pending.add(ref)
-        while self.pending:
-            ref = min(self.pending)
-            self.pending.remove(ref)
-            if ref in self.seen:
-                continue
-            self.seen.add(ref)
-            payload = self.load(ref)
-            if payload is not None and self.validate(payload, *ref):
-                self.walk(payload, *ref)
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            while self.pending:
+                refs = sorted(self.pending - self.seen)[:32]
+                self.pending.difference_update(self.seen)
+                if not refs:
+                    break
+                self.pending.difference_update(refs)
+                self.seen.update(refs)
+                for ref, payload in zip(refs, pool.map(self.load, refs)):
+                    if payload is not None and self.validate(payload, *ref):
+                        self.walk(payload, *ref)
+                if hasattr(self.store, "read_graph_json") and len(self.seen) % 256 < len(refs):
+                    print(f"GC graph: checked {len(self.seen)} roots/manifests; {len(self.pending)} pending", flush=True)
         # Publication currently has several independent locks. Re-read every
         # root and its key inventory to detect a changing snapshot.
         for bucket, files in self.files.items():
@@ -337,7 +349,9 @@ class ReferenceGraph:
                 self.blockers.add(f"root inventory recheck failed: {bucket} ({type(error).__name__})")
         for ref, digest in self.root_hashes.items():
             try:
-                if hashlib.sha256(self.store.read_bytes(*ref)).hexdigest() != digest:
+                actual = self.store.digest(*ref) if hasattr(self.store, "digest") else (
+                    hashlib.sha256(self.store.read_bytes(*ref)).hexdigest())
+                if actual != digest:
                     self.blockers.add(f"root changed: {ref[0]}:{ref[1]}")
             except Exception as error:
                 self.blockers.add(f"root recheck failed: {ref[0]}:{ref[1]} ({type(error).__name__})")
@@ -386,8 +400,8 @@ def read_gc_state(store) -> dict:
 def plan_retention(state: dict, report: dict, grace_days: int, limit: int, today=None) -> tuple[dict, dict]:
     if not report.get("graph_complete"):
         raise RuntimeError("reference graph is incomplete; refusing orphan observations")
-    if grace_days < 1 or limit < 0:
-        raise ValueError("orphan grace must be positive and limit non-negative")
+    if grace_days < 0 or limit < 0:
+        raise ValueError("orphan grace and limit must be non-negative")
     today = today or date.today()
     current = {f"{bucket}:{path}" for bucket, data in report["buckets"].items()
                for path in data.get("candidates", [])}
@@ -415,12 +429,12 @@ def main() -> int:
     parser.add_argument("--skip-input-bucket", action="store_true")
     parser.add_argument("--record-observations", action="store_true")
     parser.add_argument("--storage", choices=("hub", "s3"), default="hub")
-    parser.add_argument("--grace-days", type=int, default=14)
+    parser.add_argument("--grace-days", type=int, default=0)
     parser.add_argument("--limit", type=int, default=0)
-    parser.add_argument("--generation-grace-days", type=int, default=30)
+    parser.add_argument("--generation-grace-days", type=int, default=0)
     args = parser.parse_args()
-    if args.grace_days < 1 or args.limit < 0 or args.generation_grace_days < 30:
-        parser.error("orphan grace must be positive, generation grace at least 30 days and limit non-negative")
+    if args.grace_days < 0 or args.limit < 0 or args.generation_grace_days < 0:
+        parser.error("grace periods and limit must be non-negative")
     store = HubBucketStore() if args.storage == "hub" else S3BucketStore()
     report = ReferenceGraph(store, not args.skip_input_bucket,
                             args.generation_grace_days).build()
