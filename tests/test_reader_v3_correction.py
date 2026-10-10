@@ -61,6 +61,16 @@ class CorrectionTests(unittest.TestCase):
                 self.assertNotIn("GH_TOKEN", env)
                 self.assertEqual(env["OCR_CORRECTION_API_KEY"], "model")
 
+    def test_worker_failure_exposes_only_a_bounded_provider_code(self):
+        with patch.object(correction.subprocess, "run") as run:
+            run.return_value.returncode = 1
+            run.return_value.stderr = b'{"code":"provider-http-403"}'
+            with self.assertRaisesRegex(correction.ModelRequestError, "provider-http-403"):
+                correction.isolated_model(Path("/tmp/workspace"))
+            run.return_value.stderr = b"unexpected provider body with private details"
+            with self.assertRaisesRegex(correction.ModelRequestError, "isolated-request-failed"):
+                correction.isolated_model(Path("/tmp/workspace"))
+
     def test_proposal_does_not_publish_until_explicit_accept_and_visual_resources_reused(self):
         fixture = fixtures.V3PublicationTests()
         fixture.setUp()

@@ -12,7 +12,7 @@ on:
     inputs:
       operation:
         type: choice
-        options: [build-stage, stage, promote, rollback, ack, inspect, auto, correct, accept, reject, retry]
+        options: [build-stage, stage, promote, rollback, withdraw, ack, inspect, auto, correct, accept, reject, retry]
         default: inspect
       resource_json:
         description: Pinned build-stage spec or qualified reading/candidate/rollback resource JSON
@@ -77,7 +77,7 @@ jobs:
           if [[ -z "$RESOURCE_JSON" ]]; then RESOURCE_JSON='{}'; fi
           args=("$OPERATION" --output output/v3/publication.json)
           case "$OPERATION" in
-            build-stage|stage|promote|rollback) args+=(--resource-json "$RESOURCE_JSON" --expected-parent "$EXPECTED_PARENT") ;;
+            build-stage|stage|promote|rollback|withdraw) args+=(--resource-json "$RESOURCE_JSON" --expected-parent "$EXPECTED_PARENT") ;;
             auto|correct|accept|reject|retry) args+=(--resource-json "$RESOURCE_JSON") ;;
             ack) args+=(--surface "$SURFACE") ;;
             inspect) ;;
@@ -86,14 +86,14 @@ jobs:
           if [[ "$APPLY" == true ]]; then args+=(--apply); fi
           python scripts/publish_reader_v3.py "${args[@]}"
       - name: Publish the pinned projection to Pages
-        if: steps.operation.outputs.apply == 'true' && contains(fromJSON('["auto","accept","promote","rollback"]'), steps.operation.outputs.operation)
+        if: steps.operation.outputs.apply == 'true' && contains(fromJSON('["auto","accept","promote","rollback","withdraw"]'), steps.operation.outputs.operation)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           PAGES_TOKEN: ${{ secrets.PAGES_TOKEN }}
           PAGES_REPO: ${{ secrets.PAGES_REPO }}
         run: python scripts/publish_search_reader_index.py
       - name: Confirm both deployed consumer projections
-        if: steps.operation.outputs.apply == 'true' && contains(fromJSON('["auto","accept","promote","rollback"]'), steps.operation.outputs.operation)
+        if: steps.operation.outputs.apply == 'true' && contains(fromJSON('["auto","accept","promote","rollback","withdraw"]'), steps.operation.outputs.operation)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_INPUT_TOKEN: ${{ secrets.HF_INPUT_TOKEN }}

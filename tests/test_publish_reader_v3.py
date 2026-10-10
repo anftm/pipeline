@@ -38,6 +38,23 @@ class Store:
 
 
 class V3PublicationTests(unittest.TestCase):
+    def test_scoped_withdrawal_preserves_other_books_history_and_source_objects(self):
+        first = publish.stage(self.store, self.candidate(), self.bundle, apply=True)
+        one = publish.promote(self.store, first["candidate"], None, apply=True)
+        second = publish.stage(self.store, self.candidate("b" * 64, "repo\0second.pdf"), self.bundle, apply=True)
+        two = publish.promote(self.store, second["candidate"], one["generation"], apply=True)
+        active = publish.current(self.store)[1]["files"]["repo\0second.pdf"]
+        options = {"source_key": "repo\0second.pdf", "reading_generation": active["reading_generation"]}
+        with patch.dict("os.environ", {"GITHUB_ACTOR": "reviewer"}):
+            with self.assertRaisesRegex(ValueError, "stale withdrawal"):
+                publish.withdraw(self.store, options, one["generation"], apply=True)
+            result = publish.withdraw(self.store, options, two["generation"], apply=True)
+        catalog = publish.current(self.store)[1]
+        self.assertEqual(set(catalog["files"]), {"repo\0book.pdf"})
+        self.assertEqual(catalog["withdrawal"]["resource"], active["resource"])
+        self.assertIn((active["resource"]["bucket"], active["resource"]["path"]), self.store.objects)
+        self.assertIn((publish.ASSETS, two["pointer"]["catalog"]["path"]), self.store.objects)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

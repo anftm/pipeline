@@ -378,6 +378,40 @@ def rollback(store, target_ref, expected_parent, *, apply=False):
     return commit_catalog(store, catalog, pointer, apply=apply)
 
 
+def withdraw(store, options, expected_parent, *, apply=False):
+    """Remove only one defective v3 override; retain the source and all history."""
+    key = options.get("source_key")
+    generation = text.sha(options.get("reading_generation"))
+    if not isinstance(key, str) or not key:
+        raise ValueError("withdrawal requires an exact source key")
+    pointer, catalog = current(store)
+    active = catalog["files"].get(key)
+    if active is None:
+        report = {"applied": apply, "unchanged": True}
+    else:
+        if not pointer or pointer["generation"] != expected_parent or active["reading_generation"] != generation:
+            raise ValueError("stale withdrawal generation")
+        actor = os.environ.get("GITHUB_ACTOR", "").strip()
+        if not actor:
+            raise ValueError("authenticated withdrawal actor required")
+        files = {k: entry for k, entry in catalog["files"].items() if k != key}
+        report = commit_catalog(store, {"version": 3, "kind": "reader-reading-catalog", "files": files,
+            "parent_generation": expected_parent, "withdrawal": {"source_key": key,
+            "reading_generation": generation, "resource": active["resource"], "actor": actor,
+            "reason": "source-conversion-needs-review"}}, pointer, apply=apply)
+    if apply:
+        try:
+            from .reader_v3_automation import load_state, save_state
+        except ImportError:
+            from reader_v3_automation import load_state, save_state
+        state = load_state(store)
+        for task in state["tasks"].values():
+            if task["spec"]["source_key"] == key:
+                task.update(status="needs-review", error_type="PublicationReviewRequired")
+        save_state(store, state)
+    return report
+
+
 def acknowledge(store, surface, receipt, *, apply=False):
     if surface not in {"hf", "pages"}:
         raise ValueError("invalid consumer surface")
@@ -486,7 +520,7 @@ class CentralHubStore(HubBucketStore):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("build-stage", "stage", "promote", "rollback", "ack", "ack-all", "inspect", "project", "auto", "correct", "accept", "reject", "retry"))
+    parser.add_argument("command", choices=("build-stage", "stage", "promote", "rollback", "withdraw", "ack", "ack-all", "inspect", "project", "auto", "correct", "accept", "reject", "retry"))
     parser.add_argument("--resource", type=Path)
     parser.add_argument("--resource-json")
     parser.add_argument("--bundle", type=Path)
@@ -496,7 +530,10 @@ def main():
     parser.add_argument("--surface", choices=("hf", "pages"))
     args = parser.parse_args()
     store = CentralHubStore()
-    if args.command == "retry":
+    if args.command == "withdraw":
+        report = withdraw(store, json.loads(args.resource_json or "{}"),
+                          None if args.expected_parent == "none" else text.sha(args.expected_parent), apply=args.apply)
+    elif args.command == "retry":
         try:
             from .reader_v3_automation import retry
         except ImportError:

@@ -46,6 +46,13 @@ INSTRUCTIONS = (
 )
 
 
+class ModelRequestError(RuntimeError):
+    def __init__(self, code):
+        import re
+        self.code = code if isinstance(code, str) and re.fullmatch(r"[a-z0-9-]{1,80}", code) else "provider-error"
+        super().__init__(self.code)
+
+
 def load_state(store):
     try:
         state = json.loads(store.read_bytes(publication.ASSETS, STATE))
@@ -153,7 +160,7 @@ def model_request(workspace, *, transport=None):
                       headers={"Authorization": "Bearer " + key, "User-Agent": "opencode/1.0"}) as client:
         with client.stream("POST", endpoint + "/responses", json=request) as response:
             if response.status_code != 200:
-                raise RuntimeError(f"correction API HTTP {response.status_code}")
+                raise ModelRequestError(f"provider-http-{response.status_code}")
             parts, size = [], 0
             for chunk in response.iter_bytes():
                 size += len(chunk)
@@ -162,7 +169,7 @@ def model_request(workspace, *, transport=None):
                 parts.append(chunk)
     body = json.loads(b"".join(parts))
     if body.get("status") != "completed" or body.get("model") != MODEL:
-        raise ValueError("model response incomplete or wrong model")
+        raise ModelRequestError("provider-incomplete" if body.get("status") != "completed" else "provider-wrong-model")
     content = "".join(part["text"] for output in body.get("output", []) if output.get("type") == "message"
                       for part in output.get("content", []) if part.get("type") == "output_text")
     answer = json.loads(content)
@@ -179,7 +186,11 @@ def isolated_model(workspace):
     process = subprocess.run([sys.executable, "-B", str(Path(__file__).resolve()), "--worker", str(workspace)],
                              env=env, capture_output=True, timeout=150)
     if process.returncode:
-        raise RuntimeError("isolated correction request failed")
+        try:
+            error = json.loads(process.stderr)
+        except (ValueError, UnicodeError):
+            error = {}
+        raise ModelRequestError(error.get("code", "isolated-request-failed"))
     if len(process.stdout) > MAX_RESPONSE_BYTES:
         raise ValueError("isolated correction result exceeds limit")
     return json.loads(process.stdout)
@@ -210,6 +221,10 @@ def prepare(store, task, workspace):
 
 
 def correct(store, options, *, apply=False, invoke=None, now=None):
+    pages = options.get("pages")
+    if pages is not None and (not isinstance(pages, list) or not pages or len(pages) > MAX_REQUESTS
+            or any(type(p) is not int or p < 1 for p in pages) or not options.get("source_sha256")):
+        raise ValueError("page selection requires a source SHA and at most 20 positive pages")
     state = copy.deepcopy(load_state(store))
     _, catalog = publication.current(store)
     if apply:
@@ -233,6 +248,8 @@ def correct(store, options, *, apply=False, invoke=None, now=None):
             continue
         if options.get("source_sha256") and task["source_sha256"] != options["source_sha256"]:
             continue
+        if pages is not None and task["page"] not in pages:
+            continue
         eligible.append((identity, task))
     eligible.sort(key=lambda item: ("low-recognition-confidence" not in item[1]["issues"], item[1]["page"], item[0]))
     report = {"applied": apply, "model": MODEL, "tasks": len(state["tasks"]), "eligible": len(eligible),
@@ -247,6 +264,7 @@ def correct(store, options, *, apply=False, invoke=None, now=None):
     for identity, task in eligible[:limit]:
         if day["requests"] >= MAX_REQUESTS or time.monotonic() - started > 25 * 60:
             break
+        result = None
         try:
             with tempfile.TemporaryDirectory(prefix="reader-luna-") as directory:
                 workspace = Path(directory)
@@ -276,11 +294,23 @@ def correct(store, options, *, apply=False, invoke=None, now=None):
             task["failures"] = task.get("failures", 0) + 1
             task["status"] = "failed" if task["attempts"] >= 3 or task["failures"] >= 3 else "retry"
             task["error_type"] = type(error).__name__
+            task["error_code"] = error.code if isinstance(error, ModelRequestError) else type(error).__name__
+            if result is not None:
+                rejected = {"version": 1, "kind": "reader-v3-rejected-correction", "task_id": identity,
+                            "resources": [task["reading"], task["text_layer"]], "result": result,
+                            "reason": str(error) if isinstance(error, ValueError) else type(error).__name__}
+                raw = publication.encode(rejected)
+                path = f"reader-index/v3/corrections/rejected/{identity}/{text.digest(rejected)}.json"
+                publication.immutable_put(store, publication.ASSETS, path, raw)
+                task["rejected_result"] = publication.metadata(publication.ASSETS, path, raw, role="review")
             from datetime import timedelta
             task["retry_day"] = (now.date() + timedelta(days=1)).isoformat()
         save(store, state)
         report["processed"].append({"id": identity, "page": task["page"], "status": task["status"],
                                     "proposal": task.get("proposal"), "error_type": task.get("error_type")})
+        report["processed"][-1]["error_code"] = task.get("error_code")
+        if task.get("rejected_result"):
+            report["processed"][-1]["rejected_result"] = publication.read_index(store, task["rejected_result"])
         if task["status"] in {"proposed", "no-change"}:
             report["processed"][-1]["review"] = publication.read_index(store, task["proposal"])
     return report
@@ -360,5 +390,6 @@ if __name__ == "__main__":
         sys.stdout.buffer.write(publication.encode(model_request(Path(sys.argv[2]))))
     except Exception as error:
         # Never print provider response bodies, prompts, environment or secrets.
-        sys.stderr.write(type(error).__name__ + "\n")
+        code = error.code if isinstance(error, ModelRequestError) else type(error).__name__.lower()
+        sys.stderr.write(json.dumps({"code": code}) + "\n")
         raise SystemExit(1)
