@@ -15,6 +15,29 @@ def raw_page(text="English", confidence=.99, mode="horizontal-ltr"):
 
 
 class TextLayerTests(unittest.TestCase):
+    def test_explicit_order_acceptance_preserves_regions_and_rejects_unpositioned_text(self):
+        blocks = [{"t": "First", "b": [.1, .1, .4, .2], "c": .8, "s": "ocr"},
+                  {"t": "Second", "b": [.6, .1, .9, .2], "c": .8, "s": "ocr"}]
+        raw = {**raw_page(), **ocr_layout.arrange(blocks, 100, 200, include_writing_modes=True)}
+        baseline = layer.from_page(raw, "a" * 64)
+        order = [r["id"] for r in reversed(baseline["regions"])]
+        proposal = {"version": 1, "kind": "pdf-text-correction", "base_generation": baseline["generation"],
+                    "raw_sha256": baseline["raw_sha256"], "page_identity": baseline["page_identity"],
+                    "replacements": [], "region_order": order}
+        accepted = layer.accept_proposal(baseline, proposal, actor="reviewer")
+        self.assertEqual(accepted["text"], "Second\nFirst")
+        self.assertEqual([r["id"] for r in accepted["regions"]], order)
+        self.assertEqual(accepted["regions"][0]["quad"], baseline["regions"][1]["quad"])
+        self.assertEqual(baseline["revision"], "raw")
+        for bad in ([order[0]], [order[0]] * 2, ["b999", order[0]]):
+            with self.assertRaises(ValueError):
+                layer.accept_proposal(baseline, {**proposal, "region_order": bad}, actor="reviewer")
+        unmapped = copy.deepcopy(baseline)
+        unmapped["text"] += "unpositioned"
+        unmapped["generation"] = layer.digest({k: v for k, v in unmapped.items() if k != "generation"})
+        with self.assertRaisesRegex(ValueError, "unpositioned"):
+            layer.accept_proposal(unmapped, {**proposal, "base_generation": unmapped["generation"]}, actor="reviewer")
+
     def test_legacy_page_is_deterministic_and_does_not_mutate_raw(self):
         raw = raw_page()
         before = copy.deepcopy(raw)

@@ -249,7 +249,13 @@ def accept_proposal(layer, proposal, *, actor):
             or proposal.get("page_identity") != layer["page_identity"]):
         raise ValueError("stale or mismatched correction")
     replacements = proposal.get("replacements")
-    if not isinstance(replacements, list) or not replacements:
+    requested_order = proposal.get("region_order", [])
+    original_order = [r["id"] for r in layer["regions"]]
+    if (not isinstance(requested_order, list) or any(not isinstance(i, str) for i in requested_order)
+            or requested_order and (len(requested_order) != len(original_order) or set(requested_order) != set(original_order))):
+        raise ValueError("correction order must name every region exactly once")
+    reorder = bool(requested_order and requested_order != original_order)
+    if not isinstance(replacements, list) or not replacements and not reorder:
         raise ValueError("empty correction proposal")
     known = {r["id"]: r for r in layer["regions"]}
     changes = {}
@@ -261,10 +267,20 @@ def accept_proposal(layer, proposal, *, actor):
             raise ValueError("invalid correction region or text")
         changes[target] = item["after"]
     result = copy.deepcopy(layer)
+    if reorder:
+        cursor = 0
+        for region in layer["regions"]:
+            if layer["text"][cursor:region["start"]].strip():
+                raise ValueError("cannot reorder text with unpositioned content")
+            cursor = region["end"]
+        if layer["text"][cursor:].strip():
+            raise ValueError("cannot reorder text with unpositioned content")
+        by_id = {r["id"]: r for r in result["regions"]}
+        result["regions"] = [by_id[identity] for identity in requested_order]
     parts, position, length = [], 0, 0
-    for region in result["regions"]:
+    for index, region in enumerate(result["regions"]):
         old_start, old_end = region["start"], region["end"]
-        gap = layer["text"][position:old_start]
+        gap = ("\n" if index else "") if reorder else layer["text"][position:old_start]
         parts.append(gap)
         length += len(gap)
         if region["id"] in changes:
@@ -273,14 +289,17 @@ def accept_proposal(layer, proposal, *, actor):
             region["scripts"] = scripts(region["text"])
             region["direction"] = direction(region["text"])
         region["start"] = length
+        region["order"] = index
         length += len(region["text"])
         region["end"] = length
         parts.append(region["text"])
         position = old_end
-    parts.append(layer["text"][position:])
+    if not reorder:
+        parts.append(layer["text"][position:])
     result["text"] = "".join(parts)
     result.update(revision="accepted", quality="partially-reviewed", parent_generation=layer["generation"])
     result.setdefault("acceptances", []).append({"proposal_sha256": digest(proposal), "actor": actor,
-                                                "region_ids": sorted(changes)})
+                                                "region_ids": sorted(changes),
+                                                **({"region_order": requested_order} if reorder else {})})
     result["generation"] = digest({k: v for k, v in result.items() if k != "generation"})
     return validate(result)

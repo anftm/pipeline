@@ -48,6 +48,41 @@ def save_state(store, state):
         raise ValueError("automation checkpoint readback mismatch")
 
 
+def retry(store, options, *, apply=False):
+    """Explicit operator retry preserves history and the already charged day budget."""
+    queue = options.get("queue", "build")
+    if queue == "correction":
+        try:
+            from . import reader_v3_correction as correction
+        except ImportError:
+            import reader_v3_correction as correction
+        state, persist = correction.load_state(store), correction.save
+    elif queue == "build":
+        state, persist = load_state(store), save_state
+    else:
+        raise ValueError("unknown retry queue")
+    ids = options.get("task_ids")
+    if not isinstance(ids, list) or not ids or any(not isinstance(i, str) for i in ids) or len(set(ids)) != len(ids):
+        raise ValueError("explicit retry task IDs required")
+    import os
+    actor = os.environ.get("GITHUB_ACTOR", "").strip()
+    if not actor:
+        raise ValueError("authenticated retry actor required")
+    tasks = [state["tasks"][text.sha(identity)] for identity in ids]
+    if any(t["status"] not in {"failed", "retry"} for t in tasks):
+        raise ValueError("only failed/retry tasks may be retried")
+    if apply:
+        publication.assert_writer(store)
+        for task in tasks:
+            task.setdefault("retries", []).append({"actor": actor, "at": clock().isoformat(),
+                "attempts": task["attempts"], "failures": task.get("failures", 0), "error_type": task.get("error_type")})
+            task.update(status="pending", attempts=0, failures=0)
+            for name in ("retry_at", "retry_day", "error_type"):
+                task.pop(name, None)
+        persist(store, state)
+    return {"applied": apply, "queue": queue, "retried": ids}
+
+
 def spec_for(key, entry):
     """Admit only pinned originals or checksum-identified current-bucket PDFs."""
     source = text.sha(entry.get("source_sha256"))

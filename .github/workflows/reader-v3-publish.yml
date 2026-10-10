@@ -12,7 +12,7 @@ on:
     inputs:
       operation:
         type: choice
-        options: [build-stage, stage, promote, rollback, ack, inspect, auto, correct, accept, reject]
+        options: [build-stage, stage, promote, rollback, ack, inspect, auto, correct, accept, reject, retry]
         default: inspect
       resource_json:
         description: Pinned build-stage spec or qualified reading/candidate/rollback resource JSON
@@ -78,7 +78,7 @@ jobs:
           args=("$OPERATION" --output output/v3/publication.json)
           case "$OPERATION" in
             build-stage|stage|promote|rollback) args+=(--resource-json "$RESOURCE_JSON" --expected-parent "$EXPECTED_PARENT") ;;
-            auto|correct|accept|reject) args+=(--resource-json "$RESOURCE_JSON") ;;
+            auto|correct|accept|reject|retry) args+=(--resource-json "$RESOURCE_JSON") ;;
             ack) args+=(--surface "$SURFACE") ;;
             inspect) ;;
             *) exit 1 ;;

@@ -475,7 +475,7 @@ class CentralHubStore(HubBucketStore):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("build-stage", "stage", "promote", "rollback", "ack", "ack-all", "inspect", "project", "auto", "correct", "accept", "reject"))
+    parser.add_argument("command", choices=("build-stage", "stage", "promote", "rollback", "ack", "ack-all", "inspect", "project", "auto", "correct", "accept", "reject", "retry"))
     parser.add_argument("--resource", type=Path)
     parser.add_argument("--resource-json")
     parser.add_argument("--bundle", type=Path)
@@ -485,7 +485,13 @@ def main():
     parser.add_argument("--surface", choices=("hf", "pages"))
     args = parser.parse_args()
     store = CentralHubStore()
-    if args.command == "auto":
+    if args.command == "retry":
+        try:
+            from .reader_v3_automation import retry
+        except ImportError:
+            from reader_v3_automation import retry
+        report = retry(store, json.loads(args.resource_json or "{}"), apply=args.apply)
+    elif args.command == "auto":
         try:
             from .reader_v3_automation import run
         except ImportError:

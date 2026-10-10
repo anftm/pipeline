@@ -85,6 +85,18 @@ class AutomationTests(unittest.TestCase):
         self.assertEqual(result["tasks"], 1)
         self.assertEqual(result["eligible"], 0)
 
+    def test_explicit_retry_retains_day_charges_and_failure_history(self):
+        auto.run(self.store, apply=True, build=Mock(side_effect=OSError()), now=self.now)
+        state = auto.load_state(self.store)
+        identity = next(iter(state["tasks"]))
+        before = copy.deepcopy(state["days"])
+        with patch.dict("os.environ", {"GITHUB_ACTOR": "reviewer"}):
+            auto.retry(self.store, {"task_ids": [identity]}, apply=True)
+        state = auto.load_state(self.store)
+        self.assertEqual(state["days"], before)
+        self.assertEqual(state["tasks"][identity]["attempts"], 0)
+        self.assertEqual(state["tasks"][identity]["retries"][0]["actor"], "reviewer")
+
     def test_converted_primary_uses_qualified_derivative_and_original_identity(self):
         value = entry(key="VoiceOfML/books\0book.djvu")
         value.update(source_kind="generated", reader_assets_bucket="vomebook/pdf-pages-v2",
