@@ -15,13 +15,15 @@ from pathlib import Path
 import uuid
 
 try:
-    from . import pdf_reading_v3 as v3, pdf_text_layer as text, reader_lifecycle, shared
+    from . import pdf_reading_v3 as v3, pdf_text_layer as text, reader_lifecycle, shared, pdf_ocr, ocr_layout
     from .reader_bucket_store import HubBucketStore
 except ImportError:
     import pdf_reading_v3 as v3
     import pdf_text_layer as text
     import reader_lifecycle
     import shared
+    import pdf_ocr
+    import ocr_layout
     from reader_bucket_store import HubBucketStore
 
 ASSETS = shared.READER_ASSETS_BUCKET
@@ -284,7 +286,31 @@ def build_stage(store, spec, workspace, *, apply=False):
         return result
     import_primary(spec, workspace)
     reader = CandidateReader(store, workspace)
-    raw_ocr = v3.decode(v3.verified_read(spec["ocr_manifest"], reader))
+    if spec.get("rebuild_native_text"):
+        if spec.get("primary", {}).get("path") is None:
+            raise ValueError("native rebuild requires primary PDF")
+        primary = workspace / spec["primary"]["path"]
+        probe = pdf_ocr.probe_pdf(primary)
+        if probe["classification"] != "native-text":
+            raise PublicationReviewRequired("native rebuild source is not a complete native-text PDF")
+        source = text.sha(spec["source_sha256"])
+        identity = text.digest({"source": source, "native_rebuild": 1, "profile": pdf_ocr.asset_profile()})
+        root = Path("objects") / source[:2] / source / identity[:16]
+        pages = []
+        for number, parsed in pdf_ocr.native_pages(primary, range(1, probe["page_count"] + 1)).items():
+            payload = pdf_ocr.page_payload(number, parsed["width"], parsed["height"], parsed["blocks"], "native")
+            payload.update(ocr_layout.arrange(payload["blocks"], payload["width"], payload["height"], {},
+                                               include_writing_modes=True))
+            raw_ref = v3.stored(workspace / root / "ocr" / f"page-{number:06d}.json.gz", workspace,
+                                payload, compressed=True, role="provenance")
+            pages.append({"p": number, "source": "native", "width": parsed["width"],
+                          "height": parsed["height"], "chars": len(payload["text"]), "text": payload["text"],
+                          "text_spans": payload["text_spans"], "layout": payload["layout"],
+                          "o": raw_ref["path"], "os": raw_ref["sha256"], "ob": raw_ref["bytes"]})
+        raw_ocr = {"kind": "pdf-ocr", "complete": True, "source_sha256": source,
+                   "page_count": probe["page_count"], "language": "ch", "pages": pages}
+    else:
+        raw_ocr = v3.decode(v3.verified_read(spec["ocr_manifest"], reader))
     if raw_ocr.get("source_sha256") != source:
         raise ValueError("OCR/source identity mismatch")
     text_ref = raw_ocr.get("text_layer")
