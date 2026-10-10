@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 
 import httpx
 
@@ -19,10 +19,9 @@ class CorrectionTests(unittest.TestCase):
         self.answer = {"replacements": [{"region_id": "b0", "before": "wrong", "after": "right", "reason": "image"}],
                        "unresolved": []}
 
-    def test_unknown_duplicate_stale_and_unchanged_model_regions_rejected(self):
+    def test_unknown_duplicate_and_unchanged_model_regions_rejected(self):
         for changes in ([{**self.answer["replacements"][0], "region_id": "b99"}],
                         self.answer["replacements"] * 2,
-                        [{**self.answer["replacements"][0], "before": "stale"}],
                         [{**self.answer["replacements"][0], "after": "wrong"}]):
             with self.assertRaises(ValueError):
                 correction.validate_answer(self.layer, {"replacements": changes, "unresolved": []})
@@ -30,6 +29,17 @@ class CorrectionTests(unittest.TestCase):
         accepted = text.accept_proposal(self.layer, proposal, actor="reviewer")
         self.assertEqual(accepted["text"], "right")
         self.assertEqual(self.layer["text"], "wrong")
+
+    def test_unique_literal_patch_expands_without_changing_other_text(self):
+        layer = text.from_page(raw_page("prefix wrong suffix"), "a" * 64)
+        proposal = correction.validate_answer(layer, self.answer)
+        self.assertEqual(proposal["replacements"][0]["before"], "prefix wrong suffix")
+        self.assertEqual(proposal["replacements"][0]["after"], "prefix right suffix")
+        for content in ("wrong wrong", "unrelated"):
+            layer = text.from_page(raw_page(content), "a" * 64)
+            unresolved = correction.validate_answer(layer, self.answer)
+            self.assertEqual(unresolved["replacements"], [])
+            self.assertTrue(unresolved["unresolved"])
 
     def test_provider_has_image_exact_model_bounds_and_no_redirects(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -89,16 +99,26 @@ class CorrectionTests(unittest.TestCase):
             state["tasks"][identity] = {"source_key": "repo\0book.pdf", "source_sha256": layer["source_sha256"],
                 "page": 1, "base_generation": layer["generation"], "reading": ref, "text_layer": page_ref,
                 "issues": ["low-recognition-confidence"], "status": "pending", "attempts": 0}
+            cached = {"version": 1, "kind": "reader-v3-rejected-correction", "task_id": identity,
+                      "resources": [ref, page_ref], "result": {"answer": self.answer, "usage": {"input_tokens": 100}}}
+            raw_cached = publication.encode(cached)
+            cached_path = "reader-index/v3/corrections/rejected/" + identity + "/result.json"
+            fixture.store.put_bytes(publication.ASSETS, cached_path, raw_cached)
+            state["tasks"][identity]["rejected_result"] = publication.metadata(publication.ASSETS, cached_path, raw_cached)
             correction.save(fixture.store, state)
             before = publication.current(fixture.store)[0]
+            provider = Mock(side_effect=AssertionError("must reuse the saved provider output"))
             result = correction.correct(fixture.store, {"limit": 1}, apply=True,
-                invoke=lambda workspace: {"answer": self.answer, "usage": {"input_tokens": 100}})
+                invoke=provider)
             self.assertEqual(result["processed"][0]["status"], "proposed")
+            self.assertEqual(result["budget"]["requests"], 0)
+            provider.assert_not_called()
             self.assertEqual(publication.current(fixture.store)[0], before)
             writes = len(fixture.store.writes)
             with patch.dict(os.environ, {"GITHUB_ACTOR": "reviewer"}):
-                accepted = correction.decide(fixture.store, "accept", {"task_ids": [identity]}, apply=True)
-                retried = correction.decide(fixture.store, "accept", {"task_ids": [identity]}, apply=True)
+                options = {"task_ids": [identity], "regions": {identity: ["b0"]}}
+                accepted = correction.decide(fixture.store, "accept", options, apply=True)
+                retried = correction.decide(fixture.store, "accept", options, apply=True)
             self.assertTrue(accepted["visual_resources_reused"])
             self.assertTrue(retried["unchanged"])
             self.assertFalse(any(path.endswith((".png", ".webp", ".pdf")) for bucket, path in fixture.store.writes[writes:]))

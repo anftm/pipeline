@@ -110,7 +110,7 @@ def validate_answer(layer, answer):
         raise ValueError("model answer exceeds task scope")
     proposal = {"version": 1, "kind": "pdf-text-correction", "page": layer["page"],
                 "base_generation": layer["generation"], "raw_sha256": layer["raw_sha256"],
-                "page_identity": layer["page_identity"], "replacements": []}
+                "page_identity": layer["page_identity"], "replacements": [], "unresolved": []}
     if "region_order" in answer:
         order = answer["region_order"]
         expected = [r["id"] for r in layer["regions"]]
@@ -125,13 +125,23 @@ def validate_answer(layer, answer):
             raise ValueError("invalid model replacement schema")
         identity = change["region_id"]
         if (not isinstance(identity, str) or identity not in known or identity in seen
-                or change["before"] != known[identity]["text"] or change["before"] == change["after"]
+                or not isinstance(change["before"], str) or not change["before"] or change["before"] == change["after"]
                 or not isinstance(change["reason"], str) or not 1 <= len(change["reason"]) <= 1000
                 or not isinstance(change["after"], str) or not 1 <= len(change["after"]) <= 10000
                 or any(ord(c) < 32 and c not in "\n\t" for c in change["after"])):
             raise ValueError("model replacement differs from immutable region")
         seen.add(identity)
-        proposal["replacements"].append(copy.deepcopy(change))
+        baseline = known[identity]["text"]
+        if baseline.count(change["before"]) != 1:
+            proposal["unresolved"].append("region " + identity + ": before text is missing, ambiguous or crosses a region boundary")
+            continue
+        normalized = copy.deepcopy(change)
+        if change["before"] != baseline:
+            normalized.update(before=baseline, after=baseline.replace(change["before"], change["after"], 1),
+                              model_patch={"before": change["before"], "after": change["after"]})
+        if len(normalized["after"]) > 10000:
+            raise ValueError("expanded model region exceeds text bound")
+        proposal["replacements"].append(normalized)
     reordered = bool(proposal.get("region_order") and proposal["region_order"] != [r["id"] for r in layer["regions"]])
     if proposal["replacements"] or reordered:
         text.accept_proposal(layer, proposal, actor="validation-only")
@@ -273,16 +283,26 @@ def correct(store, options, *, apply=False, invoke=None, now=None):
                     task["status"] = "input-too-large" if chars > MAX_INPUT_CHARS else "pending"
                     save(store, state)
                     continue
-                day["requests"] += 1
-                day["input_chars"] += chars
-                day["reserved_output_tokens"] += MAX_OUTPUT_TOKENS
-                task.update(status="running", attempts=task["attempts"] + 1)
-                save(store, state)
-                result = invoke(workspace) if invoke else isolated_model(workspace,
-                    timeout=max(1, min(330, 30 * 60 - (time.monotonic() - started))))
+                if task.get("rejected_result"):
+                    cached = publication.read_index(store, task["rejected_result"])
+                    if (cached.get("kind") != "reader-v3-rejected-correction" or cached.get("version") != 1
+                            or cached.get("task_id") != identity
+                            or cached.get("resources") != [task["reading"], task["text_layer"]]):
+                        raise ValueError("cached model result task mismatch")
+                    result = cached["result"]
+                    task["reused_model_result"] = True
+                else:
+                    day["requests"] += 1
+                    day["input_chars"] += chars
+                    day["reserved_output_tokens"] += MAX_OUTPUT_TOKENS
+                    task.update(status="running", attempts=task["attempts"] + 1)
+                    save(store, state)
+                    result = invoke(workspace) if invoke else isolated_model(workspace,
+                        timeout=max(1, min(330, 30 * 60 - (time.monotonic() - started))))
                 proposal = validate_answer(layer, result["answer"])
             proposal.update(task_id=identity, model=MODEL, recipe=RECIPE, evidence=evidence,
-                            unresolved=result["answer"]["unresolved"], usage=result.get("usage", {}),
+                            validation_recipe="literal-region-patch-v1",
+                            unresolved=proposal["unresolved"] + result["answer"]["unresolved"], usage=result.get("usage", {}),
                             response_id=result.get("response_id"))
             raw = publication.encode(proposal)
             path = f"reader-index/v3/corrections/proposals/{identity}/{text.digest(proposal)}.json"
@@ -291,6 +311,8 @@ def correct(store, options, *, apply=False, invoke=None, now=None):
                 proposal["region_order"] != [r["id"] for r in layer["regions"]])
             task.update(status="proposed" if changed else "no-change",
                         proposal=publication.metadata(publication.ASSETS, path, raw, role="review"))
+            for field in ("error_type", "error_code", "retry_day"):
+                task.pop(field, None)
         except Exception as error:
             task["failures"] = task.get("failures", 0) + 1
             task["status"] = "failed" if task["attempts"] >= 3 or task["failures"] >= 3 else "retry"
@@ -326,9 +348,15 @@ def decide(store, command, options, *, apply=False):
     actor = os.environ.get("GITHUB_ACTOR", "").strip()
     if not actor:
         raise ValueError("authenticated workflow actor required")
+    selections = options.get("regions", {})
+    if not isinstance(selections, dict) or set(selections) - set(ids):
+        raise ValueError("region selection must name selected proposal tasks")
     if apply:
         publication.assert_writer(store)
     if all(t["status"] == ("accepted" if command == "accept" else "rejected") for t in tasks):
+        if command == "accept" and any(task.get("accepted_selection") != selections.get(identity)
+                                       for identity, task in zip(ids, tasks)):
+            raise ValueError("accepted proposal has a different consumed selection")
         return {"applied": apply, "unchanged": True, "task_ids": ids}
     if any(t["status"] != "proposed" for t in tasks):
         raise ValueError("decision requires unconsumed proposals")
@@ -346,6 +374,22 @@ def decide(store, command, options, *, apply=False):
     if not active:
         raise ValueError("proposal book no longer published")
     proposals = [publication.read_index(store, task["proposal"]) for task in tasks]
+    for index, (identity, task, proposal) in enumerate(zip(ids, tasks, proposals)):
+        if identity not in selections:
+            continue
+        selected = selections[identity]
+        known = {change["region_id"] for change in proposal["replacements"]}
+        if (not isinstance(selected, list) or not selected or any(not isinstance(i, str) for i in selected)
+                or len(set(selected)) != len(selected) or set(selected) - known):
+            raise ValueError("invalid explicit region selection")
+        narrowed = {**proposal, "replacements": [r for r in proposal["replacements"] if r["region_id"] in selected],
+                    "region_order": [], "review_selection": {"proposal": task["proposal"],
+                        "region_ids": sorted(selected), "actor": actor}}
+        raw = publication.encode(narrowed)
+        path = f"reader-index/v3/corrections/decisions/{identity}/{text.digest(narrowed)}.json"
+        if apply:
+            publication.immutable_put(store, publication.ASSETS, path, raw)
+        proposals[index] = narrowed
     with tempfile.TemporaryDirectory(prefix="reader-accept-") as directory:
         workspace = Path(directory)
         reader = publication.CandidateReader(store, workspace)
@@ -374,8 +418,9 @@ def decide(store, command, options, *, apply=False):
             if apply:
                 publication.promote(store, staged["candidate"], pointer["generation"], apply=True)
         if apply:
-            for task in tasks:
-                task.update(status="accepted", decision_actor=actor, decision_at=clock().isoformat())
+            for identity, task in zip(ids, tasks):
+                task.update(status="accepted", decision_actor=actor, decision_at=clock().isoformat(),
+                            accepted_selection=selections.get(identity))
             save(store, state)
     return {"applied": apply, "accepted": ids, "visual_resources_reused": True, "already_applied": already}
 
