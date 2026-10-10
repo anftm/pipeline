@@ -1,0 +1,80 @@
+name: Publish v3 Reading Generation
+run-name: v3 ${{ inputs.operation }} / ${{ inputs.apply && 'apply' || 'verify' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        type: choice
+        options: [build-stage, stage, promote, rollback, ack, inspect]
+        default: inspect
+      resource_json:
+        description: Pinned build-stage spec or qualified reading/candidate/rollback resource JSON
+        type: string
+        default: '{}'
+      expected_parent:
+        description: Expected current v3 generation, or none for initial promotion
+        type: string
+        default: none
+      surface:
+        type: choice
+        options: [hf, pages]
+        default: hf
+      apply:
+        description: Apply after complete validation under the central writer lock
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reader-sidecar
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  publish:
+    if: github.repository == 'anftm/pipeline'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      HF_INPUT_TOKEN: ${{ secrets.HF_INPUT_TOKEN }}
+      READER_V3_WRITE_PROTOCOL: central-reader-sidecar-v3-v1
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - run: pip install -r scripts/requirements.txt
+      - name: Verify and execute the central v3 operation
+        env:
+          OPERATION: ${{ inputs.operation }}
+          RESOURCE_JSON: ${{ inputs.resource_json }}
+          EXPECTED_PARENT: ${{ inputs.expected_parent }}
+          SURFACE: ${{ inputs.surface }}
+          APPLY: ${{ inputs.apply }}
+        run: |
+          args=("$OPERATION" --output output/v3/publication.json)
+          case "$OPERATION" in
+            build-stage|stage|promote|rollback) args+=(--resource-json "$RESOURCE_JSON" --expected-parent "$EXPECTED_PARENT") ;;
+            ack) args+=(--surface "$SURFACE") ;;
+            inspect) ;;
+            *) exit 1 ;;
+          esac
+          if [[ "$APPLY" == true ]]; then args+=(--apply); fi
+          python scripts/publish_reader_v3.py "${args[@]}"
+      - name: Publish the pinned projection to Pages
+        if: inputs.apply && (inputs.operation == 'promote' || inputs.operation == 'rollback')
+        env:
+          PAGES_TOKEN: ${{ secrets.PAGES_TOKEN }}
+          PAGES_REPO: ${{ secrets.PAGES_REPO }}
+        run: python scripts/publish_search_reader_index.py
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: v3-publication-report
+          path: output/v3/publication.json
+          retention-days: 30
+          if-no-files-found: warn

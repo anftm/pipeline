@@ -43,6 +43,8 @@ MANIFEST_KINDS = {
     "pdf-ocr", "ebook-chapters", "pdf-derived-source", "office-document-stream",
     "spreadsheet-html-stream", "text-document-stream", "web-document-stream",
     "static-pdf-stream", "pdf-document-stream", "static-pdf-document-stream", "epub-chapters",
+    "pdf-text-layer-index", "pdf-text-partition", "pdf-text-review",
+    "pdf-reading", "pdf-preview-partition",
 }
 
 
@@ -178,7 +180,7 @@ class ReferenceGraph:
                 bucket, explicit = context, True
             for key, item in value.items():
                 if key in {"orphans", "source_url", "source_path", "source", "text", "error",
-                           "processing_roots", "observations"}:
+                           "processing_roots", "observations", "components"}:
                     continue
                 if key == "path" and (value.get("kind") in {"pdf-render", "pdf-render-range"} or (
                         value.get("repo") and "new_path" not in value and any(
@@ -249,6 +251,17 @@ class ReferenceGraph:
             if payload.get("kind") not in MANIFEST_KINDS:
                 self.blockers.add(f"unknown manifest kind: {bucket}:{path}")
                 return False
+            if payload.get("kind") in {"pdf-text-layer-index", "pdf-reading"}:
+                try:
+                    try:
+                        from .pdf_reading_v3 import validate_text_manifest, validate_reading_manifest
+                    except ImportError:
+                        from pdf_reading_v3 import validate_text_manifest, validate_reading_manifest
+                    validator = validate_text_manifest if payload["kind"] == "pdf-text-layer-index" else validate_reading_manifest
+                    validator(payload)
+                except (ValueError, KeyError, TypeError):
+                    self.blockers.add(f"invalid v3 manifest: {bucket}:{path}")
+                    return False
             if payload.get("kind") in {"pdf-pages", "image-page-stream", "image-pages"}:
                 count = payload.get("page_count")
                 if type(count) is not int or count < 1:
