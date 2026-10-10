@@ -21,7 +21,9 @@ on:
         type: boolean
 
 concurrency:
-  group: reader-sidecar
+  # A report-only inventory performs no mutation and must not hold up OCR or
+  # v3 publication. Observation recording remains serialized with writers.
+  group: ${{ inputs.record_observations == 'true' && 'reader-sidecar' || 'reader-gc-report' }}
   cancel-in-progress: false
   queue: max
 

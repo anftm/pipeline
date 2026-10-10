@@ -38,6 +38,19 @@ def box(value):
     return value
 
 
+def quad(value):
+    if (not isinstance(value, list) or len(value) != 4
+            or any(not isinstance(point, list) or len(point) != 2
+                   or any(type(n) not in (int, float) or not math.isfinite(n) or n < 0 or n > 1
+                          for n in point) for point in value)):
+        raise ValueError("invalid normalized text quadrilateral")
+    area = sum(value[i][0] * value[(i + 1) % 4][1]
+               - value[(i + 1) % 4][0] * value[i][1] for i in range(4)) / 2
+    if abs(area) <= 1e-9:
+        raise ValueError("degenerate normalized text quadrilateral")
+    return value
+
+
 def direction(text):
     strong = {unicodedata.bidirectional(c) for c in text} & {"L", "R", "AL"}
     if "L" in strong and strong & {"R", "AL"}:
@@ -206,10 +219,7 @@ def validate(layer):
                 or region["id"] in ids or region["order"] != index):
             raise ValueError("invalid text region offsets or identity")
         box(region["box"])
-        quad = region["quad"]
-        if (len(quad) != 4 or any(len(p) != 2 for p in quad)
-                or any(number(n) > 1 for p in quad for n in p)):
-            raise ValueError("invalid region quadrilateral")
+        quad(region["quad"])
         if (region["direction"] not in {"ltr", "rtl", "mixed", "neutral"}
                 or region["writing_mode"] not in {"auto", "horizontal-ltr", "horizontal-rtl",
                                                    "vertical-rl", "vertical-lr"}

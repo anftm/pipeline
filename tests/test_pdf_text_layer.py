@@ -70,6 +70,16 @@ class TextLayerTests(unittest.TestCase):
         result = layer.from_page(raw, "a" * 64)
         self.assertEqual([r["writing_mode"] for r in result["regions"]], ["horizontal-ltr", "vertical-rl"])
 
+    def test_degenerate_or_out_of_bounds_quads_are_rejected(self):
+        baseline = layer.from_page(raw_page(), "a" * 64)
+        for quad in ([[.1, .1], [.2, .2], [.3, .3], [.4, .4]],
+                     [[-.1, .1], [.8, .1], [.8, .2], [.1, .2]]):
+            bad = copy.deepcopy(baseline)
+            bad["regions"][0]["quad"] = quad
+            bad["generation"] = layer.digest({k: v for k, v in bad.items() if k != "generation"})
+            with self.assertRaises(ValueError):
+                layer.validate(bad)
+
     def test_legacy_spans_get_region_modes_without_changing_raw_object(self):
         raw = raw_page("Text")
         raw["text_spans"][0].pop("writing_mode")
