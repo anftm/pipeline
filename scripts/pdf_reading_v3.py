@@ -21,6 +21,8 @@ except ImportError:
 
 BUCKETS = {shared.READER_ASSETS_BUCKET, shared.PDF_PAGES_BUCKET, shared.PDF_OCR_INPUT_BUCKET}
 PARTITION_SIZE = 128
+SEARCH_PARTITION_PAGES = 32
+SEARCH_PARTITION_BYTES = 512 * 1024
 
 
 def resource(value):
@@ -103,7 +105,7 @@ def backfill_text(manifest, read, bundle, options=None):
                                               include_writing_modes=True))
         layers.append(text.from_page(payload, source, manifest.get("language", "und"), ref,
                                      layout_options=page_options))
-    identity = text.digest({"raw_manifest": manifest, "options": options, "text_layer": 1})
+    identity = text.digest({"raw_manifest": manifest, "options": options, "text_layer": 2})
     root = Path("objects") / source[:2] / source / identity[:16]
     return build_text_bundle(layers, pages, root, bundle)
 
@@ -129,6 +131,17 @@ def validate_text_manifest(manifest):
     resource(manifest["review"])
     if manifest.get("book_text"):
         resource(manifest["book_text"])
+    if "search_partitions" in manifest:
+        cursor = 1
+        for part in manifest["search_partitions"]:
+            if (type(part["start"]) is not int or type(part["end"]) is not int
+                    or part["start"] != cursor or not cursor <= part["end"] <= count
+                    or part["end"] - part["start"] >= SEARCH_PARTITION_PAGES):
+                raise ValueError("invalid search partition coverage")
+            resource(part["resource"])
+            cursor = part["end"] + 1
+        if cursor != count + 1:
+            raise ValueError("incomplete search partition coverage")
     if manifest.get("parent"):
         resource(manifest["parent"])
     return manifest
@@ -164,6 +177,25 @@ def build_text_bundle(layers, raw_pages, root, bundle, *, parent=None):
     corrected = any(layer["revision"] == "accepted" for layer in layers)
     revision = "effective" if corrected else "raw"
     quality = "partially-reviewed" if corrected else "unreviewed"
+    search_partitions, chunk, chunk_bytes = [], [], 0
+
+    def flush_search():
+        start, end = chunk[0]["page"], chunk[-1]["page"]
+        ref = stored(bundle / root / "text" / f"search-{start:06d}-{end:06d}.json.gz", bundle,
+                     {"version": 1, "kind": "pdf-search-text-partition", "source_sha256": source,
+                      "generation": generation, "offset_unit": "unicode-codepoint",
+                      "start": start, "end": end, "pages": chunk}, compressed=True)
+        search_partitions.append({"start": start, "end": end, "resource": ref})
+
+    for layer in layers:
+        page = {"page": layer["page"], "text": layer["text"], "text_generation": layer["generation"]}
+        size = len(json.dumps(page, ensure_ascii=False).encode("utf-8"))
+        if chunk and (len(chunk) >= SEARCH_PARTITION_PAGES or chunk_bytes + size > SEARCH_PARTITION_BYTES):
+            flush_search()
+            chunk, chunk_bytes = [], 0
+        chunk.append(page)
+        chunk_bytes += size
+    flush_search()
     book_text = stored(bundle / root / "text" / "book-text.json.gz", bundle,
                        {"version": 2, "kind": "pdf-book-text", "complete": True,
                         "source_sha256": source, "page_count": len(layers),
@@ -190,7 +222,8 @@ def build_text_bundle(layers, raw_pages, root, bundle, *, parent=None):
     manifest = {"version": 1, "kind": "pdf-text-layer-index", "complete": True,
                 "source_sha256": source, "generation": generation, "page_count": len(layers),
                 "revision": revision, "quality": quality, "offset_unit": "unicode-codepoint",
-                "partitions": partitions, "review": review, "review_count": len(tasks), "book_text": book_text}
+                "partitions": partitions, "review": review, "review_count": len(tasks), "book_text": book_text,
+                "search_partitions": search_partitions}
     if parent is not None:
         manifest["parent"] = resource(parent)
     validate_text_manifest(manifest)
@@ -232,6 +265,15 @@ def verify_text_bundle(ref, read, source_sha256, page_count, *, verify_evidence=
                     raise ValueError("text layer/PDF page geometry mismatch")
     if text.digest(generations) != manifest["generation"]:
         raise ValueError("text index generation mismatch")
+    for part in manifest.get("search_partitions", []):
+        data = decode(verified_read(part["resource"], read))
+        expected = [{"page": p["page"], "text": p["text"], "text_generation": p["generation"]}
+                    for p in layers[part["start"] - 1:part["end"]]]
+        if (data.get("version") != 1 or data.get("kind") != "pdf-search-text-partition"
+                or data.get("source_sha256") != source_sha256 or data.get("generation") != manifest["generation"]
+                or data.get("offset_unit") != "unicode-codepoint" or data.get("start") != part["start"]
+                or data.get("end") != part["end"] or data.get("pages") != expected):
+            raise ValueError("search partition differs from effective page text")
     corrected = any(p["revision"] == "accepted" for p in layers)
     if (manifest["revision"] != ("effective" if corrected else "raw")
             or manifest["quality"] != ("partially-reviewed" if corrected else "unreviewed")):
@@ -278,6 +320,29 @@ def verify_text_bundle(ref, read, source_sha256, page_count, *, verify_evidence=
     return manifest
 
 
+def repartition_text_bundle(ref, read, bundle):
+    """Refresh search packaging without changing any raw or accepted page text."""
+    original = decode(verified_read(ref, read))
+    original = verify_text_bundle(ref, read, original["source_sha256"], original["page_count"])
+    review = decode(verified_read(original["review"], read))
+    evidence = {task["page"]: task["evidence"] for task in review["tasks"]}
+    layers, pages = [], []
+    for part in original["partitions"]:
+        for entry in decode(verified_read(part["resource"], read))["pages"]:
+            layer = decode(verified_read(entry["resource"], read))
+            layers.append(layer)
+            page = {"p": layer["page"]}
+            for item in evidence.get(layer["page"], []):
+                if item["bucket"] == shared.PDF_OCR_INPUT_BUCKET and item["path"].endswith(".png"):
+                    page.update(i=item["path"], ibucket=item["bucket"], ib=item["bytes"], **{"is": item["sha256"]})
+                    break
+            pages.append(page)
+    source = original["source_sha256"]
+    identity = text.digest({"parent": ref, "search_packaging": 1})
+    root = Path("objects") / source[:2] / source / identity[:16]
+    return build_text_bundle(layers, pages, root, bundle, parent=ref)
+
+
 def accept_text_bundle(ref, proposals, read, bundle, *, actor):
     """Offline trusted acceptance producing a new complete text/search generation."""
     source_manifest = decode(verified_read(ref, read))
@@ -309,7 +374,7 @@ def accept_text_bundle(ref, proposals, read, bundle, *, actor):
                     page["is"] = evidence["sha256"]
                     break
             pages.append(page)
-    identity = text.digest({"parent": ref, "proposals": proposals, "actor": actor, "acceptance": 1})
+    identity = text.digest({"parent": ref, "proposals": proposals, "actor": actor, "acceptance": 2})
     root = Path("objects") / source[:2] / source / identity[:16]
     return build_text_bundle(layers, pages, root, bundle, parent=ref)
 

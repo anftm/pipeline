@@ -89,7 +89,7 @@ OCR_OBJECT_PATH_RE = re.compile(
     r"^objects/[0-9a-f]{2}/[0-9a-f]{64}/[0-9a-f]{16}/"
     r"(?:ocr-manifest\.json|page-manifest\.json|render-manifest\.json|"
     r"text-layer-manifest\.json|text-review-manifest\.json|"
-    r"text/(?:page-[0-9]{6}\.json\.gz|book-text\.json\.gz|partition-[0-9]{6}-[0-9]{6}-manifest\.json)|"
+    r"text/(?:page-[0-9]{6}\.json\.gz|book-text\.json\.gz|search-[0-9]{6}-[0-9]{6}\.json\.gz|partition-[0-9]{6}-[0-9]{6}-manifest\.json)|"
     r"render-range-[0-9]{6}-[0-9]{6}\.json|"
     r"pages/page-[0-9]{6}\.(?:webp|jxl)|"
     r"ocr-input/page-[0-9]{6}\.png|"

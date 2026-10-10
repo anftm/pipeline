@@ -109,7 +109,8 @@ def upload_objects(bundle: Path) -> list[str]:
             protection_paths.append(protection_path)
             retry(lambda: api.sync_bucket(
                 str(root), f"{BUCKET}/{relative}",
-                include=["pages/*.webp", "ocr/**", "ocr-manifest.json", "page-manifest.json", "render-manifest.json",
+                include=["pages/*.webp", "ocr/**", "text/**", "text-layer-manifest.json", "text-review-manifest.json",
+                         "ocr-manifest.json", "page-manifest.json", "render-manifest.json",
                          "render-range-*.json"], quiet=True))
             retry(lambda: api.sync_bucket(
                 str(root), f"{OCR_INPUT_BUCKET}/{relative}",
@@ -964,7 +965,7 @@ def assemble_book(book, saved, bundle):
                        "text_generation": layer["generation"], "quality": layer["quality"],
                        "review_flags": layer["review_flags"]})
     root = root_for(book["source_sha256"], book["key"],
-                    book["render_manifest"]["sha256"] + book["profile"] + "|text-layer-v1")
+                    book["render_manifest"]["sha256"] + book["profile"] + "|text-layer-v2-search-partitions")
     text_layer_ref = pdf_reading_v3.build_text_bundle(layers, pages, root, bundle)
     text_path = bundle / root / "ocr" / "book-text.json.gz"
     pdf_ocr.write_gzip_json(text_path, {"version": 2, "kind": "pdf-book-text", "complete": True,

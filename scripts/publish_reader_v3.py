@@ -36,7 +36,7 @@ class PublicationReviewRequired(ValueError):
 PUBLIC_OBJECT = re.compile(
     r"objects/[0-9a-f]{2}/[0-9a-f]{64}/[0-9a-f]{16}/(?:document\.pdf|"
     r"reading-manifest\.json|page-map\.json\.gz|text-layer-manifest\.json|"
-    r"text/(?:page-[0-9]{6}\.json\.gz|book-text\.json\.gz|partition-[0-9]{6}-[0-9]{6}-manifest\.json)|"
+    r"text/(?:page-[0-9]{6}\.json\.gz|book-text\.json\.gz|search-[0-9]{6}-[0-9]{6}\.json\.gz|partition-[0-9]{6}-[0-9]{6}-manifest\.json)|"
     r"preview/(?:page-[0-9]{6}\.(?:png|webp|jpeg)|partition-[0-9]{6}-[0-9]{6}-manifest\.json))")
 
 
@@ -267,6 +267,21 @@ def build_stage(store, spec, workspace, *, apply=False):
     key = spec.get("source_key")
     if not isinstance(key, str) or not key:
         raise ValueError("single-book source key required")
+    if spec.get("reindex_reading"):
+        reader = CandidateReader(store, workspace)
+        previous = v3.verify_reading(spec["reindex_reading"], reader)
+        if previous["source_key"] != key or previous["source_sha256"] != source:
+            raise ValueError("reindex source identity mismatch")
+        effective = v3.repartition_text_bundle(previous["text_layer"], reader, workspace)
+        previews = [entry for part in previous["preview"]["partitions"]
+                    for entry in v3.decode(v3.verified_read(part["resource"], reader))["pages"]]
+        reading_spec = {"source_key": key, "source_sha256": source,
+                        "primary": previous["primary"]["resource"], "previews": previews,
+                        "text_layer": effective, "require_complete_preview": True}
+        ref, manifest = v3.build_reading(reading_spec, reader, workspace)
+        result = stage(store, ref, workspace, apply=apply)
+        result.update(reading=ref, components=manifest["components"])
+        return result
     import_primary(spec, workspace)
     reader = CandidateReader(store, workspace)
     raw_ocr = v3.decode(v3.verified_read(spec["ocr_manifest"], reader))

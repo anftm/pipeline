@@ -64,6 +64,32 @@ class ReadingV3Tests(unittest.TestCase):
         with self.assertRaises(ValueError):
             v3.verify_text_bundle(ref, self.read, "a" * 64, 1)
 
+    def test_search_partitions_are_text_only_complete_and_checked_against_pages(self):
+        layers, pages = self.layers(70)
+        ref = v3.build_text_bundle(layers, pages, Path("objects/aa/" + "a" * 64 + "/" + "b" * 16), self.bundle)
+        self.generated()
+        manifest = v3.verify_text_bundle(ref, self.read, "a" * 64, 70)
+        self.assertEqual([(p["start"], p["end"]) for p in manifest["search_partitions"]],
+                         [(1, 32), (33, 64), (65, 70)])
+        part = manifest["search_partitions"][-1]
+        data = v3.decode(self.read(part["resource"]))
+        self.assertEqual(set(data["pages"][0]), {"page", "text", "text_generation"})
+        data["pages"][-1]["text"] = "wrong effective text"
+        bad = self.add(part["resource"]["path"], gzip.compress(json.dumps(data).encode()))
+        manifest["search_partitions"][-1]["resource"] = bad
+        bad_index = self.add(ref["path"], json.dumps(manifest).encode())
+        with self.assertRaisesRegex(ValueError, "search partition differs"):
+            v3.verify_text_bundle(bad_index, self.read, "a" * 64, 70)
+
+    def test_search_partition_byte_budget_preserves_oversized_whole_page(self):
+        layers, pages = self.layers(3)
+        for n in range(3):
+            layers[n] = text.from_page({**raw_page("x" * 300000), "page": n + 1}, "a" * 64)
+        ref = v3.build_text_bundle(layers, pages, Path("objects/aa/" + "a" * 64 + "/" + "b" * 16), self.bundle)
+        self.generated()
+        manifest = v3.verify_text_bundle(ref, self.read, "a" * 64, 3)
+        self.assertEqual(len(manifest["search_partitions"]), 3)
+
     def test_review_evidence_keeps_qualified_input_bucket(self):
         layers, pages = self.layers(1)
         layers[0] = text.from_page(raw_page("Text", .1), "a" * 64)
@@ -231,6 +257,14 @@ class ReadingV3Tests(unittest.TestCase):
         index = v3.decode(self.read(manifest["book_text"]))
         self.assertEqual([p["text"] for p in index["pages"]], ["Corrected text", "Text"])
         self.assertEqual(index["quality"], "partially-reviewed")
+        repacked = v3.repartition_text_bundle(accepted, self.read, self.bundle)
+        self.generated()
+        refreshed = v3.verify_text_bundle(repacked, self.read, "a" * 64, 2)
+        self.assertEqual(refreshed["generation"], manifest["generation"])
+        self.assertEqual(refreshed["parent"], accepted)
+        self.assertEqual(refreshed["revision"], "effective")
+        search = v3.decode(self.read(refreshed["search_partitions"][0]["resource"]))
+        self.assertEqual([p["text"] for p in search["pages"]], ["Corrected text", "Text"])
         with self.assertRaises(ValueError):
             v3.accept_text_bundle(accepted, [proposal], self.read, self.bundle, actor="reviewer")
         with self.assertRaises(ValueError):
