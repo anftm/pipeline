@@ -77,9 +77,9 @@ class GitHubProducerFence:
         if any(page.get("total_count") != 0 or page.get("jobs") != [] for page in latest):
             raise RuntimeError("queued run has a latest execution job")
         jobs = [job for page in history for job in page["jobs"]]
-        if (not jobs or any(job.get("status") != "completed" or not job.get("completed_at")
-                            or job.get("run_attempt", 0) > attempt for job in jobs)):
-            raise RuntimeError("residual run history contains unfinished execution")
+        if any(job.get("status") != "completed" or not job.get("completed_at")
+               or job.get("run_attempt", 0) > attempt for job in jobs):
+            raise RuntimeError(f"residual run history contains unfinished execution: {repo}: {run['id']}")
         after = self.single(endpoint)
         identity = ("id", "status", "run_attempt", "updated_at", "check_suite_id")
         if (any(before.get(key) != after.get(key) for key in identity)

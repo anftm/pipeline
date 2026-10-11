@@ -45,6 +45,14 @@ class ResidualRunFenceTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'not drained'):
             self.check(api)
 
+    def test_cancelled_before_job_assignment_requires_the_same_isolation(self):
+        def api(endpoint):
+            if '/jobs?filter=all' in endpoint:
+                return [{'total_count': 0, 'jobs': []}]
+            return self.api(endpoint)
+        report = self.check(api)
+        self.assertEqual(report['repositories'][0]['isolated_residual_runs'][0]['historical_jobs'], 0)
+
     def test_unfinished_attempt_or_job_blocks(self):
         for marker, response in (
             ('/attempts/1', [{'id': 7, 'status': 'queued', 'run_attempt': 1}]),
