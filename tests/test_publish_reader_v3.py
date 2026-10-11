@@ -38,6 +38,19 @@ class Store:
 
 
 class V3PublicationTests(unittest.TestCase):
+    def test_unified_snapshot_retains_all_formats_and_promotions_preserve_it(self):
+        base = {"v": 1, "f": {"ebook": {"s": 2, "m": "e", "p": "book.epub"},
+                              "media": {"s": 2, "m": "a", "p": "audio.mp3"}}}
+        packed = gzip.compress(publish.encode(base), mtime=0)
+        self.store.put_bytes(publish.ASSETS, "reader-index/reader_assets.json.gz", packed)
+        first = publish.unify(self.store, apply=True)
+        pointer, catalog = publish.current(self.store)
+        self.assertEqual(publish.pinned_base(self.store, catalog, {}), base)
+        staged = publish.stage(self.store, self.candidate(), self.bundle, apply=True)
+        publish.promote(self.store, staged["candidate"], first["generation"], apply=True)
+        self.assertEqual(publish.current(self.store)[1]["base_sidecar"], catalog["base_sidecar"])
+        self.assertTrue(publish.unify(self.store, apply=True)["unchanged"])
+
     def test_scoped_withdrawal_preserves_other_books_history_and_source_objects(self):
         first = publish.stage(self.store, self.candidate(), self.bundle, apply=True)
         one = publish.promote(self.store, first["candidate"], None, apply=True)

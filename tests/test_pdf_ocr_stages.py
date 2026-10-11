@@ -184,6 +184,11 @@ class PdfOcrStagesTests(unittest.TestCase):
             self.assertEqual([p["text"] for p in text["pages"]], ["原生文字", "识别结果"])
             self.assertTrue(manifest["complete"])
             self.assertEqual(manifest["page_manifest"], result["page_manifest"])
+            from scripts.pdf_reading_v3 import verify_text_bundle
+            index = verify_text_bundle(completed["text_layer"], self.read, completed["source_sha256"], 2)
+            self.assertEqual(index["revision"], "raw")
+            self.assertEqual(index["quality"], "unreviewed")
+            self.assertEqual(text["text_layer"], completed["text_layer"])
 
     def test_page_checksum_failure_does_not_publish_ready(self):
         result = self.render_fixture()
@@ -724,6 +729,14 @@ class PdfOcrStagesTests(unittest.TestCase):
         self.assertNotEqual(first["books"][0]["profile"], changed["books"][0]["profile"])
         self.assertNotEqual(stages.generation_for(first["books"][0]), stages.generation_for(changed["books"][0]))
         self.assertEqual(first["books"][0]["render_manifest"], changed["books"][0]["render_manifest"])
+
+    def test_identical_ready_ocr_publication_is_noop(self):
+        book = {"source_sha256": "a" * 64, "source_revision": "b" * 40,
+                "source_kind": "upstream", "profile": "ocr-profile", "page_count": 12,
+                "page_manifest": {"path": "pages/manifest.json", "sha256": "c" * 64, "bytes": 12}}
+        previous = {**book, "status": "ready"}
+        self.assertTrue(stages.ocr_publication_is_current(previous, book))
+        self.assertFalse(stages.ocr_publication_is_current(previous, {**book, "profile": "changed"}))
 
 
 if __name__ == "__main__":

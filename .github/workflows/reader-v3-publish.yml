@@ -4,7 +4,7 @@ run-name: v3 ${{ inputs.operation || github.event_name }} / ${{ (inputs.apply ||
 on:
   schedule:
     - cron: '43 */2 * * *'
-    - cron: '37 5 * * *'
+    - cron: '37 */2 * * *'
   workflow_run:
     workflows: [Publish Account PDF Worker Results]
     types: [completed]
@@ -70,7 +70,7 @@ jobs:
           if [[ "$EVENT_NAME" != workflow_dispatch ]]; then
             OPERATION=auto
             APPLY=true
-            if [[ "$SCHEDULE" == '37 5 * * *' ]]; then OPERATION=correct; fi
+            if [[ "$SCHEDULE" == '37 */2 * * *' ]]; then OPERATION=correct; fi
           fi
           echo "operation=$OPERATION" >> "$GITHUB_OUTPUT"
           echo "apply=$APPLY" >> "$GITHUB_OUTPUT"
@@ -86,18 +86,30 @@ jobs:
           if [[ "$APPLY" == true ]]; then args+=(--apply); fi
           python scripts/publish_reader_v3.py "${args[@]}"
       - name: Publish the pinned projection to Pages
-        if: steps.operation.outputs.apply == 'true' && contains(fromJSON('["auto","accept","promote","rollback","withdraw"]'), steps.operation.outputs.operation)
+        if: steps.operation.outputs.apply == 'true' && contains(fromJSON('["auto","correct","accept","promote","rollback","withdraw"]'), steps.operation.outputs.operation)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           PAGES_TOKEN: ${{ secrets.PAGES_TOKEN }}
           PAGES_REPO: ${{ secrets.PAGES_REPO }}
         run: python scripts/publish_search_reader_index.py
       - name: Confirm both deployed consumer projections
-        if: steps.operation.outputs.apply == 'true' && contains(fromJSON('["auto","accept","promote","rollback","withdraw"]'), steps.operation.outputs.operation)
+        if: steps.operation.outputs.apply == 'true' && contains(fromJSON('["auto","correct","accept","promote","rollback","withdraw"]'), steps.operation.outputs.operation)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_INPUT_TOKEN: ${{ secrets.HF_INPUT_TOKEN }}
         run: python scripts/publish_reader_v3.py ack-all --apply --output output/v3/consumers.json
+      - name: Retire acknowledged history roots after their retention period
+        if: steps.operation.outputs.apply == 'true' && contains(fromJSON('["auto","correct","accept","promote","rollback","withdraw"]'), steps.operation.outputs.operation)
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: python scripts/publish_reader_v3.py retire --apply --output output/v3/retirement.json
+      - name: Write deduplicated PDF/OCR progress report
+        if: always()
+        timeout-minutes: 10
+        continue-on-error: true
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: python scripts/pdf_progress_report.py --output output/v3/pdf-progress.json
       - uses: actions/upload-artifact@v7
         if: always()
         with:

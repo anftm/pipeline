@@ -134,6 +134,22 @@ class ReadingV3Tests(unittest.TestCase):
         self.assertEqual(v3.verify_reading(ref, self.read), manifest)
         self.assertEqual(v3.build_reading(spec, self.read, self.bundle)[0], ref)
 
+    def test_real_engine_vector_preview_preserves_geometry_and_verifies(self):
+        with pymupdf.open() as doc:
+            page = doc.new_page(width=200, height=300)
+            page.insert_text((30, 70), "Vector page", fontsize=18)
+            pdf = doc.tobytes()
+        primary = self.add("objects/aa/book/primary/document.pdf", pdf)
+        spec = v3.generate_previews({"source_sha256": "a" * 64, "source_key": "repo\0book.pdf",
+                                    "primary": primary, "vector_previews": True}, self.read, self.bundle)
+        self.generated()
+        self.assertEqual(spec["previews"][0]["codec"], "svg")
+        ref, _ = v3.build_reading(spec, self.read, self.bundle)
+        self.generated()
+        self.assertTrue(v3.verify_reading(ref, self.read)["preview"]["complete"])
+        with self.assertRaises(ValueError):
+            v3.validate_vector_svg(b'<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><script/></svg>')
+
     def test_missing_preview_is_pending_and_never_claimed_complete(self):
         spec = self.spec()
         spec["previews"].pop()

@@ -17,7 +17,8 @@ COLLECTOR = ".github/workflows/reader-gc-collect.yml"
 def producer_path(path):
     path = path.split("@", 1)[0]
     name = path.rsplit("/", 1)[-1]
-    return path.startswith(".github/workflows/") and path != COLLECTOR and (
+    return path.startswith(".github/workflows/") and path not in {
+        COLLECTOR, ".github/workflows/reader-maintenance.yml"} and (
         name.startswith(("reader-", "pdf-", "lin-native-text", "migrate-pdf-")))
 
 

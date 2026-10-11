@@ -41,6 +41,15 @@ class CorrectionTests(unittest.TestCase):
             self.assertEqual(unresolved["replacements"], [])
             self.assertTrue(unresolved["unresolved"])
 
+    def test_review_requires_complete_exact_region_scope(self):
+        proposal = correction.validate_answer(self.layer, self.answer)
+        with self.assertRaises(ValueError):
+            correction.validate_review(proposal, {"decision": "accept", "region_ids": [], "reason": "image"})
+        with self.assertRaises(ValueError):
+            correction.validate_review(proposal, {"decision": "accept", "region_ids": ["b99"], "reason": "image"})
+        self.assertEqual(correction.validate_review(proposal,
+            {"decision": "uncertain", "region_ids": [], "reason": "image unclear"})["decision"], "uncertain")
+
     def test_provider_has_image_exact_model_bounds_and_no_redirects(self):
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
@@ -49,7 +58,8 @@ class CorrectionTests(unittest.TestCase):
             def handler(request):
                 body = json.loads(request.content)
                 self.assertEqual(body["model"], "gpt-6-luna")
-                self.assertEqual(body["max_output_tokens"], 4096)
+                self.assertEqual(body["reasoning"], {"effort": "max"})
+                self.assertEqual(body["max_output_tokens"], correction.MAX_OUTPUT_TOKENS)
                 self.assertEqual(body["input"][0]["content"][1]["type"], "input_image")
                 self.assertNotIn("tools", body)
                 return httpx.Response(200, json={"status": "completed", "model": correction.MODEL,
@@ -81,7 +91,7 @@ class CorrectionTests(unittest.TestCase):
             with self.assertRaisesRegex(correction.ModelRequestError, "isolated-request-failed"):
                 correction.isolated_model(Path("/tmp/workspace"))
 
-    def test_proposal_does_not_publish_until_explicit_accept_and_visual_resources_reused(self):
+    def test_independent_review_accepts_and_manual_replay_is_idempotent(self):
         fixture = fixtures.V3PublicationTests()
         fixture.setUp()
         try:
@@ -108,18 +118,21 @@ class CorrectionTests(unittest.TestCase):
             correction.save(fixture.store, state)
             before = publication.current(fixture.store)[0]
             provider = Mock(side_effect=AssertionError("must reuse the saved provider output"))
+            reviewer = Mock(return_value={"answer": {"decision": "accept", "region_ids": ["b0"],
+                                                     "reason": "visible"}, "usage": {}})
             result = correction.correct(fixture.store, {"limit": 1}, apply=True,
-                invoke=provider)
-            self.assertEqual(result["processed"][0]["status"], "proposed")
+                invoke=provider, review_invoke=reviewer)
+            self.assertEqual(result["processed"][0]["status"], "accepted")
             self.assertEqual(result["budget"]["requests"], 0)
             provider.assert_not_called()
-            self.assertEqual(publication.current(fixture.store)[0], before)
+            reviewer.assert_called_once()
+            self.assertNotEqual(publication.current(fixture.store)[0], before)
             writes = len(fixture.store.writes)
             with patch.dict(os.environ, {"GITHUB_ACTOR": "reviewer"}):
-                options = {"task_ids": [identity], "regions": {identity: ["b0"]}}
+                options = {"task_ids": [identity]}
                 accepted = correction.decide(fixture.store, "accept", options, apply=True)
                 retried = correction.decide(fixture.store, "accept", options, apply=True)
-            self.assertTrue(accepted["visual_resources_reused"])
+            self.assertTrue(accepted["unchanged"])
             self.assertTrue(retried["unchanged"])
             self.assertFalse(any(path.endswith((".png", ".webp", ".pdf")) for bucket, path in fixture.store.writes[writes:]))
             active = publication.current(fixture.store)[1]["files"]["repo\0book.pdf"]

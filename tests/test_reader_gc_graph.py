@@ -44,6 +44,17 @@ class MemoryStore:
 
 
 class ReaderGcGraphTests(unittest.TestCase):
+    def test_pinned_all_format_sidecar_keeps_resources_without_mutable_base_reference(self):
+        store = MemoryStore()
+        document = "documents/text/txt/" + "a" * 64 + "/document.txt"
+        snapshot = "reader-index/snapshots/" + "b" * 64 + "/reader_assets.json.gz"
+        store.put(ASSETS, document, b"pinned text")
+        store.put(ASSETS, snapshot, {"v": 1, "f": {"repo\0document.txt": {"s": 2, "m": "t", "p": document, "b": ASSETS}}})
+        store.put(ASSETS, "reader-index/v3/current.json", {"resources": [{"bucket": ASSETS, "path": snapshot}]})
+        report = gc.ReferenceGraph(store).build()
+        self.assertTrue(report["graph_complete"], report["blockers"])
+        self.assertEqual(report["buckets"][ASSETS]["candidates"], [])
+
     def test_v3_automation_and_model_proposals_keep_pinned_inputs(self):
         store = MemoryStore()
         primary = "derived/migration-test/" + "a" * 32 + "/document.pdf"

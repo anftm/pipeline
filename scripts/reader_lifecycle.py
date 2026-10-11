@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from contextlib import contextmanager
 import hashlib
 import json
+import threading
 try:
     from .shared import READER_ASSETS_BUCKET, PDF_PAGES_BUCKET, PDF_OCR_INPUT_BUCKET
 except ImportError:
@@ -41,10 +43,42 @@ def processing_record(resources: list[dict], operation: str, run: dict) -> dict:
                             or any(part in {"", ".", ".."} for part in item["root"].split("/"))
                             for item in resources):
         raise ValueError("processing roots require bucket-qualified resources")
+    timestamp = now_iso()
     return {"version": 1, "kind": "reader-processing-roots", "status": "processing",
             "operation": operation, "run": dict(run), "resources": resources,
-            "created_at": now_iso(), "updated_at": now_iso(),
+            "created_at": timestamp, "updated_at": timestamp, "heartbeat_at": timestamp,
             "release_policy": "explicit-publisher-handoff"}
+
+
+def heartbeat_processing(record: dict, now: str | None = None) -> dict:
+    """Refresh an active protection root without changing its ownership."""
+    if (record.get("kind") != "reader-processing-roots"
+            or record.get("status") not in {"processing", "uploaded", "published"}):
+        raise ValueError("processing record is not heartbeatable")
+    timestamp = now or now_iso()
+    return {**record, "heartbeat_at": timestamp, "updated_at": timestamp}
+
+
+@contextmanager
+def processing_heartbeat(record, persist, interval=900):
+    """Keep long transfers protected and surface failed heartbeat persistence."""
+    stop, errors = threading.Event(), []
+    def tick():
+        while not stop.wait(interval):
+            try:
+                persist(heartbeat_processing(record))
+            except Exception as error:
+                errors.append(error)
+                return
+    worker = threading.Thread(target=tick, name="reader-processing-heartbeat", daemon=True)
+    worker.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        worker.join()
+    if errors:
+        raise RuntimeError("processing heartbeat persistence failed") from errors[0]
 
 
 def release_processing(record: dict, generation: str, now: str | None = None) -> dict:

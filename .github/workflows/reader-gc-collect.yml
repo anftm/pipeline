@@ -1,8 +1,13 @@
 name: Collect Unreferenced Reader Objects
+run-name: Reader GC ${{ inputs.maintenance_id || github.run_id }}
 
 on:
   workflow_dispatch:
     inputs:
+      maintenance_id:
+        description: Correlation ID for automatic maintenance
+        type: string
+        default: ''
       apply:
         description: Collect objects after all Reader producers have been paused and drained
         type: boolean

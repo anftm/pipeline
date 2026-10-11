@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import copy
 import hashlib
+import gzip
 import io
 import json
 import os
@@ -39,7 +40,7 @@ PUBLIC_OBJECT = re.compile(
     r"objects/[0-9a-f]{2}/[0-9a-f]{64}/[0-9a-f]{16}/(?:document\.pdf|"
     r"reading-manifest\.json|page-map\.json\.gz|text-layer-manifest\.json|"
     r"text/(?:page-[0-9]{6}\.json\.gz|book-text\.json\.gz|search-[0-9]{6}-[0-9]{6}\.json\.gz|partition-[0-9]{6}-[0-9]{6}-manifest\.json)|"
-    r"preview/(?:page-[0-9]{6}\.(?:png|webp|jpeg)|partition-[0-9]{6}-[0-9]{6}-manifest\.json))")
+    r"preview/(?:page-[0-9]{6}\.(?:png|webp|jpeg|svg)|partition-[0-9]{6}-[0-9]{6}-manifest\.json))")
 
 
 def encode(value):
@@ -87,6 +88,8 @@ def validate_catalog(catalog):
     body = {k: v for k, v in catalog.items() if k != "generation"}
     if text.digest(body) != catalog.get("generation"):
         raise ValueError("reading catalog generation mismatch")
+    if catalog.get("base_sidecar"):
+        base_sidecar_ref(catalog["base_sidecar"])
     for key, entry in catalog["files"].items():
         if not isinstance(key, str) or not key or not isinstance(entry, dict):
             raise ValueError("invalid reading catalog entry")
@@ -99,6 +102,58 @@ def validate_catalog(catalog):
                 or not entry["resource"]["path"].endswith("/reading-manifest.json")):
             raise ValueError("catalog reading resource identity mismatch")
     return catalog
+
+
+def base_sidecar_ref(ref):
+    if (ref.get("bucket") != ASSETS or ref.get("role") != "runtime"
+            or not re.fullmatch(r"reader-index/snapshots/[0-9a-f]{64}/reader_assets\.json\.gz", ref.get("path", ""))
+            or type(ref.get("bytes")) is not int or not 1 <= ref["bytes"] <= 8 * 1024 * 1024):
+        raise ValueError("invalid unified sidecar resource")
+    text.sha(ref.get("sha256"))
+    if ref["path"].split("/")[2] != ref["sha256"]:
+        raise ValueError("sidecar snapshot identity mismatch")
+    return ref
+
+
+def pinned_base(store, catalog, fallback):
+    ref = catalog.get("base_sidecar")
+    if not ref:
+        return fallback
+    base_sidecar_ref(ref)
+    raw = store.read_bytes(ref["bucket"], ref["path"])
+    if len(raw) != ref["bytes"] or hashlib.sha256(raw).hexdigest() != ref["sha256"]:
+        raise ValueError("sidecar snapshot checksum mismatch")
+    with gzip.GzipFile(fileobj=io.BytesIO(raw)) as stream:
+        decoded = stream.read(50 * 1024 * 1024 + 1)
+    if len(decoded) > 50 * 1024 * 1024:
+        raise ValueError("sidecar snapshot expands beyond limit")
+    base = json.loads(decoded)
+    if base.get("v") != 1 or not isinstance(base.get("f"), dict):
+        raise ValueError("invalid sidecar snapshot")
+    return base
+
+
+def unify(store, *, apply=False):
+    pointer, catalog = current(store)
+    raw = store.read_bytes(ASSETS, "reader-index/reader_assets.json.gz")
+    digest = hashlib.sha256(raw).hexdigest()
+    ref = metadata(ASSETS, f"reader-index/snapshots/{digest}/reader_assets.json.gz", raw)
+    base_sidecar_ref(ref)
+    with gzip.GzipFile(fileobj=io.BytesIO(raw)) as stream:
+        payload = stream.read(50 * 1024 * 1024 + 1)
+    if len(payload) > 50 * 1024 * 1024:
+        raise ValueError("base sidecar expands beyond limit")
+    base = json.loads(payload)
+    if base.get("v") != 1 or not isinstance(base.get("f"), dict):
+        raise ValueError("invalid unified base sidecar")
+    if catalog.get("base_sidecar") == ref:
+        return {"applied": apply, "unchanged": True, "generation": pointer["generation"]}
+    if apply:
+        assert_writer(store)
+        immutable_put(store, ASSETS, ref["path"], raw)
+    result = {"version": 3, "kind": "reader-reading-catalog", "files": catalog["files"],
+              "base_sidecar": ref, "parent_generation": pointer["generation"] if pointer else None}
+    return commit_catalog(store, result, pointer, apply=apply)
 
 
 def current(store):
@@ -218,8 +273,11 @@ def stage(store, ref, bundle=None, *, apply=False):
         "v3-candidate-upload", {"repository": os.environ.get("GITHUB_REPOSITORY", ""),
                                 "run_id": os.environ.get("GITHUB_RUN_ID", "")})
     store.put_bytes(ASSETS, protection_path, encode(protection))
-    for key in sorted(reader.local):
+    for index, key in enumerate(sorted(reader.local), 1):
         immutable_put(store, *key, reader.local[key].read_bytes())
+        if index % 32 == 0:
+            protection = reader_lifecycle.heartbeat_processing(protection)
+            store.put_bytes(ASSETS, protection_path, encode(protection))
     # Remote readback must stand on its own, not on the local upload workspace.
     remote = CandidateReader(store)
     v3.verify_reading(ref, remote)
@@ -324,7 +382,8 @@ def build_stage(store, spec, workspace, *, apply=False):
         if not any(char.isalnum() for page in book["pages"] for char in page["text"]):
             raise PublicationReviewRequired("derived document has no usable recognized text; inspect source conversion")
     reading_spec = {"source_key": key, "source_sha256": source, "primary": spec["primary"],
-                    "text_layer": text_ref, "require_complete_preview": True}
+                    "text_layer": text_ref, "require_complete_preview": True,
+                    "vector_previews": spec.get("vector_previews", False)}
     reading_spec = v3.generate_previews(reading_spec, reader, workspace,
                                         dpi=spec.get("dpi", 150), max_pixels=spec.get("max_pixels", 50000000))
     ref, manifest = v3.build_reading(reading_spec, reader, workspace)
@@ -362,6 +421,8 @@ def promote(store, candidate_ref, expected_parent, *, apply=False):
     files = {**old["files"], key: entry}
     catalog = {"version": 3, "kind": "reader-reading-catalog", "files": files,
                "parent_generation": parent}
+    if old.get("base_sidecar"):
+        catalog["base_sidecar"] = old["base_sidecar"]
     return commit_catalog(store, catalog, pointer, apply=apply)
 
 
@@ -416,6 +477,8 @@ def rollback(store, target_ref, expected_parent, *, apply=False):
             raise ValueError("rollback resource identity mismatch")
     catalog = {"version": 3, "kind": "reader-reading-catalog", "files": target["files"],
                "parent_generation": expected_parent, "rollback_target": target["generation"]}
+    if target.get("base_sidecar"):
+        catalog["base_sidecar"] = target["base_sidecar"]
     return commit_catalog(store, catalog, pointer, apply=apply)
 
 
@@ -437,6 +500,7 @@ def withdraw(store, options, expected_parent, *, apply=False):
             raise ValueError("authenticated withdrawal actor required")
         files = {k: entry for k, entry in catalog["files"].items() if k != key}
         report = commit_catalog(store, {"version": 3, "kind": "reader-reading-catalog", "files": files,
+            **({"base_sidecar": catalog["base_sidecar"]} if catalog.get("base_sidecar") else {}),
             "parent_generation": expected_parent, "withdrawal": {"source_key": key,
             "reading_generation": generation, "resource": active["resource"], "actor": actor,
             "reason": "source-conversion-needs-review"}}, pointer, apply=apply)
@@ -520,6 +584,15 @@ def observe_consumer(store, surface, client):
         sidecar = json.loads(raw)
     if sidecar.get("v") != 1 or not isinstance(sidecar.get("f"), dict):
         raise ValueError("invalid deployed consumer sidecar")
+    if catalog.get("base_sidecar"):
+        projected = project_sidecar(pinned_base(store, catalog, {}), catalog)
+        routing = ("s", "m", "p", "b", "pd", "pdb", "c", "cb", "f", "o", "ob", "om")
+        expected = {key: {field: entry[field] for field in routing if field in entry}
+                    for key, entry in projected["f"].items()}
+        actual = {key: {field: entry[field] for field in routing if field in entry}
+                  for key, entry in sidecar["f"].items()}
+        if expected != actual:
+            raise ValueError("deployed full-format sidecar differs from pinned generation")
     for key, entry in catalog["files"].items():
         expected = {"s": 2, "m": "p", "p": entry["resource"]["path"], "b": shared.PDF_PAGES_BUCKET}
         if sidecar["f"].get(key) != expected:
@@ -561,7 +634,7 @@ class CentralHubStore(HubBucketStore):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("build-stage", "stage", "promote", "rollback", "withdraw", "ack", "ack-all", "inspect", "project", "auto", "correct", "accept", "reject", "retry"))
+    parser.add_argument("command", choices=("build-stage", "stage", "promote", "rollback", "withdraw", "ack", "ack-all", "inspect", "project", "auto", "correct", "accept", "reject", "retry", "retire"))
     parser.add_argument("--resource", type=Path)
     parser.add_argument("--resource-json")
     parser.add_argument("--bundle", type=Path)
@@ -589,13 +662,20 @@ def main():
         priority = options.get("source_sha256")
         if priority is not None:
             text.sha(priority)
-        report = run(store, apply=args.apply, priority_source=priority)
+        report = run(store, apply=args.apply, priority_source=priority,
+                     max_books=options.get("max_books", 4), max_seconds=options.get("max_seconds", 3600))
     elif args.command in {"correct", "accept", "reject"}:
         try:
             from .reader_v3_correction import operate
         except ImportError:
             from reader_v3_correction import operate
         report = operate(store, args.command, json.loads(args.resource_json or "{}"), apply=args.apply)
+    elif args.command == "retire":
+        try:
+            from .reader_v3_retirement import run
+        except ImportError:
+            from reader_v3_retirement import run
+        report = run(store, apply=args.apply)
     elif args.command == "build-stage":
         if not args.resource and not args.resource_json:
             parser.error("build-stage requires a pinned single-book spec JSON")

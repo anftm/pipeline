@@ -51,7 +51,7 @@ MANIFEST_KINDS = {
 
 def is_root(path: str) -> bool:
     name = posixpath.basename(path)
-    if path.startswith(("reader-index/generations/", "reader-index/gc/")):
+    if path.startswith(("reader-index/generations/", "reader-index/gc/", "reader-index/snapshots/")):
         return False
     return (path.startswith("reader-index/") and path.endswith((".json", ".json.gz"))) or (
         name == "index.json" or name.startswith("index-") and name.endswith(".json"))
@@ -86,6 +86,7 @@ class ReferenceGraph:
         self.trees = set()
         self.generation_grace_days = generation_grace_days
         self.catalog = {}
+        self.retired_roots = set()
         self.progress = progress or (lambda *args, **kwargs: None)
 
     def load(self, ref: tuple[str, str]) -> dict | None:
@@ -121,7 +122,7 @@ class ReferenceGraph:
         if path not in self.files[bucket] and not tree:
             self.missing.add(ref)
             return
-        if is_manifest(path) and ref not in self.seen:
+        if (is_manifest(path) or is_root(path) or path.startswith("reader-index/snapshots/")) and ref not in self.seen:
             self.pending.add(ref)
         # HTML/CSS/XHTML, fonts, media companions and manifest siblings are an
         # immutable bundle. Keep the whole bundle instead of parsing markup.
@@ -168,6 +169,9 @@ class ReferenceGraph:
 
     def walk(self, value, bucket: str, origin: str, explicit: bool = False, field: str = ""):
         if isinstance(value, dict):
+            if value.get("kind") == "reader-v3-retirement":
+                self.walk(value.get("resources", []), bucket, origin, explicit, "resources")
+                return
             if value.get("kind") == "reader-v3-automation":
                 for task in value.get("tasks", {}).values():
                     task = dict(task)
@@ -236,7 +240,13 @@ class ReferenceGraph:
 
     def validate(self, payload: dict, bucket: str, path: str) -> bool:
         if is_root(path):
-            if payload.get("kind") in {"reader-v3-automation", "reader-v3-correction-state"}:
+            if payload.get("kind") == "reader-v3-retirement":
+                if (payload.get("version") != 1 or payload.get("replacement_acks") != {"hf": True, "pages": True}
+                        or not isinstance(payload.get("resources"), list)
+                        or not isinstance(payload.get("retired_paths"), list)):
+                    self.blockers.add(f"invalid retirement state: {bucket}:{path}")
+                    return False
+            elif payload.get("kind") in {"reader-v3-automation", "reader-v3-correction-state"}:
                 if (payload.get("version") != 1 or not isinstance(payload.get("tasks"), dict)
                         or not isinstance(payload.get("days"), dict)
                         or any(not isinstance(task, dict) for task in payload["tasks"].values())):
@@ -338,9 +348,20 @@ class ReferenceGraph:
         catalog_ref = (READER_ASSETS_BUCKET, "reader-index/reader_catalog.json")
         if catalog_ref[1] in self.files.get(catalog_ref[0], set()):
             self.catalog = self.load(catalog_ref) or {}
+        retirement_ref = (READER_ASSETS_BUCKET, "reader-index/v3/retirement.json")
+        if retirement_ref[1] in self.files.get(retirement_ref[0], set()):
+            state = self.load(retirement_ref)
+            if state and self.validate(state, *retirement_ref):
+                import re
+                for path in state["retired_paths"]:
+                    if not isinstance(path, str) or not re.fullmatch(
+                            r"reader-index/v3/(?:promotions/[0-9a-f]{64}\.json|generations/[0-9a-f]{64}/catalog\.json)", path):
+                        self.blockers.add("invalid retired root path")
+                    else:
+                        self.retired_roots.add((READER_ASSETS_BUCKET, path))
         for bucket, files in self.files.items():
             for path in sorted(files):
-                if is_root(path):
+                if is_root(path) and (bucket, path) not in self.retired_roots:
                     ref = (bucket, path)
                     self.references.add(ref)
                     self.pending.add(ref)

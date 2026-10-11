@@ -55,9 +55,10 @@ class AutomationTests(unittest.TestCase):
         build = Mock(side_effect=OSError("transport"))
         auto.run(self.store, apply=True, build=build, now=self.now)
         auto.run(self.store, apply=True, build=build, now=self.now + timedelta(hours=3))
-        result = auto.run(self.store, apply=True, build=build, now=self.now + timedelta(hours=10))
+        auto.run(self.store, apply=True, build=build, now=self.now + timedelta(hours=10))
+        result = auto.run(self.store, apply=True, build=build, now=self.now + timedelta(hours=12))
         self.assertEqual(result["eligible"], 0)
-        self.assertEqual(build.call_count, 2)
+        self.assertEqual(build.call_count, 3)
         auto.run(self.store, apply=True, build=build, now=self.now + timedelta(days=1))
         task = next(iter(auto.load_state(self.store)["tasks"].values()))
         self.assertEqual(task["status"], "failed")
@@ -80,7 +81,7 @@ class AutomationTests(unittest.TestCase):
             fixture.temp.cleanup()
 
     def test_page_budget_never_truncates_a_book(self):
-        self.add_entries(entry(count=1001))
+        self.add_entries(entry(count=auto.DAILY_PAGES + 1))
         result = auto.run(self.store, now=self.now)
         self.assertEqual(result["tasks"], 1)
         self.assertEqual(result["eligible"], 0)

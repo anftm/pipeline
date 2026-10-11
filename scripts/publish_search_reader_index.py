@@ -15,12 +15,12 @@ from huggingface_hub import HfApi
 try:
     from .reader_assets import READER_ASSETS_REPO
     from .reader_bucket import INDEX_FILES, read_bytes as read_bucket_bytes
-    from .publish_reader_v3 import current as current_v3, project_sidecar
+    from .publish_reader_v3 import current as current_v3, project_sidecar, pinned_base, unify, CentralHubStore
     from .reader_bucket_store import HubBucketStore
 except ImportError:
     from reader_assets import READER_ASSETS_REPO
     from reader_bucket import INDEX_FILES, read_bytes as read_bucket_bytes
-    from publish_reader_v3 import current as current_v3, project_sidecar
+    from publish_reader_v3 import current as current_v3, project_sidecar, pinned_base, unify, CentralHubStore
     from reader_bucket_store import HubBucketStore
 
 SIDECAR_NAME = "reader_assets.json.gz"
@@ -91,9 +91,12 @@ def main() -> int:
     temporary_source = False
     if type(api) is HfApi:
         raw = read_bucket_bytes(INDEX_FILES["sidecar"], hf_token)
-        pointer, catalog = current_v3(HubBucketStore())
+        store = HubBucketStore()
+        if not args.dry_run and os.environ.get("GITHUB_WORKFLOW") == "Publish v3 Reading Generation":
+            unify(CentralHubStore(), apply=True)
+        pointer, catalog = current_v3(store)
         if pointer:
-            base = json.loads(gzip.decompress(raw))
+            base = pinned_base(store, catalog, json.loads(gzip.decompress(raw)))
             raw = gzip.compress(json.dumps(project_sidecar(base, catalog), ensure_ascii=False,
                                            sort_keys=True, separators=(",", ":")).encode(), mtime=0)
         with tempfile.NamedTemporaryFile(prefix="reader-index-", suffix=".gz", delete=False) as handle:

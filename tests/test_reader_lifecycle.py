@@ -46,6 +46,8 @@ class ReaderLifecycleTests(unittest.TestCase):
             reader_lifecycle.processing_record([{"root": "objects/a"}], "upload", {})
         record = reader_lifecycle.processing_record([{
             "bucket": reader_lifecycle.PDF_PAGES_BUCKET, "root": "objects/a"}], "upload", {})
+        refreshed = reader_lifecycle.heartbeat_processing(record, "2026-10-09T00:01:00+00:00")
+        self.assertEqual(refreshed["heartbeat_at"], "2026-10-09T00:01:00+00:00")
         released = reader_lifecycle.release_processing(record, "generation", "2026-10-09T00:00:00+00:00")
         self.assertEqual(released["status"], "released")
         self.assertEqual(reader_lifecycle.release_processing(released, "generation"), released)

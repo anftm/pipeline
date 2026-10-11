@@ -1,0 +1,42 @@
+name: Automatic Reader Maintenance
+
+on:
+  schedule:
+    - cron: '13 2 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: reader-global-maintenance
+  cancel-in-progress: false
+
+jobs:
+  maintain:
+    if: github.repository == 'anftm/pipeline'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 500
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Pause producers, collect and restore
+        timeout-minutes: 450
+        env:
+          GC_PRODUCER_TOKENS_JSON: ${{ secrets.GC_PRODUCER_TOKENS_JSON }}
+        run: python -u scripts/reader_gc_maintenance.py run --journal output/maintenance/journal.json
+      - name: Recover recorded producer state after an interrupted orchestration
+        if: always()
+        env:
+          GC_PRODUCER_TOKENS_JSON: ${{ secrets.GC_PRODUCER_TOKENS_JSON }}
+        run: python -u scripts/reader_gc_maintenance.py restore --journal output/maintenance/journal.json
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: reader-maintenance-journal
+          path: output/maintenance/*.json
+          retention-days: 90
+          if-no-files-found: error

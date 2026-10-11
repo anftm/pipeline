@@ -84,6 +84,20 @@ jobs:
           PAGES_REPO: ${{ secrets.PAGES_REPO }}
           READER_ASSETS_REPO: vomebook/Reader-Assets
         run: python scripts/publish_search_reader_index.py
+      - name: Capture deduplicated PDF/OCR progress
+        if: always()
+        timeout-minutes: 10
+        continue-on-error: true
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: python scripts/pdf_progress_report.py --output output/pdf-ocr/pdf-progress.json
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: pdf-progress-${{ inputs.stage }}-${{ inputs.worker_run_id }}
+          path: output/pdf-ocr/pdf-progress.json
+          retention-days: 30
+          if-no-files-found: warn
       - name: Advance completed rendering to this account's OCR queue
         if: inputs.stage == 'render'
         env:

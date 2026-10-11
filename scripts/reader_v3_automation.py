@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import re
 import tempfile
+import time
 from urllib.parse import unquote, urlsplit
 
 try:
@@ -20,8 +21,8 @@ except ImportError:
 
 STATE = "reader-index/v3/automation.json"
 REGISTRY = "reader-index/pdf_ocr_manifest.json"
-DAILY_ATTEMPTS = 2
-DAILY_PAGES = 1000
+DAILY_ATTEMPTS = 64
+DAILY_PAGES = 100000
 MAX_ATTEMPTS = 3
 
 
@@ -77,7 +78,7 @@ def retry(store, options, *, apply=False):
             task.setdefault("retries", []).append({"actor": actor, "at": clock().isoformat(),
                 "attempts": task["attempts"], "failures": task.get("failures", 0), "error_type": task.get("error_type")})
             task.update(status="pending", attempts=0, failures=0)
-            for name in ("retry_at", "retry_day", "error_type"):
+            for name in ("retry_at", "retry_day", "error_type", "review_status", "review_error", "merge_error"):
                 task.pop(name, None)
         persist(store, state)
     return {"applied": apply, "queue": queue, "retried": ids}
@@ -95,7 +96,7 @@ def spec_for(key, entry):
     publication.v3.resource(ocr)
     if not re.fullmatch(r"objects/" + source[:2] + "/" + source + r"/[0-9a-f]{16}/ocr-manifest\.json", ocr["path"]):
         raise ValueError("OCR resource/source mismatch")
-    spec = {"source_key": key, "source_sha256": source, "ocr_manifest": ocr}
+    spec = {"source_key": key, "source_sha256": source, "ocr_manifest": ocr, "vector_previews": True}
     if entry.get("source_kind", "upstream") == "upstream":
         origin = {"repo": entry.get("repo"), "path": entry.get("path"), "revision": entry.get("source_revision")}
         if (not isinstance(origin["repo"], str) or not re.fullmatch(r"VoiceOfML/[A-Za-z0-9._-]+", origin["repo"])
@@ -145,7 +146,26 @@ def discover(state, registry):
     return ignored
 
 
-def run(store, *, apply=False, priority_source=None, build=None, now=None):
+def run(store, *, apply=False, priority_source=None, build=None, now=None, max_books=4,
+        max_seconds=3600):
+    if type(max_books) is not int or not 1 <= max_books <= 100:
+        raise ValueError("v3 batch book limit must be 1..100")
+    started = time.monotonic()
+    reports = []
+    for _ in range(max_books if apply else 1):
+        if reports and time.monotonic() - started >= max_seconds:
+            break
+        report = _run_one(store, apply=apply, priority_source=priority_source, build=build, now=now)
+        reports.append(report)
+        if not apply or not report["processed"]:
+            break
+    result = reports[-1]
+    result["processed"] = [item for report in reports for item in report["processed"]]
+    result["elapsed_seconds"] = time.monotonic() - started
+    return result
+
+
+def _run_one(store, *, apply=False, priority_source=None, build=None, now=None):
     if apply:
         publication.assert_writer(store)
     state = copy.deepcopy(load_state(store))
