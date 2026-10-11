@@ -10,6 +10,7 @@ import json
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 try:
@@ -120,9 +121,12 @@ def verify_roots(store, reference_graph):
         roots = {p for p in store.list_files(bucket, ("",)) if graph.is_root(p)}
         if roots != {p for p in files if graph.is_root(p)}:
             raise RuntimeError("root inventory changed before deletion")
-    for ref, expected in reference_graph.root_hashes.items():
+    def recheck_root(item):
+        ref, expected = item
         if snapshot_digest(store, *ref) != expected:
             raise RuntimeError("root changed before deletion")
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(recheck_root, sorted(reference_graph.root_hashes.items())))
 
 
 def collect(store, fence, reference_graph, report, catalog, *, grace_days=0, limit=0,
@@ -209,6 +213,15 @@ def main():
         report["collection"] = result
         save()
         store.put_bytes(ASSETS, f"reader-index/gc/{run}/collection.json", encode(result))
+    last_progress = 0
+    def progress(stage, **counts):
+        nonlocal last_progress
+        value = {"stage": stage, "updated_at": lifecycle.now_iso(), **counts}
+        print(json.dumps(value), flush=True)
+        if args.apply and time.monotonic() - last_progress >= 30:
+            store.put_bytes(ASSETS, f"reader-index/gc/{run}/progress.json", encode(value))
+            last_progress = time.monotonic()
+    store.inventory_progress = lambda bucket, count: progress("inventory-progress", bucket=bucket, objects=count)
     try:
         report["producer_fence"] = fence.check()
         deadline = time.monotonic() + 1200
@@ -224,10 +237,12 @@ def main():
         fence.check()
         catalog, report["catalog"] = retire_catalog(store, raw, consumers, args.grace_days, apply=args.apply)
         save()
-        reference_graph = graph.ReferenceGraph(store, generation_grace_days=args.grace_days)
+        reference_graph = graph.ReferenceGraph(store, generation_grace_days=args.grace_days, progress=progress)
         scanned = reference_graph.build()
         report["graph"] = scanned
         save()
+        progress("deletion-preflight", graph_complete=scanned["graph_complete"],
+                 blockers=len(scanned["blockers"]))
         report["collection"] = collect(store, fence, reference_graph, scanned, catalog,
             grace_days=args.grace_days, limit=args.limit, apply=args.apply,
             checkpoint=checkpoint if args.apply else None)

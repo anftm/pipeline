@@ -32,6 +32,47 @@ class Store(MemoryStore):
 
 
 class ReaderGcCollectTests(unittest.TestCase):
+    def test_complete_deployed_projection_is_required_before_catalog_retirement(self):
+        store = Store()
+        sidecar = {'v': 1, 'f': {'book': {'p': 'objects/live/document.pdf', 'b': PDF}}}
+        store.put(ASSETS, SIDECAR, sidecar)
+        catalog, _ = reader_lifecycle.catalog_generation(sidecar)
+        store.put(ASSETS, collector.CATALOG, catalog)
+        client = Mock()
+        client.get.return_value.content = json.dumps(sidecar).encode()
+        with patch.object(collector, 'current', return_value=(None, {'files': {}})):
+            raw, consumers = collector.observe_projections(store, client)
+            self.assertEqual(set(consumers['receipts']), {'hf', 'pages'})
+            trimmed, _ = collector.retire_catalog(store, raw, consumers, 0, apply=True)
+            self.assertEqual(trimmed['generations'][trimmed['current']['generation']]['acks'],
+                             {'hf': True, 'pages': True})
+            client.get.return_value.content = json.dumps({'v': 1, 'f': {}}).encode()
+            with self.assertRaisesRegex(ValueError, 'complete sidecar'):
+                collector.observe_projections(store, client)
+
+    def test_partial_batch_failure_is_journaled_without_claiming_verified_deletion(self):
+        store = Store()
+        for number in range(2):
+            store.put(PDF, f'objects/orphan/{number}/document.pdf', b'orphan')
+        reference = graph.ReferenceGraph(store)
+        report = reference.build()
+        snapshots = []
+        delete = store.delete
+        calls = 0
+        def failing_delete(bucket, paths):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise RuntimeError('partial mutation failure')
+            delete(bucket, paths)
+        with patch.object(store, 'delete', side_effect=failing_delete):
+            with self.assertRaisesRegex(RuntimeError, 'partial mutation'):
+                collector.collect(store, Mock(), reference, report, {}, apply=True, batch_size=1,
+                    checkpoint=lambda result: snapshots.append(json.loads(json.dumps(result))))
+        self.assertEqual(snapshots[-1]['confirmed_deleted_objects'], 0)
+        self.assertEqual([batch['status'] for batch in snapshots[-1]['batches']],
+                         ['accepted', 'submitted'])
+
     def test_zero_day_retirement_preserves_current_unacked_and_handoff_tombstone(self):
         catalog = {'version': 1, 'kind': 'reader-catalog', 'current': {'generation': 'new'},
                    'generations': {

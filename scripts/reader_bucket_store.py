@@ -24,6 +24,7 @@ class HubBucketStore:
         from huggingface_hub import HfApi
         self.api = HfApi(token=os.environ.get("HF_TOKEN"))
         self.object_sizes = {}
+        self.inventory_progress = None
 
     def token(self, bucket):
         if bucket.startswith("melsm/"):
@@ -40,6 +41,8 @@ class HubBucketStore:
                     size = getattr(item, "size", None)
                     if type(size) is int and size >= 0:
                         self.object_sizes[(bucket, item.path)] = size
+                    if self.inventory_progress and len(files) % 50000 == 0:
+                        self.inventory_progress(bucket, len(files))
         return files
 
     def read_bytes(self, bucket: str, path: str) -> bytes:

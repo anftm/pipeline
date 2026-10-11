@@ -70,7 +70,8 @@ def decode(raw: bytes) -> dict:
 
 
 class ReferenceGraph:
-    def __init__(self, store, include_input: bool = True, generation_grace_days: int = 0):
+    def __init__(self, store, include_input: bool = True, generation_grace_days: int = 0,
+                 progress=None):
         self.store = store
         self.include_input = include_input
         self.files = {}
@@ -85,6 +86,7 @@ class ReferenceGraph:
         self.trees = set()
         self.generation_grace_days = generation_grace_days
         self.catalog = {}
+        self.progress = progress or (lambda *args, **kwargs: None)
 
     def load(self, ref: tuple[str, str]) -> dict | None:
         try:
@@ -309,8 +311,10 @@ class ReferenceGraph:
             if bucket == PDF_OCR_INPUT_BUCKET and not self.include_input:
                 continue
             try:
+                self.progress("inventory", bucket=bucket)
                 self.files[bucket] = self.store.list_files(bucket, ("",))
                 self.ordered[bucket] = sorted(self.files[bucket])
+                self.progress("inventory-complete", bucket=bucket, objects=len(self.files[bucket]))
             except Exception as error:
                 self.blockers.add(f"inventory unavailable: {bucket} ({type(error).__name__})")
         required = (READER_ASSETS_BUCKET, "reader-index/reader_assets.json.gz")
@@ -338,16 +342,19 @@ class ReferenceGraph:
                         self.walk(payload, *ref)
                 if hasattr(self.store, "read_graph_json") and len(self.seen) % 256 < len(refs):
                     print(f"GC graph: checked {len(self.seen)} roots/manifests; {len(self.pending)} pending", flush=True)
+                    self.progress("reference-traversal", checked=len(self.seen), pending=len(self.pending))
         # Publication currently has several independent locks. Re-read every
         # root and its key inventory to detect a changing snapshot.
         for bucket, files in self.files.items():
             try:
+                self.progress("root-inventory-recheck", bucket=bucket)
                 latest = self.store.list_files(bucket, ("",))
                 if {p for p in latest if is_root(p)} != {p for p in files if is_root(p)}:
                     self.blockers.add(f"root inventory changed: {bucket}")
             except Exception as error:
                 self.blockers.add(f"root inventory recheck failed: {bucket} ({type(error).__name__})")
-        for ref, digest in self.root_hashes.items():
+        def recheck_root(item):
+            ref, digest = item
             try:
                 actual = self.store.digest(*ref) if hasattr(self.store, "digest") else (
                     hashlib.sha256(self.store.read_bytes(*ref)).hexdigest())
@@ -355,6 +362,9 @@ class ReferenceGraph:
                     self.blockers.add(f"root changed: {ref[0]}:{ref[1]}")
             except Exception as error:
                 self.blockers.add(f"root recheck failed: {ref[0]}:{ref[1]} ({type(error).__name__})")
+        self.progress("root-content-recheck", roots=len(self.root_hashes))
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            list(pool.map(recheck_root, sorted(self.root_hashes.items())))
         if self.missing:
             self.blockers.add("referenced objects are missing")
         buckets = {}
