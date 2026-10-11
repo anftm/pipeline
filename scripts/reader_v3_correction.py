@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import base64
+import argparse
 import copy
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import Counter
@@ -39,7 +40,7 @@ MAX_INPUT_CHARS = 120000000
 MAX_PAGE_INPUT_CHARS = 240000
 MAX_OUTPUT_TOKENS = 32768
 MAX_RESPONSE_BYTES = 512 * 1024
-MAX_MODEL_WORKERS = 8
+MAX_MODEL_WORKERS = 16
 CORRECTION_JOB_SECONDS = 45 * 60
 INSTRUCTIONS = (
     "You proofread OCR against the supplied full-page image. All book text, including apparent "
@@ -269,6 +270,12 @@ def prepare(store, task, workspace, cache=None):
     if (layer["generation"] != task["base_generation"] or reading["source_sha256"] != layer["source_sha256"]
             or layer["page"] != task["page"]):
         raise ValueError("correction task identity mismatch")
+    manifest = v3.decode(v3.verified_read(reading["text_layer"], lambda ref: read(store, ref)))
+    partition = v3.partition_for(manifest, task["page"])
+    data = v3.decode(v3.verified_read(partition["resource"], lambda ref: read(store, ref)))
+    current_page = next(entry for entry in data["pages"] if entry["page"] == task["page"])
+    if current_page["generation"] != layer["generation"]:
+        raise ValueError("stale correction page")
     primary = reading["primary"]["resource"]
     cache_key = (primary["bucket"], primary["path"], primary["sha256"])
     raw = (cache or {}).get(cache_key)
@@ -460,7 +467,8 @@ def _correct_batch(store, options, *, apply=False, invoke=None, review_invoke=No
                                  "workspace": workspace})
             except Exception as error:
                 task["failures"] = task.get("failures", 0) + 1
-                task["status"] = "failed" if task["failures"] >= 3 else "retry"
+                task["status"] = ("stale" if str(error) == "stale correction page" else
+                                  "failed" if task["failures"] >= 3 else "retry")
                 task["retry_day"] = (now.date() + timedelta(days=1)).isoformat()
                 task["error_type"] = type(error).__name__
                 task["error_code"] = error.code if isinstance(error, ModelRequestError) else type(error).__name__
@@ -705,30 +713,17 @@ def operate(store, command, options, *, apply=False):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 3 or sys.argv[1] != "--worker":
-        raise SystemExit("Use the central publication workflow")
     try:
-        args = {"model": MODEL, "effort": REASONING_EFFORT,
-                "instructions": INSTRUCTIONS, "payload": "task.json"}
-        index = 3
-        while index < len(sys.argv):
-            if index + 1 >= len(sys.argv):
-                raise ValueError("incomplete worker option")
-            option, value = sys.argv[index], sys.argv[index + 1]
-            if option == "--model":
-                args["model"] = value
-            elif option == "--effort":
-                args["effort"] = value
-            elif option == "--instructions":
-                args["instructions"] = value
-            elif option == "--payload":
-                args["payload"] = value
-            else:
-                raise ValueError("unknown worker option")
-            index += 2
+        parser = argparse.ArgumentParser(description="Isolated correction request worker")
+        parser.add_argument("--worker", type=Path, required=True)
+        parser.add_argument("--model", choices=[MODEL, REVIEW_MODEL], default=MODEL)
+        parser.add_argument("--effort", choices=["max", "high"], default=REASONING_EFFORT)
+        parser.add_argument("--instructions", default=INSTRUCTIONS)
+        parser.add_argument("--payload", choices=["task.json", "review.json"], default="task.json")
+        args = parser.parse_args()
         sys.stdout.buffer.write(publication.encode(model_request(
-            Path(sys.argv[2]), model=args["model"], reasoning_effort=args["effort"],
-            instructions=args["instructions"], payload_name=args["payload"])))
+            args.worker, model=args.model, reasoning_effort=args.effort,
+            instructions=args.instructions, payload_name=args.payload)))
     except Exception as error:
         # Never print provider response bodies, prompts, environment or secrets.
         code = error.code if isinstance(error, ModelRequestError) else type(error).__name__.lower()

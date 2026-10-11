@@ -133,6 +133,7 @@ def discover(state, registry):
     if registry.get("version") != 1 or not isinstance(registry.get("files"), dict):
         raise ValueError("invalid OCR registry")
     ignored = {}
+    active_identities = set()
     for key, entry in sorted(registry["files"].items()):
         if entry.get("status") != "ready":
             continue
@@ -142,7 +143,11 @@ def discover(state, registry):
             ignored[key] = type(error).__name__
             continue
         identity = text.digest(spec)
+        active_identities.add(identity)
         state["tasks"].setdefault(identity, {"spec": spec, "page_count": count, "status": "pending", "attempts": 0})
+    for identity, task in state["tasks"].items():
+        if identity not in active_identities and task["status"] in {"pending", "retry", "building"} and not task.get("candidate"):
+            task["status"] = "superseded"
     return ignored
 
 
@@ -183,7 +188,7 @@ def _run_one(store, *, apply=False, priority_source=None, build=None, now=None):
             task["status"] = "published" if active["source_sha256"] == spec["source_sha256"] else "protected"
             task["active_generation"] = active["reading_generation"]
             continue
-        if task["status"] in {"published", "protected", "failed", "needs-review"}:
+        if task["status"] in {"published", "protected", "failed", "needs-review", "superseded"}:
             continue
         if not task.get("candidate") and task["attempts"] >= MAX_ATTEMPTS:
             task["status"] = "failed"

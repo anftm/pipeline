@@ -109,7 +109,7 @@ jobs:
         continue-on-error: true
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: python scripts/pdf_progress_report.py --output output/v3/pdf-progress.json
+        run: python scripts/pdf_progress_report.py --record --output output/v3/pdf-progress.json
       - uses: actions/upload-artifact@v7
         if: always()
         with:

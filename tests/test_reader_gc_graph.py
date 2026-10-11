@@ -44,6 +44,21 @@ class MemoryStore:
 
 
 class ReaderGcGraphTests(unittest.TestCase):
+    def test_retired_input_never_overrides_open_review_evidence(self):
+        store = MemoryStore()
+        source = "a" * 64
+        path = f"objects/aa/{source}/{'b' * 16}/ocr-input/page-000001.png"
+        store.put(INPUT, path, b"input")
+        store.put(ASSETS, "reader-index/v3/retirement.json", {
+            "version": 1, "kind": "reader-v3-retirement", "resources": [], "retired_paths": [],
+            "replacement_acks": {"hf": True, "pages": True}, "retired_inputs": {path: {
+                "bucket": INPUT, "path": path, "source_sha256": source}}})
+        store.put(ASSETS, "reader-index/open-review.json", {"resources": [{
+            "bucket": INPUT, "path": path, "role": "review"}]})
+        report = gc.ReferenceGraph(store).build()
+        self.assertFalse(report["graph_complete"])
+        self.assertTrue(any("open review" in error for error in report["blockers"]))
+
     def test_pinned_all_format_sidecar_keeps_resources_without_mutable_base_reference(self):
         store = MemoryStore()
         document = "documents/text/txt/" + "a" * 64 + "/document.txt"

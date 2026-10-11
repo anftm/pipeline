@@ -28,6 +28,7 @@ BUCKETS = (READER_ASSETS_BUCKET, PDF_PAGES_BUCKET, PDF_OCR_INPUT_BUCKET)
 MANAGED_PREFIXES = (
     "objects/", "ebook-chapters/", "staging/", "pages/", "documents/",
     "chapters/", "media/", "native/", "derived/",
+    "reader-index/snapshots/",
 )
 PATH_FIELDS = {
     "path", "paths", "object", "fallback", "manifest", "manifest_path", "root",
@@ -87,6 +88,7 @@ class ReferenceGraph:
         self.generation_grace_days = generation_grace_days
         self.catalog = {}
         self.retired_roots = set()
+        self.retired_inputs = set()
         self.progress = progress or (lambda *args, **kwargs: None)
 
     def load(self, ref: tuple[str, str]) -> dict | None:
@@ -115,6 +117,8 @@ class ReferenceGraph:
             self.blockers.add(f"invalid object path: {bucket}:{path}")
             return
         ref = (bucket, path)
+        if ref in self.retired_inputs and not tree:
+            return
         self.references.add(ref)
         if bucket not in self.files:
             self.blockers.add(f"referenced bucket was not inventoried: {bucket}")
@@ -174,6 +178,9 @@ class ReferenceGraph:
                 return
             if value.get("kind") == "reader-v3-automation":
                 for task in value.get("tasks", {}).values():
+                    candidate = task.get("candidate") or {}
+                    if task.get("status") == "published" and (candidate.get("bucket"), candidate.get("path")) in self.retired_roots:
+                        continue
                     task = dict(task)
                     spec = dict(task.get("spec") or {})
                     if spec.get("primary_source"):
@@ -202,6 +209,8 @@ class ReferenceGraph:
                     return
                 self.blockers.add(f"released root lacks catalog handoff: {bucket}:{origin}")
             context = value.get("bucket")
+            if value.get("role") == "review" and (context, value.get("path")) in self.retired_inputs:
+                self.blockers.add(f"retired input still has open review evidence: {context}:{value.get('path')}")
             if context is not None:
                 if not isinstance(context, str) or context not in BUCKETS:
                     self.blockers.add(f"invalid bucket in {bucket}:{origin}")
@@ -353,9 +362,16 @@ class ReferenceGraph:
             state = self.load(retirement_ref)
             if state and self.validate(state, *retirement_ref):
                 import re
+                for path, item in state.get("retired_inputs", {}).items():
+                    if (not re.fullmatch(r"objects/[0-9a-f]{2}/[0-9a-f]{64}/[0-9a-f]{16}/ocr-input/page-[0-9]{6}\.png", path)
+                            or item.get("path") != path or item.get("bucket") != PDF_OCR_INPUT_BUCKET
+                            or item.get("source_sha256") != path.split("/")[2]):
+                        self.blockers.add("invalid retired OCR input identity")
+                    else:
+                        self.retired_inputs.add((PDF_OCR_INPUT_BUCKET, path))
                 for path in state["retired_paths"]:
                     if not isinstance(path, str) or not re.fullmatch(
-                            r"reader-index/v3/(?:promotions/[0-9a-f]{64}\.json|generations/[0-9a-f]{64}/catalog\.json)", path):
+                            r"reader-index/(?:v3/(?:promotions/[0-9a-f]{64}\.json|generations/[0-9a-f]{64}/catalog\.json|candidates/[0-9a-f]{64}\.json)|processing/v3-[0-9a-f]{32}\.json)", path):
                         self.blockers.add("invalid retired root path")
                     else:
                         self.retired_roots.add((READER_ASSETS_BUCKET, path))

@@ -8,6 +8,7 @@ from collections import Counter
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 
@@ -19,6 +20,7 @@ except ImportError:
 
 REGISTRIES = ("pdf_render_manifest.json", "pdf_ocr_manifest.json",
               "pdf_render_progress.json", "pdf_ocr_progress.json")
+HISTORY = "reader-index/progress/history.json"
 
 
 def identity(entry):
@@ -147,11 +149,48 @@ def build_report(store=None):
     return report
 
 
+def record_progress(store, report):
+    try:
+        from .pdf_worker_lanes import load_config
+    except ImportError:
+        from pdf_worker_lanes import load_config
+    central = load_config()["publisher_repository"]
+    ref = os.environ.get("GITHUB_WORKFLOW_REF")
+    if (os.environ.get("GITHUB_ACTIONS") != "true" or os.environ.get("GITHUB_REPOSITORY") != central
+            or ref not in {central + "/.github/workflows/pdf-account-publish.yml@refs/heads/main",
+                           central + "/.github/workflows/reader-v3-publish.yml@refs/heads/main"}):
+        raise RuntimeError("progress history requires the serialized central publisher")
+    try:
+        history = json.loads(store.read_bytes(publication.ASSETS, HISTORY))
+    except FileNotFoundError:
+        history = {"version": 1, "kind": "pdf-progress-history", "resources": [], "observations": []}
+    if history.get("kind") != "pdf-progress-history" or not isinstance(history.get("observations"), list):
+        raise ValueError("invalid progress history")
+    observation = {key: report[key] for key in ("observed_at", "source_books", "render_ready_books",
+        "render_ready_pages", "ocr_ready_books", "ocr_ready_pages", "ocr_recognized_pages", "v3_promoted_books")}
+    if history["observations"]:
+        previous = history["observations"][-1]
+        elapsed = (datetime.fromisoformat(observation["observed_at"]) -
+                   datetime.fromisoformat(previous["observed_at"])).total_seconds()
+        deltas = {key: observation[key] - previous[key] for key in observation if key != "observed_at"}
+        report["since_previous_observation"] = {"elapsed_seconds": elapsed, "deltas": deltas,
+            "scope": "net-registry-growth-not-model-execution-rate",
+            "hourly_net_growth": {key: value * 3600 / elapsed for key, value in deltas.items()} if elapsed > 0 else {}}
+    history["observations"] = (history["observations"] + [observation])[-1024:]
+    raw = publication.encode(history)
+    store.put_bytes(publication.ASSETS, HISTORY, raw)
+    if store.read_bytes(publication.ASSETS, HISTORY) != raw:
+        raise ValueError("progress history readback mismatch")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--record", action="store_true")
     args = parser.parse_args()
     report = build_report()
+    if args.record:
+        record_progress(publication.HubBucketStore(), report)
     encoded = json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
