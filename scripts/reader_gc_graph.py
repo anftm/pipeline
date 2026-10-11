@@ -100,7 +100,9 @@ class ReferenceGraph:
             return payload
         except Exception as error:
             # A permissions/transport failure must never resemble an empty root.
-            self.blockers.add(f"unreadable JSON: {ref[0]}:{ref[1]} ({type(error).__name__})")
+            status = getattr(getattr(error, "response", None), "status_code", None)
+            detail = f" HTTP {status}" if status else ""
+            self.blockers.add(f"unreadable JSON: {ref[0]}:{ref[1]} ({type(error).__name__}{detail})")
             return None
 
     def mark(self, bucket: str, path: str, *, tree: bool = False):
@@ -166,6 +168,19 @@ class ReferenceGraph:
 
     def walk(self, value, bucket: str, origin: str, explicit: bool = False, field: str = ""):
         if isinstance(value, dict):
+            if value.get("kind") == "reader-v3-automation":
+                for task in value.get("tasks", {}).values():
+                    task = dict(task)
+                    spec = dict(task.get("spec") or {})
+                    if spec.get("primary_source"):
+                        planned = spec.pop("primary", None)
+                        if isinstance(planned, dict):
+                            target = (planned.get("bucket"), planned.get("path"))
+                            if target[1] in self.files.get(target[0], set()):
+                                self.walk(planned, bucket, origin, explicit, "primary")
+                    task["spec"] = spec
+                    self.walk(task, bucket, origin, explicit, "task")
+                return
             if origin.endswith("reader_catalog.json") and value.get("kind") == "reader-catalog":
                 current = (value.get("current") or {}).get("generation")
                 for generation in (value.get("generations") or {}).values():

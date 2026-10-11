@@ -116,6 +116,67 @@ def retired_snapshots(catalog):
     return result
 
 
+def collect_retired_snapshots(store, fence, catalog, *, apply=False, checkpoint=None):
+    """Retire catalog-owned snapshots; this never authorizes content-bundle deletion."""
+    expected_catalog = store.read_bytes(ASSETS, CATALOG)
+    if apply and graph.decode(expected_catalog) != catalog:
+        raise RuntimeError("catalog changed before snapshot collection")
+    targets = retired_snapshots(catalog)
+    current_id = catalog["current"]["generation"]
+    current_snapshot = catalog["generations"][current_id].get("snapshot")
+    if not current_snapshot or current_snapshot["path"] in targets:
+        raise ValueError("current catalog snapshot is not protected")
+    refs = {entry["snapshot"]["path"]: entry["snapshot"]
+            for entry in catalog.get("retired_generations", {}).values() if entry.get("snapshot")}
+    present, sizes = [], {}
+    for path in sorted(targets):
+        try:
+            raw = store.read_bytes(ASSETS, path)
+        except FileNotFoundError:
+            continue
+        ref = refs[path]
+        if len(raw) != ref["bytes"] or hashlib.sha256(raw).hexdigest() != ref["sha256"]:
+            raise ValueError("retired snapshot checksum mismatch")
+        present.append(path)
+        sizes[path] = len(raw)
+    current_raw = store.read_bytes(ASSETS, current_snapshot["path"])
+    if (len(current_raw) != current_snapshot["bytes"]
+            or hashlib.sha256(current_raw).hexdigest() != current_snapshot["sha256"]):
+        raise ValueError("current snapshot checksum mismatch")
+    result = {"scope": "retired-catalog-snapshots", "planned_objects": len(present),
+              "confirmed_deleted_objects": 0, "confirmed_deleted_bytes": 0,
+              "deleted_bytes_complete": True, "applied": apply, "batches": []}
+    if not apply or not present:
+        return result
+    fence.check()
+    if store.read_bytes(ASSETS, CATALOG) != expected_catalog:
+        raise RuntimeError("catalog changed before snapshot deletion")
+    batch = {"bucket": ASSETS, "paths": present, "status": "submitted"}
+    result["batches"].append(batch)
+    if checkpoint:
+        checkpoint(result)
+    store.delete(ASSETS, present)
+    batch["status"] = "accepted"
+    if checkpoint:
+        checkpoint(result)
+    fence.check()
+    for path in present:
+        try:
+            store.read_bytes(ASSETS, path)
+        except FileNotFoundError:
+            continue
+        raise RuntimeError("retired snapshot deletion readback still contains object")
+    if store.read_bytes(ASSETS, current_snapshot["path"]) != current_raw:
+        raise RuntimeError("current snapshot changed during retirement")
+    if store.read_bytes(ASSETS, CATALOG) != expected_catalog:
+        raise RuntimeError("catalog changed during snapshot retirement")
+    batch["status"] = "verified-deleted"
+    result.update(confirmed_deleted_objects=len(present), confirmed_deleted_bytes=sum(sizes.values()))
+    if checkpoint:
+        checkpoint(result)
+    return result
+
+
 def verify_roots(store, reference_graph):
     for bucket, files in reference_graph.files.items():
         roots = {p for p in store.list_files(bucket, ("",)) if graph.is_root(p)}
@@ -196,6 +257,7 @@ def main():
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--grace-days", type=int, default=0)
     parser.add_argument("--limit", type=int, default=0)
+    parser.add_argument("--retired-snapshots-only", action="store_true")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if args.grace_days < 0 or args.limit < 0:
@@ -237,6 +299,12 @@ def main():
         fence.check()
         catalog, report["catalog"] = retire_catalog(store, raw, consumers, args.grace_days, apply=args.apply)
         save()
+        if args.retired_snapshots_only:
+            report["collection"] = collect_retired_snapshots(store, fence, catalog,
+                apply=args.apply, checkpoint=checkpoint if args.apply else None)
+            report["complete"] = True
+            print(json.dumps({k: v for k, v in report["collection"].items() if k != "batches"}), flush=True)
+            return
         reference_graph = graph.ReferenceGraph(store, generation_grace_days=args.grace_days, progress=progress)
         scanned = reference_graph.build()
         report["graph"] = scanned

@@ -115,6 +115,7 @@ class ReaderGcCollectTests(unittest.TestCase):
             page = parsed['files']['book']['pages']['1']
             self.assertEqual(page, {'raw_resource': payload['files']['book']['pages']['1']['raw_resource']})
             self.assertEqual(parsed['components']['document'], 'ready')
+            self.assertEqual(parsed['components']['text'], 'ready')
         with self.assertRaises(Exception):
             graph_json([b'{"files":{'])
 
@@ -179,6 +180,38 @@ class ReaderGcCollectTests(unittest.TestCase):
         self.assertEqual(result['confirmed_deleted_objects'], 1)
         self.assertNotIn(old, store.objects[ASSETS])
         self.assertIn(live, store.objects[ASSETS])
+
+    def test_snapshot_retirement_verifies_identity_and_keeps_current(self):
+        store = Store()
+        def snapshot(generation, content):
+            path = f'reader-index/generations/{generation}/reader_assets.json.gz'
+            raw = gzip.compress(content)
+            store.objects[ASSETS][path] = raw
+            return {'bucket': ASSETS, 'path': path, 'bytes': len(raw),
+                    'sha256': hashlib.sha256(raw).hexdigest()}
+        old, live = 'a' * 32, 'b' * 32
+        old_ref, live_ref = snapshot(old, b'old'), snapshot(live, b'live')
+        catalog = {'version': 1, 'kind': 'reader-catalog', 'current': {'generation': live},
+            'generations': {live: {'snapshot': live_ref}}, 'retired_generations': {
+                old: {'snapshot': old_ref, 'replacement_acks': {'hf': True, 'pages': True}}}}
+        store.put(ASSETS, collector.CATALOG, catalog)
+        result = collector.collect_retired_snapshots(store, Mock(), catalog, apply=True)
+        self.assertEqual(result['confirmed_deleted_objects'], 1)
+        self.assertEqual(result['confirmed_deleted_bytes'], old_ref['bytes'])
+        self.assertIn(live_ref['path'], store.objects[ASSETS])
+        self.assertNotIn(old_ref['path'], store.objects[ASSETS])
+
+    def test_planned_primary_is_not_an_uploaded_dependency_but_real_candidate_is(self):
+        store = Store()
+        store.put(ASSETS, 'reader-index/v3/automation.json', {'version': 1,
+            'kind': 'reader-v3-automation', 'tasks': {'one': {'spec': {
+                'primary_source': {'repo': 'VoiceOfML/test', 'path': 'original.pdf'},
+                'primary': {'bucket': PDF, 'path': 'objects/planned/document.pdf'}}}}, 'days': {}})
+        scanned = graph.ReferenceGraph(store).build()
+        self.assertTrue(scanned['graph_complete'], scanned['blockers'])
+        store.put(ASSETS, 'reader-index/candidate.json', {'resources': [
+            {'bucket': PDF, 'path': 'objects/actual/reading-manifest.json'}]})
+        self.assertFalse(graph.ReferenceGraph(store).build()['graph_complete'])
 
     def test_fence_rejects_enabled_workflow_and_running_jobs_across_all_lanes(self):
         def api(endpoint):

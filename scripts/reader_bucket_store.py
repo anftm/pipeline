@@ -9,12 +9,34 @@ import json
 import os
 import posixpath
 import tempfile
+import time
 from pathlib import Path
 from urllib.parse import quote
 
 
 class S3NotFound(FileNotFoundError):
     pass
+
+
+def retry_read(operation):
+    import httpx
+    from huggingface_hub.errors import HfHubHTTPError
+    for attempt in range(6):
+        try:
+            return operation()
+        except HfHubHTTPError as error:
+            status = getattr(error.response, "status_code", None)
+            if status not in {408, 429, 500, 502, 503, 504} or attempt == 5:
+                raise
+            try:
+                delay = min(60, max(1, int(error.response.headers.get("Retry-After", "1"))))
+            except ValueError:
+                delay = min(30, 2 ** attempt)
+        except httpx.TransportError:
+            if attempt == 5:
+                raise
+            delay = min(30, 2 ** attempt)
+        time.sleep(delay)
 
 
 class HubBucketStore:
@@ -71,11 +93,13 @@ class HubBucketStore:
         except ImportError:
             from reader_gc_stream import graph_json
         token = self.token(bucket)
-        with get_session().stream("GET", f"https://huggingface.co/buckets/{bucket}/resolve/{quote(path, safe='/')}",
-                headers={"Authorization": f"Bearer {token}"} if token else {},
-                follow_redirects=True, timeout=120) as response:
-            hf_raise_for_status(response)
-            return graph_json(response.iter_bytes(), path.endswith(".gz"))
+        def read():
+            with get_session().stream("GET", f"https://huggingface.co/buckets/{bucket}/resolve/{quote(path, safe='/')}",
+                    headers={"Authorization": f"Bearer {token}"} if token else {},
+                    follow_redirects=True, timeout=120) as response:
+                hf_raise_for_status(response)
+                return graph_json(response.iter_bytes(), path.endswith(".gz"))
+        return retry_read(read)
 
     def digest(self, bucket: str, path: str) -> str:
         import hashlib

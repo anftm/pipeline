@@ -11,6 +11,11 @@ on:
         description: Unreferenced object and superseded catalog retention in days
         type: string
         default: "0"
+      scope:
+        description: Full unreferenced content collection or catalog-owned retired snapshots
+        type: choice
+        options: [unreferenced, retired-catalog-snapshots]
+        default: unreferenced
 
 permissions:
   contents: read
@@ -39,10 +44,12 @@ jobs:
           GH_TOKEN: ${{ secrets.PDF_WORKER_READ_TOKEN }}
           APPLY: ${{ inputs.apply }}
           GRACE_DAYS: ${{ inputs.grace_days }}
+          SCOPE: ${{ inputs.scope }}
         run: |
           [[ "$GRACE_DAYS" =~ ^[0-9]+$ ]] || exit 1
           args=(--grace-days "$GRACE_DAYS" --output output/gc/collection.json)
           if [[ "$APPLY" == true ]]; then args+=(--apply); fi
+          if [[ "$SCOPE" == retired-catalog-snapshots ]]; then args+=(--retired-snapshots-only); fi
           python -u scripts/reader_gc_collect.py "${args[@]}"
       - uses: actions/upload-artifact@v7
         if: always()
