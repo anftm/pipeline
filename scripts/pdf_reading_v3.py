@@ -147,7 +147,7 @@ def validate_text_manifest(manifest):
     return manifest
 
 
-def build_text_bundle(layers, raw_pages, root, bundle, *, parent=None):
+def build_text_bundle(layers, raw_pages, root, bundle, *, parent=None, include_search=True):
     if not layers or [p["page"] for p in layers] != list(range(1, len(layers) + 1)):
         raise ValueError("text layers must cover every page")
     if len(raw_pages) != len(layers):
@@ -187,7 +187,7 @@ def build_text_bundle(layers, raw_pages, root, bundle, *, parent=None):
                       "start": start, "end": end, "pages": chunk}, compressed=True)
         search_partitions.append({"start": start, "end": end, "resource": ref})
 
-    for layer in layers:
+    for layer in layers if include_search else []:
         page = {"page": layer["page"], "text": layer["text"], "text_generation": layer["generation"]}
         size = len(json.dumps(page, ensure_ascii=False).encode("utf-8"))
         if chunk and (len(chunk) >= SEARCH_PARTITION_PAGES or chunk_bytes + size > SEARCH_PARTITION_BYTES):
@@ -195,7 +195,8 @@ def build_text_bundle(layers, raw_pages, root, bundle, *, parent=None):
             chunk, chunk_bytes = [], 0
         chunk.append(page)
         chunk_bytes += size
-    flush_search()
+    if chunk:
+        flush_search()
     book_text = stored(bundle / root / "text" / "book-text.json.gz", bundle,
                        {"version": 2, "kind": "pdf-book-text", "complete": True,
                         "source_sha256": source, "page_count": len(layers),
@@ -222,8 +223,9 @@ def build_text_bundle(layers, raw_pages, root, bundle, *, parent=None):
     manifest = {"version": 1, "kind": "pdf-text-layer-index", "complete": True,
                 "source_sha256": source, "generation": generation, "page_count": len(layers),
                 "revision": revision, "quality": quality, "offset_unit": "unicode-codepoint",
-                "partitions": partitions, "review": review, "review_count": len(tasks), "book_text": book_text,
-                "search_partitions": search_partitions}
+                "partitions": partitions, "review": review, "review_count": len(tasks), "book_text": book_text}
+    if include_search:
+        manifest["search_partitions"] = search_partitions
     if parent is not None:
         manifest["parent"] = resource(parent)
     validate_text_manifest(manifest)

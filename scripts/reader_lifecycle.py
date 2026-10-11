@@ -19,6 +19,11 @@ PROCESSING_PREFIX = "processing/"
 TERMINAL_SUCCESS = {"done", "skipped"}
 
 
+def valid_processing_root(bucket, root):
+    return (isinstance(root, str) and (
+        root.startswith("objects/") or bucket == READER_ASSETS_BUCKET and root.startswith("pages/image/")))
+
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
@@ -32,7 +37,7 @@ def processing_record(resources: list[dict], operation: str, run: dict) -> dict:
     if not resources or any(not isinstance(item, dict)
                             or item.get("bucket") not in {READER_ASSETS_BUCKET, PDF_PAGES_BUCKET, PDF_OCR_INPUT_BUCKET}
                             or not isinstance(item.get("root"), str)
-                            or not item["root"].startswith("objects/")
+                            or not valid_processing_root(item["bucket"], item["root"])
                             or any(part in {"", ".", ".."} for part in item["root"].split("/"))
                             for item in resources):
         raise ValueError("processing roots require bucket-qualified resources")
@@ -60,8 +65,8 @@ def validate_processing_handoff(record: dict, result: dict) -> None:
             for key, child in value.items():
                 if key == "processing_roots":
                     continue
-                if key in {"path", "o", "i", "w", "j", "ocr_manifest"} and isinstance(child, str) \
-                        and child.startswith("objects/"):
+                if key in {"path", "manifest", "o", "i", "w", "j", "ocr_manifest"} and isinstance(child, str) \
+                        and child.startswith(("objects/", "pages/image/")):
                     paths.add(child)
                 elif isinstance(child, (dict, list)):
                     visit(child)
@@ -74,7 +79,8 @@ def validate_processing_handoff(record: dict, result: dict) -> None:
         raise ValueError("processing handoff has no resources")
     for resource in resources:
         root = resource.get("root", "") if isinstance(resource, dict) else ""
-        if not root.startswith("objects/") or not any(path.startswith(root + "/") for path in paths):
+        if not valid_processing_root(resource.get("bucket"), root) or not any(
+                path.startswith(root + "/") for path in paths):
             raise ValueError("processing root does not belong to the published result")
 
 

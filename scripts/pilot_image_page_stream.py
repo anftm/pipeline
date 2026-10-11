@@ -52,11 +52,13 @@ def parse_args() -> argparse.Namespace:
 
 
 def download(url: str, target: Path, token: str | None) -> None:
-    request = urllib.request.Request(url)
-    if token:
-        request.add_header("Authorization", f"Bearer {token}")
-    with urllib.request.urlopen(request, timeout=120) as response:
-        target.write_bytes(response.read())
+    from huggingface_hub.utils import get_session, hf_raise_for_status
+    with get_session().stream("GET", url, headers={"Authorization": f"Bearer {token}"} if token else {},
+                              follow_redirects=True, timeout=120) as response:
+        hf_raise_for_status(response)
+        with target.open("wb") as stream:
+            for chunk in response.iter_bytes():
+                stream.write(chunk)
 
 
 def source_records(path: Path, revisions: dict, max_bytes: int, extension_filter: str) -> list[dict]:
@@ -89,6 +91,10 @@ def build_one(item: dict, work: Path, token: str | None, bucket: str) -> tuple[d
     source = work / "source"
     download(source_url(item["repo"], item["revision"], item["path"]), source, token)
     source_digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    if item.get("source_sha256") and item["source_sha256"] != source_digest:
+        raise ValueError("image source checksum differs from pinned repair identity")
+    if item.get("bytes") and source.stat().st_size != item["bytes"]:
+        raise ValueError("image source byte count differs from pinned metadata")
     object_id = source_digest
     extension = item["extension"]
     root = f"{IMAGE_ROOT}/{extension}/{object_id}"

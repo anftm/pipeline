@@ -1,0 +1,72 @@
+name: Repair Missing Reader Resources
+on:
+  workflow_dispatch:
+    inputs:
+      report_run_id:
+        description: Completed central GC run containing the missing-reference report
+        type: string
+        required: true
+      mode:
+        type: choice
+        options: [all, images, text]
+        default: all
+      limit:
+        description: Maximum bundles; zero repairs all selected missing bundles
+        type: string
+        default: "0"
+      apply:
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: reader-sidecar
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  repair:
+    if: github.repository == 'anftm/pipeline'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - run: pip install -r scripts/requirements.txt
+      - name: Validate central source report
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPORT_RUN_ID: ${{ inputs.report_run_id }}
+        run: |
+          [[ "$REPORT_RUN_ID" =~ ^[0-9]+$ ]] || exit 1
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$REPORT_RUN_ID" --jq '.path + " " + .status' |
+            python -c 'import sys; assert sys.stdin.read().strip() == ".github/workflows/reader-gc-collect.yml completed"'
+      - uses: actions/download-artifact@v8
+        with:
+          name: reader-gc-collection
+          path: output/gc-report
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.report_run_id }}
+      - name: Restore exact missing image and text-layer bundles
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_INPUT_TOKEN: ${{ secrets.HF_INPUT_TOKEN }}
+          APPLY: ${{ inputs.apply }}
+          LIMIT: ${{ inputs.limit }}
+          MODE: ${{ inputs.mode }}
+        run: |
+          [[ "$LIMIT" =~ ^[0-9]+$ ]] || exit 1
+          args=(--report output/gc-report/collection.json --output output/repair/report.json --mode "$MODE" --limit "$LIMIT")
+          if [[ "$APPLY" == true ]]; then args+=(--apply); fi
+          python -u scripts/reader_resource_repair.py "${args[@]}"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: reader-resource-repair
+          path: output/repair/*.json
+          retention-days: 30
+          if-no-files-found: warn
