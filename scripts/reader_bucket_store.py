@@ -118,15 +118,17 @@ class HubBucketStore:
         import hashlib
         from huggingface_hub.utils import get_session, hf_raise_for_status
         token = self.token(bucket)
-        digest = hashlib.sha256()
-        self.pace_resolver()
-        with get_session().stream("GET", f"https://huggingface.co/buckets/{bucket}/resolve/{quote(path, safe='/')}",
-                headers={"Authorization": f"Bearer {token}"} if token else {},
-                follow_redirects=True, timeout=120) as response:
-            hf_raise_for_status(response)
-            for chunk in response.iter_bytes():
-                digest.update(chunk)
-        return digest.hexdigest()
+        def read_digest():
+            digest = hashlib.sha256()
+            self.pace_resolver()
+            with get_session().stream("GET", f"https://huggingface.co/buckets/{bucket}/resolve/{quote(path, safe='/')}",
+                    headers={"Authorization": f"Bearer {token}"} if token else {},
+                    follow_redirects=True, timeout=120) as response:
+                hf_raise_for_status(response)
+                for chunk in response.iter_bytes():
+                    digest.update(chunk)
+            return digest.hexdigest()
+        return retry_read(read_digest)
 
     def put_bytes(self, bucket: str, path: str, payload: bytes) -> None:
         from huggingface_hub import batch_bucket_files

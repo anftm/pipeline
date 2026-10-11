@@ -10,6 +10,35 @@ from scripts.reader_bucket_store import HubBucketStore, S3BucketStore
 
 
 class ReaderBucketStoreTests(unittest.TestCase):
+    def test_root_digest_retries_partial_reads_from_a_fresh_hash(self):
+        import hashlib
+        import httpx
+        from contextlib import contextmanager
+        payload = b'complete root'
+        response = Mock()
+        response.status_code = 200
+        calls = 0
+        @contextmanager
+        def stream(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            def chunks():
+                if calls == 1:
+                    yield b'partial'
+                    raise httpx.RemoteProtocolError('connection interrupted')
+                yield payload
+            response.iter_bytes.side_effect = chunks
+            yield response
+        session = Mock()
+        session.stream.side_effect = stream
+        with patch('huggingface_hub.HfApi'), patch('huggingface_hub.utils.get_session', return_value=session), \
+                patch('huggingface_hub.utils.hf_raise_for_status'), patch('scripts.reader_bucket_store.time.sleep'):
+            store = HubBucketStore()
+            store.pace_resolver = Mock()
+            self.assertEqual(store.digest('vomebook/reader-assets-v2', 'reader-index/root.json'),
+                             hashlib.sha256(payload).hexdigest())
+        self.assertEqual(calls, 2)
+
     def test_legacy_environment_cannot_remap_the_current_input_bucket(self):
         result = subprocess.check_output(["python3", "-B", "-c",
             "from scripts.shared import PDF_OCR_INPUT_BUCKET; print(PDF_OCR_INPUT_BUCKET)"],
