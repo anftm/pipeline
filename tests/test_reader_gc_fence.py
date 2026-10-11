@@ -1,0 +1,78 @@
+import unittest
+from unittest.mock import patch
+
+from scripts.reader_gc_fence import GitHubProducerFence
+
+
+class ResidualRunFenceTests(unittest.TestCase):
+    def api(self, endpoint):
+        run = {'id': 7, 'status': 'queued', 'run_attempt': 1,
+               'updated_at': '2026-10-11T00:00:00Z', 'check_suite_id': 8}
+        if endpoint.endswith('/actions/permissions'):
+            return [{'enabled': False}]
+        if '/actions/workflows?' in endpoint:
+            return [{'workflows': [{'path': '.github/workflows/pdf-account-worker.yml',
+                                    'state': 'disabled_manually'}]}]
+        if '/actions/runs?status=queued' in endpoint:
+            return [{'workflow_runs': [{**run, 'path': '.github/workflows/pdf-account-worker.yml'}]}]
+        if '/actions/runs?status=' in endpoint:
+            return [{'workflow_runs': []}]
+        if '/jobs?filter=latest' in endpoint:
+            return [{'total_count': 0, 'jobs': []}]
+        if '/jobs?filter=all' in endpoint:
+            return [{'total_count': 1, 'jobs': [{'status': 'completed', 'run_attempt': 1,
+                                               'completed_at': '2026-10-10T00:00:00Z'}]}]
+        if '/attempts/1' in endpoint:
+            return [{**run, 'status': 'completed', 'conclusion': 'cancelled'}]
+        if endpoint.endswith('/actions/runs/7'):
+            return [run]
+        raise AssertionError(endpoint)
+
+    def check(self, api):
+        with patch('scripts.reader_gc_fence.producer_repositories', return_value=['owner/repo']):
+            return GitHubProducerFence(api).check()
+
+    def test_terminal_attempt_is_accepted_only_with_repository_execution_disabled(self):
+        report = self.check(self.api)
+        residual = report['repositories'][0]['isolated_residual_runs'][0]
+        self.assertEqual(residual['attempt_conclusion'], 'cancelled')
+        self.assertEqual(residual['latest_jobs'], 0)
+        self.assertIs(residual['repository_actions_enabled'], False)
+
+    def test_zero_jobs_with_enabled_actions_still_blocks(self):
+        def api(endpoint):
+            return [{'enabled': True}] if endpoint.endswith('/actions/permissions') else self.api(endpoint)
+        with self.assertRaisesRegex(RuntimeError, 'not drained'):
+            self.check(api)
+
+    def test_unfinished_attempt_or_job_blocks(self):
+        for marker, response in (
+            ('/attempts/1', [{'id': 7, 'status': 'queued', 'run_attempt': 1}]),
+            ('/jobs?filter=latest', [{'total_count': 1, 'jobs': [{'status': 'queued'}]}]),
+            ('/jobs?filter=all', [{'jobs': [{'status': 'in_progress'}]}])):
+            with self.subTest(marker=marker):
+                def api(endpoint):
+                    return response if marker in endpoint else self.api(endpoint)
+                with self.assertRaises(RuntimeError):
+                    self.check(api)
+
+    def test_permission_or_run_changes_block(self):
+        for change in ('permissions', 'run'):
+            calls = 0
+            def api(endpoint):
+                nonlocal calls
+                target = '/actions/permissions' if change == 'permissions' else '/actions/runs/7'
+                if endpoint.endswith(target):
+                    calls += 1
+                    result = self.api(endpoint)
+                    if calls == 2:
+                        result[0]['enabled' if change == 'permissions' else 'run_attempt'] = (
+                            True if change == 'permissions' else 2)
+                    return result
+                return self.api(endpoint)
+            with self.subTest(change=change), self.assertRaises(RuntimeError):
+                self.check(api)
+
+
+if __name__ == '__main__':
+    unittest.main()

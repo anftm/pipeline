@@ -42,6 +42,7 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_INPUT_TOKEN: ${{ secrets.HF_INPUT_TOKEN }}
           GH_TOKEN: ${{ secrets.PDF_WORKER_READ_TOKEN }}
+          GC_PRODUCER_TOKENS_JSON: ${{ secrets.GC_PRODUCER_TOKENS_JSON }}
           APPLY: ${{ inputs.apply }}
           GRACE_DAYS: ${{ inputs.grace_days }}
           SCOPE: ${{ inputs.scope }}
