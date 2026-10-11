@@ -38,16 +38,17 @@ jobs:
           python-version: "3.11"
       - run: pip install -r scripts/requirements.txt
       - name: Validate central source report
+        id: report
         env:
           GH_TOKEN: ${{ github.token }}
           REPORT_RUN_ID: ${{ inputs.report_run_id }}
         run: |
           [[ "$REPORT_RUN_ID" =~ ^[0-9]+$ ]] || exit 1
-          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$REPORT_RUN_ID" --jq '.path + " " + .status' |
-            python -c 'import sys; assert sys.stdin.read().strip() == ".github/workflows/reader-gc-collect.yml completed"'
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$REPORT_RUN_ID" |
+            python -c 'import json,sys; from scripts.reader_resource_repair import report_artifact; name,path=report_artifact(json.load(sys.stdin)); print("artifact="+name); print("filename="+path)' >> "$GITHUB_OUTPUT"
       - uses: actions/download-artifact@v8
         with:
-          name: reader-gc-collection
+          name: ${{ steps.report.outputs.artifact }}
           path: output/gc-report
           github-token: ${{ github.token }}
           run-id: ${{ inputs.report_run_id }}
@@ -58,9 +59,10 @@ jobs:
           APPLY: ${{ inputs.apply }}
           LIMIT: ${{ inputs.limit }}
           MODE: ${{ inputs.mode }}
+          REPORT_FILENAME: ${{ steps.report.outputs.filename }}
         run: |
           [[ "$LIMIT" =~ ^[0-9]+$ ]] || exit 1
-          args=(--report output/gc-report/collection.json --output output/repair/report.json --mode "$MODE" --limit "$LIMIT")
+          args=(--report "output/gc-report/$REPORT_FILENAME" --output output/repair/report.json --mode "$MODE" --limit "$LIMIT")
           if [[ "$APPLY" == true ]]; then args+=(--apply); fi
           python -u scripts/reader_resource_repair.py "${args[@]}"
       - uses: actions/upload-artifact@v7

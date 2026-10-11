@@ -46,6 +46,16 @@ def encode(value):
     return (json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode()
 
 
+def report_artifact(run):
+    if run.get("status") != "completed":
+        raise ValueError("GC source report run is incomplete")
+    allowed = {".github/workflows/reader-gc-collect.yml": ("reader-gc-collection", "collection.json"),
+               ".github/workflows/reader-gc.yml": ("reader-gc-report", "reader-gc-report.json")}
+    if run.get("path") not in allowed:
+        raise ValueError("source report is not a central GC workflow")
+    return allowed[run["path"]]
+
+
 def missing_references(report):
     graph = report.get("graph") or report
     if graph.get("version") != 1 or not isinstance(graph.get("missing"), list):

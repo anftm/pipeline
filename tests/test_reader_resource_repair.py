@@ -14,6 +14,16 @@ from tests.test_reader_gc_collect import Store
 
 
 class ReaderResourceRepairTests(unittest.TestCase):
+    def test_source_artifacts_are_only_completed_central_gc_workflows(self):
+        self.assertEqual(repair.report_artifact({'path': '.github/workflows/reader-gc.yml',
+            'status': 'completed'}), ('reader-gc-report', 'reader-gc-report.json'))
+        self.assertEqual(repair.report_artifact({'path': '.github/workflows/reader-gc-collect.yml',
+            'status': 'completed'}), ('reader-gc-collection', 'collection.json'))
+        for run in ({'path': '.github/workflows/reader-gc.yml', 'status': 'in_progress'},
+                    {'path': '.github/workflows/foreign.yml', 'status': 'completed'}):
+            with self.assertRaises(ValueError):
+                repair.report_artifact(run)
+
     def test_image_identity_mismatch_stops_before_output_is_named(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
