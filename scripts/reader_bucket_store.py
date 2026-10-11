@@ -10,6 +10,7 @@ import os
 import posixpath
 import tempfile
 import time
+import threading
 from pathlib import Path
 from urllib.parse import quote
 
@@ -47,6 +48,17 @@ class HubBucketStore:
         self.api = HfApi(token=os.environ.get("HF_TOKEN"))
         self.object_sizes = {}
         self.inventory_progress = None
+        self.resolver_lock = threading.Lock()
+        self.resolver_next = 0.0
+
+    def pace_resolver(self):
+        # The resolver quota is shared by concurrent graph readers in one run.
+        with self.resolver_lock:
+            now = time.monotonic()
+            wait = max(0, self.resolver_next - now)
+            self.resolver_next = max(now, self.resolver_next) + 0.15
+        if wait:
+            time.sleep(wait)
 
     def token(self, bucket):
         if bucket.startswith("melsm/"):
@@ -94,6 +106,7 @@ class HubBucketStore:
             from reader_gc_stream import graph_json
         token = self.token(bucket)
         def read():
+            self.pace_resolver()
             with get_session().stream("GET", f"https://huggingface.co/buckets/{bucket}/resolve/{quote(path, safe='/')}",
                     headers={"Authorization": f"Bearer {token}"} if token else {},
                     follow_redirects=True, timeout=120) as response:
@@ -106,6 +119,7 @@ class HubBucketStore:
         from huggingface_hub.utils import get_session, hf_raise_for_status
         token = self.token(bucket)
         digest = hashlib.sha256()
+        self.pace_resolver()
         with get_session().stream("GET", f"https://huggingface.co/buckets/{bucket}/resolve/{quote(path, safe='/')}",
                 headers={"Authorization": f"Bearer {token}"} if token else {},
                 follow_redirects=True, timeout=120) as response:
