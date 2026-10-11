@@ -225,6 +225,11 @@ def run(store, report, output, *, apply=False, limit=0, mode="all"):
     output.parent.mkdir(parents=True, exist_ok=True)
     def save():
         output.write_bytes(encode(result))
+        if apply:
+            status = {"version": 1, "selected": result["selected"],
+                      "restored": len(result["restored"]), "already_present": len(result["already_present"]),
+                      "failed": len(result["failed"]), "updated_at": lifecycle.now_iso()}
+            store.put_json(ASSETS, "reader-index/gc/repair-" + os.environ["GITHUB_RUN_ID"] + "/progress.json", status)
     save()
     for kind, bucket, path in selected:
         try:
