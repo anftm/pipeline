@@ -372,7 +372,7 @@ class ReferenceGraph:
                         self.retired_inputs.add((PDF_OCR_INPUT_BUCKET, path))
                 for path in state["retired_paths"]:
                     if not isinstance(path, str) or not re.fullmatch(
-                            r"reader-index/(?:v3/(?:promotions/[0-9a-f]{64}\.json|generations/[0-9a-f]{64}/catalog\.json|candidates/[0-9a-f]{64}\.json)|processing/v3-[0-9a-f]{32}\.json)", path):
+                            r"reader-index/(?:v3/(?:promotions/[0-9a-f]{64}\.json|generations/[0-9a-f]{64}/catalog\.json|candidates/[0-9a-f]{64}\.json)|processing/(?:v3|djvu|office-chapters)-[0-9a-f]{32}\.json)", path):
                         self.blockers.add("invalid retired root path")
                     else:
                         self.retired_roots.add((READER_ASSETS_BUCKET, path))

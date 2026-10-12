@@ -412,6 +412,16 @@ class ReaderGcGraphTests(unittest.TestCase):
                     "processing_roots": ["reader-index/processing/foreign.json"]}], "generation", None)
             write.assert_not_called()
 
+    def test_conversion_processing_roots_are_valid_retirement_roots(self):
+        import re
+        pattern = re.compile(
+            r"reader-index/(?:v3/(?:promotions/[0-9a-f]{64}\.json|generations/[0-9a-f]{64}/catalog\.json|candidates/[0-9a-f]{64}\.json)|processing/(?:v3|djvu|office-chapters)-[0-9a-f]{32}\.json)"
+        )
+        for path in (
+                "reader-index/processing/djvu-" + "a" * 32 + ".json",
+                "reader-index/processing/office-chapters-" + "b" * 32 + ".json"):
+            self.assertRegex(path, pattern)
+
 
 class CanonicalOcrPublicationTests(unittest.TestCase):
     def test_ready_publication_verifies_manifest_text_checksums_and_page_order(self):
