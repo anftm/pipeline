@@ -76,7 +76,7 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_INPUT_TOKEN: ${{ secrets.HF_INPUT_TOKEN }}
           STAGE: ${{ inputs.stage }}
-        run: timeout --signal=TERM --kill-after=5m 150m python -u scripts/pdf_ocr_stages.py "publish-$STAGE" --results-dir output/pdf-ocr/results
+        run: timeout --signal=TERM --kill-after=5m 150m python -u scripts/pdf_ocr_stages.py "publish-$STAGE" --publish-batch-size 4 --results-dir output/pdf-ocr/results
       - name: Publish Reader sidecar to Pages
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -95,7 +95,9 @@ jobs:
         if: always()
         with:
           name: pdf-progress-${{ inputs.stage }}-${{ inputs.worker_run_id }}
-          path: output/pdf-ocr/pdf-progress.json
+          path: |
+            output/pdf-ocr/pdf-progress.json
+            output/pdf-ocr/bundle/publication.json
           retention-days: 30
           if-no-files-found: warn
       - name: Advance completed rendering to this account's OCR queue

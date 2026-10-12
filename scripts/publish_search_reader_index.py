@@ -8,6 +8,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 from huggingface_hub import HfApi
@@ -30,7 +31,10 @@ def run(args: list[str], cwd: str | None = None, env: dict | None = None):
     merged = os.environ.copy()
     if env:
         merged.update(env)
-    result = subprocess.run(args, cwd=cwd, env=merged, capture_output=True, text=True)
+    try:
+        result = subprocess.run(args, cwd=cwd, env=merged, capture_output=True, text=True, timeout=180)
+    except subprocess.TimeoutExpired:
+        return 124, "", "Git operation timed out"
     return result.returncode, result.stdout.strip(), result.stderr.strip()
 
 
@@ -49,6 +53,27 @@ def publish_to_pages(source: Path, pages_repo: str, token: str, *, dry_run: bool
         return
     if not pages_repo or not token:
         raise RuntimeError("PAGES_REPO and PAGES_TOKEN are required")
+    for attempt in range(4):
+        try:
+            _publish_to_pages_once(source, pages_repo, token)
+            return
+        except RuntimeError as error:
+            detail = str(error).lower()
+            transient = any(code in detail for code in (
+                "fatal error in commit_refs", "non-fast-forward", "fetch first",
+                "timed out", "connection reset", "could not resolve host", "http 502", "http 503", "http 504",
+                "requested url returned error: 502", "requested url returned error: 503",
+                "requested url returned error: 504",
+            ))
+            if not transient or attempt == 3:
+                raise
+            print(f"transient Pages publication failure; rebuilding from current main ({attempt + 2}/4)", flush=True)
+            time.sleep(2 ** (attempt + 1))
+
+
+def _publish_to_pages_once(source: Path, pages_repo: str, token: str) -> None:
+    # Each retry uses a fresh private clone and changes only this generated file.
+    # An accepted push whose response was lost becomes a no-op; never force push.
     with tempfile.TemporaryDirectory(prefix="reader-index-pages-") as root:
         auth = git_auth_env(token)
         ret, out, err = run(["git", "clone", "--depth", "1", f"https://github.com/{pages_repo}.git", root], env=auth)

@@ -491,7 +491,7 @@ class PdfOcrStagesTests(unittest.TestCase):
 
     def test_transfers_scope_each_book_not_whole_bucket(self):
         result = self.render_fixture()
-        with patch.object(stages, "HfApi") as api, patch.object(stages, "publish_json"):
+        with patch.object(stages, "HfApi") as api, patch.object(stages, "publish_json_batch"):
             stages.upload_objects(self.root / "render")
         pdf_upload = api.return_value.sync_bucket.call_args_list[0]
         self.assertIn("ocr-manifest.json", pdf_upload.kwargs["include"])

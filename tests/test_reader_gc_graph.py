@@ -359,13 +359,14 @@ class ReaderGcGraphTests(unittest.TestCase):
             root.mkdir(parents=True)
             (root / "ocr-input").mkdir()
             events = []
-            def protect(path, record, token):
-                events.append("protect:" + record["status"])
-                store.put(ASSETS, path, record)
+            def protect(records, token):
+                for path, record in records.items():
+                    events.append("protect:" + record["status"])
+                    store.put(ASSETS, path, record)
             def upload(*args, **kwargs):
                 events.append("upload")
                 raise ValueError("failed transfer")
-            with patch.object(stages, "HfApi") as api, patch.object(stages, "publish_json", side_effect=protect):
+            with patch.object(stages, "HfApi") as api, patch.object(stages, "publish_json_batch", side_effect=protect):
                 api.return_value.sync_bucket.side_effect = upload
                 with self.assertRaises(ValueError):
                     stages.upload_objects(Path(directory))
@@ -391,8 +392,8 @@ class ReaderGcGraphTests(unittest.TestCase):
         store.put(ASSETS, "reader-index/reader_catalog.json", catalog)
         with patch.object(stages.publication, "load_sidecar", return_value={"v": 1, "f": {}}), \
                 patch.object(stages, "publish_catalog", return_value=generation), \
-                patch.object(stages, "read_bucket_json", side_effect=lambda p, token: json.loads(store.read_bytes(ASSETS, p))), \
-                patch.object(stages, "publish_json", side_effect=lambda p, value, token: store.put(ASSETS, p, value)):
+                patch.object(publication, "read_bucket_json", side_effect=lambda p, token: json.loads(store.read_bytes(ASSETS, p))), \
+                patch.object(publication, "publish_json_batch", side_effect=lambda values, token: [store.put(ASSETS, p, v) for p, v in values.items()]):
             stages.handoff_worker_results(HfApi(), "unused", [result])
         self.assertEqual(json.loads(store.read_bytes(ASSETS, path))["status"], "released")
         report = gc.ReferenceGraph(store).build()
@@ -403,7 +404,7 @@ class ReaderGcGraphTests(unittest.TestCase):
         with patch.object(publication, "read_bucket_json", return_value={
                 "kind": "reader-processing-roots", "status": "uploaded",
                 "resources": [{"bucket": PDF, "root": "objects/foreign/book/profile"}]}), \
-                patch.object(publication, "publish_json") as write:
+                patch.object(publication, "publish_json_batch") as write:
             with self.assertRaises(ValueError):
                 publication.release_processing_roots([{
                     "ocr_manifest": "objects/own/book/profile/ocr-manifest.json",

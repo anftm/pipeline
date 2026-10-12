@@ -47,6 +47,8 @@ class OcrCompanionPublicationTests(unittest.TestCase):
             self.assertEqual(compatibility["text_layer"], result["text_layer"])
             with patch.object(publication, "read_bucket_bytes", side_effect=lambda path, token, bucket: objects[path]):
                 publication.verify_ready_objects(result)
+                parallel = v3.verify_text_bundle(result["text_layer"], read, source, 2, read_workers=4)
+                self.assertEqual(parallel, index)
                 objects[result["text_layer"]["path"]] = b"corrupt companion"
                 with self.assertRaises(ValueError):
                     publication.verify_ready_objects(result)
