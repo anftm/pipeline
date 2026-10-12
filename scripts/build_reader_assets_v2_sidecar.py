@@ -14,8 +14,12 @@ from huggingface_hub import HfFileSystem, batch_bucket_files
 
 try:
     from . import shared
+    from . import reader_lifecycle
+    from .reader_bucket import publish_catalog, publish_json, read_json as read_bucket_json
 except ImportError:
     import shared
+    import reader_lifecycle
+    from reader_bucket import publish_catalog, publish_json, read_json as read_bucket_json
 
 
 ASSETS_BUCKET = "vomebook/reader-assets-v2"
@@ -159,7 +163,25 @@ def main() -> int:
     print(f"mappings={len(index['f'])} bytes={len(payload)} output={args.output}")
     if args.apply:
         batch_bucket_files(args.assets_bucket, add=[(str(args.output), SIDECAR_PATH)], token=token)
-        print(f"published={args.assets_bucket}/{SIDECAR_PATH}")
+        generation = publish_catalog(index, token)
+        released = 0
+        # Conversion workers upload immutable bundles under a processing root
+        # before any index can reference them. The canonical sidecar/catalog
+        # is the handoff boundary; only then may those roots be released.
+        for bucket, path in ((args.pdf_bucket, args.derived_manifest),
+                             (args.assets_bucket, "chapters/ebook/epub/index.json")):
+            try:
+                payload = read_bucket_json(path, token, bucket=bucket)
+            except (FileNotFoundError, OSError, ValueError):
+                continue
+            for entry in payload.get("files", []):
+                for processing_path in entry.get("processing_roots", []):
+                    record = read_bucket_json(processing_path, token)
+                    reader_lifecycle.validate_processing_handoff(record, entry)
+                    released_record = reader_lifecycle.release_processing(record, generation)
+                    publish_json(processing_path, released_record, token)
+                    released += 1
+        print(f"published={args.assets_bucket}/{SIDECAR_PATH} catalog={generation} released_roots={released}")
     else:
         print("report-only; pass --apply to publish")
     return 0

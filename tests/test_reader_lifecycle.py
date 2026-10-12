@@ -52,6 +52,17 @@ class ReaderLifecycleTests(unittest.TestCase):
         self.assertEqual(released["status"], "released")
         self.assertEqual(reader_lifecycle.release_processing(released, "generation"), released)
 
+    def test_conversion_processing_roots_cover_derived_and_chapter_bundles(self):
+        self.assertTrue(reader_lifecycle.valid_processing_root(
+            reader_lifecycle.PDF_PAGES_BUCKET, "derived/weekly-djvu/abc"))
+        self.assertTrue(reader_lifecycle.valid_processing_root(
+            reader_lifecycle.READER_ASSETS_BUCKET, "chapters/ebook/epub/abc/def"))
+        record = reader_lifecycle.processing_record([{
+            "bucket": reader_lifecycle.READER_ASSETS_BUCKET,
+            "root": "chapters/ebook/epub/abc/def"}], "office-chapter-upload", {})
+        reader_lifecycle.validate_processing_handoff(record, {
+            "manifest": "chapters/ebook/epub/abc/def/chapter-manifest.json"})
+
     def test_catalog_compaction_keeps_current_and_unacked_history(self):
         catalog = {"version": 1, "kind": "reader-catalog", "current": {"generation": "new"},
                    "generations": {

@@ -24,8 +24,15 @@ TERMINAL_SUCCESS = {"done", "skipped"}
 
 
 def valid_processing_root(bucket, root):
-    return (isinstance(root, str) and (
-        root.startswith("objects/") or bucket == READER_ASSETS_BUCKET and root.startswith("pages/image/")))
+    if not isinstance(root, str):
+        return False
+    if bucket == PDF_PAGES_BUCKET:
+        return root.startswith(("objects/", "derived/"))
+    if bucket == READER_ASSETS_BUCKET:
+        return root.startswith(("objects/", "pages/image/", "chapters/", "documents/", "media/", "native/"))
+    if bucket == PDF_OCR_INPUT_BUCKET:
+        return root.startswith("objects/")
+    return False
 
 
 def now_iso() -> str:
@@ -101,8 +108,8 @@ def validate_processing_handoff(record: dict, result: dict) -> None:
             for key, child in value.items():
                 if key == "processing_roots":
                     continue
-                if key in {"path", "manifest", "o", "i", "w", "j", "ocr_manifest"} and isinstance(child, str) \
-                        and child.startswith(("objects/", "pages/image/")):
+                if key in {"path", "manifest", "manifest_path", "new_path", "object", "o", "i", "w", "j", "ocr_manifest"} and isinstance(child, str) \
+                        and child.startswith(("objects/", "pages/image/", "derived/", "chapters/", "documents/", "media/", "native/")):
                     paths.add(child)
                 elif isinstance(child, (dict, list)):
                     visit(child)

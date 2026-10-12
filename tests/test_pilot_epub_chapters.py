@@ -56,6 +56,49 @@ class ChmChapterPilotTests(unittest.TestCase):
                                 for path in uploads))
             self.assertIn(entry["fallback"], uploads)
 
+    def test_office_sources_share_epub_chapter_namespace_and_bound_flow(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary)
+            source_bytes = b"office source"
+            item = {"repo": "VoiceOfML/Test", "path": "book.docx", "revision": "rev",
+                    "source_bytes": len(source_bytes), "extension": "docx"}
+            bundle = work / "book" / "bundle"
+            (bundle / "chapters").mkdir(parents=True)
+            chapter = bundle / "chapters" / "chapter-0001.xhtml"
+            chapter.write_text("<html><body><h1>Office</h1><p>body</p></body></html>")
+            (bundle / "epub-search-index.json.gz").write_bytes(b"search")
+            (bundle / "chapter-manifest.json").write_text(json.dumps({
+                "version": 1, "kind": "epub-chapters", "chapters": [{
+                    "index": 1, "title": "Office", "path": "chapters/chapter-0001.xhtml",
+                    "bytes": chapter.stat().st_size, "sha256": hashlib.sha256(chapter.read_bytes()).hexdigest(),
+                }], "search_index": {"path": "epub-search-index.json.gz", "bytes": 6,
+                                      "sha256": hashlib.sha256(b"search").hexdigest()},
+            }))
+            def download(_url, target, _token):
+                target.write_bytes(source_bytes)
+            with patch.object(pilot_epub_chapters, "download", side_effect=download), \
+                    patch.object(pilot_epub_chapters, "office_to_epub", return_value=work / "office.epub"), \
+                    patch.object(pilot_epub_chapters, "build_bundle", return_value=json.loads(
+                        (bundle / "chapter-manifest.json").read_text())):
+                entry, uploads = pilot_epub_chapters.build_one(item, work / "book", "token", "vomebook/reader-assets-v2")
+            self.assertEqual(entry["extension"], "epub")
+            self.assertTrue(entry["root"].startswith("chapters/ebook/epub/"))
+            self.assertTrue(any(path.startswith(entry["root"] + "/") for path in uploads))
+
+    def test_office_converter_uses_bounded_calibre_flow(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary)
+            source = work / "source.docx"
+            source.write_bytes(b"docx")
+            output = work / "document.epub"
+            with patch.object(pilot_epub_chapters.zipfile, "is_zipfile", return_value=True), \
+                    patch.object(pilot_epub_chapters.subprocess, "run") as run:
+                run.side_effect = lambda command, **kwargs: output.write_bytes(b"epub")
+                self.assertEqual(pilot_epub_chapters.office_to_epub(source, "docx", work), output)
+            command = run.call_args.args[0]
+            self.assertIn("--flow-size", command)
+            self.assertEqual(command[command.index("--flow-size") + 1], str(pilot_epub_chapters.OFFICE_FLOW_SIZE_KB))
+
 
 if __name__ == "__main__":
     unittest.main()

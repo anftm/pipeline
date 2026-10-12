@@ -12,7 +12,7 @@ on:
     inputs:
       operation:
         type: choice
-        options: [build-stage, stage, promote, rollback, withdraw, ack, inspect, auto, correct, accept, reject, retry, repair-gbk]
+        options: [build-stage, stage, promote, rollback, withdraw, ack, inspect, auto, correct, accept, reject, retry, unify, repair-gbk]
         default: inspect
       resource_json:
         description: Pinned build-stage spec or qualified reading/candidate/rollback resource JSON
@@ -78,7 +78,7 @@ jobs:
           args=("$OPERATION" --output output/v3/publication.json)
           case "$OPERATION" in
             build-stage|stage|promote|rollback|withdraw) args+=(--resource-json "$RESOURCE_JSON" --expected-parent "$EXPECTED_PARENT") ;;
-            auto|correct|accept|reject|retry|repair-gbk) args+=(--resource-json "$RESOURCE_JSON") ;;
+            auto|correct|accept|reject|retry|repair-gbk|unify) args+=(--resource-json "$RESOURCE_JSON") ;;
             ack) args+=(--surface "$SURFACE") ;;
             inspect) ;;
             *) exit 1 ;;
@@ -86,14 +86,14 @@ jobs:
           if [[ "$APPLY" == true ]]; then args+=(--apply); fi
           python scripts/publish_reader_v3.py "${args[@]}"
       - name: Publish the pinned projection to Pages
-        if: steps.operation.outputs.apply == 'true' && contains(fromJSON('["auto","correct","accept","promote","rollback","withdraw","repair-gbk"]'), steps.operation.outputs.operation)
+        if: steps.operation.outputs.apply == 'true' && contains(fromJSON('["auto","correct","accept","promote","rollback","withdraw","repair-gbk","unify"]'), steps.operation.outputs.operation)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           PAGES_TOKEN: ${{ secrets.PAGES_TOKEN }}
           PAGES_REPO: ${{ secrets.PAGES_REPO }}
         run: python scripts/publish_search_reader_index.py
       - name: Confirm both deployed consumer projections
-        if: steps.operation.outputs.apply == 'true' && contains(fromJSON('["auto","correct","accept","promote","rollback","withdraw","repair-gbk"]'), steps.operation.outputs.operation)
+        if: steps.operation.outputs.apply == 'true' && contains(fromJSON('["auto","correct","accept","promote","rollback","withdraw","repair-gbk","unify"]'), steps.operation.outputs.operation)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_INPUT_TOKEN: ${{ secrets.HF_INPUT_TOKEN }}

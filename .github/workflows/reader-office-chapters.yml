@@ -1,0 +1,142 @@
+name: Build Office Chapter Streams
+run-name: Office chapters ${{ inputs.apply == true && 'apply' || 'plan' }}
+
+on:
+  schedule:
+    - cron: "7 4 * * 0"
+  workflow_dispatch:
+    inputs:
+      extension:
+        description: Office source extension, or all
+        required: true
+        default: all
+        type: choice
+        options: [all, doc, docx, odt, rtf]
+      limit:
+        description: Maximum sources per extension; 0 means all pending
+        required: true
+        default: "0"
+        type: string
+      apply:
+        description: Convert and publish chapter streams
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: reader-sidecar
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - run: pip install -r scripts/requirements.txt
+      - name: Fetch source metadata once
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          FORCE_SYNC: "true"
+        run: python scripts/fetch_and_parse.py
+      - name: Plan pending office chapter workers
+        id: matrix
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          [[ "${{ inputs.extension || 'all' }}" =~ ^(all|doc|docx|odt|rtf)$ ]] || exit 1
+          [[ "${{ inputs.limit || '0' }}" =~ ^[0-9]+$ ]] || exit 1
+          python scripts/plan_reader_stream_matrix.py \
+            --kind office-chapters \
+            --extension "${{ inputs.extension || 'all' }}" \
+            --output output/office-matrix.json
+          echo "matrix=$(cat output/office-matrix.json)" >> "$GITHUB_OUTPUT"
+      - run: tar -czf output/office-plan.tgz output/search_data.json state/commits.json output/office-matrix.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: reader-office-chapters-plan
+          path: output/office-plan.tgz
+          retention-days: 1
+
+  build:
+    needs: plan
+    if: >-
+      (github.event_name == 'schedule' || inputs.apply == true) &&
+      fromJSON(needs.plan.outputs.matrix).include[0] != null
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix).include }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - run: |
+          pip install -r scripts/requirements.txt
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends calibre libreoffice fontconfig fonts-noto-cjk fonts-wqy-microhei
+      - uses: actions/download-artifact@v8
+        with:
+          name: reader-office-chapters-plan
+          path: output
+      - run: tar -xzf output/office-plan.tgz
+      - name: Convert one office extension into chapter streams
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          [[ "${{ inputs.limit || '0' }}" =~ ^[0-9]+$ ]] || exit 1
+          python scripts/pilot_epub_chapters.py \
+            --extension "${{ matrix.extension }}" \
+            --limit "${{ inputs.limit || '0' }}" \
+            --shard-count 1 --shard-index 0 --apply
+
+  finalize:
+    needs: [plan, build]
+    if: >-
+      always() && needs.plan.result == 'success' &&
+      (github.event_name == 'schedule' || inputs.apply == true) &&
+      (needs.build.result == 'success' || needs.build.result == 'skipped')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - run: pip install -r scripts/requirements.txt
+      - name: Rebuild the canonical sidecar from verified indexes
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: python scripts/build_reader_assets_v2_sidecar.py --apply
+      - name: Unify the sidecar through the central v3 writer
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run reader-v3-publish.yml --repo "$GITHUB_REPOSITORY" --ref main \
+            -f operation=unify -f apply=true
+          sleep 5
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            run_id=$(gh run list --workflow reader-v3-publish.yml --event workflow_dispatch --limit 20 \
+              --json databaseId,name --jq 'map(select(.name == "v3 unify / apply")) | .[0].databaseId // empty')
+            if [[ -n "$run_id" ]]; then
+              gh run watch "$run_id" --exit-status
+              exit $?
+            fi
+            sleep 10
+          done
+          echo "could not identify dispatched central v3 unify run" >&2
+          exit 1

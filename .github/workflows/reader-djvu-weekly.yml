@@ -15,11 +15,20 @@ on:
         required: true
         default: "0"
         type: string
+      retry_failed:
+        description: Retry checkpointed DJVU failures
+        required: true
+        default: true
+        type: boolean
 
 concurrency:
   group: reader-sidecar
   cancel-in-progress: false
   queue: max
+
+permissions:
+  contents: read
+  actions: write
 
 jobs:
   sync:
@@ -47,4 +56,29 @@ jobs:
           [[ "${{ inputs.limit || '0' }}" =~ ^[0-9]+$ ]] || exit 1
           args=(--limit "${{ inputs.limit || '0' }}")
           if [[ "${{ inputs.apply || 'false' }}" == "true" || "${{ github.event_name }}" == "schedule" ]]; then args+=(--apply); fi
+          if [[ "${{ inputs.retry_failed || 'true' }}" == "true" || "${{ github.event_name }}" == "schedule" ]]; then args+=(--retry-failed); fi
           python scripts/sync_djvu_pdf_derivatives.py "${args[@]}"
+      - name: Rebuild canonical Reader sidecar
+        if: github.event_name == 'schedule' || inputs.apply == true
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: python scripts/build_reader_assets_v2_sidecar.py --apply
+      - name: Unify sidecar through the central v3 writer
+        if: github.event_name == 'schedule' || inputs.apply == true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run reader-v3-publish.yml --repo "$GITHUB_REPOSITORY" --ref main \
+            -f operation=unify -f apply=true
+          sleep 5
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            run_id=$(gh run list --workflow reader-v3-publish.yml --event workflow_dispatch --limit 20 \
+              --json databaseId,name --jq 'map(select(.name == "v3 unify / apply")) | .[0].databaseId // empty')
+            if [[ -n "$run_id" ]]; then
+              gh run watch "$run_id" --exit-status
+              exit $?
+            fi
+            sleep 10
+          done
+          echo "could not identify dispatched central v3 unify run" >&2
+          exit 1

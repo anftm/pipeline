@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import tempfile
 import urllib.request
+import zipfile
 from pathlib import Path
 
 from huggingface_hub import HfFileSystem
@@ -18,20 +19,32 @@ from huggingface_hub import HfFileSystem
 try:
     from .convert_reader_assets import convert_item
     from .epub_chapters import build_bundle, bundle_version
+    from .pilot_office_stream import converted_output, run_libreoffice
+    from .reader_bucket import index_path, publish_json
     from .recover_chm import recover as recover_chm
+    from . import reader_lifecycle
     from .reader_assets import bucket_conversion_contract, decode_search_payload, relative_path, source_url
     from .shared import batch_bucket_files_with_retry
 except ImportError:
     from convert_reader_assets import convert_item
     from epub_chapters import build_bundle, bundle_version
+    from pilot_office_stream import converted_output, run_libreoffice
+    from reader_bucket import index_path, publish_json
     from recover_chm import recover as recover_chm
+    import reader_lifecycle
     from reader_assets import bucket_conversion_contract, decode_search_payload, relative_path, source_url
     from shared import batch_bucket_files_with_retry
 
 
 TARGET_BUCKET = "vomebook/reader-assets-v2"
 ROOT = "chapters/ebook/epub"
-SUPPORTED_EXTENSIONS = {"epub", "mobi", "azw3", "fb2", "chm"}
+SUPPORTED_EXTENSIONS = {"epub", "mobi", "azw3", "fb2", "chm", "doc", "docx", "odt", "rtf"}
+OFFICE_EXTENSIONS = {"doc", "docx", "odt", "rtf"}
+OFFICE_ROOT = "chapters/ebook/epub"
+OFFICE_PROFILE = "office-epub-chapters-v1-flow-512"
+OFFICE_FLOW_SIZE_KB = 512
+OFFICE_COMMAND_TIMEOUT_SECONDS = 900
+OFFICE_MAX_CHAPTER_BYTES = 7 * 1024 * 1024
 
 
 def parse_args() -> argparse.Namespace:
@@ -72,6 +85,35 @@ def shard_for(key: str, count: int) -> int:
     return int.from_bytes(hashlib.sha256(key.encode()).digest()[:8], "big") % count
 
 
+def office_to_epub(source: Path, extension: str, work: Path) -> Path:
+    """Normalize office input once, then emit bounded-flow EPUB chapters.
+
+    DOCX is a ZIP container and cannot be opened meaningfully through HTTP
+    ranges. The conversion is therefore an offline publication step; the
+    browser later requests only the generated XHTML chapter bodies.
+    """
+    if extension not in OFFICE_EXTENSIONS:
+        raise ValueError(f"unsupported office chapter extension: {extension}")
+    normalized = source
+    if extension != "docx" or not zipfile.is_zipfile(source):
+        output = work / "normalized-docx"
+        output.mkdir(parents=True, exist_ok=True)
+        run_libreoffice(
+            ["libreoffice", "--headless", "--convert-to", "docx", "--outdir", str(output), str(source)],
+            work / "libreoffice-profile",
+        )
+        normalized = converted_output(output, "docx")
+    epub = work / "document.epub"
+    subprocess.run(
+        ["ebook-convert", str(normalized), str(epub), "--flow-size", str(OFFICE_FLOW_SIZE_KB)],
+        check=True, timeout=OFFICE_COMMAND_TIMEOUT_SECONDS,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    if not epub.is_file() or epub.stat().st_size <= 0:
+        raise RuntimeError("office EPUB conversion produced no output")
+    return epub
+
+
 def select_records(path: Path, revisions: dict, max_bytes: int, extension_filter: str) -> list[dict]:
     records = decode_search_payload(json.loads(path.read_text(encoding="utf-8")))
     selected = []
@@ -96,7 +138,15 @@ def build_one(item: dict, work: Path, token: str | None, bucket: str) -> tuple[d
     source_bytes = source.read_bytes()
     source_digest = hashlib.sha256(source_bytes).hexdigest()
     native_fallback = None
-    if extension == "chm":
+    if extension in OFFICE_EXTENSIONS:
+        chapter_source = office_to_epub(source, extension, work)
+        bundle = work / "bundle"
+        manifest = build_bundle(chapter_source, bundle)
+        if any(int(chapter.get("bytes") or 0) > OFFICE_MAX_CHAPTER_BYTES
+               for chapter in manifest.get("chapters", [])):
+            raise ValueError("office chapter exceeds the bounded browser chapter limit")
+        root_extension = "epub"
+    elif extension == "chm":
         contract = bucket_conversion_contract(item["repo"], item["path"], extension, item["source_bytes"])
         if contract is None:
             raise ValueError("no CHM conversion contract")
@@ -133,6 +183,7 @@ def build_one(item: dict, work: Path, token: str | None, bucket: str) -> tuple[d
                     f"recovery failed ({type(recovery_error).__name__}: {recovery_error})"
                 ) from recovery_error
         native_fallback = f"native/ebook/chm/{source_digest}/document.epub"
+        root_extension = extension
     else:
         chapter_source = source
         if extension != "epub":
@@ -141,12 +192,14 @@ def build_one(item: dict, work: Path, token: str | None, bucket: str) -> tuple[d
                            check=True, timeout=600)
         bundle = work / "bundle"
         manifest = build_bundle(chapter_source, bundle)
+        root_extension = extension
     if extension == "chm":
         version = bundle_version(bundle)
-        root = f"chapters/ebook/{extension}/{source_digest}/{version}"
+        root_extension = extension
+        root = f"chapters/ebook/{root_extension}/{source_digest}/{version}"
     else:
         version = bundle_version(bundle)
-        root = f"chapters/ebook/{extension}/{source_digest}/{version}"
+        root = f"chapters/ebook/{root_extension}/{source_digest}/{version}"
     uploads = {}
     for path in sorted(item for item in bundle.rglob("*") if item.is_file()):
         uploads[f"{root}/{path.relative_to(bundle).as_posix()}"] = str(path)
@@ -154,8 +207,10 @@ def build_one(item: dict, work: Path, token: str | None, bucket: str) -> tuple[d
         uploads[native_fallback] = str(native_source)
     return {
         "key": f"{item['repo']}\0{item['path']}", "repo": item["repo"], "path": item["path"],
-        "source_extension": extension, "source_revision": item["revision"], "source_sha256": source_digest,
+        "source_extension": extension, "extension": root_extension, "source_revision": item["revision"],
+        "source_sha256": source_digest,
         "source_bytes": len(source_bytes), "mode": "chapter-stream", "bucket": bucket,
+        "profile": OFFICE_PROFILE if extension in OFFICE_EXTENSIONS else "epub-chapters-v8-bucket",
         "root": root, "manifest": f"{root}/chapter-manifest.json",
         "chapter_count": len(manifest["chapters"]),
         "search_index": f"{root}/epub-search-index.json.gz",
@@ -174,7 +229,7 @@ def main() -> int:
     if extension not in SUPPORTED_EXTENSIONS:
         raise ValueError(f"unsupported ebook extension: {extension}")
     revisions = json.loads(args.revisions.read_text(encoding="utf-8"))
-    root_prefix = f"chapters/ebook/{extension}"
+    root_prefix = OFFICE_ROOT if extension in OFFICE_EXTENSIONS else f"chapters/ebook/{extension}"
     index_name = "index.json" if args.shard_count == 1 else f"index-{args.shard_index:02d}.json"
     previous = existing_index(args.bucket, token, root_prefix, index_name)
     completed = {entry.get("key"): entry.get("source_revision") for entry in previous.get("files", []) if isinstance(entry, dict)}
@@ -184,7 +239,7 @@ def main() -> int:
     if args.limit:
         selected = selected[:args.limit]
     if not selected:
-        print("no pending EPUB sources")
+        print("no pending chapter sources")
         return 0
     uploads, entries, failures = {}, [], []
     with tempfile.TemporaryDirectory(prefix="reader-epub-") as directory:
@@ -212,9 +267,28 @@ def main() -> int:
         index_file = root / "index.json"
         index_file.write_text(json.dumps({
             "version": 1, "kind": "ebook-chapter-stream-index",
-            "files": [merged[key] for key in sorted(merged)],
-            "failures": failures,
-        }, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+                                               "files": [merged[key] for key in sorted(merged)],
+                                               "failures": failures,
+                                           }, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        if args.apply:
+            for entry in entries:
+                processing_id = hashlib.sha256(
+                    f"{entry['key']}\0{entry['source_sha256']}\0{entry['root']}".encode()
+                ).hexdigest()[:32]
+                processing_path = index_path(f"processing/office-chapters-{processing_id}.json")
+                record = reader_lifecycle.processing_record(
+                    [{"bucket": bucket, "root": entry["root"]}], "office-chapter-upload",
+                    {"repository": os.environ.get("GITHUB_REPOSITORY", ""),
+                     "run_id": os.environ.get("GITHUB_RUN_ID", ""),
+                     "attempt": os.environ.get("GITHUB_RUN_ATTEMPT", "")})
+                publish_json(processing_path, record, token)
+                entry["processing_roots"] = [processing_path]
+                merged[entry["key"]] = entry
+            index_file.write_text(json.dumps({
+                "version": 1, "kind": "ebook-chapter-stream-index",
+                "files": [merged[key] for key in sorted(merged)],
+                "failures": failures,
+            }, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
         uploads[f"{root_prefix}/{index_name}"] = str(index_file)
         print(f"planned {len(entries)} EPUB stream(s), {len(uploads)} object(s), failures={len(failures)}")
         if args.apply:
