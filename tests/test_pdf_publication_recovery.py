@@ -89,15 +89,15 @@ class PdfPublicationRecoveryTests(unittest.TestCase):
             def protect(records, token):
                 events.append(("protect", copy.deepcopy(records)))
             with patch.object(stages, "publish_json_batch", side_effect=protect), \
-                    patch.object(stages, "HfApi") as api:
-                api.return_value.sync_bucket.side_effect = lambda *a, **k: events.append(("upload", a[1]))
+                    patch.object(stages.shared, "batch_bucket_files_with_retry",
+                                 side_effect=lambda bucket, additions, token: events.append(("upload", bucket, additions))):
                 paths = stages.upload_objects(bundle)
-            self.assertEqual([kind for kind, _ in events], ["protect", *["upload"] * 4, "protect"])
+            self.assertEqual([event[0] for event in events], ["protect", *["upload"] * 4, "protect"])
             self.assertEqual(len(paths), 4)
             self.assertTrue(all(value["status"] == "processing" for value in events[0][1].values()))
             self.assertTrue(all(value["status"] == "uploaded" for value in events[-1][1].values()))
-            self.assertTrue(all(target.startswith(stages.BUCKET + "/objects/")
-                                for kind, target in events if kind == "upload"))
+            uploads = [(event[1], event[2]) for event in events if event[0] == "upload"]
+            self.assertTrue(all(bucket == shared.PDF_PAGES_BUCKET and additions for bucket, additions in uploads))
 
     def test_handoff_is_batched_idempotent_and_validates_all_owners_first(self):
         paths = [f"reader-index/processing/{number}.json" for number in range(4)]

@@ -358,6 +358,7 @@ class ReaderGcGraphTests(unittest.TestCase):
             root = Path(directory) / "objects/aa/book/render"
             root.mkdir(parents=True)
             (root / "ocr-input").mkdir()
+            (root / "ocr-input" / "page-000001.png").write_bytes(b"partial")
             events = []
             def protect(records, token):
                 for path, record in records.items():
@@ -366,8 +367,8 @@ class ReaderGcGraphTests(unittest.TestCase):
             def upload(*args, **kwargs):
                 events.append("upload")
                 raise ValueError("failed transfer")
-            with patch.object(stages, "HfApi") as api, patch.object(stages, "publish_json_batch", side_effect=protect):
-                api.return_value.sync_bucket.side_effect = upload
+            with patch.object(stages, "publish_json_batch", side_effect=protect), \
+                    patch.object(stages.shared, "batch_bucket_files_with_retry", side_effect=upload):
                 with self.assertRaises(ValueError):
                     stages.upload_objects(Path(directory))
             self.assertEqual(events, ["protect:processing", "upload"])

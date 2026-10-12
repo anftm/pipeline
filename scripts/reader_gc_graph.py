@@ -9,6 +9,7 @@ import gzip
 import hashlib
 import json
 import posixpath
+import time
 from concurrent.futures import ThreadPoolExecutor
 from collections import Counter
 from datetime import date, datetime, timedelta, timezone
@@ -494,12 +495,28 @@ def main() -> int:
     parser.add_argument("--grace-days", type=int, default=0)
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--generation-grace-days", type=int, default=0)
+    parser.add_argument("--snapshot-retries", type=int, default=2,
+                        help="retry transient root/object races before returning an incomplete graph")
     args = parser.parse_args()
-    if args.grace_days < 0 or args.limit < 0 or args.generation_grace_days < 0:
+    if (args.grace_days < 0 or args.limit < 0 or args.generation_grace_days < 0
+            or args.snapshot_retries < 0 or args.snapshot_retries > 5):
         parser.error("grace periods and limit must be non-negative")
     store = HubBucketStore() if args.storage == "hub" else S3BucketStore()
-    report = ReferenceGraph(store, not args.skip_input_bucket,
-                            args.generation_grace_days).build()
+    transient_markers = ("root inventory changed", "root changed", "referenced objects are missing",
+                         "unreadable JSON", "root recheck failed", "inventory recheck failed")
+    report = None
+    for attempt in range(args.snapshot_retries + 1):
+        report = ReferenceGraph(store, not args.skip_input_bucket,
+                                args.generation_grace_days).build()
+        if report["graph_complete"] or not any(
+                any(marker in blocker for marker in transient_markers)
+                for blocker in report.get("blockers", [])) or attempt == args.snapshot_retries:
+            break
+        delay = min(30, 2 ** attempt)
+        print(f"GC snapshot changed during read; retrying in {delay}s "
+              f"({attempt + 2}/{args.snapshot_retries + 1})", flush=True)
+        time.sleep(delay)
+    assert report is not None
     if report["graph_complete"]:
         state, report["retention"] = plan_retention(read_gc_state(store), report, args.grace_days, args.limit)
         if args.record_observations:

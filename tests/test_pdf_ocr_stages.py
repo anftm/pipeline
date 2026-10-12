@@ -491,13 +491,17 @@ class PdfOcrStagesTests(unittest.TestCase):
 
     def test_transfers_scope_each_book_not_whole_bucket(self):
         result = self.render_fixture()
-        with patch.object(stages, "HfApi") as api, patch.object(stages, "publish_json_batch"):
+        uploads = []
+        with patch.object(stages.shared, "batch_bucket_files_with_retry",
+                          side_effect=lambda bucket, additions, token: uploads.append((bucket, additions))), \
+                patch.object(stages, "publish_json_batch"):
             stages.upload_objects(self.root / "render")
-        pdf_upload = api.return_value.sync_bucket.call_args_list[0]
-        self.assertIn("ocr-manifest.json", pdf_upload.kwargs["include"])
-        call = api.return_value.sync_bucket.call_args
-        self.assertTrue(call.args[1].endswith(str(Path(result["render_manifest"]["path"]).parent)))
-        self.assertNotEqual(call.args[1], stages.BUCKET)
+        self.assertEqual({bucket for bucket, _additions in uploads},
+                         {stages.shared.PDF_PAGES_BUCKET, stages.shared.PDF_OCR_INPUT_BUCKET})
+        pdf_upload = next(additions for bucket, additions in uploads if bucket == stages.shared.PDF_PAGES_BUCKET)
+        remote_paths = [remote for _local, remote in pdf_upload]
+        self.assertIn(result["render_manifest"]["path"], remote_paths)
+        self.assertNotEqual({remote.split("/", 1)[0] for remote in remote_paths}, {stages.BUCKET})
 
     def test_planner_includes_small_pdf_and_rebuilds_old_ocr_for_v2_index(self):
         item = {**self.item(), "source_bytes": 1024}
