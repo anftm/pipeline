@@ -151,6 +151,17 @@ def build_one(item: dict, work: Path, token: str) -> dict:
 
 
 def failure_entry(item: dict, error: Exception, previous: dict | None = None) -> dict:
+    if isinstance(previous, dict):
+        prior_ready = (previous.get("status") == "ready"
+                       or (previous.get("status") is None and previous.get("new_path")
+                           and previous.get("derived_sha256") and previous.get("derived_bytes")))
+        if prior_ready:
+            # Never hide an already-readable derivative because a replacement
+            # attempt failed. The changed source remains pending on the next
+            # run, while the last known-good mapping stays GC-visible.
+            return {**previous, "last_attempt_source_revision": item["revision"],
+                    "last_attempt_status": "failed", "last_attempts": int(previous.get("last_attempts", 0)) + 1,
+                    "last_attempt_error": f"{type(error).__name__}: {error}"[:1000]}
     return {"key": item["key"], "repo": item["repo"], "source_path": item["path"],
             "source_extension": "djvu", "source_revision": item["revision"],
             "status": "failed", "profile": PROFILE, "attempts": int((previous or {}).get("attempts", 0)) + 1,

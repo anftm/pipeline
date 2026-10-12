@@ -33,6 +33,16 @@ class DjvuCheckpointTests(unittest.TestCase):
         self.assertEqual(value["attempts"], 3)
         self.assertIn("bad source", value["error"])
 
+    def test_failed_replacement_retains_the_last_good_mapping(self):
+        item = self.item("new")
+        previous = {"key": item["key"], "source_revision": "old", "status": "ready",
+                    "new_path": "derived/old/document.pdf", "derived_sha256": "a" * 64,
+                    "derived_bytes": 12}
+        value = djvu.failure_entry(item, RuntimeError("temporary"), previous)
+        self.assertEqual(value["status"], "ready")
+        self.assertEqual(value["new_path"], previous["new_path"])
+        self.assertEqual(value["last_attempt_source_revision"], "new")
+
     def test_processing_identity_is_stable(self):
         self.assertEqual(djvu.processing_path("key", "revision", "a" * 64),
                          djvu.processing_path("key", "revision", "a" * 64))
