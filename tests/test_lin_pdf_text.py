@@ -36,7 +36,7 @@ class LinPdfTextTests(unittest.TestCase):
                     "repo": "VoiceOfML/Teachers", "path": path,
                     "source_kind": "generated", "source_revision": "source-revision",
                     "reader_assets_repo": "vomebook/Reader-Assets",
-                    "reader_assets_path": "objects/a/gbk-font-repair-v1/document.pdf",
+                    "reader_assets_path": f"objects/a/{reader_assets.GBK_PDF_CONTRACT[0]}/document.pdf",
                     "reader_assets_revision": "assets-revision", "force_image_render": True}
 
             with pymupdf.open(repaired) as document:

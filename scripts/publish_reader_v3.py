@@ -634,7 +634,7 @@ class CentralHubStore(HubBucketStore):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("build-stage", "stage", "promote", "rollback", "withdraw", "ack", "ack-all", "inspect", "project", "auto", "correct", "accept", "reject", "retry", "retire"))
+    parser.add_argument("command", choices=("build-stage", "stage", "promote", "rollback", "withdraw", "ack", "ack-all", "inspect", "project", "auto", "correct", "accept", "reject", "retry", "retire", "repair-gbk"))
     parser.add_argument("--resource", type=Path)
     parser.add_argument("--resource-json")
     parser.add_argument("--bundle", type=Path)
@@ -644,7 +644,14 @@ def main():
     parser.add_argument("--surface", choices=("hf", "pages"))
     args = parser.parse_args()
     store = CentralHubStore()
-    if args.command == "withdraw":
+    if args.command == "repair-gbk":
+        try:
+            from .reader_gbk_repair import run
+        except ImportError:
+            from reader_gbk_repair import run
+        with tempfile.TemporaryDirectory(prefix="reader-gbk-repair-") as directory:
+            report = run(store, json.loads(args.resource_json or "{}"), Path(directory), apply=args.apply)
+    elif args.command == "withdraw":
         report = withdraw(store, json.loads(args.resource_json or "{}"),
                           None if args.expected_parent == "none" else text.sha(args.expected_parent), apply=args.apply)
     elif args.command == "retry":

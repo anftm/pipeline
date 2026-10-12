@@ -50,10 +50,10 @@ def repairable_font(font) -> str | None:
     # The combined edition lost descriptor names and ToUnicode entirely.
     combined_placeholder = (font.get("/ToUnicode") is None
                             and re.fullmatch(r"\?{4,6}", descriptor_name) is not None)
-    # Some other Lin Yizhang volumes have no ToUnicode at all; their heading
-    # font also advertises a legacy small-Song descriptor under a Hei base font.
-    small_song_heading = (name == "黑体" and descriptor_name == "小标宋"
-                          and font.get("/ToUnicode") is None)
+    # Mao's selected editions advertise a small-Song heading descriptor under
+    # a Hei base font, with either no ToUnicode or the same broken one-byte map.
+    # The alias does not bypass the embedding, widths or CMap checks below.
+    small_song_heading = name == "黑体" and descriptor_name == "小标宋"
     if FONT_NAMES.get(descriptor_name) != FONT_NAMES[name] and not combined_placeholder and not small_song_heading:
         return None
     if any(key in descriptor for key in ("/FontFile", "/FontFile2", "/FontFile3")):
@@ -108,7 +108,9 @@ def repair_pdf(source: Path, target: Path) -> dict:
     if source.resolve() == target.resolve():
         raise ValueError("GBK repair requires a separate output file")
     reader = PdfReader(source)
-    if reader.is_encrypted:
+    # Some Mao second-edition volumes have permission encryption with an empty
+    # opening password. Accept only that case; do not guess document passwords.
+    if reader.is_encrypted and not reader.decrypt(""):
         raise ValueError("GBK repair does not accept encrypted PDFs")
     writer = PdfWriter(clone_from=reader)
     # Clone all document objects, including fonts in Form XObjects and inherited

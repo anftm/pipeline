@@ -14,11 +14,11 @@ from pypdf.generic import (
 from scripts import convert_reader_assets, reader_assets, repair_gbk_pdf
 
 
-def fixture() -> bytes:
+def fixture(*, small_song_heading=False) -> bytes:
     writer = PdfWriter()
     descriptor = DictionaryObject({
         NameObject("/Type"): NameObject("/FontDescriptor"),
-        NameObject("/FontName"): NameObject("/宋体"),
+        NameObject("/FontName"): (TextStringObject("Ð¡±êËÎ") if small_song_heading else NameObject("/宋体")),
         NameObject("/Flags"): NumberObject(4),
         NameObject("/FontBBox"): ArrayObject([NumberObject(n) for n in [0, -200, 1000, 1000]]),
         NameObject("/Ascent"): NumberObject(1000), NameObject("/Descent"): NumberObject(-200),
@@ -33,7 +33,7 @@ def fixture() -> bytes:
                         b"endcmap CMapName currentdict /CMap defineresource pop end end")
     font = DictionaryObject({
         NameObject("/Type"): NameObject("/Font"), NameObject("/Subtype"): NameObject("/TrueType"),
-        NameObject("/BaseFont"): NameObject("/宋体"),
+        NameObject("/BaseFont"): NameObject("/黑体" if small_song_heading else "/宋体"),
         NameObject("/FontDescriptor"): writer._add_object(descriptor),
         NameObject("/FirstChar"): NumberObject(0), NameObject("/LastChar"): NumberObject(255),
         NameObject("/Widths"): ArrayObject([NumberObject(500)] * 256),
@@ -129,6 +129,76 @@ class GbkPdfRepairTests(unittest.TestCase):
             font[NameObject("/BaseFont")] = NameObject("/" + base)
             font["/FontDescriptor"][NameObject("/FontName")] = TextStringObject(descriptor)
             self.assertEqual(repair_gbk_pdf.repairable_font(font), expected)
+
+    def test_small_song_heading_alias_accepts_only_missing_or_broken_unicode(self):
+        for variant in ("broken", "missing", "embedded", "multibyte", "valid-single-byte", "widths"):
+            with self.subTest(variant=variant):
+                font = PdfReader(io.BytesIO(fixture(small_song_heading=True))).pages[0]["/Resources"]["/Font"]["/F1"]
+                if variant == "missing":
+                    del font["/ToUnicode"]
+                elif variant == "embedded":
+                    font["/FontDescriptor"][NameObject("/FontFile2")] = DecodedStreamObject()
+                elif variant == "multibyte":
+                    font["/ToUnicode"].set_data(b"1 begincodespacerange <0000> <ffff> endcodespacerange")
+                elif variant == "valid-single-byte":
+                    font["/ToUnicode"].set_data(
+                        b"1 begincodespacerange <00> <ff> endcodespacerange\n"
+                        b"1 beginbfchar <41> <0041> endbfchar")
+                elif variant == "widths":
+                    font["/Widths"][0] = NumberObject(600)
+                self.assertEqual(repair_gbk_pdf.repairable_font(font),
+                                 "SimHei" if variant in {"broken", "missing"} else None)
+
+    @unittest.skipUnless(shutil.which("pdftotext"), "Poppler is required for independent text decoding")
+    def test_small_song_heading_is_repaired_without_changing_page_content(self):
+        with tempfile.TemporaryDirectory() as root:
+            source, target = Path(root) / "source.pdf", Path(root) / "repaired.pdf"
+            source.write_bytes(fixture(small_song_heading=True))
+            result = repair_gbk_pdf.repair_pdf(source, target)
+            self.assertEqual(result["fonts_repaired"], 1)
+            before, after = PdfReader(source), PdfReader(target)
+            for original, repaired in zip(before.pages, after.pages):
+                self.assertEqual(original.get_contents().get_data(), repaired.get_contents().get_data())
+                self.assertEqual(repaired["/Resources"]["/Font"]["/F1"]["/BaseFont"], "/SimHei")
+            text = subprocess.check_output(["pdftotext", str(target), "-"], text=True)
+            self.assertEqual("".join(text.split()), "建国以来毛泽东文稿ABC123" * 2)
+
+    def test_repair_profile_upgrade_requeues_the_previous_repair(self):
+        from scripts import scan_reader_assets
+
+        path = "A4 毛泽东主席/02-03 毛泽东选集 林一章版 第一版/4 1945.8-1949.9.pdf"
+        key = reader_assets.asset_key("VoiceOfML/Teachers", path)
+        record = {"Repo": "VoiceOfML/Teachers", "Folder": path.split("/")[:-1],
+                  "File": "4 1945.8-1949.9", "Extension": "pdf", "Size": 100}
+        current = {"version": 1, "files": {key: {"status": "ready", "profile": "gbk-font-repair-v1"}}}
+        queued = scan_reader_assets.build_queue([record], {"VoiceOfML/Teachers": "revision"}, current)
+        self.assertEqual(len(queued), 1)
+        self.assertEqual(queued[0]["profile"], "gbk-font-repair-v2")
+        current["files"][key]["profile"] = reader_assets.GBK_PDF_CONTRACT[0]
+        self.assertEqual(scan_reader_assets.build_queue(
+            [record], {"VoiceOfML/Teachers": "revision"}, current), [])
+
+    def test_empty_opening_password_is_repaired_but_required_password_is_not(self):
+        for password in ("", "required"):
+            with self.subTest(empty_password=not password), tempfile.TemporaryDirectory() as root:
+                source, target = Path(root) / "source.pdf", Path(root) / "repaired.pdf"
+                writer = PdfWriter(clone_from=PdfReader(io.BytesIO(fixture(small_song_heading=True))))
+                writer.encrypt(password, owner_password="owner-only")
+                writer.write(source)
+                original_bytes = source.read_bytes()
+                if password:
+                    with self.assertRaisesRegex(ValueError, "does not accept encrypted PDFs"):
+                        repair_gbk_pdf.repair_pdf(source, target)
+                    self.assertFalse(target.exists())
+                else:
+                    result = repair_gbk_pdf.repair_pdf(source, target)
+                    self.assertEqual(result, {"page_count": 2, "fonts_repaired": 1})
+                    before, after = PdfReader(source), PdfReader(target)
+                    self.assertTrue(before.is_encrypted)
+                    self.assertFalse(after.is_encrypted)
+                    for a, b in zip(before.pages, after.pages):
+                        self.assertEqual(a.get_contents().get_data(), b.get_contents().get_data())
+                self.assertEqual(source.read_bytes(), original_bytes)
 
     def test_combined_edition_placeholder_names_without_unicode(self):
         for name, expected in repair_gbk_pdf.FONT_NAMES.items():

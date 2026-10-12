@@ -27,7 +27,8 @@ except ImportError:
 def build(entry: dict, manifest: dict, source: Path, bundle: Path) -> dict:
     if (not lin_pdf_text.applies(entry) or entry.get("status") != "ready" or not entry.get("page_manifest")
             or entry.get("source_kind") != "generated"
-            or not str(entry.get("reader_assets_path") or "").endswith("/gbk-font-repair-v1/document.pdf")):
+            or not str(entry.get("reader_assets_path") or "").endswith(
+                f"/{reader_assets.GBK_PDF_CONTRACT[0]}/document.pdf")):
         raise ValueError("source has no eligible complete Lin Yizhang page stream")
     stages.validate_render(entry, manifest)
     digest, size = shared.hash_file(source)

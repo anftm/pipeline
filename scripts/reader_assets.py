@@ -97,7 +97,7 @@ CONVERTIBLE_EXTENSIONS = {
     "mp4": ("ffmpeg-video-mp4-h264-aac-v1", "video", "video.mp4"),
 }
 PROTECTED_PDF_CONTRACT = ("qpdf-decrypted-v1", "pdf", "document.pdf")
-GBK_PDF_CONTRACT = ("gbk-font-repair-v1", "pdf", "document.pdf")
+GBK_PDF_CONTRACT = ("gbk-font-repair-v2", "pdf", "document.pdf")
 GBK_PDF_FOLDER = "A4 毛泽东主席/03-03 建国以来毛泽东文稿 林一章版"
 GBK_PDF_REPAIR_FOLDERS = (
     "A1 马克思&恩格斯/01-04 马克思恩格斯全集 林一章新版",
