@@ -1,6 +1,9 @@
+import gzip
+import hashlib
+import json
 import unittest
 
-from scripts.report_office_chapter_coverage import OFFICE_PROFILE, summarize
+from scripts.report_office_chapter_coverage import OFFICE_PROFILE, summarize, verify_bundle_payload
 
 
 class OfficeChapterCoverageTests(unittest.TestCase):
@@ -11,6 +14,7 @@ class OfficeChapterCoverageTests(unittest.TestCase):
                 "extension": "docx", "source_revision": "r2"}
         current = {"key": doc["key"], "source_revision": "r1", "source_extension": "doc",
                    "extension": "epub", "profile": OFFICE_PROFILE,
+                   "bucket": "vomebook/reader-assets-v2",
                    "root": "chapters/ebook/epub/" + "a" * 64 + "/" + "b" * 16,
                    "manifest": "chapters/ebook/epub/" + "a" * 64 + "/" + "b" * 16 + "/chapter-manifest.json",
                    "search_index": "chapters/ebook/epub/" + "a" * 64 + "/" + "b" * 16 + "/epub-search-index.json.gz",
@@ -43,6 +47,22 @@ class OfficeChapterCoverageTests(unittest.TestCase):
         report = summarize([source], {"files": [], "failures": []})
         self.assertFalse(report["complete"])
         self.assertEqual(report["totals"]["missing-revision"], 1)
+
+    def test_complete_search_bundle_checks_manifest_identity_and_compressed_digest(self):
+        chapter = {"index": 1, "title": "Chapter", "path": "chapters/chapter-0001.xhtml",
+                   "bytes": 12, "sha256": "a" * 64}
+        search_raw = gzip.compress(json.dumps({"version": 1, "kind": "epub-search-index",
+                                             "chapters": [{"index": 1, "title": "Chapter",
+                                                           "path": chapter["path"], "text": "needle"}]}
+                                   ).encode(), mtime=0)
+        manifest_raw = json.dumps({"version": 1, "kind": "epub-chapters", "chapters": [chapter],
+                                   "search_index": {"path": "epub-search-index.json.gz",
+                                                    "bytes": len(search_raw),
+                                                    "sha256": hashlib.sha256(search_raw).hexdigest()}}).encode()
+        result = verify_bundle_payload({"chapter_count": 1}, manifest_raw, search_raw)
+        self.assertEqual(result["chapter_count"], 1)
+        with self.assertRaisesRegex(ValueError, "checksum"):
+            verify_bundle_payload({"chapter_count": 1}, manifest_raw, search_raw + b"x")
 
 
 if __name__ == "__main__":

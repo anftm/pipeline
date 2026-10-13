@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
+import gzip
 import hashlib
 import json
 import os
@@ -14,10 +16,10 @@ from huggingface_hub import HfFileSystem
 
 try:
     from .pilot_epub_chapters import OFFICE_EXTENSIONS, OFFICE_PROFILE, OFFICE_ROOT
-    from .reader_assets import decode_search_payload, relative_path
+    from .reader_assets import decode_search_payload, relative_path, validate_chapter_manifest
 except ImportError:
     from pilot_epub_chapters import OFFICE_EXTENSIONS, OFFICE_PROFILE, OFFICE_ROOT
-    from reader_assets import decode_search_payload, relative_path
+    from reader_assets import decode_search_payload, relative_path, validate_chapter_manifest
 
 
 TARGET_BUCKET = "vomebook/reader-assets-v2"
@@ -29,6 +31,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--revisions", type=Path, default=Path("state/commits.json"))
     parser.add_argument("--bucket", default=TARGET_BUCKET)
     parser.add_argument("--index", default=f"{OFFICE_ROOT}/index.json")
+    parser.add_argument("--verify-bundles", action="store_true",
+                        help="download and verify every current manifest and complete search index")
+    parser.add_argument("--verify-workers", type=int, default=4)
     parser.add_argument("--output", type=Path, required=True)
     return parser.parse_args()
 
@@ -68,6 +73,7 @@ def office_sources(search_data: dict, revisions: dict) -> list[dict]:
 
 def _usable_mapping(entry: dict, source: dict) -> bool:
     return (entry.get("profile") == OFFICE_PROFILE
+            and entry.get("bucket") == TARGET_BUCKET
             and entry.get("source_extension") == source["extension"]
             and entry.get("extension") == "epub"
             and isinstance(entry.get("root"), str)
@@ -128,6 +134,70 @@ def summarize(sources: list[dict], index: dict) -> dict:
             "totals": totals, "by_extension": by_extension, "sources": rows}
 
 
+def verify_bundle_payload(entry: dict, manifest_raw: bytes, search_raw: bytes) -> dict:
+    manifest = validate_chapter_manifest(json.loads(manifest_raw.decode("utf-8")))
+    if (manifest.get("kind") != "epub-chapters"
+            or len(manifest["chapters"]) != entry.get("chapter_count")):
+        raise ValueError("chapter manifest count/kind disagrees with canonical index")
+    search_ref = manifest.get("search_index")
+    if not isinstance(search_ref, dict):
+        raise ValueError("chapter manifest has no complete search index")
+    if (len(search_raw) != search_ref.get("bytes")
+            or hashlib.sha256(search_raw).hexdigest() != search_ref.get("sha256")):
+        raise ValueError("search-index size or checksum mismatch")
+    search = json.loads(gzip.decompress(search_raw).decode("utf-8"))
+    if not isinstance(search, dict):
+        raise ValueError("search index is not a JSON object")
+    search_chapters = search.get("chapters")
+    if (search.get("version") != 1 or search.get("kind") != "epub-search-index"
+            or not isinstance(search_chapters, list)
+            or len(search_chapters) != len(manifest["chapters"])):
+        raise ValueError("search index does not contain the complete chapter set")
+    for chapter, indexed in zip(manifest["chapters"], search_chapters):
+        if (indexed.get("index") != chapter["index"] or indexed.get("path") != chapter["path"]
+                or indexed.get("title") != chapter["title"] or not isinstance(indexed.get("text"), str)):
+            raise ValueError("search index chapter identity differs from the manifest")
+    return {"chapter_count": len(manifest["chapters"]),
+            "manifest_sha256": hashlib.sha256(manifest_raw).hexdigest(),
+            "search_index_sha256": hashlib.sha256(search_raw).hexdigest()}
+
+
+def verify_remote_bundle(entry: dict, bucket: str, token: str) -> dict:
+    fs = HfFileSystem(token=token)
+    def read(path):
+        with fs.open(f"hf://buckets/{bucket}/{path}", "rb") as stream:
+            return stream.read()
+    manifest_raw = read(entry["manifest"])
+    manifest = json.loads(manifest_raw.decode("utf-8"))
+    search_path = f"{entry['root']}/{manifest['search_index']['path']}"
+    search_raw = read(search_path)
+    return verify_bundle_payload(entry, manifest_raw, search_raw)
+
+
+def verify_bundles(report: dict, index: dict, bucket: str, token: str, workers: int) -> dict:
+    if type(workers) is not int or not 1 <= workers <= 16:
+        raise ValueError("verify-workers must be 1..16")
+    by_key = {item.get("key"): item for item in index.get("files", [])
+              if isinstance(item, dict) and isinstance(item.get("key"), str)}
+    mapped = [row for row in report["sources"] if row["status"] == "mapped"]
+    errors = []
+    completed = 0
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(verify_remote_bundle, by_key[row["key"]], bucket, token): row
+                   for row in mapped}
+        for future in concurrent.futures.as_completed(futures):
+            row = futures[future]
+            try:
+                future.result()
+            except Exception as error:
+                errors.append({"key": row["key"], "error": f"{type(error).__name__}: {error}"})
+            completed += 1
+            if completed % 100 == 0:
+                print(f"verified office bundles: {completed}/{len(mapped)}", flush=True)
+    return {"enabled": True, "checked": completed, "valid": completed - len(errors),
+            "failed": len(errors), "errors": sorted(errors, key=lambda item: item["key"])}
+
+
 def main() -> int:
     args = parse_args()
     raw_search = args.search_data.read_bytes()
@@ -142,6 +212,11 @@ def main() -> int:
     fs = HfFileSystem(token=token)
     index = read_index(fs, args.bucket, args.index)
     report = summarize(office_sources(search_data, revisions), index)
+    if args.verify_bundles:
+        report["bundle_verification"] = verify_bundles(report, index, args.bucket, token, args.verify_workers)
+        report["complete"] = report["complete"] and report["bundle_verification"]["failed"] == 0
+    else:
+        report["bundle_verification"] = {"enabled": False}
     report["snapshot"] = {
         "search_data_sha256": hashlib.sha256(raw_search).hexdigest(),
         "revisions_sha256": hashlib.sha256(raw_revisions).hexdigest(),
