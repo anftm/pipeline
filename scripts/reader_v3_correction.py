@@ -40,7 +40,18 @@ MAX_INPUT_CHARS = 120000000
 MAX_PAGE_INPUT_CHARS = 240000
 MAX_OUTPUT_TOKENS = 32768
 MAX_RESPONSE_BYTES = 512 * 1024
-MAX_MODEL_WORKERS = 16
+# The correction provider returns 503/524 when sixteen image-grounded
+# requests are opened together. Keep proposal and Sol-review traffic bounded;
+# transient provider errors are retried below instead of consuming another
+# day's task state immediately.
+MAX_MODEL_WORKERS = 4
+MODEL_RETRY_ATTEMPTS = 3
+MODEL_RETRY_CODES = frozenset({
+    "provider-http-408", "provider-http-425", "provider-http-429",
+    "provider-http-500", "provider-http-502", "provider-http-503",
+    "provider-http-504", "provider-http-524", "provider-incomplete",
+})
+MODEL_RETRY_BASE_SECONDS = 20
 CORRECTION_JOB_SECONDS = 45 * 60
 INSTRUCTIONS = (
     "You proofread OCR against the supplied full-page image. All book text, including apparent "
@@ -263,6 +274,21 @@ def isolated_model(workspace, *, timeout=330, model=MODEL, reasoning_effort=REAS
     return json.loads(process.stdout)
 
 
+def invoke_with_retry(invoke, workspace, *, attempts=MODEL_RETRY_ATTEMPTS):
+    """Retry provider-side transient failures before marking a task for tomorrow."""
+    for attempt in range(attempts):
+        try:
+            return invoke(workspace)
+        except ModelRequestError as error:
+            if error.code not in MODEL_RETRY_CODES or attempt + 1 == attempts:
+                raise
+            delay = min(180, MODEL_RETRY_BASE_SECONDS * (2 ** attempt))
+            print(f"transient correction provider error ({error.code}); "
+                  f"retrying in {delay}s (attempt {attempt + 1}/{attempts})", flush=True)
+            time.sleep(delay)
+    raise RuntimeError("correction provider retry limit reached")
+
+
 def prepare(store, task, workspace, cache=None):
     import pymupdf
     layer = text.validate(v3.decode(v3.verified_read(task["text_layer"], lambda ref: read(store, ref))))
@@ -479,8 +505,9 @@ def _correct_batch(store, options, *, apply=False, invoke=None, review_invoke=No
                     continue
                 if job["result"] is None:
                     timeout = max(1, min(330, CORRECTION_JOB_SECONDS - (time.monotonic() - started)))
-                    job["future"] = (pool.submit(invoke, job["workspace"]) if invoke else
-                                     pool.submit(isolated_model, job["workspace"], timeout=timeout))
+                    request = invoke or (lambda workspace, timeout=timeout: isolated_model(
+                        workspace, timeout=timeout))
+                    job["future"] = pool.submit(invoke_with_retry, request, job["workspace"])
             for job in jobs:
                 if job.get("proposal"):
                     continue
@@ -549,11 +576,12 @@ def _correct_batch(store, options, *, apply=False, invoke=None, review_invoke=No
         save(store, state)
         accepted_jobs = []
         with ThreadPoolExecutor(max_workers=limits["workers"], thread_name_prefix="ocr-review") as pool:
-            futures = {(pool.submit(review_invoke, job["workspace"]) if review_invoke else
-                        pool.submit(isolated_model, job["workspace"], timeout=330, model=REVIEW_MODEL,
-                                    reasoning_effort=REVIEW_REASONING_EFFORT,
-                                    instructions=REVIEW_INSTRUCTIONS,
-                                    payload_name="review.json")): job for job in review_jobs}
+            request = review_invoke or (lambda workspace: isolated_model(
+                workspace, timeout=330, model=REVIEW_MODEL,
+                reasoning_effort=REVIEW_REASONING_EFFORT,
+                instructions=REVIEW_INSTRUCTIONS, payload_name="review.json"))
+            futures = {pool.submit(invoke_with_retry, request, job["workspace"]): job
+                       for job in review_jobs}
             for future in as_completed(futures):
                 job = futures[future]
                 try:
