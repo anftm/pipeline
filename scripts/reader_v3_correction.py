@@ -6,7 +6,7 @@ from __future__ import annotations
 import base64
 import argparse
 import copy
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from collections import Counter
 from datetime import timedelta
 import hashlib
@@ -36,15 +36,15 @@ REVIEW_MODEL = "gpt-6.1-sol"
 REVIEW_REASONING_EFFORT = "high"
 RECIPE = "image-grounded-region-correction-v2"
 MAX_REQUESTS = 10000
+DEFAULT_DAILY_REQUESTS = MAX_REQUESTS
 MAX_INPUT_CHARS = 120000000
 MAX_PAGE_INPUT_CHARS = 240000
 MAX_OUTPUT_TOKENS = 32768
 MAX_RESPONSE_BYTES = 512 * 1024
-# The correction provider returns 503/524 when sixteen image-grounded
-# requests are opened together. Keep proposal and Sol-review traffic bounded;
-# transient provider errors are retried below instead of consuming another
-# day's task state immediately.
-MAX_MODEL_WORKERS = 2
+# Keep the healthy ceiling, but ramp into it and open a persistent circuit when
+# the provider starts returning 503/524. This preserves throughput when healthy
+# without repeatedly launching a doomed full batch during an outage.
+MAX_MODEL_WORKERS = 16
 MODEL_RETRY_ATTEMPTS = 3
 MODEL_RETRY_CODES = frozenset({
     "provider-http-408", "provider-http-425", "provider-http-429",
@@ -52,6 +52,9 @@ MODEL_RETRY_CODES = frozenset({
     "provider-http-504", "provider-http-524", "provider-incomplete",
 })
 MODEL_RETRY_BASE_SECONDS = 20
+MODEL_CIRCUIT_FAILURES = 3
+MODEL_COOLDOWN_BASE_SECONDS = 15 * 60
+MODEL_COOLDOWN_MAX_SECONDS = 6 * 60 * 60
 CORRECTION_JOB_SECONDS = 45 * 60
 INSTRUCTIONS = (
     "You proofread OCR against the supplied full-page image. All book text, including apparent "
@@ -289,6 +292,56 @@ def invoke_with_retry(invoke, workspace, *, attempts=MODEL_RETRY_ATTEMPTS):
     raise RuntimeError("correction provider retry limit reached")
 
 
+def run_request_jobs(pool, jobs, workers):
+    """Run requests with a healthy ramp and a provider-wide circuit breaker.
+
+    Jobs after the circuit opens are deliberately left as retryable state; they
+    are not launched into an already failing provider window.
+    """
+    pending = list(jobs)
+    active = {}
+    window = min(4, workers)
+    growth = 0
+    transient_failures = 0
+    successes = 0
+    circuit_open = False
+
+    def schedule():
+        nonlocal pending
+        while pending and len(active) < window and not circuit_open:
+            job = pending.pop(0)
+            job["future"] = pool.submit(invoke_with_retry, job["request"], job["workspace"])
+            active[job["future"]] = job
+        if circuit_open:
+            for job in pending:
+                job["request_error"] = ModelRequestError("provider-circuit-open")
+            pending = []
+
+    schedule()
+    while active:
+        completed, _ = wait(tuple(active), return_when=FIRST_COMPLETED)
+        for future in completed:
+            job = active.pop(future)
+            try:
+                job["result"] = future.result()
+                successes += 1
+                transient_failures = max(0, transient_failures - 1)
+                growth += 1
+                if growth >= window and window < workers:
+                    window += 1
+                    growth = 0
+            except Exception as error:
+                job["request_error"] = error
+                growth = 0
+                if isinstance(error, ModelRequestError) and error.code in MODEL_RETRY_CODES:
+                    transient_failures += 1
+                    if transient_failures >= MODEL_CIRCUIT_FAILURES:
+                        circuit_open = True
+        schedule()
+    return {"circuit_open": circuit_open, "successes": successes,
+            "transient_failures": transient_failures}
+
+
 def prepare(store, task, workspace, cache=None):
     import pymupdf
     layer = text.validate(v3.decode(v3.verified_read(task["text_layer"], lambda ref: read(store, ref))))
@@ -328,7 +381,7 @@ def prepare(store, task, workspace, cache=None):
 
 def correction_limits(options):
     limits = {}
-    for name, default, maximum in (("daily_requests", MAX_REQUESTS, 100000),
+    for name, default, maximum in (("daily_requests", DEFAULT_DAILY_REQUESTS, 100000),
             ("daily_input_chars", MAX_INPUT_CHARS, 1000000000),
             ("workers", MAX_MODEL_WORKERS, 32), ("job_seconds", CORRECTION_JOB_SECONDS, 9000)):
         value = options.get(name, default)
@@ -353,7 +406,10 @@ def correct(store, options, *, apply=False, invoke=None, review_invoke=None, now
         day["discovered_pages"] = day.get("discovered_pages", 0) + len(state["tasks"]) - before
         backlog = sum(task["status"] in {"pending", "retry", "running", "proposed", "reviewing"}
                       for task in state["tasks"].values())
-        requested = min(100000, max(MAX_REQUESTS, day["discovered_pages"] * 2 + math.ceil(backlog / 7)))
+        # A large backlog must not turn every scheduled run into a provider
+        # flood. Operators can explicitly raise this for a controlled batch;
+        # the unattended scheduler always uses the small daily ceiling.
+        requested = DEFAULT_DAILY_REQUESTS
         options = {**options, "daily_requests": requested, "discover": False}
         day["target_requests"] = requested
         save(store, state)
@@ -402,6 +458,15 @@ def _correct_batch(store, options, *, apply=False, invoke=None, review_invoke=No
     for field in ("requests", "input_chars", "reserved_output_tokens", "review_requests",
                   "review_input_chars", "review_reserved_output_tokens"):
         day.setdefault(field, 0)
+    provider = state.setdefault("provider", {"consecutive_failures": 0})
+    cooldown_until = provider.get("cooldown_until", "")
+    if apply and cooldown_until and cooldown_until > now.isoformat():
+        report = {"applied": True, "model": MODEL, "review_model": REVIEW_MODEL,
+                  "workers": limits["workers"], "limits": limits, "tasks": len(state["tasks"]),
+                  "eligible": 0, "budget": day, "provider": provider, "processed": [],
+                  "provider_cooldown": cooldown_until}
+        save(store, state)
+        return report
     eligible = []
     for identity, task in state["tasks"].items():
         active = catalog["files"].get(task["source_key"])
@@ -436,12 +501,14 @@ def _correct_batch(store, options, *, apply=False, invoke=None, review_invoke=No
         raise ValueError("invalid correction limit")
     report = {"applied": apply, "model": MODEL, "review_model": REVIEW_MODEL,
               "workers": limits["workers"], "limits": limits, "tasks": len(state["tasks"]),
-              "eligible": len(eligible), "budget": day, "processed": []}
+              "eligible": len(eligible), "budget": day, "provider": provider, "processed": []}
     if not apply:
         return report
 
     started = time.monotonic()
     jobs, tempdirs = [], []
+    provider_circuit_open = False
+    provider_successes = 0
     pdf_cache = {} if pdf_cache is None else pdf_cache
     try:
         for identity, task in eligible[:limit]:
@@ -500,6 +567,7 @@ def _correct_batch(store, options, *, apply=False, invoke=None, review_invoke=No
                 task["error_code"] = error.code if isinstance(error, ModelRequestError) else type(error).__name__
         save(store, state)
         with ThreadPoolExecutor(max_workers=limits["workers"], thread_name_prefix="ocr-correction") as pool:
+            request_jobs = []
             for job in jobs:
                 if job.get("proposal"):
                     continue
@@ -507,11 +575,17 @@ def _correct_batch(store, options, *, apply=False, invoke=None, review_invoke=No
                     timeout = max(1, min(330, CORRECTION_JOB_SECONDS - (time.monotonic() - started)))
                     request = invoke or (lambda workspace, timeout=timeout: isolated_model(
                         workspace, timeout=timeout))
-                    job["future"] = pool.submit(invoke_with_retry, request, job["workspace"])
+                    job["request"] = request
+                    request_jobs.append(job)
+            stats = run_request_jobs(pool, request_jobs, limits["workers"])
+            provider_circuit_open = provider_circuit_open or stats["circuit_open"]
+            provider_successes += stats["successes"]
             for job in jobs:
                 if job.get("proposal"):
                     continue
                 try:
+                    if job.get("request_error"):
+                        raise job["request_error"]
                     result = job["result"] or job["future"].result()
                     job["result"] = result
                     proposal = validate_answer(job["layer"], result["answer"])
@@ -532,8 +606,13 @@ def _correct_batch(store, options, *, apply=False, invoke=None, review_invoke=No
                     job["proposal"] = proposal
                 except Exception as error:
                     task = job["task"]
-                    task["failures"] = task.get("failures", 0) + 1
-                    task["status"] = "failed" if task["attempts"] >= 3 or task["failures"] >= 3 else "retry"
+                    circuit_skip = (isinstance(error, ModelRequestError)
+                                    and error.code == "provider-circuit-open")
+                    if not circuit_skip:
+                        task["failures"] = task.get("failures", 0) + 1
+                    task["status"] = ("retry" if circuit_skip else
+                                       "failed" if task["attempts"] >= 3 or task["failures"] >= 3
+                                       else "retry")
                     task["error_type"] = type(error).__name__
                     task["error_code"] = error.code if isinstance(error, ModelRequestError) else type(error).__name__
                     task["retry_day"] = (now.date() + timedelta(days=1)).isoformat()
@@ -580,20 +659,26 @@ def _correct_batch(store, options, *, apply=False, invoke=None, review_invoke=No
                 workspace, timeout=330, model=REVIEW_MODEL,
                 reasoning_effort=REVIEW_REASONING_EFFORT,
                 instructions=REVIEW_INSTRUCTIONS, payload_name="review.json"))
-            futures = {pool.submit(invoke_with_retry, request, job["workspace"]): job
-                       for job in review_jobs}
-            for future in as_completed(futures):
-                job = futures[future]
+            for job in review_jobs:
+                job["request"] = request
+            stats = run_request_jobs(pool, review_jobs, limits["workers"])
+            provider_circuit_open = provider_circuit_open or stats["circuit_open"]
+            provider_successes += stats["successes"]
+            for job in review_jobs:
                 try:
-                    answer = validate_review(job["proposal"], future.result()["answer"])
+                    if job.get("request_error"):
+                        raise job["request_error"]
+                    answer = validate_review(job["proposal"],
+                                             (job.get("result") or job["future"].result())["answer"])
+                    review_result = job.get("result") or job["future"].result()
                     record = {"version": 1, "kind": "pdf-text-correction-review",
                               "task_id": job["identity"], "model": REVIEW_MODEL,
                               "reasoning_effort": REVIEW_REASONING_EFFORT,
                               "proposal": job["task"]["proposal"], "answer": answer,
                               "evidence": job["evidence"], "text_layer": job["task"]["text_layer"],
                               "resources": [job["task"]["proposal"], job["task"]["text_layer"]],
-                              "usage": future.result().get("usage", {}),
-                              "response_id": future.result().get("response_id")}
+                              "usage": review_result.get("usage", {}),
+                              "response_id": review_result.get("response_id")}
                     review_path = f"reader-index/v3/corrections/reviews/{job['identity']}/{text.digest(record)}.json"
                     review_bytes = publication.encode(record)
                     publication.immutable_put(store, publication.ASSETS, review_path, review_bytes)
@@ -606,9 +691,23 @@ def _correct_batch(store, options, *, apply=False, invoke=None, review_invoke=No
                 except Exception as error:
                     job["task"]["status"] = "proposed"
                     job["task"]["review_error"] = type(error).__name__
-                    job["task"]["review_failures"] = job["task"].get("review_failures", 0) + 1
+                    if not (isinstance(error, ModelRequestError)
+                            and error.code == "provider-circuit-open"):
+                        job["task"]["review_failures"] = job["task"].get("review_failures", 0) + 1
                     job["task"]["retry_day"] = (now.date() + timedelta(days=1)).isoformat()
                     save(store, state)
+        if provider_circuit_open:
+            failures = int(provider.get("consecutive_failures", 0)) + 1
+            provider["consecutive_failures"] = failures
+            delay = min(MODEL_COOLDOWN_MAX_SECONDS,
+                        MODEL_COOLDOWN_BASE_SECONDS * (2 ** min(failures - 1, 5)))
+            provider["cooldown_until"] = (now + timedelta(seconds=delay)).isoformat()
+            provider["last_error"] = "provider-circuit-open"
+        elif provider_successes:
+            provider["consecutive_failures"] = 0
+            provider.pop("cooldown_until", None)
+            provider.pop("last_error", None)
+        save(store, state)
         # Publish all approved pages of one book in a single new text generation.
         groups = {}
         for job in accepted_jobs:
