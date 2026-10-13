@@ -18,7 +18,8 @@ class OfficeChapterCoverageTests(unittest.TestCase):
         report = summarize([doc, docx], {"files": [current], "failures": []})
         self.assertFalse(report["complete"])
         self.assertEqual(report["totals"], {"mapped": 1, "pending": 1, "failed": 0,
-                         "stale-mapping": 0, "invalid-mapping": 0, "total": 2})
+                         "stale-mapping": 0, "invalid-mapping": 0,
+                         "missing-revision": 0, "total": 2})
         self.assertEqual(report["sources"][1]["status"], "pending")
 
     def test_failed_stale_and_malformed_mappings_are_not_counted_as_complete(self):
@@ -35,6 +36,13 @@ class OfficeChapterCoverageTests(unittest.TestCase):
         report = summarize([source], {"files": [bad], "failures": []})
         self.assertEqual(report["sources"][0]["status"], "invalid-mapping")
         self.assertFalse(report["complete"])
+
+    def test_active_source_without_repository_revision_blocks_retirement_gate(self):
+        source = {"key": "repo\0one.rtf", "repo": "repo", "path": "one.rtf",
+                  "extension": "rtf", "source_revision": ""}
+        report = summarize([source], {"files": [], "failures": []})
+        self.assertFalse(report["complete"])
+        self.assertEqual(report["totals"]["missing-revision"], 1)
 
 
 if __name__ == "__main__":

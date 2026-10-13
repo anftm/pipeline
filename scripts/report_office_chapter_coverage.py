@@ -54,8 +54,8 @@ def office_sources(search_data: dict, revisions: dict) -> list[dict]:
         repo = str(record.get("Repo") or "")
         path = relative_path(record)
         revision = str(revisions.get(repo) or "")
-        if not repo or not path or not revision:
-            continue
+        if not repo or not path:
+            raise ValueError(f"office source lacks a stable repository/path identity: {record!r}")
         key = f"{repo}\0{path}"
         candidate = {"key": key, "repo": repo, "path": path,
                      "extension": extension, "source_revision": revision}
@@ -94,7 +94,9 @@ def summarize(sources: list[dict], index: dict) -> dict:
                          and entry.get("source_revision") == source["source_revision"] else None)
         current_failure = (failure if isinstance(failure, dict)
                            and failure.get("source_revision") == source["source_revision"] else None)
-        if current_entry and _usable_mapping(current_entry, source):
+        if not source["source_revision"]:
+            status = "missing-revision"
+        elif current_entry and _usable_mapping(current_entry, source):
             status = "mapped"
         elif current_entry:
             status = "invalid-mapping"
@@ -115,11 +117,11 @@ def summarize(sources: list[dict], index: dict) -> dict:
     by_extension = {}
     for extension in sorted(OFFICE_EXTENSIONS):
         values = {status: states[(extension, status)] for status in
-                  ("mapped", "pending", "failed", "stale-mapping", "invalid-mapping")}
+                  ("mapped", "pending", "failed", "stale-mapping", "invalid-mapping", "missing-revision")}
         values["total"] = sum(values.values())
         by_extension[extension] = values
     totals = {status: sum(values[status] for values in by_extension.values())
-              for status in ("mapped", "pending", "failed", "stale-mapping", "invalid-mapping")}
+              for status in ("mapped", "pending", "failed", "stale-mapping", "invalid-mapping", "missing-revision")}
     totals["total"] = sum(totals.values())
     return {"version": 1, "kind": "office-chapter-coverage", "profile": OFFICE_PROFILE,
             "complete": totals["total"] > 0 and totals["mapped"] == totals["total"],
