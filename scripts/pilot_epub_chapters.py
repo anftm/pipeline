@@ -24,7 +24,9 @@ try:
     from .reader_bucket import index_path
     from .recover_chm import recover as recover_chm
     from . import reader_lifecycle
-    from .reader_assets import bucket_conversion_contract, decode_search_payload, relative_path, source_url
+    from .reader_assets import (
+        bucket_conversion_contract, decode_search_payload, relative_path, source_password, source_url,
+    )
     from .shared import batch_bucket_files_with_retry
 except ImportError:
     from convert_reader_assets import convert_item
@@ -33,7 +35,9 @@ except ImportError:
     from reader_bucket import index_path
     from recover_chm import recover as recover_chm
     import reader_lifecycle
-    from reader_assets import bucket_conversion_contract, decode_search_payload, relative_path, source_url
+    from reader_assets import (
+        bucket_conversion_contract, decode_search_payload, relative_path, source_password, source_url,
+    )
     from shared import batch_bucket_files_with_retry
 
 
@@ -137,7 +141,32 @@ def shard_for(key: str, count: int) -> int:
     return int.from_bytes(hashlib.sha256(key.encode()).digest()[:8], "big") % count
 
 
-def office_to_epub(source: Path, extension: str, work: Path) -> Path:
+def decrypt_office_source(source: Path, extension: str, password: str, work: Path) -> Path:
+    """Decrypt a password-protected DOC/DOCX before offline conversion.
+
+    The filename-encoded source password (for example ``〔密码：123〕``) and the
+    known-password table already drive the native Reader conversion path. Without
+    this step LibreOffice silently produces no output for encrypted inputs, so the
+    office chapter stream must decrypt first and convert the plaintext copy.
+    """
+    if not password or extension not in {"doc", "docx"}:
+        return source
+    import msoffcrypto
+    with source.open("rb") as encrypted:
+        try:
+            document = msoffcrypto.OfficeFile(encrypted)
+        except Exception:
+            return source
+        if not document.is_encrypted():
+            return source
+        decrypted = work / f"decrypted.{extension}"
+        document.load_key(password=password)
+        with decrypted.open("wb") as handle:
+            document.decrypt(handle)
+    return decrypted
+
+
+def office_to_epub(source: Path, extension: str, work: Path, password: str = "") -> Path:
     """Normalize office input once, then emit bounded-flow EPUB chapters.
 
     DOCX is a ZIP container and cannot be opened meaningfully through HTTP
@@ -146,6 +175,7 @@ def office_to_epub(source: Path, extension: str, work: Path) -> Path:
     """
     if extension not in OFFICE_EXTENSIONS:
         raise ValueError(f"unsupported office chapter extension: {extension}")
+    source = decrypt_office_source(source, extension, password, work)
     normalized = source
     if extension != "docx" or not zipfile.is_zipfile(source):
         output = work / "normalized-docx"
@@ -221,7 +251,8 @@ def build_one(item: dict, work: Path, token: str | None, bucket: str) -> tuple[d
     source_digest = hashlib.sha256(source_bytes).hexdigest()
     native_fallback = None
     if extension in OFFICE_EXTENSIONS:
-        chapter_source = office_to_epub(source, extension, work)
+        chapter_source = office_to_epub(
+            source, extension, work, source_password(item["repo"], item["path"]))
         bundle = work / "bundle"
         manifest = build_bundle(chapter_source, bundle)
         validate_office_chapter_budget(manifest, bundle)
