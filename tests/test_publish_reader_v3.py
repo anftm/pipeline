@@ -296,7 +296,14 @@ class V3PublicationTests(unittest.TestCase):
         self.assertEqual(workflow["name"], "Publish v3 Reading Generation")
         self.assertEqual(workflow["concurrency"]["group"], "reader-sidecar")
         self.assertFalse(workflow["concurrency"]["cancel-in-progress"])
+        self.assertNotIn("workflow_run", workflow[True])
         self.assertFalse(workflow[True]["workflow_dispatch"]["inputs"]["apply"]["default"])
+        # Correction is suspended from automation: schedules admit OCR only.
+        script = next(step["run"] for step in workflow["jobs"]["publish"]["steps"]
+                      if step.get("id") == "operation")
+        self.assertIn("OPERATION=auto\n", script)
+        self.assertNotIn("OPERATION=correct", script)
+        self.assertNotIn("cycle", workflow[True]["workflow_dispatch"]["inputs"]["operation"]["options"])
         env = {"GITHUB_ACTIONS": "true", "GITHUB_REPOSITORY": "anftm/pipeline", "GITHUB_RUN_ID": "123",
                "GITHUB_WORKFLOW": workflow["name"], "READER_V3_WRITE_PROTOCOL": publish.PROTOCOL,
                "GITHUB_WORKFLOW_REF": "anftm/pipeline/.github/workflows/reader-v3-publish.yml@refs/heads/main"}

@@ -634,7 +634,7 @@ class CentralHubStore(HubBucketStore):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("build-stage", "stage", "promote", "rollback", "withdraw", "ack", "ack-all", "inspect", "project", "cycle", "auto", "correct", "accept", "reject", "retry", "retire", "unify", "repair-gbk"))
+    parser.add_argument("command", choices=("build-stage", "stage", "promote", "rollback", "withdraw", "ack", "ack-all", "inspect", "project", "auto", "correct", "accept", "reject", "retry", "retire", "unify", "repair-gbk"))
     parser.add_argument("--resource", type=Path)
     parser.add_argument("--resource-json")
     parser.add_argument("--bundle", type=Path)
@@ -673,28 +673,6 @@ def main():
             text.sha(priority)
         report = run(store, apply=args.apply, priority_source=priority,
                      max_books=options.get("max_books", 4), max_seconds=options.get("max_seconds", 3600))
-    elif args.command == "cycle":
-        options = json.loads(args.resource_json or "{}")
-        try:
-            from .reader_v3_automation import run as admit
-            from .reader_v3_correction import correct
-        except ImportError:
-            from reader_v3_automation import run as admit
-            from reader_v3_correction import correct
-        auto_options = options.get("auto", options)
-        priority = auto_options.get("source_sha256")
-        if priority is not None:
-            text.sha(priority)
-        correction_options = dict(options.get("correction", {}))
-        correction_report = correct(store, correction_options, apply=args.apply)
-        # Correction has a bounded provider window and may trip its circuit
-        # quickly. Run it before expensive admission builds so a large PDF
-        # cannot starve an existing correction backlog under the writer lock.
-        auto_report = admit(store, apply=args.apply, priority_source=priority,
-                            max_books=auto_options.get("max_books", 4),
-                            max_seconds=auto_options.get("max_seconds", 3600))
-        report = {"version": 1, "kind": "reader-v3-cycle",
-                  "applied": args.apply, "auto": auto_report, "correction": correction_report}
     elif args.command in {"correct", "accept", "reject"}:
         try:
             from .reader_v3_correction import operate
