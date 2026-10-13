@@ -298,6 +298,10 @@ class V3PublicationTests(unittest.TestCase):
         self.assertFalse(workflow["concurrency"]["cancel-in-progress"])
         self.assertNotIn("workflow_run", workflow[True])
         self.assertFalse(workflow[True]["workflow_dispatch"]["inputs"]["apply"]["default"])
+        self.assertIn("retire-ocr-progress", workflow[True]["workflow_dispatch"]["inputs"]["operation"]["options"])
+        operation_step = next(step for step in workflow["jobs"]["publish"]["steps"]
+                              if step.get("id") == "operation")
+        self.assertIn("retire-ocr-progress)", operation_step["run"])
         # Correction is suspended from automation: schedules admit OCR only.
         script = next(step["run"] for step in workflow["jobs"]["publish"]["steps"]
                       if step.get("id") == "operation")

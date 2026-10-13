@@ -679,7 +679,7 @@ class CentralHubStore(HubBucketStore):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("build-stage", "stage", "promote", "rollback", "withdraw", "ack", "ack-all", "inspect", "project", "auto", "build-task", "correct", "accept", "reject", "retry", "retire", "unify", "repair-gbk"))
+    parser.add_argument("command", choices=("build-stage", "stage", "promote", "rollback", "withdraw", "ack", "ack-all", "inspect", "project", "auto", "build-task", "correct", "accept", "reject", "retry", "retire", "retire-ocr-progress", "unify", "repair-gbk"))
     parser.add_argument("--resource", type=Path)
     parser.add_argument("--resource-json")
     parser.add_argument("--bundle", type=Path)
@@ -748,6 +748,21 @@ def main():
         except ImportError:
             from reader_v3_retirement import run
         report = run(store, apply=args.apply)
+    elif args.command == "retire-ocr-progress":
+        try:
+            from . import pdf_ocr_progress
+        except ImportError:
+            import pdf_ocr_progress
+        token = os.environ.get("HF_TOKEN")
+        progress = pdf_ocr_progress.ProgressStore(token)
+        index = progress.index()
+        migrated = (index or {}).get("migrated_from")
+        report = {"kind": "pdf-ocr-progress-legacy-retirement", "applied": args.apply,
+                  "eligible": bool(migrated and not index.get("legacy_retired")),
+                  "migrated_from": migrated}
+        if args.apply:
+            assert_writer(store)
+            report["result"] = pdf_ocr_progress.retire_legacy(progress, token)
     elif args.command == "build-stage":
         if not args.resource and not args.resource_json:
             parser.error("build-stage requires a pinned single-book spec JSON")

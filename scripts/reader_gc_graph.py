@@ -9,6 +9,7 @@ import gzip
 import hashlib
 import json
 import posixpath
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from collections import Counter
@@ -255,6 +256,33 @@ class ReferenceGraph:
                         or not isinstance(payload.get("resources"), list)
                         or not isinstance(payload.get("retired_paths"), list)):
                     self.blockers.add(f"invalid retirement state: {bucket}:{path}")
+                    return False
+            elif payload.get("kind") == "pdf-ocr-progress-index":
+                books = payload.get("books")
+                migrated = payload.get("migrated_from")
+                if (payload.get("version") != 1 or not isinstance(books, dict)
+                        or any(not isinstance(key, str) or not isinstance(item, dict)
+                               or not isinstance(item.get("generation"), str)
+                               or not isinstance(item.get("pages"), list)
+                               or any(type(page) is not int or page < 1 for page in item["pages"])
+                               for key, item in books.items())
+                        or (migrated is not None and (not isinstance(migrated, dict)
+                            or migrated.get("path") != "reader-index/pdf_ocr_progress.json"
+                            or type(migrated.get("bytes")) is not int or migrated["bytes"] <= 0
+                            or not re.fullmatch(r"[0-9a-f]{64}", str(migrated.get("sha256", "")))))):
+                    self.blockers.add(f"invalid PDF OCR progress index: {bucket}:{path}")
+                    return False
+            elif payload.get("kind") == "pdf-ocr-progress-book":
+                files = payload.get("files")
+                key = payload.get("key")
+                entry = files.get(key) if isinstance(files, dict) and isinstance(key, str) else None
+                if (payload.get("version") != 1 or not isinstance(key, str) or not key
+                        or not isinstance(files, dict) or set(files) != {key}
+                        or not isinstance(entry, dict) or not isinstance(entry.get("generation"), str)
+                        or not isinstance(entry.get("pages"), dict)
+                        or any(not isinstance(page, dict) or str(page.get("p")) != number
+                               for number, page in entry["pages"].items())):
+                    self.blockers.add(f"invalid PDF OCR progress shard: {bucket}:{path}")
                     return False
             elif payload.get("kind") in {"reader-v3-automation", "reader-v3-correction-state"}:
                 if (payload.get("version") != 1 or not isinstance(payload.get("tasks"), dict)

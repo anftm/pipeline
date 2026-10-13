@@ -44,6 +44,31 @@ class MemoryStore:
 
 
 class ReaderGcGraphTests(unittest.TestCase):
+    def test_sharded_ocr_progress_roots_are_accepted_and_keep_page_objects(self):
+        store = MemoryStore()
+        key = "VoiceOfML/Test\0book.pdf"
+        page_path = "objects/aa/" + "a" * 64 + "/" + "b" * 16 + "/ocr/page-000001.json.gz"
+        generation = "c" * 64
+        store.put(PDF, page_path, b"ocr page")
+        store.put(ASSETS, "reader-index/pdf_ocr_progress/index.json", {
+            "version": 1, "kind": "pdf-ocr-progress-index",
+            "books": {key: {"generation": generation, "pages": [1]}},
+            "migrated_from": {"path": "reader-index/pdf_ocr_progress.json",
+                              "sha256": "d" * 64, "bytes": 1024, "books": 1, "pages": 1},
+            "legacy_retired": True,
+        })
+        store.put(ASSETS, "reader-index/pdf_ocr_progress.json", {
+            "version": 1, "kind": "pdf-ocr-progress-legacy-tombstone", "files": {},
+            "superseded_by": "reader-index/pdf_ocr_progress/index.json"})
+        store.put(ASSETS, "reader-index/pdf_ocr_progress/books/aa/" + "e" * 64 + ".json.gz", {
+            "version": 1, "kind": "pdf-ocr-progress-book", "key": key,
+            "files": {key: {"generation": generation, "pages": {
+                "1": {"p": 1, "o": page_path, "os": "f" * 64, "ob": 8}}}}})
+        graph = gc.ReferenceGraph(store)
+        report = graph.build()
+        self.assertTrue(report["graph_complete"], report["blockers"])
+        self.assertIn((PDF, page_path), graph.references)
+
     def test_retired_input_never_overrides_open_review_evidence(self):
         store = MemoryStore()
         source = "a" * 64
