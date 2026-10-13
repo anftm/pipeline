@@ -182,6 +182,53 @@ class ChmChapterPilotTests(unittest.TestCase):
             pilot_epub_chapters.validate_office_search_index_expanded_size(
                 pilot_epub_chapters.OFFICE_MAX_SEARCH_INDEX_EXPANDED_BYTES + 1)
 
+    def test_encrypted_office_source_is_decrypted_with_its_source_password(self):
+        captured = {}
+
+        class FakeDocument:
+            def is_encrypted(self):
+                return True
+
+            def load_key(self, password=None):
+                captured["password"] = password
+
+            def decrypt(self, handle):
+                handle.write(b"plaintext")
+
+        class FakeMsoffcrypto:
+            @staticmethod
+            def OfficeFile(handle):
+                return FakeDocument()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary)
+            source = work / "source.docx"
+            source.write_bytes(b"encrypted-package")
+            with patch.dict("sys.modules", {"msoffcrypto": FakeMsoffcrypto}):
+                decrypted = pilot_epub_chapters.decrypt_office_source(source, "docx", "123", work)
+            self.assertEqual(decrypted, work / "decrypted.docx")
+            self.assertEqual(decrypted.read_bytes(), b"plaintext")
+            self.assertEqual(captured["password"], "123")
+
+    def test_office_source_without_a_password_or_encryption_is_untouched(self):
+        class PlainDocument:
+            def is_encrypted(self):
+                return False
+
+        class PlainMsoffcrypto:
+            @staticmethod
+            def OfficeFile(handle):
+                return PlainDocument()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary)
+            source = work / "source.docx"
+            source.write_bytes(b"docx")
+            self.assertEqual(pilot_epub_chapters.decrypt_office_source(source, "docx", "", work), source)
+            self.assertEqual(pilot_epub_chapters.decrypt_office_source(source, "odt", "123", work), source)
+            with patch.dict("sys.modules", {"msoffcrypto": PlainMsoffcrypto}):
+                self.assertEqual(pilot_epub_chapters.decrypt_office_source(source, "docx", "123", work), source)
+
 
 if __name__ == "__main__":
     unittest.main()
