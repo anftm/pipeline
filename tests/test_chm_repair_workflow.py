@@ -16,6 +16,8 @@ class ChmRepairWorkflowTests(unittest.TestCase):
         self.assertFalse(inputs["retry_failed"]["default"])
         steps = workflow["jobs"]["plan"]["steps"]
         plan_step = next(step for step in steps if step.get("name") == "Plan only sources on the old CHM chapter profile")
+        fetch_step = next(step for step in steps if step.get("name") == "Fetch pinned CHM source metadata")
+        self.assertEqual(fetch_step["env"]["SKIP_SIZES"], "true")
         self.assertEqual(plan_step["id"], "plan")
         plan = plan_step["run"]
         self.assertIn("--extension chm", plan)

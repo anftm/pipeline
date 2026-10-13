@@ -525,6 +525,7 @@ def write_action_output(name: str, value: str) -> None:
 def main():
     token = os.environ.get("HF_TOKEN", "")
     force_sync = os.environ.get("FORCE_SYNC", "false").lower() == "true"
+    skip_sizes = os.environ.get("SKIP_SIZES", "false").lower() == "true"
 
     print("=" * 60)
     print("📂 VoiceOfML Search Pipeline — fetch_and_parse")
@@ -618,8 +619,16 @@ def main():
         print(f"   ✅ 解析到 {len(repo_records)} 条记录")
 
         # 3. 批量获取大小
-        print(f"   📏 批量获取文件大小 ({len(all_paths)} 个文件)...")
-        size_map = batch_get_sizes(repo, revision, all_paths, token)
+        if skip_sizes:
+            # CHM planning only needs the catalog paths and extensions.  Avoid
+            # issuing thousands of paths-info requests when the consumer does
+            # not apply a source-byte limit; regular search generation keeps
+            # the historical size-enrichment path.
+            print(f"   ⏭ 跳过文件大小查询 ({len(all_paths)} 个文件)")
+            size_map = {}
+        else:
+            print(f"   📏 批量获取文件大小 ({len(all_paths)} 个文件)...")
+            size_map = batch_get_sizes(repo, revision, all_paths, token)
         
         # 4. 补全 Size
         filled = 0

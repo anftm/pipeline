@@ -4,6 +4,7 @@ import io
 import json
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest.mock import patch
 
@@ -12,6 +13,23 @@ from scripts.epub_chapters import _parse_package_xml
 
 
 class ChmChapterPilotTests(unittest.TestCase):
+    def test_source_download_honors_hf_retry_countdown(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary) / "source.chm"
+            error = urllib.error.HTTPError(
+                "https://example.test/book.chm", 429, "rate limited", {},
+                io.BytesIO(b"429 Too Many Requests. Retry after 23 seconds (0/5000 requests remaining)."))
+            response = unittest.mock.Mock()
+            response.__enter__ = lambda value: value
+            response.__exit__ = lambda *args: None
+            response.read.return_value = b"CHM"
+            with patch.object(pilot_epub_chapters.urllib.request, "urlopen",
+                              side_effect=[error, response]), \
+                    patch.object(pilot_epub_chapters.time, "sleep") as sleep:
+                pilot_epub_chapters.download("https://example.test/book.chm", target, "token")
+            self.assertEqual(target.read_bytes(), b"CHM")
+            sleep.assert_called_once_with(23)
+
     def test_existing_index_only_treats_not_found_as_an_empty_index(self):
         fs = unittest.mock.Mock()
         fs.open.side_effect = FileNotFoundError("missing index")

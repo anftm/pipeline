@@ -46,6 +46,7 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           FORCE_SYNC: "true"
+          SKIP_SIZES: "true"
         run: python scripts/fetch_and_parse.py
       - name: Plan only sources on the old CHM chapter profile
         id: plan

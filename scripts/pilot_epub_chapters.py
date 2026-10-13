@@ -4,6 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import urllib.error
+import time
+import re
+import email.utils
 from concurrent.futures import ThreadPoolExecutor
 import gzip
 import hashlib
@@ -63,6 +67,9 @@ OFFICE_MAX_TOTAL_CHAPTER_BYTES = 500 * 1024 * 1024
 OFFICE_MAX_CHAPTERS = 10_000
 OFFICE_MAX_SEARCH_INDEX_BYTES = 64 * 1024 * 1024
 OFFICE_MAX_SEARCH_INDEX_EXPANDED_BYTES = 256 * 1024 * 1024
+SOURCE_RETRY_DELAYS = (1, 2, 4, 8, 16, 32, 64, 120)
+SOURCE_TRANSIENT_HTTP_CODES = frozenset({408, 425, 429, 500, 502, 503, 504})
+SOURCE_RETRY_AFTER_CAP_SECONDS = 300
 
 
 def parse_args() -> argparse.Namespace:
@@ -86,11 +93,50 @@ def parse_args() -> argparse.Namespace:
 
 
 def download(url: str, target: Path, token: str | None) -> None:
-    request = urllib.request.Request(url)
-    if token:
-        request.add_header("Authorization", f"Bearer {token}")
-    with urllib.request.urlopen(request, timeout=180) as response:
-        target.write_bytes(response.read())
+    for attempt in range(len(SOURCE_RETRY_DELAYS) + 1):
+        request = urllib.request.Request(url)
+        request.add_header("User-Agent", "VoiceOfML-Reader-CHM/1.0")
+        if token:
+            request.add_header("Authorization", f"Bearer {token}")
+        try:
+            with urllib.request.urlopen(request, timeout=180) as response:
+                payload = response.read()
+            target.write_bytes(payload)
+            return
+        except urllib.error.HTTPError as error:
+            if error.code not in SOURCE_TRANSIENT_HTTP_CODES or attempt >= len(SOURCE_RETRY_DELAYS):
+                raise
+            retry_after = error.headers.get("Retry-After") if error.headers else None
+            delay = None
+            if retry_after:
+                try:
+                    delay = int(float(retry_after))
+                except (OverflowError, TypeError, ValueError):
+                    try:
+                        retry_at = email.utils.parsedate_to_datetime(retry_after)
+                        delay = int(retry_at.timestamp() - time.time())
+                    except (OverflowError, TypeError, ValueError):
+                        pass
+            if delay is None:
+                try:
+                    body = error.read(8192).decode("utf-8", "replace")
+                except Exception:
+                    body = ""
+                match = re.search(r"\bretry\s+after\s+(\d+(?:\.\d+)?)\s+seconds\b",
+                                  body, re.IGNORECASE)
+                delay = int(float(match.group(1))) if match else SOURCE_RETRY_DELAYS[attempt]
+            delay = max(1, min(SOURCE_RETRY_AFTER_CAP_SECONDS, delay))
+            print(f"transient CHM source download ({error.code}); retrying in {delay}s "
+                  f"(attempt {attempt + 1}/{len(SOURCE_RETRY_DELAYS)})", flush=True)
+            time.sleep(delay)
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as error:
+            if attempt >= len(SOURCE_RETRY_DELAYS):
+                raise
+            delay = SOURCE_RETRY_DELAYS[attempt]
+            print(f"transient CHM source download ({error}); retrying in {delay}s "
+                  f"(attempt {attempt + 1}/{len(SOURCE_RETRY_DELAYS)})", flush=True)
+            time.sleep(delay)
+    raise RuntimeError("CHM source download retry limit reached")
 
 
 def existing_index(bucket: str, token: str | None, root: str, name: str = "index.json") -> dict:
