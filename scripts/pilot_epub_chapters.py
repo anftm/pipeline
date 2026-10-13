@@ -77,11 +77,19 @@ def existing_index(bucket: str, token: str | None, root: str, name: str = "index
         fs = HfFileSystem(token=token)
         with fs.open(f"hf://buckets/{bucket}/{root}/{name}", "rb") as stream:
             payload = json.loads(stream.read().decode("utf-8"))
-        if isinstance(payload, dict) and isinstance(payload.get("files"), list):
-            return payload
-    except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError):
-        pass
-    return {"version": 1, "kind": "ebook-chapter-stream-index", "files": []}
+    except FileNotFoundError:
+        return {"version": 1, "kind": "ebook-chapter-stream-index", "files": []}
+    if not isinstance(payload, dict) or not isinstance(payload.get("files"), list):
+        raise ValueError(f"invalid ebook chapter index: {bucket}/{root}/{name}")
+    return payload
+
+
+def merge_index_entries(previous: dict, entries: list[dict]) -> dict[str, dict]:
+    """Merge source keys without dropping other EPUB-family extensions."""
+    merged = {entry.get("key"): entry for entry in previous.get("files", [])
+              if isinstance(entry, dict) and entry.get("key")}
+    merged.update({entry["key"]: entry for entry in entries})
+    return merged
 
 
 def shard_for(key: str, count: int) -> int:
@@ -274,8 +282,7 @@ def main() -> int:
         if not entries and failures:
             print(f"no EPUB source converted; failures={len(failures)}")
             return 0
-        merged = {entry.get("key"): entry for entry in previous.get("files", []) if isinstance(entry, dict)}
-        merged.update({entry["key"]: entry for entry in entries})
+        merged = merge_index_entries(previous, entries)
         index_file = root / "index.json"
         index_file.write_text(json.dumps({
             "version": 1, "kind": "ebook-chapter-stream-index",

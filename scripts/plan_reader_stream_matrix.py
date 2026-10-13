@@ -48,9 +48,11 @@ def read_json(fs: HfFileSystem, bucket: str, path: str) -> dict:
     try:
         with fs.open(f"hf://buckets/{bucket}/{path}", "rb") as stream:
             value = json.loads(stream.read().decode("utf-8"))
-        return value if isinstance(value, dict) else {}
-    except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError):
+    except FileNotFoundError:
         return {}
+    if not isinstance(value, dict):
+        raise ValueError(f"invalid Reader stream index: {bucket}/{path}")
+    return value
 
 
 def source_extension(record: dict) -> str:

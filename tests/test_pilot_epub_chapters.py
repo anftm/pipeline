@@ -1,4 +1,5 @@
 import hashlib
+import io
 import json
 import tempfile
 import unittest
@@ -10,6 +11,35 @@ from scripts.epub_chapters import _parse_package_xml
 
 
 class ChmChapterPilotTests(unittest.TestCase):
+    def test_existing_index_only_treats_not_found_as_an_empty_index(self):
+        fs = unittest.mock.Mock()
+        fs.open.side_effect = FileNotFoundError("missing index")
+        with patch.object(pilot_epub_chapters, "HfFileSystem", return_value=fs):
+            result = pilot_epub_chapters.existing_index("bucket", "token", "chapters/ebook/epub")
+        self.assertEqual(result["files"], [])
+
+        for error in (PermissionError("denied"), OSError("network read failed")):
+            fs = unittest.mock.Mock()
+            fs.open.side_effect = error
+            with patch.object(pilot_epub_chapters, "HfFileSystem", return_value=fs):
+                with self.assertRaises(type(error)):
+                    pilot_epub_chapters.existing_index("bucket", "token", "chapters/ebook/epub")
+
+        fs = unittest.mock.Mock()
+        fs.open.return_value = io.BytesIO(b"[]")
+        with patch.object(pilot_epub_chapters, "HfFileSystem", return_value=fs):
+            with self.assertRaisesRegex(ValueError, "invalid ebook chapter index"):
+                pilot_epub_chapters.existing_index("bucket", "token", "chapters/ebook/epub")
+
+    def test_shared_epub_index_merge_preserves_other_extensions(self):
+        epub = {"key": "VoiceOfML/Test\0book.epub", "source_extension": "epub",
+                "source_revision": "old-epub"}
+        docx = {"key": "VoiceOfML/Test\0book.docx", "source_extension": "docx",
+                "extension": "epub", "source_revision": "docx-rev"}
+        merged = pilot_epub_chapters.merge_index_entries({"files": [epub]}, [docx])
+        self.assertEqual(merged[epub["key"]], epub)
+        self.assertEqual(merged[docx["key"]], docx)
+
     def test_package_repair_does_not_declare_reserved_xmlns_prefix(self):
         raw = (b'<package xmlns="urn:opf">'
                b'<metadata xmlns:dc="urn:dc"><dc:date xsi:type="dcterms:W3CDTF">x</dc:date>'
