@@ -8,6 +8,7 @@ import gzip
 import json
 import os
 import posixpath
+import random
 import tempfile
 import time
 import threading
@@ -22,22 +23,22 @@ class S3NotFound(FileNotFoundError):
 def retry_read(operation):
     import httpx
     from huggingface_hub.errors import HfHubHTTPError
-    for attempt in range(6):
+    for attempt in range(12):
         try:
             return operation()
         except HfHubHTTPError as error:
             status = getattr(error.response, "status_code", None)
-            if status not in {408, 429, 500, 502, 503, 504} or attempt == 5:
+            if status not in {408, 429, 500, 502, 503, 504} or attempt == 11:
                 raise
             try:
-                delay = min(60, max(1, int(error.response.headers.get("Retry-After", "1"))))
+                delay = min(300, max(1, int(float(error.response.headers.get("Retry-After", "1")))))
             except ValueError:
-                delay = min(30, 2 ** attempt)
+                delay = min(120, 2 ** attempt)
         except httpx.TransportError:
-            if attempt == 5:
+            if attempt == 11:
                 raise
-            delay = min(30, 2 ** attempt)
-        time.sleep(delay)
+            delay = min(120, 2 ** attempt)
+        time.sleep(delay + random.uniform(0, 1.5))
 
 
 class HubBucketStore:
@@ -82,14 +83,16 @@ class HubBucketStore:
     def read_bytes(self, bucket: str, path: str) -> bytes:
         from huggingface_hub.utils import get_session, hf_raise_for_status
         token = self.token(bucket)
-        response = get_session().get(
-            f"https://huggingface.co/buckets/{bucket}/resolve/{quote(path, safe='/')}",
-            headers={"Authorization": f"Bearer {token}"} if token else {},
-            follow_redirects=True, timeout=120)
-        if response.status_code == 404:
-            raise FileNotFoundError(path)
-        hf_raise_for_status(response)
-        return response.content
+        def read():
+            response = get_session().get(
+                f"https://huggingface.co/buckets/{bucket}/resolve/{quote(path, safe='/')}",
+                headers={"Authorization": f"Bearer {token}"} if token else {},
+                follow_redirects=True, timeout=120)
+            if response.status_code == 404:
+                raise FileNotFoundError(path)
+            hf_raise_for_status(response)
+            return response.content
+        return retry_read(read)
 
     def put_json(self, bucket: str, path: str, payload: dict) -> None:
         from huggingface_hub import batch_bucket_files
