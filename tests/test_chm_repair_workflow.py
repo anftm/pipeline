@@ -18,10 +18,11 @@ class ChmRepairWorkflowTests(unittest.TestCase):
         self.assertIn("--extension chm", scan)
         self.assertIn("--limit", scan)
         convert = workflow["jobs"]["convert"]
-        self.assertEqual(convert["strategy"]["max-parallel"], 8)
+        self.assertEqual(convert["strategy"]["max-parallel"], 3)
         self.assertIn("validate all mapped source text", convert["steps"][-2]["name"])
         publish = workflow["jobs"]["publish"]
-        self.assertEqual(publish["strategy"]["max-parallel"], 1)
+        self.assertNotIn("strategy", publish)
+        self.assertIn("--bundles", publish["steps"][-1]["run"])
         self.assertIn("reader-v3-publish.yml", workflow["jobs"]["finalize"]["steps"][0]["run"])
         self.assertIn("operation=unify", workflow["jobs"]["finalize"]["steps"][0]["run"])
 
