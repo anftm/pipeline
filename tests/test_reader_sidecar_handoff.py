@@ -5,6 +5,11 @@ from scripts.reader_lifecycle import processing_record
 
 
 class ReaderSidecarHandoffTests(unittest.TestCase):
+    def test_sidecar_handoff_scans_all_ebook_chapter_indexes_including_chm(self):
+        indexes = sidecar.ebook_chapter_indexes("vomebook/reader-assets-v2")
+        self.assertIn(("vomebook/reader-assets-v2", "chapters/ebook/chm/index.json"), indexes)
+        self.assertEqual(len(indexes), 5)
+
     def test_only_new_processing_roots_are_published_as_released(self):
         bucket = "vomebook/reader-assets-v2"
         root = "chapters/ebook/epub/" + "a" * 64 + "/" + "b" * 16

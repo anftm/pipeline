@@ -56,6 +56,18 @@ class ChmChapterPilotTests(unittest.TestCase):
         self.assertEqual({item["key"] for item in result["files"]}, {epub_key, docx_key})
         self.assertEqual(result["failures"], [retry])
 
+    def test_chm_source_text_profile_requeues_existing_chapter_streams_once(self):
+        key = "VoiceOfML/Test\0legacy.chm"
+        previous = {"files": [{"key": key, "source_revision": "same-revision",
+                               "profile": "epub-chapters-v8-bucket"}], "failures": []}
+        self.assertEqual(pilot_epub_chapters.chapter_profile("chm"), pilot_epub_chapters.CHM_PROFILE)
+        self.assertNotIn(key, pilot_epub_chapters.completed_revisions(
+            previous, profile=pilot_epub_chapters.CHM_PROFILE))
+        upgraded = {"files": [{"key": key, "source_revision": "same-revision",
+                               "profile": pilot_epub_chapters.CHM_PROFILE}], "failures": []}
+        self.assertEqual(pilot_epub_chapters.completed_revisions(
+            upgraded, profile=pilot_epub_chapters.CHM_PROFILE)[key], "same-revision")
+
     def test_failure_only_batch_can_publish_a_durable_failure_checkpoint(self):
         previous = {"files": [], "failures": []}
         failure = {"key": "VoiceOfML/Test\0bad.doc", "source_revision": "rev", "error": "invalid"}
@@ -114,6 +126,7 @@ class ChmChapterPilotTests(unittest.TestCase):
 
             self.assertEqual(entry["source_sha256"], source_digest)
             self.assertEqual(entry["source_extension"], "chm")
+            self.assertEqual(entry["profile"], pilot_epub_chapters.CHM_PROFILE)
             self.assertTrue(entry["fallback"].startswith("native/ebook/chm/"))
             self.assertTrue(any(path.endswith("chapter-manifest.json") and path.startswith("chapters/ebook/chm/")
                                 for path in uploads))

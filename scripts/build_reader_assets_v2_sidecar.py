@@ -25,6 +25,7 @@ except ImportError:
 ASSETS_BUCKET = "vomebook/reader-assets-v2"
 PDF_BUCKET = "vomebook/pdf-pages-v2"
 SIDECAR_PATH = "reader-index/reader_assets.json.gz"
+EBOOK_EXTENSIONS = ("epub", "mobi", "azw3", "fb2", "chm")
 
 
 def arguments():
@@ -87,6 +88,12 @@ def release_processing_roots(indexes: list[dict], generation: str, read, publish
     for path, record in updates.items():
         publish(path, record)
     return len(updates)
+
+
+def ebook_chapter_indexes(assets_bucket: str) -> list[tuple[str, str]]:
+    """Return every canonical ebook chapter index that can own upload roots."""
+    return [(assets_bucket, f"chapters/ebook/{extension}/index.json")
+            for extension in EBOOK_EXTENSIONS]
 
 
 def build(fs: HfFileSystem, assets_bucket: str, pdf_bucket: str, derived_path: str,
@@ -178,8 +185,8 @@ def main() -> int:
         # before any index can reference them. The canonical sidecar/catalog
         # is the handoff boundary; only then may those roots be released.
         indexes = []
-        for bucket, path in ((args.pdf_bucket, args.derived_manifest),
-                             (args.assets_bucket, "chapters/ebook/epub/index.json")):
+        for bucket, path in [(args.pdf_bucket, args.derived_manifest),
+                             *ebook_chapter_indexes(args.assets_bucket)]:
             try:
                 payload = read_bucket_json(path, token, bucket=bucket)
             except (FileNotFoundError, OSError, ValueError):

@@ -5,7 +5,7 @@ import yaml
 
 
 class ChmRepairWorkflowTests(unittest.TestCase):
-    def test_chm_rebuild_is_explicit_bounded_and_serializes_publication(self):
+    def test_chm_rebuild_uses_canonical_index_and_serializes_unification(self):
         root = Path(__file__).resolve().parents[1]
         workflow = yaml.safe_load((root / ".github/workflows/repair-chm-conversions.yml").read_text())
         self.assertEqual(workflow["concurrency"]["group"], "reader-sidecar")
@@ -15,20 +15,18 @@ class ChmRepairWorkflowTests(unittest.TestCase):
         self.assertEqual(inputs["limit"]["default"], "100")
         self.assertFalse(inputs["retry_failed"]["default"])
         steps = workflow["jobs"]["plan"]["steps"]
-        plan_step = next(step for step in steps if step.get("name") == "Plan stale CHM profiles")
-        self.assertEqual(plan_step["id"], "matrix")
-        scan = plan_step["run"]
-        self.assertIn("--extension chm", scan)
-        self.assertIn("--limit", scan)
-        self.assertIn("--retry-failed", scan)
-        convert = workflow["jobs"]["convert"]
-        self.assertEqual(convert["strategy"]["max-parallel"], 3)
-        self.assertIn("validate all mapped source text", convert["steps"][-2]["name"])
-        publish = workflow["jobs"]["publish"]
-        self.assertNotIn("strategy", publish)
-        self.assertIn("--bundles", publish["steps"][-1]["run"])
-        self.assertIn("reader-v3-publish.yml", workflow["jobs"]["finalize"]["steps"][0]["run"])
-        self.assertIn("operation=unify", workflow["jobs"]["finalize"]["steps"][0]["run"])
+        plan_step = next(step for step in steps if step.get("name") == "Plan only sources on the old CHM chapter profile")
+        self.assertEqual(plan_step["id"], "plan")
+        plan = plan_step["run"]
+        self.assertIn("--extension chm", plan)
+        self.assertIn("--plan-only", plan)
+        self.assertIn("--retry-failures", plan)
+        rebuild = workflow["jobs"]["rebuild"]
+        commands = "\n".join(step.get("run", "") for step in rebuild["steps"])
+        self.assertIn("--apply --workers 2", commands)
+        self.assertIn("build_reader_assets_v2_sidecar.py --apply", commands)
+        self.assertIn("reader-v3-publish.yml", commands)
+        self.assertIn("operation=unify", commands)
 
 
 if __name__ == "__main__":

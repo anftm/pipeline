@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import gzip
 import hashlib
 import json
@@ -47,6 +48,8 @@ SUPPORTED_EXTENSIONS = {"epub", "mobi", "azw3", "fb2", "chm", "doc", "docx", "od
 OFFICE_EXTENSIONS = {"doc", "docx", "odt", "rtf"}
 OFFICE_ROOT = "chapters/ebook/epub"
 OFFICE_PROFILE = "office-epub-chapters-v1-flow-512"
+CHM_PROFILE = "chm-epub-chapters-v9-source-text"
+EPUB_PROFILE = "epub-chapters-v8-bucket"
 OFFICE_FLOW_SIZE_KB = 512
 OFFICE_COMMAND_TIMEOUT_SECONDS = 900
 OFFICE_MAX_CHAPTER_BYTES = 7 * 1024 * 1024
@@ -67,6 +70,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--extension", default="epub")
     parser.add_argument("--bucket", default=TARGET_BUCKET)
     parser.add_argument("--apply", action="store_true")
+    parser.add_argument("--plan-only", action="store_true",
+                        help="report stale chapter sources without downloading or converting them")
+    parser.add_argument("--workers", type=int, default=1,
+                        help="parallel per-book conversions (1-4; publication remains one checkpoint)")
     parser.add_argument("--shard-count", type=int, default=1)
     parser.add_argument("--shard-index", type=int, default=0)
     return parser.parse_args()
@@ -100,14 +107,24 @@ def merge_index_entries(previous: dict, entries: list[dict]) -> dict[str, dict]:
     return merged
 
 
-def completed_revisions(index: dict, retry_failures: bool = False) -> dict[str, str]:
+def completed_revisions(index: dict, retry_failures: bool = False, profile: str | None = None) -> dict[str, str]:
     completed = {item["key"]: item.get("source_revision") for item in index.get("files", [])
-                 if isinstance(item, dict) and item.get("key")}
+                 if isinstance(item, dict) and item.get("key")
+                 and (profile is None or item.get("profile") == profile)}
     if not retry_failures:
         for item in index.get("failures", []):
-            if isinstance(item, dict) and item.get("key"):
+            if (isinstance(item, dict) and item.get("key")
+                    and (profile is None or item.get("profile") == profile)):
                 completed.setdefault(item["key"], item.get("source_revision"))
     return completed
+
+
+def chapter_profile(extension: str) -> str:
+    if extension == "chm":
+        return CHM_PROFILE
+    if extension in OFFICE_EXTENSIONS:
+        return OFFICE_PROFILE
+    return EPUB_PROFILE
 
 
 def merge_index_failures(previous: dict, entries: list[dict], failures: list[dict]) -> list[dict]:
@@ -321,7 +338,7 @@ def build_one(item: dict, work: Path, token: str | None, bucket: str) -> tuple[d
         "source_extension": extension, "extension": root_extension, "source_revision": item["revision"],
         "source_sha256": source_digest,
         "source_bytes": len(source_bytes), "mode": "chapter-stream", "bucket": bucket,
-        "profile": OFFICE_PROFILE if extension in OFFICE_EXTENSIONS else "epub-chapters-v8-bucket",
+        "profile": chapter_profile(extension),
         "root": root, "manifest": f"{root}/chapter-manifest.json",
         "chapter_count": len(manifest["chapters"]),
         "search_index": f"{root}/epub-search-index.json.gz",
@@ -333,6 +350,8 @@ def main() -> int:
     args = parse_args()
     if args.limit < 0 or args.max_source_bytes < 0:
         raise ValueError("limit and max-source-bytes must be non-negative")
+    if not 1 <= args.workers <= 4:
+        raise ValueError("workers must be between 1 and 4")
     if args.shard_count < 1 or not 0 <= args.shard_index < args.shard_count:
         raise ValueError("invalid shard")
     token = os.environ.get("HF_TOKEN")
@@ -343,33 +362,58 @@ def main() -> int:
     root_prefix = OFFICE_ROOT if extension in OFFICE_EXTENSIONS else f"chapters/ebook/{extension}"
     index_name = "index.json" if args.shard_count == 1 else f"index-{args.shard_index:02d}.json"
     previous = existing_index(args.bucket, token, root_prefix, index_name)
-    completed = completed_revisions(previous, args.retry_failures)
+    expected_profile = chapter_profile(extension)
+    completed = completed_revisions(
+        previous, args.retry_failures, expected_profile if extension == "chm" else None)
     selected = [item for item in select_records(args.search_data, revisions, args.max_source_bytes, extension)
                 if shard_for(f"{item['repo']}\0{item['path']}", args.shard_count) == args.shard_index
                 if completed.get(f"{item['repo']}\0{item['path']}") != item["revision"]]
     if args.limit:
         selected = selected[:args.limit]
+    if args.plan_only:
+        print(json.dumps({"kind": "epub-chapter-plan", "extension": extension,
+                          "profile": expected_profile, "selected": len(selected)}, ensure_ascii=False), flush=True)
+        return 0
     if not selected:
         print("no pending chapter sources")
         return 0
     uploads, entries, failures = {}, [], []
     with tempfile.TemporaryDirectory(prefix="reader-epub-") as directory:
         root = Path(directory)
-        for index, item in enumerate(selected):
+
+        def build_selected(pair):
+            index, item = pair
             item["extension"] = extension
             try:
-                entry, files = build_one(item, root / str(index), token, args.bucket)
+                return item, *build_one(item, root / str(index), token, args.bucket), None
             except Exception as error:
-                failures.append({
+                failure = {
                     "key": f"{item['repo']}\0{item['path']}",
                     "repo": item["repo"], "path": item["path"],
                     "source_revision": item["revision"],
+                    "profile": expected_profile,
                     "error": f"{type(error).__name__}: {error}",
-                })
-                print(f"failed: {item['repo']}/{item['path']}: {type(error).__name__}: {error}")
-                continue
-            entries.append(entry)
-            uploads.update(files)
+                }
+                return item, None, None, failure
+
+        pairs = list(enumerate(selected))
+        if args.workers == 1:
+            built = map(build_selected, pairs)
+            executor = None
+        else:
+            executor = ThreadPoolExecutor(max_workers=args.workers, thread_name_prefix="chm-convert")
+            built = executor.map(build_selected, pairs)
+        try:
+            for item, entry, files, failure in built:
+                if failure:
+                    failures.append(failure)
+                    print(f"failed: {item['repo']}/{item['path']}: {failure['error']}", flush=True)
+                    continue
+                entries.append(entry)
+                uploads.update(files)
+        finally:
+            if executor:
+                executor.shutdown(wait=True, cancel_futures=True)
         merged = merge_index_entries(previous, entries)
         index_file = root / "index.json"
         payload = merged_index_payload(previous, entries, failures)
