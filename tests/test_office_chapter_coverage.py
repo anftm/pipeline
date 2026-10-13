@@ -3,7 +3,9 @@ import hashlib
 import json
 import unittest
 
-from scripts.report_office_chapter_coverage import OFFICE_PROFILE, summarize, verify_bundle_payload
+from scripts.report_office_chapter_coverage import (
+    OFFICE_PROFILE, summarize, verify_bundle_payload, verify_processing_payload,
+)
 
 
 class OfficeChapterCoverageTests(unittest.TestCase):
@@ -66,6 +68,17 @@ class OfficeChapterCoverageTests(unittest.TestCase):
             verify_bundle_payload({"chapter_count": 1}, manifest_raw, search_raw + b"x", chapter_body)
         with self.assertRaisesRegex(ValueError, "first chapter"):
             verify_bundle_payload({"chapter_count": 1}, manifest_raw, search_raw, b"wrong chapter")
+
+    def test_processing_handoff_must_be_released_for_the_chapter_root(self):
+        entry = {"root": "chapters/ebook/epub/" + "a" * 64 + "/" + "b" * 16}
+        record = {"kind": "reader-processing-roots", "status": "released",
+                  "generation": "c" * 32,
+                  "resources": [{"bucket": "vomebook/reader-assets-v2", "root": entry["root"]}]}
+        self.assertEqual(verify_processing_payload(record, entry, "vomebook/reader-assets-v2"), "c" * 32)
+        for changed in ({**record, "status": "processing"},
+                        {**record, "resources": []}):
+            with self.assertRaises(ValueError):
+                verify_processing_payload(changed, entry, "vomebook/reader-assets-v2")
 
 
 if __name__ == "__main__":

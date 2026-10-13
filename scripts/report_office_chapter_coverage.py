@@ -9,6 +9,7 @@ import gzip
 import hashlib
 import json
 import os
+import re
 from collections import Counter
 from pathlib import Path
 
@@ -170,6 +171,17 @@ def verify_bundle_payload(entry: dict, manifest_raw: bytes, search_raw: bytes,
             "first_chapter_sha256": hashlib.sha256(first_chapter_raw).hexdigest()}
 
 
+def verify_processing_payload(record: dict, entry: dict, bucket: str) -> str:
+    generation = record.get("generation")
+    if (record.get("kind") != "reader-processing-roots" or record.get("status") != "released"
+            or not isinstance(generation, str) or not re.fullmatch(r"[0-9a-f]{32}", generation)):
+        raise ValueError("office processing root was not released by a catalog generation")
+    if not any(resource.get("bucket") == bucket and resource.get("root") == entry["root"]
+               for resource in record.get("resources", []) if isinstance(resource, dict)):
+        raise ValueError("released office processing root does not match the chapter bundle")
+    return generation
+
+
 def verify_remote_bundle(entry: dict, bucket: str, token: str) -> dict:
     manifest_raw = read_bucket_bytes(entry["manifest"], token, bucket)
     manifest = json.loads(manifest_raw.decode("utf-8"))
@@ -177,7 +189,14 @@ def verify_remote_bundle(entry: dict, bucket: str, token: str) -> dict:
     search_raw = read_bucket_bytes(search_path, token, bucket)
     first_chapter_raw = read_bucket_bytes(
         f"{entry['root']}/{manifest['chapters'][0]['path']}", token, bucket)
-    return verify_bundle_payload(entry, manifest_raw, search_raw, first_chapter_raw)
+    result = verify_bundle_payload(entry, manifest_raw, search_raw, first_chapter_raw)
+    roots = entry.get("processing_roots") or []
+    if not roots:
+        raise ValueError("office chapter mapping has no processing-root receipt")
+    for path in roots:
+        record = json.loads(read_bucket_bytes(path, token, bucket).decode("utf-8"))
+        verify_processing_payload(record, entry, bucket)
+    return result
 
 
 def verify_bundles(report: dict, index: dict, bucket: str, token: str, workers: int) -> dict:
