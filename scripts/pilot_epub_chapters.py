@@ -56,6 +56,8 @@ CHM_PROFILE = "chm-epub-chapters-v9-source-text"
 EPUB_PROFILE = "epub-chapters-v8-bucket"
 OFFICE_FLOW_SIZE_KB = 512
 OFFICE_COMMAND_TIMEOUT_SECONDS = 900
+OFFICE_LARGE_DOC_BYTES = 3 * 1024 * 1024
+OFFICE_LARGE_DOC_TIMEOUT_SECONDS = 3600
 OFFICE_MAX_CHAPTER_BYTES = 7 * 1024 * 1024
 OFFICE_MAX_TOTAL_CHAPTER_BYTES = 500 * 1024 * 1024
 OFFICE_MAX_CHAPTERS = 10_000
@@ -198,11 +200,17 @@ def office_to_epub(source: Path, extension: str, work: Path, password: str = "")
         raise ValueError(f"unsupported office chapter extension: {extension}")
     source = decrypt_office_source(source, extension, password, work)
     epub = work / "document.epub"
+    html_doc = extension == "doc" and looks_like_html(source)
+    large_legacy_doc = (
+        extension == "doc" and not html_doc and source.stat().st_size >= OFFICE_LARGE_DOC_BYTES
+    )
+    timeout_seconds = (OFFICE_LARGE_DOC_TIMEOUT_SECONDS if large_legacy_doc
+                       else OFFICE_COMMAND_TIMEOUT_SECONDS)
 
     def convert_to_epub(input_path: Path) -> None:
         subprocess.run(
             ["ebook-convert", str(input_path), str(epub), "--flow-size", str(OFFICE_FLOW_SIZE_KB)],
-            check=True, timeout=OFFICE_COMMAND_TIMEOUT_SECONDS,
+            check=True, timeout=timeout_seconds,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
         if not epub.is_file() or epub.stat().st_size <= 0:
@@ -211,7 +219,7 @@ def office_to_epub(source: Path, extension: str, work: Path, password: str = "")
     # Some historical .doc files are HTML documents with a misleading suffix.
     # Decode and sanitize them as HTML rather than asking LibreOffice to parse
     # them as OLE documents (which can exit successfully without producing DOCX).
-    if extension == "doc" and looks_like_html(source):
+    if html_doc:
         html_source = work / "source.html"
         html_source.write_text(
             sanitize_html(decode_html_source(source), allow_relative=True), encoding="utf-8")
@@ -226,12 +234,13 @@ def office_to_epub(source: Path, extension: str, work: Path, password: str = "")
             run_libreoffice(
                 ["libreoffice", "--headless", "--convert-to", "docx", "--outdir", str(output), str(source)],
                 work / "libreoffice-profile",
+                timeout_seconds=(OFFICE_LARGE_DOC_TIMEOUT_SECONDS if large_legacy_doc else None),
             )
             normalized = converted_output(output, "docx")
         convert_to_epub(normalized)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError,
             RuntimeError) as primary_error:
-        if extension != "doc":
+        if extension != "doc" or large_legacy_doc:
             raise
         # Keep conversion of large/legacy binary DOC files complete when the
         # layout-preserving LibreOffice/Calibre path times out. This is the same

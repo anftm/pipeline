@@ -60,8 +60,12 @@ def index(bucket, root, token):
         return {"files": []}
 
 
-def run_libreoffice(command: list[str], profile: Path) -> None:
+def run_libreoffice(command: list[str], profile: Path,
+                    timeout_seconds: int | None = None) -> None:
     """Run one conversion in an isolated profile and clean up hung children."""
+    timeout_seconds = timeout_seconds or LIBREOFFICE_TIMEOUT_SECONDS
+    if timeout_seconds < 1:
+        raise ValueError("LibreOffice timeout must be positive")
     profile.mkdir(parents=True, exist_ok=True)
     full_command = [command[0], f"-env:UserInstallation={profile.as_uri()}", *command[1:]]
     process = subprocess.Popen(
@@ -72,14 +76,14 @@ def run_libreoffice(command: list[str], profile: Path) -> None:
         start_new_session=True,
     )
     try:
-        stdout, stderr = process.communicate(timeout=LIBREOFFICE_TIMEOUT_SECONDS)
+        stdout, stderr = process.communicate(timeout=timeout_seconds)
     except subprocess.TimeoutExpired as error:
         try:
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
         process.communicate()
-        raise subprocess.TimeoutExpired(full_command, LIBREOFFICE_TIMEOUT_SECONDS) from error
+        raise subprocess.TimeoutExpired(full_command, timeout_seconds) from error
     if process.returncode:
         raise subprocess.CalledProcessError(process.returncode, full_command, stdout, stderr)
 

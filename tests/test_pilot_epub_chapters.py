@@ -220,6 +220,44 @@ class ChmChapterPilotTests(unittest.TestCase):
             self.assertEqual(Path(run.call_args.args[0][1]).name, "antiword-fallback.html")
             self.assertEqual(output.read_bytes(), b"fallback epub")
 
+    def test_large_binary_doc_gets_extended_conversion_deadline(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary)
+            source = work / "large.doc"
+            with source.open("wb") as handle:
+                handle.truncate(pilot_epub_chapters.OFFICE_LARGE_DOC_BYTES + 1)
+            normalized = work / "normalized.docx"
+            normalized.write_bytes(b"docx")
+            output = work / "document.epub"
+
+            def convert(command, **_kwargs):
+                Path(command[2]).write_bytes(b"epub")
+
+            with patch.object(pilot_epub_chapters, "run_libreoffice") as libreoffice, \
+                    patch.object(pilot_epub_chapters, "converted_output", return_value=normalized), \
+                    patch.object(pilot_epub_chapters.subprocess, "run", side_effect=convert) as run:
+                self.assertEqual(pilot_epub_chapters.office_to_epub(source, "doc", work), output)
+
+            self.assertEqual(
+                libreoffice.call_args.kwargs["timeout_seconds"],
+                pilot_epub_chapters.OFFICE_LARGE_DOC_TIMEOUT_SECONDS)
+            self.assertEqual(
+                run.call_args.kwargs["timeout"],
+                pilot_epub_chapters.OFFICE_LARGE_DOC_TIMEOUT_SECONDS)
+
+    def test_large_binary_doc_timeout_does_not_downgrade_to_antiword_html(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary)
+            source = work / "large.doc"
+            with source.open("wb") as handle:
+                handle.truncate(pilot_epub_chapters.OFFICE_LARGE_DOC_BYTES + 1)
+            timeout = pilot_epub_chapters.subprocess.TimeoutExpired(["libreoffice"], 3600)
+            with patch.object(pilot_epub_chapters, "run_libreoffice", side_effect=timeout), \
+                    patch.object(pilot_epub_chapters, "doc_to_html_fallback") as antiword:
+                with self.assertRaises(pilot_epub_chapters.subprocess.TimeoutExpired):
+                    pilot_epub_chapters.office_to_epub(source, "doc", work)
+            antiword.assert_not_called()
+
     def test_office_chapter_bundle_obeys_browser_and_search_budgets(self):
         valid = {"chapters": [{"bytes": 7 * 1024 * 1024}],
                  "search_index": {"bytes": 64 * 1024 * 1024}}
