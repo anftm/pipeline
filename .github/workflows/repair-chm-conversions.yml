@@ -59,10 +59,12 @@ jobs:
           if [[ "$RETRY_FAILED" == "true" ]]; then args+=(--retry-failures); fi
           report=$(python scripts/pilot_epub_chapters.py "${args[@]}")
           echo "$report"
+          mkdir -p output
+          printf '%s\n' "$report" > output/chm-plan.json
           count=$(python -c 'import json,sys; print(json.loads(sys.argv[1])["selected"])' "$report")
           echo "count=$count" >> "$GITHUB_OUTPUT"
       - name: Preserve the pinned source snapshot for the conversion run
-        run: tar -czf output/chm-source-snapshot.tgz output/search_data.json state/commits.json
+        run: tar -czf output/chm-source-snapshot.tgz output/search_data.json state/commits.json output/chm-plan.json
       - uses: actions/upload-artifact@v7
         with:
           name: chm-source-snapshot

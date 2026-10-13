@@ -21,6 +21,7 @@ class ChmRepairWorkflowTests(unittest.TestCase):
         self.assertIn("--extension chm", plan)
         self.assertIn("--plan-only", plan)
         self.assertIn("--retry-failures", plan)
+        self.assertIn("output/chm-plan.json", "\n".join(step.get("run", "") for step in steps))
         rebuild = workflow["jobs"]["rebuild"]
         commands = "\n".join(step.get("run", "") for step in rebuild["steps"])
         self.assertIn("--apply --workers 2", commands)
