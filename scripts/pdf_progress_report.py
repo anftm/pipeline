@@ -134,7 +134,18 @@ def build_report(store=None):
             return {"files": {}, "tasks": {}, "days": {}}
         snapshots[path] = {"sha256": digest}
         return data
-    registries = [registry(name) for name in REGISTRIES]
+    def ocr_progress():
+        # The per-book index replaces the multi-GB legacy registry once migrated.
+        index = registry("pdf_ocr_progress/index.json")
+        if index.get("kind") != "pdf-ocr-progress-index":
+            snapshots.pop("reader-index/pdf_ocr_progress/index.json", None)
+            return registry("pdf_ocr_progress.json")
+        return {"version": 1, "files": {
+            key: {"generation": item["generation"],
+                  "pages": {str(number): {"p": number} for number in item["pages"]}}
+            for key, item in index["books"].items()}}
+    registries = [registry(name) if name != "pdf_ocr_progress.json" else ocr_progress()
+                  for name in REGISTRIES]
     for data in registries:
         if data.get("version") != 1 or not isinstance(data.get("files"), dict):
             if data.get("files") != {}:
