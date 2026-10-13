@@ -17,9 +17,11 @@ from huggingface_hub import HfFileSystem
 try:
     from .pilot_epub_chapters import OFFICE_EXTENSIONS, OFFICE_PROFILE, OFFICE_ROOT
     from .reader_assets import decode_search_payload, relative_path, validate_chapter_manifest
+    from .reader_bucket import read_bytes as read_bucket_bytes
 except ImportError:
     from pilot_epub_chapters import OFFICE_EXTENSIONS, OFFICE_PROFILE, OFFICE_ROOT
     from reader_assets import decode_search_payload, relative_path, validate_chapter_manifest
+    from reader_bucket import read_bytes as read_bucket_bytes
 
 
 TARGET_BUCKET = "vomebook/reader-assets-v2"
@@ -169,15 +171,12 @@ def verify_bundle_payload(entry: dict, manifest_raw: bytes, search_raw: bytes,
 
 
 def verify_remote_bundle(entry: dict, bucket: str, token: str) -> dict:
-    fs = HfFileSystem(token=token)
-    def read(path):
-        with fs.open(f"hf://buckets/{bucket}/{path}", "rb") as stream:
-            return stream.read()
-    manifest_raw = read(entry["manifest"])
+    manifest_raw = read_bucket_bytes(entry["manifest"], token, bucket)
     manifest = json.loads(manifest_raw.decode("utf-8"))
     search_path = f"{entry['root']}/{manifest['search_index']['path']}"
-    search_raw = read(search_path)
-    first_chapter_raw = read(f"{entry['root']}/{manifest['chapters'][0]['path']}")
+    search_raw = read_bucket_bytes(search_path, token, bucket)
+    first_chapter_raw = read_bucket_bytes(
+        f"{entry['root']}/{manifest['chapters'][0]['path']}", token, bucket)
     return verify_bundle_payload(entry, manifest_raw, search_raw, first_chapter_raw)
 
 
