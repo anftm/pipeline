@@ -63,6 +63,15 @@ class DjvuCheckpointTests(unittest.TestCase):
         self.assertNotEqual(djvu.processing_path("key", "revision", "a" * 64),
                             djvu.processing_path("key", "revision", "b" * 64))
 
+    def test_producer_workflows_release_writer_lock_before_unify_runs(self):
+        from pathlib import Path
+        root = Path(__file__).resolve().parents[1] / ".github" / "workflows"
+        for name in ("reader-djvu-weekly.yml", "reader-office-chapters.yml"):
+            source = (root / name).read_text(encoding="utf-8")
+            self.assertIn('group: reader-sidecar', source)
+            self.assertIn('operation=unify -f apply=true', source)
+            self.assertNotIn('gh run watch', source)
+
 
 if __name__ == "__main__":
     unittest.main()
