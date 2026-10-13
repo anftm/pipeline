@@ -14,6 +14,11 @@ on:
         required: true
         default: false
         type: boolean
+      retry_failed:
+        description: Explicitly retry assets whose previous v4 conversion failed
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -49,9 +54,12 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           READER_ASSETS_REPO: VoiceOfML/Reader-Assets
           LIMIT: ${{ inputs.limit || '100' }}
+          RETRY_FAILED: ${{ inputs.retry_failed || 'false' }}
         run: |
           [[ "$LIMIT" =~ ^[0-9]+$ ]] && ((10#$LIMIT >= 1 && 10#$LIMIT <= 100)) || exit 1
-          python scripts/scan_reader_assets.py --extension chm --limit "$LIMIT"
+          args=(--extension chm --limit "$LIMIT")
+          if [[ "$RETRY_FAILED" == "true" ]]; then args+=(--retry-failed); fi
+          python scripts/scan_reader_assets.py "${args[@]}"
           # The scanner has already selected only CHM; leave the scope variables
           # unset here so the planner spreads work across stable conversion shards.
           python scripts/prepare_reader_assets_plan.py

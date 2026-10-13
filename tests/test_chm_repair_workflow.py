@@ -13,10 +13,14 @@ class ChmRepairWorkflowTests(unittest.TestCase):
         inputs = workflow[True]["workflow_dispatch"]["inputs"]
         self.assertFalse(inputs["apply"]["default"])
         self.assertEqual(inputs["limit"]["default"], "100")
+        self.assertFalse(inputs["retry_failed"]["default"])
         steps = workflow["jobs"]["plan"]["steps"]
-        scan = next(step["run"] for step in steps if step.get("name") == "Plan stale CHM profiles")
+        plan_step = next(step for step in steps if step.get("name") == "Plan stale CHM profiles")
+        self.assertEqual(plan_step["id"], "matrix")
+        scan = plan_step["run"]
         self.assertIn("--extension chm", scan)
         self.assertIn("--limit", scan)
+        self.assertIn("--retry-failed", scan)
         convert = workflow["jobs"]["convert"]
         self.assertEqual(convert["strategy"]["max-parallel"], 3)
         self.assertIn("validate all mapped source text", convert["steps"][-2]["name"])
