@@ -1,0 +1,59 @@
+name: Build v3 Reading Candidates
+run-name: v3 build wave / ${{ github.event_name }}
+
+# Heavy per-book builds (PDF/OCR reads, text layers, previews, immutable uploads)
+# run here in parallel, outside reader-sidecar. Builders may only upload
+# immutable candidates and per-task build records; promotion into the catalog
+# stays in reader-v3-publish.yml under the single writer lock.
+on:
+  workflow_dispatch:
+    inputs:
+      tasks:
+        description: JSON list of {identity, attempt} charged by the serialized auto step
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: reader-v3-build
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  build:
+    if: github.repository == 'anftm/pipeline'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        task: ${{ fromJSON(inputs.tasks) }}
+    env:
+      READER_V3_BUILD_PROTOCOL: central-reader-v3-candidate-build-v1
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - run: sudo apt-get update && sudo apt-get install -y poppler-utils
+      - run: pip install -r scripts/requirements.txt
+      - name: Build and stage one immutable candidate
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_INPUT_TOKEN: ${{ secrets.HF_INPUT_TOKEN }}
+          TASK_JSON: ${{ toJSON(matrix.task) }}
+        run: python scripts/publish_reader_v3.py build-task --resource-json "$TASK_JSON" --output output/v3/build.json
+
+  promote:
+    needs: build
+    if: always() && github.repository == 'anftm/pipeline'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Promote staged candidates and plan the next wave under the writer lock
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run reader-v3-publish.yml --repo "$GITHUB_REPOSITORY" --ref main -f operation=auto -f apply=true

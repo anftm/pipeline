@@ -190,6 +190,24 @@ def assert_writer(store):
     store.assert_serialized_writer(PROTOCOL)
 
 
+BUILD_PROTOCOL = "central-reader-v3-candidate-build-v1"
+
+
+def assert_stager(store):
+    """Immutable candidate uploads: the serialized writer or the parallel central builder.
+
+    Builders never write the pointer/catalog or the automation state; promotion
+    still requires ``assert_writer`` under ``reader-sidecar``.
+    """
+    try:
+        assert_writer(store)
+    except RuntimeError:
+        check = getattr(store, "assert_candidate_builder", None)
+        if check is None:
+            raise
+        check(BUILD_PROTOCOL)
+
+
 class CandidateReader:
     def __init__(self, store, bundle=None):
         self.store, self.bundle = store, bundle.resolve() if bundle else None
@@ -264,7 +282,7 @@ def stage(store, ref, bundle=None, *, apply=False):
               "local_objects": len(reader.local), "applied": apply}
     if not apply:
         return report
-    assert_writer(store)
+    assert_stager(store)
     roots = sorted({(bucket, "/".join(path.split("/")[:4])) for bucket, path in reader.local})
     protection_path = "reader-index/processing/v3-" + uuid.uuid4().hex + ".json"
     protection = reader_lifecycle.processing_record(
@@ -321,6 +339,29 @@ def import_primary(spec, workspace):
     target.write_bytes(raw)
 
 
+def native_ocr(spec, workspace, primary, unusable="native rebuild source is not a complete native-text PDF"):
+    """Raw OCR-shaped pages from a complete native text layer (no recognition)."""
+    probe = pdf_ocr.probe_pdf(primary)
+    if probe["classification"] != "native-text":
+        raise PublicationReviewRequired(unusable)
+    source = text.sha(spec["source_sha256"])
+    identity = text.digest({"source": source, "native_rebuild": 1, "profile": pdf_ocr.asset_profile()})
+    root = Path("objects") / source[:2] / source / identity[:16]
+    pages = []
+    for number, parsed in pdf_ocr.native_pages(primary, range(1, probe["page_count"] + 1)).items():
+        payload = pdf_ocr.page_payload(number, parsed["width"], parsed["height"], parsed["blocks"], "native")
+        payload.update(ocr_layout.arrange(payload["blocks"], payload["width"], payload["height"], {},
+                                           include_writing_modes=True))
+        raw_ref = v3.stored(workspace / root / "ocr" / f"page-{number:06d}.json.gz", workspace,
+                            payload, compressed=True, role="provenance")
+        pages.append({"p": number, "source": "native", "width": parsed["width"],
+                      "height": parsed["height"], "chars": len(payload["text"]), "text": payload["text"],
+                      "text_spans": payload["text_spans"], "layout": payload["layout"],
+                      "o": raw_ref["path"], "os": raw_ref["sha256"], "ob": raw_ref["bytes"]})
+    return {"kind": "pdf-ocr", "complete": True, "source_sha256": source,
+            "page_count": probe["page_count"], "language": "ch", "pages": pages}
+
+
 def build_stage(store, spec, workspace, *, apply=False):
     """Explicit single-book generation from pinned PDF and complete OCR objects."""
     source = text.sha(spec.get("source_sha256"))
@@ -348,25 +389,7 @@ def build_stage(store, spec, workspace, *, apply=False):
         if spec.get("primary", {}).get("path") is None:
             raise ValueError("native rebuild requires primary PDF")
         primary = workspace / spec["primary"]["path"]
-        probe = pdf_ocr.probe_pdf(primary)
-        if probe["classification"] != "native-text":
-            raise PublicationReviewRequired("native rebuild source is not a complete native-text PDF")
-        source = text.sha(spec["source_sha256"])
-        identity = text.digest({"source": source, "native_rebuild": 1, "profile": pdf_ocr.asset_profile()})
-        root = Path("objects") / source[:2] / source / identity[:16]
-        pages = []
-        for number, parsed in pdf_ocr.native_pages(primary, range(1, probe["page_count"] + 1)).items():
-            payload = pdf_ocr.page_payload(number, parsed["width"], parsed["height"], parsed["blocks"], "native")
-            payload.update(ocr_layout.arrange(payload["blocks"], payload["width"], payload["height"], {},
-                                               include_writing_modes=True))
-            raw_ref = v3.stored(workspace / root / "ocr" / f"page-{number:06d}.json.gz", workspace,
-                                payload, compressed=True, role="provenance")
-            pages.append({"p": number, "source": "native", "width": parsed["width"],
-                          "height": parsed["height"], "chars": len(payload["text"]), "text": payload["text"],
-                          "text_spans": payload["text_spans"], "layout": payload["layout"],
-                          "o": raw_ref["path"], "os": raw_ref["sha256"], "ob": raw_ref["bytes"]})
-        raw_ocr = {"kind": "pdf-ocr", "complete": True, "source_sha256": source,
-                   "page_count": probe["page_count"], "language": "ch", "pages": pages}
+        raw_ocr = native_ocr(spec, workspace, primary)
     else:
         raw_ocr = v3.decode(v3.verified_read(spec["ocr_manifest"], reader))
     if raw_ocr.get("source_sha256") != source:
@@ -380,7 +403,16 @@ def build_stage(store, spec, workspace, *, apply=False):
         text_index = v3.decode(v3.verified_read(text_ref, reader))
         book = v3.decode(v3.verified_read(text_index["book_text"], reader))
         if not any(char.isalnum() for page in book["pages"] for char in page["text"]):
-            raise PublicationReviewRequired("derived document has no usable recognized text; inspect source conversion")
+            # Converted documents were sometimes classified as scans by an older
+            # probe although the derived PDF carries a complete text layer.
+            # Use that layer instead of the unusable OCR; still refuse otherwise.
+            primary = v3.verified_read(spec["primary"], reader)
+            with tempfile.TemporaryDirectory(prefix="reader-v3-native-probe-") as probe_dir:
+                local = Path(probe_dir) / "document.pdf"
+                local.write_bytes(primary)
+                raw_ocr = native_ocr(spec, workspace, local,
+                                     "derived document has no usable recognized or native text; inspect source conversion")
+            text_ref = v3.backfill_text(raw_ocr, reader, workspace)
     reading_spec = {"source_key": key, "source_sha256": source, "primary": spec["primary"],
                     "text_layer": text_ref, "require_complete_preview": True,
                     "vector_previews": spec.get("vector_previews", False)}
@@ -631,10 +663,23 @@ class CentralHubStore(HubBucketStore):
                 or os.environ.get("READER_V3_WRITE_PROTOCOL") != PROTOCOL):
             raise RuntimeError("v3 mutation requires the central serialized workflow")
 
+    def assert_candidate_builder(self, protocol):
+        try:
+            from .pdf_worker_lanes import load_config
+        except ImportError:
+            from pdf_worker_lanes import load_config
+        expected = load_config()["publisher_repository"]
+        if (protocol != BUILD_PROTOCOL or os.environ.get("GITHUB_ACTIONS") != "true"
+                or os.environ.get("GITHUB_REPOSITORY") != expected
+                or not os.environ.get("GITHUB_RUN_ID")
+                or os.environ.get("GITHUB_WORKFLOW_REF") != expected + "/.github/workflows/reader-v3-build.yml@refs/heads/main"
+                or os.environ.get("READER_V3_BUILD_PROTOCOL") != BUILD_PROTOCOL):
+            raise RuntimeError("v3 candidate upload requires the central build workflow")
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("build-stage", "stage", "promote", "rollback", "withdraw", "ack", "ack-all", "inspect", "project", "auto", "correct", "accept", "reject", "retry", "retire", "unify", "repair-gbk"))
+    parser.add_argument("command", choices=("build-stage", "stage", "promote", "rollback", "withdraw", "ack", "ack-all", "inspect", "project", "auto", "build-task", "correct", "accept", "reject", "retry", "retire", "unify", "repair-gbk"))
     parser.add_argument("--resource", type=Path)
     parser.add_argument("--resource-json")
     parser.add_argument("--bundle", type=Path)
@@ -671,8 +716,26 @@ def main():
         priority = options.get("source_sha256")
         if priority is not None:
             text.sha(priority)
-        report = run(store, apply=args.apply, priority_source=priority,
-                     max_books=options.get("max_books", 4), max_seconds=options.get("max_seconds", 3600))
+        if options.get("inline"):
+            # Legacy single-runner mode: builds inside the writer lock.
+            report = run(store, apply=args.apply, priority_source=priority,
+                         max_books=options.get("max_books", 4), max_seconds=options.get("max_seconds", 3600))
+        else:
+            try:
+                from .reader_v3_automation import wave
+            except ImportError:
+                from reader_v3_automation import wave
+            report = wave(store, apply=args.apply, priority_source=priority,
+                          wave_size=options.get("wave_size", 8))
+    elif args.command == "build-task":
+        try:
+            from .reader_v3_automation import build_task
+        except ImportError:
+            from reader_v3_automation import build_task
+        options = json.loads(args.resource_json or "{}")
+        if type(options.get("attempt")) is not int:
+            parser.error("build-task requires identity and integer attempt")
+        report = build_task(store, options.get("identity"), options["attempt"])
     elif args.command in {"correct", "accept", "reject"}:
         try:
             from .reader_v3_correction import operate

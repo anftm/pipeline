@@ -29,6 +29,7 @@ on:
 
 permissions:
   contents: read
+  actions: write
 
 concurrency:
   group: reader-sidecar
@@ -82,21 +83,35 @@ jobs:
           esac
           if [[ "$APPLY" == true ]]; then args+=(--apply); fi
           python scripts/publish_reader_v3.py "${args[@]}"
+          changed=true
+          if [[ "$OPERATION" == auto ]]; then
+            changed=$(jq -r 'if has("changed") then .changed else (.processed | length > 0) end' output/v3/publication.json)
+          fi
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+      - name: Dispatch the next parallel build wave outside the writer lock
+        if: steps.operation.outputs.apply == 'true' && steps.operation.outputs.operation == 'auto'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          wave=$(jq -c '.wave // []' output/v3/publication.json)
+          if [[ "$wave" != "[]" ]]; then
+            gh workflow run reader-v3-build.yml --repo "$GITHUB_REPOSITORY" --ref main -f tasks="$wave"
+          fi
       - name: Publish the pinned projection to Pages
-        if: steps.operation.outputs.apply == 'true' && contains(fromJSON('["auto","correct","accept","promote","rollback","withdraw","repair-gbk","unify"]'), steps.operation.outputs.operation)
+        if: steps.operation.outputs.apply == 'true' && steps.operation.outputs.changed == 'true' && contains(fromJSON('["auto","correct","accept","promote","rollback","withdraw","repair-gbk","unify"]'), steps.operation.outputs.operation)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           PAGES_TOKEN: ${{ secrets.PAGES_TOKEN }}
           PAGES_REPO: ${{ secrets.PAGES_REPO }}
         run: python scripts/publish_search_reader_index.py
       - name: Confirm both deployed consumer projections
-        if: steps.operation.outputs.apply == 'true' && contains(fromJSON('["auto","correct","accept","promote","rollback","withdraw","repair-gbk","unify"]'), steps.operation.outputs.operation)
+        if: steps.operation.outputs.apply == 'true' && steps.operation.outputs.changed == 'true' && contains(fromJSON('["auto","correct","accept","promote","rollback","withdraw","repair-gbk","unify"]'), steps.operation.outputs.operation)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_INPUT_TOKEN: ${{ secrets.HF_INPUT_TOKEN }}
         run: python scripts/publish_reader_v3.py ack-all --apply --output output/v3/consumers.json
       - name: Retire acknowledged history roots after their retention period
-        if: steps.operation.outputs.apply == 'true' && contains(fromJSON('["auto","correct","accept","promote","rollback","withdraw"]'), steps.operation.outputs.operation)
+        if: steps.operation.outputs.apply == 'true' && steps.operation.outputs.changed == 'true' && contains(fromJSON('["auto","correct","accept","promote","rollback","withdraw"]'), steps.operation.outputs.operation)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: python scripts/publish_reader_v3.py retire --apply --output output/v3/retirement.json

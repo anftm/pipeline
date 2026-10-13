@@ -117,3 +117,107 @@ class AutomationTests(unittest.TestCase):
                        {"reader_assets_path": "derived/../document.pdf"}, {"source_url": "https://evil.example/book.pdf"}):
             with self.assertRaises(ValueError):
                 auto.spec_for(value["key"], {**value, **change})
+
+
+class WaveTests(unittest.TestCase):
+    """Parallel builds outside the writer lock; only promotion is serialized."""
+
+    def setUp(self):
+        self.store = fixtures.Store()
+        self.now = datetime(2026, 10, 10, tzinfo=timezone.utc)
+        books = [entry(key=f"VoiceOfML/books\0b{i}.pdf", source=f"{i:x}" * 64, count=10 + i) for i in range(3)]
+        self.store.objects[(publication.ASSETS, auto.REGISTRY)] = publication.encode(
+            {"version": 1, "files": {e["key"]: e for e in books}})
+
+    def test_dry_run_plans_without_writes_and_apply_charges_a_wave(self):
+        plan = auto.wave(self.store, now=self.now, wave_size=2)
+        self.assertEqual(len(plan["next"]), 2)
+        self.assertEqual(self.store.writes, [])
+        report = auto.wave(self.store, apply=True, now=self.now, wave_size=2)
+        self.assertEqual([item["attempt"] for item in report["wave"]], [1, 1])
+        self.assertEqual(report["budget"]["attempts"], 2)
+        self.assertFalse(report["changed"])
+        state = auto.load_state(self.store)
+        self.assertEqual(sum(t["status"] == "building" for t in state["tasks"].values()), 2)
+        # In-flight builds are not charged or dispatched again.
+        again = auto.wave(self.store, apply=True, now=self.now, wave_size=8)
+        self.assertEqual(len(again["wave"]), 1)
+        self.assertEqual(again["budget"]["attempts"], 3)
+
+    def test_builder_records_are_collected_promoted_and_failures_retried(self):
+        fixture = fixtures.V3PublicationTests()
+        fixture.setUp()
+        try:
+            planned = auto.wave(self.store, apply=True, now=self.now, wave_size=2)["wave"]
+            state = auto.load_state(self.store)
+            first, second = planned
+            key = state["tasks"][first["identity"]]["spec"]["source_key"]
+            staged = publication.stage(self.store, fixture.candidate(key=key), fixture.bundle, apply=True)
+            self.store.allowed = False  # builders are not the serialized writer
+            self.store.assert_candidate_builder = lambda protocol: None
+            auto.build_task(self.store, first["identity"], first["attempt"], build=Mock(return_value=staged))
+            auto.build_task(self.store, second["identity"], second["attempt"], build=Mock(side_effect=OSError()))
+            stale = auto.build_task(self.store, second["identity"], 99, build=Mock())
+            self.assertEqual(stale["status"], "stale")
+            with self.assertRaises(RuntimeError):
+                auto.save_state(self.store, auto.load_state(self.store))
+            self.store.allowed = True
+            report = auto.wave(self.store, apply=True, now=self.now + timedelta(minutes=5), wave_size=1)
+            self.assertTrue(report["changed"])
+            statuses = {item["id"]: item["status"] for item in report["collected"]}
+            self.assertEqual(statuses, {first["identity"]: "staged", second["identity"]: "retry"})
+            self.assertEqual(report["processed"][0]["status"], "published")
+            self.assertIn(key, publication.current(self.store)[1]["files"])
+            self.assertEqual(len(report["wave"]), 1)  # the third book; the failed one waits for retry_at
+        finally:
+            fixture.temp.cleanup()
+
+    def test_lost_builder_times_out_and_unusable_text_gets_one_native_retry(self):
+        report = auto.wave(self.store, apply=True, now=self.now, wave_size=1)
+        identity = report["wave"][0]["identity"]
+        later = auto.wave(self.store, apply=True, now=self.now + auto.BUILD_TIMEOUT, wave_size=1)
+        self.assertEqual(later["collected"], [{"id": identity, "status": "retry", "error_type": "BuildTimeout"}])
+        state = auto.load_state(self.store)
+        task = state["tasks"][identity]
+        task.update(status="needs-review", error_type="PublicationReviewRequired")
+        task.pop("review_recipe", None)
+        self.store.objects[(publication.ASSETS, auto.STATE)] = publication.encode(state)
+        retried = auto.wave(self.store, apply=True, now=self.now + timedelta(days=2), wave_size=3)
+        self.assertIn(identity, [item["identity"] for item in retried["wave"]])
+        self.store.allowed = False
+        self.store.assert_candidate_builder = lambda protocol: None
+        auto.build_task(self.store, identity, auto.load_state(self.store)["tasks"][identity]["attempts"],
+                        build=Mock(side_effect=publication.PublicationReviewRequired()))
+        self.store.allowed = True
+        final = auto.wave(self.store, apply=True, now=self.now + timedelta(days=2, minutes=5), wave_size=3)
+        self.assertNotIn(identity, [item["identity"] for item in final["wave"]])
+        self.assertEqual(auto.load_state(self.store)["tasks"][identity]["status"], "needs-review")
+
+    def test_superseded_duplicates_leave_needs_review(self):
+        state = {"version": 1, "kind": "reader-v3-automation", "days": {}, "tasks": {
+            "f" * 64: {"spec": {"source_key": "old"}, "page_count": 1, "status": "needs-review", "attempts": 1}}}
+        auto.discover(state, {"version": 1, "files": {}})
+        self.assertEqual(state["tasks"]["f" * 64]["status"], "superseded")
+
+    def test_native_fallback_refuses_a_primary_without_complete_text(self):
+        with patch.object(publication.pdf_ocr, "probe_pdf", return_value={"classification": "scan"}):
+            with self.assertRaises(publication.PublicationReviewRequired):
+                publication.native_ocr({"source_sha256": "a" * 64}, None, None, "no text")
+
+    def test_build_workflow_is_parallel_outside_the_writer_lock(self):
+        import yaml
+        from pathlib import Path
+        root = Path(__file__).resolve().parents[1]
+        build = yaml.safe_load((root / ".github/workflows/reader-v3-build.yml").read_text())
+        self.assertEqual(build["concurrency"]["group"], "reader-v3-build")
+        self.assertEqual(build["jobs"]["build"]["strategy"]["max-parallel"], 4)
+        self.assertIn("build-task", build["jobs"]["build"]["steps"][-1]["run"])
+        self.assertIn("operation=auto", build["jobs"]["promote"]["steps"][0]["run"])
+        env = {"GITHUB_ACTIONS": "true", "GITHUB_REPOSITORY": "anftm/pipeline", "GITHUB_RUN_ID": "1",
+               "GITHUB_WORKFLOW_REF": "anftm/pipeline/.github/workflows/reader-v3-build.yml@refs/heads/main",
+               "READER_V3_BUILD_PROTOCOL": publication.BUILD_PROTOCOL, "GITHUB_WORKFLOW": "Build v3 Reading Candidates"}
+        store = publication.CentralHubStore.__new__(publication.CentralHubStore)
+        with patch.dict("os.environ", env, clear=True):
+            publication.assert_stager(store)  # builders may upload immutable candidates
+            with self.assertRaises(RuntimeError):
+                publication.assert_writer(store)  # but never write the catalog or state

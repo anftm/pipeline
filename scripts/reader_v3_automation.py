@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import re
@@ -21,9 +22,15 @@ except ImportError:
 
 STATE = "reader-index/v3/automation.json"
 REGISTRY = "reader-index/pdf_ocr_manifest.json"
-DAILY_ATTEMPTS = 64
-DAILY_PAGES = 100000
+BUILDS = "reader-index/v3/builds"
+# Builds run in parallel outside reader-sidecar; only promotion is serialized.
+DAILY_ATTEMPTS = 384
+DAILY_PAGES = 200000
 MAX_ATTEMPTS = 3
+WAVE_SIZE = 8
+BUILD_TIMEOUT = timedelta(hours=6)
+# Recipe revision whose unusable-text handling falls back to a native text layer.
+REVIEW_RECIPE = "native-text-fallback-v1"
 
 
 def clock():
@@ -146,9 +153,160 @@ def discover(state, registry):
         active_identities.add(identity)
         state["tasks"].setdefault(identity, {"spec": spec, "page_count": count, "status": "pending", "attempts": 0})
     for identity, task in state["tasks"].items():
-        if identity not in active_identities and task["status"] in {"pending", "retry", "building"} and not task.get("candidate"):
+        if identity not in active_identities and task["status"] in {
+                "pending", "retry", "building", "needs-review"} and not task.get("candidate"):
             task["status"] = "superseded"
     return ignored
+
+
+def _eligible(state, catalog, budget, now, priority_source=None, *, skip_building=False):
+    eligible = []
+    for identity, task in state["tasks"].items():
+        spec = task["spec"]
+        active = catalog["files"].get(spec["source_key"])
+        if active:
+            # A different raw recipe must never replace accepted or already published text.
+            task["status"] = "published" if active["source_sha256"] == spec["source_sha256"] else "protected"
+            task["active_generation"] = active["reading_generation"]
+            continue
+        if (task["status"] == "needs-review" and task.get("error_type") == "PublicationReviewRequired"
+                and task.get("review_recipe") != REVIEW_RECIPE):
+            # One rebuild under the native-text fallback recipe; a second review is final.
+            task.update(status="pending", attempts=0, failures=0, review_recipe=REVIEW_RECIPE)
+            task.pop("retry_at", None)
+        if task["status"] in {"published", "protected", "failed", "needs-review", "superseded"}:
+            continue
+        if skip_building and task["status"] == "building" and not task.get("candidate"):
+            continue
+        if not task.get("candidate") and task["attempts"] >= MAX_ATTEMPTS:
+            task["status"] = "failed"
+            continue
+        if task.get("retry_at") and task["retry_at"] > now.isoformat():
+            continue
+        if task.get("candidate"):
+            eligible.append((identity, task))
+        elif (task["attempts"] < MAX_ATTEMPTS and budget["attempts"] < DAILY_ATTEMPTS
+              and budget["pages"] + task["page_count"] <= DAILY_PAGES):
+            eligible.append((identity, task))
+    eligible.sort(key=lambda pair: (pair[1]["spec"]["source_sha256"] != priority_source,
+                                    not bool(pair[1].get("candidate")), pair[1]["page_count"], pair[0]))
+    return eligible
+
+
+def _charge(task, budget, now):
+    task.update(status="building", attempts=task["attempts"] + 1, started_at=now.isoformat())
+    budget["attempts"] += 1
+    budget["pages"] += task["page_count"]
+
+
+def _promote(store, task):
+    pointer, latest = publication.current(store)
+    if task["spec"]["source_key"] in latest["files"]:
+        task["status"] = "protected"
+    else:
+        promoted = publication.promote(store, task["candidate"], pointer["generation"] if pointer else None, apply=True)
+        task.update(status="published", catalog_generation=promoted["generation"])
+    task.pop("retry_at", None)
+    task.pop("error_type", None)
+
+
+def _fail(task, error_type, review, now):
+    task["error_type"] = error_type
+    task["failures"] = task.get("failures", 0) + 1
+    if review:
+        task["review_recipe"] = REVIEW_RECIPE
+    task["status"] = ("needs-review" if review else
+                      "failed" if task["failures"] >= MAX_ATTEMPTS else "retry")
+    task["retry_at"] = (now + timedelta(hours=2 ** min(task["failures"], 5))).isoformat()
+
+
+def build_path(identity):
+    return f"{BUILDS}/{text.sha(identity)}.json"
+
+
+def wave(store, *, apply=False, priority_source=None, now=None, wave_size=WAVE_SIZE):
+    """Serialized step: collect parallel build results, promote them, plan the next wave.
+
+    Runs under reader-sidecar. It never builds; ``build_task`` does that in the
+    separate central build workflow, which cannot write the catalog or this state.
+    """
+    if type(wave_size) is not int or not 1 <= wave_size <= 32:
+        raise ValueError("v3 build wave size must be 1..32")
+    if apply:
+        publication.assert_writer(store)
+    state = copy.deepcopy(load_state(store))
+    ignored = discover(state, json.loads(store.read_bytes(publication.ASSETS, REGISTRY)))
+    now = now or clock()
+    budget = state["days"].setdefault(now.date().isoformat(), {"attempts": 0, "pages": 0})
+    collected = []
+    for identity, task in state["tasks"].items():
+        if task["status"] != "building" or task.get("candidate"):
+            continue
+        try:
+            record = json.loads(store.read_bytes(publication.ASSETS, build_path(identity)))
+        except FileNotFoundError:
+            record = None
+        if record is None or record.get("attempt") != task["attempts"]:
+            started = datetime.fromisoformat(task.get("started_at") or "1970-01-01T00:00:00+00:00")
+            if now - started >= BUILD_TIMEOUT:
+                _fail(task, "BuildTimeout", False, now)
+                collected.append({"id": identity, "status": task["status"], "error_type": "BuildTimeout"})
+            continue
+        if record["status"] == "staged":
+            task.update(status="staged", candidate=record["candidate"])
+        else:
+            _fail(task, record.get("error_type") or "BuildFailed", record["status"] == "needs-review", now)
+        collected.append({"id": identity, "status": task["status"], "error_type": task.get("error_type")})
+    _, catalog = publication.current(store)
+    eligible = _eligible(state, catalog, budget, now, priority_source, skip_building=True)
+    report = {"applied": apply, "tasks": len(state["tasks"]), "ignored": ignored, "eligible": len(eligible),
+              "budget": budget, "collected": collected, "processed": [], "wave": [], "changed": False}
+    if not apply:
+        report["next"] = [identity for identity, _ in eligible[:wave_size]]
+        return report
+    save_state(store, state)
+    for identity, task in [pair for pair in eligible if pair[1].get("candidate")]:
+        try:
+            _promote(store, task)
+            report["changed"] = report["changed"] or task["status"] == "published"
+        except Exception as error:
+            _fail(task, type(error).__name__, isinstance(error, publication.PublicationReviewRequired), now)
+        save_state(store, state)
+        report["processed"].append({"id": identity, "status": task["status"], "error_type": task.get("error_type")})
+    for identity, task in [pair for pair in eligible if not pair[1].get("candidate")]:
+        if len(report["wave"]) >= wave_size or budget["attempts"] >= DAILY_ATTEMPTS:
+            break
+        if budget["pages"] + task["page_count"] > DAILY_PAGES:
+            continue
+        _charge(task, budget, now)
+        report["wave"].append({"identity": identity, "attempt": task["attempts"]})
+    save_state(store, state)  # Charge before dispatch, including builds that never report.
+    return report
+
+
+def build_task(store, identity, attempt, *, build=None):
+    """Parallel builder: stage one immutable candidate and record the outcome only."""
+    publication.assert_stager(store)
+    identity = text.sha(identity)
+    task = load_state(store)["tasks"].get(identity)
+    if not task or task["status"] != "building" or task["attempts"] != attempt or task.get("candidate"):
+        return {"identity": identity, "attempt": attempt, "status": "stale"}
+    record = {"version": 1, "kind": "reader-v3-build", "identity": identity, "attempt": attempt,
+              "run_id": os.environ.get("GITHUB_RUN_ID", ""), "resources": []}
+    try:
+        with tempfile.TemporaryDirectory(prefix="reader-v3-build-") as directory:
+            built = (build or publication.build_stage)(store, task["spec"], Path(directory), apply=True)
+        record.update(status="staged", candidate=built["candidate"])
+        # Keeps the candidate (and its whole closure) referenced until promotion.
+        record["resources"] = [built["candidate"]]
+    except Exception as error:
+        record.update(status="needs-review" if isinstance(error, publication.PublicationReviewRequired) else "failed",
+                      error_type=type(error).__name__, error=str(error)[:500])
+    raw = publication.encode(record)
+    store.put_bytes(publication.ASSETS, build_path(identity), raw)
+    if store.read_bytes(publication.ASSETS, build_path(identity)) != raw:
+        raise ValueError("build record readback mismatch")
+    return record
 
 
 def run(store, *, apply=False, priority_source=None, build=None, now=None, max_books=4,
@@ -179,29 +337,7 @@ def _run_one(store, *, apply=False, priority_source=None, build=None, now=None):
     day = now.date().isoformat()
     budget = state["days"].setdefault(day, {"attempts": 0, "pages": 0})
     _, catalog = publication.current(store)
-    eligible = []
-    for identity, task in state["tasks"].items():
-        spec = task["spec"]
-        active = catalog["files"].get(spec["source_key"])
-        if active:
-            # A different raw recipe must never replace accepted or already published text.
-            task["status"] = "published" if active["source_sha256"] == spec["source_sha256"] else "protected"
-            task["active_generation"] = active["reading_generation"]
-            continue
-        if task["status"] in {"published", "protected", "failed", "needs-review", "superseded"}:
-            continue
-        if not task.get("candidate") and task["attempts"] >= MAX_ATTEMPTS:
-            task["status"] = "failed"
-            continue
-        if task.get("retry_at") and task["retry_at"] > now.isoformat():
-            continue
-        if task.get("candidate"):
-            eligible.append((identity, task))
-        elif (task["attempts"] < MAX_ATTEMPTS and budget["attempts"] < DAILY_ATTEMPTS
-              and budget["pages"] + task["page_count"] <= DAILY_PAGES):
-            eligible.append((identity, task))
-    eligible.sort(key=lambda pair: (pair[1]["spec"]["source_sha256"] != priority_source,
-                                    not bool(pair[1].get("candidate")), pair[1]["page_count"], pair[0]))
+    eligible = _eligible(state, catalog, budget, now, priority_source)
     report = {"applied": apply, "tasks": len(state["tasks"]), "ignored": ignored,
               "eligible": len(eligible), "budget": budget, "processed": []}
     if not apply:
@@ -213,28 +349,15 @@ def _run_one(store, *, apply=False, priority_source=None, build=None, now=None):
     identity, task = eligible[0]
     try:
         if not task.get("candidate"):
-            task.update(status="building", attempts=task["attempts"] + 1, started_at=now.isoformat())
-            budget["attempts"] += 1
-            budget["pages"] += task["page_count"]
+            _charge(task, budget, now)
             save_state(store, state)  # Charge before work, including interrupted attempts.
             with tempfile.TemporaryDirectory(prefix="reader-v3-auto-") as directory:
                 built = (build or publication.build_stage)(store, task["spec"], Path(directory), apply=True)
             task.update(status="staged", candidate=built["candidate"])
             save_state(store, state)
-        pointer, latest = publication.current(store)
-        if task["spec"]["source_key"] in latest["files"]:
-            task["status"] = "protected"
-        else:
-            promoted = publication.promote(store, task["candidate"], pointer["generation"] if pointer else None, apply=True)
-            task.update(status="published", catalog_generation=promoted["generation"])
-        task.pop("retry_at", None)
-        task.pop("error_type", None)
+        _promote(store, task)
     except Exception as error:
-        task["error_type"] = type(error).__name__
-        task["failures"] = task.get("failures", 0) + 1
-        task["status"] = ("needs-review" if isinstance(error, publication.PublicationReviewRequired) else
-                          "failed" if task["failures"] >= MAX_ATTEMPTS else "retry")
-        task["retry_at"] = (now + timedelta(hours=2 ** min(task["failures"], 5))).isoformat()
+        _fail(task, type(error).__name__, isinstance(error, publication.PublicationReviewRequired), now)
     save_state(store, state)
     report["processed"].append({"id": identity, "status": task["status"], "error_type": task.get("error_type")})
     return report
