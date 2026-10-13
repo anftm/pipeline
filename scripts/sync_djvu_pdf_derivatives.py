@@ -45,6 +45,8 @@ def args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--search-data", type=Path, default=Path("output/search_data.json"))
     parser.add_argument("--revisions", type=Path, default=Path("state/commits.json"))
+    parser.add_argument("--repo", default="")
+    parser.add_argument("--path", default="")
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--retry-failed", action="store_true")
     parser.add_argument("--force", action="store_true")
@@ -69,7 +71,7 @@ def read_manifest(token: str) -> dict:
     return value
 
 
-def source_records(search_data: Path, revisions: Path) -> list[dict]:
+def source_records(search_data: Path, revisions: Path, *, repo_filter="", path_filter="") -> list[dict]:
     revision_map = json.loads(revisions.read_text(encoding="utf-8"))
     records = []
     for record in decode_search_payload(json.loads(search_data.read_text(encoding="utf-8"))):
@@ -77,6 +79,8 @@ def source_records(search_data: Path, revisions: Path) -> list[dict]:
             continue
         repo = str(record.get("Repo") or "")
         path = relative_path(record)
+        if (repo_filter and repo != repo_filter) or (path_filter and path != path_filter):
+            continue
         revision = str(revision_map.get(repo) or "")
         if repo and revision:
             records.append({"repo": repo, "path": path, "revision": revision,
@@ -156,9 +160,9 @@ def failure_entry(item: dict, error: Exception, previous: dict | None = None) ->
                        or (previous.get("status") is None and previous.get("new_path")
                            and previous.get("derived_sha256") and previous.get("derived_bytes")))
         if prior_ready:
-            # Never hide an already-readable derivative because a replacement
-            # attempt failed. The changed source remains pending on the next
-            # run, while the last known-good mapping stays GC-visible.
+            # Never hide an already-readable derivative because an explicit
+            # replacement attempt failed. Keep the failed revision recorded;
+            # retry it only by explicit retry or exact-path force.
             return {**previous, "last_attempt_source_revision": item["revision"],
                     "last_attempt_status": "failed", "last_attempts": int(previous.get("last_attempts", 0)) + 1,
                     "last_attempt_error": f"{type(error).__name__}: {error}"[:1000]}
@@ -183,14 +187,27 @@ def pending_records(records, existing, *, retry_failed=False, force=False):
     pending = []
     for item in records:
         prior = existing.get(item["key"])
-        if not force and isinstance(prior, dict):
-            prior_ready = (prior.get("status") == "ready"
-                           or (prior.get("status") is None and prior.get("new_path")
-                               and prior.get("derived_sha256") and prior.get("derived_bytes")))
-            if prior.get("source_revision") == item["revision"] and prior_ready:
-                continue
-            if prior.get("source_revision") == item["revision"] and prior.get("status") == "failed" and not retry_failed:
-                continue
+        if not isinstance(prior, dict):
+            pending.append(item)
+            continue
+        if force:
+            pending.append(item)
+            continue
+        prior_ready = (prior.get("status") == "ready"
+                       or (prior.get("status") is None and prior.get("new_path")
+                           and prior.get("derived_sha256") and prior.get("derived_bytes")))
+        if prior_ready:
+            # HF dataset revisions are repository-wide. An unrelated commit is
+            # not evidence that this DJVU changed; keep its immutable derivative.
+            # Rebuild a ready key only with an exact-path --force request. A
+            # failed exact-source attempt is retried only when requested.
+            retry_revision = prior.get("last_attempt_source_revision")
+            if prior.get("last_attempt_status") == "failed" and retry_revision == item["revision"]:
+                if retry_failed:
+                    pending.append(item)
+            continue
+        if prior.get("source_revision") == item["revision"] and prior.get("status") == "failed" and not retry_failed:
+            continue
         pending.append(item)
     return pending
 
@@ -199,10 +216,15 @@ def main() -> int:
     options = args()
     if options.limit < 0:
         raise ValueError("limit must be non-negative")
+    if bool(options.repo) != bool(options.path):
+        raise ValueError("--repo and --path must be supplied together")
+    if options.force and not options.path:
+        raise ValueError("--force requires an exact --repo and --path")
     token = os.environ.get("HF_TOKEN")
     if not token:
         raise RuntimeError("HF_TOKEN is required")
-    records = source_records(options.search_data, options.revisions)
+    records = source_records(options.search_data, options.revisions,
+                             repo_filter=options.repo, path_filter=options.path)
     manifest = read_manifest(token)
     results = {item["key"]: item for item in manifest["files"] if isinstance(item, dict) and item.get("key")}
     pending = pending_records(records, results, retry_failed=options.retry_failed, force=options.force)

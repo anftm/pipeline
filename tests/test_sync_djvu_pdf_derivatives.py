@@ -15,16 +15,30 @@ class DjvuCheckpointTests(unittest.TestCase):
                                    "derived_bytes": 12}}
         self.assertEqual(djvu.pending_records([item], existing), [])
 
-    def test_changed_revision_requeues_but_failed_entry_requires_explicit_retry(self):
+    def test_repository_revision_drift_does_not_rebuild_good_mapping(self):
+        item = self.item("new")
+        key = item["key"]
+        ready = {key: {"key": key, "source_revision": "old", "status": "ready",
+                       "new_path": "derived/old/document.pdf", "derived_sha256": "a" * 64,
+                       "derived_bytes": 12}}
+        self.assertEqual(djvu.pending_records([item], ready), [])
+        self.assertEqual(djvu.pending_records([item], ready, force=True), [item])
+        self.assertEqual(djvu.pending_records([item], {}, force=True), [item])
+        with self.assertRaisesRegex(ValueError, "exact --repo and --path"):
+            import unittest.mock
+            with unittest.mock.patch.object(djvu, "args", return_value=type("Args", (), {
+                    "limit": 0, "repo": "", "path": "", "force": True})()):
+                # Exercise the CLI guard before it touches credentials or remote indexes.
+                djvu.main()
+
+    def test_failed_entry_requires_explicit_retry_when_revision_is_unchanged(self):
         item = self.item("new")
         key = item["key"]
         failed = {key: {"key": key, "source_revision": "new", "status": "failed"}}
         self.assertEqual(djvu.pending_records([item], failed), [])
         self.assertEqual(djvu.pending_records([item], failed, retry_failed=True), [item])
-        old = {key: {"key": key, "source_revision": "old", "status": "ready",
-                     "new_path": "derived/old/document.pdf", "derived_sha256": "a" * 64,
-                     "derived_bytes": 12}}
-        self.assertEqual(djvu.pending_records([item], old), [item])
+        failed[key]["source_revision"] = "old"
+        self.assertEqual(djvu.pending_records([item], failed), [item])
 
     def test_failure_checkpoint_is_explicit_and_attempt_counted(self):
         item = self.item()

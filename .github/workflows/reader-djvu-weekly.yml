@@ -20,6 +20,21 @@ on:
         required: true
         default: true
         type: boolean
+      repo:
+        description: Exact source dataset, required for force rebuild
+        required: false
+        default: ""
+        type: string
+      path:
+        description: Exact DJVU path within repo, required for force rebuild
+        required: false
+        default: ""
+        type: string
+      force:
+        description: Force rebuild one exact source path
+        required: true
+        default: false
+        type: boolean
 
 concurrency:
   group: reader-sidecar
@@ -55,6 +70,14 @@ jobs:
         run: |
           [[ "${{ inputs.limit || '0' }}" =~ ^[0-9]+$ ]] || exit 1
           args=(--limit "${{ inputs.limit || '0' }}")
+          if [[ -n "${{ inputs.repo || '' }}" || -n "${{ inputs.path || '' }}" ]]; then
+            [[ -n "${{ inputs.repo || '' }}" && -n "${{ inputs.path || '' }}" ]] || exit 1
+            args+=(--repo "${{ inputs.repo }}" --path "${{ inputs.path }}")
+          fi
+          if [[ "${{ inputs.force || 'false' }}" == "true" ]]; then
+            [[ -n "${{ inputs.repo || '' }}" && -n "${{ inputs.path || '' }}" ]] || exit 1
+            args+=(--force)
+          fi
           if [[ "${{ inputs.apply || 'false' }}" == "true" || "${{ github.event_name }}" == "schedule" ]]; then args+=(--apply); fi
           if [[ "${{ inputs.retry_failed || 'true' }}" == "true" || "${{ github.event_name }}" == "schedule" ]]; then args+=(--retry-failed); fi
           python scripts/sync_djvu_pdf_derivatives.py "${args[@]}"
