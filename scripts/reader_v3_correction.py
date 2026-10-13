@@ -661,7 +661,12 @@ def _correct_batch(store, options, *, apply=False, invoke=None, review_invoke=No
                 instructions=REVIEW_INSTRUCTIONS, payload_name="review.json"))
             for job in review_jobs:
                 job["request"] = request
-            stats = run_request_jobs(pool, review_jobs, limits["workers"])
+            if provider_circuit_open:
+                for job in review_jobs:
+                    job["request_error"] = ModelRequestError("provider-circuit-open")
+                stats = {"circuit_open": True, "successes": 0, "transient_failures": 0}
+            else:
+                stats = run_request_jobs(pool, review_jobs, limits["workers"])
             provider_circuit_open = provider_circuit_open or stats["circuit_open"]
             provider_successes += stats["successes"]
             for job in review_jobs:
