@@ -17,6 +17,11 @@ on:
         required: true
         default: "0"
         type: string
+      retry_failures:
+        description: Retry previously failed sources in selected extensions
+        required: true
+        default: false
+        type: boolean
       apply:
         description: Convert and publish chapter streams
         required: true
@@ -56,9 +61,12 @@ jobs:
         run: |
           [[ "${{ inputs.extension || 'all' }}" =~ ^(all|doc|docx|odt|rtf)$ ]] || exit 1
           [[ "${{ inputs.limit || '0' }}" =~ ^[0-9]+$ ]] || exit 1
+          retry_args=()
+          if [[ "${{ inputs.retry_failures || 'false' }}" == "true" ]]; then retry_args+=(--retry-failures); fi
           python scripts/plan_reader_stream_matrix.py \
             --kind office-chapters \
             --extension "${{ inputs.extension || 'all' }}" \
+            "${retry_args[@]}" \
             --output output/office-matrix.json
           echo "matrix=$(cat output/office-matrix.json)" >> "$GITHUB_OUTPUT"
       - run: tar -czf output/office-plan.tgz output/search_data.json state/commits.json output/office-matrix.json
@@ -99,10 +107,13 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           [[ "${{ inputs.limit || '0' }}" =~ ^[0-9]+$ ]] || exit 1
+          retry_args=()
+          if [[ "${{ inputs.retry_failures || 'false' }}" == "true" ]]; then retry_args+=(--retry-failures); fi
           python scripts/pilot_epub_chapters.py \
             --extension "${{ matrix.extension }}" \
             --limit "${{ inputs.limit || '0' }}" \
-            --shard-count 1 --shard-index 0 --apply
+            "${retry_args[@]}" \
+             --shard-count 1 --shard-index 0 --apply
 
   finalize:
     needs: [plan, build]

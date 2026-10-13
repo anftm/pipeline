@@ -2,7 +2,7 @@ import io
 import unittest
 from unittest.mock import Mock
 
-from scripts.plan_reader_stream_matrix import read_json
+from scripts.plan_reader_stream_matrix import completed_entries, read_json
 
 
 class ReaderStreamMatrixIndexTests(unittest.TestCase):
@@ -23,6 +23,19 @@ class ReaderStreamMatrixIndexTests(unittest.TestCase):
             fs.open.return_value = io.BytesIO(raw)
             with self.assertRaises(ValueError):
                 read_json(fs, "bucket", "chapters/ebook/epub/index.json")
+
+    def test_failed_sources_are_skipped_unless_retry_is_explicit(self):
+        index = {"files": [{"key": "good", "source_revision": "r1"}],
+                 "failures": [{"key": "bad", "source_revision": "r2"}]}
+        self.assertEqual(completed_entries(index), {"good": "r1", "bad": "r2"})
+        self.assertEqual(completed_entries(index, retry_failures=True), {"good": "r1"})
+
+    def test_office_workflow_exposes_and_passes_explicit_failure_retry(self):
+        from pathlib import Path
+        workflow = (Path(__file__).resolve().parents[1] / ".github" / "workflows" /
+                    "reader-office-chapters.yml").read_text(encoding="utf-8")
+        self.assertIn("retry_failures:", workflow)
+        self.assertEqual(workflow.count("--retry-failures"), 2)
 
 
 if __name__ == "__main__":

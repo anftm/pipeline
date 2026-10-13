@@ -40,6 +40,28 @@ class ChmChapterPilotTests(unittest.TestCase):
         self.assertEqual(merged[epub["key"]], epub)
         self.assertEqual(merged[docx["key"]], docx)
 
+    def test_failures_are_checkpoints_until_explicit_retry_and_merge_across_extensions(self):
+        epub_key = "VoiceOfML/Test\0old.epub"
+        doc_key = "VoiceOfML/Test\0old.doc"
+        docx_key = "VoiceOfML/Test\0book.docx"
+        previous = {"files": [{"key": epub_key, "source_revision": "epub-rev"}],
+                    "failures": [{"key": doc_key, "source_revision": "doc-rev", "error": "bad doc"},
+                                 {"key": docx_key, "source_revision": "docx-rev", "error": "old failure"}]}
+        self.assertEqual(pilot_epub_chapters.completed_revisions(previous)[doc_key], "doc-rev")
+        self.assertNotIn(doc_key, pilot_epub_chapters.completed_revisions(previous, retry_failures=True))
+        success = {"key": docx_key, "source_revision": "docx-rev", "extension": "epub"}
+        retry = {"key": doc_key, "source_revision": "doc-rev-2", "error": "still invalid"}
+        result = pilot_epub_chapters.merged_index_payload(previous, [success], [retry])
+        self.assertEqual({item["key"] for item in result["files"]}, {epub_key, docx_key})
+        self.assertEqual(result["failures"], [retry])
+
+    def test_failure_only_batch_can_publish_a_durable_failure_checkpoint(self):
+        previous = {"files": [], "failures": []}
+        failure = {"key": "VoiceOfML/Test\0bad.doc", "source_revision": "rev", "error": "invalid"}
+        payload = pilot_epub_chapters.merged_index_payload(previous, [], [failure])
+        self.assertEqual(payload["files"], [])
+        self.assertEqual(payload["failures"], [failure])
+
     def test_office_upload_processing_root_is_bucket_qualified(self):
         entry = {"key": "VoiceOfML/Test\0book.docx", "source_sha256": "a" * 64,
                  "root": "chapters/ebook/epub/" + "b" * 64 + "/" + "c" * 16}

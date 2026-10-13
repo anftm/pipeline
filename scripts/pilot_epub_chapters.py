@@ -56,6 +56,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--revisions", type=Path, default=Path("state/commits.json"))
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--max-source-bytes", type=int, default=0)
+    parser.add_argument("--retry-failures", action="store_true",
+                         help="include previously failed sources in this extension's work queue")
     parser.add_argument("--extension", default="epub")
     parser.add_argument("--bucket", default=TARGET_BUCKET)
     parser.add_argument("--apply", action="store_true")
@@ -90,6 +92,33 @@ def merge_index_entries(previous: dict, entries: list[dict]) -> dict[str, dict]:
               if isinstance(entry, dict) and entry.get("key")}
     merged.update({entry["key"]: entry for entry in entries})
     return merged
+
+
+def completed_revisions(index: dict, retry_failures: bool = False) -> dict[str, str]:
+    completed = {item["key"]: item.get("source_revision") for item in index.get("files", [])
+                 if isinstance(item, dict) and item.get("key")}
+    if not retry_failures:
+        for item in index.get("failures", []):
+            if isinstance(item, dict) and item.get("key"):
+                completed.setdefault(item["key"], item.get("source_revision"))
+    return completed
+
+
+def merge_index_failures(previous: dict, entries: list[dict], failures: list[dict]) -> list[dict]:
+    merged = {item["key"]: item for item in previous.get("failures", [])
+              if isinstance(item, dict) and item.get("key")}
+    for entry in entries:
+        merged.pop(entry["key"], None)
+    for failure in failures:
+        merged[failure["key"]] = failure
+    return [merged[key] for key in sorted(merged)]
+
+
+def merged_index_payload(previous: dict, entries: list[dict], failures: list[dict]) -> dict:
+    merged = merge_index_entries(previous, entries)
+    return {"version": 1, "kind": "ebook-chapter-stream-index",
+            "files": [merged[key] for key in sorted(merged)],
+            "failures": merge_index_failures(previous, entries, failures)}
 
 
 def processing_record_for_entry(entry: dict, bucket: str, run: dict) -> tuple[str, dict]:
@@ -262,7 +291,7 @@ def main() -> int:
     root_prefix = OFFICE_ROOT if extension in OFFICE_EXTENSIONS else f"chapters/ebook/{extension}"
     index_name = "index.json" if args.shard_count == 1 else f"index-{args.shard_index:02d}.json"
     previous = existing_index(args.bucket, token, root_prefix, index_name)
-    completed = {entry.get("key"): entry.get("source_revision") for entry in previous.get("files", []) if isinstance(entry, dict)}
+    completed = completed_revisions(previous, args.retry_failures)
     selected = [item for item in select_records(args.search_data, revisions, args.max_source_bytes, extension)
                 if shard_for(f"{item['repo']}\0{item['path']}", args.shard_count) == args.shard_index
                 if completed.get(f"{item['repo']}\0{item['path']}") != item["revision"]]
@@ -289,16 +318,11 @@ def main() -> int:
                 continue
             entries.append(entry)
             uploads.update(files)
-        if not entries and failures:
-            print(f"no EPUB source converted; failures={len(failures)}")
-            return 0
         merged = merge_index_entries(previous, entries)
         index_file = root / "index.json"
-        index_file.write_text(json.dumps({
-            "version": 1, "kind": "ebook-chapter-stream-index",
-                                               "files": [merged[key] for key in sorted(merged)],
-                                               "failures": failures,
-                                           }, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        payload = merged_index_payload(previous, entries, failures)
+        index_file.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+                              encoding="utf-8")
         if args.apply:
             for entry in entries:
                 processing_path, record = processing_record_for_entry(
@@ -309,11 +333,11 @@ def main() -> int:
                 publish_json(processing_path, record, token)
                 entry["processing_roots"] = [processing_path]
                 merged[entry["key"]] = entry
-            index_file.write_text(json.dumps({
-                "version": 1, "kind": "ebook-chapter-stream-index",
-                "files": [merged[key] for key in sorted(merged)],
-                "failures": failures,
-            }, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+            payload = {"version": 1, "kind": "ebook-chapter-stream-index",
+                       "files": [merged[key] for key in sorted(merged)],
+                       "failures": merge_index_failures(previous, entries, failures)}
+            index_file.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+                                  encoding="utf-8")
         uploads[f"{root_prefix}/{index_name}"] = str(index_file)
         print(f"planned {len(entries)} EPUB stream(s), {len(uploads)} object(s), failures={len(failures)}")
         if args.apply:
