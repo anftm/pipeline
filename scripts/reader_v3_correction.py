@@ -44,7 +44,7 @@ MAX_RESPONSE_BYTES = 512 * 1024
 # requests are opened together. Keep proposal and Sol-review traffic bounded;
 # transient provider errors are retried below instead of consuming another
 # day's task state immediately.
-MAX_MODEL_WORKERS = 4
+MAX_MODEL_WORKERS = 2
 MODEL_RETRY_ATTEMPTS = 3
 MODEL_RETRY_CODES = frozenset({
     "provider-http-408", "provider-http-425", "provider-http-429",
