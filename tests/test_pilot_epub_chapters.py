@@ -99,6 +99,18 @@ class ChmChapterPilotTests(unittest.TestCase):
             self.assertIn("--flow-size", command)
             self.assertEqual(command[command.index("--flow-size") + 1], str(pilot_epub_chapters.OFFICE_FLOW_SIZE_KB))
 
+    def test_office_chapter_bundle_obeys_browser_and_search_budgets(self):
+        valid = {"chapters": [{"bytes": 7 * 1024 * 1024}],
+                 "search_index": {"bytes": 64 * 1024 * 1024}}
+        pilot_epub_chapters.validate_office_chapter_budget(valid)
+        for value in (
+            {"chapters": [{"bytes": 8 * 1024 * 1024}], "search_index": {"bytes": 1}},
+            {"chapters": [{"bytes": 7 * 1024 * 1024}] * 72, "search_index": {"bytes": 1}},
+            {"chapters": [{"bytes": 1}], "search_index": {"bytes": 65 * 1024 * 1024}},
+        ):
+            with self.assertRaises(ValueError):
+                pilot_epub_chapters.validate_office_chapter_budget(value)
+
 
 if __name__ == "__main__":
     unittest.main()

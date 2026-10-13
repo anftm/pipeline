@@ -45,6 +45,9 @@ OFFICE_PROFILE = "office-epub-chapters-v1-flow-512"
 OFFICE_FLOW_SIZE_KB = 512
 OFFICE_COMMAND_TIMEOUT_SECONDS = 900
 OFFICE_MAX_CHAPTER_BYTES = 7 * 1024 * 1024
+OFFICE_MAX_TOTAL_CHAPTER_BYTES = 500 * 1024 * 1024
+OFFICE_MAX_CHAPTERS = 10_000
+OFFICE_MAX_SEARCH_INDEX_BYTES = 64 * 1024 * 1024
 
 
 def parse_args() -> argparse.Namespace:
@@ -114,6 +117,17 @@ def office_to_epub(source: Path, extension: str, work: Path) -> Path:
     return epub
 
 
+def validate_office_chapter_budget(manifest: dict) -> None:
+    chapters = manifest.get("chapters", [])
+    search_index_bytes = int((manifest.get("search_index") or {}).get("bytes") or 0)
+    if (not isinstance(chapters, list) or len(chapters) > OFFICE_MAX_CHAPTERS
+            or sum(int(chapter.get("bytes") or 0) for chapter in chapters) > OFFICE_MAX_TOTAL_CHAPTER_BYTES
+            or search_index_bytes > OFFICE_MAX_SEARCH_INDEX_BYTES):
+        raise ValueError("office chapter stream exceeds the Reader manifest/search budget")
+    if any(int(chapter.get("bytes") or 0) > OFFICE_MAX_CHAPTER_BYTES for chapter in chapters):
+        raise ValueError("office chapter exceeds the bounded browser chapter limit")
+
+
 def select_records(path: Path, revisions: dict, max_bytes: int, extension_filter: str) -> list[dict]:
     records = decode_search_payload(json.loads(path.read_text(encoding="utf-8")))
     selected = []
@@ -142,9 +156,7 @@ def build_one(item: dict, work: Path, token: str | None, bucket: str) -> tuple[d
         chapter_source = office_to_epub(source, extension, work)
         bundle = work / "bundle"
         manifest = build_bundle(chapter_source, bundle)
-        if any(int(chapter.get("bytes") or 0) > OFFICE_MAX_CHAPTER_BYTES
-               for chapter in manifest.get("chapters", [])):
-            raise ValueError("office chapter exceeds the bounded browser chapter limit")
+        validate_office_chapter_budget(manifest)
         root_extension = "epub"
     elif extension == "chm":
         contract = bucket_conversion_contract(item["repo"], item["path"], extension, item["source_bytes"])
