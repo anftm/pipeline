@@ -14,6 +14,8 @@ import os
 import sys
 import time
 import gzip
+from datetime import timezone
+from email.utils import parsedate_to_datetime
 import urllib.parse
 import posixpath
 import urllib.error
@@ -73,7 +75,8 @@ BROWSER_KEY_MAP = {
 
 SEARCH_DATA_VERSION = 2
 TRANSIENT_HTTP_CODES = frozenset({408, 425, 429, 500, 502, 503, 504})
-HTTP_RETRY_DELAYS = (1, 2, 4)
+HTTP_RETRY_DELAYS = (1, 2, 4, 8, 16, 32, 64, 120)
+HTTP_RETRY_AFTER_CAP_SECONDS = 300
 
 
 # ═══════════════════════════════════════════════════════════
@@ -89,7 +92,20 @@ def _make_request(url: str, token: str) -> urllib.request.Request:
     return req
 
 
-def _retry_delay(attempt: int) -> int:
+def _retry_delay(attempt: int, error: urllib.error.HTTPError | None = None) -> int:
+    if error is not None:
+        retry_after = error.headers.get("Retry-After") if error.headers else None
+        if retry_after:
+            try:
+                return max(0, min(HTTP_RETRY_AFTER_CAP_SECONDS, int(float(retry_after))))
+            except (OverflowError, ValueError):
+                try:
+                    retry_at = parsedate_to_datetime(retry_after)
+                    if retry_at.tzinfo is None:
+                        retry_at = retry_at.replace(tzinfo=timezone.utc)
+                    return max(0, min(HTTP_RETRY_AFTER_CAP_SECONDS, int(retry_at.timestamp() - time.time())))
+                except (OverflowError, TypeError, ValueError):
+                    pass
     return HTTP_RETRY_DELAYS[min(attempt, len(HTTP_RETRY_DELAYS) - 1)]
 
 
@@ -101,7 +117,7 @@ def _open_with_retries(req: urllib.request.Request, timeout: int):
         except urllib.error.HTTPError as error:
             if error.code not in TRANSIENT_HTTP_CODES or attempt >= len(HTTP_RETRY_DELAYS):
                 raise
-            delay = _retry_delay(attempt)
+            delay = _retry_delay(attempt, error)
             print(f"  ⚠ HTTP {error.code}，{delay}s 后重试 ({attempt + 1}/{len(HTTP_RETRY_DELAYS)})...")
             time.sleep(delay)
         except (urllib.error.URLError, TimeoutError, ConnectionError) as error:

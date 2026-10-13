@@ -55,6 +55,32 @@ class FetchAndParseTests(unittest.TestCase):
         self.assertEqual(result, {"sha": "captured"})
         sleep.assert_called_once_with(1)
 
+    def test_http_429_retry_honors_retry_after_and_caps_wait(self):
+        response = Mock()
+        response.__enter__ = lambda value: value
+        response.__exit__ = lambda *args: None
+        response.read.return_value = b"catalog\n"
+        error = urllib.error.HTTPError(
+            "https://example.test", 429, "rate limited", {"Retry-After": "900"}, None)
+
+        with patch.object(urllib.request, "urlopen", side_effect=[error, response]), \
+                patch.object(self.module.time, "sleep") as sleep:
+            result = self.module.http_get_text("https://example.test")
+
+        self.assertEqual(result, "catalog\n")
+        sleep.assert_called_once_with(self.module.HTTP_RETRY_AFTER_CAP_SECONDS)
+
+    def test_http_retry_after_date_is_parsed(self):
+        from datetime import datetime, timezone
+        from email.utils import format_datetime
+
+        retry_at = datetime.fromtimestamp(self.module.time.time() + 45, timezone.utc)
+        error = urllib.error.HTTPError(
+            "https://example.test", 429, "rate limited",
+            {"Retry-After": format_datetime(retry_at, usegmt=True)}, None)
+
+        self.assertIn(self.module._retry_delay(0, error), {44, 45})
+
     def test_text_request_retries_transient_network_errors(self):
         response = Mock()
         response.__enter__ = lambda value: value
