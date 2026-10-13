@@ -106,6 +106,8 @@ def source_pages(root, work):
             else:
                 text = "<pre>" + html.escape(text) + "</pre>"
         text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text)
+        # Input bytes are decoded already; remove the stale XML encoding PI.
+        text = re.sub(r"^\s*<\?xml\b[^?]*\?>", "", text, count=1, flags=re.IGNORECASE)
         doc = HTML.document_fromstring(text or "<html><body></body></html>")
         etree.strip_elements(doc, etree.Comment, with_tail=False)
         scripts = 0

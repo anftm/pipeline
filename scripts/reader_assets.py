@@ -55,7 +55,7 @@ CONVERTIBLE_EXTENSIONS = {
     "fb2": ("foliate-original-v1", "foliate", "document.fb2"),
     "odt": ("calibre-odt-html-v1", "html", "document.html"),
     "rtf": ("calibre-rtf-html-v1", "html", "document.html"),
-    "chm": ("calibre-chm-epub-v3", "epub", "document.epub"),
+    "chm": ("calibre-chm-epub-v4-source-text", "epub", "document.epub"),
     "tif": ("pillow-pdf-v2", "pdf", "document.pdf"),
     "tiff": ("pillow-pdf-v2", "pdf", "document.pdf"),
     "djvu": ("djvulibre-pdf-v2", "pdf", "document.pdf"),
@@ -312,7 +312,7 @@ def validate_manifest(manifest: dict) -> dict:
                 validate_chapter_manifest_path(entry["chapter_manifest"])
             if "fallback_path" in entry:
                 validate_object_path(entry["fallback_path"])
-            if entry.get("chapter_bucket") not in {None, "vomebook/pdf-pages"}:
+            if entry.get("chapter_bucket") not in {None, READER_ASSETS_BUCKET}:
                 raise ValueError("invalid chapter bucket")
             if "chapter_manifest" in entry and not entry["chapter_manifest"].endswith("/chapter-manifest.json"):
                 raise ValueError("invalid chapter manifest path")

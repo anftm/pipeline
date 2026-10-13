@@ -190,7 +190,8 @@ def decode_html_source(source: Path) -> str:
     if match:
         declared = match.group(1).lower().replace("_", "-")
         declared = {
-            "gb2312": "gb18030", "gb-2312": "gb18030", "gbk": "gb18030",
+            "gb2312": "gb18030", "gb-2312": "gb18030", "gb-2312-80": "gb18030",
+            "gb2312-80": "gb18030", "gbk": "gb18030",
             "x-gbk": "gb18030", "x-sjis": "shift-jis", "windows-31j": "shift-jis",
             "ks_c_5601-1987": "euc-kr", "euc-cn": "gb18030", "x-euc-tw": "big5",
         }.get(declared, declared)

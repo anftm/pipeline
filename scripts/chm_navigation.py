@@ -458,7 +458,45 @@ def repair_conversion(source, target, work):
             if name not in mapping and 'chm-page-'+str(index) in sections:
                 values=sections['chm-page-'+str(index)]
                 if matches_source(name,[v.split('#',1)[0] for v in values]):mapping[name]=values
+        # Calibre may produce a structurally valid EPUB while misdecoding legacy
+        # CHM charsets. Compare mapped pages and substantial unmapped pages with
+        # our charset-aware source extraction before accepting the conversion.
+        source_inventory = recover_chm.source_pages(root, work)
+        mismatches = source_text_mismatches(source_inventory, mapping, documents)
+        if mismatches:
+            detail = ", ".join(f"{name} ({expected}/{actual} chars)"
+                                for name, expected, actual in mismatches[:5])
+            raise ValueError("converted CHM EPUB text differs from source pages: " + detail)
     navigation_report=repair_epub(target,root,mapping)
     images=chm_resources.repair_images(target,root,mapping)
     links=chm_resources.repair_links(target,root,mapping)
     return {'navigation':navigation_report,'images':images,'links':links}
+
+
+def source_text_mismatches(source_pages, mapping, documents):
+    """Return source pages whose text is altered, lost, or omitted from the EPUB."""
+    mismatches = []
+    whole_epub = ''.join(
+        re.sub(r'\s+', '', ''.join(body.itertext()))
+        for document in documents.values()
+        if (body := document.find('{*}body')) is not None
+    )
+    for page in source_pages:
+        source = page.get('path')
+        expected = re.sub(r'\s+', '', page.get('expected') or '')
+        targets = mapping.get(source, [])
+        if not expected:
+            continue
+        actual_parts = []
+        for target in targets:
+            name = target.split('#', 1)[0]
+            document = documents.get(name)
+            if document is None:
+                continue
+            body = document.find('{*}body')
+            if body is not None:
+                actual_parts.append(re.sub(r'\s+', '', ''.join(body.itertext())))
+        actual = ''.join(actual_parts)
+        if expected not in actual and expected not in whole_epub and (targets or len(expected) >= 512):
+            mismatches.append((source, len(expected), len(actual)))
+    return mismatches

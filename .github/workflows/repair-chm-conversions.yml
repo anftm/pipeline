@@ -1,0 +1,152 @@
+name: Rebuild CHM Reader assets with text-fidelity checks
+run-name: CHM text-fidelity rebuild / ${{ inputs.apply == true && 'apply' || 'plan' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: Maximum stale CHM assets in this batch (1-100)
+        required: true
+        default: "100"
+        type: string
+      apply:
+        description: Convert and publish; false only reports the pending queue
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: reader-sidecar
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  plan:
+    if: github.repository == 'anftm/pipeline'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    outputs:
+      count: ${{ steps.matrix.outputs.count }}
+      shards: ${{ steps.matrix.outputs.shards }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - run: pip install -r scripts/requirements.txt
+      - name: Fetch pinned source metadata
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          FORCE_SYNC: "true"
+        run: python scripts/fetch_and_parse.py
+      - name: Plan stale CHM profiles
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          READER_ASSETS_REPO: VoiceOfML/Reader-Assets
+          LIMIT: ${{ inputs.limit || '100' }}
+        run: |
+          [[ "$LIMIT" =~ ^[0-9]+$ ]] && ((10#$LIMIT >= 1 && 10#$LIMIT <= 100)) || exit 1
+          python scripts/scan_reader_assets.py --extension chm --limit "$LIMIT"
+          # The scanner has already selected only CHM; leave the scope variables
+          # unset here so the planner spreads work across stable conversion shards.
+          python scripts/prepare_reader_assets_plan.py
+          echo "count=$(jq -r '.items | length' output/reader-assets/queue.json)" >> "$GITHUB_OUTPUT"
+          echo "shards=$(cat output/reader-assets/shards.json)" >> "$GITHUB_OUTPUT"
+      - name: Package immutable source queue
+        run: tar -czf output/chm-repair-plan.tgz output/search_data.json state/commits.json output/reader-assets
+      - uses: actions/upload-artifact@v7
+        with:
+          name: chm-repair-plan
+          path: output/chm-repair-plan.tgz
+          retention-days: 1
+          if-no-files-found: error
+      - name: Show read-only plan
+        if: inputs.apply != true
+        run: |
+          jq '{items: [.items[] | {repo, path, source_revision, profile}], count: (.items | length)}' \
+            output/reader-assets/queue.json
+
+  convert:
+    needs: plan
+    if: inputs.apply == true && needs.plan.outputs.count != '0' && fromJSON(needs.plan.outputs.shards)[0] != null
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.shards) }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - run: |
+          pip install -r scripts/requirements.txt
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends calibre p7zip-full
+      - uses: actions/download-artifact@v8
+        with:
+          name: chm-repair-plan
+          path: output
+      - run: tar -xzf output/chm-repair-plan.tgz
+      - name: Convert CHMs and validate all mapped source text
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          READER_ASSETS_REPO: VoiceOfML/Reader-Assets
+          READER_CHM_COMMAND_TIMEOUT: "1800"
+        run: python scripts/convert_reader_assets.py --queue "output/reader-assets/queue-${{ matrix.shard }}.json" --bundle "output/reader-assets/bundle-${{ matrix.shard }}"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: chm-repair-bundle-${{ matrix.shard }}
+          path: output/reader-assets/bundle-${{ matrix.shard }}
+          retention-days: 1
+          if-no-files-found: error
+
+  publish:
+    needs: [plan, convert]
+    if: >-
+      always() && inputs.apply == true && github.repository == 'anftm/pipeline' &&
+      needs.plan.result == 'success' &&
+      (needs.convert.result == 'success' || needs.convert.result == 'failure') &&
+      needs.plan.outputs.count != '0'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.shards) }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - run: pip install -r scripts/requirements.txt
+      - uses: actions/download-artifact@v8
+        with:
+          name: chm-repair-bundle-${{ matrix.shard }}
+          path: output/reader-assets/bundle-${{ matrix.shard }}
+      - name: Publish verified CHM assets and chapter streams
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          READER_ASSETS_REPO: VoiceOfML/Reader-Assets
+        run: python scripts/publish_reader_assets.py --bundle "output/reader-assets/bundle-${{ matrix.shard }}"
+
+  finalize:
+    needs: [plan, convert, publish]
+    if: >-
+      always() && inputs.apply == true && github.repository == 'anftm/pipeline' &&
+      needs.plan.result == 'success' && needs.plan.outputs.count != '0' &&
+      needs.publish.result == 'success'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Project the repaired sidecar through the serialized v3 publisher
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run reader-v3-publish.yml --repo "$GITHUB_REPOSITORY" --ref main -f operation=unify -f apply=true

@@ -4,10 +4,37 @@ import zipfile
 from lxml import etree
 from ebooklib import epub
 from pathlib import Path
-from scripts.chm_navigation import SitemapParser, SourcePaths, flatten, navigation, repair_epub
+from scripts.chm_navigation import SitemapParser, SourcePaths, flatten, navigation, repair_epub, source_text_mismatches
 
 
 class ChmNavigationTests(unittest.TestCase):
+    def test_source_text_gate_rejects_mojibake_in_mapped_chapters(self):
+        from lxml import etree
+        source_pages = [{"path": "About.html", "expected": "EtextWizard目录：一、关于Etext Wizard软件开发目的"}]
+        mapping = {"About.html": ["EPUB/About.xhtml"]}
+        corrupted = etree.fromstring(
+            b'<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+            b'EtextWizard\xc4\xbfl\xc2\xbc\xef\xbf\xbd\xef\xbf\xbd'
+            b'\xe4\xb8\x80\xe3\x80\x81\xe5\x85\xb3\xe4\xba\x8eEtext Wizard'
+            b'</body></html>'
+        )
+        mismatches = source_text_mismatches(source_pages, mapping, {"EPUB/About.xhtml": corrupted})
+        self.assertEqual([row[0] for row in mismatches], ["About.html"])
+        clean = etree.fromstring(
+            '<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+            'EtextWizard 目录：一、关于Etext Wizard 软件开发目的'
+            '</body></html>'.encode()
+        )
+        self.assertEqual(source_text_mismatches(source_pages, mapping, {"EPUB/About.xhtml": clean}), [])
+
+    def test_source_text_gate_rejects_omitted_unmapped_long_pages(self):
+        from lxml import etree
+        source_pages = [{"path": "appendix.txt", "expected": "正文内容" * 200}]
+        self.assertEqual(source_text_mismatches(source_pages, {}, {}),
+                         [("appendix.txt", len(source_pages[0]["expected"]), 0)])
+        clean = etree.fromstring(("<html><body>" + source_pages[0]["expected"] + "</body></html>").encode())
+        self.assertEqual(source_text_mismatches(source_pages, {}, {"EPUB/other.xhtml": clean}), [])
+
     def test_chm_keeps_native_tree_instead_of_flat_chapter_sidecar(self):
         from scripts.reader_assets import needs_epub_chapters
         self.assertTrue(needs_epub_chapters('chm','epub',1))

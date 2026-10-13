@@ -11,6 +11,17 @@ from PIL import Image
 
 
 class ChmRecoveryTests(unittest.TestCase):
+    def test_source_page_accepts_unicode_xml_declaration_after_charset_decode(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            page = root / "xml.xhtml"
+            page.write_text('<?xml version="1.0" encoding="UTF-8"?>'
+                            '<html><head><title>章节</title></head><body><p>正文内容</p></body></html>',
+                            encoding="utf-8")
+            records = recover_chm.source_pages(root, root)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["expected"], "正文内容")
+
     def test_recovery_retains_unlisted_txt_static_scripts_and_images(self):
         def extract(_source, root):
             (root / 'first.htm').write_text('<title>First</title><p>first body</p><img src="cover.png">')

@@ -56,7 +56,7 @@ class ReaderAssetContractTests(unittest.TestCase):
             "fb2": ("foliate-original-v1", "foliate", "document.fb2"),
             "odt": ("calibre-odt-html-v1", "html", "document.html"),
             "rtf": ("calibre-rtf-html-v1", "html", "document.html"),
-            "chm": ("calibre-chm-epub-v3", "epub", "document.epub"),
+            "chm": ("calibre-chm-epub-v4-source-text", "epub", "document.epub"),
             "tif": ("pillow-pdf-v2", "pdf", "document.pdf"),
             "tiff": ("pillow-pdf-v2", "pdf", "document.pdf"),
             "djvu": ("djvulibre-pdf-v2", "pdf", "document.pdf"),
@@ -1655,6 +1655,16 @@ aW1hZ2U=
             )
             self.assertIn("列宁", target.read_text(encoding="utf-8"))
             self.assertIn('charset="utf-8"', target.read_text(encoding="utf-8").lower())
+
+    def test_chm_legacy_gb2312_80_charset_is_decoded_as_gb18030(self):
+        with tempfile.TemporaryDirectory() as root:
+            source = Path(root) / "About.html"
+            source.write_bytes(
+                '<meta http-equiv="Content-Type" content="text/html; charset=gb_2312-80">'
+                '<p>目录：一、关于Etext Wizard</p>'.encode("gb18030")
+            )
+            decoded = convert_reader_assets.decode_html_source(source)
+        self.assertIn("目录：一、关于Etext Wizard", decoded)
 
     def test_html_conversion_decodes_quoted_big5_charset(self):
         with tempfile.TemporaryDirectory() as root:
