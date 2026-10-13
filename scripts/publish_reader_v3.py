@@ -685,11 +685,14 @@ def main():
         priority = auto_options.get("source_sha256")
         if priority is not None:
             text.sha(priority)
+        correction_options = dict(options.get("correction", {}))
+        correction_report = correct(store, correction_options, apply=args.apply)
+        # Correction has a bounded provider window and may trip its circuit
+        # quickly. Run it before expensive admission builds so a large PDF
+        # cannot starve an existing correction backlog under the writer lock.
         auto_report = admit(store, apply=args.apply, priority_source=priority,
                             max_books=auto_options.get("max_books", 4),
                             max_seconds=auto_options.get("max_seconds", 3600))
-        correction_options = dict(options.get("correction", {}))
-        correction_report = correct(store, correction_options, apply=args.apply)
         report = {"version": 1, "kind": "reader-v3-cycle",
                   "applied": args.apply, "auto": auto_report, "correction": correction_report}
     elif args.command in {"correct", "accept", "reject"}:
