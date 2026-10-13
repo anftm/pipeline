@@ -18,6 +18,17 @@ class OfficeStreamTests(unittest.TestCase):
             self.assertIn("legacy text", output.read_text(encoding="utf-8"))
             self.assertEqual(run.call_args.args[0][:3], ["antiword", "-m", "UTF-8.txt"])
 
+    def test_doc_text_fallback_rejects_empty_extraction(self):
+        with tempfile.TemporaryDirectory() as temporary, \
+                patch.object(pilot_office_stream.subprocess, "run") as run:
+            run.return_value.stdout = b" \n\t"
+            source = Path(temporary) / "source.doc"
+            output = Path(temporary) / "document.html"
+            source.write_bytes(b"legacy")
+            with self.assertRaisesRegex(RuntimeError, "antiword produced no DOC text"):
+                pilot_office_stream.doc_to_html_fallback(source, output)
+            self.assertFalse(output.exists())
+
     def test_detects_html_saved_with_doc_extension(self):
         with tempfile.TemporaryDirectory() as temporary:
             source = Path(temporary) / "source.doc"

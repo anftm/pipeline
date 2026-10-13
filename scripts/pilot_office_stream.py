@@ -127,6 +127,8 @@ def doc_to_html_fallback(source: Path, output: Path) -> None:
         timeout=180,
     )
     text = result.stdout.decode("utf-8", "replace")
+    if not text.strip():
+        raise RuntimeError("antiword produced no DOC text")
     document = "<html><body><pre>" + html.escape(text) + "</pre></body></html>"
     output.write_text(sanitize_html(document, allow_relative=False), encoding="utf-8")
 

@@ -96,7 +96,7 @@ jobs:
       - run: |
           pip install -r scripts/requirements.txt
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends calibre libreoffice fontconfig fonts-noto-cjk fonts-wqy-microhei
+          sudo apt-get install -y --no-install-recommends antiword calibre libreoffice fontconfig fonts-noto-cjk fonts-wqy-microhei
       - uses: actions/download-artifact@v8
         with:
           name: reader-office-chapters-plan

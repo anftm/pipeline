@@ -176,6 +176,50 @@ class ChmChapterPilotTests(unittest.TestCase):
             self.assertIn("--flow-size", command)
             self.assertEqual(command[command.index("--flow-size") + 1], str(pilot_epub_chapters.OFFICE_FLOW_SIZE_KB))
 
+    def test_html_document_with_doc_suffix_skips_libreoffice(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary)
+            source = work / "source.doc"
+            source.write_bytes(b"\xef\xbb\xbf<html><body><p>HTML document</p><script>unsafe()</script></body></html>")
+            output = work / "document.epub"
+
+            def convert(command, **_kwargs):
+                Path(command[2]).write_bytes(b"epub")
+
+            with patch.object(pilot_epub_chapters, "run_libreoffice",
+                              side_effect=AssertionError("HTML input must not go through LibreOffice")), \
+                    patch.object(pilot_epub_chapters.subprocess, "run", side_effect=convert) as run:
+                self.assertEqual(pilot_epub_chapters.office_to_epub(source, "doc", work), output)
+
+            command = run.call_args.args[0]
+            self.assertEqual(Path(command[1]).name, "source.html")
+            normalized = Path(command[1]).read_text(encoding="utf-8")
+            self.assertIn("HTML document", normalized)
+            self.assertNotIn("<script", normalized.lower())
+
+    def test_legacy_doc_conversion_timeout_falls_back_to_antiword_text(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary)
+            source = work / "source.doc"
+            source.write_bytes(b"legacy OLE DOC")
+            output = work / "document.epub"
+
+            def antiword_fallback(_source, target):
+                target.write_text("<html><body><pre>完整提取的正文</pre></body></html>", encoding="utf-8")
+
+            def convert(command, **_kwargs):
+                Path(command[2]).write_bytes(b"fallback epub")
+
+            with patch.object(pilot_epub_chapters, "run_libreoffice",
+                              side_effect=pilot_epub_chapters.subprocess.TimeoutExpired(["libreoffice"], 600)), \
+                    patch.object(pilot_epub_chapters, "doc_to_html_fallback", side_effect=antiword_fallback) as antiword, \
+                    patch.object(pilot_epub_chapters.subprocess, "run", side_effect=convert) as run:
+                self.assertEqual(pilot_epub_chapters.office_to_epub(source, "doc", work), output)
+
+            antiword.assert_called_once_with(source, work / "antiword-fallback.html")
+            self.assertEqual(Path(run.call_args.args[0][1]).name, "antiword-fallback.html")
+            self.assertEqual(output.read_bytes(), b"fallback epub")
+
     def test_office_chapter_bundle_obeys_browser_and_search_budgets(self):
         valid = {"chapters": [{"bytes": 7 * 1024 * 1024}],
                  "search_index": {"bytes": 64 * 1024 * 1024}}

@@ -19,9 +19,11 @@ from pathlib import Path
 from huggingface_hub import HfFileSystem
 
 try:
-    from .convert_reader_assets import convert_item
+    from .convert_reader_assets import convert_item, decode_html_source, sanitize_html
     from .epub_chapters import build_bundle, bundle_version
-    from .pilot_office_stream import converted_output, run_libreoffice
+    from .pilot_office_stream import (
+        converted_output, doc_to_html_fallback, looks_like_html, run_libreoffice,
+    )
     from .reader_bucket import index_path
     from .recover_chm import recover as recover_chm
     from . import reader_lifecycle
@@ -30,9 +32,11 @@ try:
     )
     from .shared import batch_bucket_files_with_retry
 except ImportError:
-    from convert_reader_assets import convert_item
+    from convert_reader_assets import convert_item, decode_html_source, sanitize_html
     from epub_chapters import build_bundle, bundle_version
-    from pilot_office_stream import converted_output, run_libreoffice
+    from pilot_office_stream import (
+        converted_output, doc_to_html_fallback, looks_like_html, run_libreoffice,
+    )
     from reader_bucket import index_path
     from recover_chm import recover as recover_chm
     import reader_lifecycle
@@ -193,23 +197,55 @@ def office_to_epub(source: Path, extension: str, work: Path, password: str = "")
     if extension not in OFFICE_EXTENSIONS:
         raise ValueError(f"unsupported office chapter extension: {extension}")
     source = decrypt_office_source(source, extension, password, work)
-    normalized = source
-    if extension != "docx" or not zipfile.is_zipfile(source):
-        output = work / "normalized-docx"
-        output.mkdir(parents=True, exist_ok=True)
-        run_libreoffice(
-            ["libreoffice", "--headless", "--convert-to", "docx", "--outdir", str(output), str(source)],
-            work / "libreoffice-profile",
-        )
-        normalized = converted_output(output, "docx")
     epub = work / "document.epub"
-    subprocess.run(
-        ["ebook-convert", str(normalized), str(epub), "--flow-size", str(OFFICE_FLOW_SIZE_KB)],
-        check=True, timeout=OFFICE_COMMAND_TIMEOUT_SECONDS,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-    )
-    if not epub.is_file() or epub.stat().st_size <= 0:
-        raise RuntimeError("office EPUB conversion produced no output")
+
+    def convert_to_epub(input_path: Path) -> None:
+        subprocess.run(
+            ["ebook-convert", str(input_path), str(epub), "--flow-size", str(OFFICE_FLOW_SIZE_KB)],
+            check=True, timeout=OFFICE_COMMAND_TIMEOUT_SECONDS,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        if not epub.is_file() or epub.stat().st_size <= 0:
+            raise RuntimeError("office EPUB conversion produced no output")
+
+    # Some historical .doc files are HTML documents with a misleading suffix.
+    # Decode and sanitize them as HTML rather than asking LibreOffice to parse
+    # them as OLE documents (which can exit successfully without producing DOCX).
+    if extension == "doc" and looks_like_html(source):
+        html_source = work / "source.html"
+        html_source.write_text(
+            sanitize_html(decode_html_source(source), allow_relative=True), encoding="utf-8")
+        convert_to_epub(html_source)
+        return epub
+
+    try:
+        normalized = source
+        if extension != "docx" or not zipfile.is_zipfile(source):
+            output = work / "normalized-docx"
+            output.mkdir(parents=True, exist_ok=True)
+            run_libreoffice(
+                ["libreoffice", "--headless", "--convert-to", "docx", "--outdir", str(output), str(source)],
+                work / "libreoffice-profile",
+            )
+            normalized = converted_output(output, "docx")
+        convert_to_epub(normalized)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError,
+            RuntimeError) as primary_error:
+        if extension != "doc":
+            raise
+        # Keep conversion of large/legacy binary DOC files complete when the
+        # layout-preserving LibreOffice/Calibre path times out. This is the same
+        # antiword text fallback used by the native DOC Reader conversion.
+        text_html = work / "antiword-fallback.html"
+        doc_to_html_fallback(source, text_html)
+        epub.unlink(missing_ok=True)
+        try:
+            convert_to_epub(text_html)
+        except Exception as fallback_error:
+            raise RuntimeError(
+                f"DOC conversion failed ({type(primary_error).__name__}: {primary_error}); "
+                f"antiword EPUB fallback failed ({type(fallback_error).__name__}: {fallback_error})"
+            ) from fallback_error
     return epub
 
 

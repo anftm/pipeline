@@ -67,6 +67,42 @@ class EpubTocTests(unittest.TestCase):
         self.assertIn('href="chapter-0002.xhtml"', text)
         self.assertIn('>没有匹配</', text)
 
+    def test_unsafe_epub_paths_are_omitted_without_losing_valid_spine_content(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "unsafe-paths.epub"
+            with zipfile.ZipFile(source, "w") as archive:
+                archive.writestr(
+                    "META-INF/container.xml",
+                    '<container><rootfiles><rootfile full-path="O/content.opf"/></rootfiles></container>')
+                archive.writestr(
+                    "O/content.opf",
+                    '<package><manifest>'
+                    '<item id="toc" href="toc.ncx" media-type="application/x-dtbncx+xml"/>'
+                    '<item id="outside" href="../../outside.xhtml" media-type="application/xhtml+xml"/>'
+                    '<item id="book" href="book.xhtml" media-type="application/xhtml+xml"/>'
+                    '</manifest><spine><itemref idref="outside"/><itemref idref="book"/></spine></package>')
+                archive.writestr(
+                    "O/toc.ncx",
+                    '<ncx><navMap><navPoint><navLabel><text>Bad</text></navLabel>'
+                    '<content src="../../outside.xhtml"/></navPoint></navMap></ncx>')
+                archive.writestr(
+                    "O/book.xhtml",
+                    '<html><body><p>保留的正文</p><img src="../../../../outside.png"/>'
+                    '<a href="../../../../outside.xhtml">越界链接</a></body></html>')
+                archive.writestr("../outside.xhtml", "<html><body>must not read</body></html>")
+                archive.writestr("../../outside.png", b"must not copy")
+
+            bundle = root / "bundle"
+            result = epub_chapters.build_bundle(source, bundle)
+            self.assertEqual(len(result["chapters"]), 1)
+            chapter = (bundle / result["chapters"][0]["path"]).read_text(encoding="utf-8")
+            self.assertIn("保留的正文", chapter)
+            self.assertNotIn("src=", chapter)
+            self.assertNotIn("outside.xhtml", chapter)
+            self.assertNotIn("must not read", chapter)
+            self.assertFalse((bundle / "resources").exists())
+
 
 if __name__ == '__main__':
     unittest.main()

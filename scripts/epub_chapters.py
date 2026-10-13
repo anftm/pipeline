@@ -112,7 +112,13 @@ def _toc_entries(archive: zipfile.ZipFile, opf_path: str, manifest: dict, names:
         def add(label, href, depth):
             if not href:
                 return
-            target = _zip_path(posixpath.dirname(toc_path), href)
+            try:
+                target = _zip_path(posixpath.dirname(toc_path), href)
+            except ValueError:
+                # Broken generated books occasionally contain TOC targets that
+                # escape the EPUB root. Do not let one unusable navigation entry
+                # reject the readable spine or expose a path outside the bundle.
+                return
             entries.append({"title": label, "source_path": target,
                             "fragment": unquote(urlsplit(href).fragment), "depth": depth})
         def ncx(parent, depth=0):
@@ -341,12 +347,17 @@ def build_bundle(epub: Path, output: Path, *, fallback: str | None = None,
         for entry in toc_entries:
             if not _placeholder_title(entry["title"]):
                 toc_titles.setdefault(entry["source_path"], entry["title"])
-        document_items = {
-            _zip_path(base, item.get("href", "")): item
-            for item in manifest.values()
-            if "nav" not in item.get("properties", "").split()
-            and item.get("media-type", "").lower() in {"application/xhtml+xml", "text/html"}
-        }
+        document_items = {}
+        for item in manifest.values():
+            if ("nav" in item.get("properties", "").split()
+                    or item.get("media-type", "").lower() not in {"application/xhtml+xml", "text/html"}):
+                continue
+            try:
+                item_path = _zip_path(base, item.get("href", ""))
+            except ValueError:
+                # An out-of-root manifest item cannot be a valid EPUB chapter.
+                continue
+            document_items[item_path] = item
         spine_paths = []
         for ref in opf.iter():
             if _local_name(ref) != "itemref":
@@ -354,7 +365,10 @@ def build_bundle(epub: Path, output: Path, *, fallback: str | None = None,
             item = manifest.get(ref.attrib.get("idref"))
             if not item or "nav" in item.get("properties", "").split():
                 continue
-            candidate = _zip_path(base, item.get("href", ""))
+            try:
+                candidate = _zip_path(base, item.get("href", ""))
+            except ValueError:
+                continue
             if candidate in document_items:
                 spine_paths.append(candidate)
         document_paths = spine_paths + ([path for path in sorted(document_items) if path not in spine_paths]
@@ -378,7 +392,9 @@ def build_bundle(epub: Path, output: Path, *, fallback: str | None = None,
                 value = match.group(2)
                 try:
                     resource = _zip_path(posixpath.dirname(source_path), value)
-                except ValueError:
+                except ValueError as error:
+                    if str(error) == "unsafe EPUB resource path":
+                        return ""
                     return match.group(0)
                 if resource not in names or resource.lower().endswith((".xhtml", ".html", ".htm")):
                     return match.group(0)
@@ -408,7 +424,9 @@ def build_bundle(epub: Path, output: Path, *, fallback: str | None = None,
                 try:
                     original = _zip_path(posixpath.dirname(record["source_path"]), value)
                     fragment = urlsplit(value).fragment
-                except ValueError:
+                except ValueError as error:
+                    if str(error) == "unsafe EPUB resource path":
+                        return ""
                     return match.group(0)
                 target = chapter_paths.get(original)
                 if target is None:
