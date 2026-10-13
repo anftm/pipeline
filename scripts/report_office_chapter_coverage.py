@@ -134,7 +134,8 @@ def summarize(sources: list[dict], index: dict) -> dict:
             "totals": totals, "by_extension": by_extension, "sources": rows}
 
 
-def verify_bundle_payload(entry: dict, manifest_raw: bytes, search_raw: bytes) -> dict:
+def verify_bundle_payload(entry: dict, manifest_raw: bytes, search_raw: bytes,
+                          first_chapter_raw: bytes) -> dict:
     manifest = validate_chapter_manifest(json.loads(manifest_raw.decode("utf-8")))
     if (manifest.get("kind") != "epub-chapters"
             or len(manifest["chapters"]) != entry.get("chapter_count")):
@@ -157,9 +158,14 @@ def verify_bundle_payload(entry: dict, manifest_raw: bytes, search_raw: bytes) -
         if (indexed.get("index") != chapter["index"] or indexed.get("path") != chapter["path"]
                 or indexed.get("title") != chapter["title"] or not isinstance(indexed.get("text"), str)):
             raise ValueError("search index chapter identity differs from the manifest")
+    first_chapter = manifest["chapters"][0]
+    if (len(first_chapter_raw) != first_chapter["bytes"]
+            or hashlib.sha256(first_chapter_raw).hexdigest() != first_chapter["sha256"]):
+        raise ValueError("first chapter size or checksum mismatch")
     return {"chapter_count": len(manifest["chapters"]),
             "manifest_sha256": hashlib.sha256(manifest_raw).hexdigest(),
-            "search_index_sha256": hashlib.sha256(search_raw).hexdigest()}
+            "search_index_sha256": hashlib.sha256(search_raw).hexdigest(),
+            "first_chapter_sha256": hashlib.sha256(first_chapter_raw).hexdigest()}
 
 
 def verify_remote_bundle(entry: dict, bucket: str, token: str) -> dict:
@@ -171,7 +177,8 @@ def verify_remote_bundle(entry: dict, bucket: str, token: str) -> dict:
     manifest = json.loads(manifest_raw.decode("utf-8"))
     search_path = f"{entry['root']}/{manifest['search_index']['path']}"
     search_raw = read(search_path)
-    return verify_bundle_payload(entry, manifest_raw, search_raw)
+    first_chapter_raw = read(f"{entry['root']}/{manifest['chapters'][0]['path']}")
+    return verify_bundle_payload(entry, manifest_raw, search_raw, first_chapter_raw)
 
 
 def verify_bundles(report: dict, index: dict, bucket: str, token: str, workers: int) -> dict:

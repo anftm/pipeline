@@ -49,8 +49,9 @@ class OfficeChapterCoverageTests(unittest.TestCase):
         self.assertEqual(report["totals"]["missing-revision"], 1)
 
     def test_complete_search_bundle_checks_manifest_identity_and_compressed_digest(self):
+        chapter_body = b"chapter body"
         chapter = {"index": 1, "title": "Chapter", "path": "chapters/chapter-0001.xhtml",
-                   "bytes": 12, "sha256": "a" * 64}
+                   "bytes": len(chapter_body), "sha256": hashlib.sha256(chapter_body).hexdigest()}
         search_raw = gzip.compress(json.dumps({"version": 1, "kind": "epub-search-index",
                                              "chapters": [{"index": 1, "title": "Chapter",
                                                            "path": chapter["path"], "text": "needle"}]}
@@ -59,10 +60,12 @@ class OfficeChapterCoverageTests(unittest.TestCase):
                                    "search_index": {"path": "epub-search-index.json.gz",
                                                     "bytes": len(search_raw),
                                                     "sha256": hashlib.sha256(search_raw).hexdigest()}}).encode()
-        result = verify_bundle_payload({"chapter_count": 1}, manifest_raw, search_raw)
+        result = verify_bundle_payload({"chapter_count": 1}, manifest_raw, search_raw, chapter_body)
         self.assertEqual(result["chapter_count"], 1)
         with self.assertRaisesRegex(ValueError, "checksum"):
-            verify_bundle_payload({"chapter_count": 1}, manifest_raw, search_raw + b"x")
+            verify_bundle_payload({"chapter_count": 1}, manifest_raw, search_raw + b"x", chapter_body)
+        with self.assertRaisesRegex(ValueError, "first chapter"):
+            verify_bundle_payload({"chapter_count": 1}, manifest_raw, search_raw, b"wrong chapter")
 
 
 if __name__ == "__main__":
