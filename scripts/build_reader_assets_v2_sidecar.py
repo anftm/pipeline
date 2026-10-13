@@ -79,6 +79,16 @@ def add_pdf_streams(files: dict, payload: dict, bucket: str) -> None:
             files[key] = {**files.get(key, {}), **shared.pdf_pages_sidecar_entry(path, entry, files.get(key)), "b": bucket}
 
 
+def release_processing_roots(indexes: list[dict], generation: str, read, publish) -> int:
+    """Release only newly handed-off roots; retained released roots are read-only."""
+    results = [entry for payload in indexes for entry in payload.get("files", [])
+               if isinstance(entry, dict)]
+    updates = reader_lifecycle.processing_handoffs(results, generation, read)
+    for path, record in updates.items():
+        publish(path, record)
+    return len(updates)
+
+
 def build(fs: HfFileSystem, assets_bucket: str, pdf_bucket: str, derived_path: str,
           render_path: str, ocr_path: str) -> dict:
     files = {}
@@ -164,23 +174,20 @@ def main() -> int:
     if args.apply:
         batch_bucket_files(args.assets_bucket, add=[(str(args.output), SIDECAR_PATH)], token=token)
         generation = publish_catalog(index, token)
-        released = 0
         # Conversion workers upload immutable bundles under a processing root
         # before any index can reference them. The canonical sidecar/catalog
         # is the handoff boundary; only then may those roots be released.
+        indexes = []
         for bucket, path in ((args.pdf_bucket, args.derived_manifest),
                              (args.assets_bucket, "chapters/ebook/epub/index.json")):
             try:
                 payload = read_bucket_json(path, token, bucket=bucket)
             except (FileNotFoundError, OSError, ValueError):
                 continue
-            for entry in payload.get("files", []):
-                for processing_path in entry.get("processing_roots", []):
-                    record = read_bucket_json(processing_path, token)
-                    reader_lifecycle.validate_processing_handoff(record, entry)
-                    released_record = reader_lifecycle.release_processing(record, generation)
-                    publish_json(processing_path, released_record, token)
-                    released += 1
+            indexes.append(payload)
+        released = release_processing_roots(
+            indexes, generation, lambda path: read_bucket_json(path, token),
+            lambda path, record: publish_json(path, record, token))
         print(f"published={args.assets_bucket}/{SIDECAR_PATH} catalog={generation} released_roots={released}")
     else:
         print("report-only; pass --apply to publish")
