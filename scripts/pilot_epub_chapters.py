@@ -20,7 +20,7 @@ try:
     from .convert_reader_assets import convert_item
     from .epub_chapters import build_bundle, bundle_version
     from .pilot_office_stream import converted_output, run_libreoffice
-    from .reader_bucket import index_path, publish_json
+    from .reader_bucket import index_path
     from .recover_chm import recover as recover_chm
     from . import reader_lifecycle
     from .reader_assets import bucket_conversion_contract, decode_search_payload, relative_path, source_url
@@ -29,7 +29,7 @@ except ImportError:
     from convert_reader_assets import convert_item
     from epub_chapters import build_bundle, bundle_version
     from pilot_office_stream import converted_output, run_libreoffice
-    from reader_bucket import index_path, publish_json
+    from reader_bucket import index_path
     from recover_chm import recover as recover_chm
     import reader_lifecycle
     from reader_assets import bucket_conversion_contract, decode_search_payload, relative_path, source_url
@@ -323,6 +323,7 @@ def main() -> int:
         payload = merged_index_payload(previous, entries, failures)
         index_file.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
                               encoding="utf-8")
+        processing_uploads = []
         if args.apply:
             for entry in entries:
                 processing_path, record = processing_record_for_entry(
@@ -330,7 +331,11 @@ def main() -> int:
                     {"repository": os.environ.get("GITHUB_REPOSITORY", ""),
                      "run_id": os.environ.get("GITHUB_RUN_ID", ""),
                      "attempt": os.environ.get("GITHUB_RUN_ATTEMPT", "")})
-                publish_json(processing_path, record, token)
+                local_record = root / "processing-roots" / Path(processing_path).name
+                local_record.parent.mkdir(parents=True, exist_ok=True)
+                local_record.write_text(json.dumps(record, ensure_ascii=False, sort_keys=True,
+                                                   separators=(",", ":")) + "\n", encoding="utf-8")
+                processing_uploads.append((str(local_record), processing_path))
                 entry["processing_roots"] = [processing_path]
                 merged[entry["key"]] = entry
             payload = {"version": 1, "kind": "ebook-chapter-stream-index",
@@ -338,6 +343,8 @@ def main() -> int:
                        "failures": merge_index_failures(previous, entries, failures)}
             index_file.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
                                   encoding="utf-8")
+            if processing_uploads:
+                batch_bucket_files_with_retry(args.bucket, processing_uploads, token)
         uploads[f"{root_prefix}/{index_name}"] = str(index_file)
         print(f"planned {len(entries)} EPUB stream(s), {len(uploads)} object(s), failures={len(failures)}")
         if args.apply:
