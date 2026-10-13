@@ -92,6 +92,16 @@ def merge_index_entries(previous: dict, entries: list[dict]) -> dict[str, dict]:
     return merged
 
 
+def processing_record_for_entry(entry: dict, bucket: str, run: dict) -> tuple[str, dict]:
+    processing_id = hashlib.sha256(
+        f"{entry['key']}\0{entry['source_sha256']}\0{entry['root']}".encode()
+    ).hexdigest()[:32]
+    processing_path = index_path(f"processing/office-chapters-{processing_id}.json")
+    record = reader_lifecycle.processing_record(
+        [{"bucket": bucket, "root": entry["root"]}], "office-chapter-upload", run)
+    return processing_path, record
+
+
 def shard_for(key: str, count: int) -> int:
     return int.from_bytes(hashlib.sha256(key.encode()).digest()[:8], "big") % count
 
@@ -291,12 +301,8 @@ def main() -> int:
                                            }, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
         if args.apply:
             for entry in entries:
-                processing_id = hashlib.sha256(
-                    f"{entry['key']}\0{entry['source_sha256']}\0{entry['root']}".encode()
-                ).hexdigest()[:32]
-                processing_path = index_path(f"processing/office-chapters-{processing_id}.json")
-                record = reader_lifecycle.processing_record(
-                    [{"bucket": bucket, "root": entry["root"]}], "office-chapter-upload",
+                processing_path, record = processing_record_for_entry(
+                    entry, args.bucket,
                     {"repository": os.environ.get("GITHUB_REPOSITORY", ""),
                      "run_id": os.environ.get("GITHUB_RUN_ID", ""),
                      "attempt": os.environ.get("GITHUB_RUN_ATTEMPT", "")})

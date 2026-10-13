@@ -40,6 +40,16 @@ class ChmChapterPilotTests(unittest.TestCase):
         self.assertEqual(merged[epub["key"]], epub)
         self.assertEqual(merged[docx["key"]], docx)
 
+    def test_office_upload_processing_root_is_bucket_qualified(self):
+        entry = {"key": "VoiceOfML/Test\0book.docx", "source_sha256": "a" * 64,
+                 "root": "chapters/ebook/epub/" + "b" * 64 + "/" + "c" * 16}
+        bucket = "vomebook/reader-assets-v2"
+        path, record = pilot_epub_chapters.processing_record_for_entry(
+            entry, bucket, {"repository": "anftm/pipeline", "run_id": "123"})
+        self.assertRegex(path, r"^reader-index/processing/office-chapters-[0-9a-f]{32}\.json$")
+        self.assertEqual(record["status"], "processing")
+        self.assertEqual(record["resources"], [{"bucket": bucket, "root": entry["root"]}])
+
     def test_package_repair_does_not_declare_reserved_xmlns_prefix(self):
         raw = (b'<package xmlns="urn:opf">'
                b'<metadata xmlns:dc="urn:dc"><dc:date xsi:type="dcterms:W3CDTF">x</dc:date>'
