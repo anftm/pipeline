@@ -1,4 +1,5 @@
 import hashlib
+import gzip
 import io
 import json
 import tempfile
@@ -128,13 +129,14 @@ class ChmChapterPilotTests(unittest.TestCase):
             (bundle / "chapters").mkdir(parents=True)
             chapter = bundle / "chapters" / "chapter-0001.xhtml"
             chapter.write_text("<html><body><h1>Office</h1><p>body</p></body></html>")
-            (bundle / "epub-search-index.json.gz").write_bytes(b"search")
+            search_bytes = gzip.compress(b"search", mtime=0)
+            (bundle / "epub-search-index.json.gz").write_bytes(search_bytes)
             (bundle / "chapter-manifest.json").write_text(json.dumps({
                 "version": 1, "kind": "epub-chapters", "chapters": [{
                     "index": 1, "title": "Office", "path": "chapters/chapter-0001.xhtml",
                     "bytes": chapter.stat().st_size, "sha256": hashlib.sha256(chapter.read_bytes()).hexdigest(),
-                }], "search_index": {"path": "epub-search-index.json.gz", "bytes": 6,
-                                      "sha256": hashlib.sha256(b"search").hexdigest()},
+                }], "search_index": {"path": "epub-search-index.json.gz", "bytes": len(search_bytes),
+                                      "sha256": hashlib.sha256(search_bytes).hexdigest()},
             }))
             def download(_url, target, _token):
                 target.write_bytes(source_bytes)
@@ -172,6 +174,13 @@ class ChmChapterPilotTests(unittest.TestCase):
         ):
             with self.assertRaises(ValueError):
                 pilot_epub_chapters.validate_office_chapter_budget(value)
+
+    def test_office_search_index_obeys_expanded_worker_limit(self):
+        pilot_epub_chapters.validate_office_search_index_expanded_size(
+            pilot_epub_chapters.OFFICE_MAX_SEARCH_INDEX_EXPANDED_BYTES)
+        with self.assertRaisesRegex(ValueError, "Worker text limit"):
+            pilot_epub_chapters.validate_office_search_index_expanded_size(
+                pilot_epub_chapters.OFFICE_MAX_SEARCH_INDEX_EXPANDED_BYTES + 1)
 
 
 if __name__ == "__main__":

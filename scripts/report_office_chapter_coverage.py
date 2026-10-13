@@ -7,6 +7,7 @@ import argparse
 import concurrent.futures
 import gzip
 import hashlib
+import io
 import json
 import os
 import re
@@ -16,11 +17,13 @@ from pathlib import Path
 from huggingface_hub import HfFileSystem
 
 try:
-    from .pilot_epub_chapters import OFFICE_EXTENSIONS, OFFICE_PROFILE, OFFICE_ROOT
+    from .pilot_epub_chapters import (OFFICE_EXTENSIONS, OFFICE_MAX_SEARCH_INDEX_EXPANDED_BYTES,
+                                      OFFICE_PROFILE, OFFICE_ROOT)
     from .reader_assets import decode_search_payload, relative_path, validate_chapter_manifest
     from .reader_bucket import read_bytes as read_bucket_bytes
 except ImportError:
-    from pilot_epub_chapters import OFFICE_EXTENSIONS, OFFICE_PROFILE, OFFICE_ROOT
+    from pilot_epub_chapters import (OFFICE_EXTENSIONS, OFFICE_MAX_SEARCH_INDEX_EXPANDED_BYTES,
+                                     OFFICE_PROFILE, OFFICE_ROOT)
     from reader_assets import decode_search_payload, relative_path, validate_chapter_manifest
     from reader_bucket import read_bytes as read_bucket_bytes
 
@@ -149,7 +152,11 @@ def verify_bundle_payload(entry: dict, manifest_raw: bytes, search_raw: bytes,
     if (len(search_raw) != search_ref.get("bytes")
             or hashlib.sha256(search_raw).hexdigest() != search_ref.get("sha256")):
         raise ValueError("search-index size or checksum mismatch")
-    search = json.loads(gzip.decompress(search_raw).decode("utf-8"))
+    with gzip.GzipFile(fileobj=io.BytesIO(search_raw), mode="rb") as stream:
+        expanded = stream.read(OFFICE_MAX_SEARCH_INDEX_EXPANDED_BYTES + 1)
+    if len(expanded) > OFFICE_MAX_SEARCH_INDEX_EXPANDED_BYTES:
+        raise ValueError("search index exceeds the browser Worker expanded-text limit")
+    search = json.loads(expanded.decode("utf-8"))
     if not isinstance(search, dict):
         raise ValueError("search index is not a JSON object")
     search_chapters = search.get("chapters")

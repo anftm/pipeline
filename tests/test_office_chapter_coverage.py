@@ -2,9 +2,12 @@ import gzip
 import hashlib
 import json
 import unittest
+from unittest.mock import patch
 
+from scripts import report_office_chapter_coverage as coverage
 from scripts.report_office_chapter_coverage import (
-    OFFICE_PROFILE, summarize, verify_bundle_payload, verify_processing_payload,
+    OFFICE_MAX_SEARCH_INDEX_EXPANDED_BYTES, OFFICE_PROFILE, summarize,
+    verify_bundle_payload, verify_processing_payload,
 )
 
 
@@ -68,6 +71,16 @@ class OfficeChapterCoverageTests(unittest.TestCase):
             verify_bundle_payload({"chapter_count": 1}, manifest_raw, search_raw + b"x", chapter_body)
         with self.assertRaisesRegex(ValueError, "first chapter"):
             verify_bundle_payload({"chapter_count": 1}, manifest_raw, search_raw, b"wrong chapter")
+        manifest = json.loads(manifest_raw)
+        expanded_search = gzip.compress(json.dumps({"version": 1, "kind": "epub-search-index",
+            "chapters": [{"index": 1, "title": "Chapter", "path": chapter["path"], "text": "123456"}]}).encode(), mtime=0)
+        manifest["search_index"]["bytes"] = len(expanded_search)
+        manifest["search_index"]["sha256"] = hashlib.sha256(expanded_search).hexdigest()
+        with patch.object(coverage, "OFFICE_MAX_SEARCH_INDEX_EXPANDED_BYTES", 8):
+            with self.assertRaisesRegex(ValueError, "expanded-text limit"):
+                verify_bundle_payload({"chapter_count": 1}, json.dumps(manifest).encode(),
+                                      expanded_search, chapter_body)
+        self.assertEqual(OFFICE_MAX_SEARCH_INDEX_EXPANDED_BYTES, 256 * 1024 * 1024)
 
     def test_processing_handoff_must_be_released_for_the_chapter_root(self):
         entry = {"root": "chapters/ebook/epub/" + "a" * 64 + "/" + "b" * 16}

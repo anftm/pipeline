@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import gzip
 import hashlib
 import json
 import os
@@ -48,6 +49,7 @@ OFFICE_MAX_CHAPTER_BYTES = 7 * 1024 * 1024
 OFFICE_MAX_TOTAL_CHAPTER_BYTES = 500 * 1024 * 1024
 OFFICE_MAX_CHAPTERS = 10_000
 OFFICE_MAX_SEARCH_INDEX_BYTES = 64 * 1024 * 1024
+OFFICE_MAX_SEARCH_INDEX_EXPANDED_BYTES = 256 * 1024 * 1024
 
 
 def parse_args() -> argparse.Namespace:
@@ -164,7 +166,21 @@ def office_to_epub(source: Path, extension: str, work: Path) -> Path:
     return epub
 
 
-def validate_office_chapter_budget(manifest: dict) -> None:
+def validate_office_search_index_expanded_size(expanded_bytes: int) -> None:
+    if expanded_bytes > OFFICE_MAX_SEARCH_INDEX_EXPANDED_BYTES:
+        raise ValueError("office search index exceeds the bounded Reader Worker text limit")
+
+
+def validate_office_gzip_search_index(path: Path) -> int:
+    expanded_bytes = 0
+    with gzip.open(path, "rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            expanded_bytes += len(chunk)
+            validate_office_search_index_expanded_size(expanded_bytes)
+    return expanded_bytes
+
+
+def validate_office_chapter_budget(manifest: dict, bundle: Path | None = None) -> None:
     chapters = manifest.get("chapters", [])
     search_index_bytes = int((manifest.get("search_index") or {}).get("bytes") or 0)
     if (not isinstance(chapters, list) or len(chapters) > OFFICE_MAX_CHAPTERS
@@ -173,6 +189,11 @@ def validate_office_chapter_budget(manifest: dict) -> None:
         raise ValueError("office chapter stream exceeds the Reader manifest/search budget")
     if any(int(chapter.get("bytes") or 0) > OFFICE_MAX_CHAPTER_BYTES for chapter in chapters):
         raise ValueError("office chapter exceeds the bounded browser chapter limit")
+    if bundle is not None:
+        search_path = (manifest.get("search_index") or {}).get("path")
+        if search_path != "epub-search-index.json.gz":
+            raise ValueError("office bundle has an unexpected search-index path")
+        validate_office_gzip_search_index(bundle / search_path)
 
 
 def select_records(path: Path, revisions: dict, max_bytes: int, extension_filter: str) -> list[dict]:
@@ -203,7 +224,7 @@ def build_one(item: dict, work: Path, token: str | None, bucket: str) -> tuple[d
         chapter_source = office_to_epub(source, extension, work)
         bundle = work / "bundle"
         manifest = build_bundle(chapter_source, bundle)
-        validate_office_chapter_budget(manifest)
+        validate_office_chapter_budget(manifest, bundle)
         root_extension = "epub"
     elif extension == "chm":
         contract = bucket_conversion_contract(item["repo"], item["path"], extension, item["source_bytes"])
