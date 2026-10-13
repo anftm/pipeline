@@ -29,7 +29,9 @@ jobs:
     timeout-minutes: 300
     strategy:
       fail-fast: false
-      max-parallel: 4
+      # The Hub resolver quota is 5,000 requests/5 minutes across the shared token.
+      # Keep page-object verification below that account-wide ceiling.
+      max-parallel: 1
       matrix:
         task: ${{ fromJSON(inputs.tasks) }}
     env:

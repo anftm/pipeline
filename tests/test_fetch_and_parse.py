@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import os
 import tempfile
@@ -69,6 +70,22 @@ class FetchAndParseTests(unittest.TestCase):
 
         self.assertEqual(result, "catalog\n")
         sleep.assert_called_once_with(self.module.HTTP_RETRY_AFTER_CAP_SECONDS)
+
+    def test_http_429_retry_parses_hf_countdown_from_error_body(self):
+        error = urllib.error.HTTPError(
+            "https://example.test", 429, "rate limited", {},
+            io.BytesIO(b"429 Too Many Requests. Retry after 23 seconds (0/5000 requests remaining)."))
+        response = Mock()
+        response.__enter__ = lambda value: value
+        response.__exit__ = lambda *args: None
+        response.read.return_value = b"catalog\n"
+
+        with patch.object(urllib.request, "urlopen", side_effect=[error, response]), \
+                patch.object(self.module.time, "sleep") as sleep:
+            result = self.module.http_get_text("https://example.test")
+
+        self.assertEqual(result, "catalog\n")
+        sleep.assert_called_once_with(23)
 
     def test_http_retry_after_date_is_parsed(self):
         from datetime import datetime, timezone

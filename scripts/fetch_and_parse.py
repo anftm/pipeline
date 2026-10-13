@@ -11,6 +11,7 @@
 
 import json
 import os
+import re
 import sys
 import time
 import gzip
@@ -106,6 +107,13 @@ def _retry_delay(attempt: int, error: urllib.error.HTTPError | None = None) -> i
                     return max(0, min(HTTP_RETRY_AFTER_CAP_SECONDS, int(retry_at.timestamp() - time.time())))
                 except (OverflowError, TypeError, ValueError):
                     pass
+        try:
+            body = error.read(8192).decode("utf-8", "replace")
+        except Exception:
+            body = ""
+        match = re.search(r"\bretry\s+after\s+(\d+(?:\.\d+)?)\s+seconds\b", body, re.IGNORECASE)
+        if match:
+            return max(1, min(HTTP_RETRY_AFTER_CAP_SECONDS, int(float(match.group(1)))))
     return HTTP_RETRY_DELAYS[min(attempt, len(HTTP_RETRY_DELAYS) - 1)]
 
 

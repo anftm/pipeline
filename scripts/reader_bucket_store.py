@@ -9,6 +9,7 @@ import json
 import os
 import posixpath
 import random
+import re
 import tempfile
 import time
 import threading
@@ -18,6 +19,23 @@ from urllib.parse import quote
 
 class S3NotFound(FileNotFoundError):
     pass
+
+
+def resolver_retry_delay(error: BaseException, attempt: int) -> int:
+    """Use HF's explicit reset countdown, including the response-body form."""
+    response = getattr(error, "response", None)
+    headers = getattr(response, "headers", {}) or {}
+    retry_after = headers.get("Retry-After") or headers.get("retry-after")
+    if retry_after:
+        try:
+            return min(300, max(1, int(float(retry_after))))
+        except (OverflowError, TypeError, ValueError):
+            pass
+    details = f"{error} {getattr(response, 'text', '')}"
+    match = re.search(r"\bretry\s+after\s+(\d+(?:\.\d+)?)\s+seconds\b", details, re.IGNORECASE)
+    if match:
+        return min(300, max(1, int(float(match.group(1)))))
+    return min(120, 2 ** min(attempt, 7))
 
 
 def retry_read(operation):
@@ -30,14 +48,13 @@ def retry_read(operation):
             status = getattr(error.response, "status_code", None)
             if status not in {408, 429, 500, 502, 503, 504} or attempt == 11:
                 raise
-            try:
-                delay = min(300, max(1, int(float(error.response.headers.get("Retry-After", "1")))))
-            except ValueError:
-                delay = min(120, 2 ** attempt)
+            delay = resolver_retry_delay(error, attempt)
         except httpx.TransportError:
             if attempt == 11:
                 raise
             delay = min(120, 2 ** attempt)
+        print(f"transient Reader bucket read error; retrying in {delay}s "
+              f"(attempt {attempt + 1}/12)", flush=True)
         time.sleep(delay + random.uniform(0, 1.5))
 
 
@@ -57,7 +74,7 @@ class HubBucketStore:
         with self.resolver_lock:
             now = time.monotonic()
             wait = max(0, self.resolver_next - now)
-            self.resolver_next = max(now, self.resolver_next) + 0.15
+            self.resolver_next = max(now, self.resolver_next) + 0.3
         if wait:
             time.sleep(wait)
 
@@ -84,6 +101,7 @@ class HubBucketStore:
         from huggingface_hub.utils import get_session, hf_raise_for_status
         token = self.token(bucket)
         def read():
+            self.pace_resolver()
             response = get_session().get(
                 f"https://huggingface.co/buckets/{bucket}/resolve/{quote(path, safe='/')}",
                 headers={"Authorization": f"Bearer {token}"} if token else {},

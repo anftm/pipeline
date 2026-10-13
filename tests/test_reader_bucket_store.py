@@ -51,11 +51,33 @@ class ReaderBucketStoreTests(unittest.TestCase):
                 patch("huggingface_hub.utils.get_session", return_value=session), \
                 patch("scripts.reader_bucket_store.time.sleep", side_effect=sleeps.append):
             store = HubBucketStore()
+            store.pace_resolver = Mock()
             self.assertEqual(store.read_bytes("vomebook/reader-assets-v2", "reader-index/current.json"), b"root")
         self.assertEqual(session.get.call_count, 2)
+        self.assertEqual(store.pace_resolver.call_count, 2)
         self.assertEqual(len(sleeps), 1)
         self.assertGreaterEqual(sleeps[0], 300)
         self.assertLess(sleeps[0], 302)
+
+    def test_hub_read_bytes_honors_retry_countdown_in_hf_error_body(self):
+        import httpx
+        request = httpx.Request("GET", "https://huggingface.co/buckets/bucket/resolve/path")
+        throttled = httpx.Response(
+            429, content=b"429 Too Many Requests. Retry after 23 seconds (0/5000 requests remaining).",
+            request=request)
+        success = httpx.Response(200, content=b"root", request=request)
+        session = Mock()
+        session.get.side_effect = [throttled, success]
+        sleeps = []
+        with patch("huggingface_hub.HfApi"), \
+                patch("huggingface_hub.utils.get_session", return_value=session), \
+                patch("scripts.reader_bucket_store.time.sleep", side_effect=sleeps.append), \
+                patch("scripts.reader_bucket_store.random.uniform", return_value=0.5):
+            store = HubBucketStore()
+            store.pace_resolver = Mock()
+            self.assertEqual(store.read_bytes("vomebook/reader-assets-v2", "reader-index/current.json"), b"root")
+        self.assertEqual(session.get.call_count, 2)
+        self.assertEqual(sleeps, [23.5])
 
     def test_legacy_environment_cannot_remap_the_current_input_bucket(self):
         result = subprocess.check_output(["python3", "-B", "-c",
