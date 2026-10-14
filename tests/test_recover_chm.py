@@ -75,3 +75,27 @@ class ChmRecoveryTests(unittest.TestCase):
                 report = recover_chm.recover(source, root / 'book.epub', 'Book')
             self.assertEqual(report['images'], 1)
             self.assertEqual(report['missing_images'], [])
+
+    def test_html_404_page_disguised_as_image_is_omitted_and_recorded(self):
+        def extract(_source, root):
+            (root / 'images').mkdir()
+            (root / 'images/transdot.gif').write_text(
+                '<!DOCTYPE HTML><html><title>The page cannot be found</title></html>',
+                encoding='ascii')
+            (root / 'page.htm').write_text(
+                '<html><body><p>正文仍然保留</p><img src="images/transdot.gif"></body></html>',
+                encoding='utf-8')
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / 'source.chm'
+            source.write_bytes(b'ITSF')
+            target = root / 'book.epub'
+            with patch.object(recover_chm, 'extract', side_effect=extract):
+                report = recover_chm.recover(source, target, 'Book')
+            self.assertEqual(report['images'], 0)
+            self.assertEqual(report['missing_images'][0]['reason'], 'html-image-placeholder')
+            with zipfile.ZipFile(target) as archive:
+                body = b''.join(archive.read(name) for name in archive.namelist()
+                                if name.endswith('.xhtml'))
+            self.assertIn('正文仍然保留'.encode(), body)

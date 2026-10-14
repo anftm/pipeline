@@ -106,7 +106,9 @@ def source_pages(root, work):
             else:
                 text = "<pre>" + html.escape(text) + "</pre>"
         text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text)
-        # Input bytes are decoded already; remove the stale XML encoding PI.
+        # lxml rejects a Unicode string containing an XML encoding declaration.
+        # The bytes have already been decoded by decode_html_source, so the PI
+        # is metadata only and must not be passed back to the HTML parser.
         text = re.sub(r"^\s*<\?xml\b[^?]*\?>", "", text, count=1, flags=re.IGNORECASE)
         doc = HTML.document_fromstring(text or "<html><body></body></html>")
         etree.strip_elements(doc, etree.Comment, with_tail=False)
@@ -173,6 +175,12 @@ def ordered_pages(pages, root):
     return ordered
 
 
+def html_image_placeholder(data: bytes) -> bool:
+    """Recognize old CHM image entries that contain an embedded HTTP 404 page."""
+    probe = data.lstrip()[:512].lower()
+    return probe.startswith((b"<!doctype html", b"<html", b"<html "))
+
+
 def recover(source, target, title):
     source_sha = hashlib.sha256(source.read_bytes()).hexdigest()
     with tempfile.TemporaryDirectory(prefix="chm-recovery-") as temporary:
@@ -222,6 +230,15 @@ def recover(source, target, title):
                             missing_images.append({"page": page["path"], "src": raw})
                             continue
                         data = resource.read_bytes()
+                    if html_image_placeholder(data):
+                        # Some legacy CHMs contain Internet Explorer's 404 HTML
+                        # response under an image filename (often transdot.gif).
+                        # It is not recoverable image content; do not let it
+                        # invalidate the whole book or alter the page text.
+                        missing_images.append({"page": page["path"], "src": raw,
+                                               "reason": "html-image-placeholder"})
+                        node.attrib.pop(attribute, None)
+                        continue
                     try:
                         with Image.open(io.BytesIO(data)) as image:
                             mime = Image.MIME.get(image.format)
