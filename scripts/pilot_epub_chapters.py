@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import html as html_lib
 import urllib.error
 import time
 import re
@@ -18,6 +19,7 @@ import subprocess
 import tempfile
 import urllib.request
 import zipfile
+from html.parser import HTMLParser
 from pathlib import Path
 
 from huggingface_hub import HfFileSystem
@@ -28,7 +30,7 @@ try:
     from .pilot_office_stream import (
         converted_output, doc_to_html_fallback, looks_like_html, run_libreoffice,
     )
-    from .reader_bucket import index_path
+    from .reader_bucket import index_path, read_bytes
     from .recover_chm import recover as recover_chm
     from . import reader_lifecycle
     from .reader_assets import (
@@ -41,7 +43,7 @@ except ImportError:
     from pilot_office_stream import (
         converted_output, doc_to_html_fallback, looks_like_html, run_libreoffice,
     )
-    from reader_bucket import index_path
+    from reader_bucket import index_path, read_bytes
     from recover_chm import recover as recover_chm
     import reader_lifecycle
     from reader_assets import (
@@ -235,7 +237,66 @@ def decrypt_office_source(source: Path, extension: str, password: str, work: Pat
     return decrypted
 
 
-def office_to_epub(source: Path, extension: str, work: Path, password: str = "") -> Path:
+class _LegacyOfficeText(HTMLParser):
+    """Extract text from the native DOC fallback without retaining its <pre>."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.depth = 0
+        self.parts = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag.lower() == "pre":
+            self.depth += 1
+
+    def handle_endtag(self, tag):
+        if tag.lower() == "pre" and self.depth:
+            self.depth -= 1
+
+    def handle_data(self, data):
+        if self.depth:
+            self.parts.append(data)
+
+
+def write_styled_legacy_office_html(raw: bytes, output: Path, title: str) -> None:
+    """Turn the old native text fallback into readable, styled HTML.
+
+    The legacy converter stores difficult OLE DOC files as one giant ``<pre>``.
+    Feeding that directly to the chapter converter produces the ugly native HTML
+    view. Reflow its blank-line-separated text into normal paragraphs first.
+    """
+    parser = _LegacyOfficeText()
+    parser.feed(raw.decode("utf-8", "replace"))
+    parser.close()
+    text = "\n".join(parser.parts)
+    if not text.strip():
+        raise ValueError("legacy office HTML contains no readable text")
+    paragraphs = []
+    for block in re.split(r"\n[ \t]*\n+", text.replace("\r\n", "\n")):
+        lines = [re.sub(r"[ \t]+", " ", line).strip() for line in block.split("\n")]
+        value = " ".join(line for line in lines if line)
+        if not value:
+            continue
+        value = value.replace("[pic]", "（图片）")
+        paragraphs.append(f"<p>{html_lib.escape(value)}</p>")
+    if not paragraphs:
+        raise ValueError("legacy office HTML contains no non-empty paragraphs")
+    style = (
+        "body{margin:0 auto;max-width:48rem;padding:1.5rem 1.25rem;"
+        "font-family:serif;font-size:1rem;line-height:1.8;color:#202124;}"
+        "h1{font-size:1.55rem;line-height:1.35;text-align:center;margin:0 0 2rem;}"
+        "p{margin:0 0 .9em;text-indent:2em;text-align:justify;}"
+        "p:first-of-type{text-indent:0;}"
+        "@media(prefers-color-scheme:dark){body{color:#e7e9eb;background:#181b1e;}}"
+    )
+    document = ("<!doctype html><html><head><meta charset=\"utf-8\"><title>"
+                f"{html_lib.escape(title)}</title><style>{style}</style></head><body>"
+                f"<h1>{html_lib.escape(title)}</h1>{''.join(paragraphs)}</body></html>")
+    output.write_text(document, encoding="utf-8")
+
+
+def office_to_epub(source: Path, extension: str, work: Path, password: str = "",
+                   legacy_html: bytes | None = None, title: str = "") -> Path:
     """Normalize office input once, then emit bounded-flow EPUB chapters.
 
     DOCX is a ZIP container and cannot be opened meaningfully through HTTP
@@ -261,6 +322,12 @@ def office_to_epub(source: Path, extension: str, work: Path, password: str = "")
         )
         if not epub.is_file() or epub.stat().st_size <= 0:
             raise RuntimeError("office EPUB conversion produced no output")
+
+    if legacy_html is not None:
+        html_source = work / "legacy-native.html"
+        write_styled_legacy_office_html(legacy_html, html_source, title or source.stem)
+        convert_to_epub(html_source)
+        return epub
 
     # Some historical .doc files are HTML documents with a misleading suffix.
     # Decode and sanitize them as HTML rather than asking LibreOffice to parse
@@ -359,8 +426,17 @@ def build_one(item: dict, work: Path, token: str | None, bucket: str) -> tuple[d
     source_digest = hashlib.sha256(source_bytes).hexdigest()
     native_fallback = None
     if extension in OFFICE_EXTENSIONS:
+        legacy_html = None
+        if extension == "doc":
+            try:
+                legacy_html = read_bytes(
+                    f"documents/office/doc/{source_digest}/document.html", token, bucket)
+                print(f"using legacy native DOC fallback for {item['repo']}/{item['path']}")
+            except FileNotFoundError:
+                pass
         chapter_source = office_to_epub(
-            source, extension, work, source_password(item["repo"], item["path"]))
+            source, extension, work, source_password(item["repo"], item["path"]),
+            legacy_html=legacy_html, title=Path(item["path"]).stem)
         bundle = work / "bundle"
         manifest = build_bundle(chapter_source, bundle)
         validate_office_chapter_budget(manifest, bundle)

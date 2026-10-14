@@ -276,6 +276,64 @@ class ChmChapterPilotTests(unittest.TestCase):
                     pilot_epub_chapters.office_to_epub(source, "doc", work)
             antiword.assert_not_called()
 
+    def test_legacy_native_doc_html_is_reflowed_before_calibre(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary)
+            source = work / "source.doc"
+            source.write_bytes(b"legacy source")
+            output = work / "document.epub"
+            raw = ("<html><body><pre>\n\nЗаголовок\n\nСтрока 1\nСтрока 2\n\n[pic]"
+                   "</pre></body></html>").encode("utf-8")
+
+            def convert(command, **_kwargs):
+                Path(command[2]).write_bytes(b"epub")
+
+            with patch.object(pilot_epub_chapters.subprocess, "run", side_effect=convert) as run:
+                self.assertEqual(
+                    pilot_epub_chapters.office_to_epub(
+                        source, "doc", work, legacy_html=raw, title="1942"), output)
+
+            generated = Path(run.call_args.args[0][1]).read_text(encoding="utf-8")
+            self.assertEqual(Path(run.call_args.args[0][1]).name, "legacy-native.html")
+            self.assertIn("font-family:serif", generated)
+            self.assertIn("\u0421\u0442\u0440\u043e\u043a\u0430 1 \u0421\u0442\u0440\u043e\u043a\u0430 2", generated)
+            self.assertIn("\uff08\u56fe\u7247\uff09", generated)
+            self.assertNotIn("<pre", generated.lower())
+
+    def test_doc_build_reads_existing_native_html_before_retrying_libreoffice(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary)
+            source_bytes = b"legacy source"
+            source_digest = hashlib.sha256(source_bytes).hexdigest()
+            item = {"repo": "VoiceOfML/Test", "path": "book.doc", "revision": "rev",
+                    "source_bytes": len(source_bytes), "extension": "doc"}
+            bundle = work / "book" / "bundle"
+            (bundle / "chapters").mkdir(parents=True)
+            chapter = bundle / "chapters" / "chapter-0001.xhtml"
+            chapter.write_text("<html><body><p>body</p></body></html>")
+            search_bytes = gzip.compress(b"search", mtime=0)
+            (bundle / "epub-search-index.json.gz").write_bytes(search_bytes)
+            manifest = {"version": 1, "kind": "epub-chapters", "chapters": [{
+                "index": 1, "title": "Book", "path": "chapters/chapter-0001.xhtml",
+                "bytes": chapter.stat().st_size, "sha256": hashlib.sha256(chapter.read_bytes()).hexdigest(),
+            }], "search_index": {"path": "epub-search-index.json.gz", "bytes": len(search_bytes),
+                                 "sha256": hashlib.sha256(search_bytes).hexdigest()}}
+            (bundle / "chapter-manifest.json").write_text(json.dumps(manifest))
+
+            def download(_url, target, _token):
+                target.write_bytes(source_bytes)
+
+            with patch.object(pilot_epub_chapters, "download", side_effect=download), \
+                    patch.object(pilot_epub_chapters, "read_bytes", return_value=b"<pre>native</pre>") as read, \
+                    patch.object(pilot_epub_chapters, "office_to_epub", return_value=work / "office.epub") as convert, \
+                    patch.object(pilot_epub_chapters, "build_bundle", return_value=manifest):
+                pilot_epub_chapters.build_one(
+                    item, work / "book", "token", "vomebook/reader-assets-v2")
+
+            read.assert_called_once_with(
+                f"documents/office/doc/{source_digest}/document.html", "token", "vomebook/reader-assets-v2")
+            self.assertEqual(convert.call_args.kwargs["legacy_html"], b"<pre>native</pre>")
+
     def test_office_chapter_bundle_obeys_browser_and_search_budgets(self):
         valid = {"chapters": [{"bytes": 7 * 1024 * 1024}],
                  "search_index": {"bytes": 64 * 1024 * 1024}}
