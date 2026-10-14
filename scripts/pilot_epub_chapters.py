@@ -82,6 +82,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-source-bytes", type=int, default=0)
     parser.add_argument("--retry-failures", action="store_true",
                          help="include previously failed sources in this extension's work queue")
+    parser.add_argument("--failed-only", action="store_true",
+                         help="retry only sources present in the previous failure checkpoint")
     parser.add_argument("--extension", default="epub")
     parser.add_argument("--bucket", default=TARGET_BUCKET)
     parser.add_argument("--apply", action="store_true")
@@ -171,6 +173,11 @@ def completed_revisions(index: dict, retry_failures: bool = False, profile: str 
                     and (profile is None or item.get("profile") == profile)):
                 completed.setdefault(item["key"], item.get("source_revision"))
     return completed
+
+
+def failed_keys(index: dict) -> set[str]:
+    return {item.get("key") for item in index.get("failures", [])
+            if isinstance(item, dict) and item.get("key")}
 
 
 def chapter_profile(extension: str) -> str:
@@ -529,11 +536,15 @@ def main() -> int:
     root_prefix = OFFICE_ROOT if extension in OFFICE_EXTENSIONS else f"chapters/ebook/{extension}"
     index_name = "index.json" if args.shard_count == 1 else f"index-{args.shard_index:02d}.json"
     previous = existing_index(args.bucket, token, root_prefix, index_name)
+    if args.failed_only and not args.retry_failures:
+        raise ValueError("--failed-only requires --retry-failures")
     expected_profile = chapter_profile(extension)
+    failure_keys = failed_keys(previous)
     completed = completed_revisions(
         previous, args.retry_failures, expected_profile if extension == "chm" else None)
     selected = [item for item in select_records(args.search_data, revisions, args.max_source_bytes, extension)
                 if shard_for(f"{item['repo']}\0{item['path']}", args.shard_count) == args.shard_index
+                if not args.failed_only or f"{item['repo']}\0{item['path']}" in failure_keys
                 if completed.get(f"{item['repo']}\0{item['path']}") != item["revision"]]
     if args.limit:
         selected = selected[:args.limit]

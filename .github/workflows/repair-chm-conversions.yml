@@ -19,6 +19,11 @@ on:
         required: true
         default: false
         type: boolean
+      failed_only:
+        description: Retry only the previous failure checkpoint, not the old-profile queue
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -54,6 +59,7 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           LIMIT: ${{ inputs.limit || '100' }}
           RETRY_FAILED: ${{ inputs.retry_failed || 'false' }}
+          FAILED_ONLY: ${{ inputs.failed_only || 'false' }}
         run: |
           [[ "$LIMIT" =~ ^[0-9]+$ ]] && ((10#$LIMIT >= 1 && 10#$LIMIT <= 100)) || exit 1
           args=(--extension chm --limit "$LIMIT" --shard-count 1 --shard-index 0 --plan-only)

@@ -13,6 +13,11 @@ from scripts.epub_chapters import _parse_package_xml
 
 
 class ChmChapterPilotTests(unittest.TestCase):
+    def test_failed_only_checkpoint_keys(self):
+        previous = {'failures': [{'key': 'VoiceOfML/Test\0bad.chm'}]}
+        self.assertEqual(pilot_epub_chapters.failed_keys(previous),
+                         {'VoiceOfML/Test\0bad.chm'})
+
     def test_source_download_honors_hf_retry_countdown(self):
         with tempfile.TemporaryDirectory() as temporary:
             target = Path(temporary) / "source.chm"
