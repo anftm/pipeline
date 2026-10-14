@@ -12,6 +12,7 @@ import json
 import os
 import re
 import tempfile
+import time
 from pathlib import Path
 import uuid
 
@@ -634,6 +635,45 @@ def observe_consumer(store, surface, client):
             "projection_verified": True}
 
 
+def acknowledge_all(store, client, *, apply=False, timeout_seconds=1200,
+                    sleep_fn=time.sleep, clock=time.monotonic):
+    """Acknowledge both consumers without turning propagation lag into a publish failure."""
+    import httpx
+
+    pending = {"hf", "pages"}
+    report = {"applied": apply, "complete": False, "consumers": {},
+              "pending": sorted(pending), "timeout_seconds": timeout_seconds}
+    if current(store)[0] is None:
+        report["reason"] = "no-current-generation"
+        return report
+
+    errors = {}
+    deadline = clock() + timeout_seconds
+    while pending:
+        for surface in sorted(pending):
+            try:
+                receipt = observe_consumer(store, surface, client)
+                report["consumers"][surface] = acknowledge(store, surface, receipt, apply=apply)
+                pending.remove(surface)
+                errors.pop(surface, None)
+            except (ValueError, httpx.HTTPError) as error:
+                errors[surface] = type(error).__name__
+        if not pending:
+            break
+        remaining = deadline - clock()
+        if remaining <= 0:
+            break
+        sleep_fn(min(20, remaining))
+
+    report["pending"] = sorted(pending)
+    report["complete"] = not pending
+    if pending:
+        report["reason"] = "consumer-projection-timeout"
+    if errors:
+        report["errors"] = errors
+    return report
+
+
 def project_sidecar(sidecar, catalog):
     validate_catalog(catalog)
     if sidecar.get("v") != 1 or not isinstance(sidecar.get("f"), dict):
@@ -771,23 +811,8 @@ def main():
             report = build_stage(store, spec, Path(directory), apply=args.apply)
     elif args.command == "ack-all":
         import httpx
-        import time
-        pending = {"hf", "pages"}
-        report = {"applied": args.apply, "consumers": {}}
-        deadline = time.monotonic() + 1200
-        if current(store)[0] is not None:
-            with httpx.Client(timeout=30, follow_redirects=True) as client:
-                while pending:
-                    for surface in sorted(pending):
-                        try:
-                            receipt = observe_consumer(store, surface, client)
-                            report["consumers"][surface] = acknowledge(store, surface, receipt, apply=args.apply)
-                            pending.remove(surface)
-                        except (ValueError, httpx.HTTPError):
-                            if time.monotonic() >= deadline:
-                                raise RuntimeError("consumer projection acceptance deadline exceeded") from None
-                    if pending:
-                        time.sleep(20)
+        with httpx.Client(timeout=30, follow_redirects=True) as client:
+            report = acknowledge_all(store, client, apply=args.apply)
     elif args.command == "ack":
         if not args.surface:
             parser.error("ack requires --surface")

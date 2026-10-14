@@ -246,6 +246,30 @@ class V3PublicationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             publish.acknowledge(self.store, "hf", {**accepted, "generation": "a" * 64}, apply=True)
 
+    def test_ack_all_reports_projection_timeout_without_failing_publication(self):
+        staged = publish.stage(self.store, self.candidate(), self.bundle, apply=True)
+        promoted = publish.promote(self.store, staged["candidate"], None, apply=True)
+        clock = [0]
+        accepted = {"generation": promoted["generation"], "surface": "hf", "applied": True,
+                    "acks": {"hf": True, "pages": False}}
+
+        def observe(_store, surface, _client):
+            if surface == "hf":
+                return {"version": 1, "surface": "hf", "active": True,
+                        "generation": promoted["generation"],
+                        "catalog_sha256": promoted["pointer"]["catalog"]["sha256"], "files": 1}
+            raise ValueError("Pages projection is still old")
+
+        with patch.object(publish, "observe_consumer", side_effect=observe), \
+                patch.object(publish, "acknowledge", return_value=accepted):
+            report = publish.acknowledge_all(
+                self.store, object(), apply=True, timeout_seconds=5,
+                sleep_fn=lambda seconds: clock.__setitem__(0, clock[0] + seconds),
+                clock=lambda: clock[0])
+        self.assertFalse(report["complete"])
+        self.assertEqual(report["pending"], ["pages"])
+        self.assertEqual(report["reason"], "consumer-projection-timeout")
+
     def test_live_acceptance_checks_actual_sidecar_not_status_alone(self):
         import gzip
         import httpx
@@ -308,6 +332,14 @@ class V3PublicationTests(unittest.TestCase):
         self.assertIn("OPERATION=auto\n", script)
         self.assertNotIn("OPERATION=correct", script)
         self.assertNotIn("cycle", workflow[True]["workflow_dispatch"]["inputs"]["operation"]["options"])
+        ack_step = next(step for step in workflow["jobs"]["publish"]["steps"]
+                        if step.get("id") == "ack")
+        self.assertIn("operation == 'auto'", ack_step["if"])
+        self.assertIn("complete=", ack_step["run"])
+        retire_step = next(step for step in workflow["jobs"]["publish"]["steps"]
+                           if step.get("name", "").startswith("Retire acknowledged"))
+        self.assertIn("steps.ack.outputs.complete == 'true'", retire_step["if"])
+        self.assertIn("operation == 'auto'", retire_step["if"])
         env = {"GITHUB_ACTIONS": "true", "GITHUB_REPOSITORY": "anftm/pipeline", "GITHUB_RUN_ID": "123",
                "GITHUB_WORKFLOW": workflow["name"], "READER_V3_WRITE_PROTOCOL": publish.PROTOCOL,
                "GITHUB_WORKFLOW_REF": "anftm/pipeline/.github/workflows/reader-v3-publish.yml@refs/heads/main"}

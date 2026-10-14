@@ -106,13 +106,27 @@ jobs:
           PAGES_REPO: ${{ secrets.PAGES_REPO }}
         run: python scripts/publish_search_reader_index.py
       - name: Confirm both deployed consumer projections
-        if: steps.operation.outputs.apply == 'true' && steps.operation.outputs.changed == 'true' && contains(fromJSON('["auto","correct","accept","promote","rollback","withdraw","repair-gbk","unify"]'), steps.operation.outputs.operation)
+        id: ack
+        if: >-
+          steps.operation.outputs.apply == 'true' &&
+          (
+            steps.operation.outputs.operation == 'auto' ||
+            (steps.operation.outputs.changed == 'true' && contains(fromJSON('["auto","correct","accept","promote","rollback","withdraw","repair-gbk","unify"]'), steps.operation.outputs.operation))
+          )
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_INPUT_TOKEN: ${{ secrets.HF_INPUT_TOKEN }}
-        run: python scripts/publish_reader_v3.py ack-all --apply --output output/v3/consumers.json
+        run: |
+          python scripts/publish_reader_v3.py ack-all --apply --output output/v3/consumers.json
+          echo "complete=$(jq -r '.complete // false' output/v3/consumers.json)" >> "$GITHUB_OUTPUT"
       - name: Retire acknowledged history roots after their retention period
-        if: steps.operation.outputs.apply == 'true' && steps.operation.outputs.changed == 'true' && contains(fromJSON('["auto","correct","accept","promote","rollback","withdraw"]'), steps.operation.outputs.operation)
+        if: >-
+          steps.ack.outputs.complete == 'true' &&
+          steps.operation.outputs.apply == 'true' &&
+          (
+            steps.operation.outputs.operation == 'auto' ||
+            (steps.operation.outputs.changed == 'true' && contains(fromJSON('["auto","correct","accept","promote","rollback","withdraw"]'), steps.operation.outputs.operation))
+          )
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: python scripts/publish_reader_v3.py retire --apply --output output/v3/retirement.json

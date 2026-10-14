@@ -133,7 +133,9 @@ jobs:
 
   notify:
     needs: [plan, build]
-    if: always() && !cancelled() && needs.plan.result == 'success'
+    if: >-
+      always() && !cancelled() && needs.plan.result == 'success' &&
+      needs.plan.outputs.shard_count != '0' && needs.build.result != 'cancelled'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
