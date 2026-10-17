@@ -119,20 +119,23 @@ class HubBucketStore:
             target.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
             batch_bucket_files(bucket, add=[(str(target), path)], token=self.token(bucket))
 
-    def read_graph_json(self, bucket: str, path: str):
+    def read_graph_json(self, bucket: str, path: str, parser=None):
         from huggingface_hub.utils import get_session, hf_raise_for_status
         try:
             from .reader_gc_stream import graph_json
         except ImportError:
             from reader_gc_stream import graph_json
+        parser = parser or graph_json
         token = self.token(bucket)
         def read():
             self.pace_resolver()
             with get_session().stream("GET", f"https://huggingface.co/buckets/{bucket}/resolve/{quote(path, safe='/')}",
                     headers={"Authorization": f"Bearer {token}"} if token else {},
                     follow_redirects=True, timeout=120) as response:
+                if response.status_code == 404:
+                    raise FileNotFoundError(path)
                 hf_raise_for_status(response)
-                return graph_json(response.iter_bytes(), path.endswith(".gz"))
+                return parser(response.iter_bytes(), path.endswith(".gz"))
         return retry_read(read)
 
     def digest(self, bucket: str, path: str) -> str:
@@ -166,6 +169,40 @@ class HubBucketStore:
             batch_bucket_files(bucket, delete=paths, token=self.token(bucket))
 
 
+S3_RETRY_CODES = {"500", "502", "503", "504", "InternalError", "ServiceUnavailable", "SlowDown",
+                  "RequestTimeout", "RequestTimeTooSkewed", "Throttling", "ThrottlingException"}
+
+
+def s3_error_code(error: BaseException):
+    response = getattr(error, "response", None)
+    if not isinstance(response, dict):
+        return None, None
+    return (response.get("Error", {}).get("Code"),
+            response.get("ResponseMetadata", {}).get("HTTPStatusCode"))
+
+
+def retry_s3(operation, attempts: int = 8, sleep=time.sleep):
+    """Retry transient S3 transport/streaming failures; missing objects stay missing."""
+    from botocore.exceptions import BotoCoreError, ClientError
+    for attempt in range(attempts):
+        try:
+            return operation()
+        except ClientError as error:
+            code, status = s3_error_code(error)
+            if code in {"404", "NoSuchKey", "NotFound"} or status == 404:
+                raise S3NotFound(str(error)) from error
+            if (str(code) not in S3_RETRY_CODES and status not in {500, 502, 503, 504}) \
+                    or attempt == attempts - 1:
+                raise
+        except (BotoCoreError, OSError) as error:
+            if isinstance(error, FileNotFoundError) or attempt == attempts - 1:
+                raise
+        delay = min(30, 2 ** attempt) + random.uniform(0, 1)
+        print(f"transient Reader S3 read error; retrying in {delay:.1f}s "
+              f"(attempt {attempt + 1}/{attempts})", flush=True)
+        sleep(delay)
+
+
 class S3BucketStore:
     def __init__(self) -> None:
         self._access_key = os.environ.get("HF_S3_ACCESS_KEY_ID")
@@ -178,13 +215,23 @@ class S3BucketStore:
         except ImportError as error:
             raise RuntimeError("boto3 is required for Reader bucket operations") from error
         self._boto3 = boto3
+        # Short socket timeouts turn stalled connections (observed at ~190 s)
+        # into quick retries; read_timeout bounds each socket read, not a body.
         self._config = Config(region_name="us-east-1", s3={"addressing_style": "path"},
                               retries={"mode": "adaptive", "max_attempts": 8},
-                              max_pool_connections=64)
+                              connect_timeout=10, read_timeout=20,
+                              max_pool_connections=int(os.environ.get("READER_S3_POOL", "128")))
         self._namespace = os.environ.get("HF_S3_NAMESPACE", "vomebook")
         self._input_namespace = os.environ.get("HF_S3_INPUT_NAMESPACE", "melsm")
         self._input_bucket = os.environ.get("HF_S3_INPUT_BUCKET", "pdf-archive-v2")
         self._clients = {}
+        self.object_sizes = {}
+        # Listing and read-time ETags let the GC graph detect changed roots
+        # without re-downloading every root.
+        self.root_etags = {}
+        self.read_etags = {}
+        self.root_predicate = None
+        self.list_workers = int(os.environ.get("READER_S3_LIST_WORKERS", "32"))
 
     def _location(self, bucket: str) -> tuple[str, str]:
         if "/" in bucket:
@@ -206,34 +253,137 @@ class S3BucketStore:
                 aws_access_key_id=key, aws_secret_access_key=secret, config=self._config)
         return self._clients[cache_key]
 
+    def _remember_etag(self, bucket: str, path: str, response) -> None:
+        etag = response.get("ETag") if isinstance(response, dict) else None
+        if etag:
+            self.__dict__.setdefault("read_etags", {})[(bucket, path)] = etag
+
+    def _shards(self, client, name: str, prefix: str, depth: int = 0):
+        """Split a prefix by delimiter so large buckets list in parallel."""
+        files, children = {}, []
+        for page in client.get_paginator("list_objects_v2").paginate(Bucket=name, Prefix=prefix, Delimiter="/"):
+            files.update((item["Key"], item) for item in page.get("Contents", []))
+            children.extend(item["Prefix"] for item in page.get("CommonPrefixes", []))
+        if not children:
+            return files, []
+        if depth >= 2 or len(children) >= 16:
+            return files, children
+        shards = []
+        for child in sorted(children):
+            direct, nested = self._shards(client, name, child, depth + 1)
+            files.update(direct)
+            shards.extend(nested)
+        return files, shards
+
     def list_files(self, bucket: str, prefixes: tuple[str, ...]) -> set[str]:
         namespace, name = self._location(bucket)
         client = self._client(namespace)
         def one(prefix):
-            result = set()
+            result = {}
             for page in client.get_paginator("list_objects_v2").paginate(Bucket=name, Prefix=prefix):
-                result.update(item["Key"] for item in page.get("Contents", []))
+                result.update((item["Key"], item) for item in page.get("Contents", []))
             return result
-        files = set()
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(16, max(1, len(prefixes)))) as pool:
-            for result in pool.map(one, prefixes):
-                files.update(result)
-        return files
+        items, shards = {}, []
+        for prefix in prefixes:
+            direct, found = retry_s3(lambda prefix=prefix: self._shards(client, name, prefix))
+            items.update(direct)
+            shards.extend(found)
+        workers = getattr(self, "list_workers", 32)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(workers, len(shards) or 1))) as pool:
+            for result in pool.map(lambda shard: retry_s3(lambda: one(shard)), shards):
+                items.update(result)
+        predicate = getattr(self, "root_predicate", None)
+        etags = (self.__dict__.setdefault("root_etags", {}).setdefault(bucket, {})
+                 if prefixes == ("",) and predicate else None)
+        sizes = self.__dict__.setdefault("object_sizes", {})
+        if etags is not None:
+            etags.clear()
+        for key, item in items.items():
+            size = item.get("Size")
+            if type(size) is int and size >= 0:
+                sizes[(bucket, key)] = size
+            if etags is not None and predicate(key):
+                etags[key] = item.get("ETag")
+        return set(items)
+
+    def list_roots(self, bucket: str, parents: set[str]) -> dict[str, str | None]:
+        """List only GC root locations: all of reader-index/ plus known index directories."""
+        namespace, name = self._location(bucket)
+        client = self._client(namespace)
+        predicate = getattr(self, "root_predicate", None) or (lambda path: True)
+        def flat(prefix):
+            items = {}
+            for page in client.get_paginator("list_objects_v2").paginate(Bucket=name, Prefix=prefix, Delimiter="/"):
+                items.update((item["Key"], item) for item in page.get("Contents", []))
+            return items
+        def deep(prefix):
+            items = {}
+            for page in client.get_paginator("list_objects_v2").paginate(Bucket=name, Prefix=prefix):
+                items.update((item["Key"], item) for item in page.get("Contents", []))
+            return items
+        top, children = {}, []
+        for page in client.get_paginator("list_objects_v2").paginate(Bucket=name, Prefix="reader-index/", Delimiter="/"):
+            top.update((item["Key"], item) for item in page.get("Contents", []))
+            children.extend(item["Prefix"] for item in page.get("CommonPrefixes", []))
+        jobs = [(deep, child) for child in children] + [(flat, parent) for parent in sorted(parents)]
+        workers = getattr(self, "list_workers", 32)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(workers, len(jobs) or 1))) as pool:
+            for result in pool.map(lambda job: retry_s3(lambda: job[0](job[1])), jobs):
+                top.update(result)
+        roots = {key: item.get("ETag") for key, item in top.items() if predicate(key)}
+        self.__dict__.setdefault("root_etags", {}).setdefault(bucket, {}).update(roots)
+        return roots
 
     def read_bytes(self, bucket: str, path: str) -> bytes:
         namespace, name = self._location(bucket)
-        try:
+        def read():
             response = self._client(namespace).get_object(Bucket=name, Key=path)
+            body = response["Body"]
+            try:
+                raw = body.read()
+            finally:
+                body.close()
+            self._remember_etag(bucket, path, response)
+            return raw
+        try:
+            return retry_s3(read)
         except Exception as error:
-            code = getattr(error, "response", {}).get("Error", {}).get("Code")
-            if code in {"404", "NoSuchKey", "NotFound", "NoSuchBucket"}:
+            code, _ = s3_error_code(error)
+            if code == "NoSuchBucket":
                 raise S3NotFound(path) from error
             raise
-        body = response["Body"]
+
+    def read_graph_json(self, bucket: str, path: str, parser=None):
         try:
-            return body.read()
-        finally:
-            body.close()
+            from .reader_gc_stream import graph_json
+        except ImportError:
+            from reader_gc_stream import graph_json
+        parser = parser or graph_json
+        namespace, name = self._location(bucket)
+        def read():
+            response = self._client(namespace).get_object(Bucket=name, Key=path)
+            body = response["Body"]
+            try:
+                result = parser(iter(lambda: body.read(1024 * 1024), b""), path.endswith(".gz"))
+            finally:
+                body.close()
+            self._remember_etag(bucket, path, response)
+            return result
+        return retry_s3(read)
+
+    def digest(self, bucket: str, path: str) -> str:
+        import hashlib
+        namespace, name = self._location(bucket)
+        def read():
+            response = self._client(namespace).get_object(Bucket=name, Key=path)
+            body, value = response["Body"], hashlib.sha256()
+            try:
+                for chunk in iter(lambda: body.read(1024 * 1024), b""):
+                    value.update(chunk)
+            finally:
+                body.close()
+            return value.hexdigest()
+        return retry_s3(read)
 
     def put_json(self, bucket: str, path: str, payload: dict) -> None:
         namespace, name = self._location(bucket)

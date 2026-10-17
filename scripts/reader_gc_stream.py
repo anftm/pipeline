@@ -54,3 +54,68 @@ def graph_json(chunks, compressed=False):
     if not isinstance(builder.value, dict):
         raise ValueError("expected a JSON object")
     return builder.value, source.hash.hexdigest()
+
+
+def catalog_json(chunks, compressed=False, grace_days=0):
+    """Stream a Reader catalog keeping every generation id but only live references.
+
+    Superseded, acknowledged generations are reduced to identity stubs. Live
+    generations keep only references not already kept by another live
+    generation, so the walk still visits every live reference exactly once.
+    """
+    import ijson
+    try:
+        from .reader_lifecycle import generation_live
+    except ImportError:
+        from reader_lifecycle import generation_live
+    source = HashingReader(chunks)
+    stream = io.BufferedReader(source)
+    decoded = gzip.GzipFile(fileobj=stream) if compressed else stream
+    top = ijson.ObjectBuilder()
+    generations, seen = {}, set()
+    current, name, entry, depth = None, None, None, 0
+    for prefix, event, value in ijson.parse(decoded, use_float=True):
+        if prefix == "current.generation" and event == "string":
+            current = value
+        if entry is None and prefix == "generations":
+            if event == "map_key":
+                name = value
+                continue
+            if event in {"start_map", "end_map"}:
+                top.event(event, value)
+                continue
+        if entry is not None or prefix == f"generations.{name}" and name is not None \
+                and prefix.startswith("generations."):
+            if entry is None:
+                entry, depth = ijson.ObjectBuilder(), 0
+            entry.event(event, value)
+            depth += event in {"start_map", "start_array"}
+            depth -= event in {"end_map", "end_array"}
+            if depth:
+                continue
+            item, entry = entry.value, None
+            if isinstance(item, dict):
+                live = current is None or generation_live(item, current, grace_days=grace_days)
+                if live and isinstance(item.get("references"), list):
+                    kept = []
+                    for ref in item["references"]:
+                        identity = (ref.get("bucket"), ref.get("path")) if isinstance(ref, dict) else None
+                        if identity is None or identity not in seen:
+                            kept.append(ref)
+                            if identity is not None:
+                                seen.add(identity)
+                    item["references"] = kept
+                elif not live:
+                    item.pop("references", None)
+                    item["gc_stub"] = True
+            generations[name] = item
+            continue
+        top.event(event, value)
+    while stream.read(65536):
+        pass
+    payload = top.value
+    if not isinstance(payload, dict):
+        raise ValueError("expected a JSON object")
+    if "generations" in payload:
+        payload["generations"] = generations
+    return payload, source.hash.hexdigest()
