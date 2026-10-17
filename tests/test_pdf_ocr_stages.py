@@ -207,6 +207,30 @@ class PdfOcrStagesTests(unittest.TestCase):
             retried = stages.plan_images({result["key"]: result}, {}, progress)
             self.assertEqual(retried["total_ocr_pages"], 1)
 
+    def test_degenerate_three_pixel_page_is_retained_without_calling_ocr_engine(self):
+        import io
+        with Image.new("RGB", (2200, 3), "white") as image:
+            stream = io.BytesIO()
+            image.save(stream, format="PNG")
+        raw = stream.getvalue()
+        page = {"p": 283, "width": 2200, "height": 3, "source": "ocr",
+                "i": "objects/aa/" + "a" * 64 + "/" + "b" * 16 + "/ocr-input/page-000283.png",
+                "ib": len(raw), "is": hashlib.sha256(raw).hexdigest()}
+        task = {"key": "repo\0degenerate.pdf", "generation": "c" * 64,
+                "source_sha256": "d" * 64, "profile": "profile", "ocr_language": "ch",
+                "ocr_backend": "rapidocr_onnxruntime", "layout_options": {}, "pages": [page]}
+        with patch.object(stages, "read_object", return_value=raw), \
+                patch.object(pdf_ocr, "ocr_page", side_effect=AssertionError("degenerate page must skip OCR")):
+            result = stages.recognize_task(task, self.root / "degenerate-ocr")
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(len(result["pages"]), 1)
+        self.store(self.root / "degenerate-ocr")
+        saved = result["pages"][0]
+        payload = json.loads(gzip.decompress(self.read(stages.page_meta(saved, "o"), ".json.gz")))
+        self.assertEqual(payload["text"], "")
+        self.assertEqual(payload["blocks"], [])
+        self.assertEqual(payload["ocr_warning"], "degenerate-image-below-minimum-side")
+
     def test_500_page_tasks_split_large_books_and_keep_every_page(self):
         result = self.render_fixture()
         manifest = json.loads(self.read(result["render_manifest"]))

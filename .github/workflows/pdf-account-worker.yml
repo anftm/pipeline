@@ -15,6 +15,10 @@ on:
         description: Maximum pending books in this account's lane
         type: string
         default: "20"
+      retry_failed_only:
+        description: Retry only books currently failed in the OCR registry
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -64,6 +68,7 @@ jobs:
           WORKER_OWNER: ${{ github.repository_owner }}
           STAGE: ${{ inputs.stage || 'render' }}
           LIMIT: ${{ inputs.limit || '20' }}
+          RETRY_FAILED_ONLY: ${{ inputs.retry_failed_only || 'false' }}
         run: |
           [[ "$LIMIT" =~ ^[0-9]+$ ]] && ((10#$LIMIT >= 1 && 10#$LIMIT <= 100)) || exit 1
           lane=$(python scripts/pdf_worker_lanes.py --owner "$WORKER_OWNER")
@@ -71,6 +76,7 @@ jobs:
           if [[ "$STAGE" == render ]]; then
              python scripts/pdf_ocr_stages.py plan-render --native-text-stream --target-render-seconds 6000 --retry-failed "${args[@]}"
           elif [[ "$STAGE" == ocr ]]; then
+            if [[ "$RETRY_FAILED_ONLY" == "true" ]]; then args+=(--retry-failed-only); fi
             python scripts/pdf_ocr_stages.py plan-ocr "${args[@]}"
           else
             exit 1

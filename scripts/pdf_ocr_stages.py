@@ -47,6 +47,7 @@ PROGRESS_REGISTRY = "pdf_ocr_progress.json"
 RENDER_PROGRESS_REGISTRY = "pdf_render_progress.json"
 RENDER_RANGE_PAGES = 250
 RENDER_RANGE_THRESHOLD = 500
+MIN_OCR_IMAGE_SIDE_PIXELS = 8
 BUCKET = f"hf://buckets/{shared.PDF_PAGES_BUCKET}"
 OCR_INPUT_BUCKET = f"hf://buckets/{shared.PDF_OCR_INPUT_BUCKET}"
 SMALL_RENDER_MAX_SOURCE_BYTES = 100 * 1024 * 1024
@@ -956,11 +957,23 @@ def recognize_task(task, bundle):
                         width, height = rotated.size
                         rotated.save(png)
                         rotated.close()
-                if pdf_ocr.resolve_ocr_config(task["ocr_language"], task["ocr_backend"]) == pdf_ocr.resolve_ocr_config():
-                    blocks = pdf_ocr.ocr_page(png, width, height)
+                degenerate = min(width, height) < MIN_OCR_IMAGE_SIDE_PIXELS
+                if degenerate:
+                    # A thin scan strip such as 2200x3 pixels cannot contain
+                    # recoverable text at the rendered resolution. Preserve it
+                    # as an empty OCR page rather than letting RapidOCR reject
+                    # the whole book with ResizeImgError.
+                    blocks = []
+                    print(f"OCR page {page['p']}: skipped degenerate image {width}x{height} "
+                          f"({task['key']})", flush=True)
                 else:
-                    blocks = pdf_ocr.ocr_page(png, width, height, task["ocr_language"], task["ocr_backend"])
+                    if pdf_ocr.resolve_ocr_config(task["ocr_language"], task["ocr_backend"]) == pdf_ocr.resolve_ocr_config():
+                        blocks = pdf_ocr.ocr_page(png, width, height)
+                    else:
+                        blocks = pdf_ocr.ocr_page(png, width, height, task["ocr_language"], task["ocr_backend"])
                 payload = pdf_ocr.page_payload(page["p"], page["width"], page["height"], blocks, "ocr")
+                if degenerate:
+                    payload["ocr_warning"] = "degenerate-image-below-minimum-side"
                 arranged = ocr_layout.arrange(blocks, width, height, options)
                 payload.update(ocr_layout.restore_coordinates(arranged, rotation))
                 out = bundle / root / "ocr" / f"page-{page['p']:06d}.json.gz"
