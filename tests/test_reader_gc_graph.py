@@ -263,7 +263,7 @@ class ReaderGcGraphTests(unittest.TestCase):
             self.assertFalse(gc.ReferenceGraph(store).build()["graph_complete"])
         self.assertFalse(gc.ReferenceGraph(store, include_input=False).build()["graph_complete"])
 
-    def test_root_change_and_new_root_during_scan_are_detected(self):
+    def test_root_change_and_new_root_during_scan_converge_on_latest_versions(self):
         store = MemoryStore()
         original = store.read_bytes
         reads = 0
@@ -272,11 +272,12 @@ class ReaderGcGraphTests(unittest.TestCase):
             if path == SIDECAR:
                 reads += 1
                 if reads == 2:
-                    return gzip.compress(b'{"v":1,"f":{"new":{"s":4}}}')
+                    store.put(ASSETS, SIDECAR, {"v": 1, "f": {"new": {"s": 4}}})
             return original(bucket, path)
         with patch.object(store, "read_bytes", side_effect=racing_read):
             report = gc.ReferenceGraph(store).build()
-        self.assertTrue(any("root changed" in value for value in report["blockers"]))
+        self.assertTrue(report["graph_complete"], report["blockers"])
+        self.assertGreaterEqual(reads, 3)
         original_list = store.list_files
         pdf_lists = 0
         def racing_list(bucket, prefixes):
@@ -288,7 +289,106 @@ class ReaderGcGraphTests(unittest.TestCase):
             return original_list(bucket, prefixes)
         with patch.object(store, "list_files", side_effect=racing_list):
             report = gc.ReferenceGraph(store).build()
-        self.assertTrue(any("root inventory changed" in value for value in report["blockers"]))
+        self.assertTrue(report["graph_complete"], report["blockers"])
+        self.assertIn(f"{PDF}:reader-index/new.json", report["roots"])
+
+    def test_root_that_never_stops_changing_blocks_the_report(self):
+        store = MemoryStore()
+        original = store.read_bytes
+        reads = 0
+        def churning_read(bucket, path):
+            nonlocal reads
+            if path == SIDECAR:
+                reads += 1
+                store.put(ASSETS, SIDECAR, {"v": 1, "f": {str(reads): {"s": reads}}})
+            return original(bucket, path)
+        with patch.object(store, "read_bytes", side_effect=churning_read):
+            report = gc.ReferenceGraph(store, max_rounds=3).build()
+        self.assertFalse(report["graph_complete"])
+        self.assertIn("root inventory did not stabilize after 3 rounds", report["blockers"])
+
+    def test_handoff_published_after_catalog_read_resolves_without_blocker(self):
+        store = MemoryStore()
+        root = "objects/aa/book/render"
+        store.put(PDF, root + "/pages/page-000001.webp", b"page")
+        catalog = {"version": 1, "kind": "reader-catalog", "current": {"generation": "old"},
+                   "generations": {"old": {"generation": "old", "status": "current", "references": []}}}
+        store.put(ASSETS, "reader-index/reader_catalog.json", catalog)
+        store.put(ASSETS, "reader-index/processing/released.json", {
+            "kind": "reader-processing-roots", "status": "released", "generation": "new",
+            "resources": [{"bucket": PDF, "root": root}]})
+        original = store.read_bytes
+        def publish_after_first_catalog_read(bucket, path):
+            raw = original(bucket, path)
+            if path == "reader-index/processing/released.json":
+                store.put(ASSETS, "reader-index/reader_catalog.json", {
+                    **catalog, "current": {"generation": "new"}, "generations": {
+                        "old": {"generation": "old", "status": "superseded", "references": []},
+                        "new": {"generation": "new", "status": "current", "references": []}}})
+            return raw
+        with patch.object(store, "read_bytes", side_effect=publish_after_first_catalog_read):
+            report = gc.ReferenceGraph(store).build()
+        self.assertTrue(report["graph_complete"], report["blockers"])
+
+    def test_object_listed_after_initial_inventory_is_not_missing(self):
+        store = MemoryStore()
+        path = "objects/late/book/document.pdf"
+        store.put(ASSETS, "reader-index/manifest.json", {"files": {"book": {"object": path, "bucket": PDF}}})
+        original = store.list_files
+        calls = 0
+        def late_list(bucket, prefixes):
+            nonlocal calls
+            if bucket == PDF:
+                calls += 1
+                if calls == 2:
+                    store.put(PDF, path, b"pdf")
+                    store.put(PDF, "objects/late/book/companion.css", b"css")
+            return original(bucket, prefixes)
+        with patch.object(store, "list_files", side_effect=late_list):
+            report = gc.ReferenceGraph(store).build()
+        self.assertTrue(report["graph_complete"], report["blockers"])
+        self.assertEqual(report["buckets"][PDF]["candidates"], [])
+
+    def test_reference_dropped_by_newer_root_version_is_not_missing(self):
+        store = MemoryStore()
+        root_path = "reader-index/manifest.json"
+        store.put(ASSETS, root_path, {"files": {"book": {"object": "objects/gone/book.pdf", "bucket": PDF}}})
+        original = store.read_bytes
+        reads = 0
+        def replace_root(bucket, path):
+            nonlocal reads
+            raw = original(bucket, path)
+            if path == root_path:
+                reads += 1
+                if reads == 1:
+                    store.put(ASSETS, root_path, {"files": {}})
+            return raw
+        with patch.object(store, "read_bytes", side_effect=replace_root):
+            report = gc.ReferenceGraph(store).build()
+        self.assertTrue(report["graph_complete"], report["blockers"])
+        self.assertEqual(report["missing"], [])
+
+    def test_catalog_stream_keeps_generation_ids_but_only_live_references(self):
+        from scripts.reader_gc_stream import catalog_json
+        shared = {"bucket": PDF, "path": "objects/shared.pdf"}
+        catalog = {"version": 1, "kind": "reader-catalog", "current": {"generation": "c"}, "generations": {
+            "a": {"generation": "a", "status": "superseded", "superseded_at": "2026-01-01T00:00:00+00:00",
+                  "replacement_acks": {"hf": True, "pages": True},
+                  "references": [{"bucket": PDF, "path": "objects/old.pdf"}]},
+            "b": {"generation": "b", "status": "superseded", "superseded_at": "2026-01-01T00:00:00+00:00",
+                  "references": [shared]},
+            "c": {"generation": "c", "status": "current", "references": [shared, {"bucket": PDF, "path": "objects/new.pdf"}]}},
+            "retired_generations": {"z": {"replacement_generation": "c", "replacement_acks": {"hf": True, "pages": True}}}}
+        raw = json.dumps(catalog, sort_keys=True).encode()
+        payload, digest = catalog_json([raw[:17], raw[17:]])
+        self.assertEqual(digest, hashlib.sha256(raw).hexdigest())
+        self.assertEqual(set(payload["generations"]), {"a", "b", "c"})
+        self.assertTrue(payload["generations"]["a"]["gc_stub"])
+        self.assertNotIn("references", payload["generations"]["a"])
+        kept = payload["generations"]["b"]["references"] + payload["generations"]["c"]["references"]
+        self.assertEqual(sorted(ref["path"] for ref in kept), ["objects/new.pdf", "objects/shared.pdf"])
+        self.assertEqual(payload["retired_generations"], catalog["retired_generations"])
+        self.assertEqual(payload["current"], {"generation": "c"})
 
     def test_unknown_formats_are_reported_and_never_deleted(self):
         store = MemoryStore()
@@ -372,6 +472,8 @@ class ReaderGcGraphTests(unittest.TestCase):
         self.assertIn("record_observations", workflow["concurrency"]["group"])
         commands = "\n".join(step.get("run", "") for step in workflow["jobs"]["gc"]["steps"])
         self.assertIn("python scripts/reader_gc_graph.py", commands)
+        self.assertIn("--storage s3", commands)
+        self.assertLessEqual(workflow["jobs"]["gc"]["timeout-minutes"], 360)
         self.assertNotIn("--apply", commands)
         self.assertIn("--record-observations", commands)
         artifacts = [step for step in workflow["jobs"]["gc"]["steps"] if "upload-artifact" in step.get("uses", "")]

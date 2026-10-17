@@ -123,6 +123,45 @@ class ReaderBucketStoreTests(unittest.TestCase):
         self.assertEqual(self.store(client).read_bytes("bucket", "path"), b"json")
         self.assertTrue(body.closed)
 
+    def test_s3_graph_read_retries_interrupted_streams_but_not_missing_objects(self):
+        from botocore.exceptions import ClientError, ResponseStreamingError
+        from scripts.reader_bucket_store import S3NotFound
+        class Broken(io.BytesIO):
+            def read(self, size=-1):
+                raise ResponseStreamingError(error="connection reset")
+        client = Mock()
+        client.get_object.side_effect = [{"Body": Broken()}, {"Body": io.BytesIO(b'{"files": {}}'), "ETag": '"e"'}]
+        store = self.store(client)
+        with patch("scripts.reader_bucket_store.time.sleep"):
+            payload, _digest = store.read_graph_json("vomebook/reader-assets-v2", "reader-index/root.json")
+        self.assertEqual(payload, {"files": {}})
+        self.assertEqual(client.get_object.call_count, 2)
+        self.assertEqual(store.read_etags[("vomebook/reader-assets-v2", "reader-index/root.json")], '"e"')
+        client.get_object.reset_mock()
+        client.get_object.side_effect = ClientError({"Error": {"Code": "NoSuchKey"},
+                                                     "ResponseMetadata": {"HTTPStatusCode": 404}}, "GetObject")
+        with self.assertRaises(S3NotFound):
+            store.read_bytes("vomebook/reader-assets-v2", "missing.json")
+        client.get_object.assert_called_once()
+
+    def test_s3_inventory_shards_prefixes_and_records_root_etags(self):
+        pages = {
+            ("", "/"): {"Contents": [{"Key": "root.json", "ETag": '"r"', "Size": 2}],
+                        "CommonPrefixes": [{"Prefix": "objects/"}]},
+            ("objects/", "/"): {"CommonPrefixes": [{"Prefix": f"objects/{i:02x}/"} for i in range(16)]},
+        }
+        def paginate(Bucket, Prefix, Delimiter=None):
+            if (Prefix, Delimiter) in pages:
+                return [pages[(Prefix, Delimiter)]]
+            return [{"Contents": [{"Key": Prefix + "index.json", "ETag": '"' + Prefix + '"', "Size": 1}]}]
+        client = Mock()
+        client.get_paginator.return_value.paginate.side_effect = paginate
+        store = self.store(client)
+        store.root_predicate = lambda path: path.endswith(".json")
+        files = store.list_files("vomebook/reader-assets-v2", ("",))
+        self.assertEqual(len(files), 17)
+        self.assertEqual(store.root_etags["vomebook/reader-assets-v2"]["objects/0a/index.json"], '"objects/0a/"')
+
     def test_delete_checks_per_object_errors(self):
         client = Mock()
         client.delete_objects.return_value = {"Errors": [{"Key": "a", "Code": "AccessDenied"}]}

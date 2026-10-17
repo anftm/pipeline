@@ -6,7 +6,7 @@ from scripts import reader_gc_graph as gc
 
 class ReaderGcRetryTests(unittest.TestCase):
     def test_transient_snapshot_race_is_retried(self):
-        incomplete = {"graph_complete": False, "blockers": ["root inventory changed: bucket"],
+        incomplete = {"graph_complete": False, "blockers": ["root inventory did not stabilize after 6 rounds"],
                       "buckets": {}, "missing": []}
         complete = {"graph_complete": True, "blockers": [], "buckets": {}, "missing": []}
         with patch.object(gc, "HubBucketStore", return_value=Mock()), \
