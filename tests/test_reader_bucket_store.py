@@ -162,6 +162,29 @@ class ReaderBucketStoreTests(unittest.TestCase):
         self.assertEqual(len(files), 17)
         self.assertEqual(store.root_etags["vomebook/reader-assets-v2"]["objects/0a/index.json"], '"objects/0a/"')
 
+    def test_s3_root_listing_reads_index_dirs_without_full_inventory(self):
+        calls = []
+        def paginate(Bucket, Prefix, Delimiter=None):
+            calls.append((Prefix, Delimiter))
+            if Prefix == "reader-index/" and Delimiter:
+                return [{"Contents": [{"Key": "reader-index/catalog.json", "ETag": '"c"'}],
+                         "CommonPrefixes": [{"Prefix": "reader-index/processing/"}]}]
+            if Prefix == "reader-index/processing/":
+                return [{"Contents": [{"Key": "reader-index/processing/a.json", "ETag": '"a"'}]}]
+            if Prefix == "chapters/ebook/epub/":
+                return [{"Contents": [{"Key": "chapters/ebook/epub/index.json", "ETag": '"e"'},
+                                      {"Key": "chapters/ebook/epub/readme.txt", "ETag": '"t"'}]}]
+            raise AssertionError(Prefix)
+        client = Mock()
+        client.get_paginator.return_value.paginate.side_effect = paginate
+        store = self.store(client)
+        store.root_predicate = lambda path: path.endswith(".json")
+        roots = store.list_roots("vomebook/reader-assets-v2", {"chapters/ebook/epub/"})
+        self.assertEqual(roots, {"reader-index/catalog.json": '"c"', "reader-index/processing/a.json": '"a"',
+                                 "chapters/ebook/epub/index.json": '"e"'})
+        self.assertIn(("chapters/ebook/epub/", "/"), calls)
+        self.assertNotIn(("", None), calls)
+
     def test_delete_checks_per_object_errors(self):
         client = Mock()
         client.delete_objects.return_value = {"Errors": [{"Key": "a", "Code": "AccessDenied"}]}

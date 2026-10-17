@@ -81,7 +81,8 @@ def decode(raw: bytes) -> dict:
 
 class ReferenceGraph:
     def __init__(self, store, include_input: bool = True, generation_grace_days: int = 0,
-                 progress=None, workers: int = 8, max_rounds: int = 6):
+                 progress=None, workers: int = 8, max_rounds: int = 20, full_passes: int = 3,
+                 deadline: float | None = None):
         self.store = store
         self.include_input = include_input
         self.files = {}
@@ -101,6 +102,9 @@ class ReferenceGraph:
         self.progress = progress or (lambda *args, **kwargs: None)
         self.workers = max(1, workers)
         self.max_rounds = max(1, max_rounds)
+        self.full_passes = max(1, full_passes)
+        self.deadline = deadline
+        self.started = time.monotonic()
         self.lock = threading.Lock()
         self.origin = None
         # Per-origin facts are replaced whenever that origin is re-read, so a
@@ -470,7 +474,12 @@ class ReferenceGraph:
                 inflight[pool.submit(self.load, ref)] = ref
             if not inflight:
                 return
-            done, _ = wait(inflight, return_when=FIRST_COMPLETED)
+            if self.deadline is not None and time.monotonic() > self.deadline:
+                for future in inflight:
+                    future.cancel()
+                self.pending.update(inflight.values())
+                raise TimeoutError("GC scan deadline reached")
+            done, _ = wait(inflight, timeout=30, return_when=FIRST_COMPLETED)
             for future in done:
                 ref = inflight.pop(future)
                 payload = future.result()
@@ -478,7 +487,8 @@ class ReferenceGraph:
                     self.process(ref, payload)
                 checked += 1
                 if checked % 1024 == 0:
-                    print(f"GC graph: checked {len(self.seen)} roots/manifests; {len(self.pending)} pending", flush=True)
+                    print(f"GC graph: checked {len(self.seen)} roots/manifests; {len(self.pending)} pending; "
+                          f"{time.monotonic() - self.started:.0f}s", flush=True)
                     self.progress("reference-traversal", checked=len(self.seen), pending=len(self.pending))
 
     def changed(self, ref) -> bool:
@@ -511,45 +521,86 @@ class ReferenceGraph:
                     break
                 parent = posixpath.dirname(parent)
 
+    def list_roots(self, bucket):
+        if hasattr(self.store, "list_roots"):
+            parents = {posixpath.dirname(path) + "/" for path in self.root_names.get(bucket, set())
+                       if not path.startswith("reader-index/") and "/" in path}
+            return set(self.store.list_roots(bucket, parents))
+        return {path for path in self.store.list_files(bucket, ("",)) if is_root(path)}
+
+    def root_round(self, pool, round_number) -> bool:
+        """Read every listed root at its current version; True when nothing changed."""
+        self.drain(pool)
+        work = set()
+        for bucket in tuple(self.files):
+            self.progress("root-inventory-recheck", bucket=bucket, round=round_number)
+            roots = self.list_roots(bucket)
+            self.root_names[bucket] = roots
+            for path in sorted(roots):
+                ref = (bucket, path)
+                if ref in self.retired_roots:
+                    continue
+                if ref not in self.seen:
+                    work.add(ref)
+                    self.references.add(ref)
+                elif ref not in self.unreadable and self.changed(ref):
+                    work.add(ref)
+        work.update(ref for ref in self.unreadable if self.failures[ref] < 3
+                    and (ref[1] in self.root_names.get(ref[0], set())
+                         or ref[1] in self.files.get(ref[0], set())))
+        self.progress("root-content-recheck", roots=len(self.root_hashes), changed=len(work),
+                      round=round_number)
+        if not work and not self.pending:
+            return True
+        print(f"GC graph: round {round_number} re-reading {len(work)} new or changed roots; "
+              f"{time.monotonic() - self.started:.0f}s", flush=True)
+        self.seen.difference_update(work)
+        self.pending.update(work)
+        return False
+
+    def full_pass(self) -> bool:
+        """Refresh object existence; True unless it revealed roots in new locations."""
+        new_roots = False
+        for bucket in tuple(self.files):
+            self.progress("inventory-refresh", bucket=bucket)
+            latest = self.store.list_files(bucket, ("",))
+            previous, known = self.files[bucket], self.root_names.get(bucket, set())
+            self.files[bucket] = latest
+            self.ordered[bucket] = sorted(latest)
+            self.protect_additions(bucket, latest - previous)
+            roots = {path for path in latest if is_root(path)}
+            new_roots |= bool(roots - known)
+            self.root_names[bucket] = known | roots
+        for ref in list(self.deferred):
+            if ref[1] in self.files.get(ref[0], set()):
+                self.deferred.discard(ref)
+                previous, self.origin = self.origin, None
+                self.mark(*ref)
+                self.origin = previous
+        return not new_roots and not self.pending
+
     def converge(self, pool) -> bool:
-        """Re-list until every current root was read at its listed version."""
-        for round_number in range(1, self.max_rounds + 1):
-            self.drain(pool)
-            work = set()
-            for bucket in tuple(self.files):
+        """Converge on roots with cheap root-only listings, then confirm with a full inventory."""
+        rounds = 0
+        for _ in range(self.full_passes):
+            while True:
+                rounds += 1
+                if rounds > self.max_rounds:
+                    return False
                 try:
-                    self.progress("root-inventory-recheck", bucket=bucket, round=round_number)
-                    latest = self.store.list_files(bucket, ("",))
+                    if self.root_round(pool, rounds):
+                        break
+                except TimeoutError:
+                    raise
                 except Exception as error:
-                    self.blockers.add(f"root inventory recheck failed: {bucket} ({type(error).__name__})")
+                    self.blockers.add(f"root inventory recheck failed ({type(error).__name__})")
                     return True
-                previous = self.files[bucket]
-                self.set_inventory(bucket, latest)
-                self.protect_additions(bucket, latest - previous)
-                for path in sorted(self.root_names[bucket]):
-                    ref = (bucket, path)
-                    if ref in self.retired_roots:
-                        continue
-                    if ref not in self.seen:
-                        work.add(ref)
-                        self.references.add(ref)
-                    elif ref not in self.unreadable and self.changed(ref):
-                        work.add(ref)
-            for ref in list(self.deferred):
-                if ref[1] in self.files.get(ref[0], set()):
-                    self.deferred.discard(ref)
-                    previous, self.origin = self.origin, None
-                    self.mark(*ref)
-                    self.origin = previous
-            work.update(ref for ref in self.unreadable if self.failures[ref] < 3
-                        and ref[1] in self.files.get(ref[0], set()))
-            self.progress("root-content-recheck", roots=len(self.root_hashes), changed=len(work),
-                          round=round_number)
-            if not work and not self.pending:
+            try:
+                if self.full_pass():
+                    return True
+            except Exception as error:
+                self.blockers.add(f"root inventory recheck failed ({type(error).__name__})")
                 return True
-            print(f"GC graph: round {round_number} re-reading {len(work)} new or changed roots", flush=True)
-            self.seen.difference_update(work)
-            self.pending.update(work)
         return False
 
     def finalize(self):
@@ -581,6 +632,8 @@ class ReferenceGraph:
                 continue
             try:
                 self.set_inventory(bucket, self.inventory(bucket))
+                print(f"GC graph: inventory {bucket} objects={len(self.files[bucket])}; "
+                      f"{time.monotonic() - self.started:.0f}s", flush=True)
             except Exception as error:
                 self.blockers.add(f"inventory unavailable: {bucket} ({type(error).__name__})")
         required = (READER_ASSETS_BUCKET, "reader-index/reader_assets.json.gz")
@@ -602,8 +655,12 @@ class ReferenceGraph:
                     if ref not in self.retired_roots and ref not in self.seen:
                         self.references.add(ref)
                         self.pending.add(ref)
-            if not self.converge(pool):
-                self.blockers.add(f"root inventory did not stabilize after {self.max_rounds} rounds")
+            try:
+                if not self.converge(pool):
+                    self.blockers.add(f"root inventory did not stabilize after {self.max_rounds} rounds")
+            except TimeoutError:
+                self.blockers.add(f"GC scan deadline reached with {len(self.pending)} unread roots/manifests")
+                pool.shutdown(wait=False, cancel_futures=True)
         self.finalize()
         if self.missing:
             self.blockers.add("referenced objects are missing")
@@ -686,22 +743,27 @@ def main() -> int:
     parser.add_argument("--generation-grace-days", type=int, default=0)
     parser.add_argument("--workers", type=int, default=8,
                         help="parallel root/manifest readers")
-    parser.add_argument("--max-rounds", type=int, default=6,
-                        help="inventory convergence rounds before reporting an unstable snapshot")
+    parser.add_argument("--max-rounds", type=int, default=20,
+                        help="root-only convergence rounds before reporting an unstable snapshot")
+    parser.add_argument("--deadline-minutes", type=int, default=0,
+                        help="write an incomplete report instead of exceeding this wall-clock budget")
     parser.add_argument("--snapshot-retries", type=int, default=2,
                         help="retry transient root/object races before returning an incomplete graph")
     args = parser.parse_args()
     if (args.grace_days < 0 or args.limit < 0 or args.generation_grace_days < 0
             or args.snapshot_retries < 0 or args.snapshot_retries > 5
-            or not 1 <= args.workers <= 128 or not 1 <= args.max_rounds <= 20):
+            or not 1 <= args.workers <= 128 or not 1 <= args.max_rounds <= 60):
         parser.error("grace periods and limit must be non-negative")
     store = HubBucketStore() if args.storage == "hub" else S3BucketStore()
     transient_markers = ("root inventory did not stabilize", "unreadable JSON", "root recheck failed",
                          "root inventory recheck failed")
     report = None
+    deadline = time.monotonic() + args.deadline_minutes * 60 if args.deadline_minutes > 0 else None
     for attempt in range(args.snapshot_retries + 1):
         report = ReferenceGraph(store, not args.skip_input_bucket, args.generation_grace_days,
-                                workers=args.workers, max_rounds=args.max_rounds).build()
+                                workers=args.workers, max_rounds=args.max_rounds, deadline=deadline).build()
+        if any("deadline reached" in blocker for blocker in report.get("blockers", [])):
+            break
         if report["graph_complete"] or not any(
                 any(marker in blocker for marker in transient_markers)
                 for blocker in report.get("blockers", [])) or attempt == args.snapshot_retries:

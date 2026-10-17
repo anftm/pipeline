@@ -307,6 +307,40 @@ class ReaderGcGraphTests(unittest.TestCase):
         self.assertFalse(report["graph_complete"])
         self.assertIn("root inventory did not stabilize after 3 rounds", report["blockers"])
 
+    def test_root_in_new_directory_found_by_full_pass_is_read(self):
+        store = MemoryStore()
+        roots_only = []
+        def list_roots(bucket, parents):
+            roots_only.append(bucket)
+            return {path: None for path in store.objects[bucket] if gc.is_root(path) and (
+                path.startswith("reader-index/") or any(
+                    path.startswith(parent) and "/" not in path[len(parent):] for parent in parents))}
+        store.list_roots = list_roots
+        page = "chapters/ebook/new/objects/book/chapter-0001.xhtml"
+        store.put(ASSETS, page, b"chapter")
+        original = store.list_files
+        calls = 0
+        def late_index(bucket, prefixes):
+            nonlocal calls
+            if bucket == ASSETS:
+                calls += 1
+                if calls == 2:
+                    store.put(ASSETS, "chapters/ebook/new/index.json", {"files": {"book": {"path": page}}})
+            return original(bucket, prefixes)
+        with patch.object(store, "list_files", side_effect=late_index):
+            report = gc.ReferenceGraph(store).build()
+        self.assertTrue(report["graph_complete"], report["blockers"])
+        self.assertIn(f"{ASSETS}:chapters/ebook/new/index.json", report["roots"])
+        self.assertEqual(report["buckets"][ASSETS]["candidates"], [])
+        self.assertTrue(roots_only)
+
+    def test_deadline_writes_an_incomplete_report_instead_of_running_on(self):
+        store = MemoryStore()
+        store.put(ASSETS, "reader-index/manifest.json", {"files": {}})
+        report = gc.ReferenceGraph(store, deadline=gc.time.monotonic() - 1).build()
+        self.assertFalse(report["graph_complete"])
+        self.assertTrue(any("deadline reached" in blocker for blocker in report["blockers"]))
+
     def test_handoff_published_after_catalog_read_resolves_without_blocker(self):
         store = MemoryStore()
         root = "objects/aa/book/render"

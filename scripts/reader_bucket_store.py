@@ -306,6 +306,34 @@ class S3BucketStore:
                 etags[key] = item.get("ETag")
         return set(items)
 
+    def list_roots(self, bucket: str, parents: set[str]) -> dict[str, str | None]:
+        """List only GC root locations: all of reader-index/ plus known index directories."""
+        namespace, name = self._location(bucket)
+        client = self._client(namespace)
+        predicate = getattr(self, "root_predicate", None) or (lambda path: True)
+        def flat(prefix):
+            items = {}
+            for page in client.get_paginator("list_objects_v2").paginate(Bucket=name, Prefix=prefix, Delimiter="/"):
+                items.update((item["Key"], item) for item in page.get("Contents", []))
+            return items
+        def deep(prefix):
+            items = {}
+            for page in client.get_paginator("list_objects_v2").paginate(Bucket=name, Prefix=prefix):
+                items.update((item["Key"], item) for item in page.get("Contents", []))
+            return items
+        top, children = {}, []
+        for page in client.get_paginator("list_objects_v2").paginate(Bucket=name, Prefix="reader-index/", Delimiter="/"):
+            top.update((item["Key"], item) for item in page.get("Contents", []))
+            children.extend(item["Prefix"] for item in page.get("CommonPrefixes", []))
+        jobs = [(deep, child) for child in children] + [(flat, parent) for parent in sorted(parents)]
+        workers = getattr(self, "list_workers", 32)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(workers, len(jobs) or 1))) as pool:
+            for result in pool.map(lambda job: retry_s3(lambda: job[0](job[1])), jobs):
+                top.update(result)
+        roots = {key: item.get("ETag") for key, item in top.items() if predicate(key)}
+        self.__dict__.setdefault("root_etags", {}).setdefault(bucket, {}).update(roots)
+        return roots
+
     def read_bytes(self, bucket: str, path: str) -> bytes:
         namespace, name = self._location(bucket)
         def read():
