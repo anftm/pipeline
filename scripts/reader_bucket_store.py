@@ -215,9 +215,12 @@ class S3BucketStore:
         except ImportError as error:
             raise RuntimeError("boto3 is required for Reader bucket operations") from error
         self._boto3 = boto3
+        # Short socket timeouts turn stalled connections (observed at ~190 s)
+        # into quick retries; read_timeout bounds each socket read, not a body.
         self._config = Config(region_name="us-east-1", s3={"addressing_style": "path"},
                               retries={"mode": "adaptive", "max_attempts": 8},
-                              max_pool_connections=64)
+                              connect_timeout=10, read_timeout=20,
+                              max_pool_connections=int(os.environ.get("READER_S3_POOL", "128")))
         self._namespace = os.environ.get("HF_S3_NAMESPACE", "vomebook")
         self._input_namespace = os.environ.get("HF_S3_INPUT_NAMESPACE", "melsm")
         self._input_bucket = os.environ.get("HF_S3_INPUT_BUCKET", "pdf-archive-v2")

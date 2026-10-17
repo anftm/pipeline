@@ -13,7 +13,7 @@ import posixpath
 import re
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -459,20 +459,27 @@ class ReferenceGraph:
         self.root_names[bucket] = {path for path in files if is_root(path)}
 
     def drain(self, pool):
+        # Keep every reader busy: one slow object must not stall a whole batch.
+        inflight, checked = {}, 0
         while True:
-            refs = sorted(self.pending - self.seen)[:max(32, self.workers * 4)]
-            self.pending.difference_update(self.seen)
-            if not refs:
-                self.pending.clear()
+            while self.pending and len(inflight) < self.workers * 2:
+                ref = self.pending.pop()
+                if ref in self.seen:
+                    continue
+                self.seen.add(ref)
+                inflight[pool.submit(self.load, ref)] = ref
+            if not inflight:
                 return
-            self.pending.difference_update(refs)
-            self.seen.update(refs)
-            for ref, payload in zip(refs, pool.map(self.load, refs)):
+            done, _ = wait(inflight, return_when=FIRST_COMPLETED)
+            for future in done:
+                ref = inflight.pop(future)
+                payload = future.result()
                 if payload is not None:
                     self.process(ref, payload)
-            if len(self.seen) % 256 < len(refs):
-                print(f"GC graph: checked {len(self.seen)} roots/manifests; {len(self.pending)} pending", flush=True)
-                self.progress("reference-traversal", checked=len(self.seen), pending=len(self.pending))
+                checked += 1
+                if checked % 1024 == 0:
+                    print(f"GC graph: checked {len(self.seen)} roots/manifests; {len(self.pending)} pending", flush=True)
+                    self.progress("reference-traversal", checked=len(self.seen), pending=len(self.pending))
 
     def changed(self, ref) -> bool:
         recorded = self.fingerprints.get(ref)
