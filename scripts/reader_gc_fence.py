@@ -19,7 +19,8 @@ def producer_path(path):
     name = path.rsplit("/", 1)[-1]
     return path.startswith(".github/workflows/") and path not in {
         COLLECTOR, ".github/workflows/reader-maintenance.yml"} and (
-        name.startswith(("reader-", "pdf-", "lin-native-text", "migrate-pdf-")))
+        name.startswith(("reader-", "pdf-", "lin-native-text", "migrate-pdf-")) or
+        name == "publish-source-txt.yml")
 
 
 def producer_repositories():

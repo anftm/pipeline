@@ -1,15 +1,53 @@
-name: Publish source txt once
+name: Reader/桶 · Publish UTF-8 Text
+run-name: UTF-8 text ${{ inputs.apply == true && 'publish' || 'plan' }} (${{ inputs.extension || 'all' }})
 
 on:
   workflow_dispatch:
+    inputs:
+      extension:
+        description: Text sources to normalize (all means txt/md/markdown)
+        required: true
+        type: choice
+        default: all
+        options: [all, txt, md, markdown]
+      limit:
+        description: Maximum pending sources; 0 means all (checkpoints permit resume)
+        required: true
+        type: string
+        default: "0"
+      force:
+        description: Rebuild even sources already verified under the current UTF-8 profile
+        type: boolean
+        default: false
+      retry_failures:
+        description: Retry sources in the previous decoding-failure checkpoint
+        type: boolean
+        default: false
+      selection_json:
+        description: Optional exact source-key to approved SHA-256 JSON map (empty means ordinary pending scope)
+        type: string
+        default: "{}"
+      apply:
+        description: Upload verified UTF-8/BOM text and refresh Reader mappings
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: write
 
 concurrency:
-  group: publish-source-txt-once
+  # A read-only plan owns no shared index. Every apply still uses the existing
+  # serialized Reader writer lock, including a selected-source pilot.
+  group: ${{ inputs.apply == true && 'reader-sidecar' || format('reader-text-plan-{0}', github.run_id) }}
   cancel-in-progress: false
+  queue: max
 
 jobs:
   publish-source-txt:
     runs-on: ubuntu-latest
+    timeout-minutes: 350
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -25,19 +63,65 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y git-lfs
-          git lfs version
-          pip install -r scripts/requirements.txt
+        run: pip install -r scripts/requirements.txt
 
       - name: Generate search data
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          FORCE_SYNC: "true"
         run: python scripts/fetch_and_parse.py
 
-      - name: Publish source txt files
+      - name: Plan or publish UTF-8 text to the existing Reader bucket
+        id: text
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          HF_USERNAME: ${{ vars.HF_USERNAME || 'VoiceOfML' }}
-        run: python scripts/publish_source_txt_once.py
+          TEXT_EXTENSION: ${{ inputs.extension }}
+          TEXT_LIMIT: ${{ inputs.limit }}
+          TEXT_FORCE: ${{ inputs.force }}
+          TEXT_RETRY: ${{ inputs.retry_failures }}
+          TEXT_APPLY: ${{ inputs.apply }}
+          TEXT_SELECTION: ${{ inputs.selection_json || '{}' }}
+        run: |
+          [[ "$TEXT_LIMIT" =~ ^[0-9]+$ ]] || exit 1
+          case "$TEXT_EXTENSION" in
+            all) args=(--extension txt --extension md --extension markdown) ;;
+            txt|md|markdown) args=(--extension "$TEXT_EXTENSION") ;;
+            *) exit 1 ;;
+          esac
+          [[ "$TEXT_FORCE" != true ]] || args+=(--force)
+          [[ "$TEXT_RETRY" != true ]] || args+=(--retry-failures)
+          if [[ "$TEXT_APPLY" == true ]]; then args+=(--apply); else args+=(--plan-only); fi
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          selection = json.loads(os.environ['TEXT_SELECTION'])
+          Path('output/text-approved-selection.json').write_text(json.dumps(selection), encoding='utf-8')
+          PY
+          python scripts/pilot_text_stream.py "${args[@]}" --limit "$TEXT_LIMIT" \
+            --selection output/text-approved-selection.json \
+            --report output/text-stream-report.json
+
+      - name: Rebuild canonical mappings after verified checkpoints
+        if: always() && inputs.apply == true && steps.text.outputs.checkpoint_complete == 'true' && steps.text.outputs.published_count != '0'
+        id: sidecar
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: python scripts/build_reader_assets_v2_sidecar.py --apply
+
+      - name: Publish both search projections through the existing central writer
+        if: always() && steps.sidecar.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run reader-v3-publish.yml --repo "$GITHUB_REPOSITORY" --ref main \
+            -f operation=unify -f apply=true
+          echo "central writer queued; this run releases reader-sidecar before it can start"
+
+      - name: Retain counts and failed-source report (not source documents)
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: reader-utf8-text-report
+          path: output/text-stream-report.json
+          if-no-files-found: warn
+          retention-days: 14

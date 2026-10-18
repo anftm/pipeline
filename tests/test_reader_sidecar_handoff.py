@@ -34,6 +34,20 @@ class ReaderSidecarHandoffTests(unittest.TestCase):
         self.assertEqual(count, 0)
         self.assertEqual(written, [])
 
+    def test_verified_text_roots_use_the_same_explicit_catalog_handoff(self):
+        bucket = "vomebook/reader-assets-v2"
+        root = "documents/text/txt/" + "a" * 64
+        path = "reader-index/processing/text-" + "b" * 32 + ".json"
+        entry = {"key": "VoiceOfML/Test\0book.txt", "object": root + "/document.txt",
+                 "processing_roots": [path]}
+        record = processing_record([{"bucket": bucket, "root": root}], "text-utf8-upload", {})
+        written = []
+        count = sidecar.release_processing_roots(
+            [{"files": [entry]}], "c" * 32, lambda _: record,
+            lambda name, value: written.append((name, value)))
+        self.assertEqual(count, 1)
+        self.assertEqual(written[0][1]["status"], "released")
+
 
 if __name__ == "__main__":
     unittest.main()

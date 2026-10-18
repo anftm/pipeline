@@ -186,6 +186,7 @@ def main() -> int:
         # is the handoff boundary; only then may those roots be released.
         indexes = []
         for bucket, path in [(args.pdf_bucket, args.derived_manifest),
+                             (args.assets_bucket, "documents/text/index.json"),
                              *ebook_chapter_indexes(args.assets_bucket)]:
             try:
                 payload = read_bucket_json(path, token, bucket=bucket)
