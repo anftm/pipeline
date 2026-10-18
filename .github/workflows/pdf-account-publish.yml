@@ -91,6 +91,15 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: python scripts/pdf_progress_report.py --record --output output/pdf-ocr/pdf-progress.json
+      - name: Admit at most one next OCR batch for this account
+        if: inputs.stage == 'render' || (inputs.stage == 'ocr' && steps.queue.outputs.shard_count != '0')
+        env:
+          GH_TOKEN: ${{ secrets.PDF_WORKER_READ_TOKEN }}
+          WORKER_REPOSITORY: ${{ inputs.worker_repository }}
+          WORKER_RUN_ID: ${{ inputs.worker_run_id }}
+        run: |
+          python scripts/pdf_worker_dispatch.py --repository "$WORKER_REPOSITORY" \
+            --after-run "$WORKER_RUN_ID" --apply --output output/pdf-ocr/dispatch.json
       - uses: actions/upload-artifact@v7
         if: always()
         with:
@@ -98,19 +107,6 @@ jobs:
           path: |
             output/pdf-ocr/pdf-progress.json
             output/pdf-ocr/bundle/publication.json
+            output/pdf-ocr/dispatch.json
           retention-days: 30
           if-no-files-found: warn
-      - name: Request next OCR batch only after this publication
-        if: inputs.stage == 'ocr' && steps.queue.outputs.shard_count != '0'
-        env:
-          GH_TOKEN: ${{ secrets.PDF_WORKER_READ_TOKEN }}
-          WORKER_REPOSITORY: ${{ inputs.worker_repository }}
-        run: |
-          gh workflow run pdf-account-worker.yml --repo "$WORKER_REPOSITORY" --ref main \
-            -f stage=ocr -f limit=20
-      - name: Advance completed rendering to this account's OCR queue
-        if: inputs.stage == 'render'
-        env:
-          GH_TOKEN: ${{ secrets.PDF_WORKER_READ_TOKEN }}
-          WORKER_REPOSITORY: ${{ inputs.worker_repository }}
-        run: gh workflow run pdf-account-worker.yml --repo "$WORKER_REPOSITORY" --ref main -f stage=ocr -f limit=20

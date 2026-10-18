@@ -246,11 +246,20 @@ class PdfWorkerLaneTests(unittest.TestCase):
         self.assertNotIn("publish-ocr", worker_commands)
         self.assertNotIn("publish_search_reader_index.py", worker_commands)
         self.assertEqual(worker["jobs"]["build"]["strategy"]["max-parallel"], 1)
+        self.assertNotIn("schedule", worker[True])
+        self.assertIn("needs.plan.outputs.shard_count != '0'", worker["jobs"]["notify"]["if"])
         self.assertIn("retry_failed_only", worker[True]["workflow_dispatch"]["inputs"])
         plan_script = next(step["run"] for step in worker["jobs"]["plan"]["steps"]
                            if step.get("id") == "plan")
         self.assertIn("--retry-failed-only", plan_script)
         self.assertEqual(publisher["concurrency"]["group"], "reader-sidecar")
+        self.assertIn("Admit at most one next OCR batch for this account",
+                      "\n".join(step.get("name", "") for step in publisher["jobs"]["publish"]["steps"]))
+        self.assertIn("steps.queue.outputs.shard_count != '0'",
+                      "\n".join(step.get("if", "") for step in publisher["jobs"]["publish"]["steps"]))
+        publisher_commands = "\n".join(step.get("run", "") for job in publisher["jobs"].values() for step in job["steps"])
+        self.assertIn("python scripts/pdf_worker_dispatch.py", publisher_commands)
+        self.assertNotIn("gh workflow run pdf-account-worker.yml", publisher_commands)
         for workflow in (worker, publisher):
             for job in workflow["jobs"].values():
                 for step in job["steps"]:
