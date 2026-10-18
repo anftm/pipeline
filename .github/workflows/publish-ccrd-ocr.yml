@@ -1,0 +1,97 @@
+name: CCRD · Publish Verified OCR Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      stage_run_id:
+        description: Successful central stage-ccrd-ocr-text.yml run containing the full approved artifact
+        type: string
+        required: true
+      release_path:
+        description: Exact immutable releases/ocr-<generation>/manifest.json path
+        type: string
+        required: true
+      release_sha256:
+        description: Approved full release manifest SHA-256
+        type: string
+        required: true
+      expected_parent:
+        description: Existing OCR generation or none for the first additive release
+        type: string
+        default: none
+      apply:
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: publish-ccrd-index
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  publish:
+    if: github.repository == 'anftm/pipeline'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      CCRD_OCR_WRITE_PROTOCOL: central-ccrd-ocr-publication-v1
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - run: pip install -r scripts/requirements.txt
+      - name: Verify the exact stage run identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STAGE_RUN_ID: ${{ inputs.stage_run_id }}
+        run: |
+          [[ "$STAGE_RUN_ID" =~ ^[0-9]+$ ]] || exit 1
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$STAGE_RUN_ID" > stage-run.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          run = json.loads(Path('stage-run.json').read_text())
+          if (run['path'] != '.github/workflows/stage-ccrd-ocr-text.yml'
+                  or run['status'] != 'completed' or run['conclusion'] != 'success'):
+              raise ValueError('OCR publication requires a successful actual central stage run')
+          PY
+      - uses: actions/download-artifact@v7
+        with:
+          name: ccrd-ocr-text-and-index-candidate
+          path: output/ccrd-ocr-candidate
+          run-id: ${{ inputs.stage_run_id }}
+          github-token: ${{ github.token }}
+      - name: Verify the approved additive release and publish without deletion
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_INPUT_TOKEN: ${{ secrets.HF_INPUT_TOKEN }}
+          RELEASE_PATH: ${{ inputs.release_path }}
+          RELEASE_SHA256: ${{ inputs.release_sha256 }}
+          EXPECTED_PARENT: ${{ inputs.expected_parent }}
+          APPLY: ${{ inputs.apply }}
+        run: |
+          metadata_sha=$(python - <<'PY'
+          import json
+          from pathlib import Path
+          receipt = json.loads(Path('output/ccrd-ocr-candidate/release-receipt.json').read_text())
+          print(receipt['manifest']['base_metadata_sha256'])
+          PY
+          )
+          args=()
+          if [[ "$APPLY" == true ]]; then args+=(--apply --activate-space); fi
+          python -B scripts/publish_ccrd_ocr.py --root output/ccrd-ocr-candidate \
+            --release-path "$RELEASE_PATH" --release-sha256 "$RELEASE_SHA256" \
+            --base-metadata-sha256 "$metadata_sha" --expected-parent "$EXPECTED_PARENT" \
+            "${args[@]}" --output output/ccrd-publication.json
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: ccrd-ocr-publication-receipt
+          path: output/ccrd-publication.json
+          if-no-files-found: warn
+          retention-days: 30

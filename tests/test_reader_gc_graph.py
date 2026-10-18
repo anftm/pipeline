@@ -16,7 +16,7 @@ from scripts import reader_bucket
 from scripts import pdf_ocr_stages as stages
 
 
-ASSETS, PDF, INPUT = gc.BUCKETS
+ASSETS, PDF, INPUT = gc.READER_BUCKETS
 SIDECAR = "reader-index/reader_assets.json.gz"
 
 

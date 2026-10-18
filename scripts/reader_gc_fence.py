@@ -20,7 +20,8 @@ def producer_path(path):
     return path.startswith(".github/workflows/") and path not in {
         COLLECTOR, ".github/workflows/reader-maintenance.yml"} and (
         name.startswith(("reader-", "pdf-", "lin-native-text", "migrate-pdf-")) or
-        name == "publish-source-txt.yml")
+        name in {"publish-source-txt.yml", "publish-ccrd-index.yml", "promote-ccrd-generation.yml",
+                 "update-ccrd-source.yml", "publish-ccrd-ocr.yml"})
 
 
 def producer_repositories():

@@ -32,6 +32,13 @@ SIDECAR = "reader-index/reader_assets.json.gz"
 CONSUMERS = "reader-index/reader_gc_consumers.json"
 
 
+def reject_unaccepted_ccrd_collection(store) -> None:
+    """New cross-domain publication is report-only until its deletion tier is accepted."""
+    paths = store.list_files(graph.ccrd_lifecycle.BUCKET, ('control/', 'text/exports/', 'releases/ocr-'))
+    if paths:
+        raise RuntimeError('four-bucket OCR-library collection is report-only; no deletion acceptance exists yet')
+
+
 def encode(payload):
     return (json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode()
 
@@ -118,6 +125,8 @@ def retired_snapshots(catalog):
 
 def collect_retired_snapshots(store, fence, catalog, *, apply=False, checkpoint=None):
     """Retire catalog-owned snapshots; this never authorizes content-bundle deletion."""
+    if apply:
+        reject_unaccepted_ccrd_collection(store)
     expected_catalog = store.read_bytes(ASSETS, CATALOG)
     if apply and graph.decode(expected_catalog) != catalog:
         raise RuntimeError("catalog changed before snapshot collection")
@@ -179,8 +188,8 @@ def collect_retired_snapshots(store, fence, catalog, *, apply=False, checkpoint=
 
 def verify_roots(store, reference_graph):
     for bucket, files in reference_graph.files.items():
-        roots = {p for p in store.list_files(bucket, ("",)) if graph.is_root(p)}
-        if roots != {p for p in files if graph.is_root(p)}:
+        roots = {p for p in store.list_files(bucket, ("",)) if graph.is_root(p, bucket)}
+        if roots != {p for p in files if graph.is_root(p, bucket)}:
             raise RuntimeError("root inventory changed before deletion")
     def recheck_root(item):
         ref, expected = item
@@ -194,6 +203,8 @@ def collect(store, fence, reference_graph, report, catalog, *, grace_days=0, lim
             batch_size=500, apply=False, checkpoint=None):
     if not report["graph_complete"]:
         raise RuntimeError("reference graph is incomplete; no object deletion is authorized")
+    if apply:
+        reject_unaccepted_ccrd_collection(store)
     state, retention = graph.plan_retention(graph.read_gc_state(store), report, grace_days, limit)
     eligible = {tuple(key.split(":", 1)) for key in retention["past_grace_paths"]}
     snapshots = retired_snapshots(catalog)
@@ -214,7 +225,7 @@ def collect(store, fence, reference_graph, report, catalog, *, grace_days=0, lim
             batch = paths[offset:offset + batch_size]
             if any((bucket, p) in reference_graph.references for p in batch):
                 raise RuntimeError("referenced object entered deletion batch")
-            if any(not p.startswith(graph.MANAGED_PREFIXES) and not (
+            if any(not p.startswith(graph.managed_prefixes(bucket)) and not (
                     bucket == ASSETS and p in snapshots) for p in batch):
                 raise RuntimeError("unmanaged object entered deletion batch")
             record = {"bucket": bucket, "paths": batch, "status": "submitted"}
@@ -265,6 +276,8 @@ def main():
     if args.apply:
         assert_collector_context()
     store, fence = HubBucketStore(), GitHubProducerFence()
+    if args.apply:
+        reject_unaccepted_ccrd_collection(store)
     report = {"version": 1, "mode": "collect" if args.apply else "plan", "grace_days": args.grace_days,
               "started_at": lifecycle.now_iso(), "complete": False}
     args.output.parent.mkdir(parents=True, exist_ok=True)

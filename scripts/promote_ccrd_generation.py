@@ -22,6 +22,7 @@ from publish_ccrd_index import (
     SOURCE_ARCHIVE_URL,
     TOKENIZER_VERSION,
     inspect_database,
+    read_current,
     sha256,
 )
 
@@ -39,6 +40,7 @@ def main() -> int:
 
     workdir = Path(tempfile.mkdtemp(prefix="ccrd_promote_"))
     try:
+        previous = read_current(workdir, token)
         files = []
         for source in ("CCRD", "CW"):
             relative = f"generations/{generation}/{source}.sqlite3"
@@ -55,18 +57,20 @@ def main() -> int:
                 "bytes": local.stat().st_size,
                 **inspect_database(local, expected_counts[source]),
             }
-        manifest = {
-            "format": 1,
-            "source_archive": {"url": SOURCE_ARCHIVE_URL, "sha256": SOURCE_ARCHIVE_SHA256},
-            "builder": {"url": BUILDER_URL, "sha256": BUILDER_SHA256},
-            "tokenizer_version": TOKENIZER_VERSION,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "databases": databases,
-        }
+        saved_manifest = workdir / 'generation-manifest.json'
+        download_bucket_files(BUCKET, files=[(f"generations/{generation}/manifest.json", str(saved_manifest))],
+                              token=token, raise_on_missing_files=True)
+        manifest = json.loads(saved_manifest.read_text(encoding='utf-8'))
+        if (manifest.get('format') != 1 or manifest.get('tokenizer_version') != TOKENIZER_VERSION
+                or manifest.get('databases') != databases):
+            raise ValueError('stored generation manifest does not match verified databases')
         manifest_path = workdir / CURRENT_PATH
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
-        batch_bucket_files(BUCKET, delete=[CURRENT_PATH], token=token)
+        if read_current(workdir, token) != previous:
+            raise RuntimeError('CCRD pointer changed before promotion')
         batch_bucket_files(BUCKET, add=[(str(manifest_path), CURRENT_PATH)], token=token)
+        if read_current(workdir, token) != manifest:
+            raise RuntimeError('CCRD promotion readback mismatch')
         print(json.dumps(manifest, ensure_ascii=False, indent=2))
         return 0
     finally:

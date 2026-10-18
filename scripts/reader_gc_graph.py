@@ -21,16 +21,18 @@ from pathlib import Path
 try:
     from .reader_bucket_store import HubBucketStore, S3BucketStore
     from .shared import READER_ASSETS_BUCKET, PDF_PAGES_BUCKET, PDF_OCR_INPUT_BUCKET
-    from . import reader_lifecycle
+    from . import reader_lifecycle, ccrd_lifecycle
     from .reader_gc_stream import catalog_json
 except ImportError:
     from reader_bucket_store import HubBucketStore, S3BucketStore
     from shared import READER_ASSETS_BUCKET, PDF_PAGES_BUCKET, PDF_OCR_INPUT_BUCKET
     import reader_lifecycle
+    import ccrd_lifecycle
     from reader_gc_stream import catalog_json
 
 
-BUCKETS = (READER_ASSETS_BUCKET, PDF_PAGES_BUCKET, PDF_OCR_INPUT_BUCKET)
+READER_BUCKETS = (READER_ASSETS_BUCKET, PDF_PAGES_BUCKET, PDF_OCR_INPUT_BUCKET)
+BUCKETS = (*READER_BUCKETS, ccrd_lifecycle.BUCKET)
 CATALOG_REF = (READER_ASSETS_BUCKET, "reader-index/reader_catalog.json")
 RETIREMENT_REF = (READER_ASSETS_BUCKET, "reader-index/v3/retirement.json")
 ACKED = {"hf": True, "pages": True}
@@ -59,7 +61,13 @@ MANIFEST_KINDS = {
 }
 
 
-def is_root(path: str) -> bool:
+def managed_prefixes(bucket: str) -> tuple[str, ...]:
+    return ccrd_lifecycle.MANAGED_PREFIXES if bucket == ccrd_lifecycle.BUCKET else MANAGED_PREFIXES
+
+
+def is_root(path: str, bucket: str | None = None) -> bool:
+    if bucket == ccrd_lifecycle.BUCKET:
+        return ccrd_lifecycle.is_root(path)
     name = posixpath.basename(path)
     if path.startswith(("reader-index/generations/", "reader-index/gc/", "reader-index/snapshots/")):
         return False
@@ -118,6 +126,11 @@ class ReferenceGraph:
         self.retired_acked = set()
         self.fingerprints = {}
         self.root_names = {}
+        self.expected_resources = {}
+        self.loaded_digests = {}
+        self.external_pins = set()
+        self.externally_traversed = set()
+        self.active_external_pin = False
 
     def read_catalog(self, ref):
         parser = functools.partial(catalog_json, grace_days=self.generation_grace_days)
@@ -145,7 +158,8 @@ class ReferenceGraph:
             return None
         with self.lock:
             self.unreadable.pop(ref, None)
-            if is_root(ref[1]):
+            self.loaded_digests[ref] = digest
+            if is_root(ref[1], ref[0]):
                 self.root_hashes[ref] = digest
                 etag = getattr(self.store, "read_etags", {}).get(ref)
                 self.fingerprints[ref] = ("etag", etag) if etag else ("sha256", digest)
@@ -180,6 +194,9 @@ class ReferenceGraph:
 
     def process(self, ref, payload):
         self.origin = ref
+        self.active_external_pin = ref in self.external_pins
+        if self.active_external_pin:
+            self.externally_traversed.add(ref)
         self.direct[ref] = set()
         self.handoffs.pop(ref, None)
         try:
@@ -192,8 +209,9 @@ class ReferenceGraph:
             self.walk(payload, *ref)
         finally:
             self.origin = None
+            self.active_external_pin = False
 
-    def mark(self, bucket: str, path: str, *, tree: bool = False):
+    def mark(self, bucket: str, path: str, *, tree: bool = False, external_pin: bool = False):
         if bucket not in BUCKETS:
             self.blockers.add(f"unsupported reference bucket: {bucket}")
             return
@@ -202,7 +220,9 @@ class ReferenceGraph:
             self.blockers.add(f"invalid object path: {bucket}:{path}")
             return
         ref = (bucket, path)
-        if ref in self.retired_inputs and not tree:
+        if external_pin or self.active_external_pin:
+            self.external_pins.add(ref)
+        if ref in self.retired_inputs and ref not in self.external_pins and not tree:
             return
         self.references.add(ref)
         if not tree and self.origin is not None:
@@ -214,8 +234,15 @@ class ReferenceGraph:
             # Judged against the final inventory; may also appear later.
             self.deferred.add(ref)
             return
-        if (is_manifest(path) or is_root(path) or path.startswith("reader-index/snapshots/")) and ref not in self.seen:
+        graph_document = (ccrd_lifecycle.is_document(path) if bucket == ccrd_lifecycle.BUCKET else
+                          is_manifest(path) or is_root(path) or path.startswith("reader-index/snapshots/"))
+        if graph_document and ref not in self.seen:
             self.pending.add(ref)
+        elif graph_document and ref in self.external_pins and ref not in self.externally_traversed:
+            self.seen.discard(ref)
+            self.pending.add(ref)
+        if bucket == ccrd_lifecycle.BUCKET:
+            return
         # HTML/CSS/XHTML, fonts, media companions and manifest siblings are an
         # immutable bundle. Keep the whole bundle instead of parsing markup.
         root = path if tree else posixpath.dirname(path)
@@ -230,6 +257,8 @@ class ReferenceGraph:
             for child in ordered[start:end]:
                 child_ref = (bucket, child)
                 self.references.add(child_ref)
+                if self.active_external_pin or external_pin:
+                    self.external_pins.add(child_ref)
                 if is_manifest(child) and child_ref not in self.seen:
                     self.pending.add(child_ref)
 
@@ -260,6 +289,18 @@ class ReferenceGraph:
             self.mark(bucket, posixpath.join(posixpath.dirname(origin), value), tree=field == "root")
 
     def walk(self, value, bucket: str, origin: str, explicit: bool = False, field: str = ""):
+        if bucket == ccrd_lifecycle.BUCKET and not field:
+            for ref in ccrd_lifecycle.references(value, origin):
+                key = ref['bucket'], ref['path']
+                previous = self.expected_resources.get(key)
+                if previous and (previous['sha256'], previous['bytes']) != (ref['sha256'], ref['bytes']):
+                    self.blockers.add(f"conflicting retained resource identity: {key[0]}:{key[1]}")
+                    continue
+                self.expected_resources[key] = ref
+                if key in self.loaded_digests and self.loaded_digests[key] != ref['sha256']:
+                    self.blockers.add(f"retained resource checksum mismatch: {key[0]}:{key[1]}")
+                self.mark(*key, external_pin=True)
+            return
         if isinstance(value, dict):
             if value.get("kind") == "reader-v3-retirement":
                 self.walk(value.get("resources", []), bucket, origin, explicit, "resources")
@@ -334,7 +375,19 @@ class ReferenceGraph:
             self.path(value, bucket, origin, explicit, field)
 
     def validate(self, payload: dict, bucket: str, path: str) -> bool:
-        if is_root(path):
+        ref = (bucket, path)
+        expected = self.expected_resources.get(ref)
+        if expected and self.loaded_digests.get(ref) != expected['sha256']:
+            self.blockers.add(f"retained resource checksum mismatch: {bucket}:{path}")
+            return False
+        if bucket == ccrd_lifecycle.BUCKET:
+            try:
+                ccrd_lifecycle.references(payload, path)
+            except (ValueError, KeyError, TypeError) as error:
+                self.blockers.add(f"invalid CCRD lifecycle schema: {path} ({type(error).__name__})")
+                return False
+            return True
+        if is_root(path, bucket):
             if payload.get("kind") == "reader-v3-retirement":
                 if (payload.get("version") != 1 or payload.get("replacement_acks") != {"hf": True, "pages": True}
                         or not isinstance(payload.get("resources"), list)
@@ -460,7 +513,7 @@ class ReferenceGraph:
     def set_inventory(self, bucket, files):
         self.files[bucket] = files
         self.ordered[bucket] = sorted(files)
-        self.root_names[bucket] = {path for path in files if is_root(path)}
+        self.root_names[bucket] = {path for path in files if is_root(path, bucket)}
 
     def drain(self, pool):
         # Keep every reader busy: one slow object must not stall a whole batch.
@@ -522,11 +575,13 @@ class ReferenceGraph:
                 parent = posixpath.dirname(parent)
 
     def list_roots(self, bucket):
+        if bucket == ccrd_lifecycle.BUCKET:
+            return {path for path in self.store.list_files(bucket, ("",)) if is_root(path, bucket)}
         if hasattr(self.store, "list_roots"):
             parents = {posixpath.dirname(path) + "/" for path in self.root_names.get(bucket, set())
                        if not path.startswith("reader-index/") and "/" in path}
             return set(self.store.list_roots(bucket, parents))
-        return {path for path in self.store.list_files(bucket, ("",)) if is_root(path)}
+        return {path for path in self.store.list_files(bucket, ("",)) if is_root(path, bucket)}
 
     def root_round(self, pool, round_number) -> bool:
         """Read every listed root at its current version; True when nothing changed."""
@@ -568,7 +623,7 @@ class ReferenceGraph:
             self.files[bucket] = latest
             self.ordered[bucket] = sorted(latest)
             self.protect_additions(bucket, latest - previous)
-            roots = {path for path in latest if is_root(path)}
+            roots = {path for path in latest if is_root(path, bucket)}
             new_roots |= bool(roots - known)
             self.root_names[bucket] = known | roots
         for ref in list(self.deferred):
@@ -605,13 +660,13 @@ class ReferenceGraph:
 
     def finalize(self):
         def alive(ref):
-            if ref in self.retired_roots:
+            if ref in self.retired_roots and ref not in self.external_pins:
                 return False
-            if is_root(ref[1]):
+            if is_root(ref[1], ref[0]):
                 return ref[1] in self.root_names.get(ref[0], set())
             return ref[1] in self.files.get(ref[0], set())
         self.missing = {ref for origin, refs in self.direct.items() if alive(origin)
-                        for ref in refs if ref not in self.retired_inputs
+                        for ref in refs if (ref not in self.retired_inputs or ref in self.external_pins)
                         and ref[0] in self.files and ref[1] not in self.files[ref[0]]}
         for ref, message in self.unreadable.items():
             if alive(ref):
@@ -668,9 +723,9 @@ class ReferenceGraph:
         complete = not self.blockers
         for bucket, files in self.files.items():
             unreferenced = sorted(path for path in files if (bucket, path) not in self.references
-                                  and path.startswith(MANAGED_PREFIXES))
+                                  and path.startswith(managed_prefixes(bucket)))
             unmanaged = sorted(path for path in files if (bucket, path) not in self.references
-                               and not path.startswith(MANAGED_PREFIXES))
+                                and not path.startswith(managed_prefixes(bucket)))
             buckets[bucket] = {
                 "objects": len(files),
                 "referenced": sum((bucket, path) in self.references for path in files),
