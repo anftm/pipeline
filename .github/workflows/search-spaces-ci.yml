@@ -28,6 +28,7 @@ jobs:
               ["static/app.js","static/index.html","static/style.css","static/sw.js",
                "static/icons/icon-192.png","static/icons/icon-512.png",
                ".dockerignore",
+               ".gitattributes",
                "data/initial/global.json","data/initial/manifest.json",
                "data/initial/sources/CCRD.json","data/initial/sources/CW.json",
                "data/sidebar/global.json","data/sidebar/manifest.json",
