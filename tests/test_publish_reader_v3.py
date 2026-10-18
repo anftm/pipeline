@@ -508,5 +508,15 @@ class V3PublicationTests(unittest.TestCase):
             publish.stage(self.store, ref2, self.bundle, apply=True)
         self.assertNotIn((publish.ASSETS, publish.POINTER), self.store.objects)
 
+    def test_preview_promotion_refuses_a_newly_completed_ocr_route(self):
+        preview = self.preview_candidate()
+        staged = publish.stage(self.store, preview, self.bundle, apply=True)
+        self.store.put_bytes(publish.ASSETS, "reader-index/pdf_ocr_manifest.json", publish.encode(
+            {"version": 1, "files": {"repo\0book.pdf": {"status": "ready", "ocr_manifest": "retained"}}}))
+        with self.assertRaisesRegex(ValueError, "cannot hide already available OCR"):
+            publish.promote(self.store, staged["candidate"], None, apply=True)
+        self.assertNotIn((publish.ASSETS, publish.POINTER), self.store.objects)
+
+
 if __name__ == "__main__":
     unittest.main()

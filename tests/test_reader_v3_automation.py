@@ -117,13 +117,14 @@ class AutomationTests(unittest.TestCase):
 
     def test_preview_ready_book_can_receive_text_but_existing_ready_text_is_protected(self):
         book = entry(count=1)
-        self.add_entries(book)
+        self.add_entries({**{k: v for k, v in book.items() if not k.startswith("ocr_manifest")}, "status": "rendered"})
         fixture = fixtures.V3PublicationTests()
         fixture.setUp()
         try:
             preview = fixture.preview_candidate(key=book["key"])
             staged = publication.stage(self.store, preview, fixture.bundle, apply=True)
             publication.promote(self.store, staged["candidate"], None, apply=True)
+            self.add_entries(book)
             report = auto.wave(self.store, apply=True, now=self.now, wave_size=1)
             self.assertEqual(len(report["wave"]), 1)
             task_id = report["wave"][0]["identity"]
@@ -136,6 +137,18 @@ class AutomationTests(unittest.TestCase):
             self.assertNotIn("preview_only", builder.call_args.args[1])
         finally:
             fixture.temp.cleanup()
+
+    def test_ocr_finishing_during_preview_build_supersedes_only_the_image_only_task(self):
+        book = entry(count=1)
+        pending = {**{k: v for k, v in book.items() if not k.startswith("ocr_manifest")}, "status": "rendered"}
+        state = {"version": 1, "kind": "reader-v3-automation", "tasks": {}, "days": {}}
+        rendered = {"version": 1, "files": {book["key"]: book}}
+        auto.discover(state, {"version": 1, "files": {book["key"]: pending}}, rendered)
+        identity = next(iter(state["tasks"]))
+        state["tasks"][identity].update(status="building", attempts=1)
+        auto.discover(state, {"version": 1, "files": {book["key"]: book}}, rendered)
+        self.assertEqual(state["tasks"][identity]["status"], "superseded")
+        self.assertEqual(sum(t["status"] == "pending" and not t["spec"].get("preview_only") for t in state["tasks"].values()), 1)
 
     def test_unusable_converted_text_requires_review_without_repeated_builds(self):
         builder = Mock(side_effect=publication.PublicationReviewRequired())

@@ -567,6 +567,13 @@ def promote(store, candidate_ref, expected_parent, *, apply=False):
         return {"generation": parent, "applied": apply, "unchanged": True, "pointer": pointer}
     if parent != expected_parent:
         raise ValueError("stale expected parent; replan against current catalog")
+    if not manifest.get("text_layer"):
+        try:
+            ocr = json.loads(store.read_bytes(ASSETS, "reader-index/pdf_ocr_manifest.json"))["files"].get(key, {})
+        except FileNotFoundError:
+            ocr = {}
+        if ocr.get("status") in {"ready", "skipped"} or ocr.get("ocr_manifest") or ocr.get("text_layer"):
+            raise ValueError("preview-only publication cannot hide already available OCR text")
     previous_entry = old["files"].get(key)
     if previous_entry and not manifest.get("text_layer"):
         raise ValueError("preview-only publication cannot replace an existing reading")

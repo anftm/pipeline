@@ -187,6 +187,14 @@ def discover(state, registry, rendered=None):
             active_identities.add(identity)
             state["tasks"].setdefault(identity, {"spec": spec, "page_count": count, "status": "pending", "attempts": 0})
     for identity, task in state["tasks"].items():
+        existing_ocr = registry["files"].get(task["spec"].get("source_key"), {})
+        if (task["spec"].get("preview_only") and task["status"] not in {"published", "protected"}
+                and (existing_ocr.get("status") in {"ready", "skipped"}
+                     or existing_ocr.get("ocr_manifest") or existing_ocr.get("text_layer"))):
+            # OCR may finish while previews are being built. Keep that complete
+            # v2 text route live until the full v3 candidate can preserve it.
+            task["status"] = "superseded"
+            continue
         if identity not in active_identities and task["status"] in {
                 "pending", "retry", "dispatch-pending", "needs-review"} and not task.get("candidate"):
             task["status"] = "superseded"
