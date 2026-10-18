@@ -96,6 +96,34 @@ class TextNormalizationTests(unittest.TestCase):
         with self.assertRaises(TextEncodingError):
             normalize_utf8(raw + b"\0", encoding="gb18030", preserve_controls={"U+001A": 1})
 
+    def test_one_reviewed_stray_prefix_byte_does_not_discard_the_first_paragraph(self):
+        header = "广告\r\n".encode("gb18030")
+        body = "完整第一段手机。\n\n完整末段。\r\n".encode("gb18030")
+        raw = header + b"\xcd" + body
+        offset = len(header)
+        with self.assertRaises(UnicodeError):
+            normalize_utf8(raw, encoding="gb18030")
+        output, metadata = normalize_utf8(raw, encoding="gb18030", remove_prefix_byte={"offset": offset, "hex": "cd"})
+        self.assertEqual(output.decode("utf-8-sig"), (header + body).decode("gb18030"))
+        retained = output.decode("utf-8-sig").encode("gb18030")
+        self.assertEqual(retained[:offset] + b"\xcd" + retained[offset:], raw)
+        self.assertEqual(metadata["removed_prefix_byte"], {"offset": offset, "hex": "cd"})
+        self.assertEqual(metadata["normalization_recipe"], "strict-decode-with-reviewed-prefix-byte-removal-v1")
+        self.assertTrue(metadata["source_roundtrip_verified"])
+        with self.assertRaises(UnicodeError):
+            normalize_utf8(raw + b"\xa3", encoding="gb18030", remove_prefix_byte={"offset": offset, "hex": "cd"})
+
+    def test_prefix_byte_repair_cannot_guess_delete_ranges_or_skip_later_bad_bytes(self):
+        raw = b"header\n\xcd" + "完整正文".encode("gb18030")
+        for removal in ({"offset": 7, "hex": "ce"}, {"offset": 7, "hex": "cdce"},
+                        {"offset": -1, "hex": "cd"}, {"offset": True, "hex": "cd"},
+                        {"offset": 4096, "hex": "cd"}, {"offset": len(raw), "hex": "cd"},
+                        {"offset": 7, "hex": "cd", "length": 20}, None):
+            with self.subTest(removal=removal), self.assertRaises((UnicodeError, TextEncodingError)):
+                normalize_utf8(raw, encoding="gb18030", remove_prefix_byte=removal)
+        with self.assertRaises(TextEncodingError):
+            normalize_utf8(raw, remove_prefix_byte={"offset": 7, "hex": "cd"})
+
 
 class TextStreamPublicationTests(unittest.TestCase):
     def test_download_strips_authorization_on_signed_host_redirects_and_keeps_size_bound(self):
@@ -180,6 +208,17 @@ class TextStreamPublicationTests(unittest.TestCase):
             self.assertEqual(Path(files[entry["object"]]).read_bytes().decode("utf-8-sig").encode("gb18030"), raw)
             self.assertEqual(entry["preserved_controls"], {"U+001A": 1})
             self.assertTrue(entry["source_roundtrip_verified"])
+
+    def test_reviewed_prefix_repair_is_not_misreported_as_unchanged_utf8(self):
+        item = {"repo": "VoiceOfML/Test", "path": "reviewed.txt", "extension": "txt", "revision": "a" * 40}
+        raw = b"\xffComplete UTF-8 body\r\n"
+        options = {"encoding": "utf-8", "remove_prefix_byte": {"offset": 0, "hex": "ff"}}
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(stream, "download", side_effect=lambda url, target, token: target.write_bytes(raw)):
+            entry, files = stream.build_one(item, Path(directory), None, stream.TARGET_BUCKET, options,
+                                            skip_utf8=True, expected_sha256=hashlib.sha256(raw).hexdigest())
+            self.assertEqual(Path(files[entry["object"]]).read_bytes(), codecs.BOM_UTF8 + raw[1:])
+            self.assertEqual(entry["removed_prefix_byte"], {"offset": 0, "hex": "ff"})
 
     def test_override_apply_requires_exact_checksum_selection_before_download(self):
         with tempfile.TemporaryDirectory() as directory:

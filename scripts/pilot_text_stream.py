@@ -166,12 +166,19 @@ def encoding_options(value) -> dict:
         return {}
     if isinstance(value, str) and value:
         return {"encoding": value}
-    if (isinstance(value, dict) and set(value) <= {"encoding", "preserve_controls"}
+    if (isinstance(value, dict) and set(value) <= {"encoding", "preserve_controls", "remove_prefix_byte"}
             and isinstance(value.get("encoding"), str) and value["encoding"]
             and ("preserve_controls" not in value or
                  isinstance(value["preserve_controls"], dict) and value["preserve_controls"]
                  and all(key == "U+001A" and type(count) is int and count > 0
-                         for key, count in value["preserve_controls"].items()))):
+                         for key, count in value["preserve_controls"].items()))
+            and ("remove_prefix_byte" not in value or
+                 isinstance(value["remove_prefix_byte"], dict)
+                 and set(value["remove_prefix_byte"]) == {"offset", "hex"}
+                 and type(value["remove_prefix_byte"]["offset"]) is int
+                 and 0 <= value["remove_prefix_byte"]["offset"] < 4096
+                 and isinstance(value["remove_prefix_byte"]["hex"], str)
+                 and re.fullmatch(r"[0-9a-f]{2}", value["remove_prefix_byte"]["hex"]))):
         return value
     raise ValueError("invalid exact-source encoding/control override")
 
@@ -187,7 +194,7 @@ def build_one(item: dict, work: Path, token: str | None, bucket: str,
     if expected_sha256 is not None and source_digest != expected_sha256:
         raise ValueError("source checksum differs from the approved selection")
     normalized, metadata = normalize_utf8(raw, hint=item["path"].rsplit("/", 1)[-1], **encoding_options(encoding))
-    if skip_utf8 and metadata["source_encoding"] in {"utf-8", "utf-8-sig"}:
+    if skip_utf8 and metadata["source_encoding"] in {"utf-8", "utf-8-sig"} and "removed_prefix_byte" not in metadata:
         raise Utf8SourceUnchanged({"key": f"{item['repo']}\0{item['path']}",
             "source_revision": item["revision"], "source_sha256": source_digest,
             "source_bytes": len(raw), "source_encoding": metadata["source_encoding"]})
@@ -399,7 +406,8 @@ def main() -> int:
             report["converted"] += len(entries)
             report["converted_sources"].extend({key:entry[key] for key in
                 ("key", "source_revision", "source_sha256", "source_encoding", "encoding_decision",
-                 "object", "manifest", "sha256", "bytes", "characters", "preserved_controls", "source_roundtrip_verified")
+                 "object", "manifest", "sha256", "bytes", "characters", "preserved_controls", "source_roundtrip_verified",
+                 "removed_prefix_byte", "normalization_recipe")
                  if key in entry} for entry in entries)
             report["failures"].extend(failures)
             save()

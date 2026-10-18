@@ -134,7 +134,19 @@ def decode_source_text(raw: bytes, *, hint: str = "", encoding: str | None = Non
 
 
 def normalize_utf8(raw: bytes, *, hint: str = "", encoding: str | None = None,
-                   preserve_controls: dict | None = None) -> tuple[bytes, dict]:
+                   preserve_controls: dict | None = None,
+                   remove_prefix_byte: dict | None = None) -> tuple[bytes, dict]:
+    original = raw
+    if remove_prefix_byte is not None:
+        removal = remove_prefix_byte
+        if (not encoding or not isinstance(removal, dict) or set(removal) != {"offset", "hex"}
+                or type(removal["offset"]) is not int or not 0 <= removal["offset"] < min(4096, len(raw))
+                or not isinstance(removal["hex"], str) or not re.fullmatch(r"[0-9a-f]{2}", removal["hex"])):
+            raise TextEncodingError("prefix-byte repair needs explicit encoding and one exact reviewed byte within 4096 bytes")
+        offset = removal["offset"]
+        if raw[offset:offset + 1].hex() != removal["hex"]:
+            raise TextEncodingError("reviewed prefix byte does not match source")
+        raw = raw[:offset] + raw[offset + 1:]
     text, source_encoding, decision = decode_source_text(raw, hint=hint, encoding=encoding,
                                                        preserve_controls=preserve_controls)
     normalized = UTF8_BOM + text.encode("utf-8", errors="strict")
@@ -145,6 +157,13 @@ def normalize_utf8(raw: bytes, *, hint: str = "", encoding: str | None = None,
                 "characters": len(text)}
     if preserve_controls:
         metadata["preserved_controls"] = dict(preserve_controls)
-    if source_encoding == "windows-936" or preserve_controls:
+    if remove_prefix_byte is not None:
+        retained = (b"\x80".join(part.encode("gbk", errors="strict") for part in text.split("€"))
+                    if source_encoding == "windows-936" else text.encode(source_encoding, errors="strict"))
+        if retained != raw or retained[:offset] + bytes.fromhex(removal["hex"]) + retained[offset:] != original:
+            raise TextEncodingError("reviewed prefix repair does not reconstruct the complete original")
+        metadata["removed_prefix_byte"] = dict(removal)
+        metadata["normalization_recipe"] = "strict-decode-with-reviewed-prefix-byte-removal-v1"
+    if source_encoding == "windows-936" or preserve_controls or remove_prefix_byte is not None:
         metadata["source_roundtrip_verified"] = True
     return normalized, metadata
