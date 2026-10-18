@@ -97,7 +97,8 @@ class AutomationTests(unittest.TestCase):
             "primary": {"bucket": "vomebook/pdf-pages-v2", "path": "objects/aa/" + "a" * 64 + "/" +
                         auto.text.digest({"primary": 1})[:16] + "/document.pdf",
                         "sha256": "a" * 64, "bytes": 100, "role": "runtime"}})
-        self.add_entries({**book, "status": "rendered"})
+        pending = {k: v for k, v in book.items() if not k.startswith("ocr_manifest")}
+        self.add_entries({**pending, "status": "rendered"})
         self.store.objects[(publication.ASSETS, auto.RENDER_REGISTRY)] = publication.encode(
             {"version": 1, "files": {book["key"]: book}})
         report = auto.wave(self.store, apply=True, now=self.now, preview_first=True)
@@ -106,6 +107,13 @@ class AutomationTests(unittest.TestCase):
         self.assertTrue(task["spec"]["preview_only"])
         self.assertNotIn("ocr_manifest", task["spec"])
         self.assertEqual(task["page_count"], book["page_count"])
+        # An older retained OCR route must not be hidden behind an image-only
+        # override even if some producer left a non-ready status on the entry.
+        for status in ("rendered", "failed"):
+            state = {"version": 1, "kind": "reader-v3-automation", "tasks": {}, "days": {}}
+            auto.discover(state, {"version": 1, "files": {book["key"]: {**book, "status": status}}},
+                          {"version": 1, "files": {book["key"]: book}})
+            self.assertEqual(state["tasks"], {})
 
     def test_preview_ready_book_can_receive_text_but_existing_ready_text_is_protected(self):
         book = entry(count=1)
@@ -223,7 +231,8 @@ class WaveTests(unittest.TestCase):
         registry = json.loads(self.store.objects[(publication.ASSETS, auto.REGISTRY)])
         rendered = {book["key"]: book for book in books}
         for book in books:
-            registry["files"][book["key"]] = {**book, "status": "rendered"}
+            pending = {k: v for k, v in book.items() if not k.startswith("ocr_manifest")}
+            registry["files"][book["key"]] = {**pending, "status": "rendered"}
         self.store.objects[(publication.ASSETS, auto.REGISTRY)] = publication.encode(registry)
         self.store.objects[(publication.ASSETS, auto.RENDER_REGISTRY)] = publication.encode({"version": 1, "files": rendered})
         planned = auto.wave(self.store, apply=True, now=self.now, wave_size=4, preview_first=True)

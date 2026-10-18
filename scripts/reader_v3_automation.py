@@ -173,7 +173,9 @@ def discover(state, registry, rendered=None):
         for key, entry in sorted(rendered["files"].items()):
             # A ready text package goes directly through the full builder. Never
             # replace it with an image-only candidate just to show a fast count.
-            if registry["files"].get(key, {}).get("status") in {"ready", "skipped"} or entry.get("status") != "ready":
+            existing = registry["files"].get(key, {})
+            if (existing.get("status") in {"ready", "skipped", "failed"} or existing.get("ocr_manifest")
+                    or existing.get("text_layer") or entry.get("status") != "ready"):
                 continue
             try:
                 spec, count = primary_spec(key, entry)
