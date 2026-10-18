@@ -1,0 +1,80 @@
+name: Search Spaces · CI
+
+on:
+  schedule:
+    - cron: "23 4 * * *"
+  workflow_dispatch:
+  repository_dispatch:
+    types: [search-spaces-changed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: search-spaces-ci
+  cancel-in-progress: true
+
+jobs:
+  static-contracts:
+    name: ${{ matrix.name }} static contracts
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: CCRD
+            repo: vomebook/Search
+            files: >-
+              ["static/app.js","static/index.html","static/style.css","static/sw.js",
+               "tests/test_search.py","app.py","build_fulltext_db.py","ocr_release.py",
+               "Dockerfile","start.sh","requirements-test.txt"]
+            test: python3 -B -m unittest -v tests.test_search.FrontendContractTests
+          - name: BHA
+            repo: vomebook/bha-search
+            files: >-
+              ["static/app.js","static/index.html","static/style.css","static/sw.js",
+               "tests/test_frontend.py","app/__init__.py","app/config.py","requirements-test.txt"]
+            test: APP_ROOT="$PWD" python3 -B -m unittest -v tests.test_frontend
+    steps:
+      - name: Checkout pipeline
+        uses: actions/checkout@v7
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: "26.11.1"
+      - name: Fetch current Space sources and tests
+        env:
+          SPACE_REPO: ${{ matrix.repo }}
+          SPACE_FILES: ${{ matrix.files }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          from urllib.parse import quote
+          from urllib.request import Request, urlopen
+
+          root = Path("space")
+          repo = os.environ["SPACE_REPO"]
+          files = json.loads(os.environ["SPACE_FILES"])
+          for name in files:
+              target = root / name
+              target.parent.mkdir(parents=True, exist_ok=True)
+              url = f"https://huggingface.co/spaces/{repo}/resolve/main/{quote(name, safe='/')}?download=true"
+              request = Request(url, headers={"User-Agent": "vomebook-search-spaces-ci"})
+              with urlopen(request, timeout=120) as response:
+                  target.write_bytes(response.read())
+          PY
+      - name: Install test dependencies
+        working-directory: space
+        run: python3 -m pip install -r requirements-test.txt
+      - name: Check JavaScript syntax
+        working-directory: space
+        run: node --check static/app.js
+      - name: Run frontend contract tests
+        working-directory: space
+        run: ${{ matrix.test }}
