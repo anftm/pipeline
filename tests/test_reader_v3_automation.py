@@ -139,10 +139,80 @@ class WaveTests(unittest.TestCase):
         self.assertFalse(report["changed"])
         state = auto.load_state(self.store)
         self.assertEqual(sum(t["status"] == "building" for t in state["tasks"].values()), 2)
-        # In-flight builds are not charged or dispatched again.
+        # Any unfinished wave blocks the next wave, even for different books.
         again = auto.wave(self.store, apply=True, now=self.now, wave_size=8)
-        self.assertEqual(len(again["wave"]), 1)
-        self.assertEqual(again["budget"]["attempts"], 3)
+        self.assertEqual(again["wave"], [])
+        self.assertTrue(again["admission_blocked"])
+        self.assertEqual(again["inflight"], 2)
+        self.assertEqual(again["budget"]["attempts"], 2)
+
+    def test_live_or_queued_builders_block_timeouts_and_all_new_admission(self):
+        first = auto.wave(self.store, apply=True, now=self.now, wave_size=1)["wave"]
+        before = auto.load_state(self.store)["days"]
+        active = [{"run_id": 123, "tasks": first}]
+        for apply in (False, True):
+            report = auto.wave(self.store, apply=apply, now=self.now + auto.BUILD_TIMEOUT,
+                               wave_size=2, build_runs=active)
+            self.assertEqual(report["wave"], [])
+            self.assertEqual(report["collected"], [])
+            self.assertTrue(report["admission_blocked"])
+        state = auto.load_state(self.store)
+        self.assertEqual(state["days"], before)
+        self.assertEqual(state["tasks"][first[0]["identity"]]["status"], "building")
+        # A GitHub wave can still be finishing its jobs after its records arrive.
+        state["tasks"][first[0]["identity"]]["status"] = "published"
+        self.store.objects[(publication.ASSETS, auto.STATE)] = publication.encode(state)
+        report = auto.wave(self.store, apply=True, now=self.now, build_runs=active)
+        self.assertEqual(report["wave"], [])
+
+    def test_cancelled_unstarted_dispatches_reuse_charge_and_attempt_after_drain(self):
+        wave = auto.wave(self.store, apply=True, now=self.now, wave_size=3)["wave"]
+        before = auto.load_state(self.store)
+        cancelled = {"id": 123, "repository": {"full_name": "anftm/pipeline"},
+                     "path": ".github/workflows/reader-v3-build.yml", "head_branch": "main",
+                     "event": "workflow_dispatch", "status": "completed", "conclusion": "cancelled",
+                     "run_attempt": 1}
+        options = {"queue": "build-dispatch", "cancelled_run_ids": [123], "tasks": wave[1:]}
+        def github(path):
+            return {"jobs": [], "total_count": 0} if "/jobs?" in path else cancelled
+        with patch.object(auto, "github", side_effect=github), \
+                patch.object(auto, "active_builds", return_value=[{"run_id": 456, "tasks": wave[:1]}]), \
+                patch.dict("os.environ", {"GITHUB_ACTOR": "operator"}):
+            report = auto.retry(self.store, options, apply=True)
+        self.assertEqual(report["recovered"], wave[1:])
+        state = auto.load_state(self.store)
+        self.assertEqual(state["days"], before["days"])
+        self.assertTrue(all(state["tasks"][t["identity"]]["status"] == "dispatch-pending" for t in wave[1:]))
+        blocked = auto.wave(self.store, apply=True, now=self.now, wave_size=3)
+        self.assertEqual(blocked["wave"], [])
+        # Simulate collection of the retained active task. At the budget ceiling
+        # the precharged queued work must still resume using its original attempt.
+        state = auto.load_state(self.store)
+        state["tasks"][wave[0]["identity"]]["status"] = "published"
+        state["days"][self.now.date().isoformat()] = {"attempts": auto.DAILY_ATTEMPTS, "pages": auto.DAILY_PAGES}
+        self.store.objects[(publication.ASSETS, auto.STATE)] = publication.encode(state)
+        resumed = auto.wave(self.store, apply=True, now=self.now, wave_size=3)
+        self.assertEqual(resumed["wave"], wave[1:])
+        self.assertEqual(resumed["budget"], state["days"][self.now.date().isoformat()])
+        self.assertEqual(auto.load_state(self.store)["dispatch_recoveries"][0]["cancelled_run_ids"], [123])
+
+    def test_dispatch_recovery_refuses_active_jobs_or_uninspectable_queues(self):
+        first = auto.wave(self.store, apply=True, now=self.now, wave_size=1)["wave"]
+        options = {"queue": "build-dispatch", "cancelled_run_ids": [123], "tasks": first}
+        cancelled = {"id": 123, "repository": {"full_name": "anftm/pipeline"},
+                     "path": ".github/workflows/reader-v3-build.yml", "head_branch": "main",
+                     "event": "workflow_dispatch", "status": "completed", "conclusion": "cancelled",
+                     "run_attempt": 1}
+        def github(path):
+            return {"jobs": [], "total_count": 0} if "/jobs?" in path else cancelled
+        before = copy.deepcopy(self.store.objects)
+        for active in ([{"run_id": 456, "tasks": first}], [{"run_id": 456, "tasks": []}]):
+            with patch.object(auto, "github", side_effect=github), \
+                    patch.object(auto, "active_builds", return_value=active), \
+                    patch.dict("os.environ", {"GITHUB_ACTOR": "operator"}):
+                with self.assertRaises(ValueError):
+                    auto.retry(self.store, options, apply=True)
+        self.assertEqual(self.store.objects, before)
 
     def test_builder_records_are_collected_promoted_and_failures_retried(self):
         fixture = fixtures.V3PublicationTests()
@@ -156,6 +226,10 @@ class WaveTests(unittest.TestCase):
             self.store.allowed = False  # builders are not the serialized writer
             self.store.assert_candidate_builder = lambda protocol: None
             auto.build_task(self.store, first["identity"], first["attempt"], build=Mock(return_value=staged))
+            duplicate = Mock()
+            recorded = auto.build_task(self.store, first["identity"], first["attempt"], build=duplicate)
+            self.assertEqual(recorded["status"], "staged")
+            duplicate.assert_not_called()
             auto.build_task(self.store, second["identity"], second["attempt"], build=Mock(side_effect=OSError()))
             stale = auto.build_task(self.store, second["identity"], 99, build=Mock())
             self.assertEqual(stale["status"], "stale")
@@ -213,6 +287,11 @@ class WaveTests(unittest.TestCase):
         self.assertEqual(build["jobs"]["build"]["strategy"]["max-parallel"], 1)
         self.assertIn("build-task", build["jobs"]["build"]["steps"][-1]["run"])
         self.assertIn("operation=auto", build["jobs"]["promote"]["steps"][0]["run"])
+        self.assertIn("!cancelled()", build["jobs"]["promote"]["if"])
+        self.assertIn("needs.build.result != 'cancelled'", build["jobs"]["promote"]["if"])
+        publish = yaml.safe_load((root / ".github/workflows/reader-v3-publish.yml").read_text())
+        operation = next(step for step in publish["jobs"]["publish"]["steps"] if step.get("id") == "operation")
+        self.assertEqual(operation["env"]["GH_TOKEN"], "${{ github.token }}")
         env = {"GITHUB_ACTIONS": "true", "GITHUB_REPOSITORY": "anftm/pipeline", "GITHUB_RUN_ID": "1",
                "GITHUB_WORKFLOW_REF": "anftm/pipeline/.github/workflows/reader-v3-build.yml@refs/heads/main",
                "READER_V3_BUILD_PROTOCOL": publication.BUILD_PROTOCOL, "GITHUB_WORKFLOW": "Build v3 Reading Candidates"}

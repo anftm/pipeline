@@ -48,7 +48,10 @@ jobs:
 
   promote:
     needs: build
-    if: always() && github.repository == 'anftm/pipeline' && vars.READER_V3_AUTO_PAUSED != 'true'
+    if: >-
+      always() && !cancelled() && needs.build.result != 'cancelled' &&
+      needs.build.result != 'skipped' && github.repository == 'anftm/pipeline' &&
+      vars.READER_V3_AUTO_PAUSED != 'true'
     runs-on: ubuntu-24.04
     steps:
       - name: Promote staged candidates and plan the next wave under the writer lock

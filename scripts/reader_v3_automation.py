@@ -9,6 +9,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import re
+import subprocess
 import tempfile
 import time
 from urllib.parse import unquote, urlsplit
@@ -59,6 +60,8 @@ def save_state(store, state):
 def retry(store, options, *, apply=False):
     """Explicit operator retry preserves history and the already charged day budget."""
     queue = options.get("queue", "build")
+    if queue == "build-dispatch":
+        return recover_dispatches(store, options, apply=apply)
     if queue == "correction":
         try:
             from . import reader_v3_correction as correction
@@ -154,7 +157,7 @@ def discover(state, registry):
         state["tasks"].setdefault(identity, {"spec": spec, "page_count": count, "status": "pending", "attempts": 0})
     for identity, task in state["tasks"].items():
         if identity not in active_identities and task["status"] in {
-                "pending", "retry", "building", "needs-review"} and not task.get("candidate"):
+                "pending", "retry", "building", "dispatch-pending", "needs-review"} and not task.get("candidate"):
             task["status"] = "superseded"
     return ignored
 
@@ -178,6 +181,11 @@ def _eligible(state, catalog, budget, now, priority_source=None, *, skip_buildin
             continue
         if skip_building and task["status"] == "building" and not task.get("candidate"):
             continue
+        if task["status"] == "dispatch-pending" and not task.get("candidate"):
+            # A cancelled zero-job dispatch already paid for this attempt. Reuse
+            # it even at the daily/attempt ceiling, without another charge.
+            eligible.append((identity, task))
+            continue
         if not task.get("candidate") and task["attempts"] >= MAX_ATTEMPTS:
             task["status"] = "failed"
             continue
@@ -189,7 +197,8 @@ def _eligible(state, catalog, budget, now, priority_source=None, *, skip_buildin
               and budget["pages"] + task["page_count"] <= DAILY_PAGES):
             eligible.append((identity, task))
     eligible.sort(key=lambda pair: (pair[1]["spec"]["source_sha256"] != priority_source,
-                                    not bool(pair[1].get("candidate")), pair[1]["page_count"], pair[0]))
+                                    not bool(pair[1].get("candidate")),
+                                    pair[1]["status"] != "dispatch-pending", pair[1]["page_count"], pair[0]))
     return eligible
 
 
@@ -224,7 +233,115 @@ def build_path(identity):
     return f"{BUILDS}/{text.sha(identity)}.json"
 
 
-def wave(store, *, apply=False, priority_source=None, now=None, wave_size=WAVE_SIZE):
+def github(path):
+    """Bounded, repository-scoped read; an API failure must not open admission."""
+    if os.environ.get("GITHUB_REPOSITORY") != "anftm/pipeline":
+        raise RuntimeError("v3 build queue inspection requires the central repository")
+    result = subprocess.run(["gh", "api", "repos/anftm/pipeline/" + path],
+                            capture_output=True, text=True, timeout=60)
+    if result.returncode:
+        raise RuntimeError("cannot verify v3 build queue; refusing new admission")
+    return json.loads(result.stdout)
+
+
+def build_jobs(run):
+    if (run.get("repository", {}).get("full_name", "").lower() != "anftm/pipeline"
+            or run.get("path") != ".github/workflows/reader-v3-build.yml"
+            or run.get("head_branch") != "main"
+            or run.get("event") != "workflow_dispatch"):
+        raise ValueError("v3 build run identity mismatch")
+    jobs, page = [], 1
+    while True:
+        data = github(f"actions/runs/{run['id']}/jobs?per_page=100&page={page}")
+        jobs.extend(data["jobs"])
+        if len(jobs) >= data["total_count"]:
+            return jobs
+        if not data["jobs"]:
+            raise ValueError("incomplete v3 build job listing")
+        page += 1
+
+
+def active_builds():
+    """Include queued waves, but not a finished wave's callback-only job."""
+    runs = {}
+    for status in ("pending", "queued", "in_progress"):
+        page = 1
+        while True:
+            data = github(f"actions/workflows/reader-v3-build.yml/runs?status={status}&per_page=100&page={page}")
+            runs.update((run["id"], run) for run in data["workflow_runs"])
+            if len(data["workflow_runs"]) < 100:
+                break
+            page += 1
+    active = []
+    for run in runs.values():
+        jobs = build_jobs(run)
+        builders = [job for job in jobs if job["name"].startswith("build (")]
+        if jobs and not builders:
+            raise ValueError("cannot identify v3 build jobs")
+        if not jobs or any(job["status"] != "completed" for job in builders):
+            tasks = []
+            for job in builders:
+                match = re.fullmatch(r"build \(([1-9][0-9]*), ([0-9a-f]{64})\)", job["name"])
+                if not match:
+                    raise ValueError("cannot identify active v3 build task")
+                tasks.append({"identity": match[2], "attempt": int(match[1])})
+            active.append({"run_id": run["id"], "tasks": tasks})
+    return active
+
+
+def recover_dispatches(store, options, *, apply=False):
+    """Return only verified cancelled/unstarted work to the bounded dispatcher.
+
+    No source, candidate, failure history or charged attempt is discarded. A
+    replacement dispatch uses the same attempt rather than calling model OCR.
+    """
+    if apply:
+        publication.assert_writer(store)
+    actor = os.environ.get("GITHUB_ACTOR", "").strip()
+    runs, requested = options.get("cancelled_run_ids"), options.get("tasks")
+    if (not actor or not isinstance(runs, list) or not runs or len(runs) > 256
+            or any(type(run) is not int or run < 1 for run in runs) or len(set(runs)) != len(runs)
+            or not isinstance(requested, list) or not requested or len(requested) > 256):
+        raise ValueError("explicit cancelled dispatches and task attempts required")
+    for run_id in runs:
+        run = github(f"actions/runs/{run_id}")
+        if (run.get("status") != "completed" or run.get("conclusion") != "cancelled"
+                or run.get("run_attempt") != 1 or build_jobs(run)):
+            raise ValueError("dispatch recovery requires cancelled first-attempt runs with zero jobs")
+    active = active_builds()
+    if any(not run["tasks"] for run in active):
+        raise ValueError("unplanned build run still queued; refusing dispatch recovery")
+    protected = {task["identity"] for run in active for task in run["tasks"]}
+    state = copy.deepcopy(load_state(store))
+    recovered, retained, seen = [], [], set()
+    for item in requested:
+        identity, attempt = text.sha(item.get("identity")), item.get("attempt")
+        if identity in seen or type(attempt) is not int or attempt < 1 or identity in protected:
+            raise ValueError("invalid, duplicate or active dispatch recovery task")
+        seen.add(identity)
+        task = state["tasks"][identity]
+        if task.get("attempts") != attempt or task.get("status") != "building" or task.get("candidate"):
+            raise ValueError("dispatch recovery task changed since inspection")
+        try:
+            record = json.loads(store.read_bytes(publication.ASSETS, build_path(identity)))
+        except FileNotFoundError:
+            record = None
+        if record and record.get("attempt") == attempt:
+            # The normal collector owns completed results, never reset them.
+            retained.append(item)
+            continue
+        task["status"] = "dispatch-pending"
+        recovered.append(item)
+    report = {"applied": apply, "queue": "build-dispatch", "cancelled_run_ids": runs,
+              "recovered": recovered, "retained_results": retained, "actor": actor, "at": clock().isoformat()}
+    if apply:
+        state.setdefault("dispatch_recoveries", []).append({k: v for k, v in report.items() if k != "applied"})
+        save_state(store, state)
+    return report
+
+
+def wave(store, *, apply=False, priority_source=None, now=None, wave_size=WAVE_SIZE,
+         build_runs=None):
     """Serialized step: collect parallel build results, promote them, plan the next wave.
 
     Runs under reader-sidecar. It never builds; ``build_task`` does that in the
@@ -234,6 +351,8 @@ def wave(store, *, apply=False, priority_source=None, now=None, wave_size=WAVE_S
         raise ValueError("v3 build wave size must be 1..32")
     if apply:
         publication.assert_writer(store)
+    if build_runs is None:
+        build_runs = active_builds() if isinstance(store, publication.CentralHubStore) else []
     state = copy.deepcopy(load_state(store))
     ignored = discover(state, json.loads(store.read_bytes(publication.ASSETS, REGISTRY)))
     now = now or clock()
@@ -248,7 +367,9 @@ def wave(store, *, apply=False, priority_source=None, now=None, wave_size=WAVE_S
             record = None
         if record is None or record.get("attempt") != task["attempts"]:
             started = datetime.fromisoformat(task.get("started_at") or "1970-01-01T00:00:00+00:00")
-            if now - started >= BUILD_TIMEOUT:
+            # Admission time is not execution time. A matrix job may wait hours
+            # behind its siblings; never expire or retry it while a builder runs.
+            if not build_runs and now - started >= BUILD_TIMEOUT:
                 _fail(task, "BuildTimeout", False, now)
                 collected.append({"id": identity, "status": task["status"], "error_type": "BuildTimeout"})
             continue
@@ -259,10 +380,15 @@ def wave(store, *, apply=False, priority_source=None, now=None, wave_size=WAVE_S
         collected.append({"id": identity, "status": task["status"], "error_type": task.get("error_type")})
     _, catalog = publication.current(store)
     eligible = _eligible(state, catalog, budget, now, priority_source, skip_building=True)
+    inflight = [identity for identity, task in state["tasks"].items()
+                if task["status"] == "building" and not task.get("candidate")]
+    blocked = bool(build_runs or inflight)
     report = {"applied": apply, "tasks": len(state["tasks"]), "ignored": ignored, "eligible": len(eligible),
-              "budget": budget, "collected": collected, "processed": [], "wave": [], "changed": False}
+              "budget": budget, "collected": collected, "processed": [], "wave": [], "changed": False,
+              "inflight": len(inflight), "active_build_runs": [run["run_id"] for run in build_runs],
+              "admission_blocked": blocked}
     if not apply:
-        report["next"] = [identity for identity, _ in eligible[:wave_size]]
+        report["next"] = [] if blocked else [identity for identity, _ in eligible[:wave_size]]
         return report
     save_state(store, state)
     for identity, task in [pair for pair in eligible if pair[1].get("candidate")]:
@@ -273,12 +399,15 @@ def wave(store, *, apply=False, priority_source=None, now=None, wave_size=WAVE_S
             _fail(task, type(error).__name__, isinstance(error, publication.PublicationReviewRequired), now)
         save_state(store, state)
         report["processed"].append({"id": identity, "status": task["status"], "error_type": task.get("error_type")})
-    for identity, task in [pair for pair in eligible if not pair[1].get("candidate")]:
-        if len(report["wave"]) >= wave_size or budget["attempts"] >= DAILY_ATTEMPTS:
+    for identity, task in ([] if blocked else [pair for pair in eligible if not pair[1].get("candidate")]):
+        if len(report["wave"]) >= wave_size:
             break
-        if budget["pages"] + task["page_count"] > DAILY_PAGES:
-            continue
-        _charge(task, budget, now)
+        if task["status"] == "dispatch-pending":
+            task.update(status="building", started_at=now.isoformat())
+        else:
+            if budget["attempts"] >= DAILY_ATTEMPTS or budget["pages"] + task["page_count"] > DAILY_PAGES:
+                continue
+            _charge(task, budget, now)
         report["wave"].append({"identity": identity, "attempt": task["attempts"]})
     save_state(store, state)  # Charge before dispatch, including builds that never report.
     return report
@@ -291,6 +420,15 @@ def build_task(store, identity, attempt, *, build=None):
     task = load_state(store)["tasks"].get(identity)
     if not task or task["status"] != "building" or task["attempts"] != attempt or task.get("candidate"):
         return {"identity": identity, "attempt": attempt, "status": "stale"}
+    try:
+        prior = json.loads(store.read_bytes(publication.ASSETS, build_path(identity)))
+    except FileNotFoundError:
+        prior = None
+    if prior and prior.get("attempt") == attempt:
+        if (prior.get("identity") != identity or prior.get("kind") != "reader-v3-build"
+                or prior.get("status") not in {"staged", "failed", "needs-review"}):
+            raise ValueError("invalid existing v3 build result")
+        return prior
     record = {"version": 1, "kind": "reader-v3-build", "identity": identity, "attempt": attempt,
               "run_id": os.environ.get("GITHUB_RUN_ID", ""), "resources": []}
     try:

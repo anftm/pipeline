@@ -57,6 +57,7 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_INPUT_TOKEN: ${{ secrets.HF_INPUT_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
           OCR_CORRECTION_API_BASE: ${{ secrets.OCR_CORRECTION_API_BASE }}
           OCR_CORRECTION_API_KEY: ${{ secrets.OCR_CORRECTION_API_KEY }}
           OPERATION: ${{ inputs.operation }}

@@ -11,15 +11,17 @@ from scripts import publish_search_reader_index as publication
 
 
 def condition(expression, *, operation='auto', changed='false', apply='true', paused='false',
-              event='workflow_dispatch', repository='anftm/pipeline'):
+              event='workflow_dispatch', repository='anftm/pipeline', build_result='success', cancelled=False):
     """Evaluate only our checked-in fixed Actions conditions, with no external data."""
     replacements = {
         'steps.operation.outputs.operation': operation, 'steps.operation.outputs.changed': changed,
         'steps.operation.outputs.apply': apply, 'vars.READER_V3_AUTO_PAUSED': paused,
         'inputs.operation': operation, 'github.event_name': event, 'github.repository': repository,
+        'needs.build.result': build_result,
     }
     for key in sorted(replacements, key=len, reverse=True):
         expression = expression.replace(key, repr(replacements[key]))
+    expression = expression.replace('!cancelled()', repr(not cancelled))
     expression = expression.replace('&&', ' and ').replace('||', ' or ').replace('always()', 'True')
     return bool(eval('(' + expression + ')', {'__builtins__': {}, 'fromJSON': json.loads, 'contains': lambda items, value: value in items}))
 
@@ -85,6 +87,11 @@ class ReaderProjectionSyncTests(unittest.TestCase):
         for job in build['jobs'].values():
             self.assertFalse(condition(job['if'], paused='true'))
             self.assertTrue(condition(job['if'], paused='false'))
+        callback = build['jobs']['promote']['if']
+        self.assertFalse(condition(callback, cancelled=True))
+        self.assertFalse(condition(callback, build_result='cancelled'))
+        self.assertFalse(condition(callback, build_result='skipped'))
+        self.assertTrue(condition(callback, build_result='failure'))
 
 
 if __name__ == '__main__':
