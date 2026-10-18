@@ -152,7 +152,10 @@ def directory_payloads(records: list[dict]) -> tuple[list[dict], dict]:
         return {"name": name, "path": path, "count": counts[path], "hasDirectFiles": bool(direct[path]),
                 "hasChildren": bool(children[path]), "showSelfToggle": bool(path and direct[path] and children[path]),
                 "children": [node(child, (path + "/" if path else "") + child) for child in sorted(children[path])]}
-    return [node(SOURCE_NAME, "")], dict(browser)
+    # The source slug identifies this collection. Do not add a synthetic
+    # `OCR成果/` directory above the preserved origin hierarchy; VoiceOfML,
+    # or any other source owner, is the actual top-level folder.
+    return [node(child, child) for child in sorted(children[""])], dict(browser)
 
 
 def zip_member(record: dict) -> str:
@@ -167,7 +170,7 @@ def zip_member(record: dict) -> str:
         return value
     parts = safe_path(record["display_rel_path"]).split("/")
     parts[-1] = component(PurePosixPath(parts[-1]).stem) + ".txt"
-    return "/".join([SOURCE_NAME, *[component(part) for part in parts[:-1]], parts[-1]])
+    return "/".join([component(part) for part in parts])
 
 
 def validate_database(path: Path, records: list[dict], text_root: Path) -> None:
