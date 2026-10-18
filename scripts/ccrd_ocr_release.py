@@ -16,7 +16,7 @@ import unicodedata
 BUCKET = "vomebook/ccrd-index"
 TOKENIZER = "cjk-bigram-boundary-fts5-v6-snippet-anchors"
 SOURCE = "OCR"
-SOURCE_NAME = "OCR成果"
+SOURCE_NAME = "VoiceOfML"
 
 
 def canonical(value) -> bytes:
