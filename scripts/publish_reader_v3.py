@@ -15,6 +15,10 @@ import tempfile
 import time
 from pathlib import Path
 import uuid
+from collections import OrderedDict
+import threading
+import shutil
+import weakref
 
 try:
     from . import pdf_reading_v3 as v3, pdf_text_layer as text, reader_lifecycle, shared, pdf_ocr, ocr_layout
@@ -210,9 +214,21 @@ def assert_stager(store):
 
 
 class CandidateReader:
-    def __init__(self, store, bundle=None):
+    def __init__(self, store, bundle=None, *, cache_bytes=128 * 1024 * 1024):
         self.store, self.bundle = store, bundle.resolve() if bundle else None
         self.refs, self.local = {}, {}
+        self.verified = set()
+        self.cache_bytes, self.cached_bytes = cache_bytes, 0
+        self.cache = OrderedDict()
+        self.cache_directory = Path(tempfile.mkdtemp(prefix="v3-verified-read-"))
+        self.cleanup_cache = weakref.finalize(self, shutil.rmtree, self.cache_directory, ignore_errors=True)
+        self.lock = threading.RLock()
+        self.read_stats = {"remote_reads": 0, "cache_hits": 0, "remote_bytes": 0}
+
+    def close(self):
+        self.cleanup_cache()
+        self.cache.clear()
+        self.cached_bytes = 0
 
     def __call__(self, ref):
         v3.resource(ref)
@@ -224,17 +240,45 @@ class CandidateReader:
                     r"documents/pdf/[a-z0-9_-]+/[0-9a-f]{64}/document\.pdf", ref["path"])):
             raise ValueError("runtime candidate resource lacks a public Reader path")
         key = (ref["bucket"], ref["path"])
-        if key in self.refs and self.refs[key]["sha256"] != ref["sha256"]:
-            raise ValueError("conflicting candidate reference digests")
-        self.refs[key] = dict(ref)
+        with self.lock:
+            if key in self.refs and any(self.refs[key][field] != ref[field] for field in ("sha256", "bytes")):
+                raise ValueError("conflicting candidate reference digests")
+            self.refs[key] = dict(ref)
         if self.bundle and ref["bucket"] == shared.PDF_PAGES_BUCKET:
             target = (self.bundle / ref["path"]).resolve()
             if not target.is_relative_to(self.bundle):
                 raise ValueError("candidate path escapes bundle")
             if target.is_file():
-                self.local[key] = target
-                return target.read_bytes()
-        return self.store.read_bytes(*key)
+                raw = target.read_bytes()
+                if len(raw) != ref["bytes"] or hashlib.sha256(raw).hexdigest() != ref["sha256"]:
+                    raise ValueError("candidate resource checksum mismatch")
+                with self.lock:
+                    self.local[key] = target
+                    self.verified.add(key)
+                return raw
+        with self.lock:
+            if key in self.cache:
+                self.read_stats["cache_hits"] += 1
+                cached, size = self.cache.pop(key)
+                self.cache[key] = (cached, size)
+                return cached.read_bytes()
+        raw = self.store.read_bytes(*key)
+        if len(raw) != ref["bytes"] or hashlib.sha256(raw).hexdigest() != ref["sha256"]:
+            raise ValueError("candidate resource checksum mismatch")
+        with self.lock:
+            self.verified.add(key)
+            self.read_stats["remote_reads"] += 1
+            self.read_stats["remote_bytes"] += len(raw)
+            if len(raw) <= self.cache_bytes and key not in self.cache:
+                while self.cached_bytes + len(raw) > self.cache_bytes:
+                    _, (old, size) = self.cache.popitem(last=False)
+                    old.unlink()
+                    self.cached_bytes -= size
+                target = self.cache_directory / text.digest(key)
+                target.write_bytes(raw)
+                self.cache[key] = (target, len(raw))
+                self.cached_bytes += len(raw)
+        return raw
 
     def closure(self):
         """Verify provenance/review dependencies too, preserving all named evidence."""
@@ -243,6 +287,11 @@ class CandidateReader:
             key = min(set(self.refs) - seen)
             seen.add(key)
             ref = self.refs[key]
+            if key in self.verified and not ref["path"].endswith((".json", ".json.gz")):
+                # Its complete exact bytes were already checked by this reader.
+                # Binary media have no nested dependencies; retain the pin but
+                # do not download/decode the same page again for graph traversal.
+                continue
             raw = v3.verified_read(ref, self)
             if not ref["path"].endswith((".json", ".json.gz")):
                 continue
@@ -265,11 +314,12 @@ class CandidateReader:
 
 
 def stage(store, ref, bundle=None, *, apply=False):
+    started = time.monotonic()
     validate_reading_ref(ref)
     reader = CandidateReader(store, bundle)
     manifest = v3.verify_reading(ref, reader)
-    if not manifest["preview"]["complete"] or not manifest.get("text_layer"):
-        raise ValueError("promotion candidate requires complete previews and text")
+    if not manifest["preview"]["complete"]:
+        raise ValueError("promotion candidate requires complete previews")
     reader.closure()
     body = {"version": 1, "kind": "reader-reading-candidate", "source_key": manifest["source_key"],
             "source_sha256": manifest["source_sha256"], "reading_generation": manifest["generation"],
@@ -279,9 +329,11 @@ def stage(store, ref, bundle=None, *, apply=False):
     path = f"reader-index/v3/candidates/{identity}.json"
     raw = encode(body)
     report = {"candidate": metadata(ASSETS, path, raw), "source_key": body["source_key"],
-              "page_count": body["page_count"], "resources_verified": len(reader.refs),
-              "local_objects": len(reader.local), "applied": apply}
+               "page_count": body["page_count"], "resources_verified": len(reader.refs),
+               "local_objects": len(reader.local), "applied": apply}
+    report["timings"] = {"verify_local_seconds": round(time.monotonic() - started, 3)}
     if not apply:
+        reader.close()
         return report
     assert_stager(store)
     roots = sorted({(bucket, "/".join(path.split("/")[:4])) for bucket, path in reader.local})
@@ -292,19 +344,44 @@ def stage(store, ref, bundle=None, *, apply=False):
         "v3-candidate-upload", {"repository": os.environ.get("GITHUB_REPOSITORY", ""),
                                 "run_id": os.environ.get("GITHUB_RUN_ID", "")})
     store.put_bytes(ASSETS, protection_path, encode(protection))
-    for index, key in enumerate(sorted(reader.local), 1):
-        immutable_put(store, *key, reader.local[key].read_bytes())
-        if index % 32 == 0:
-            protection = reader_lifecycle.heartbeat_processing(protection)
-            store.put_bytes(ASSETS, protection_path, encode(protection))
+    upload_started = time.monotonic()
+    batch_put = getattr(store, "put_files", None)
+    keys = sorted(reader.local)
+    for start in range(0, len(keys), 32):
+        chunk = keys[start:start + 32]
+        if callable(batch_put):
+            def inspect(key):
+                expected = reader.refs[key]
+                try:
+                    prior = store.read_bytes(*key)
+                except FileNotFoundError:
+                    return key
+                if len(prior) != expected["bytes"] or hashlib.sha256(prior).hexdigest() != expected["sha256"]:
+                    raise ValueError(f"immutable object conflict: {key[0]}:{key[1]}")
+                return None
+            missing = [key for key in shared.ordered_reads(inspect, chunk, 4) if key is not None]
+            for bucket in sorted({key[0] for key in missing}):
+                batch_put(bucket, [(str(reader.local[key]), key[1]) for key in missing if key[0] == bucket])
+        else:
+            for key in chunk:
+                immutable_put(store, *key, reader.local[key].read_bytes())
+        protection = reader_lifecycle.heartbeat_processing(protection)
+        store.put_bytes(ASSETS, protection_path, encode(protection))
     # Remote readback must stand on its own, not on the local upload workspace.
+    report["timings"]["upload_seconds"] = round(time.monotonic() - upload_started, 3)
+    readback_started = time.monotonic()
     remote = CandidateReader(store)
     v3.verify_reading(ref, remote)
     remote.closure()
+    report["timings"]["verify_remote_seconds"] = round(time.monotonic() - readback_started, 3)
+    report["reads"] = {"assembly": dict(reader.read_stats), "remote_readback": dict(remote.read_stats)}
+    remote.close()
+    reader.close()
     immutable_put(store, ASSETS, path, raw)
     protection.update(status="uploaded", updated_at=reader_lifecycle.now_iso(), candidate=report["candidate"])
     store.put_bytes(ASSETS, protection_path, encode(protection))
     report["processing_root"] = protection_path
+    report["timings"]["stage_total_seconds"] = round(time.monotonic() - started, 3)
     return report
 
 
@@ -365,6 +442,7 @@ def native_ocr(spec, workspace, primary, unusable="native rebuild source is not 
 
 def build_stage(store, spec, workspace, *, apply=False):
     """Explicit single-book generation from pinned PDF and complete OCR objects."""
+    started = time.monotonic()
     source = text.sha(spec.get("source_sha256"))
     key = spec.get("source_key")
     if not isinstance(key, str) or not key:
@@ -384,8 +462,36 @@ def build_stage(store, spec, workspace, *, apply=False):
         result = stage(store, ref, workspace, apply=apply)
         result.update(reading=ref, components=manifest["components"])
         return result
-    import_primary(spec, workspace)
+    if not spec.get("reuse_reading"):
+        import_primary(spec, workspace)
     reader = CandidateReader(store, workspace)
+    reuse = spec.get("reuse_reading")
+    previews = None
+    if reuse:
+        previous = v3.verify_reading(validate_reading_ref(reuse), reader)
+        if (previous["source_key"] != key or previous["source_sha256"] != source
+                or previous["primary"]["resource"] != spec["primary"] or not previous["preview"]["complete"]):
+            raise ValueError("preview reuse source mismatch")
+        previews = [entry for part in previous["preview"]["partitions"]
+                    for entry in v3.decode(v3.verified_read(part["resource"], reader))["pages"]]
+    if spec.get("preview_only"):
+        reading_spec = {"source_key": key, "source_sha256": source, "primary": spec["primary"],
+                        "require_complete_preview": True, "vector_previews": spec.get("vector_previews", False)}
+        preview_started = time.monotonic()
+        if previews is None:
+            reading_spec = v3.generate_previews(reading_spec, reader, workspace,
+                                               dpi=spec.get("dpi", 150), max_pixels=spec.get("max_pixels", 50000000))
+        else:
+            reading_spec["previews"] = previews
+        preview_seconds = time.monotonic() - preview_started
+        ref, manifest = v3.build_reading(reading_spec, reader, workspace)
+        reader.close()
+        result = stage(store, ref, workspace, apply=apply)
+        result.update(reading=ref, components=manifest["components"])
+        result["build"] = {"preview_only": True, "reused_preview_pages": len(previews or []),
+                           "preview_seconds": round(preview_seconds, 3),
+                           "total_seconds": round(time.monotonic() - started, 3)}
+        return result
     if spec.get("rebuild_native_text"):
         if spec.get("primary", {}).get("path") is None:
             raise ValueError("native rebuild requires primary PDF")
@@ -417,12 +523,21 @@ def build_stage(store, spec, workspace, *, apply=False):
     reading_spec = {"source_key": key, "source_sha256": source, "primary": spec["primary"],
                     "text_layer": text_ref, "require_complete_preview": True,
                     "vector_previews": spec.get("vector_previews", False)}
-    reading_spec = v3.generate_previews(reading_spec, reader, workspace,
-                                        dpi=spec.get("dpi", 150), max_pixels=spec.get("max_pixels", 50000000))
+    preview_started = time.monotonic()
+    if previews is None:
+        reading_spec = v3.generate_previews(reading_spec, reader, workspace,
+                                            dpi=spec.get("dpi", 150), max_pixels=spec.get("max_pixels", 50000000))
+    else:
+        reading_spec["previews"] = previews
+    preview_seconds = time.monotonic() - preview_started
     ref, manifest = v3.build_reading(reading_spec, reader, workspace)
+    reader.close()
     result = stage(store, ref, workspace, apply=apply)
     result["reading"] = ref
     result["components"] = manifest["components"]
+    result["build"] = {"preview_only": False, "reused_preview_pages": len(previews or []),
+                       "preview_seconds": round(preview_seconds, 3),
+                       "total_seconds": round(time.monotonic() - started, 3)}
     return result
 
 
@@ -436,7 +551,7 @@ def promote(store, candidate_ref, expected_parent, *, apply=False):
     verified = CandidateReader(store)
     manifest = v3.verify_reading(candidate["reading"], verified)
     verified.closure()
-    if (not manifest["preview"]["complete"] or not manifest.get("text_layer")
+    if (not manifest["preview"]["complete"]
             or candidate["source_key"] != manifest["source_key"]
             or candidate["reading_generation"] != manifest["generation"]
             or candidate["source_sha256"] != manifest["source_sha256"]):
@@ -448,9 +563,27 @@ def promote(store, candidate_ref, expected_parent, *, apply=False):
              "reading_generation": manifest["generation"], "page_count": manifest["page_count"],
              "components": manifest["components"]}
     if old["files"].get(key) == entry:
+        verified.close()
         return {"generation": parent, "applied": apply, "unchanged": True, "pointer": pointer}
     if parent != expected_parent:
         raise ValueError("stale expected parent; replan against current catalog")
+    previous_entry = old["files"].get(key)
+    if previous_entry and not manifest.get("text_layer"):
+        raise ValueError("preview-only publication cannot replace an existing reading")
+    if (previous_entry and previous_entry.get("components", {}).get("text") == "pending"):
+        previous = v3.verify_reading(previous_entry["resource"], verified)
+        def previews(value):
+            return [page for part in value["preview"]["partitions"]
+                    for page in v3.decode(v3.verified_read(part["resource"], verified))["pages"]]
+        same_map = (previous["page_map"] == manifest["page_map"] or
+                    v3.decode(v3.verified_read(previous["page_map"], verified)) ==
+                    v3.decode(v3.verified_read(manifest["page_map"], verified)))
+        if (previous["source_sha256"] != manifest["source_sha256"]
+                or previous["primary"] != manifest["primary"]
+                or not same_map
+                or previews(previous) != previews(manifest)):
+            raise ValueError("text upgrade must preserve the complete existing preview")
+    verified.close()
     files = {**old["files"], key: entry}
     catalog = {"version": 3, "kind": "reader-reading-catalog", "files": files,
                "parent_generation": parent}
@@ -689,6 +822,9 @@ def project_sidecar(sidecar, catalog):
 
 
 class CentralHubStore(HubBucketStore):
+    def put_files(self, bucket, additions):
+        shared.batch_bucket_files_with_retry(bucket, additions, self.token(bucket))
+
     def assert_serialized_writer(self, protocol):
         try:
             from .pdf_worker_lanes import load_config
@@ -766,7 +902,9 @@ def main():
             except ImportError:
                 from reader_v3_automation import wave
             report = wave(store, apply=args.apply, priority_source=priority,
-                          wave_size=options.get("wave_size", 8))
+                          wave_size=options.get("wave_size", 8), source_keys=options.get("source_keys"),
+                          promotion_limit=options.get("promotion_limit", 4),
+                          preview_first=options.get("preview_first", os.environ.get("READER_V3_PREVIEW_FIRST") == "true"))
     elif args.command == "build-task":
         try:
             from .reader_v3_automation import build_task

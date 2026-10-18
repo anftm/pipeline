@@ -86,6 +86,49 @@ class AutomationTests(unittest.TestCase):
         self.assertEqual(result["tasks"], 1)
         self.assertEqual(result["eligible"], 0)
 
+    def test_preview_admission_does_not_wait_for_ocr_and_ready_specs_keep_identity(self):
+        book = entry()
+        ready_spec, _ = auto.spec_for(book["key"], book)
+        self.assertEqual(ready_spec, {
+            "source_key": book["key"], "source_sha256": book["source_sha256"], "vector_previews": True,
+            "ocr_manifest": {"bucket": "vomebook/pdf-pages-v2", "path": book["ocr_manifest"],
+                             "sha256": book["ocr_manifest_sha256"], "bytes": book["ocr_manifest_bytes"], "role": "provenance"},
+            "primary_source": {"repo": book["repo"], "path": book["path"], "revision": book["source_revision"]},
+            "primary": {"bucket": "vomebook/pdf-pages-v2", "path": "objects/aa/" + "a" * 64 + "/" +
+                        auto.text.digest({"primary": 1})[:16] + "/document.pdf",
+                        "sha256": "a" * 64, "bytes": 100, "role": "runtime"}})
+        self.add_entries({**book, "status": "rendered"})
+        self.store.objects[(publication.ASSETS, auto.RENDER_REGISTRY)] = publication.encode(
+            {"version": 1, "files": {book["key"]: book}})
+        report = auto.wave(self.store, apply=True, now=self.now, preview_first=True)
+        self.assertEqual(len(report["wave"]), 1)
+        task = auto.load_state(self.store)["tasks"][report["wave"][0]["identity"]]
+        self.assertTrue(task["spec"]["preview_only"])
+        self.assertNotIn("ocr_manifest", task["spec"])
+        self.assertEqual(task["page_count"], book["page_count"])
+
+    def test_preview_ready_book_can_receive_text_but_existing_ready_text_is_protected(self):
+        book = entry(count=1)
+        self.add_entries(book)
+        fixture = fixtures.V3PublicationTests()
+        fixture.setUp()
+        try:
+            preview = fixture.preview_candidate(key=book["key"])
+            staged = publication.stage(self.store, preview, fixture.bundle, apply=True)
+            publication.promote(self.store, staged["candidate"], None, apply=True)
+            report = auto.wave(self.store, apply=True, now=self.now, wave_size=1)
+            self.assertEqual(len(report["wave"]), 1)
+            task_id = report["wave"][0]["identity"]
+            self.store.allowed = False
+            self.store.assert_candidate_builder = lambda protocol: None
+            builder = Mock(return_value=staged)
+            with patch.object(publication, "build_stage", builder):
+                auto.build_task(self.store, task_id, 1)
+            self.assertEqual(builder.call_args.args[1]["reuse_reading"], preview)
+            self.assertNotIn("preview_only", builder.call_args.args[1])
+        finally:
+            fixture.temp.cleanup()
+
     def test_unusable_converted_text_requires_review_without_repeated_builds(self):
         builder = Mock(side_effect=publication.PublicationReviewRequired())
         report = auto.run(self.store, apply=True, build=builder, now=self.now)
@@ -145,6 +188,47 @@ class WaveTests(unittest.TestCase):
         self.assertTrue(again["admission_blocked"])
         self.assertEqual(again["inflight"], 2)
         self.assertEqual(again["budget"]["attempts"], 2)
+
+    def test_unpublished_candidates_bound_the_next_wave_and_scoped_pilot_is_exact(self):
+        report = auto.wave(self.store, apply=True, now=self.now, wave_size=3)
+        state = auto.load_state(self.store)
+        for item in report["wave"]:
+            task = state["tasks"][item["identity"]]
+            task.update(status="staged", candidate={"path": "retained"})
+        extra = entry(key="VoiceOfML/books\0extra.pdf", source="f" * 64)
+        registry = json.loads(self.store.objects[(publication.ASSETS, auto.REGISTRY)])
+        registry["files"][extra["key"]] = extra
+        self.store.objects[(publication.ASSETS, auto.REGISTRY)] = publication.encode(registry)
+        self.store.objects[(publication.ASSETS, auto.STATE)] = publication.encode(state)
+        def promote(_store, task):
+            task["status"] = "published"
+        with patch.object(auto, "_promote", side_effect=promote):
+            report = auto.wave(self.store, apply=True, now=self.now, wave_size=3, promotion_limit=1)
+        self.assertEqual(len(report["processed"]), 1)
+        self.assertEqual(len(report["wave"]), 1)
+        state = auto.load_state(self.store)
+        self.assertEqual(sum(t["status"] in {"building", "staged"} for t in state["tasks"].values()), 3)
+        # A pilot selection cannot dispatch another source, charge it, or
+        # supersede its already existing pending task.
+        other = fixtures.Store()
+        other.objects[(publication.ASSETS, auto.REGISTRY)] = publication.encode(registry)
+        scoped = auto.wave(other, apply=True, now=self.now, source_keys=[extra["key"]])
+        self.assertEqual(len(scoped["wave"]), 1)
+        state = auto.load_state(other)
+        self.assertEqual(state["tasks"][scoped["wave"][0]["identity"]]["spec"]["source_key"], extra["key"])
+        self.assertEqual(sum(t["status"] == "pending" for t in state["tasks"].values()), 3)
+
+    def test_preview_and_complete_text_work_share_each_wave(self):
+        books = [entry(key=f"VoiceOfML/books\0preview-{i}.pdf", source=str(i + 3) * 64) for i in range(4)]
+        registry = json.loads(self.store.objects[(publication.ASSETS, auto.REGISTRY)])
+        rendered = {book["key"]: book for book in books}
+        for book in books:
+            registry["files"][book["key"]] = {**book, "status": "rendered"}
+        self.store.objects[(publication.ASSETS, auto.REGISTRY)] = publication.encode(registry)
+        self.store.objects[(publication.ASSETS, auto.RENDER_REGISTRY)] = publication.encode({"version": 1, "files": rendered})
+        planned = auto.wave(self.store, apply=True, now=self.now, wave_size=4, preview_first=True)
+        state = auto.load_state(self.store)
+        self.assertEqual(sum(bool(state["tasks"][item["identity"]]["spec"].get("preview_only")) for item in planned["wave"]), 2)
 
     def test_live_or_queued_builders_block_timeouts_and_all_new_admission(self):
         first = auto.wave(self.store, apply=True, now=self.now, wave_size=1)["wave"]
@@ -328,7 +412,7 @@ class WaveTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         build = yaml.safe_load((root / ".github/workflows/reader-v3-build.yml").read_text())
         self.assertEqual(build["concurrency"]["group"], "reader-v3-build")
-        self.assertEqual(build["jobs"]["build"]["strategy"]["max-parallel"], 1)
+        self.assertEqual(build["jobs"]["build"]["strategy"]["max-parallel"], 2)
         self.assertIn("build-task", build["jobs"]["build"]["steps"][-1]["run"])
         self.assertIn("operation=auto", build["jobs"]["promote"]["steps"][0]["run"])
         self.assertIn("!cancelled()", build["jobs"]["promote"]["if"])

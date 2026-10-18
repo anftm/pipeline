@@ -379,5 +379,134 @@ class V3PublicationTests(unittest.TestCase):
         self.assertEqual(report["components"]["text"], "ready")
         self.assertNotIn((publish.ASSETS, publish.POINTER), self.store.objects)
         publish.promote(self.store, report["candidate"], None, apply=True)
+
+    def preview_candidate(self, source="a" * 64, key="repo\0book.pdf"):
+        full = self.candidate(source, key)
+        manifest = v3.decode((self.bundle / full["path"]).read_bytes())
+        previews = [page for part in manifest["preview"]["partitions"]
+                    for page in v3.decode((self.bundle / part["resource"]["path"]).read_bytes())["pages"]]
+        spec = {"source_key": key, "source_sha256": source, "primary": manifest["primary"]["resource"],
+                "previews": previews, "require_complete_preview": True}
+        return v3.build_reading(spec, lambda ref: (self.bundle / ref["path"]).read_bytes(), self.bundle)[0]
+
+
+    def test_preview_can_publish_before_ocr_and_later_fill_text_without_rerender(self):
+        preview = self.preview_candidate()
+        staged = publish.stage(self.store, preview, self.bundle, apply=True)
+        first = publish.promote(self.store, staged["candidate"], None, apply=True)
+        before = v3.verify_reading(preview, lambda ref: self.store.read_bytes(ref["bucket"], ref["path"]))
+        self.assertIsNone(before["text_layer"])
+        self.assertEqual(before["components"]["text"], "pending")
+        self.assertEqual(before["components"]["preview"], "ready")
+        # The independently built text bundle uses exactly the existing page
+        # resources. No image/SVG generation is needed for this later upgrade.
+        full = self.candidate()
+        full_manifest = v3.decode((self.bundle / full["path"]).read_bytes())
+        ocr = {"source_sha256": "a" * 64, "page_count": 1, "text_layer": full_manifest["text_layer"]}
+        raw = publish.encode(ocr)
+        ocr_ref = publish.metadata(v3.shared.PDF_PAGES_BUCKET,
+                                  "objects/aa/" + "a" * 64 + "/" + "e" * 16 + "/ocr-manifest.json", raw, "provenance")
+        self.store.put_bytes(ocr_ref["bucket"], ocr_ref["path"], raw)
+        # Publish already-built text resources as an OCR assembler would.
+        publish.stage(self.store, full, self.bundle, apply=True)
+        spec = {"source_key": "repo\0book.pdf", "source_sha256": "a" * 64,
+                "primary": before["primary"]["resource"], "ocr_manifest": ocr_ref,
+                "reuse_reading": preview, "vector_previews": True}
+        with patch.object(v3, "generate_previews", side_effect=AssertionError("must reuse previews")):
+            upgraded = publish.build_stage(self.store, spec, self.bundle / "text-upgrade", apply=True)
+        publish.promote(self.store, upgraded["candidate"], first["generation"], apply=True)
+        active = publish.current(self.store)[1]["files"]["repo\0book.pdf"]
+        after = v3.verify_reading(active["resource"], lambda ref: self.store.read_bytes(ref["bucket"], ref["path"]))
+        self.assertEqual(after["text_layer"], full_manifest["text_layer"])
+        self.assertEqual(after["components"]["text"], "ready")
+        with self.assertRaisesRegex(ValueError, "preview-only publication cannot replace"):
+            publish.promote(self.store, staged["candidate"], publish.current(self.store)[0]["generation"], apply=True)
+
+
+    def test_preview_only_builder_never_requires_or_reads_ocr(self):
+        ref = self.candidate()
+        manifest = v3.decode((self.bundle / ref["path"]).read_bytes())
+        primary = manifest["primary"]["resource"]
+        self.store.put_bytes(primary["bucket"], primary["path"], (self.bundle / primary["path"]).read_bytes())
+        spec = {"source_key": "repo\0book.pdf", "source_sha256": "a" * 64,
+                "primary": primary, "preview_only": True, "vector_previews": True}
+        with patch.object(v3, "backfill_text", side_effect=AssertionError("must not require OCR")), \
+                patch.object(publish, "native_ocr", side_effect=AssertionError("must not extract text")):
+            result = publish.build_stage(self.store, spec, self.bundle / "preview-only", apply=True)
+        self.assertEqual(result["components"]["preview"], "ready")
+        self.assertEqual(result["components"]["text"], "pending")
+
+
+    def test_preview_only_catalog_and_inflight_task_keep_gc_reference_closure(self):
+        from tests.test_reader_gc_graph import MemoryStore
+        from scripts.reader_gc_graph import ReferenceGraph
+        preview = self.preview_candidate()
+        staged = publish.stage(self.store, preview, self.bundle, apply=True)
+        publish.promote(self.store, staged["candidate"], None, apply=True)
+        store = MemoryStore()
+        for (bucket, path), raw in self.store.objects.items():
+            store.objects[bucket][path] = raw
+        report = ReferenceGraph(store).build()
+        self.assertTrue(report["graph_complete"], report["blockers"])
+        self.assertTrue(all(not value["candidates"] for value in report["buckets"].values()))
+
+
+    def test_text_upgrade_cannot_silently_change_existing_preview_resources(self):
+        preview = self.preview_candidate()
+        staged = publish.stage(self.store, preview, self.bundle, apply=True)
+        first = publish.promote(self.store, staged["candidate"], None, apply=True)
+        altered = publish.stage(self.store, self.candidate(label="Different preview prefix"), self.bundle, apply=True)
+        with self.assertRaisesRegex(ValueError, "preserve the complete existing preview"):
+            publish.promote(self.store, altered["candidate"], first["generation"], apply=True)
+        self.assertEqual(publish.current(self.store)[0]["generation"], first["generation"])
+
+
+    def test_candidate_read_cache_is_bounded_and_fresh_readback_detects_mutation(self):
+        raw = b"12345"
+        ref = publish.metadata(v3.shared.PDF_PAGES_BUCKET,
+                               "objects/aa/" + "a" * 64 + "/" + "b" * 16 + "/preview/page-000001.png", raw)
+        self.store.put_bytes(ref["bucket"], ref["path"], raw)
+        reader = publish.CandidateReader(self.store, cache_bytes=5)
+        with patch.object(self.store, "read_bytes", wraps=self.store.read_bytes) as read:
+            self.assertEqual(reader(ref), raw)
+            self.assertEqual(reader(ref), raw)
+            self.assertEqual(read.call_count, 1)
+        other = {**ref, "path": ref["path"].replace("000001", "000002")}
+        self.store.put_bytes(other["bucket"], other["path"], raw)
+        reader(other)
+        self.assertEqual(reader.cached_bytes, 5)
+        self.assertEqual(len(reader.cache), 1)
+        self.store.put_bytes(ref["bucket"], ref["path"], b"bad")
+        fresh = publish.CandidateReader(self.store)
+        with self.assertRaisesRegex(ValueError, "checksum mismatch"):
+            fresh(ref)
+        reader.close()
+        fresh.close()
+
+
+    def test_batch_upload_still_requires_independent_complete_remote_readback(self):
+        ref = self.candidate()
+        batches = []
+        def upload(bucket, additions):
+            batches.append(list(additions))
+            for local, path in additions:
+                self.store.put_bytes(bucket, path, Path(local).read_bytes())
+        self.store.put_files = upload
+        report = publish.stage(self.store, ref, self.bundle, apply=True)
+        self.assertTrue(report["applied"])
+        self.assertEqual(len(batches), 1)
+        self.assertGreater(len(batches[0]), 1)
+        # A new candidate with an upload that corrupts any one preview must fail
+        # before a candidate record/catalog can be promoted.
+        ref2 = self.candidate("b" * 64, "repo\0second.pdf")
+        def corrupt(bucket, additions):
+            for local, path in additions:
+                raw = b"bad" if path.endswith(".png") else Path(local).read_bytes()
+                self.store.put_bytes(bucket, path, raw)
+        self.store.put_files = corrupt
+        with self.assertRaises(ValueError):
+            publish.stage(self.store, ref2, self.bundle, apply=True)
+        self.assertNotIn((publish.ASSETS, publish.POINTER), self.store.objects)
+
 if __name__ == "__main__":
     unittest.main()

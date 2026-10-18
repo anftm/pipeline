@@ -23,6 +23,7 @@ except ImportError:
 
 STATE = "reader-index/v3/automation.json"
 REGISTRY = "reader-index/pdf_ocr_manifest.json"
+RENDER_REGISTRY = "reader-index/pdf_render_manifest.json"
 BUILDS = "reader-index/v3/builds"
 # Builds run in parallel outside reader-sidecar; only promotion is serialized.
 DAILY_ATTEMPTS = 384
@@ -96,19 +97,14 @@ def retry(store, options, *, apply=False):
     return {"applied": apply, "queue": queue, "retried": ids}
 
 
-def spec_for(key, entry):
-    """Admit only pinned originals or checksum-identified current-bucket PDFs."""
+def primary_spec(key, entry):
+    """Pin a PDF independently of whether its OCR is complete."""
     source = text.sha(entry.get("source_sha256"))
     size, count = entry.get("source_bytes"), entry.get("page_count")
     if (entry.get("status") != "ready" or type(count) is not int or count < 1
             or type(size) is not int or not 1 <= size <= 512 * 1024 * 1024):
-        raise ValueError("OCR entry lacks bounded complete source metadata")
-    ocr = {"bucket": shared.PDF_PAGES_BUCKET, "path": entry["ocr_manifest"],
-           "sha256": entry["ocr_manifest_sha256"], "bytes": entry["ocr_manifest_bytes"], "role": "provenance"}
-    publication.v3.resource(ocr)
-    if not re.fullmatch(r"objects/" + source[:2] + "/" + source + r"/[0-9a-f]{16}/ocr-manifest\.json", ocr["path"]):
-        raise ValueError("OCR resource/source mismatch")
-    spec = {"source_key": key, "source_sha256": source, "ocr_manifest": ocr, "vector_previews": True}
+        raise ValueError("PDF entry lacks bounded complete source metadata")
+    spec = {"source_key": key, "source_sha256": source, "vector_previews": True}
     if entry.get("source_kind", "upstream") == "upstream":
         origin = {"repo": entry.get("repo"), "path": entry.get("path"), "revision": entry.get("source_revision")}
         if (not isinstance(origin["repo"], str) or not re.fullmatch(r"VoiceOfML/[A-Za-z0-9._-]+", origin["repo"])
@@ -137,11 +133,25 @@ def spec_for(key, entry):
                 r"documents/pdf/[a-z0-9_-]+/[0-9a-f]{64}/document\.pdf", primary["path"])):
             raise ValueError("derived primary path is not published")
         spec["primary"] = primary
+    return spec, count
+
+
+def spec_for(key, entry):
+    """Admit pinned complete OCR without changing existing task identities."""
+    spec, count = primary_spec(key, entry)
+    source = spec["source_sha256"]
+    ocr = {"bucket": shared.PDF_PAGES_BUCKET, "path": entry["ocr_manifest"],
+           "sha256": entry["ocr_manifest_sha256"], "bytes": entry["ocr_manifest_bytes"], "role": "provenance"}
+    publication.v3.resource(ocr)
+    if not re.fullmatch(r"objects/" + source[:2] + "/" + source + r"/[0-9a-f]{16}/ocr-manifest\.json", ocr["path"]):
+        raise ValueError("OCR resource/source mismatch")
+    spec["ocr_manifest"] = ocr
+    if entry.get("source_kind", "upstream") != "upstream":
         spec["require_usable_text"] = True
     return spec, count
 
 
-def discover(state, registry):
+def discover(state, registry, rendered=None):
     if registry.get("version") != 1 or not isinstance(registry.get("files"), dict):
         raise ValueError("invalid OCR registry")
     ignored = {}
@@ -157,9 +167,26 @@ def discover(state, registry):
         identity = text.digest(spec)
         active_identities.add(identity)
         state["tasks"].setdefault(identity, {"spec": spec, "page_count": count, "status": "pending", "attempts": 0})
+    if rendered is not None:
+        if rendered.get("version") != 1 or not isinstance(rendered.get("files"), dict):
+            raise ValueError("invalid PDF render registry")
+        for key, entry in sorted(rendered["files"].items()):
+            # A ready text package goes directly through the full builder. Never
+            # replace it with an image-only candidate just to show a fast count.
+            if registry["files"].get(key, {}).get("status") in {"ready", "skipped"} or entry.get("status") != "ready":
+                continue
+            try:
+                spec, count = primary_spec(key, entry)
+                spec["preview_only"] = True
+            except (ValueError, KeyError, TypeError) as error:
+                ignored[key] = type(error).__name__
+                continue
+            identity = text.digest(spec)
+            active_identities.add(identity)
+            state["tasks"].setdefault(identity, {"spec": spec, "page_count": count, "status": "pending", "attempts": 0})
     for identity, task in state["tasks"].items():
         if identity not in active_identities and task["status"] in {
-                "pending", "retry", "building", "dispatch-pending", "needs-review"} and not task.get("candidate"):
+                "pending", "retry", "dispatch-pending", "needs-review"} and not task.get("candidate"):
             task["status"] = "superseded"
     return ignored
 
@@ -169,11 +196,18 @@ def _eligible(state, catalog, budget, now, priority_source=None, *, skip_buildin
     for identity, task in state["tasks"].items():
         spec = task["spec"]
         active = catalog["files"].get(spec["source_key"])
-        if active:
+        text_upgrade = (active and active["source_sha256"] == spec["source_sha256"]
+                        and active.get("components", {}).get("text") == "pending" and not spec.get("preview_only"))
+        if active and not text_upgrade:
             # A different raw recipe must never replace accepted or already published text.
             task["status"] = "published" if active["source_sha256"] == spec["source_sha256"] else "protected"
             task["active_generation"] = active["reading_generation"]
             continue
+        if text_upgrade and task["status"] in {"published", "protected"}:
+            # Older admission code treated any canonical entry as full-text
+            # completion. The actual pending component, not that stale label,
+            # controls this strictly additive text upgrade.
+            task["status"] = "staged" if task.get("candidate") else "pending"
         if (task["status"] == "needs-review" and task.get("error_type") == "PublicationReviewRequired"
                 and task.get("review_recipe") != REVIEW_RECIPE):
             # One rebuild under the native-text fallback recipe; a second review is final.
@@ -200,8 +234,26 @@ def _eligible(state, catalog, budget, now, priority_source=None, *, skip_buildin
             eligible.append((identity, task))
     eligible.sort(key=lambda pair: (pair[1]["spec"]["source_sha256"] != priority_source,
                                     not bool(pair[1].get("candidate")),
+                                    not (catalog["files"].get(pair[1]["spec"]["source_key"], {}).get("components", {}).get("text") == "pending"
+                                         and not pair[1]["spec"].get("preview_only")),
                                     pair[1]["status"] != "dispatch-pending", pair[1]["page_count"], pair[0]))
     return eligible
+
+
+def build_order(eligible):
+    """Share each bounded wave between new page streams and ready text packages."""
+    pairs = [pair for pair in eligible if not pair[1].get("candidate")]
+    previews = iter(pair for pair in pairs if pair[1]["spec"].get("preview_only"))
+    complete = iter(pair for pair in pairs if not pair[1]["spec"].get("preview_only"))
+    first, second = (previews, complete) if pairs and pairs[0][1]["spec"].get("preview_only") else (complete, previews)
+    while True:
+        a, b = next(first, None), next(second, None)
+        if a is None and b is None:
+            return
+        if a is not None:
+            yield a
+        if b is not None:
+            yield b
 
 
 def _charge(task, budget, now):
@@ -212,7 +264,10 @@ def _charge(task, budget, now):
 
 def _promote(store, task):
     pointer, latest = publication.current(store)
-    if task["spec"]["source_key"] in latest["files"]:
+    active = latest["files"].get(task["spec"]["source_key"])
+    if active and not (active["source_sha256"] == task["spec"]["source_sha256"]
+                       and active.get("components", {}).get("text") == "pending"
+                       and not task["spec"].get("preview_only")):
         task["status"] = "protected"
     else:
         promoted = publication.promote(store, task["candidate"], pointer["generation"] if pointer else None, apply=True)
@@ -393,7 +448,7 @@ def recover_execution_timeouts(store, options, *, apply=False):
 
 
 def wave(store, *, apply=False, priority_source=None, now=None, wave_size=WAVE_SIZE,
-         build_runs=None):
+         build_runs=None, source_keys=None, promotion_limit=4, preview_first=False):
     """Serialized step: collect parallel build results, promote them, plan the next wave.
 
     Runs under reader-sidecar. It never builds; ``build_task`` does that in the
@@ -401,6 +456,13 @@ def wave(store, *, apply=False, priority_source=None, now=None, wave_size=WAVE_S
     """
     if type(wave_size) is not int or not 1 <= wave_size <= 32:
         raise ValueError("v3 build wave size must be 1..32")
+    if type(promotion_limit) is not int or not 1 <= promotion_limit <= 8:
+        raise ValueError("v3 promotion limit must be 1..8")
+    if type(preview_first) is not bool:
+        raise ValueError("preview-first admission must be boolean")
+    if source_keys is not None and (not isinstance(source_keys, list) or not source_keys or len(source_keys) > 256
+                                    or any(not isinstance(k, str) or not k for k in source_keys)):
+        raise ValueError("invalid scoped v3 source keys")
     if apply:
         publication.assert_writer(store)
     if build_runs is None:
@@ -408,7 +470,13 @@ def wave(store, *, apply=False, priority_source=None, now=None, wave_size=WAVE_S
         # imported publication.CentralHubStore. Never use isinstance for this gate.
         build_runs = active_builds() if os.environ.get("GITHUB_ACTIONS") == "true" else []
     state = copy.deepcopy(load_state(store))
-    ignored = discover(state, json.loads(store.read_bytes(publication.ASSETS, REGISTRY)))
+    rendered = None
+    if preview_first:
+        try:
+            rendered = json.loads(store.read_bytes(publication.ASSETS, RENDER_REGISTRY))
+        except FileNotFoundError:
+            pass
+    ignored = discover(state, json.loads(store.read_bytes(publication.ASSETS, REGISTRY)), rendered)
     now = now or clock()
     budget = state["days"].setdefault(now.date().isoformat(), {"attempts": 0, "pages": 0})
     collected = []
@@ -434,6 +502,8 @@ def wave(store, *, apply=False, priority_source=None, now=None, wave_size=WAVE_S
         collected.append({"id": identity, "status": task["status"], "error_type": task.get("error_type")})
     _, catalog = publication.current(store)
     eligible = _eligible(state, catalog, budget, now, priority_source, skip_building=True)
+    if source_keys is not None:
+        eligible = [pair for pair in eligible if pair[1]["spec"]["source_key"] in source_keys]
     inflight = [identity for identity, task in state["tasks"].items()
                 if task["status"] == "building" and not task.get("candidate")]
     blocked = bool(build_runs or inflight)
@@ -442,10 +512,10 @@ def wave(store, *, apply=False, priority_source=None, now=None, wave_size=WAVE_S
               "inflight": len(inflight), "active_build_runs": [run["run_id"] for run in build_runs],
               "admission_blocked": blocked}
     if not apply:
-        report["next"] = [] if blocked else [identity for identity, _ in eligible[:wave_size]]
+        report["next"] = [] if blocked else [identity for identity, _ in list(build_order(eligible))[:wave_size]]
         return report
     save_state(store, state)
-    for identity, task in [pair for pair in eligible if pair[1].get("candidate")]:
+    for identity, task in [pair for pair in eligible if pair[1].get("candidate")][:promotion_limit]:
         try:
             _promote(store, task)
             report["changed"] = report["changed"] or task["status"] == "published"
@@ -453,8 +523,11 @@ def wave(store, *, apply=False, priority_source=None, now=None, wave_size=WAVE_S
             _fail(task, type(error).__name__, isinstance(error, publication.PublicationReviewRequired), now)
         save_state(store, state)
         report["processed"].append({"id": identity, "status": task["status"], "error_type": task.get("error_type")})
-    for identity, task in ([] if blocked else [pair for pair in eligible if not pair[1].get("candidate")]):
-        if len(report["wave"]) >= wave_size:
+    staged = sum(bool(task.get("candidate")) and task["status"] not in {"published", "protected", "failed", "needs-review", "superseded"}
+                 for task in state["tasks"].values())
+    capacity = max(0, wave_size - staged)
+    for identity, task in ([] if blocked else build_order(eligible)):
+        if len(report["wave"]) >= capacity:
             break
         if task["status"] == "dispatch-pending":
             task.update(status="building", started_at=now.isoformat())
@@ -487,8 +560,16 @@ def build_task(store, identity, attempt, *, build=None):
               "run_id": os.environ.get("GITHUB_RUN_ID", ""), "resources": []}
     try:
         with tempfile.TemporaryDirectory(prefix="reader-v3-build-") as directory:
-            built = (build or publication.build_stage)(store, task["spec"], Path(directory), apply=True)
+            spec = dict(task["spec"])
+            if not spec.get("preview_only") and build is None:
+                _, catalog = publication.current(store)
+                active = catalog["files"].get(spec["source_key"])
+                if (active and active["source_sha256"] == spec["source_sha256"]
+                        and active.get("components", {}).get("text") == "pending"):
+                    spec["reuse_reading"] = active["resource"]
+            built = (build or publication.build_stage)(store, spec, Path(directory), apply=True)
         record.update(status="staged", candidate=built["candidate"])
+        record["metrics"] = {key: built[key] for key in ("build", "timings", "reads") if key in built}
         # Keeps the candidate (and its whole closure) referenced until promotion.
         record["resources"] = [built["candidate"]]
     except Exception as error:

@@ -638,7 +638,7 @@ def build_reading(spec, read, bundle):
     return ref, manifest
 
 
-def verify_reading(ref, read):
+def verify_reading(ref, read, *, read_workers=4):
     manifest = validate_reading_manifest(decode(verified_read(ref, read)))
     source = text.sha(manifest["source_sha256"])
     text.sha(manifest["generation"])
@@ -673,7 +673,7 @@ def verify_reading(ref, read):
                 or type(partition.get("complete")) is not bool
                 or partition["complete"] != (numbers == list(range(start, end + 1)))):
             raise ValueError("preview partition page coverage mismatch")
-        for page in data["pages"]:
+        def verify_preview(page):
             geometry = mapping["pages"][page["page"] - 1]
             if page["page_identity"] != geometry["identity"]:
                 raise ValueError("preview/PDF page identity mismatch")
@@ -689,12 +689,14 @@ def verify_reading(ref, read):
                 raise ValueError("preview format mismatch")
             if abs((width / height) / (geometry["width"] / geometry["height"]) - 1) > .01:
                 raise ValueError("preview geometry mismatch")
-            seen.add(page["page"])
+            return page["page"]
+        seen.update(shared.ordered_reads(verify_preview, data["pages"], read_workers))
     if (preview["ready_pages"] != len(seen)
             or preview["complete"] != (seen == set(range(1, count + 1)))):
         raise ValueError("reading stream completeness mismatch")
     if manifest.get("text_layer"):
-        verify_text_bundle(manifest["text_layer"], read, source, count, page_geometries=mapping["pages"])
+        verify_text_bundle(manifest["text_layer"], read, source, count, page_geometries=mapping["pages"],
+                           read_workers=read_workers)
     components = manifest["components"]
     if (components.get("document") != "ready"
             or components.get("preview") != ("ready" if preview["complete"] else "pending")

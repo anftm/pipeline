@@ -27,7 +27,7 @@ jobs:
     strategy:
       fail-fast: false
       # The resolver quota is shared by the account. Preserve the one-build cap.
-      max-parallel: 1
+      max-parallel: 2
       matrix:
         task: ${{ fromJSON(inputs.tasks) }}
     env:
