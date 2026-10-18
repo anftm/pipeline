@@ -133,7 +133,7 @@ class TextStreamPublicationTests(unittest.TestCase):
                 stream.build_one(item, root / "mismatch", None, stream.TARGET_BUCKET,
                                  skip_utf8=True, expected_sha256="0" * 64)
 
-    def test_utf8_only_apply_does_not_republish_index_or_create_protection_roots(self):
+    def test_utf8_only_apply_checkpoints_verification_without_publishing_a_derivative(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory)
             source=root/"source.json";source.write_text(json.dumps([
@@ -145,13 +145,78 @@ class TextStreamPublicationTests(unittest.TestCase):
             with patch.object(stream,"parse_args",return_value=args), \
                  patch.object(stream,"existing_index",return_value={"version":1,"kind":"text-stream-index","files":[]}), \
                  patch.object(stream,"download",side_effect=lambda url,target,token:target.write_bytes(b"# Existing UTF-8\n")), \
-                 patch.object(stream,"publish_checkpoint") as publish, \
+                 patch.object(stream,"publish_checkpoint", return_value={"files": []}) as publish, \
                  patch.dict(os.environ,{"HF_TOKEN":"test","GITHUB_OUTPUT":str(root/"outputs")}):
                 self.assertEqual(stream.main(),0)
-                publish.assert_not_called()
+                publish.assert_called_once()
+                self.assertEqual(publish.call_args.args[1:4], ([], [], {}))
+                checked = publish.call_args.kwargs["unchanged_utf8"]
+                self.assertEqual(len(checked), 1)
+                self.assertEqual(checked[0]["key"], "VoiceOfML/Test\0readme.md")
                 report=json.loads(args.report.read_text())
                 self.assertEqual(report["published"],0)
                 self.assertEqual(len(report["unchanged_utf8"]),1)
+
+    def test_utf8_ledger_preserves_every_mapping_and_advances_the_next_small_batch(self):
+        key = "VoiceOfML/Test\0readme.md"
+        checked = {"key": key, "source_revision": "a" * 40, "source_sha256": "b" * 64,
+                   "source_bytes": 17, "source_encoding": "utf-8"}
+        previous = {"version": 1, "kind": "text-stream-index", "files": [{"key": key, "object": "old.txt"}]}
+        stored, uploads = [copy.deepcopy(previous)], []
+        def put(bucket, additions, token):
+            for local, remote in additions:
+                uploads.append(remote)
+                self.assertEqual(remote, stream.ROOT + "/index.json")
+                stored[0] = json.loads(Path(local).read_text())
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(stream, "existing_index", side_effect=lambda *args: stored[0]), \
+                patch.object(stream, "batch_bucket_files_with_retry", side_effect=put), \
+                patch.object(stream, "read_bytes") as body_read:
+            next_index = stream.publish_checkpoint(previous, [], [], {}, Path(directory), stream.TARGET_BUCKET, "test", unchanged_utf8=[checked])
+        self.assertEqual(next_index["files"], previous["files"])
+        self.assertEqual(uploads, [stream.ROOT + "/index.json"])
+        body_read.assert_not_called()
+        sources = [{"repo": "VoiceOfML/Test", "path": "readme.md", "revision": "a" * 40},
+                   {"repo": "VoiceOfML/Test", "path": "next.md", "revision": "a" * 40}]
+        self.assertEqual(stream.pending_records(sources, next_index), [sources[1]])
+        self.assertEqual(stream.pending_records(sources, next_index, force=True), sources)
+        self.assertEqual(stream.pending_records([{**sources[0], "revision": "c" * 40}], next_index), [{**sources[0], "revision": "c" * 40}])
+
+    def test_malformed_utf8_ledger_cannot_suppress_sources(self):
+        payload = {"version": 1, "kind": "text-stream-index", "files": [], "verified_utf8": [{"key": "missing-hash"}]}
+        with patch.object(stream, "read_json", return_value=payload), self.assertRaises(ValueError):
+            stream.existing_index(stream.TARGET_BUCKET, None)
+
+    def test_two_limit_one_runs_reach_two_utf8_sources_without_touching_mappings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.json"
+            source.write_text(json.dumps([{"Repo": "VoiceOfML/Test", "File": name, "Extension": "md", "Folder": []}
+                                          for name in ("first", "second")]))
+            revisions = root / "revisions.json"
+            revisions.write_text(json.dumps({"VoiceOfML/Test": "a" * 40}))
+            args = SimpleNamespace(search_data=source, revisions=revisions, extensions=["md"], limit=1,
+                checkpoint_size=64, bucket=stream.TARGET_BUCKET, apply=True, plan_only=False,
+                force=False, retry_failures=False, encoding_overrides=None, report=root / "report.json")
+            stored = [{"version": 1, "kind": "text-stream-index", "files": []}]
+            seen = []
+            def download(url, target, token):
+                seen.append(url.rsplit("/", 1)[-1]); target.write_bytes(b"# correct UTF-8\n")
+            def upload(bucket, additions, token):
+                for local, remote in additions:
+                    self.assertEqual(remote, stream.ROOT + "/index.json")
+                    stored[0] = json.loads(Path(local).read_text())
+            with patch.object(stream, "parse_args", return_value=args), \
+                    patch.object(stream, "existing_index", side_effect=lambda *args: stored[0]), \
+                    patch.object(stream, "download", side_effect=download), \
+                    patch.object(stream, "batch_bucket_files_with_retry", side_effect=upload), \
+                    patch.dict(os.environ, {"HF_TOKEN": "test"}):
+                self.assertEqual(stream.main(), 0)
+                self.assertEqual(stream.main(), 0)
+                self.assertEqual(stream.main(), 0)
+            self.assertEqual(seen, ["first.md", "second.md"])
+            self.assertEqual(stored[0]["files"], [])
+            self.assertEqual(len(stored[0]["verified_utf8"]), 2)
 
     def test_shared_content_has_one_deterministic_manifest_not_source_dependent_bytes(self):
         with tempfile.TemporaryDirectory() as directory:

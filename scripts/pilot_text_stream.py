@@ -144,7 +144,21 @@ def existing_index(bucket: str, token: str | None) -> dict:
         raise ValueError("invalid or duplicate text stream keys")
     if not isinstance(payload.get("failures", []), list):
         raise ValueError("invalid text failure checkpoint")
+    utf8 = payload.get("verified_utf8", [])
+    if not isinstance(utf8, list) or any(not valid_utf8_checkpoint(entry) for entry in utf8):
+        raise ValueError("invalid unchanged UTF-8 checkpoint")
+    if len({entry["key"] for entry in utf8}) != len(utf8):
+        raise ValueError("duplicate unchanged UTF-8 checkpoint")
     return payload
+
+
+def valid_utf8_checkpoint(entry) -> bool:
+    return (isinstance(entry, dict) and isinstance(entry.get("key"), str) and entry["key"].count("\0") == 1
+            and re.fullmatch(r"[0-9a-f]{40}", str(entry.get("source_revision", ""))) is not None
+            and re.fullmatch(r"[0-9a-f]{64}", str(entry.get("source_sha256", ""))) is not None
+            and type(entry.get("source_bytes")) is int and 0 <= entry["source_bytes"] <= MAX_SOURCE_BYTES
+            and entry.get("source_encoding") in {"utf-8", "utf-8-sig"}
+            and entry.get("profile") == PROFILE)
 
 
 def build_one(item: dict, work: Path, token: str | None, bucket: str,
@@ -202,13 +216,15 @@ def pending_records(records: list[dict], previous: dict, *, force=False, retry_f
                  if entry.get("profile") == PROFILE}
     failed = {entry["key"]: entry.get("source_revision") for entry in previous.get("failures", [])
               if isinstance(entry, dict) and entry.get("profile") == PROFILE}
+    completed.update({entry["key"]: entry["source_revision"] for entry in previous.get("verified_utf8", [])
+                      if valid_utf8_checkpoint(entry)})
     return [item for item in records if force or
             completed.get(f"{item['repo']}\0{item['path']}") != item["revision"] and
             (retry_failures or failed.get(f"{item['repo']}\0{item['path']}") != item["revision"])]
 
 
 def publish_checkpoint(previous: dict, entries: list[dict], failures: list[dict], uploads: dict,
-                       root: Path, bucket: str, token: str | None) -> dict:
+                       root: Path, bucket: str, token: str | None, *, unchanged_utf8=()) -> dict:
     """Protect, upload and verify immutable bytes before advancing the index."""
     run = {key: os.environ.get(name, "") for key, name in
            (("repository", "GITHUB_REPOSITORY"), ("run_id", "GITHUB_RUN_ID"), ("attempt", "GITHUB_RUN_ATTEMPT"))}
@@ -237,14 +253,23 @@ def publish_checkpoint(previous: dict, entries: list[dict], failures: list[dict]
     for remote, local in sorted(uploads.items()):
         if read_bytes(remote, token, bucket=bucket) != Path(local).read_bytes():
             raise ValueError("immutable text object readback failed")
+    checked = [{**entry, "profile": PROFILE} for entry in unchanged_utf8]
+    if any(not valid_utf8_checkpoint(entry) for entry in checked):
+        raise ValueError("unchanged UTF-8 source lacks a complete verification identity")
     merged = {entry["key"]: entry for entry in previous["files"]}
     merged.update({entry["key"]: entry for entry in entries})
     failed = {entry["key"]: entry for entry in previous.get("failures", [])}
-    for entry in entries:
+    for entry in [*entries, *checked]:
         failed.pop(entry["key"], None)
     failed.update({entry["key"]: entry for entry in failures})
     payload = {**previous, "files": [merged[key] for key in sorted(merged)],
                "failures": [failed[key] for key in sorted(failed)]}
+    verified = {entry["key"]: entry for entry in previous.get("verified_utf8", [])}
+    for entry in [*entries, *failures]:
+        verified.pop(entry["key"], None)
+    verified.update({entry["key"]: entry for entry in checked})
+    if verified or "verified_utf8" in previous:
+        payload["verified_utf8"] = [verified[key] for key in sorted(verified)]
     # The workflow's reader-sidecar lock serializes writers; this is an extra
     # expected-parent check, not a claim that the bucket supports compare/swap.
     if existing_index(bucket, token) != previous:
@@ -312,7 +337,7 @@ def main() -> int:
         return 0
     cursor = 0
     while cursor < len(selected):
-        uploads, entries, failures = {}, [], []
+        uploads, entries, failures, checked_utf8 = {}, [], [], []
         with tempfile.TemporaryDirectory(prefix="reader-text-") as directory:
             root = Path(directory)
             batch_bytes = 0
@@ -327,6 +352,9 @@ def main() -> int:
                                              skip_utf8=True, expected_sha256=selection.get(key))
                 except Utf8SourceUnchanged as unchanged:
                     report["unchanged_utf8"].append(unchanged.metadata)
+                    # The durable ledger changes no source byte or Reader mapping.
+                    # It prevents a bounded next batch from selecting these files forever.
+                    checked_utf8.append(unchanged.metadata)
                 except (ValueError, UnicodeError) as error:
                     failures.append({"key": key, "source_revision": item["revision"], "profile": PROFILE,
                                       "error": f"{type(error).__name__}: {error}"})
@@ -340,8 +368,9 @@ def main() -> int:
                 # permitted document may exceed the soft checkpoint byte budget.
                 if batch_bytes >= CHECKPOINT_BYTES:
                     break
-            if args.apply and (entries or failures):
-                previous = publish_checkpoint(previous, entries, failures, uploads, root, args.bucket, token)
+            if args.apply and (entries or failures or checked_utf8):
+                previous = publish_checkpoint(previous, entries, failures, uploads, root, args.bucket, token,
+                                              unchanged_utf8=checked_utf8)
                 report["published"] += len(entries)
             report["attempted"] = cursor
             report["converted"] += len(entries)
