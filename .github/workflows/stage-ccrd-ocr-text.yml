@@ -1,0 +1,80 @@
+name: CCRD · Stage OCR Text and Index
+
+on:
+  workflow_dispatch:
+    inputs:
+      spec_json:
+        description: Exact original repo/path/revision, OCR text-manifest resource, page count and stable doc_number
+        type: string
+        required: true
+      consumer_revision:
+        description: Pinned 40-hex vomebook/Search commit for the approved builder and base metadata
+        type: string
+        required: true
+      builder_sha256:
+        description: Approved SHA-256 of that commit's build_fulltext_db.py
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  stage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: pip install -r scripts/requirements.txt
+      - name: Check the plain-text export contract offline
+        run: python -B -m unittest tests.test_export_reader_txt -v
+      - name: Prepare pinned inputs and consumer contract
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          OCR_SPEC_JSON: ${{ inputs.spec_json }}
+          CONSUMER_REVISION: ${{ inputs.consumer_revision }}
+          BUILDER_SHA256: ${{ inputs.builder_sha256 }}
+        run: |
+          python - <<'PY'
+          import json, os, re, shutil
+          from pathlib import Path
+          from huggingface_hub import hf_hub_download
+          revision = os.environ['CONSUMER_REVISION']
+          builder = os.environ['BUILDER_SHA256']
+          if not re.fullmatch(r'[0-9a-f]{40}', revision) or not re.fullmatch(r'[0-9a-f]{64}', builder):
+              raise ValueError('consumer and builder must be immutable approved identities')
+          raw = os.environ['OCR_SPEC_JSON']
+          if len(raw.encode()) > 65536:
+              raise ValueError('spec is too large')
+          spec = json.loads(raw)
+          Path('output').mkdir(exist_ok=True)
+          Path('output/ocr-export-spec.json').write_text(json.dumps(spec, ensure_ascii=False), encoding='utf-8')
+          for name in ('build_fulltext_db.py', 'data/search_data.json.gz'):
+              hf_hub_download('vomebook/Search', name, repo_type='space', revision=revision,
+                              local_dir='output/ccrd-consumer', token=os.environ['HF_TOKEN'])
+          shutil.copyfile('scripts/ccrd_ocr_release.py', 'output/ccrd-consumer/ocr_release.py')
+          PY
+      - name: Export verified effective text without geometry
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: python -B scripts/export_reader_txt.py --spec output/ocr-export-spec.json --remote --output output/ccrd-ocr-candidate
+      - name: Build only the independent OCR SQLite candidate
+        env:
+          BUILDER_SHA256: ${{ inputs.builder_sha256 }}
+        run: |
+          metadata_sha=$(python -c 'import hashlib; from pathlib import Path; print(hashlib.sha256(Path("output/ccrd-consumer/data/search_data.json.gz").read_bytes()).hexdigest())')
+          python -B scripts/build_ccrd_ocr_release.py --root output/ccrd-ocr-candidate \
+            --exports output/ccrd-ocr-candidate/export-refs.json --consumer-root output/ccrd-consumer \
+            --builder-sha256 "$BUILDER_SHA256" --base-metadata-sha256 "$metadata_sha" \
+            --report output/ccrd-ocr-candidate/release-receipt.json
+      - name: Retain the complete candidate for review, not publication
+        uses: actions/upload-artifact@v7
+        with:
+          name: ccrd-ocr-text-and-index-candidate
+          path: output/ccrd-ocr-candidate/
+          if-no-files-found: error
+          retention-days: 14
