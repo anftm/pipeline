@@ -63,6 +63,39 @@ class TextNormalizationTests(unittest.TestCase):
         raw = codecs.BOM_UTF8 + "text\ufffd\r\n".encode()
         self.assertEqual(normalize_utf8(raw, encoding="utf-8")[0], raw)
 
+    def test_windows_936_euro_is_explicit_strict_and_byte_reversible(self):
+        raw = "中文".encode("gbk") + b"\x80" + b"\x81\x80" + b"\r\n" + b"\x80"
+        expected = "中文€" + b"\x81\x80".decode("gbk") + "\r\n€"
+        output, metadata = normalize_utf8(raw, encoding="windows-936")
+        self.assertEqual(output, codecs.BOM_UTF8 + expected.encode())
+        self.assertEqual(b"\x80".join(part.encode("gbk") for part in output.decode("utf-8-sig").split("€")), raw)
+        self.assertEqual(metadata["source_encoding"], "windows-936")
+        self.assertTrue(metadata["source_roundtrip_verified"])
+        self.assertEqual(metadata["encoding_decision"], "explicit")
+        with self.assertRaises(UnicodeError):
+            normalize_utf8(raw, encoding="gbk")
+        for damaged in (b"\x81", b"\xa3 ", b"\xff\x80", b"\x81\x30\x80"):
+            with self.subTest(raw=damaged), self.assertRaises(UnicodeError):
+                normalize_utf8(damaged, encoding="windows-936")
+
+    def test_reviewed_sub_control_is_preserved_without_truncating_later_text(self):
+        text = "前文\r\n上午八\x1a时四十分\n完整后文"
+        raw = text.encode("gb18030")
+        with self.assertRaises(TextEncodingError):
+            normalize_utf8(raw)
+        output, metadata = normalize_utf8(raw, encoding="gb18030", preserve_controls={"U+001A": 1})
+        self.assertEqual(output.decode("utf-8-sig"), text)
+        self.assertEqual(output.decode("utf-8-sig").encode("gb18030"), raw)
+        self.assertEqual(metadata["preserved_controls"], {"U+001A": 1})
+        self.assertTrue(metadata["source_roundtrip_verified"])
+        for options in ({"U+001A": 2}, {"U+0000": 1}, {"U+001A": True}, {"U+001A": 0}, [], "U+001A"):
+            with self.subTest(options=options), self.assertRaises(TextEncodingError):
+                normalize_utf8(raw, encoding="gb18030", preserve_controls=options)
+        with self.assertRaisesRegex(TextEncodingError, "explicit encoding"):
+            normalize_utf8(raw, preserve_controls={"U+001A": 1})
+        with self.assertRaises(TextEncodingError):
+            normalize_utf8(raw + b"\0", encoding="gb18030", preserve_controls={"U+001A": 1})
+
 
 class TextStreamPublicationTests(unittest.TestCase):
     def test_download_strips_authorization_on_signed_host_redirects_and_keeps_size_bound(self):
@@ -131,7 +164,90 @@ class TextStreamPublicationTests(unittest.TestCase):
             self.assertFalse((root / "unchanged/document.md").exists())
             with self.assertRaisesRegex(ValueError, "approved selection"):
                 stream.build_one(item, root / "mismatch", None, stream.TARGET_BUCKET,
-                                 skip_utf8=True, expected_sha256="0" * 64)
+                                  skip_utf8=True, expected_sha256="0" * 64)
+
+    def test_reviewed_control_override_is_bound_to_original_bytes_and_reported(self):
+        item = {"repo": "VoiceOfML/Test", "path": "reviewed.txt", "extension": "txt", "revision": "a" * 40}
+        raw = "完整前文\x1a完整后文".encode("gb18030")
+        options = {"encoding": "gb18030", "preserve_controls": {"U+001A": 1}}
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(stream, "download", side_effect=lambda url, target, token: target.write_bytes(raw)):
+            root = Path(directory)
+            with self.assertRaisesRegex(ValueError, "approved selection"):
+                stream.build_one(item, root / "wrong", None, stream.TARGET_BUCKET, options, expected_sha256="0" * 64)
+            entry, files = stream.build_one(item, root / "correct", None, stream.TARGET_BUCKET, options,
+                                            expected_sha256=hashlib.sha256(raw).hexdigest())
+            self.assertEqual(Path(files[entry["object"]]).read_bytes().decode("utf-8-sig").encode("gb18030"), raw)
+            self.assertEqual(entry["preserved_controls"], {"U+001A": 1})
+            self.assertTrue(entry["source_roundtrip_verified"])
+
+    def test_override_apply_requires_exact_checksum_selection_before_download(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            key = "VoiceOfML/Test\0reviewed.txt"
+            source = root / "source.json"
+            source.write_text(json.dumps([{"Repo": "VoiceOfML/Test", "File": "reviewed", "Extension": "txt", "Folder": []}]))
+            revisions = root / "revisions.json"; revisions.write_text(json.dumps({"VoiceOfML/Test": "a" * 40}))
+            overrides = root / "overrides.json"; overrides.write_text(json.dumps({key: "windows-936"}))
+            args = SimpleNamespace(search_data=source, revisions=revisions, extensions=["txt"], limit=0,
+                checkpoint_size=64, bucket=stream.TARGET_BUCKET, apply=True, plan_only=False,
+                force=False, retry_failures=True, encoding_overrides=overrides, report=root / "report.json")
+            with patch.object(stream, "parse_args", return_value=args), \
+                    patch.object(stream, "existing_index", return_value={"version": 1, "kind": "text-stream-index", "files": []}), \
+                    patch.object(stream, "download") as fetch, patch.dict(os.environ, {"HF_TOKEN": "test"}):
+                with self.assertRaisesRegex(ValueError, "source-SHA selection"):
+                    stream.main()
+                fetch.assert_not_called()
+
+    def test_override_schema_rejects_unreviewed_control_and_replacement_options(self):
+        for value in ({"encoding": "gbk", "errors": "replace"}, {"encoding": "gbk", "preserve_controls": {"U+0000": 1}},
+                      {"encoding": "gbk", "preserve_controls": {"U+001A": True}}, {}, [], ""):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                stream.encoding_options(value)
+
+    def test_scoped_reviewed_retry_clears_only_the_two_recovered_failures(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bodies = {"controls.txt": "完整前文\x1a完整后文".encode("gb18030"),
+                      "windows.txt": "完整中文".encode("gbk") + b"\x80"}
+            prefix = "VoiceOfML/Test\0"
+            source = root / "source.json"
+            source.write_text(json.dumps([{"Repo": "VoiceOfML/Test", "File": name[:-4], "Extension": "txt", "Folder": []}
+                                          for name in bodies]))
+            revisions = root / "revisions.json"; revisions.write_text(json.dumps({"VoiceOfML/Test": "a" * 40}))
+            selection = root / "selection.json"
+            selection.write_text(json.dumps({prefix + name: hashlib.sha256(raw).hexdigest() for name, raw in bodies.items()}))
+            overrides = root / "overrides.json"
+            overrides.write_text(json.dumps({prefix + "controls.txt": {"encoding": "gb18030", "preserve_controls": {"U+001A": 1}},
+                                             prefix + "windows.txt": "windows-936"}))
+            untouched = {"key": prefix + "damaged.txt", "object": "original-damaged-mapping.txt"}
+            remaining = {"key": untouched["key"], "source_revision": "a" * 40, "profile": PROFILE, "error": "damaged original"}
+            stored = [{"version": 1, "kind": "text-stream-index", "files": [untouched],
+                       "failures": [remaining, *[{"key": prefix + name, "source_revision": "a" * 40, "profile": PROFILE}
+                                                 for name in bodies]]}]
+            objects = {}
+            def upload(bucket, additions, token):
+                for local, remote in additions:
+                    objects[remote] = Path(local).read_bytes()
+                    if remote == stream.ROOT + "/index.json": stored[0] = json.loads(objects[remote])
+            def read(remote, token, bucket):
+                if remote not in objects: raise FileNotFoundError(remote)
+                return objects[remote]
+            args = SimpleNamespace(search_data=source, revisions=revisions, extensions=["txt"], limit=0,
+                checkpoint_size=64, bucket=stream.TARGET_BUCKET, apply=True, plan_only=False,
+                force=False, retry_failures=True, encoding_overrides=overrides, selection=selection, report=root / "report.json")
+            with patch.object(stream, "parse_args", return_value=args), \
+                    patch.object(stream, "existing_index", side_effect=lambda *args: stored[0]), \
+                    patch.object(stream, "download", side_effect=lambda url, target, token: target.write_bytes(bodies[url.rsplit('/', 1)[1]])), \
+                    patch.object(stream, "batch_bucket_files_with_retry", side_effect=upload), \
+                    patch.object(stream, "read_bytes", side_effect=read), patch.dict(os.environ, {"HF_TOKEN": "test"}):
+                self.assertEqual(stream.main(), 0)
+            report = json.loads(args.report.read_text())
+            self.assertEqual(report["published"], 2)
+            self.assertEqual(report["unresolved_failures"], 0)
+            self.assertEqual(stored[0]["failures"], [remaining])
+            self.assertIn(untouched, stored[0]["files"])
+            self.assertEqual(report["converted_sources"][0]["preserved_controls"], {"U+001A": 1})
 
     def test_utf8_only_apply_checkpoints_verification_without_publishing_a_derivative(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -309,6 +425,10 @@ class TextStreamPublicationTests(unittest.TestCase):
         self.assertIn("reader-text-plan-{0}", text)
         self.assertIn("--plan-only", text)
         self.assertIn("pilot_text_stream.py", text)
+        self.assertIn("TEXT_ENCODINGS: ${{ inputs.encoding_overrides_json || '{}' }}", text)
+        self.assertIn("json.loads(os.environ['TEXT_ENCODINGS'])", text)
+        self.assertIn("--encoding-overrides output/text-encoding-overrides.json", text)
+        self.assertNotIn("run: ${{ inputs.encoding_overrides_json", text)
         self.assertIn("build_reader_assets_v2_sidecar.py --apply", text)
         self.assertNotIn("run: python scripts/publish_source_txt_once.py", text)
         self.assertTrue(producer_path(".github/workflows/publish-source-txt.yml"))

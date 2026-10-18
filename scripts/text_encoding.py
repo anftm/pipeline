@@ -6,6 +6,7 @@ Ambiguous legacy inputs require an explicit per-source encoding override.
 from __future__ import annotations
 
 import codecs
+from collections import Counter
 import re
 
 try:
@@ -22,8 +23,13 @@ class TextEncodingError(ValueError):
     pass
 
 
-def validate_text(text: str) -> str:
-    if any(ord(c) < 32 and c not in "\t\n\r\f" for c in text):
+def validate_text(text: str, *, preserve_controls: dict | None = None) -> str:
+    approved = {} if preserve_controls is None else preserve_controls
+    if (not isinstance(approved, dict) or any(key != "U+001A" or type(count) is not int or count < 1
+                                             for key, count in approved.items())):
+        raise TextEncodingError("only exact reviewed U+001A counts may be preserved")
+    controls = Counter(f"U+{ord(c):04X}" for c in text if ord(c) < 32 and c not in "\t\n\r\f")
+    if controls != approved:
         raise TextEncodingError("text contains NUL or binary control bytes")
     # Encoding is strict: no surrogate replacement, whitespace cleanup, newline
     # normalization or removal of a literal Unicode replacement character.
@@ -31,10 +37,38 @@ def validate_text(text: str) -> str:
     return text
 
 
-def decode_source_text(raw: bytes, *, hint: str = "", encoding: str | None = None) -> tuple[str, str, str]:
+def decode_windows_936(raw: bytes) -> str:
+    """Strict Python GBK plus Windows' single-byte 0x80 euro, never replacement.
+
+    A GBK trailing 0x80 belongs to its two-byte character, not to the euro mapping.
+    All chunks still use the strict codec and the complete result must round-trip.
+    Undefined CP936 extensions remain errors rather than guessed characters.
+    """
+    parts, start, cursor = [], 0, 0
+    while cursor < len(raw):
+        byte = raw[cursor]
+        if byte == 0x80:
+            parts.extend((raw[start:cursor].decode("gbk", errors="strict"), "€"))
+            cursor += 1
+            start = cursor
+        else:
+            cursor += 2 if 0x81 <= byte <= 0xfe else 1
+    parts.append(raw[start:].decode("gbk", errors="strict"))
+    text = "".join(parts)
+    if b"\x80".join(part.encode("gbk", errors="strict") for part in text.split("€")) != raw:
+        raise TextEncodingError("Windows-936 source does not round-trip")
+    return text
+
+
+def decode_source_text(raw: bytes, *, hint: str = "", encoding: str | None = None,
+                       preserve_controls: dict | None = None) -> tuple[str, str, str]:
     if looks_like_lfs_pointer(raw):
         raise TextEncodingError("source is a Git LFS pointer, not document text")
+    if preserve_controls is not None and not encoding:
+        raise TextEncodingError("reviewed controls require an explicit encoding")
     if encoding:
+        if encoding.lower().replace("_", "-") == "windows-936":
+            return validate_text(decode_windows_936(raw), preserve_controls=preserve_controls), "windows-936", "explicit"
         try:
             canonical = codecs.lookup(encoding).name
         except LookupError as error:
@@ -45,7 +79,10 @@ def decode_source_text(raw: bytes, *, hint: str = "", encoding: str | None = Non
             raise TextEncodingError("unsupported explicit text encoding")
         if canonical == "utf-8" and raw.startswith(UTF8_BOM):
             canonical = "utf-8-sig"
-        return validate_text(raw.decode(canonical, errors="strict")), canonical, "explicit"
+        text = validate_text(raw.decode(canonical, errors="strict"), preserve_controls=preserve_controls)
+        if preserve_controls and text.encode(canonical, errors="strict") != raw:
+            raise TextEncodingError("reviewed-control source does not round-trip")
+        return text, canonical, "explicit"
     for signature, codec in ((codecs.BOM_UTF32_LE, "utf-32"), (codecs.BOM_UTF32_BE, "utf-32"),
                              (codecs.BOM_UTF8, "utf-8-sig"), (codecs.BOM_UTF16_LE, "utf-16"),
                              (codecs.BOM_UTF16_BE, "utf-16")):
@@ -96,11 +133,18 @@ def decode_source_text(raw: bytes, *, hint: str = "", encoding: str | None = Non
     return text, codec, "legacy-score"
 
 
-def normalize_utf8(raw: bytes, *, hint: str = "", encoding: str | None = None) -> tuple[bytes, dict]:
-    text, source_encoding, decision = decode_source_text(raw, hint=hint, encoding=encoding)
+def normalize_utf8(raw: bytes, *, hint: str = "", encoding: str | None = None,
+                   preserve_controls: dict | None = None) -> tuple[bytes, dict]:
+    text, source_encoding, decision = decode_source_text(raw, hint=hint, encoding=encoding,
+                                                       preserve_controls=preserve_controls)
     normalized = UTF8_BOM + text.encode("utf-8", errors="strict")
     if normalized.decode("utf-8-sig", errors="strict") != text:
         raise TextEncodingError("UTF-8 verification failed")
-    return normalized, {"encoding": "utf-8", "bom": True, "profile": PROFILE,
-                        "source_encoding": source_encoding, "encoding_decision": decision,
-                        "characters": len(text)}
+    metadata = {"encoding": "utf-8", "bom": True, "profile": PROFILE,
+                "source_encoding": source_encoding, "encoding_decision": decision,
+                "characters": len(text)}
+    if preserve_controls:
+        metadata["preserved_controls"] = dict(preserve_controls)
+    if source_encoding == "windows-936" or preserve_controls:
+        metadata["source_roundtrip_verified"] = True
+    return normalized, metadata

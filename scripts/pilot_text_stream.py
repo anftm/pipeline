@@ -161,8 +161,23 @@ def valid_utf8_checkpoint(entry) -> bool:
             and entry.get("profile") == PROFILE)
 
 
+def encoding_options(value) -> dict:
+    if value is None:
+        return {}
+    if isinstance(value, str) and value:
+        return {"encoding": value}
+    if (isinstance(value, dict) and set(value) <= {"encoding", "preserve_controls"}
+            and isinstance(value.get("encoding"), str) and value["encoding"]
+            and ("preserve_controls" not in value or
+                 isinstance(value["preserve_controls"], dict) and value["preserve_controls"]
+                 and all(key == "U+001A" and type(count) is int and count > 0
+                         for key, count in value["preserve_controls"].items()))):
+        return value
+    raise ValueError("invalid exact-source encoding/control override")
+
+
 def build_one(item: dict, work: Path, token: str | None, bucket: str,
-              encoding: str | None = None, *, skip_utf8: bool = False,
+              encoding: str | dict | None = None, *, skip_utf8: bool = False,
               expected_sha256: str | None = None) -> tuple[dict, dict[str, str]]:
     work.mkdir(parents=True, exist_ok=True)
     source = work / "source"
@@ -171,7 +186,7 @@ def build_one(item: dict, work: Path, token: str | None, bucket: str,
     source_digest = hashlib.sha256(raw).hexdigest()
     if expected_sha256 is not None and source_digest != expected_sha256:
         raise ValueError("source checksum differs from the approved selection")
-    normalized, metadata = normalize_utf8(raw, hint=item["path"].rsplit("/", 1)[-1], encoding=encoding)
+    normalized, metadata = normalize_utf8(raw, hint=item["path"].rsplit("/", 1)[-1], **encoding_options(encoding))
     if skip_utf8 and metadata["source_encoding"] in {"utf-8", "utf-8-sig"}:
         raise Utf8SourceUnchanged({"key": f"{item['repo']}\0{item['path']}",
             "source_revision": item["revision"], "source_sha256": source_digest,
@@ -299,8 +314,12 @@ def main() -> int:
     if wanted - SUPPORTED_EXTENSIONS:
         raise ValueError("unsupported text extension")
     overrides = json.loads(args.encoding_overrides.read_text(encoding="utf-8")) if args.encoding_overrides else {}
-    if not isinstance(overrides, dict) or any(not isinstance(k, str) or not isinstance(v, str) for k, v in overrides.items()):
-        raise ValueError("encoding overrides must map exact source keys to encoding names")
+    if not isinstance(overrides, dict) or any(not isinstance(key, str) or key.count("\0") != 1 for key in overrides):
+        raise ValueError("encoding overrides must map exact source keys to reviewed encodings/options")
+    for value in overrides.values():
+        if value is None:
+            raise ValueError("an encoding override cannot be null")
+        encoding_options(value)
     revisions = json.loads(args.revisions.read_text(encoding="utf-8"))
     previous = existing_index(args.bucket, token)
     records = select_records(args.search_data, revisions, wanted)
@@ -316,6 +335,8 @@ def main() -> int:
         if set(selection) - known:
             raise ValueError("approved selection contains a source absent from the current metadata scope")
         records = [item for item in records if f"{item['repo']}\0{item['path']}" in selection]
+    if args.apply and set(overrides) - set(selection):
+        raise ValueError("published encoding/control overrides require an approved source-SHA selection")
     pending = pending_records(records, previous, force=args.force, retry_failures=args.retry_failures)
     selected = pending
     if args.limit:
@@ -328,6 +349,8 @@ def main() -> int:
               "unchanged_utf8": [], "converted_sources": [], "failures": [], "decisions": {}, "checkpoint_complete": False}
     if selection:
         report["selection_sha256"] = hashlib.sha256(selection_path.read_bytes()).hexdigest()
+    if args.encoding_overrides:
+        report["encoding_overrides_sha256"] = hashlib.sha256(args.encoding_overrides.read_bytes()).hexdigest()
     args.report.parent.mkdir(parents=True, exist_ok=True)
     def save():
         args.report.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -376,7 +399,8 @@ def main() -> int:
             report["converted"] += len(entries)
             report["converted_sources"].extend({key:entry[key] for key in
                 ("key", "source_revision", "source_sha256", "source_encoding", "encoding_decision",
-                 "object", "manifest", "sha256", "bytes", "characters")} for entry in entries)
+                 "object", "manifest", "sha256", "bytes", "characters", "preserved_controls", "source_roundtrip_verified")
+                 if key in entry} for entry in entries)
             report["failures"].extend(failures)
             save()
             print(f"verified checkpoint: converted={report['converted']} failures={len(report['failures'])}", flush=True)

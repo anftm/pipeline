@@ -27,6 +27,10 @@ on:
         description: Optional exact source-key to approved SHA-256 JSON map (empty means ordinary pending scope)
         type: string
         default: "{}"
+      encoding_overrides_json:
+        description: Reviewed exact-key encodings/options; apply requires matching source-SHA selection
+        type: string
+        default: "{}"
       apply:
         description: Upload verified UTF-8/BOM text and refresh Reader mappings
         required: true
@@ -81,6 +85,7 @@ jobs:
           TEXT_RETRY: ${{ inputs.retry_failures }}
           TEXT_APPLY: ${{ inputs.apply }}
           TEXT_SELECTION: ${{ inputs.selection_json || '{}' }}
+          TEXT_ENCODINGS: ${{ inputs.encoding_overrides_json || '{}' }}
         run: |
           [[ "$TEXT_LIMIT" =~ ^[0-9]+$ ]] || exit 1
           case "$TEXT_EXTENSION" in
@@ -96,9 +101,12 @@ jobs:
           from pathlib import Path
           selection = json.loads(os.environ['TEXT_SELECTION'])
           Path('output/text-approved-selection.json').write_text(json.dumps(selection), encoding='utf-8')
+          overrides = json.loads(os.environ['TEXT_ENCODINGS'])
+          Path('output/text-encoding-overrides.json').write_text(json.dumps(overrides), encoding='utf-8')
           PY
           python scripts/pilot_text_stream.py "${args[@]}" --limit "$TEXT_LIMIT" \
             --selection output/text-approved-selection.json \
+            --encoding-overrides output/text-encoding-overrides.json \
             --report output/text-stream-report.json
 
       - name: Rebuild canonical mappings after verified checkpoints
