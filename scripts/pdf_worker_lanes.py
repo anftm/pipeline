@@ -13,8 +13,7 @@ NAME = re.compile(r"[a-z0-9][a-z0-9-]*")
 OWNER = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}")
 
 
-def load_config(path=DEFAULT_CONFIG):
-    config = json.loads(Path(path).read_text(encoding="utf-8"))
+def _validate_config(config, *, allow_legacy=True):
     if not isinstance(config, dict) or config.get("version") != 1:
         raise ValueError("invalid PDF worker configuration")
     native = config.get("native_lanes")
@@ -49,7 +48,19 @@ def load_config(path=DEFAULT_CONFIG):
         elif type(upper) is not int or upper <= lower:
             raise ValueError("invalid native PDF size range")
         cursor = upper
+    if allow_legacy:
+        legacy = config.get("legacy_configs", [])
+        if not isinstance(legacy, list):
+            raise ValueError("legacy PDF worker configurations must be a list")
+        for prior in legacy:
+            if not isinstance(prior, dict) or "legacy_configs" in prior:
+                raise ValueError("invalid legacy PDF worker configuration")
+            _validate_config(prior, allow_legacy=False)
     return config
+
+
+def load_config(path=DEFAULT_CONFIG):
+    return _validate_config(json.loads(Path(path).read_text(encoding="utf-8")))
 
 
 def lane_for_owner(config, owner):
@@ -60,17 +71,43 @@ def lane_for_owner(config, owner):
 
 
 def config_identity(config):
-    routing = {**config, "native_lanes": [{key: value for key, value in lane.items() if key != "repository"}
-                                          for lane in config["native_lanes"]],
-               "converted_lane": {key: value for key, value in config["converted_lane"].items() if key != "repository"}}
+    # Ignore compatibility snapshots: the fingerprint represents only the
+    # routing contract that created the queue.
+    routing = {
+        "version": config["version"],
+        "publisher_repository": config["publisher_repository"],
+        "native_lanes": [{key: value for key, value in lane.items() if key != "repository"}
+                         for lane in config["native_lanes"]],
+        "converted_lane": {key: value for key, value in config["converted_lane"].items()
+                           if key != "repository"},
+    }
     return hashlib.sha256(json.dumps(routing, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 def repository_for_owner(config, owner):
-    lane_for_owner(config, owner)
-    for lane in [*config["native_lanes"], config["converted_lane"]]:
-        if lane["owner"].lower() == owner.lower():
-            return lane.get("repository", f"{lane['owner']}/pipeline")
+    for routing in [config, *config.get("legacy_configs", [])]:
+        for lane in [*routing["native_lanes"], routing["converted_lane"]]:
+            if lane["owner"].lower() == owner.lower():
+                return lane.get("repository", f"{lane['owner']}/pipeline")
+    raise ValueError("account has no PDF worker repository")
+
+
+def config_for_repository(config, repository):
+    """Resolve the queue routing snapshot for a current or legacy worker repo."""
+    for routing in [config, *config.get("legacy_configs", [])]:
+        for lane in [*routing["native_lanes"], routing["converted_lane"]]:
+            candidate = lane.get("repository", lane["owner"] + "/pipeline")
+            if candidate.lower() == repository.lower():
+                return routing
+    raise ValueError("PDF worker repository is not configured")
+
+
+def config_for_queue(config, queue):
+    identity = queue.get("worker_config")
+    for routing in [config, *config.get("legacy_configs", [])]:
+        if identity == config_identity(routing):
+            return routing
+    raise ValueError("PDF worker queue configuration is unknown")
 
 
 def routing_bytes(item):
@@ -100,12 +137,13 @@ def select_records(config, records, lane, owner):
 
 
 def validate_queue(config, queue, owner, stage):
-    lane = lane_for_owner(config, owner)
+    routing = config_for_queue(config, queue)
+    lane = lane_for_owner(routing, owner)
     expected_kind = {"render": "pdf-render-queue", "ocr": "pdf-image-ocr-queue"}[stage]
     if (queue.get("version") != 1 or queue.get("kind") != expected_kind
             or queue.get("worker_owner", "").lower() != owner.lower()
             or queue.get("worker_lane") != lane
-            or queue.get("worker_config") != config_identity(config)):
+            or queue.get("worker_config") != config_identity(routing)):
         raise ValueError("PDF worker queue identity mismatch")
     records = [*queue.get("books", []), *queue.get("failed", [])]
     if stage == "render":
@@ -113,7 +151,7 @@ def validate_queue(config, queue, owner, stage):
         records.extend({**books.get(item["key"], {}), **item}
                        for shard in queue["shards"] for item in shard["records"])
     for item in records:
-        if item.get("worker_lane") != lane or lane_for(config, item) != lane:
+        if item.get("worker_lane") != lane or lane_for(routing, item) != lane:
             raise ValueError("PDF worker queue contains a different account's source")
 
 
@@ -125,11 +163,14 @@ def main():
     parser.add_argument("--stage", choices=("render", "ocr"))
     args = parser.parse_args()
     config = load_config(args.config)
-    lane = lane_for_owner(config, args.owner)
     if args.queue:
         if not args.stage:
             parser.error("--queue requires --stage")
-        validate_queue(config, json.loads(args.queue.read_text(encoding="utf-8")), args.owner, args.stage)
+        queue = json.loads(args.queue.read_text(encoding="utf-8"))
+        lane = lane_for_owner(config_for_queue(config, queue), args.owner)
+        validate_queue(config, queue, args.owner, args.stage)
+    else:
+        lane = lane_for_owner(config, args.owner)
     print(lane)
 
 

@@ -33,28 +33,25 @@ class PdfWorkerLaneTests(unittest.TestCase):
         keys = [item["key"] for selected in selections for item in selected]
         self.assertCountEqual(keys, [item["key"] for item in items])
         self.assertEqual(len(keys), len(set(keys)))
-        self.assertEqual([item["path"] for item in selections[0]], ["6.pdf", "7.pdf"])
-        self.assertEqual([item["path"] for item in selections[1]], ["8.pdf", "9.pdf"])
-        self.assertEqual([item["path"] for item in selections[2]], ["10.pdf", "11.pdf"])
-        self.assertEqual([item["path"] for item in selections[3]], ["12.pdf", "13.pdf"])
-        self.assertEqual([item["path"] for item in selections[4]], ["14.pdf"])
-        self.assertEqual([item["path"] for item in selections[5]],
-                         ["15.pdf"])
-        self.assertEqual([item["path"] for item in selections[6]],
-                          ["0.pdf", "1.pdf", "2.pdf", "3.pdf", "4.pdf", "5.pdf", "16.pdf", "17.pdf"])
+        self.assertEqual([item["path"] for item in selections[0]],
+                         [f"{n}.pdf" for n in range(6, 14)])
+        self.assertEqual([item["path"] for item in selections[1]],
+                         [f"{n}.pdf" for n in [0, 1, 2, 3, 4, 5, 14, 15, 16, 17]])
         self.assertEqual(len(selections[-1]), 5)
-        self.assertEqual(lanes.lane_for_owner(self.config, "rioholland79"), "native-small-upper")
-        self.assertEqual(lanes.lane_for_owner(self.config, "devondunn7"), "native-small-mid")
-        self.assertEqual(lanes.lane_for_owner(self.config, "dellamcastillo"), "native-medium-lower")
+        self.assertEqual(lanes.lane_for_owner(self.config, "vomebook"), "native-under-100m")
+        self.assertEqual(lanes.lane_for_owner(self.config, "anftm"), "native-100m-plus")
+        self.assertEqual(lanes.lane_for_owner(self.config, "ambrossee768"), "converted")
+        with self.assertRaises(ValueError):
+            lanes.lane_for_owner(self.config, "rioholland79")
 
     def test_source_probe_does_not_change_account_ownership(self):
         source = self.item(size=0)
-        selected = lanes.select_records(self.config, [source], "native-large", "alicetran68")[0]
-        self.assertEqual(lanes.lane_for(self.config, {**selected, "source_bytes": 1024}), "native-large")
+        selected = lanes.select_records(self.config, [source], "native-100m-plus", "anftm")[0]
+        self.assertEqual(lanes.lane_for(self.config, {**selected, "source_bytes": 1024}), "native-100m-plus")
         repaired = self.item(size=1024, source_kind="generated", original_source_bytes=104857600)
-        self.assertEqual(lanes.lane_for(self.config, repaired), "native-medium")
+        self.assertEqual(lanes.lane_for(self.config, repaired), "native-100m-plus")
         with self.assertRaises(ValueError):
-            lanes.select_records(self.config, [source], "native-large", "vomebook")
+            lanes.select_records(self.config, [source], "native-100m-plus", "vomebook")
 
     def test_repository_override_keeps_routing_fingerprint_and_enforces_account(self):
         config = copy.deepcopy(self.config)
@@ -150,23 +147,23 @@ class PdfWorkerLaneTests(unittest.TestCase):
             self.assertEqual(lanes.lane_for(loaded, self.item(size=size)), f"size-{min(size // 10, 6)}")
 
     def test_central_publisher_rejects_foreign_sources_and_config_drift(self):
-        selected = lanes.select_records(self.config, [self.item()], "native-small", "vomebook")
+        selected = lanes.select_records(self.config, [self.item()], "native-under-100m", "vomebook")
         queue = {"version": 1, "kind": "pdf-render-queue", "worker_owner": "vomebook",
-                 "worker_lane": "native-small", "worker_config": lanes.config_identity(self.config),
+                 "worker_lane": "native-under-100m", "worker_config": lanes.config_identity(self.config),
                  "books": selected, "shards": [{"records": selected}]}
         lanes.validate_queue(self.config, queue, "vomebook", "render")
         variants = [dict(queue, worker_config="old"), dict(queue, worker_owner="anftm"),
-                    dict(queue, books=[self.item(size=2**40, worker_lane="native-small")])]
+                    dict(queue, books=[self.item(size=2**40, worker_lane="native-under-100m")])]
         for variant in variants:
             with self.assertRaises(ValueError):
                 lanes.validate_queue(self.config, variant, "vomebook", "render")
 
     def test_compact_time_weighted_tasks_retain_book_ownership(self):
         item = self.item(page_count=2, source_sha256="a" * 64, profile="profile")
-        selected = lanes.select_records(self.config, [item], "native-small", "vomebook")
+        selected = lanes.select_records(self.config, [item], "native-under-100m", "vomebook")
         queue = stages.plan_render_ranges({"version": 1, "kind": "pdf-render-queue",
             "shards": [{"records": selected}]}, {}, 1500)
-        queue.update(worker_owner="vomebook", worker_lane="native-small",
+        queue.update(worker_owner="vomebook", worker_lane="native-under-100m",
                      worker_config=lanes.config_identity(self.config))
         self.assertNotIn("worker_lane", queue["shards"][0]["records"][0])
         lanes.validate_queue(self.config, queue, "vomebook", "render")
@@ -180,7 +177,7 @@ class PdfWorkerLaneTests(unittest.TestCase):
             records = pdf_ocr.source_records(Path("search.json"), Path("revisions.json"), {"files": {"x": {}}})
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0]["original_source_bytes"], 104857600)
-        self.assertEqual(lanes.lane_for(self.config, records[0]), "native-medium")
+        self.assertEqual(lanes.lane_for(self.config, records[0]), "native-100m-plus")
 
     def test_both_planners_filter_before_expensive_work(self):
         records = [self.item(), self.item("large.pdf", 2**40),
@@ -194,7 +191,7 @@ class PdfWorkerLaneTests(unittest.TestCase):
                 def registry(_api, _repo, name, *args):
                     return {"files": {item["key"]: item for item in records}
                             if name == stages.RENDER_REGISTRY else {}}
-                argv = ["pdf_ocr_stages.py", stage, "--worker-lane", "native-small",
+                argv = ["pdf_ocr_stages.py", stage, "--worker-lane", "native-under-100m",
                         "--worker-owner", "vomebook", "--queue", str(queue_path), "--output", str(output)]
                 with patch.object(sys, "argv", argv), patch.object(stages, "HfApi"), \
                         patch.object(stages, "load_registry", side_effect=registry), \
@@ -207,9 +204,21 @@ class PdfWorkerLaneTests(unittest.TestCase):
                 if isinstance(selected, dict):
                     selected = list(selected.values())
                 self.assertEqual([item["key"] for item in selected], [records[0]["key"]])
-                self.assertEqual(selected[0]["worker_lane"], "native-small")
+                self.assertEqual(selected[0]["worker_lane"], "native-under-100m")
                 queue = json.loads(queue_path.read_text())
                 lanes.validate_queue(self.config, queue, "vomebook", stage.removeprefix("plan-"))
+
+    def test_legacy_queue_fingerprints_remain_publishable_but_disabled_owners_cannot_plan(self):
+        old = self.config["legacy_configs"][0]
+        source = self.item("old-5mb.pdf", 5 * 1024 * 1024)
+        selected = lanes.select_records(old, [source], "native-small-upper", "rioholland79")
+        queue = {"version": 1, "kind": "pdf-image-ocr-queue", "worker_owner": "rioholland79",
+                 "worker_lane": "native-small-upper", "worker_config": lanes.config_identity(old),
+                 "books": selected, "shards": []}
+        lanes.validate_queue(self.config, queue, "rioholland79", "ocr")
+        self.assertEqual(lanes.repository_for_owner(self.config, "rioholland79"), "rioholland79/pipeline")
+        with self.assertRaises(ValueError):
+            lanes.lane_for_owner(self.config, "rioholland79")
 
     def test_run_validation_rejects_other_workflows_branches_and_unfinished_jobs(self):
         repository = lanes.repository_for_owner(self.config, "vomebook")
@@ -223,6 +232,10 @@ class PdfWorkerLaneTests(unittest.TestCase):
                 validate_run(self.config, repository, {**run, field: value})
         with self.assertRaises(ValueError):
             validate_run(self.config, "unconfigured/pipeline", run)
+
+        legacy_repo = lanes.repository_for_owner(self.config, "rioholland79")
+        legacy_run = {**run, "repository": {"full_name": legacy_repo}}
+        validate_run(self.config, legacy_repo, legacy_run)
 
     def test_worker_cannot_publish_registries_and_publisher_keeps_shared_lock(self):
         root = Path(__file__).resolve().parents[1]

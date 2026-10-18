@@ -17,7 +17,8 @@ def validate_run(config, repository, run):
     owner, separator, name = repository.partition("/")
     if not separator or repository.lower() != pdf_worker_lanes.repository_for_owner(config, owner).lower():
         raise ValueError("PDF worker must run in its configured account repository")
-    pdf_worker_lanes.lane_for_owner(config, owner)
+    routing = pdf_worker_lanes.config_for_repository(config, repository)
+    pdf_worker_lanes.lane_for_owner(routing, owner)
     if (run.get("repository", {}).get("full_name", "").lower() != repository.lower()
             or run.get("head_branch") != "main"
             or run.get("path") != ".github/workflows/pdf-account-worker.yml"
@@ -38,7 +39,8 @@ def main():
     owner, separator, name = args.repository.partition("/")
     if not separator or args.repository.lower() != pdf_worker_lanes.repository_for_owner(config, owner).lower() or args.run_id < 1:
         parser.error("invalid worker repository or run ID")
-    lane = pdf_worker_lanes.lane_for_owner(config, owner)
+    routing = pdf_worker_lanes.config_for_repository(config, args.repository)
+    lane = pdf_worker_lanes.lane_for_owner(routing, owner)
     for attempt in range(31):
         completed = subprocess.run(["gh", "api", f"repos/{args.repository}/actions/runs/{args.run_id}"],
                                    check=True, capture_output=True, text=True, timeout=30)
