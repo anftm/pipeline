@@ -62,6 +62,8 @@ def retry(store, options, *, apply=False):
     queue = options.get("queue", "build")
     if queue == "build-dispatch":
         return recover_dispatches(store, options, apply=apply)
+    if queue == "build-timeout":
+        return recover_execution_timeouts(store, options, apply=apply)
     if queue == "correction":
         try:
             from . import reader_v3_correction as correction
@@ -340,6 +342,56 @@ def recover_dispatches(store, options, *, apply=False):
     return report
 
 
+def recover_execution_timeouts(store, options, *, apply=False):
+    """Compensate one false queue-time expiry, backed by the exact build jobs."""
+    if apply:
+        publication.assert_writer(store)
+    runs, requested = options.get("build_run_ids"), options.get("tasks")
+    actor = os.environ.get("GITHUB_ACTOR", "").strip()
+    if (not actor or not isinstance(runs, list) or not runs or len(runs) > 32
+            or any(type(run) is not int or run < 1 for run in runs)
+            or not isinstance(requested, list) or not requested or len(requested) > 256):
+        raise ValueError("explicit build runs and timed-out task attempts required")
+    jobs = {}
+    for run_id in runs:
+        run = github(f"actions/runs/{run_id}")
+        if run.get("conclusion") == "cancelled":
+            raise ValueError("cancelled execution is not a live timeout recovery")
+        for job in build_jobs(run):
+            match = re.fullmatch(r"build \(([1-9][0-9]*), ([0-9a-f]{64})\)", job["name"])
+            if match:
+                jobs[(match[2], int(match[1]))] = job
+    state = copy.deepcopy(load_state(store))
+    recovered, seen = [], set()
+    for item in requested:
+        identity, attempt = text.sha(item.get("identity")), item.get("attempt")
+        failures = item.get("failures")
+        job = jobs.get((identity, attempt))
+        task = state["tasks"][identity]
+        if (identity in seen or type(attempt) is not int or type(failures) is not int or failures < 1
+                or job is None or task.get("attempts") != attempt or task.get("failures") != failures
+                or task.get("status") not in {"failed", "retry"}
+                or task.get("error_type") != "BuildTimeout" or task.get("candidate")):
+            raise ValueError("timed-out task no longer matches the inspected build execution")
+        seen.add(identity)
+        try:
+            record = json.loads(store.read_bytes(publication.ASSETS, build_path(identity)))
+        except FileNotFoundError:
+            record = None
+        status = ("building" if job["status"] != "completed" or record and record.get("attempt") == attempt
+                  else "dispatch-pending")
+        recovered.append({**item, "status": status, "job_id": job["id"],
+                          "false_timeout": {k: task.get(k) for k in ("error_type", "retry_at", "failures")}})
+        task.update(status=status, failures=failures - 1)
+        task.pop("retry_at", None)
+    report = {"applied": apply, "queue": "build-timeout", "build_run_ids": runs,
+              "recovered": recovered, "actor": actor, "at": clock().isoformat()}
+    if apply:
+        state.setdefault("execution_timeout_recoveries", []).append({k: v for k, v in report.items() if k != "applied"})
+        save_state(store, state)
+    return report
+
+
 def wave(store, *, apply=False, priority_source=None, now=None, wave_size=WAVE_SIZE,
          build_runs=None):
     """Serialized step: collect parallel build results, promote them, plan the next wave.
@@ -352,7 +404,9 @@ def wave(store, *, apply=False, priority_source=None, now=None, wave_size=WAVE_S
     if apply:
         publication.assert_writer(store)
     if build_runs is None:
-        build_runs = active_builds() if isinstance(store, publication.CentralHubStore) else []
+        # The CLI store can be __main__.CentralHubStore, not the separately
+        # imported publication.CentralHubStore. Never use isinstance for this gate.
+        build_runs = active_builds() if os.environ.get("GITHUB_ACTIONS") == "true" else []
     state = copy.deepcopy(load_state(store))
     ignored = discover(state, json.loads(store.read_bytes(publication.ASSETS, REGISTRY)))
     now = now or clock()

@@ -165,6 +165,50 @@ class WaveTests(unittest.TestCase):
         report = auto.wave(self.store, apply=True, now=self.now, build_runs=active)
         self.assertEqual(report["wave"], [])
 
+    def test_actions_entrypoint_checks_queue_without_relying_on_store_class_identity(self):
+        active = [{"run_id": 123, "tasks": []}]
+        with patch.dict("os.environ", {"GITHUB_ACTIONS": "true"}), \
+                patch.object(auto, "active_builds", return_value=active) as inspect:
+            report = auto.wave(self.store, apply=True, now=self.now)
+        inspect.assert_called_once_with()
+        self.assertTrue(report["admission_blocked"])
+        self.assertEqual(report["wave"], [])
+        self.assertEqual(report["budget"]["attempts"], 0)
+        before = copy.deepcopy(self.store.objects)
+        with patch.dict("os.environ", {"GITHUB_ACTIONS": "true"}), \
+                patch.object(auto, "active_builds", side_effect=RuntimeError("unreadable")):
+            with self.assertRaises(RuntimeError):
+                auto.wave(self.store, apply=True, now=self.now)
+        self.assertEqual(self.store.objects, before)
+
+    def test_false_timeout_compensation_preserves_budget_attempt_and_audit(self):
+        planned = auto.wave(self.store, apply=True, now=self.now, wave_size=2)["wave"]
+        state = auto.load_state(self.store)
+        for item in planned:
+            state["tasks"][item["identity"]].update(status="failed", failures=3, error_type="BuildTimeout",
+                                                   retry_at=(self.now + timedelta(days=1)).isoformat())
+        self.store.objects[(publication.ASSETS, auto.STATE)] = publication.encode(state)
+        run = {"id": 123, "repository": {"full_name": "anftm/pipeline"},
+               "path": ".github/workflows/reader-v3-build.yml", "head_branch": "main",
+               "event": "workflow_dispatch", "status": "in_progress"}
+        jobs = [{"id": i, "name": f"build ({item['attempt']}, {item['identity']})",
+                 "status": "queued" if i == 0 else "completed"} for i, item in enumerate(planned)]
+        def github(path):
+            return {"jobs": jobs, "total_count": 2} if "/jobs?" in path else run
+        options = {"queue": "build-timeout", "build_run_ids": [123],
+                   "tasks": [{**item, "failures": 3} for item in planned]}
+        with patch.object(auto, "github", side_effect=github), \
+                patch.dict("os.environ", {"GITHUB_ACTOR": "operator"}):
+            report = auto.retry(self.store, options, apply=True)
+        restored = auto.load_state(self.store)
+        self.assertEqual(restored["days"], state["days"])
+        self.assertEqual([item["status"] for item in report["recovered"]], ["building", "dispatch-pending"])
+        for item in planned:
+            task = restored["tasks"][item["identity"]]
+            self.assertEqual(task["attempts"], item["attempt"])
+            self.assertEqual(task["failures"], 2)
+        self.assertEqual(restored["execution_timeout_recoveries"][0]["recovered"][0]["false_timeout"]["failures"], 3)
+
     def test_cancelled_unstarted_dispatches_reuse_charge_and_attempt_after_drain(self):
         wave = auto.wave(self.store, apply=True, now=self.now, wave_size=3)["wave"]
         before = auto.load_state(self.store)
