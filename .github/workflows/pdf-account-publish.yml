@@ -100,6 +100,14 @@ jobs:
             output/pdf-ocr/bundle/publication.json
           retention-days: 30
           if-no-files-found: warn
+      - name: Request next OCR batch only after this publication
+        if: inputs.stage == 'ocr' && steps.queue.outputs.shard_count != '0'
+        env:
+          GH_TOKEN: ${{ secrets.PDF_WORKER_READ_TOKEN }}
+          WORKER_REPOSITORY: ${{ inputs.worker_repository }}
+        run: |
+          gh workflow run pdf-account-worker.yml --repo "$WORKER_REPOSITORY" --ref main \
+            -f stage=ocr -f limit=20
       - name: Advance completed rendering to this account's OCR queue
         if: inputs.stage == 'render'
         env:
