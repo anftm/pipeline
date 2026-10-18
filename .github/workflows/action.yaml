@@ -1,49 +1,24 @@
-name: Keep HuggingFace Spaces Alive
+name: 运维 · Keep HuggingFace Spaces Alive
 
 on:
   schedule:
-    - cron: '0 0 * * *'
+    # Leave ample margin below a 24-hour idle timeout, away from the hour boundary.
+    - cron: '17 2,8,14,20 * * *'
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   ping:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - name: Ping all Spaces
-        run: |
-          urls=(
-            "https://vomebook-hitokoto.hf.space/"
-            "https://voiceofml-search.hf.space/"
-            "https://vomebook-search.hf.space/"
-            "https://vomebook-bha-search.hf.space/"
-          )
-          failed=()
-
-          for url in "${urls[@]}"; do
-            echo "--- Pinging: $url ---"
-            if response=$(curl --silent --show-error --fail --output /dev/null \
-              --write-out "%{http_code}" --max-time 30 \
-              --retry 2 --retry-delay 5 --retry-all-errors "$url"); then
-              echo "HTTP Status: $response"
-              if [ "$response" = "200" ]; then
-                echo "Success"
-              else
-                echo "Warning: got HTTP $response"
-                failed+=("$url (HTTP $response)")
-              fi
-            else
-              if [ -n "$response" ] && [ "$response" != "000" ]; then
-                echo "Warning: got HTTP $response after retries"
-                failed+=("$url (HTTP $response)")
-              else
-                echo "Warning: request failed after retries"
-                failed+=("$url (request failed)")
-              fi
-            fi
-          done
-
-          if [ "${#failed[@]}" -gt 0 ]; then
-            echo "Failed Space checks:"
-            printf '  - %s\n' "${failed[@]}"
-            exit 1
-          fi
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Verify keepalive contracts offline
+        run: python -B -m unittest tests.test_ping_spaces -v
+      - name: Ping all Spaces and wait for BHA readiness
+        run: python -B scripts/ping_spaces.py
