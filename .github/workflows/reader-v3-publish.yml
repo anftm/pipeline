@@ -8,7 +8,7 @@ on:
     inputs:
       operation:
         type: choice
-        options: [build-stage, stage, promote, rollback, withdraw, ack, inspect, auto, correct, accept, reject, retry, retire-ocr-progress, unify, repair-gbk]
+        options: [build-stage, stage, promote, rollback, withdraw, ack, inspect, auto, correct, accept, reject, retry, retire, retire-ocr-progress, unify, repair-gbk]
         default: inspect
       resource_json:
         description: Pinned build-stage spec or qualified reading/candidate/rollback resource JSON
@@ -38,7 +38,10 @@ concurrency:
 
 jobs:
   publish:
-    if: github.repository == 'anftm/pipeline'
+    if: >-
+      github.repository == 'anftm/pipeline' &&
+      (vars.READER_V3_AUTO_PAUSED != 'true' ||
+       (github.event_name == 'workflow_dispatch' && inputs.operation != 'auto'))
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     env:
@@ -77,7 +80,7 @@ jobs:
           case "$OPERATION" in
             build-stage|stage|promote|rollback|withdraw) args+=(--resource-json "$RESOURCE_JSON" --expected-parent "$EXPECTED_PARENT") ;;
             auto|correct|accept|reject|retry|repair-gbk|unify) args+=(--resource-json "$RESOURCE_JSON") ;;
-            retire-ocr-progress) ;;
+            retire|retire-ocr-progress) ;;
             ack) args+=(--surface "$SURFACE") ;;
             inspect) ;;
             *) exit 1 ;;
@@ -90,7 +93,7 @@ jobs:
           fi
           echo "changed=$changed" >> "$GITHUB_OUTPUT"
       - name: Dispatch the next parallel build wave outside the writer lock
-        if: steps.operation.outputs.apply == 'true' && steps.operation.outputs.operation == 'auto'
+        if: steps.operation.outputs.apply == 'true' && steps.operation.outputs.operation == 'auto' && vars.READER_V3_AUTO_PAUSED != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -99,7 +102,10 @@ jobs:
             gh workflow run reader-v3-build.yml --repo "$GITHUB_REPOSITORY" --ref main -f tasks="$wave"
           fi
       - name: Publish the pinned projection to Pages
-        if: steps.operation.outputs.apply == 'true' && steps.operation.outputs.changed == 'true' && contains(fromJSON('["auto","correct","accept","promote","rollback","withdraw","repair-gbk","unify"]'), steps.operation.outputs.operation)
+        if: >-
+          steps.operation.outputs.apply == 'true' &&
+          (steps.operation.outputs.operation == 'auto' ||
+           (steps.operation.outputs.changed == 'true' && contains(fromJSON('["correct","accept","promote","rollback","withdraw","repair-gbk","unify"]'), steps.operation.outputs.operation)))
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           PAGES_TOKEN: ${{ secrets.PAGES_TOKEN }}
@@ -119,19 +125,12 @@ jobs:
         run: |
           python scripts/publish_reader_v3.py ack-all --apply --output output/v3/consumers.json
           echo "complete=$(jq -r '.complete // false' output/v3/consumers.json)" >> "$GITHUB_OUTPUT"
-      - name: Retire acknowledged history roots after their retention period
-        if: >-
-          steps.ack.outputs.complete == 'true' &&
-          steps.operation.outputs.apply == 'true' &&
-          (
-            steps.operation.outputs.operation == 'auto' ||
-            (steps.operation.outputs.changed == 'true' && contains(fromJSON('["auto","correct","accept","promote","rollback","withdraw"]'), steps.operation.outputs.operation))
-          )
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: python scripts/publish_reader_v3.py retire --apply --output output/v3/retirement.json
+      # Full history/input retirement is manual operation=retire. Do not scan
+      # every retained OCR book while holding the ordinary publication lock.
       - name: Write deduplicated PDF/OCR progress report
-        if: always()
+        if: >-
+          always() && steps.operation.outputs.operation != 'unify' &&
+          steps.operation.outputs.operation != 'inspect' && steps.operation.outputs.operation != 'ack'
         timeout-minutes: 10
         continue-on-error: true
         env:

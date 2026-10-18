@@ -1,10 +1,7 @@
 name: Build v3 Reading Candidates
 run-name: v3 build wave / ${{ github.event_name }}
 
-# Heavy per-book builds (PDF/OCR reads, text layers, previews, immutable uploads)
-# run here in parallel, outside reader-sidecar. Builders may only upload
-# immutable candidates and per-task build records; promotion into the catalog
-# stays in reader-v3-publish.yml under the single writer lock.
+# Heavy per-book builds stay outside reader-sidecar; promotion owns the writer.
 on:
   workflow_dispatch:
     inputs:
@@ -24,13 +21,12 @@ concurrency:
 
 jobs:
   build:
-    if: github.repository == 'anftm/pipeline'
+    if: github.repository == 'anftm/pipeline' && vars.READER_V3_AUTO_PAUSED != 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 300
     strategy:
       fail-fast: false
-      # The Hub resolver quota is 5,000 requests/5 minutes across the shared token.
-      # Keep page-object verification below that account-wide ceiling.
+      # The resolver quota is shared by the account. Preserve the one-build cap.
       max-parallel: 1
       matrix:
         task: ${{ fromJSON(inputs.tasks) }}
@@ -52,7 +48,7 @@ jobs:
 
   promote:
     needs: build
-    if: always() && github.repository == 'anftm/pipeline'
+    if: always() && github.repository == 'anftm/pipeline' && vars.READER_V3_AUTO_PAUSED != 'true'
     runs-on: ubuntu-24.04
     steps:
       - name: Promote staged candidates and plan the next wave under the writer lock

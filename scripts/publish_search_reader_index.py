@@ -16,15 +16,25 @@ from huggingface_hub import HfApi
 try:
     from .reader_assets import READER_ASSETS_REPO
     from .reader_bucket import INDEX_FILES, read_bytes as read_bucket_bytes
-    from .publish_reader_v3 import current as current_v3, project_sidecar, pinned_base, unify, CentralHubStore
+    from .publish_reader_v3 import current as current_v3, project_sidecar, pinned_base, unify, CentralHubStore, PROTOCOL
     from .reader_bucket_store import HubBucketStore
 except ImportError:
     from reader_assets import READER_ASSETS_REPO
     from reader_bucket import INDEX_FILES, read_bytes as read_bucket_bytes
-    from publish_reader_v3 import current as current_v3, project_sidecar, pinned_base, unify, CentralHubStore
+    from publish_reader_v3 import current as current_v3, project_sidecar, pinned_base, unify, CentralHubStore, PROTOCOL
     from reader_bucket_store import HubBucketStore
 
 SIDECAR_NAME = "reader_assets.json.gz"
+
+
+def synchronize_pinned_base(*, dry_run: bool) -> bool:
+    """Refresh all-format routing under the verified writer, independent of OCR work."""
+    if dry_run or os.environ.get("READER_V3_WRITE_PROTOCOL") != PROTOCOL:
+        return False
+    store = CentralHubStore()
+    store.assert_serialized_writer(PROTOCOL)
+    unify(store, apply=True)
+    return True
 
 
 def run(args: list[str], cwd: str | None = None, env: dict | None = None):
@@ -117,8 +127,7 @@ def main() -> int:
     if type(api) is HfApi:
         raw = read_bucket_bytes(INDEX_FILES["sidecar"], hf_token)
         store = HubBucketStore()
-        if not args.dry_run and os.environ.get("GITHUB_WORKFLOW") == "Publish v3 Reading Generation":
-            unify(CentralHubStore(), apply=True)
+        synchronize_pinned_base(dry_run=args.dry_run)
         pointer, catalog = current_v3(store)
         if pointer:
             base = pinned_base(store, catalog, json.loads(gzip.decompress(raw)))

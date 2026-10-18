@@ -336,10 +336,10 @@ class V3PublicationTests(unittest.TestCase):
                         if step.get("id") == "ack")
         self.assertIn("operation == 'auto'", ack_step["if"])
         self.assertIn("complete=", ack_step["run"])
-        retire_step = next(step for step in workflow["jobs"]["publish"]["steps"]
-                           if step.get("name", "").startswith("Retire acknowledged"))
-        self.assertIn("steps.ack.outputs.complete == 'true'", retire_step["if"])
-        self.assertIn("operation == 'auto'", retire_step["if"])
+        self.assertIn("retire", workflow[True]["workflow_dispatch"]["inputs"]["operation"]["options"])
+        self.assertIn("retire|retire-ocr-progress)", operation_step["run"])
+        self.assertFalse(any(step.get("name", "").startswith("Retire acknowledged")
+                             for step in workflow["jobs"]["publish"]["steps"]))
         env = {"GITHUB_ACTIONS": "true", "GITHUB_REPOSITORY": "anftm/pipeline", "GITHUB_RUN_ID": "123",
                "GITHUB_WORKFLOW": workflow["name"], "READER_V3_WRITE_PROTOCOL": publish.PROTOCOL,
                "GITHUB_WORKFLOW_REF": "anftm/pipeline/.github/workflows/reader-v3-publish.yml@refs/heads/main"}
