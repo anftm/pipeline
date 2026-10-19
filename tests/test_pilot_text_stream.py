@@ -124,6 +124,40 @@ class TextNormalizationTests(unittest.TestCase):
         with self.assertRaises(TextEncodingError):
             normalize_utf8(raw, remove_prefix_byte={"offset": 7, "hex": "cd"})
 
+    def test_exact_authorized_nul_cleanup_preserves_every_other_character(self):
+        text = "前文\r\n穹\0瘢\0\0literal\ufffd?/p>完整后文\n"
+        for bom in (b"", codecs.BOM_UTF8):
+            raw = bom + text.encode()
+            offsets = [index for index, byte in enumerate(raw) if byte == 0]
+            with self.subTest(bom=bool(bom)):
+                with self.assertRaises(TextEncodingError):
+                    normalize_utf8(raw)
+                output, metadata = normalize_utf8(raw, encoding="utf-8", remove_nul_bytes=offsets)
+                self.assertEqual(output.decode("utf-8-sig"), text.replace("\0", ""))
+                self.assertEqual(metadata["removed_nul_bytes"], offsets)
+                self.assertEqual(metadata["normalization_recipe"], "strict-utf8-with-reviewed-nul-removal-v1")
+                self.assertTrue(metadata["source_roundtrip_verified"])
+                retained = output.decode("utf-8-sig").encode(metadata["source_encoding"])
+                reconstructed = bytearray(retained)
+                for offset in offsets:
+                    reconstructed[offset:offset] = b"\0"
+                self.assertEqual(bytes(reconstructed), raw)
+
+    def test_nul_cleanup_refuses_guessed_positions_other_encodings_and_binary(self):
+        raw = b"A\0B\0C"
+        for offsets in ([], [1], [1, 2], [3, 1], [1, 1, 3], [True, 3], [-1, 3], [1, 5], "1,3"):
+            with self.subTest(offsets=offsets), self.assertRaises(TextEncodingError):
+                normalize_utf8(raw, encoding="utf-8", remove_nul_bytes=offsets)
+        for encoding in (None, "gb18030", "utf-16", "cp1252"):
+            with self.subTest(encoding=encoding), self.assertRaises(TextEncodingError):
+                normalize_utf8(raw, encoding=encoding, remove_nul_bytes=[1, 3])
+        for body in (b"A\0\xff", b"A\0\x01", b"A" + b"\0" * 33):
+            with self.subTest(body=body), self.assertRaises((UnicodeError, TextEncodingError)):
+                normalize_utf8(body, encoding="utf-8", remove_nul_bytes=[i for i, byte in enumerate(body) if byte == 0])
+        for options in ({"preserve_controls": {"U+001A": 1}}, {"remove_prefix_byte": {"offset": 0, "hex": "41"}}):
+            with self.subTest(options=options), self.assertRaises(TextEncodingError):
+                normalize_utf8(raw, encoding="utf-8", remove_nul_bytes=[1, 3], **options)
+
 
 class TextStreamPublicationTests(unittest.TestCase):
     def test_download_strips_authorization_on_signed_host_redirects_and_keeps_size_bound(self):
@@ -220,6 +254,30 @@ class TextStreamPublicationTests(unittest.TestCase):
             self.assertEqual(Path(files[entry["object"]]).read_bytes(), codecs.BOM_UTF8 + raw[1:])
             self.assertEqual(entry["removed_prefix_byte"], {"offset": 0, "hex": "ff"})
 
+    def test_reviewed_nul_cleanup_requires_sha_and_retains_original_provenance(self):
+        item = {"repo": "VoiceOfML/Test", "path": "reviewed.txt", "extension": "txt", "revision": "a" * 40}
+        raw = "完整前文穹\0瘢\0?/p>完整后文\r\n".encode()
+        offsets = [index for index, byte in enumerate(raw) if byte == 0]
+        options = {"encoding": "utf-8", "remove_nul_bytes": offsets}
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(stream, "download", side_effect=lambda url, target, token: target.write_bytes(raw)):
+            root = Path(directory)
+            with self.assertRaisesRegex(ValueError, "approved source checksum"):
+                stream.build_one(item, root / "unapproved", None, stream.TARGET_BUCKET, options, skip_utf8=True)
+            with self.assertRaisesRegex(ValueError, "approved selection"):
+                stream.build_one(item, root / "wrong", None, stream.TARGET_BUCKET, options,
+                                 expected_sha256="0" * 64)
+            entry, files = stream.build_one(item, root / "approved", None, stream.TARGET_BUCKET, options,
+                                            skip_utf8=True, expected_sha256=hashlib.sha256(raw).hexdigest())
+            self.assertEqual(Path(files[entry["object"]]).read_bytes(), codecs.BOM_UTF8 + raw.replace(b"\0", b""))
+            self.assertEqual(entry["removed_nul_bytes"], offsets)
+            retained = entry["retained_source"]
+            self.assertEqual(Path(files[retained["path"]]).read_bytes(), raw)
+            self.assertEqual(retained["sha256"], hashlib.sha256(raw).hexdigest())
+            self.assertEqual(retained["role"], "provenance")
+            self.assertTrue(retained["path"].startswith(entry["object"].rsplit("/", 1)[0] + "/"))
+            self.assertEqual(len(files), 3)
+
     def test_override_apply_requires_exact_checksum_selection_before_download(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -240,7 +298,10 @@ class TextStreamPublicationTests(unittest.TestCase):
 
     def test_override_schema_rejects_unreviewed_control_and_replacement_options(self):
         for value in ({"encoding": "gbk", "errors": "replace"}, {"encoding": "gbk", "preserve_controls": {"U+0000": 1}},
-                      {"encoding": "gbk", "preserve_controls": {"U+001A": True}}, {}, [], ""):
+                      {"encoding": "gbk", "preserve_controls": {"U+001A": True}}, {}, [], "",
+                      {"encoding": "utf-8", "remove_nul_bytes": []}, {"encoding": "utf-8", "remove_nul_bytes": [True]},
+                      {"encoding": "utf-8", "remove_nul_bytes": [2, 1]},
+                      {"encoding": "utf-8", "remove_nul_bytes": [1], "preserve_controls": {"U+001A": 1}}):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 stream.encoding_options(value)
 
@@ -287,6 +348,67 @@ class TextStreamPublicationTests(unittest.TestCase):
             self.assertEqual(stored[0]["failures"], [remaining])
             self.assertIn(untouched, stored[0]["files"])
             self.assertEqual(report["converted_sources"][0]["preserved_controls"], {"U+001A": 1})
+
+    def test_exact_nul_cleanup_retry_publishes_one_body_and_keeps_other_failures(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            prefix = "VoiceOfML/Test\0"
+            key = prefix + "reviewed.txt"
+            raw = "完整原文\0穹瘢?/p>完整末尾\n".encode()
+            options = {"encoding": "utf-8", "remove_nul_bytes": [raw.index(b"\0")]}
+            source = root / "source.json"; source.write_text(json.dumps([
+                {"Repo": "VoiceOfML/Test", "File": "reviewed", "Extension": "txt", "Folder": []}]))
+            revisions = root / "revisions.json"; revisions.write_text(json.dumps({"VoiceOfML/Test": "a" * 40}))
+            selection = root / "selection.json"; selection.write_text(json.dumps({key: hashlib.sha256(raw).hexdigest()}))
+            overrides = root / "overrides.json"; overrides.write_text(json.dumps({key: options}))
+            remaining = {"key": prefix + "other.txt", "source_revision": "a" * 40, "profile": PROFILE, "error": "unreviewed damage"}
+            old_other = {"key": remaining["key"], "object": "unchanged.txt"}
+            stored = [{"version": 1, "kind": "text-stream-index", "files": [old_other],
+                       "failures": [remaining, {"key": key, "source_revision": "a" * 40, "profile": PROFILE, "error": "NUL"}]}]
+            objects = {}
+            def upload(bucket, additions, token):
+                for local, remote in additions:
+                    objects[remote] = Path(local).read_bytes()
+                    if remote == stream.ROOT + "/index.json": stored[0] = json.loads(objects[remote])
+            def read(remote, token, bucket):
+                if remote not in objects: raise FileNotFoundError(remote)
+                return objects[remote]
+            args = SimpleNamespace(search_data=source, revisions=revisions, extensions=["txt"], limit=1,
+                checkpoint_size=64, bucket=stream.TARGET_BUCKET, apply=True, plan_only=False,
+                force=False, retry_failures=True, encoding_overrides=overrides, selection=selection, report=root / "report.json")
+            with patch.object(stream, "parse_args", return_value=args), \
+                    patch.object(stream, "existing_index", side_effect=lambda *args: stored[0]), \
+                    patch.object(stream, "download", side_effect=lambda url, target, token: target.write_bytes(raw)), \
+                    patch.object(stream, "batch_bucket_files_with_retry", side_effect=upload), \
+                    patch.object(stream, "read_bytes", side_effect=read), patch.dict(os.environ, {"HF_TOKEN": "test"}):
+                self.assertEqual(stream.main(), 0)
+            report = json.loads(args.report.read_text())
+            self.assertEqual(report["published"], 1)
+            self.assertEqual(report["unchanged_utf8"], [])
+            self.assertEqual(stored[0]["failures"], [remaining])
+            self.assertIn(old_other, stored[0]["files"])
+            retained = report["converted_sources"][0]["retained_source"]
+            self.assertEqual(objects[retained["path"]], raw)
+            self.assertEqual(report["converted_sources"][0]["removed_nul_bytes"], options["remove_nul_bytes"])
+
+    def test_cleanup_original_stays_in_the_streamed_bucket_reference_graph(self):
+        from scripts.reader_gc_stream import graph_json
+        from scripts.reader_gc_graph import ReferenceGraph
+        original = "documents/text/txt/" + "a" * 64 + "/original-" + "b" * 64 + ".bin"
+        document = "documents/text/txt/" + "a" * 64 + "/document.txt"
+        payload = {"version": 1, "kind": "text-stream-index", "files": [{
+            "key": "VoiceOfML/Test\0reviewed.txt", "repo": "VoiceOfML/Test", "path": "reviewed.txt",
+            "object": document, "bucket": stream.TARGET_BUCKET,
+            "retained_source": {"bucket": stream.TARGET_BUCKET, "path": original,
+                                "bytes": 10, "sha256": "b" * 64, "role": "provenance"}}]}
+        parsed, _digest = graph_json([json.dumps(payload).encode()])
+        graph = ReferenceGraph(None)
+        graph.files = {stream.TARGET_BUCKET: {document, original}}
+        graph.ordered = {stream.TARGET_BUCKET: sorted(graph.files[stream.TARGET_BUCKET])}
+        graph.walk(parsed, stream.TARGET_BUCKET, stream.ROOT + "/index.json")
+        self.assertIn((stream.TARGET_BUCKET, document), graph.references)
+        self.assertIn((stream.TARGET_BUCKET, original), graph.references)
+        self.assertFalse(graph.missing)
 
     def test_utf8_only_apply_checkpoints_verification_without_publishing_a_derivative(self):
         with tempfile.TemporaryDirectory() as directory:

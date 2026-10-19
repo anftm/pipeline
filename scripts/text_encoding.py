@@ -134,9 +134,33 @@ def decode_source_text(raw: bytes, *, hint: str = "", encoding: str | None = Non
 
 
 def normalize_utf8(raw: bytes, *, hint: str = "", encoding: str | None = None,
-                   preserve_controls: dict | None = None,
-                   remove_prefix_byte: dict | None = None) -> tuple[bytes, dict]:
+                    preserve_controls: dict | None = None,
+                    remove_prefix_byte: dict | None = None,
+                    remove_nul_bytes: list[int] | None = None) -> tuple[bytes, dict]:
     original = raw
+    if remove_nul_bytes is not None:
+        offsets = remove_nul_bytes
+        if (not encoding or remove_prefix_byte is not None or preserve_controls is not None
+                or not isinstance(offsets, list) or not 1 <= len(offsets) <= 32
+                or any(type(offset) is not int or not 0 <= offset < len(raw) for offset in offsets)
+                or offsets != sorted(set(offsets))):
+            raise TextEncodingError("NUL cleanup needs explicit UTF-8, 1..32 exact ordered byte offsets and no other repair")
+        try:
+            codec = codecs.lookup(encoding).name
+        except LookupError as error:
+            raise TextEncodingError("unknown explicit text encoding") from error
+        if codec not in {"utf-8", "utf-8-sig"}:
+            raise TextEncodingError("reviewed NUL cleanup is limited to strict UTF-8 originals")
+        # The original must already decode strictly. This is an explicitly
+        # authorized deletion, never a binary/encoding-error recovery policy.
+        raw.decode("utf-8", errors="strict")
+        if offsets != [offset for offset, byte in enumerate(raw) if byte == 0]:
+            raise TextEncodingError("reviewed NUL offsets do not match all source NUL bytes")
+        parts, cursor = [], 0
+        for offset in offsets:
+            parts.append(raw[cursor:offset])
+            cursor = offset + 1
+        raw = b"".join([*parts, raw[cursor:]])
     if remove_prefix_byte is not None:
         removal = remove_prefix_byte
         if (not encoding or not isinstance(removal, dict) or set(removal) != {"offset", "hex"}
@@ -164,6 +188,18 @@ def normalize_utf8(raw: bytes, *, hint: str = "", encoding: str | None = None,
             raise TextEncodingError("reviewed prefix repair does not reconstruct the complete original")
         metadata["removed_prefix_byte"] = dict(removal)
         metadata["normalization_recipe"] = "strict-decode-with-reviewed-prefix-byte-removal-v1"
-    if source_encoding == "windows-936" or preserve_controls or remove_prefix_byte is not None:
+    if remove_nul_bytes is not None:
+        retained = text.encode(source_encoding, errors="strict")
+        parts, cursor = [], 0
+        for number, offset in enumerate(remove_nul_bytes):
+            position = offset - number
+            parts.extend((retained[cursor:position], b"\0"))
+            cursor = position
+        reconstructed = b"".join([*parts, retained[cursor:]])
+        if retained != raw or reconstructed != original:
+            raise TextEncodingError("reviewed NUL cleanup does not reconstruct the complete original")
+        metadata["removed_nul_bytes"] = list(remove_nul_bytes)
+        metadata["normalization_recipe"] = "strict-utf8-with-reviewed-nul-removal-v1"
+    if source_encoding == "windows-936" or preserve_controls or remove_prefix_byte is not None or remove_nul_bytes is not None:
         metadata["source_roundtrip_verified"] = True
     return normalized, metadata
