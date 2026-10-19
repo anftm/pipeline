@@ -78,6 +78,10 @@ def set_state(repo, path, body, expected):
 def permissions(repo, desired):
     # GET may expose read-only or newly added fields that PUT does not accept.
     body = {key: desired[key] for key in ("enabled", "allowed_actions") if key in desired}
+    # GitHub rejects allowed_actions when Actions is being disabled. Keep the
+    # original policy only for re-enabling; the disabled state ignores it.
+    if body.get("enabled") is False:
+        body.pop("allowed_actions", None)
     set_state(repo, "actions/permissions", body,
               lambda value: all(value.get(key) == item for key, item in body.items()))
 

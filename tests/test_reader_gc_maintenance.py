@@ -106,6 +106,26 @@ class MaintenanceTests(unittest.TestCase):
         # No credential material may appear in a failure intended for logs.
         self.assertNotIn("ghp_", str(caught.exception))
 
+    def test_disabling_repository_actions_omits_allowed_actions(self):
+        state = {"enabled": True, "allowed_actions": "all"}
+        writes = []
+
+        def api(repo, path, *, method="GET", body=None):
+            if path != "actions/permissions":
+                raise AssertionError(path)
+            if method == "GET":
+                return dict(state)
+            writes.append(body)
+            state.clear()
+            state.update(body)
+            return {}
+
+        with patch.object(maintenance, "api", side_effect=api):
+            maintenance.permissions("owner/repo", {
+                "enabled": False, "allowed_actions": "all"})
+        self.assertEqual(writes, [{"enabled": False}])
+        self.assertFalse(state["enabled"])
+
     def test_ambiguous_rerun_is_never_blindly_repeated(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "journal.json"
