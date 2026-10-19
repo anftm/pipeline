@@ -70,7 +70,8 @@ def resource(value):
         raise ValueError("invalid qualified resource bucket")
     path = value.get("path")
     if (not isinstance(path, str) or not (path.startswith(("objects/", "derived/")) or
-            re.fullmatch(r"documents/pdf/[a-z0-9_-]+/[0-9a-f]{64}/document\.pdf", path))
+            re.fullmatch(r"documents/pdf/[a-z0-9_-]+/[0-9a-f]{64}/document\.pdf", path) or
+            re.fullmatch(r"documents/pdf/[a-z0-9_-]+/[0-9a-f]{64}/document-manifest\.json", path))
             or "\\" in path or any(part in {"", ".", ".."} for part in path.split("/"))
             or any(ord(c) < 32 for c in path) or "?" in path or "#" in path):
         raise ValueError("invalid qualified resource path")

@@ -149,13 +149,45 @@ def export_spec(store, job, number):
         spec.update(reading_manifest=ref, text_manifest=manifest.get('text_layer'))
     if entry.get('source_kind', 'upstream') != 'upstream':
         derivation = job.get('derivation')
-        if (not derivation or derivation.get('repo') != repo or derivation.get('source_path') != path
-                or derivation.get('source_revision') != spec['origin_revision']
-                or derivation.get('derived_sha256') != spec['source_sha256']
+        bucket = entry.get('reader_assets_bucket')
+        relative = entry.get('reader_assets_path')
+        if derivation is None and isinstance(relative, str):
+            match = re.fullmatch(r'documents/pdf/[a-z0-9_-]+/([0-9a-f]{64})/document\.pdf', relative)
+        else:
+            match = None
+        if match:
+            # Static PDF/Office/PostScript conversions keep their provenance in
+            # a document-owned manifest next to the PDF instead of the derived
+            # source index. The directory name is the original source digest.
+            if bucket not in {shared.PDF_PAGES_BUCKET, shared.READER_ASSETS_BUCKET}:
+                raise ValueError('unsupported derived provenance bucket')
+            manifest_path = relative.rsplit('/', 1)[0] + '/document-manifest.json'
+            value = json.loads(store.read_bytes(bucket, manifest_path))
+            if (value.get('kind') != 'static-pdf-document-stream' or value.get('version') != 1
+                    or value.get('path') != 'document.pdf'
+                    or value.get('source_sha256') != match.group(1)
+                    or value.get('sha256') != spec['source_sha256']
+                    or value.get('bytes') != entry.get('source_bytes')):
+                raise ValueError('derived OCR lacks matching original provenance')
+            derivation = {'bucket': bucket, 'manifest_path': manifest_path,
+                          'source_sha256': value['source_sha256'],
+                          'derived_sha256': value['sha256'],
+                          'derived_bytes': value['bytes']}
+        if (not derivation or derivation.get('derived_sha256') != spec['source_sha256']
                 or derivation.get('derived_bytes') != entry.get('source_bytes')):
             raise ValueError('derived OCR lacks matching original provenance')
+        if derivation.get('repo') is not None or derivation.get('source_path') is not None:
+            # The derived-source index carries a full original identity; require
+            # it to match. A document-owned manifest has no repo/path fields and
+            # binds the conversion through the source digest instead.
+            if (derivation.get('repo') != repo or derivation.get('source_path') != path
+                    or derivation.get('source_revision') != spec['origin_revision']):
+                raise ValueError('derived OCR lacks matching original provenance')
         bucket, relative = derivation.get('bucket'), contract.safe_path(derivation.get('manifest_path'))
-        if bucket not in {shared.PDF_PAGES_BUCKET, shared.READER_ASSETS_BUCKET} or not relative.startswith(('derived/', 'objects/')):
+        if bucket not in {shared.PDF_PAGES_BUCKET, shared.READER_ASSETS_BUCKET}:
+            raise ValueError('unsupported derived provenance resource')
+        if not (relative.startswith(('derived/', 'objects/'))
+                or re.fullmatch(r'documents/pdf/[a-z0-9_-]+/[0-9a-f]{64}/document-manifest\.json', relative)):
             raise ValueError('unsupported derived provenance resource')
         raw = store.read_bytes(bucket, relative)
         spec.update(origin_sha256=derivation.get('source_sha256'), derivation_manifest={

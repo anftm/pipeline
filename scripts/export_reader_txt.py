@@ -83,11 +83,23 @@ def build_export(spec: dict, read, *, allow_unreviewed: bool = False, max_input_
     if spec["origin_sha256"] != spec["source_sha256"]:
         derivation_ref = v3.resource(spec.get("derivation_manifest"))
         derivation = v3.decode(checked_read(derivation_ref))
-        if (derivation.get("kind") != "pdf-derived-source" or derivation.get("version") != 1
-                or derivation.get("repo") != repo or derivation.get("source_path") != original
-                or derivation.get("source_revision") != spec["origin_revision"]
-                or derivation.get("source_sha256") != spec["origin_sha256"]
-                or derivation.get("derived_sha256") != spec["source_sha256"]):
+        if derivation.get("kind") == "pdf-derived-source":
+            valid = (derivation.get("version") == 1
+                     and derivation.get("repo") == repo and derivation.get("source_path") == original
+                     and derivation.get("source_revision") == spec["origin_revision"]
+                     and derivation.get("source_sha256") == spec["origin_sha256"]
+                     and derivation.get("derived_sha256") == spec["source_sha256"])
+        elif derivation.get("kind") == "static-pdf-document-stream":
+            # Office/PostScript/static-document sources are converted once into
+            # a document-owned PDF. That manifest names the original source
+            # digest and the converted PDF digest, but not a repo/path identity.
+            valid = (derivation.get("version") == 1
+                     and derivation.get("path") == "document.pdf"
+                     and derivation.get("source_sha256") == spec["origin_sha256"]
+                     and derivation.get("sha256") == spec["source_sha256"])
+        else:
+            valid = False
+        if not valid:
             raise ValueError("OCR primary differs from its pinned original derivation")
         references[(derivation_ref["bucket"], derivation_ref["path"])] = dict(derivation_ref)
 

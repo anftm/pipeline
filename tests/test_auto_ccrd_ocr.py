@@ -183,6 +183,32 @@ class AutoCcrdOcrTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'original provenance'):
             auto.export_spec(self.store, jobs[0], 1)
 
+    def test_static_document_manifest_supplies_converted_provenance(self):
+        """Office/PostScript PDFs have no entry in the derived-source index."""
+        key, entry = self.book('office')
+        original = 'f' * 64
+        stem = 'documents/pdf/wps/' + original
+        entry.update(source_kind='generated', source_extension='wps',
+                     reader_assets_bucket=shared.READER_ASSETS_BUCKET,
+                     reader_assets_path=stem + '/document.pdf', source_url='')
+        manifest = {'kind': 'static-pdf-document-stream', 'version': 1, 'path': 'document.pdf',
+                    'source_extension': 'wps', 'source_sha256': original,
+                    'bytes': entry['source_bytes'], 'sha256': entry['source_sha256']}
+        path = stem + '/document-manifest.json'
+        self.store.objects[shared.READER_ASSETS_BUCKET, path] = contract.canonical(manifest)
+        jobs, _, _ = auto.discover(self.registry, self.derived, {'files': {}}, {}, {'failures': {}})
+        spec = auto.export_spec(self.store, jobs[0], 1)
+        self.assertEqual(spec['origin_sha256'], original)
+        self.assertEqual(spec['derivation_manifest']['path'], path)
+        read = lambda ref: self.store.read_bytes(ref['bucket'], ref['path'])
+        result = exporter.build_export(spec, read, allow_unreviewed=True)
+        self.assertEqual(result['manifest']['origin_sha256'], original)
+        self.assertEqual(result['manifest']['source_sha256'], entry['source_sha256'])
+        manifest['sha256'] = 'c' * 64
+        self.store.objects[shared.READER_ASSETS_BUCKET, path] = contract.canonical(manifest)
+        with self.assertRaisesRegex(ValueError, 'original provenance'):
+            auto.export_spec(self.store, jobs[0], 1)
+
     def test_only_accepted_descendant_updates_preserve_raw_and_previous_corrections(self):
         key, entry = self.book('upgrade')
         job = {'entry': entry, 'key': key, 'active': None}
