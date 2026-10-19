@@ -12,7 +12,13 @@ import urllib.request
 from unittest.mock import patch
 
 from scripts import pilot_text_stream as stream
-from scripts.text_encoding import PROFILE, TextEncodingError, normalize_utf8
+from scripts.text_encoding import PROFILE, REVIEWED_SOURCE_REPAIRS, TextEncodingError, normalize_utf8
+
+
+def repair_fixture(raw, old_span, replacement):
+    return {"source_sha256": hashlib.sha256(raw).hexdigest(), "offset": raw.index(old_span),
+            "original_text": old_span.decode("utf-8"), "replacement_text": replacement,
+            "reference_url": "https://example.invalid/review.html", "reference_sha256": "a" * 64}
 
 
 class TextNormalizationTests(unittest.TestCase):
@@ -124,39 +130,47 @@ class TextNormalizationTests(unittest.TestCase):
         with self.assertRaises(TextEncodingError):
             normalize_utf8(raw, remove_prefix_byte={"offset": 7, "hex": "cd"})
 
-    def test_exact_authorized_nul_cleanup_preserves_every_other_character(self):
-        text = "前文\r\n穹\0瘢\0\0literal\ufffd?/p>完整后文\n"
+    def test_exact_reviewed_source_repair_preserves_every_other_character(self):
+        damaged, replacement = "穹\0瘢\0\0?/p>", "民服务？"
+        text = "前文\r\n" + damaged + "literal\ufffd完整后文\n"
         for bom in (b"", codecs.BOM_UTF8):
             raw = bom + text.encode()
-            offsets = [index for index, byte in enumerate(raw) if byte == 0]
-            with self.subTest(bom=bool(bom)):
+            fixture = repair_fixture(raw, damaged.encode(), replacement)
+            with self.subTest(bom=bool(bom)), patch.dict(REVIEWED_SOURCE_REPAIRS, {"fixture": fixture}):
                 with self.assertRaises(TextEncodingError):
                     normalize_utf8(raw)
-                output, metadata = normalize_utf8(raw, encoding="utf-8", remove_nul_bytes=offsets)
-                self.assertEqual(output.decode("utf-8-sig"), text.replace("\0", ""))
-                self.assertEqual(metadata["removed_nul_bytes"], offsets)
-                self.assertEqual(metadata["normalization_recipe"], "strict-utf8-with-reviewed-nul-removal-v1")
+                output, metadata = normalize_utf8(raw, encoding="utf-8", reviewed_source_repair="fixture")
+                self.assertEqual(output.decode("utf-8-sig"), text.replace(damaged, replacement))
+                self.assertEqual(metadata["reviewed_source_repair"], "fixture")
+                self.assertEqual(metadata["replaced_source_span"]["original_text"], damaged)
+                self.assertEqual(metadata["normalization_recipe"], "strict-utf8-reviewed-source-repair-v1")
                 self.assertTrue(metadata["source_roundtrip_verified"])
                 retained = output.decode("utf-8-sig").encode(metadata["source_encoding"])
-                reconstructed = bytearray(retained)
-                for offset in offsets:
-                    reconstructed[offset:offset] = b"\0"
-                self.assertEqual(bytes(reconstructed), raw)
+                offset = fixture["offset"]
+                self.assertEqual(retained[:offset] + damaged.encode() + retained[offset + len(replacement.encode()):], raw)
 
-    def test_nul_cleanup_refuses_guessed_positions_other_encodings_and_binary(self):
-        raw = b"A\0B\0C"
-        for offsets in ([], [1], [1, 2], [3, 1], [1, 1, 3], [True, 3], [-1, 3], [1, 5], "1,3"):
-            with self.subTest(offsets=offsets), self.assertRaises(TextEncodingError):
-                normalize_utf8(raw, encoding="utf-8", remove_nul_bytes=offsets)
-        for encoding in (None, "gb18030", "utf-16", "cp1252"):
-            with self.subTest(encoding=encoding), self.assertRaises(TextEncodingError):
-                normalize_utf8(raw, encoding=encoding, remove_nul_bytes=[1, 3])
-        for body in (b"A\0\xff", b"A\0\x01", b"A" + b"\0" * 33):
-            with self.subTest(body=body), self.assertRaises((UnicodeError, TextEncodingError)):
-                normalize_utf8(body, encoding="utf-8", remove_nul_bytes=[i for i, byte in enumerate(body) if byte == 0])
-        for options in ({"preserve_controls": {"U+001A": 1}}, {"remove_prefix_byte": {"offset": 0, "hex": "41"}}):
-            with self.subTest(options=options), self.assertRaises(TextEncodingError):
-                normalize_utf8(raw, encoding="utf-8", remove_nul_bytes=[1, 3], **options)
+    def test_source_repair_refuses_unknown_recipes_byte_drift_and_other_encodings(self):
+        raw = b"A\0B"
+        fixture = repair_fixture(raw, b"\0", "复原")
+        with patch.dict(REVIEWED_SOURCE_REPAIRS, {"fixture": fixture}):
+            for recipe in (None, "not-reviewed", {}, True):
+                with self.subTest(recipe=recipe), self.assertRaises(TextEncodingError):
+                    normalize_utf8(raw, encoding="utf-8", reviewed_source_repair=recipe)
+            for encoding in (None, "gb18030", "utf-16", "cp1252"):
+                with self.subTest(encoding=encoding), self.assertRaises(TextEncodingError):
+                    normalize_utf8(raw, encoding=encoding, reviewed_source_repair="fixture")
+            with self.assertRaisesRegex(TextEncodingError, "SHA-256"):
+                normalize_utf8(raw + b"changed", encoding="utf-8", reviewed_source_repair="fixture")
+            for options in ({"preserve_controls": {"U+001A": 1}}, {"remove_prefix_byte": {"offset": 0, "hex": "41"}}):
+                with self.subTest(options=options), self.assertRaises(TextEncodingError):
+                    normalize_utf8(raw, encoding="utf-8", reviewed_source_repair="fixture", **options)
+        for damaged in (b"A\0\xff", b"A\0\x01"):
+            with patch.dict(REVIEWED_SOURCE_REPAIRS, {"fixture": repair_fixture(damaged, b"\0", "复原")}):
+                with self.subTest(damaged=damaged), self.assertRaises((UnicodeError, TextEncodingError)):
+                    normalize_utf8(damaged, encoding="utf-8", reviewed_source_repair="fixture")
+        with patch.dict(REVIEWED_SOURCE_REPAIRS, {"fixture": {**fixture, "offset": 0}}):
+            with self.assertRaisesRegex(TextEncodingError, "span"):
+                normalize_utf8(raw, encoding="utf-8", reviewed_source_repair="fixture")
 
 
 class TextStreamPublicationTests(unittest.TestCase):
@@ -254,12 +268,13 @@ class TextStreamPublicationTests(unittest.TestCase):
             self.assertEqual(Path(files[entry["object"]]).read_bytes(), codecs.BOM_UTF8 + raw[1:])
             self.assertEqual(entry["removed_prefix_byte"], {"offset": 0, "hex": "ff"})
 
-    def test_reviewed_nul_cleanup_requires_sha_and_retains_original_provenance(self):
+    def test_reviewed_source_repair_requires_sha_and_retains_original_provenance(self):
         item = {"repo": "VoiceOfML/Test", "path": "reviewed.txt", "extension": "txt", "revision": "a" * 40}
-        raw = "完整前文穹\0瘢\0?/p>完整后文\r\n".encode()
-        offsets = [index for index, byte in enumerate(raw) if byte == 0]
-        options = {"encoding": "utf-8", "remove_nul_bytes": offsets}
+        damaged, replacement = "穹\0瘢\0?/p>", "复原句。"
+        raw = ("完整前文" + damaged + "完整后文\r\n").encode()
+        options = {"encoding": "utf-8", "reviewed_source_repair": "fixture"}
         with tempfile.TemporaryDirectory() as directory, \
+                patch.dict(REVIEWED_SOURCE_REPAIRS, {"fixture": repair_fixture(raw, damaged.encode(), replacement)}), \
                 patch.object(stream, "download", side_effect=lambda url, target, token: target.write_bytes(raw)):
             root = Path(directory)
             with self.assertRaisesRegex(ValueError, "approved source checksum"):
@@ -269,8 +284,8 @@ class TextStreamPublicationTests(unittest.TestCase):
                                  expected_sha256="0" * 64)
             entry, files = stream.build_one(item, root / "approved", None, stream.TARGET_BUCKET, options,
                                             skip_utf8=True, expected_sha256=hashlib.sha256(raw).hexdigest())
-            self.assertEqual(Path(files[entry["object"]]).read_bytes(), codecs.BOM_UTF8 + raw.replace(b"\0", b""))
-            self.assertEqual(entry["removed_nul_bytes"], offsets)
+            self.assertEqual(Path(files[entry["object"]]).read_bytes(), codecs.BOM_UTF8 + raw.replace(damaged.encode(), replacement.encode()))
+            self.assertEqual(entry["reviewed_source_repair"], "fixture")
             retained = entry["retained_source"]
             self.assertEqual(Path(files[retained["path"]]).read_bytes(), raw)
             self.assertEqual(retained["sha256"], hashlib.sha256(raw).hexdigest())
@@ -299,9 +314,10 @@ class TextStreamPublicationTests(unittest.TestCase):
     def test_override_schema_rejects_unreviewed_control_and_replacement_options(self):
         for value in ({"encoding": "gbk", "errors": "replace"}, {"encoding": "gbk", "preserve_controls": {"U+0000": 1}},
                       {"encoding": "gbk", "preserve_controls": {"U+001A": True}}, {}, [], "",
-                      {"encoding": "utf-8", "remove_nul_bytes": []}, {"encoding": "utf-8", "remove_nul_bytes": [True]},
-                      {"encoding": "utf-8", "remove_nul_bytes": [2, 1]},
-                      {"encoding": "utf-8", "remove_nul_bytes": [1], "preserve_controls": {"U+001A": 1}}):
+                      {"encoding": "utf-8", "remove_nul_bytes": [1]},
+                      {"encoding": "utf-8", "reviewed_source_repair": "unreviewed"},
+                      {"encoding": "utf-8", "reviewed_source_repair": {}},
+                      {"encoding": "utf-8", "reviewed_source_repair": "mlmrl-1967-02-01-mojibake-v1", "preserve_controls": {"U+001A": 1}}):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 stream.encoding_options(value)
 
@@ -349,13 +365,14 @@ class TextStreamPublicationTests(unittest.TestCase):
             self.assertIn(untouched, stored[0]["files"])
             self.assertEqual(report["converted_sources"][0]["preserved_controls"], {"U+001A": 1})
 
-    def test_exact_nul_cleanup_retry_publishes_one_body_and_keeps_other_failures(self):
+    def test_exact_source_repair_retry_publishes_one_body_and_keeps_other_failures(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             prefix = "VoiceOfML/Test\0"
             key = prefix + "reviewed.txt"
-            raw = "完整原文\0穹瘢?/p>完整末尾\n".encode()
-            options = {"encoding": "utf-8", "remove_nul_bytes": [raw.index(b"\0")]}
+            damaged, replacement = "\0穹瘢?/p>", "复原句。"
+            raw = ("完整原文" + damaged + "完整末尾\n").encode()
+            options = {"encoding": "utf-8", "reviewed_source_repair": "fixture"}
             source = root / "source.json"; source.write_text(json.dumps([
                 {"Repo": "VoiceOfML/Test", "File": "reviewed", "Extension": "txt", "Folder": []}]))
             revisions = root / "revisions.json"; revisions.write_text(json.dumps({"VoiceOfML/Test": "a" * 40}))
@@ -377,6 +394,7 @@ class TextStreamPublicationTests(unittest.TestCase):
                 checkpoint_size=64, bucket=stream.TARGET_BUCKET, apply=True, plan_only=False,
                 force=False, retry_failures=True, encoding_overrides=overrides, selection=selection, report=root / "report.json")
             with patch.object(stream, "parse_args", return_value=args), \
+                    patch.dict(REVIEWED_SOURCE_REPAIRS, {"fixture": repair_fixture(raw, damaged.encode(), replacement)}), \
                     patch.object(stream, "existing_index", side_effect=lambda *args: stored[0]), \
                     patch.object(stream, "download", side_effect=lambda url, target, token: target.write_bytes(raw)), \
                     patch.object(stream, "batch_bucket_files_with_retry", side_effect=upload), \
@@ -389,7 +407,8 @@ class TextStreamPublicationTests(unittest.TestCase):
             self.assertIn(old_other, stored[0]["files"])
             retained = report["converted_sources"][0]["retained_source"]
             self.assertEqual(objects[retained["path"]], raw)
-            self.assertEqual(report["converted_sources"][0]["removed_nul_bytes"], options["remove_nul_bytes"])
+            self.assertEqual(report["converted_sources"][0]["reviewed_source_repair"], "fixture")
+            self.assertEqual(report["converted_sources"][0]["replaced_source_span"]["replacement_text"], replacement)
 
     def test_cleanup_original_stays_in_the_streamed_bucket_reference_graph(self):
         from scripts.reader_gc_stream import graph_json

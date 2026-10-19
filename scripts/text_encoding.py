@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import codecs
 from collections import Counter
+import hashlib
 import re
 
 try:
@@ -17,6 +18,20 @@ except ImportError:
 PROFILE = "strict-utf8-bom-v1"
 UTF8_BOM = codecs.BOM_UTF8
 COMMON_CJK = set("的一是在不了有和人这中大为上个国我以要他时来用们生到作地于出就分对成会可主发年动同工也能下过子说产种面而方后多定行学法所民得经之进着等部家自理起现实都体制当本性应开合因由然前外政社义事相全与关各重新内正反明原利质向道命此变结解问意建公系军情者立代通题党程展料员革文总品活长求老基资级图统知组别期论运农指区战任处理世")
+
+# Manually reviewed, user-authorized source repairs. These are not decoding
+# guesses or a caller-supplied replacement API. Each recipe accepts only the
+# complete original SHA and one exact byte span, retaining all other content.
+REVIEWED_SOURCE_REPAIRS = {
+    "mlmrl-1967-02-01-mojibake-v1": {
+        "source_sha256": "da24e640b710afb49ba75a7a107047da066b202d29b0115d185729bbc5b34805",
+        "offset": 9484,
+        "original_text": "穹\0瘢\0炊\0哦荆\0驮闾ち巳嗣癫撇\0\0腔挂\0\0墒裁矗?/p>",
+        "replacement_text": "民服务，反而放毒，就糟踏了人民财产，那还要它干什么？",
+        "reference_url": "https://www.prisoncensorship.info/archive/etext/chinese/classics/jiangqing1966to1976/061-090/073.html",
+        "reference_sha256": "0a293f7f424650fbf4d5e91b85dc369841961c04fe2420bc36adb520a5f099ee",
+    },
+}
 
 
 class TextEncodingError(ValueError):
@@ -136,31 +151,28 @@ def decode_source_text(raw: bytes, *, hint: str = "", encoding: str | None = Non
 def normalize_utf8(raw: bytes, *, hint: str = "", encoding: str | None = None,
                     preserve_controls: dict | None = None,
                     remove_prefix_byte: dict | None = None,
-                    remove_nul_bytes: list[int] | None = None) -> tuple[bytes, dict]:
+                    reviewed_source_repair: str | None = None) -> tuple[bytes, dict]:
     original = raw
-    if remove_nul_bytes is not None:
-        offsets = remove_nul_bytes
+    if reviewed_source_repair is not None:
         if (not encoding or remove_prefix_byte is not None or preserve_controls is not None
-                or not isinstance(offsets, list) or not 1 <= len(offsets) <= 32
-                or any(type(offset) is not int or not 0 <= offset < len(raw) for offset in offsets)
-                or offsets != sorted(set(offsets))):
-            raise TextEncodingError("NUL cleanup needs explicit UTF-8, 1..32 exact ordered byte offsets and no other repair")
+                or not isinstance(reviewed_source_repair, str) or reviewed_source_repair not in REVIEWED_SOURCE_REPAIRS):
+            raise TextEncodingError("source repair requires one known reviewed recipe, explicit UTF-8 and no other repair")
         try:
             codec = codecs.lookup(encoding).name
-        except LookupError as error:
+        except (LookupError, TypeError) as error:
             raise TextEncodingError("unknown explicit text encoding") from error
         if codec not in {"utf-8", "utf-8-sig"}:
-            raise TextEncodingError("reviewed NUL cleanup is limited to strict UTF-8 originals")
-        # The original must already decode strictly. This is an explicitly
-        # authorized deletion, never a binary/encoding-error recovery policy.
+            raise TextEncodingError("reviewed source repair is limited to strict UTF-8 originals")
+        repair = REVIEWED_SOURCE_REPAIRS[reviewed_source_repair]
+        if hashlib.sha256(raw).hexdigest() != repair["source_sha256"]:
+            raise TextEncodingError("source differs from the complete approved repair SHA-256")
         raw.decode("utf-8", errors="strict")
-        if offsets != [offset for offset, byte in enumerate(raw) if byte == 0]:
-            raise TextEncodingError("reviewed NUL offsets do not match all source NUL bytes")
-        parts, cursor = [], 0
-        for offset in offsets:
-            parts.append(raw[cursor:offset])
-            cursor = offset + 1
-        raw = b"".join([*parts, raw[cursor:]])
+        offset = repair["offset"]
+        old_span = repair["original_text"].encode("utf-8", errors="strict")
+        new_span = validate_text(repair["replacement_text"]).encode("utf-8", errors="strict")
+        if raw[offset:offset + len(old_span)] != old_span:
+            raise TextEncodingError("reviewed source span differs from original bytes")
+        raw = raw[:offset] + new_span + raw[offset + len(old_span):]
     if remove_prefix_byte is not None:
         removal = remove_prefix_byte
         if (not encoding or not isinstance(removal, dict) or set(removal) != {"offset", "hex"}
@@ -188,18 +200,18 @@ def normalize_utf8(raw: bytes, *, hint: str = "", encoding: str | None = None,
             raise TextEncodingError("reviewed prefix repair does not reconstruct the complete original")
         metadata["removed_prefix_byte"] = dict(removal)
         metadata["normalization_recipe"] = "strict-decode-with-reviewed-prefix-byte-removal-v1"
-    if remove_nul_bytes is not None:
+    if reviewed_source_repair is not None:
         retained = text.encode(source_encoding, errors="strict")
-        parts, cursor = [], 0
-        for number, offset in enumerate(remove_nul_bytes):
-            position = offset - number
-            parts.extend((retained[cursor:position], b"\0"))
-            cursor = position
-        reconstructed = b"".join([*parts, retained[cursor:]])
+        reconstructed = retained[:offset] + old_span + retained[offset + len(new_span):]
         if retained != raw or reconstructed != original:
-            raise TextEncodingError("reviewed NUL cleanup does not reconstruct the complete original")
-        metadata["removed_nul_bytes"] = list(remove_nul_bytes)
-        metadata["normalization_recipe"] = "strict-utf8-with-reviewed-nul-removal-v1"
-    if source_encoding == "windows-936" or preserve_controls or remove_prefix_byte is not None or remove_nul_bytes is not None:
+            raise TextEncodingError("reviewed source repair does not reconstruct the complete original")
+        metadata["reviewed_source_repair"] = reviewed_source_repair
+        metadata["replaced_source_span"] = {
+            "offset": offset, "original_bytes": len(old_span), "replacement_bytes": len(new_span),
+            "original_text": repair["original_text"], "replacement_text": repair["replacement_text"],
+            "reference_url": repair["reference_url"], "reference_sha256": repair["reference_sha256"],
+        }
+        metadata["normalization_recipe"] = "strict-utf8-reviewed-source-repair-v1"
+    if source_encoding == "windows-936" or preserve_controls or remove_prefix_byte is not None or reviewed_source_repair is not None:
         metadata["source_roundtrip_verified"] = True
     return normalized, metadata

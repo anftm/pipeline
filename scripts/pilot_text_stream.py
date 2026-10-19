@@ -21,13 +21,13 @@ try:
     from .shared import batch_bucket_files_with_retry
     from .reader_bucket import read_bytes, read_json
     from .reader_lifecycle import processing_record
-    from .text_encoding import PROFILE, normalize_utf8
+    from .text_encoding import PROFILE, REVIEWED_SOURCE_REPAIRS, normalize_utf8
 except ImportError:
     from reader_assets import decode_search_payload, relative_path, source_url
     from shared import batch_bucket_files_with_retry
     from reader_bucket import read_bytes, read_json
     from reader_lifecycle import processing_record
-    from text_encoding import PROFILE, normalize_utf8
+    from text_encoding import PROFILE, REVIEWED_SOURCE_REPAIRS, normalize_utf8
 
 
 TARGET_BUCKET = "vomebook/reader-assets-v2"
@@ -166,7 +166,7 @@ def encoding_options(value) -> dict:
         return {}
     if isinstance(value, str) and value:
         return {"encoding": value}
-    if (isinstance(value, dict) and set(value) <= {"encoding", "preserve_controls", "remove_prefix_byte", "remove_nul_bytes"}
+    if (isinstance(value, dict) and set(value) <= {"encoding", "preserve_controls", "remove_prefix_byte", "reviewed_source_repair"}
             and isinstance(value.get("encoding"), str) and value["encoding"]
             and ("preserve_controls" not in value or
                  isinstance(value["preserve_controls"], dict) and value["preserve_controls"]
@@ -179,10 +179,9 @@ def encoding_options(value) -> dict:
                  and 0 <= value["remove_prefix_byte"]["offset"] < 4096
                  and isinstance(value["remove_prefix_byte"]["hex"], str)
                   and re.fullmatch(r"[0-9a-f]{2}", value["remove_prefix_byte"]["hex"]))
-            and ("remove_nul_bytes" not in value or
-                 isinstance(value["remove_nul_bytes"], list) and 1 <= len(value["remove_nul_bytes"]) <= 32
-                 and all(type(offset) is int and 0 <= offset < MAX_SOURCE_BYTES for offset in value["remove_nul_bytes"])
-                 and value["remove_nul_bytes"] == sorted(set(value["remove_nul_bytes"]))
+            and ("reviewed_source_repair" not in value or
+                 isinstance(value["reviewed_source_repair"], str)
+                 and value["reviewed_source_repair"] in REVIEWED_SOURCE_REPAIRS
                  and not {"preserve_controls", "remove_prefix_byte"}.intersection(value))):
         return value
     raise ValueError("invalid exact-source encoding/control override")
@@ -197,13 +196,13 @@ def build_one(item: dict, work: Path, token: str | None, bucket: str,
     raw = source.read_bytes()
     source_digest = hashlib.sha256(raw).hexdigest()
     options = encoding_options(encoding)
-    if "remove_nul_bytes" in options and expected_sha256 is None:
-        raise ValueError("reviewed NUL cleanup requires an exact approved source checksum")
+    if "reviewed_source_repair" in options and expected_sha256 is None:
+        raise ValueError("reviewed source repair requires an exact approved source checksum")
     if expected_sha256 is not None and source_digest != expected_sha256:
         raise ValueError("source checksum differs from the approved selection")
     normalized, metadata = normalize_utf8(raw, hint=item["path"].rsplit("/", 1)[-1], **options)
     if (skip_utf8 and metadata["source_encoding"] in {"utf-8", "utf-8-sig"}
-            and not {"removed_prefix_byte", "removed_nul_bytes"}.intersection(metadata)):
+            and not {"removed_prefix_byte", "reviewed_source_repair"}.intersection(metadata)):
         raise Utf8SourceUnchanged({"key": f"{item['repo']}\0{item['path']}",
             "source_revision": item["revision"], "source_sha256": source_digest,
             "source_bytes": len(raw), "source_encoding": metadata["source_encoding"]})
@@ -234,7 +233,7 @@ def build_one(item: dict, work: Path, token: str | None, bucket: str,
     manifest_file = work / manifest_name
     manifest_file.write_text(json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
     files = {object_path: str(output), manifest_path: str(manifest_file)}
-    if "removed_nul_bytes" in metadata:
+    if "reviewed_source_repair" in metadata:
         # Retain the entire unmodified input alongside this protected bundle.
         # The qualified index reference keeps it reachable after handoff, too.
         original_path = f"{root}/original-{source_digest}.bin"
@@ -424,7 +423,7 @@ def main() -> int:
             report["converted_sources"].extend({key:entry[key] for key in
                 ("key", "source_revision", "source_sha256", "source_encoding", "encoding_decision",
                  "object", "manifest", "sha256", "bytes", "characters", "preserved_controls", "source_roundtrip_verified",
-                  "removed_prefix_byte", "removed_nul_bytes", "retained_source", "normalization_recipe")
+                  "removed_prefix_byte", "reviewed_source_repair", "replaced_source_span", "retained_source", "normalization_recipe")
                  if key in entry} for entry in entries)
             report["failures"].extend(failures)
             save()
