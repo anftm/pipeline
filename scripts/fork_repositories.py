@@ -96,9 +96,15 @@ def ensure_fork(token: str, repo: str) -> str:
 
     if not data.get("delete_branch_on_merge"):
         status, update = api_request(token, "PATCH", mirror_path, {"delete_branch_on_merge": True})
-        if status != 200:
+        if status == 200:
+            print(f"[{repo}] enabled automatic merged-branch deletion")
+        elif status in (403, 404, 422):
+            # Repository settings are optional housekeeping and a fork may be
+            # administered by the upstream owner. Do not fail archive syncing
+            # (and its data branches) because this cosmetic setting is refused.
+            print(f"[{repo}] branch cleanup setting not writable ({status}); continuing")
+        else:
             raise RuntimeError(f"[{repo}] branch cleanup setting failed ({status}): {update.get('message', update)}")
-        print(f"[{repo}] enabled automatic merged-branch deletion")
 
     status, data = api_request(token, "GET", upstream_path)
     if status != 200:

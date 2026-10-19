@@ -88,5 +88,25 @@ class ForkRepositoriesTests(unittest.TestCase):
         })
 
 
+    def test_optional_branch_cleanup_setting_does_not_fail_archive_sync(self):
+        """A refused cosmetic repo setting must not block fork data syncing."""
+        repo = "banned-historical-archives0"
+        mirror = {"full_name": f"{fork_repositories.MIRROR_OWNER}/{repo}", "fork": True,
+                  "parent": {"full_name": f"{fork_repositories.UPSTREAM_OWNER}/{repo}"}}
+        responses = {
+            ("GET", f"/repos/{fork_repositories.MIRROR_OWNER}/{repo}"): (200, mirror),
+            ("PATCH", f"/repos/{fork_repositories.MIRROR_OWNER}/{repo}"): (404, {"message": "Not Found"}),
+            ("GET", f"/repos/{fork_repositories.UPSTREAM_OWNER}/{repo}"): (200, {"default_branch": "main"}),
+        }
+        with patch.object(fork_repositories, "api_request",
+                          side_effect=lambda _t, method, path, payload=None: responses[(method, path)]):
+            self.assertEqual(fork_repositories.ensure_fork("token", repo), "main")
+        responses[("PATCH", f"/repos/{fork_repositories.MIRROR_OWNER}/{repo}")] = (500, {"message": "boom"})
+        with patch.object(fork_repositories, "api_request",
+                          side_effect=lambda _t, method, path, payload=None: responses[(method, path)]):
+            with self.assertRaisesRegex(RuntimeError, "branch cleanup setting failed"):
+                fork_repositories.ensure_fork("token", repo)
+
+
 if __name__ == "__main__":
     unittest.main()
