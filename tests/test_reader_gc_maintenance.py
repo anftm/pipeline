@@ -126,6 +126,23 @@ class MaintenanceTests(unittest.TestCase):
         self.assertEqual(writes, [{"enabled": False}])
         self.assertFalse(state["enabled"])
 
+    def test_repository_permission_denial_is_best_effort(self):
+        record = {"permission": {"enabled": True, "allowed_actions": "all"}}
+        denied = maintenance.MaintenanceAPIError(
+            "owner/repo", "actions/permissions", "PUT", 403)
+        with patch.object(maintenance, "permissions", side_effect=denied):
+            self.assertFalse(maintenance.disable_actions("owner/repo", record))
+        self.assertEqual(record["permission_denied"], 403)
+        self.assertNotIn("permission_changed", record)
+
+    def test_repository_permission_server_error_is_not_ignored(self):
+        record = {"permission": {"enabled": True}}
+        failed = maintenance.MaintenanceAPIError(
+            "owner/repo", "actions/permissions", "PUT", 500)
+        with patch.object(maintenance, "permissions", side_effect=failed):
+            with self.assertRaises(maintenance.MaintenanceAPIError):
+                maintenance.disable_actions("owner/repo", record)
+
     def test_ambiguous_rerun_is_never_blindly_repeated(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "journal.json"

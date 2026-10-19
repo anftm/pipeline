@@ -86,6 +86,26 @@ def permissions(repo, desired):
               lambda value: all(value.get(key) == item for key, item in body.items()))
 
 
+def disable_actions(repo, record):
+    """Best-effort repository isolation; workflow disable is the primary fence.
+
+    A producer token may have Actions write but no Administration write. That is
+    enough to disable every producer workflow and cancel queued runs, which is
+    the normal drain. The collector fence still rejects any residual queued run
+    while repository Actions stays enabled, so a denied PUT cannot authorize a
+    deletion race.
+    """
+    try:
+        permissions(repo, {**record["permission"], "enabled": False})
+    except MaintenanceAPIError as error:
+        if error.status not in {401, 403, 404}:
+            raise
+        record["permission_denied"] = error.status
+        return False
+    record["permission_changed"] = True
+    return True
+
+
 def workflow_state(repo, workflow, enabled):
     path = f"actions/workflows/{workflow['id']}"
     desired = "active" if enabled else "disabled_manually"
@@ -234,9 +254,8 @@ def run(path, *, limit=0, apply=True):
                         if attempt.get("status") != "completed":
                             raise
             if repo != central and record["permission"].get("enabled"):
-                record["permission_changed"] = True
+                disable_actions(repo, record)
                 journal(path, state)
-                permissions(repo, {**record["permission"], "enabled": False})
         deadline = time.monotonic() + 3600
         while True:
             active = []
