@@ -1,0 +1,66 @@
+name: Reader GC Queue Cleanup
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_ids:
+        description: Comma-separated workflow run IDs to delete
+        required: true
+        default: "39254755093"
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: reader-gc-cleanup-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    if: github.repository == 'anftm/pipeline'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Delete stuck workflow runs with the central producer token
+        env:
+          GC_PRODUCER_TOKENS_JSON: ${{ secrets.GC_PRODUCER_TOKENS_JSON }}
+          RUN_IDS: ${{ inputs.run_ids }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import time
+          import urllib.error
+          import urllib.request
+
+          tokens = json.loads(os.environ["GC_PRODUCER_TOKENS_JSON"])
+          token = tokens[os.environ["REPOSITORY"]]
+          base = "https://api.github.com/repos/" + os.environ["REPOSITORY"]
+
+          def call(path, method="GET"):
+              request = urllib.request.Request(
+                  base + path, data=b"" if method != "GET" else None, method=method,
+                  headers={"Authorization": "Bearer " + token,
+                           "Accept": "application/vnd.github+json"})
+              try:
+                  with urllib.request.urlopen(request, timeout=60) as response:
+                      return response.status, response.read().decode("utf-8", "replace")
+              except urllib.error.HTTPError as error:
+                  return error.code, error.read().decode("utf-8", "replace")
+
+          for raw in os.environ["RUN_IDS"].split(","):
+              run_id = raw.strip()
+              if not run_id:
+                  continue
+              status, body = call(f"/actions/runs/{run_id}", "DELETE")
+              print(f"{run_id} delete {status} {body[:160]}", flush=True)
+              if status == 204:
+                  continue
+              status, body = call(f"/actions/runs/{run_id}/cancel", "POST")
+              print(f"{run_id} cancel {status} {body[:160]}", flush=True)
+              time.sleep(5)
+              status, body = call(f"/actions/runs/{run_id}", "DELETE")
+              print(f"{run_id} retry-delete {status} {body[:160]}", flush=True)
+          PY
