@@ -90,6 +90,79 @@ class PublishCcrdOcrTests(unittest.TestCase):
         self.assertEqual(self.store.objects[contract.BUCKET, self.text_path], b'different')
         self.assertNotIn((contract.BUCKET, publisher.CURRENT), self.store.objects)
 
+    def test_interrupted_unpromoted_generation_may_be_completed_but_not_published_history(self):
+        self.publish(apply=True)
+        previous, _ = publisher.optional_json(self.store, publisher.CURRENT)
+        generation = 'e' * 64
+        intent = {'version': 1, 'kind': 'ccrd-ocr-intent', 'generation': generation,
+                  'status': 'uploading', 'expected_parent': previous['generation'], 'resources': []}
+        self.store.objects[contract.BUCKET, f'control/intents/{generation}.json'] = contract.canonical(intent)
+        db_path = f'indexes/ocr/{generation}/OCR.sqlite3'
+        release_path = f'releases/ocr-{generation}/manifest.json'
+        self.store.objects[contract.BUCKET, db_path] = b'partial database'
+        self.store.objects[contract.BUCKET, release_path] = b'partial manifest'
+        self.files[db_path] = b'complete database'
+        self.files[release_path] = b'complete manifest'
+        self.candidate['manifest']['generation'] = generation
+        report = self.publish(apply=True, expected_parent=previous['generation'])
+        self.assertEqual(report['generation'], generation)
+        self.assertEqual(self.store.objects[contract.BUCKET, db_path], b'complete database')
+        self.assertEqual(self.store.objects[contract.BUCKET, release_path], b'complete manifest')
+        self.assertEqual(self.store.objects[contract.BUCKET, self.text_path], self.body)
+        self.assertEqual(json.loads(self.store.read_bytes(contract.BUCKET, publisher.CURRENT))['generation'], generation)
+
+    def test_unpromoted_candidate_resume_is_limited_to_its_generation_namespace(self):
+        previous = {'generation': 'a' * 64}
+        generation = 'e' * 64
+        intent = {'version': 1, 'kind': 'ccrd-ocr-intent', 'generation': generation,
+                  'status': 'uploading', 'expected_parent': previous['generation'], 'resources': []}
+        intent_path = f'control/intents/{generation}.json'
+        self.store.objects[contract.BUCKET, intent_path] = contract.canonical(intent)
+        db_path = f'indexes/ocr/{generation}/OCR.sqlite3'
+        release_path = f'releases/ocr-{generation}/manifest.json'
+        self.assertEqual(publisher.unpromoted_candidate_paths(
+            self.store, {'generation': generation}, previous), {db_path, release_path})
+        # A committed or absent intent, a different parent, or the live generation
+        # never grants replacement.
+        for changed, parent in (({**intent, 'status': 'committed'}, previous),
+                                ({**intent, 'expected_parent': 'b' * 64}, previous),
+                                (intent, {'generation': generation})):
+            self.store.objects[contract.BUCKET, intent_path] = contract.canonical(changed)
+            self.assertEqual(publisher.unpromoted_candidate_paths(
+                self.store, {'generation': generation}, parent), set())
+        self.store.objects.pop((contract.BUCKET, intent_path))
+        self.assertEqual(publisher.unpromoted_candidate_paths(
+            self.store, {'generation': generation}, previous), set())
+
+    def test_resume_preserves_protection_for_objects_it_did_not_replace(self):
+        generation = 'e' * 64
+        intent_path = f'control/intents/{generation}.json'
+        old = {'version': 1, 'kind': 'ccrd-ocr-intent', 'generation': generation,
+               'status': 'uploading', 'expected_parent': None,
+               'resources': [{'bucket': contract.BUCKET, 'path': 'text/objects/old.txt',
+                              'sha256': 'a' * 64, 'bytes': 1, 'role': 'runtime'},
+                             {'bucket': contract.BUCKET, 'path': 'indexes/ocr/' + generation + '/OCR.sqlite3',
+                              'sha256': 'b' * 64, 'bytes': 1, 'role': 'runtime'}]}
+        self.store.objects[contract.BUCKET, intent_path] = contract.canonical(old)
+        intent = {'version': 1, 'kind': 'ccrd-ocr-intent', 'generation': generation,
+                  'status': 'uploading', 'expected_parent': None,
+                  'resources': [{'bucket': contract.BUCKET,
+                                 'path': 'indexes/ocr/' + generation + '/OCR.sqlite3',
+                                 'sha256': 'c' * 64, 'bytes': 2, 'role': 'runtime'}]}
+        merged = publisher.merge_unpromoted_intent(
+            self.store, intent_path, intent, {'indexes/ocr/' + generation + '/OCR.sqlite3': b'x'})
+        paths = {ref['path']: ref for ref in merged['resources']}
+        self.assertIn('text/objects/old.txt', paths)
+        self.assertEqual(paths['indexes/ocr/' + generation + '/OCR.sqlite3']['sha256'], 'c' * 64)
+
+    def test_resume_replaces_only_the_named_unpromoted_objects(self):
+        self.store.objects[contract.BUCKET, self.text_path] = b'partial text'
+        publisher.put_checked(self.store, self.text_path, b'complete text', immutable=True,
+                              replace_unpromoted=True)
+        self.assertEqual(self.store.objects[contract.BUCKET, self.text_path], b'complete text')
+        with self.assertRaisesRegex(ValueError, 'immutable'):
+            publisher.put_checked(self.store, self.text_path, b'other text', immutable=True)
+
     def test_additive_update_never_silently_drops_a_previous_book(self):
         self.publish(apply=True)
         pointer, _ = publisher.optional_json(self.store, publisher.CURRENT)

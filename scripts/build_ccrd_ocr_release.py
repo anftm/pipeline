@@ -7,6 +7,33 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import sqlite3
+
+
+def normalize_database(path: Path) -> None:
+    """Make the pinned builder's SQLite bytes reproducible.
+
+    The builder inserts ``postings`` in Python set/dict order, so identical
+    exports produce different bytes under different hash seeds. That breaks
+    resuming an interrupted upload of the same release generation. Rewrite the
+    table in token order and compact it; the indexed content is unchanged.
+    """
+    with sqlite3.connect(path) as connection:
+        connection.execute("PRAGMA journal_mode = OFF")
+        connection.execute("PRAGMA synchronous = OFF")
+        connection.execute(
+            "CREATE TABLE postings_normalized (token_hash BLOB PRIMARY KEY, "
+            "docs BLOB NOT NULL, doc_count INTEGER NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO postings_normalized (token_hash, docs, doc_count) "
+            "SELECT token_hash, docs, doc_count FROM postings ORDER BY token_hash"
+        )
+        connection.execute("DROP TABLE postings")
+        connection.execute("ALTER TABLE postings_normalized RENAME TO postings")
+        connection.commit()
+        connection.execute("PRAGMA page_size = 4096")
+        connection.execute("VACUUM")
 
 
 def module(path: Path, name: str):
@@ -50,6 +77,7 @@ def build_release(root: Path, export_refs: list[dict], consumer_root: Path,
     builder.FULLTEXT_DIR = target.parent
     target.parent.mkdir(parents=True, exist_ok=True)
     builder.build_source_db("OCR", records)
+    normalize_database(target)
     consumer.validate_database(target, records, root)
     raw = target.read_bytes()
     manifest = {**identity, "generation": generation, "documents": len(records),

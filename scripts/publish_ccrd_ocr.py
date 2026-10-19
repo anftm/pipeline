@@ -107,19 +107,67 @@ def optional_json(store, path):
     return payload, raw
 
 
-def put_checked(store, path, raw, *, immutable=False):
+def put_checked(store, path, raw, *, immutable=False, replace_unpromoted=False):
     if immutable:
         try:
             previous = store.read_bytes(contract.BUCKET, path)
         except FileNotFoundError:
             previous = None
         if previous is not None:
-            if previous != raw:
+            if previous == raw:
+                return
+            if not replace_unpromoted:
                 raise ValueError('immutable OCR-library object conflict')
-            return
+            # Only a generation that was never promoted may be completed after
+            # an interrupted upload. Its namespace is unreachable from CURRENT
+            # and from every release manifest, so replacing the candidate copy
+            # cannot rewrite published history.
+            print(f'completing interrupted upload for {path}', flush=True)
     store.put_bytes(contract.BUCKET, path, raw)
     if store.read_bytes(contract.BUCKET, path) != raw:
         raise ValueError('OCR-library upload readback mismatch')
+
+
+def unpromoted_candidate_paths(store, manifest, previous):
+    """Return the two generation-addressed objects of an unpromoted candidate.
+
+    Interrupting an upload leaves a never-promoted generation whose database and
+    manifest may differ from a later rebuild. Those two paths are addressed by
+    generation, not by content; every export and TXT path stays content-addressed
+    and must never be replaced.
+    """
+    generation = manifest['generation']
+    if previous and previous['generation'] == generation:
+        return set()
+    if optional_json(store, f'control/retained/{generation}.json')[0]:
+        return set()
+    intent = optional_json(store, f'control/intents/{generation}.json')[0]
+    expected = previous['generation'] if previous else None
+    if (not intent or intent.get('kind') != 'ccrd-ocr-intent'
+            or intent.get('status') != 'uploading' or intent.get('generation') != generation
+            or intent.get('expected_parent') != expected):
+        return set()
+    return {f'indexes/ocr/{generation}/OCR.sqlite3', f'releases/ocr-{generation}/manifest.json'}
+
+
+def merge_unpromoted_intent(store, intent_path, intent, files):
+    """Keep every object of an interrupted upload reachable.
+
+    Replacing an ``uploading`` intent must not drop references to objects the
+    interrupted run already uploaded, or a later GC could treat them as
+    unreachable. New candidate members supersede the old copy at the same path;
+    all other old members stay protected by the new intent.
+    """
+    old = optional_json(store, intent_path)[0]
+    if (not old or old.get('kind') != 'ccrd-ocr-intent' or old.get('status') != 'uploading'
+            or old.get('generation') != intent['generation']):
+        return intent
+    by_identity = {(ref['bucket'], ref['path']): ref for ref in intent['resources']}
+    for ref in old.get('resources', []):
+        if ref.get('path') not in files:
+            by_identity.setdefault((ref.get('bucket'), ref.get('path')), ref)
+    intent['resources'] = sorted(by_identity.values(), key=lambda ref: (ref['bucket'], ref['path']))
+    return intent
 
 
 def plan(root, path, sha256, base_metadata_sha256):
@@ -177,9 +225,11 @@ def publish(store, root, path, sha256, base_metadata_sha256, expected_parent, *,
     assert_writer()
     # Protect candidate members/provenance before the first upload. An incomplete
     # intent is deliberately a GC blocker, never an expiration-based delete grant.
+    resumable = unpromoted_candidate_paths(store, manifest, previous)
+    intent = merge_unpromoted_intent(store, intent_path, intent, files)
     put_checked(store, intent_path, contract.canonical(intent))
     for key, value in sorted(files.items()):
-        put_checked(store, key, value, immutable=True)
+        put_checked(store, key, value, immutable=True, replace_unpromoted=key in resumable)
     # Provenance must still exist with its exact identity, including accepted text.
     seen = set()
     for ref in retained:
