@@ -31,7 +31,7 @@ except ImportError:
 SOURCE_ARCHIVE_URL = "https://github.com/anftm/pipeline/releases/download/ccrd/ccrd-corpus.tar.gz"
 SOURCE_ARCHIVE_SHA256 = "a6b1615054303740e892e535e3c9a6d4f4805ac572f7f1577b10685249a862f1"
 BUILDER_URL = "https://huggingface.co/spaces/vomebook/Search/resolve/main/build_fulltext_db.py"
-BUILDER_SHA256 = "293f0c65db6a4709cb756f9bbbcaa95d3f7dbb2442e21e91f9f181f166dc1e53"
+BUILDER_SHA256 = "ed3cfbb2af5871c8a5d368512e939aa4164aebd71f43e1ff9af6cde3e0a02fac"
 BUCKET = "vomebook/ccrd-index"
 SOURCES = ("CCRD", "CW")
 TOKENIZER_VERSION = "cjk-bigram-boundary-fts5-v6-snippet-anchors"

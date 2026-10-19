@@ -12,7 +12,9 @@ from pathlib import Path
 from huggingface_hub import download_bucket_files
 
 from ccrd_source_override import CORPUS_PATH, download_override
-from publish_ccrd_index import BUCKET, CURRENT_PATH
+from publish_ccrd_index import (
+    BUCKET, BUILDER_SHA256, CURRENT_PATH, SOURCE_ARCHIVE_SHA256,
+)
 
 
 def write_output(changed: bool) -> None:
@@ -41,6 +43,20 @@ def main() -> int:
             manifest = json.loads(current_path.read_text(encoding="utf-8"))
         except Exception as exc:
             print(f"No usable current manifest ({type(exc).__name__}); rebuilding")
+            write_output(True)
+            return 0
+
+        # A builder or corpus change invalidates the published index even when the
+        # single changing source text is unchanged. Without these checks a fixed
+        # index builder would never be applied to an existing generation.
+        published_builder = (manifest.get("builder") or {}).get("sha256")
+        if published_builder != BUILDER_SHA256:
+            print(f"Builder hash changed: {published_builder or '(missing)'} -> {BUILDER_SHA256}")
+            write_output(True)
+            return 0
+        published_archive = (manifest.get("source_archive") or {}).get("sha256")
+        if published_archive != SOURCE_ARCHIVE_SHA256:
+            print(f"Corpus archive changed: {published_archive or '(missing)'} -> {SOURCE_ARCHIVE_SHA256}")
             write_output(True)
             return 0
 
