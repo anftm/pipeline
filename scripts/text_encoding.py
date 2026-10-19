@@ -31,6 +31,18 @@ REVIEWED_SOURCE_REPAIRS = {
         "reference_url": "https://www.prisoncensorship.info/archive/etext/chinese/classics/jiangqing1966to1976/061-090/073.html",
         "reference_sha256": "0a293f7f424650fbf4d5e91b85dc369841961c04fe2420bc36adb520a5f099ee",
     },
+    "mlmrl-1967-04-16-mojibake-v1": {
+        "source_sha256": "7088b4a442c02e818ee63a26c9d30952fb1a78ce6fb35afe57aa75f071449f27",
+        "offset": 9761,
+        "original_text": "\0囊欢\0浴？\0淮未蠡岵荒苌钊氲母恪Ｔ谒枷肷希\0谡苎Х矫妫\0褂懈\0喙ぷ饕\0觯\0嬲\0\0鞑檠芯俊８闩碚嬲庑┡淹讲皇潜本┒\0翘旖蚋愕模\0比灰灿斜本┮恍┎牧峡垂\0恕Ｎ颐且\0\0徊礁呔倜\0蠖\0枷胛按蠛炱焯乇鹨\0汛蠓较蜃ソ簦\0鞑榕碚嫖侍夂苌伲\0\0奈侍庑枰\0阋桓恪?/p>",
+        "replacement_text": (
+            "样的一动脑。开一次大会不能深入的搞。在思想上，在哲学方面，还有更多工作要做，真正要调查研究。"
+            "搞彭真这些叛徒不是北京而是天津搞的，当然也有北京一些材料看过了。"
+            "我们要进一步高举毛泽东思想伟大红旗特别要把大方向抓紧，调查彭真问题很少，他的问题需要搞一搞。"
+        ),
+        "reference_url": "https://www.prisoncensorship.info/archive/etext/chinese/classics/jiangqing1966to1976/061-090/088.html",
+        "reference_sha256": "997d95c4b48cb826561209963d5d77ea100d5366f36b538c61dcacd16d6e5774",
+    },
 }
 
 

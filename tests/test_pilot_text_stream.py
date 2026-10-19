@@ -174,6 +174,22 @@ class TextNormalizationTests(unittest.TestCase):
 
 
 class TextStreamPublicationTests(unittest.TestCase):
+    def test_article_repairs_have_distinct_complete_source_and_reference_identities(self):
+        first = REVIEWED_SOURCE_REPAIRS["mlmrl-1967-02-01-mojibake-v1"]
+        second = REVIEWED_SOURCE_REPAIRS["mlmrl-1967-04-16-mojibake-v1"]
+        self.assertNotEqual(first["source_sha256"], second["source_sha256"])
+        self.assertNotEqual(first["reference_sha256"], second["reference_sha256"])
+        self.assertEqual(second["source_sha256"], "7088b4a442c02e818ee63a26c9d30952fb1a78ce6fb35afe57aa75f071449f27")
+        self.assertEqual(second["offset"], 9761)
+        self.assertEqual(second["original_text"].count("\0"), 22)
+        self.assertEqual(len(second["original_text"].encode()), 328)
+        self.assertTrue(second["reference_url"].endswith("/088.html"))
+        for recipe, repair in (("mlmrl-1967-02-01-mojibake-v1", first), ("mlmrl-1967-04-16-mojibake-v1", second)):
+            # Even a matching damaged span never authorizes a different whole file.
+            fake = b"prefix" + repair["original_text"].encode() + b"suffix"
+            with self.subTest(recipe=recipe), self.assertRaisesRegex(TextEncodingError, "SHA-256"):
+                normalize_utf8(fake, encoding="utf-8", reviewed_source_repair=recipe)
+
     def test_download_strips_authorization_on_signed_host_redirects_and_keeps_size_bound(self):
         class Response(io.BytesIO):
             headers = {"Content-Length": "6"}
