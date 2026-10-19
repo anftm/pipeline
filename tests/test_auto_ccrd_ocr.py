@@ -183,6 +183,27 @@ class AutoCcrdOcrTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'original provenance'):
             auto.export_spec(self.store, jobs[0], 1)
 
+    def test_unusable_source_text_is_a_terminal_disposition_not_a_batch_failure(self):
+        """Unchanged binary-control sources must not fail every later batch."""
+        key, entry = self.book('binary')
+        with patch.object(auto.builder, 'build_release', side_effect=self.build), \
+                patch.object(publisher, 'plan', side_effect=self.plan), \
+                patch.object(publisher, 'assert_writer'), \
+                patch.object(exporter, 'build_export',
+                             side_effect=exporter.PermanentTextRejection('OCR text contains binary controls')):
+            report = self.run_auto('permanent', apply=True)
+        self.assertEqual([item['key'] for item in report['failures']], [key])
+        self.assertIn('rejected', report['failures'][0])
+        self.assertEqual(report['processed'], [])
+        state = json.loads(self.store.objects[(contract.BUCKET, auto.STATE)])
+        self.assertEqual(state['failures'][key]['error_type'], 'PermanentTextRejection')
+        # The next run treats the same unchanged bytes as an explicit quarantine
+        # and is not failed by them.
+        again = self.run_auto('permanent-again', plan_only=True)
+        self.assertEqual(again['eligible'], 0)
+        self.assertEqual(again['quarantined'], [key])
+        self.assertNotIn((contract.BUCKET, publisher.CURRENT), self.store.objects)
+
     def test_static_document_manifest_supplies_converted_provenance(self):
         """Office/PostScript PDFs have no entry in the derived-source index."""
         key, entry = self.book('office')

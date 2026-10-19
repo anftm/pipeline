@@ -280,12 +280,20 @@ def reconcile(store, root, consumer_root, approved, *, limit=8, apply=False, pla
         except Exception as error:
             # Quarantine only this exact input identity. Keep the old complete
             # release active; the next automatic run can advance other books.
+            permanent = isinstance(error, exporter.PermanentTextRejection)
             failure = {'key': job['key'], 'fingerprint': job['fingerprint'],
                        'quarantine': job['quarantine'], 'error_type': type(error).__name__}
+            if permanent:
+                # The source's own text is unusable (binary controls, no usable
+                # characters). Record it as a terminal disposition instead of
+                # failing every later batch for the same unchanged bytes.
+                failure['rejected'] = str(error)[:300]
             report['failures'].append(failure)
             state['failures'][job['key']] = failure
             if apply:
                 save_state(store, state)
+            if apply and permanent:
+                continue
             raise
     report['documents'] = len(exports)
     if not changed:
