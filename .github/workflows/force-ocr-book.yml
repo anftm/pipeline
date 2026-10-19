@@ -30,6 +30,10 @@ on:
         description: Prepare immutable OCR objects and serialize their publication
         default: false
         type: boolean
+      recovery:
+        description: One-off unique writer group for a prepared publication while the shared queue is stuck
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -89,12 +93,17 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     concurrency:
-      group: reader-sidecar
+      group: ${{ inputs.recovery == true && format('reader-sidecar-recovery-{0}', github.run_id) || 'reader-sidecar' }}
       cancel-in-progress: false
       queue: max
     env:
       FORCE_OCR_PUBLICATION_PROTOCOL: explicit-ps-ocr-v1
     steps:
+      - name: Restrict recovery to a reused prepared publication
+        if: inputs.recovery && (inputs.prepared_run_id == '' || !inputs.apply)
+        run: |
+          echo "recovery requires a prepared_run_id and apply=true" >&2
+          exit 1
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
