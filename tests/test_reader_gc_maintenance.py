@@ -143,6 +143,26 @@ class MaintenanceTests(unittest.TestCase):
             with self.assertRaises(maintenance.MaintenanceAPIError):
                 maintenance.disable_actions("owner/repo", record)
 
+    def test_preflight_skips_central_repository_actions_permission(self):
+        calls = []
+
+        def api(repo, path, *, method="GET", body=None):
+            calls.append((repo, path))
+            raise AssertionError("central Actions policy must not be read")
+
+        with patch.object(maintenance, "producer_repositories",
+                          return_value=["central/repo"]), \
+                patch.object(maintenance, "load_config",
+                             return_value={"publisher_repository": "central/repo"}), \
+                patch.object(maintenance, "pages",
+                             return_value=[{"id": 1, "state": "active",
+                                            "path": ".github/workflows/pdf-account-worker.yml"}]), \
+                patch.object(maintenance, "api", side_effect=api):
+            result = maintenance.preflight()
+        self.assertEqual(list(result), ["central/repo"])
+        self.assertEqual(result["central/repo"]["permission"], {})
+        self.assertEqual(calls, [])
+
     def test_ambiguous_rerun_is_never_blindly_repeated(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "journal.json"

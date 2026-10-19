@@ -128,6 +128,7 @@ def workflow_state(repo, workflow, enabled):
 
 def preflight():
     """Check every credential and inventory before disabling the first producer."""
+    central = load_config()["publisher_repository"]
     result = {}
     errors = []
     for repo in producer_repositories():
@@ -136,7 +137,12 @@ def preflight():
             workflows = [w for w in inventory if producer_path(w["path"])]
             if not any(w["path"].endswith("/pdf-account-worker.yml") for w in workflows):
                 raise RuntimeError("incomplete producer inventory")
-            result[repo] = {"permission": api(repo, "actions/permissions"), "workflows": [
+            # The central repository is never repository-disabled: it hosts the
+            # maintenance run itself and only needs its producer workflows
+            # stopped. Some central worker credentials intentionally cannot read
+            # or write the repository Actions policy.
+            permission = {} if repo == central else api(repo, "actions/permissions")
+            result[repo] = {"permission": permission, "workflows": [
                 {"id": w["id"], "state": w["state"], "path": w["path"]} for w in workflows],
                 "cancelled": []}
         except (MaintenanceAPIError, RuntimeError) as error:
