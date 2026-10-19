@@ -97,6 +97,22 @@ def render(api: HfApi, assets_repo: str, key: str, entry: dict, source: Path,
     probe = pdf_ocr.probe_pdf(source)
     presentation = pdf_ocr.reader_presentation(source)
     item = render_item(entry, probe, presentation, language, layout_rotation)
+    digest, _ = shared.hash_file(source)
+    existing = stages.load_registry(api, assets_repo, stages.RENDER_REGISTRY)["files"].get(key)
+    if (existing and existing.get("status") == "ready"
+            and existing.get("source_sha256") == digest
+            and existing.get("render_profile") == item["render_profile"]
+            and existing.get("page_count") == probe["page_count"]
+            and existing.get("ocr_pages") == probe["page_count"]
+            and existing.get("render_manifest")):
+        manifest = json.loads(stages.read_object(existing["render_manifest"], "/render-manifest.json"))
+        stages.validate_render(existing, manifest)
+        print(json.dumps({
+            "event": "render-reused", "key": display_key(key),
+            "render_manifest": existing["render_manifest"]["path"],
+            "ocr_pages": existing["ocr_pages"],
+        }, ensure_ascii=False, sort_keys=True), flush=True)
+        return existing
     bundle = output / "render"
     if bundle.exists():
         raise SystemExit(f"refusing to reuse render workspace: {bundle}")
@@ -144,7 +160,7 @@ def recognize(api: HfApi, assets_repo: str, key: str, rendered: dict, output: Pa
     results: list[dict] = []
     updates: dict = {}
     for shard in queue["shard_ids"]:
-        for task in queue["shards"][shard]["records"]:
+        for task in queue["shards"][shard]:
             result = stages.recognize_task(task, bundle)
             result["processing_roots"] = stages.upload_objects(bundle)
             results.append(result)
