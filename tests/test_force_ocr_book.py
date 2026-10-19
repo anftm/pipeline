@@ -180,6 +180,46 @@ class ForceOcrBookTests(unittest.TestCase):
             result = repair.publish(object(), self.key, report, apply=True)
         self.assertTrue(result["unchanged"])
         self.assertEqual(order, ["publish", "handoff"])
+
+    def test_large_manifest_compacts_only_duplicate_page_payloads_and_retains_original(self):
+        report = self.prepare()
+        original = report["entry"]
+        manifest = json.loads(self.objects[original["ocr_manifest"]])
+        for page in manifest["pages"]:
+            page["text"] = "重复的完整正文" * 1000
+        raw = json.dumps(manifest, ensure_ascii=False).encode()
+        self.objects[original["ocr_manifest"]] = raw
+        original = {**original, "ocr_manifest_bytes": len(raw), "ocr_manifest_sha256": hashlib.sha256(raw).hexdigest()}
+        limit = 8192
+        with patch.object(stages, "read_object", side_effect=self.read):
+            compact = repair.compact_reader_manifest(original, self.root / "compact", limit=limit)
+        self.assertLess(compact["ocr_manifest_bytes"], limit)
+        self.assertNotEqual(compact["ocr_manifest"], original["ocr_manifest"])
+        reduced = json.loads((self.root / "compact" / compact["ocr_manifest"]).read_bytes())
+        self.assertEqual(reduced["book_text"], manifest["book_text"])
+        self.assertEqual(reduced["text_layer"], manifest["text_layer"])
+        self.assertEqual(compact["text_layer"], original["text_layer"])
+        self.assertEqual(len(reduced["pages"]), len(manifest["pages"]))
+        for before, after in zip(manifest["pages"], reduced["pages"]):
+            self.assertEqual(after, {k: v for k, v in before.items() if k not in {"text", "text_spans", "layout"}})
+        self.assertEqual(reduced["resources"][-1]["path"], original["ocr_manifest"])
+        self.assertEqual(reduced["resources"][-1]["sha256"], original["ocr_manifest_sha256"])
+        self.assertEqual(self.objects[original["ocr_manifest"]], raw)
+        with patch.object(stages, "read_object", side_effect=self.read):
+            repeated = repair.compact_reader_manifest(original, self.root / "compact-again", limit=limit)
+        self.assertEqual(repeated, compact)
+
+    def test_large_manifest_without_verified_text_companion_cannot_be_compacted(self):
+        report = self.prepare()
+        original = report["entry"]
+        manifest = json.loads(self.objects[original["ocr_manifest"]])
+        manifest.pop("text_layer")
+        raw = json.dumps(manifest).encode()
+        self.objects[original["ocr_manifest"]] = raw
+        original = {**original, "ocr_manifest_bytes": len(raw), "ocr_manifest_sha256": hashlib.sha256(raw).hexdigest()}
+        with patch.object(stages, "read_object", side_effect=self.read):
+            with self.assertRaisesRegex(ValueError, "complete independent text"):
+                repair.compact_reader_manifest(original, self.root / "bad-compact", limit=1)
         env = {"GITHUB_ACTIONS": "true", "GITHUB_REPOSITORY": "anftm/pipeline", "GITHUB_RUN_ID": "1",
                "GITHUB_WORKFLOW_REF": "anftm/pipeline/.github/workflows/force-ocr-book.yml@refs/heads/main",
                "FORCE_OCR_PUBLICATION_PROTOCOL": repair.PROTOCOL}

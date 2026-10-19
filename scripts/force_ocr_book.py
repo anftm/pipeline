@@ -38,6 +38,7 @@ APPROVED = {
 ASSETS_REPO = "vomebook/Reader-Assets"
 PROTOCOL = "explicit-ps-ocr-v1"
 CHECKPOINT_PAGES = 25
+READER_MANIFEST_BYTES = 8 * 1024 * 1024
 
 
 def approve(key, digest, language="auto"):
@@ -180,6 +181,40 @@ def handoff_owner(result):
     return owner
 
 
+def compact_reader_manifest(result, bundle, *, limit=READER_MANIFEST_BYTES):
+    """Keep every page/reference while removing duplicate inline OCR payloads.
+
+    Reader loads the complete text from the existing checked text bundle and
+    page objects. Large legacy manifests duplicate that text/spans/layout and
+    exceed Reader's unchanged manifest budget. Retain the original manifest as
+    qualified provenance too; never truncate the page sequence or source text.
+    """
+    if result["ocr_manifest_bytes"] <= limit:
+        return dict(result)
+    original = {"bucket": shared.PDF_PAGES_BUCKET, "path": result["ocr_manifest"],
+                "sha256": result["ocr_manifest_sha256"], "bytes": result["ocr_manifest_bytes"],
+                "role": "provenance"}
+    manifest = json.loads(stages.read_object(original, "/ocr-manifest.json"))
+    if (not manifest.get("text_layer") or manifest["text_layer"] != result["text_layer"]
+            or manifest.get("complete") is not True
+            or manifest.get("source_sha256") != result["source_sha256"]
+            or manifest.get("page_count") != result["page_count"]
+            or [p.get("p") for p in manifest.get("pages", [])] != list(range(1, result["page_count"] + 1))):
+        raise ValueError("compaction requires a complete independent text bundle")
+    pages = [{k: value for k, value in page.items() if k not in {"text", "text_spans", "layout"}}
+             for page in manifest["pages"]]
+    compact = {**manifest, "pages": pages, "resources": [*manifest.get("resources", []), original]}
+    root = stages.root_for(result["source_sha256"], result["key"],
+                           original["sha256"] + "|reader-compact-ocr-manifest-v1")
+    target = bundle / root / "ocr-manifest.json"
+    pdf_ocr.write_json(target, compact)
+    meta = stages.metadata(target, bundle)
+    if meta["bytes"] > limit:
+        raise ValueError("complete reference-only manifest still exceeds Reader budget")
+    return {**result, "ocr_manifest": meta["path"], "ocr_manifest_sha256": meta["sha256"],
+            "ocr_manifest_bytes": meta["bytes"]}
+
+
 def publish(api, key, report, *, apply=False):
     current = load_entry(api, key)
     if (report.get("version") != 1 or report.get("kind") != PROTOCOL
@@ -196,19 +231,29 @@ def publish(api, key, report, *, apply=False):
             or result.get("image_rendered") or result.get("page_manifest")
             or not pdf_ocr.preserves_reader_pdf(result)):
         raise ValueError("prepared OCR result differs from its explicit approval")
-    # Retry is idempotent, but another publication or source drift requires review.
-    already = current.get("ocr_manifest_sha256") == result.get("ocr_manifest_sha256")
-    if not already and identity(current) != source:
-        raise ValueError("OCR entry changed during preparation; refusing to overwrite it")
-    if apply:
-        assert_publisher()
-        owner = handoff_owner(result)
-        # The generic publisher verifies the full text bundle and commits the
-        # compact entry. Only then can the expanded page owner release roots.
-        publication.publish(api, ASSETS_REPO, [{**result, "processing_roots": []}])
-        stages.handoff_worker_results(api, ASSETS_REPO, [owner])
+    original = result
+    with tempfile.TemporaryDirectory(prefix="reader-ocr-compact-") as directory:
+        bundle = Path(directory)
+        result = compact_reader_manifest(original, bundle)
+        # The exact prepared full manifest may have committed before a handoff
+        # failure. Accept that identity or this deterministic compact result,
+        # never an unrelated descendant or reviewed generation.
+        already = current.get("ocr_manifest_sha256") == result.get("ocr_manifest_sha256")
+        prepared = current.get("ocr_manifest_sha256") == original.get("ocr_manifest_sha256")
+        if not already and not prepared and identity(current) != source:
+            raise ValueError("OCR entry changed during preparation; refusing to overwrite it")
+        if apply:
+            assert_publisher()
+            extra_roots = stages.upload_objects(bundle) if result != original else []
+            result = {**result, "processing_roots": [*result.get("processing_roots", []), *extra_roots]}
+            owner = handoff_owner(result)
+            # Only checked page/text refs go to the compact registry entry;
+            # expanded page ownership is used solely for safe root handoff.
+            publication.publish(api, ASSETS_REPO, [{**result, "processing_roots": []}])
+            stages.handoff_worker_results(api, ASSETS_REPO, [owner])
     return {"applied": apply, "unchanged": already, "source_key": key,
-            "text_layer": result["text_layer"], "page_count": pages}
+            "text_layer": result["text_layer"], "page_count": pages,
+            "ocr_manifest": result["ocr_manifest"], "manifest_bytes": result["ocr_manifest_bytes"]}
 
 
 def main():
