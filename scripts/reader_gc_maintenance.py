@@ -207,6 +207,13 @@ def restore(path):
                     continue
                 current = api(repo, f"actions/runs/{run['id']}")
                 if current["status"] == "completed" and current.get("conclusion") == "cancelled":
+                    # A run cancelled while still waiting for a concurrency slot
+                    # has no jobs. Re-running it produces a permanent
+                    # "waiting for pending jobs" wrapper, so leave it terminal.
+                    if not pages(repo, f"actions/runs/{run['id']}/jobs?filter=all", "jobs"):
+                        run["restored"] = True
+                        journal(path, state)
+                        continue
                     if run.get("restoration_requested"):
                         if current.get("run_attempt", 1) <= run.get("restoration_attempt", 1):
                             raise RuntimeError("ambiguous rerun response requires readback before retry")

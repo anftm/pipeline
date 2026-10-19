@@ -163,13 +163,26 @@ class MaintenanceTests(unittest.TestCase):
         self.assertEqual(result["central/repo"]["permission"], {})
         self.assertEqual(calls, [])
 
+    def test_cancelled_run_without_jobs_is_not_rerun(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.json"
+            maintenance.journal(path, {"repositories": {"owner/repo": {"workflows": [],
+                "cancelled": [{"id": 42}]}}})
+            with patch.object(maintenance, "api", return_value={
+                    "status": "completed", "conclusion": "cancelled", "run_attempt": 1}) as api, \
+                    patch.object(maintenance, "pages", return_value=[]):
+                maintenance.restore(path)
+            self.assertTrue(json.loads(path.read_text())["restored"])
+            self.assertFalse(any(call.args[1].endswith("/rerun") for call in api.call_args_list))
+
     def test_ambiguous_rerun_is_never_blindly_repeated(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "journal.json"
             maintenance.journal(path, {"repositories": {"owner/repo": {"workflows": [],
                 "cancelled": [{"id": 42, "restoration_requested": True, "restoration_attempt": 1}]}}})
             with patch.object(maintenance, "api", return_value={
-                    "status": "completed", "conclusion": "cancelled", "run_attempt": 1}) as api:
+                    "status": "completed", "conclusion": "cancelled", "run_attempt": 1}) as api, \
+                    patch.object(maintenance, "pages", return_value=[{"id": 1}]):
                 with self.assertRaises(RuntimeError):
                     maintenance.restore(path)
                 api.assert_called_once()
