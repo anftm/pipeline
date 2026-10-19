@@ -91,7 +91,25 @@ def discover(registry, derived, catalog, exports, state, *, retry_failures=False
         derived_entry = derivations.get(key) if entry.get('source_kind', 'upstream') != 'upstream' else None
         identity = {'key': key, 'entry': entry, 'active': active, 'derivation': derived_entry}
         fingerprint = contract.digest(contract.canonical(identity))
-        if not retry_failures and state['failures'].get(key, {}).get('fingerprint') == fingerprint:
+        # Quarantine identity is the immutable input, not the mutable live
+        # release: a catalog/export change elsewhere must not retry a source
+        # whose exact bytes already failed. A changed source, text layer or
+        # derivation still produces a new fingerprint and is reconsidered.
+        source_identity = {
+            'key': key,
+            'source_sha256': entry.get('source_sha256'),
+            'source_revision': entry.get('source_revision'),
+            'page_count': entry.get('page_count'),
+            'text_layer': entry.get('text_layer'),
+            'derivation': None if not derived_entry else {
+                'source_sha256': derived_entry.get('source_sha256'),
+                'derived_sha256': derived_entry.get('derived_sha256'),
+                'derived_bytes': derived_entry.get('derived_bytes'),
+                'manifest_path': derived_entry.get('manifest_path'),
+            },
+        }
+        quarantine = contract.digest(contract.canonical(source_identity))
+        if not retry_failures and state['failures'].get(key, {}).get('quarantine') == quarantine:
             quarantined.append(key)
             continue
         if (active and active['source_sha256'] != entry.get('source_sha256')):
@@ -106,7 +124,7 @@ def discover(registry, derived, catalog, exports, state, *, retry_failures=False
             if ((has_effective and active['resource'] in retained)
                     or (not has_effective and entry.get('text_layer') in retained)):
                 continue
-        jobs.append({**identity, 'book_id': book, 'fingerprint': fingerprint})
+        jobs.append({**identity, 'book_id': book, 'fingerprint': fingerprint, 'quarantine': quarantine})
     jobs.sort(key=lambda job: (job['book_id'] in exports,
                               job['entry'].get('page_count', 1 << 63), job['key']))
     return jobs, deferred, quarantined
@@ -230,7 +248,8 @@ def reconcile(store, root, consumer_root, approved, *, limit=8, apply=False, pla
         except Exception as error:
             # Quarantine only this exact input identity. Keep the old complete
             # release active; the next automatic run can advance other books.
-            failure = {'key': job['key'], 'fingerprint': job['fingerprint'], 'error_type': type(error).__name__}
+            failure = {'key': job['key'], 'fingerprint': job['fingerprint'],
+                       'quarantine': job['quarantine'], 'error_type': type(error).__name__}
             report['failures'].append(failure)
             state['failures'][job['key']] = failure
             if apply:

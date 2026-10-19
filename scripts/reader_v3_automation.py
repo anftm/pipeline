@@ -201,22 +201,123 @@ def discover(state, registry, rendered=None):
     return ignored
 
 
-def _eligible(state, catalog, budget, now, priority_source=None, *, skip_building=False):
+def _text_summary(store, manifest):
+    """Usability summary without reading full text unless the layer is raw."""
+    layer = manifest.get("text_layer")
+    if not layer:
+        return {"usable": False, "revision": None, "accepted": False, "quality": None}
+    index = publication.v3.decode(publication.v3.verified_read(
+        layer, lambda item: store.read_bytes(item["bucket"], item["path"])))
+    quality, revision = index.get("quality"), index.get("revision")
+    accepted = quality == "partially-reviewed"
+    usable = False
+    if not accepted and revision != "effective":
+        book = publication.v3.decode(publication.v3.verified_read(
+            index["book_text"], lambda item: store.read_bytes(item["bucket"], item["path"])))
+        text = "".join(page.get("text") or "" for page in book["pages"])
+        usable = any(char.isalnum() for char in text)
+    return {"usable": usable, "revision": revision, "accepted": accepted, "quality": quality}
+
+
+def _probe_text(store, task, catalog):
+    """Cache whether a staged candidate may repair an unusable live text layer.
+
+    A converted source can keep an OCR layer produced before the render
+    environment had CJK fonts/CMaps; such a layer may be one symbol (``●``)
+    although the same primary PDF has a complete text layer. The probe is only
+    read when the candidate differs from the live generation, so ordinary
+    books keep their current cheap path.
+    """
+    active = catalog["files"].get(task["spec"]["source_key"])
+    candidate = task.get("candidate")
+    if not active or not candidate or task["spec"].get("preview_only"):
+        task.pop("text_probe", None)
+        return
+    identity = [candidate["path"], candidate["sha256"], active["reading_generation"]]
+    probe = task.get("text_probe")
+    if probe and probe.get("identity") == identity:
+        return
+    try:
+        candidate_body = publication.read_index(store, candidate)
+        if candidate_body.get("reading_generation") == active["reading_generation"]:
+            task["text_probe"] = {"identity": identity, "matches_active": True}
+            return
+        candidate_manifest = publication.v3.decode(publication.v3.verified_read(
+            candidate_body["reading"], lambda item: store.read_bytes(item["bucket"], item["path"])))
+    except (FileNotFoundError, ValueError, KeyError):
+        task.pop("text_probe", None)
+        return
+    if (active.get("source_sha256") != task["spec"]["source_sha256"]
+            or active.get("components", {}).get("text") != "ready"
+            or candidate_body.get("source_sha256") != active["source_sha256"]):
+        task.pop("text_probe", None)
+        return
+    active_manifest = publication.v3.decode(publication.v3.verified_read(
+        active["resource"], lambda item: store.read_bytes(item["bucket"], item["path"])))
+    active_text = _text_summary(store, active_manifest)
+    candidate_text = _text_summary(store, candidate_manifest)
+    task["text_probe"] = {
+        "identity": identity,
+        "matches_active": False,
+        "active_usable": active_text["usable"],
+        "active_revision": active_text["revision"],
+        "active_accepted": active_text["accepted"],
+        "candidate_usable": candidate_text["usable"],
+        "candidate_revision": candidate_text["revision"],
+        "candidate_accepted": candidate_text["accepted"],
+        "candidate_generation": candidate_manifest["generation"],
+        "same_primary": _same_primary(active_manifest, candidate_manifest),
+    }
+
+
+def _same_primary(left, right):
+    """Compare primary content identity, not the staging path chosen for it."""
+    left = (left.get("primary") or {}).get("resource") or {}
+    right = (right.get("primary") or {}).get("resource") or {}
+    return bool(left.get("sha256") and left.get("sha256") == right.get("sha256")
+                and left.get("bytes") == right.get("bytes"))
+
+
+def _can_replace_unusable_text(task, active):
+    """Allow one additive repair of a live layer with no usable characters.
+
+    Never replaces accepted/effective corrections, a different source or
+    primary, or an image-only candidate.
+    """
+    probe = task.get("text_probe")
+    if not probe or probe.get("matches_active") or not active or task["spec"].get("preview_only"):
+        return False
+    if (active.get("source_sha256") != task["spec"]["source_sha256"]
+            or active.get("components", {}).get("text") != "ready"):
+        return False
+    return bool(probe["candidate_usable"]
+                and not probe["candidate_accepted"]
+                and probe["candidate_revision"] != "effective"
+                and probe["active_usable"] is False
+                and not probe["active_accepted"]
+                and probe["active_revision"] != "effective"
+                and probe["same_primary"])
+
+
+def _eligible(state, catalog, budget, now, priority_source=None, *, skip_building=False, store=None):
     eligible = []
     for identity, task in state["tasks"].items():
         spec = task["spec"]
         active = catalog["files"].get(spec["source_key"])
+        if store is not None:
+            _probe_text(store, task, catalog)
         text_upgrade = (active and active["source_sha256"] == spec["source_sha256"]
                         and active.get("components", {}).get("text") == "pending" and not spec.get("preview_only"))
-        if active and not text_upgrade:
+        replacement = _can_replace_unusable_text(task, active)
+        if active and not text_upgrade and not replacement:
             # A different raw recipe must never replace accepted or already published text.
             task["status"] = "published" if active["source_sha256"] == spec["source_sha256"] else "protected"
             task["active_generation"] = active["reading_generation"]
             continue
-        if text_upgrade and task["status"] in {"published", "protected"}:
+        if (text_upgrade or replacement) and task["status"] in {"published", "protected"}:
             # Older admission code treated any canonical entry as full-text
-            # completion. The actual pending component, not that stale label,
-            # controls this strictly additive text upgrade.
+            # completion. The actual pending/unusable component, not that stale
+            # label, controls this strictly additive text upgrade.
             task["status"] = "staged" if task.get("candidate") else "pending"
         if (task["status"] == "needs-review" and task.get("error_type") == "PublicationReviewRequired"
                 and task.get("review_recipe") != REVIEW_RECIPE):
@@ -275,9 +376,11 @@ def _charge(task, budget, now):
 def _promote(store, task):
     pointer, latest = publication.current(store)
     active = latest["files"].get(task["spec"]["source_key"])
-    if active and not (active["source_sha256"] == task["spec"]["source_sha256"]
-                       and active.get("components", {}).get("text") == "pending"
-                       and not task["spec"].get("preview_only")):
+    text_upgrade = (active
+                    and active["source_sha256"] == task["spec"]["source_sha256"]
+                    and active.get("components", {}).get("text") == "pending"
+                    and not task["spec"].get("preview_only"))
+    if active and not (text_upgrade or _can_replace_unusable_text(task, active)):
         task["status"] = "protected"
     else:
         promoted = publication.promote(store, task["candidate"], pointer["generation"] if pointer else None, apply=True)
@@ -511,7 +614,7 @@ def wave(store, *, apply=False, priority_source=None, now=None, wave_size=WAVE_S
             _fail(task, record.get("error_type") or "BuildFailed", record["status"] == "needs-review", now)
         collected.append({"id": identity, "status": task["status"], "error_type": task.get("error_type")})
     _, catalog = publication.current(store)
-    eligible = _eligible(state, catalog, budget, now, priority_source, skip_building=True)
+    eligible = _eligible(state, catalog, budget, now, priority_source, skip_building=True, store=store)
     if source_keys is not None:
         eligible = [pair for pair in eligible if pair[1]["spec"]["source_key"] in source_keys]
     inflight = [identity for identity, task in state["tasks"].items()
@@ -620,7 +723,7 @@ def _run_one(store, *, apply=False, priority_source=None, build=None, now=None):
     day = now.date().isoformat()
     budget = state["days"].setdefault(day, {"attempts": 0, "pages": 0})
     _, catalog = publication.current(store)
-    eligible = _eligible(state, catalog, budget, now, priority_source)
+    eligible = _eligible(state, catalog, budget, now, priority_source, store=store)
     report = {"applied": apply, "tasks": len(state["tasks"]), "ignored": ignored,
               "eligible": len(eligible), "budget": budget, "processed": []}
     if not apply:

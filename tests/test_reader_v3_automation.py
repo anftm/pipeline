@@ -423,6 +423,63 @@ class WaveTests(unittest.TestCase):
         auto.discover(state, {"version": 1, "files": {}})
         self.assertEqual(state["tasks"]["f" * 64]["status"], "superseded")
 
+    def test_live_unusable_text_can_be_replaced_by_a_complete_candidate(self):
+        """A symbol-only legacy OCR layer must not block its own complete rebuild."""
+        fixture = fixtures.V3PublicationTests()
+        fixture.setUp()
+        try:
+            key = entry()["key"]
+            self.store.objects[(publication.ASSETS, auto.REGISTRY)] = publication.encode(
+                {"version": 1, "files": {key: entry(key=key)}})
+            empty = fixture.candidate(key=key, label="●")
+            staged = publication.stage(self.store, empty, fixture.bundle, apply=True)
+            first = publication.promote(self.store, staged["candidate"], None, apply=True)
+            active = publication.current(self.store)[1]["files"][key]
+            good = fixture.candidate(key=key, label="Complete recovered body text")
+            good_staged = publication.stage(self.store, good, fixture.bundle, apply=True)
+            candidate = good_staged["candidate"]
+            identity = "c" * 64
+            state = {"version": 1, "kind": "reader-v3-automation", "days": {}, "tasks": {
+                identity: {"spec": {"source_key": key, "source_sha256": "a" * 64},
+                           "page_count": 1, "status": "published", "attempts": 1,
+                           "active_generation": active["reading_generation"],
+                           "candidate": candidate}}}
+            self.store.objects[(publication.ASSETS, auto.STATE)] = publication.encode(state)
+            report = auto.wave(self.store, apply=True, now=self.now, wave_size=1)
+            promoted = publication.current(self.store)[1]["files"][key]
+            self.assertNotEqual(promoted["reading_generation"], first["generation"])
+            task = auto.load_state(self.store)["tasks"][identity]
+            self.assertEqual(task["status"], "published")
+            self.assertTrue(task["text_probe"]["candidate_usable"])
+            self.assertFalse(task["text_probe"]["active_usable"])
+            self.assertIn(identity, [item["id"] for item in report["processed"]])
+        finally:
+            fixture.temp.cleanup()
+
+    def test_text_replacement_never_overrides_accepted_or_effective_layers(self):
+        """The additive repair is limited to unusable raw layers."""
+        active = {"source_sha256": "a" * 64, "components": {"text": "ready"}}
+        spec = {"source_key": "VoiceOfML/books\0book.pdf", "source_sha256": "a" * 64}
+        for active_probe, expected in (
+                ({"active_usable": False, "active_revision": "raw", "active_accepted": False}, True),
+                ({"active_usable": True, "active_revision": "raw", "active_accepted": False}, False),
+                ({"active_usable": False, "active_revision": "effective", "active_accepted": False}, False),
+                ({"active_usable": False, "active_revision": "raw", "active_accepted": True}, False)):
+            task = {"spec": spec, "text_probe": {**active_probe, "matches_active": False,
+                    "candidate_usable": True, "candidate_revision": "raw",
+                    "candidate_accepted": False, "same_primary": True}}
+            self.assertEqual(auto._can_replace_unusable_text(task, active), expected)
+        task = {"spec": spec, "text_probe": {"active_usable": False, "active_revision": "raw",
+                "active_accepted": False, "matches_active": False, "candidate_usable": True,
+                "candidate_revision": "raw", "candidate_accepted": False, "same_primary": False}}
+        self.assertFalse(auto._can_replace_unusable_text(task, active))
+        task["text_probe"]["same_primary"] = True
+        task["spec"] = {**spec, "preview_only": True}
+        self.assertFalse(auto._can_replace_unusable_text(task, active))
+        task["spec"] = spec
+        task["text_probe"]["matches_active"] = True
+        self.assertFalse(auto._can_replace_unusable_text(task, active))
+
     def test_native_fallback_refuses_a_primary_without_complete_text(self):
         with patch.object(publication.pdf_ocr, "probe_pdf", return_value={"classification": "scan"}):
             with self.assertRaises(publication.PublicationReviewRequired):

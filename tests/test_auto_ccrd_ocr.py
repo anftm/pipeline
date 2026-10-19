@@ -136,6 +136,26 @@ class AutoCcrdOcrTests(unittest.TestCase):
             self.assertEqual(retried['selected'], [key])
             build.assert_not_called()
 
+    def test_quarantine_identity_ignores_unrelated_live_release_changes(self):
+        """An unchanged bad input stays quarantined when only the catalog moves."""
+        key, entry = self.book('stable')
+        jobs, _, _ = auto.discover(self.registry, self.derived, {'files': {}}, {}, {'failures': {}})
+        quarantine = jobs[0]['quarantine']
+        state = {'failures': {key: {'quarantine': quarantine, 'fingerprint': 'old'}}}
+        moved = {'files': {key: {'resource': {'path': 'objects/moved/reading-manifest.json'},
+                                 'source_sha256': entry['source_sha256'],
+                                 'reading_generation': 'f' * 64,
+                                 'page_count': entry['page_count'],
+                                 'components': {'text': 'ready'}}}}
+        jobs, _, quarantined = auto.discover(self.registry, self.derived, moved, {}, state)
+        self.assertEqual(jobs, [])
+        self.assertEqual(quarantined, [key])
+        changed = copy.deepcopy(self.registry)
+        changed['files'][key]['source_sha256'] = 'b' * 64
+        jobs, _, quarantined = auto.discover(changed, self.derived, {'files': {}}, {}, state)
+        self.assertEqual(quarantined, [])
+        self.assertEqual([job['key'] for job in jobs], [key])
+
     def test_missing_companion_is_deferred_not_called_published_or_corrected(self):
         key, entry = self.book('legacy')
         del entry['text_layer']

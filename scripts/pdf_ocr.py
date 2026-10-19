@@ -179,7 +179,7 @@ def object_root(source_sha: str, key: str, language=None, backend=None) -> Path:
     return Path("objects") / source_sha[:2] / source_sha / key_sha
 
 
-def _run(command: list[str], *, timeout: int = COMMAND_TIMEOUT) -> str:
+def _run(command: list[str], *, timeout: int = COMMAND_TIMEOUT, stderr: bool = False):
     try:
         result = subprocess.run(
             command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -190,6 +190,8 @@ def _run(command: list[str], *, timeout: int = COMMAND_TIMEOUT) -> str:
     except subprocess.CalledProcessError as exc:
         detail = (exc.stderr or exc.stdout or "").strip()[-1000:]
         raise RuntimeError(f"command failed: {command[0]}: {detail}") from exc
+    if stderr:
+        return result.stdout, result.stderr
     return result.stdout
 
 
@@ -606,10 +608,18 @@ def render_page(path: Path, page: int, directory: Path,
                 reader_pixels: tuple[int, int] | None = None, reader_jxl: bool = False,
                 reader_images: bool = True) -> tuple[Path, int, int]:
     prefix = directory / f"page-{page:06d}"
-    _run([
+    _stdout, errors = _run([
         "pdftocairo", "-png", "-singlefile", "-r", str(_page_render_dpi(path, page)),
         "-f", str(page), "-l", str(page), str(path), str(prefix),
-    ], timeout=COMMAND_TIMEOUT)
+    ], timeout=COMMAND_TIMEOUT, stderr=True)
+    # A PDF with non-embedded CJK CID fonts renders as an almost blank page when
+    # Poppler lacks the required CMap/font packages, silently producing an
+    # unusable OCR input. Fail loudly instead of publishing a symbol-only layer.
+    if "some font thing failed" in errors or "Couldn't find a font" in errors:
+        raise RuntimeError(
+            "pdftocairo could not resolve a font; install poppler-data and CJK "
+            "fonts before rendering (refusing an unreliable OCR page): "
+            + errors.strip().splitlines()[0][:200])
     png = prefix.with_suffix(".png")
     if not png.is_file():
         raise RuntimeError(f"page {page} render missing")

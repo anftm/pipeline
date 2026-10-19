@@ -100,6 +100,23 @@ class RealPdfRenderingTests(unittest.TestCase):
                 self.assertEqual(reader.size, webp.size)
                 self.assertEqual(reader.height, 1800)
 
+    def test_unresolved_font_warning_refuses_an_unreliable_ocr_page(self):
+        """A missing CMap/CJK font must fail the render, not OCR a blank page."""
+        from PIL import Image as PILImage
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "cjk-cid.pdf"
+            with Image.new("RGB", (200, 300), "white") as image:
+                image.save(source, "PDF", resolution=100)
+            warning = ("Syntax Error: Couldn't find a font for '<cb><ce><cc><e5>'\n"
+                       "some font thing failed\n")
+            with patch.object(pdf_ocr, "_run", return_value=("", warning)):
+                with self.assertRaisesRegex(RuntimeError, "poppler-data"):
+                    pdf_ocr.render_page(source, 1, root)
+            png, width, height = pdf_ocr.render_page(source, 1, root)
+            with PILImage.open(png) as image:
+                self.assertEqual(image.size, (width, height))
+
     def test_reader_quality_uses_clean_scan_only_with_or_without_jxl(self):
         with Image.new("RGB", (128, 128), "white") as clean, \
                 Image.new("RGB", (128, 128), (196, 166, 115)) as yellowed, \
