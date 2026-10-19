@@ -21,6 +21,19 @@ on:
         type: choice
         options: [unreferenced, retired-catalog-snapshots]
         default: unreferenced
+      reader_only:
+        description: Delete only the original Reader buckets and keep the fourth domain intact
+        type: boolean
+        default: true
+      limit:
+        description: Maximum objects in this collection batch; zero means all candidates
+        type: string
+        default: "0"
+      storage:
+        description: Read backend; Hub remains the only writer
+        type: choice
+        options: [s3, hub]
+        default: s3
 
 permissions:
   contents: read
@@ -51,10 +64,22 @@ jobs:
           APPLY: ${{ inputs.apply }}
           GRACE_DAYS: ${{ inputs.grace_days }}
           SCOPE: ${{ inputs.scope }}
+          READER_ONLY: ${{ inputs.reader_only }}
+          LIMIT: ${{ inputs.limit || '0' }}
+          STORAGE: ${{ inputs.storage || 's3' }}
+          HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+          HF_S3_NAMESPACE: vomebook
+          HF_S3_INPUT_NAMESPACE: melsm
+          HF_S3_INPUT_ACCESS_KEY_ID: ${{ secrets.HF_S3_INPUT_ACCESS_KEY_ID }}
+          HF_S3_INPUT_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_INPUT_SECRET_ACCESS_KEY }}
         run: |
           [[ "$GRACE_DAYS" =~ ^[0-9]+$ ]] || exit 1
-          args=(--grace-days "$GRACE_DAYS" --output output/gc/collection.json)
+          [[ "$LIMIT" =~ ^[0-9]+$ ]] || exit 1
+          args=(--grace-days "$GRACE_DAYS" --limit "$LIMIT" --storage "$STORAGE"
+                --output output/gc/collection.json)
           if [[ "$APPLY" == true ]]; then args+=(--apply); fi
+          if [[ "$READER_ONLY" == true ]]; then args+=(--reader-only); fi
           if [[ "$SCOPE" == retired-catalog-snapshots ]]; then args+=(--retired-snapshots-only); fi
           python -u scripts/reader_gc_collect.py "${args[@]}"
       - uses: actions/upload-artifact@v7

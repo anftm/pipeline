@@ -127,6 +127,28 @@ jobs:
         run: |
           python scripts/publish_reader_v3.py ack-all --apply --output output/v3/consumers.json
           echo "complete=$(jq -r '.complete // false' output/v3/consumers.json)" >> "$GITHUB_OUTPUT"
+          # Record the base-catalog generation both deployments just confirmed.
+          # The GC collector needs this to compact history; it never relied on
+          # acknowledgments inside the 2 GB canonical catalog itself.
+          if [[ "$(jq -r '.complete // false' output/v3/consumers.json)" == "true" ]]; then
+            python scripts/publish_reader_v3.py acknowledge-legacy --apply \
+              --output output/v3/acknowledgments.json
+            ack_reason=$(jq -r '.reason // "recorded"' output/v3/acknowledgments.json)
+            if [[ "$ack_reason" == "recorded" ]]; then
+              # Shrink the base catalog in the ordinary publish path. The 2 GB
+              # object would otherwise need a drained window just to stay bounded.
+              python scripts/publish_reader_v3.py compact-legacy --apply \
+                --output output/v3/catalog-compaction.json
+              # The compaction rewrites the catalog, so refresh the receipt that
+              # names its digest for the GC collector.
+              python scripts/publish_reader_v3.py acknowledge-legacy --apply \
+                --output output/v3/acknowledgments.json
+            else
+              echo "base acknowledgment deferred: $ack_reason"
+            fi
+          else
+            echo "consumer projections are incomplete; base acknowledgment deferred"
+          fi
       # Full history/input retirement is manual operation=retire. Do not scan
       # every retained OCR book while holding the ordinary publication lock.
       - name: Write deduplicated PDF/OCR progress report

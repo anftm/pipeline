@@ -4,6 +4,17 @@ on:
   schedule:
     - cron: '13 2 * * 1'
   workflow_dispatch:
+    inputs:
+      limit:
+        description: Maximum objects to collect in this window; zero means all candidates
+        required: true
+        default: "0"
+        type: string
+      plan_only:
+        description: Drain and plan without deleting anything
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -23,11 +34,21 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: '3.11'
+      - name: Verify every producer credential before isolation
+        env:
+          GC_PRODUCER_TOKENS_JSON: ${{ secrets.GC_PRODUCER_TOKENS_JSON }}
+        run: python -u scripts/reader_gc_maintenance.py preflight --journal output/maintenance/preflight.json
       - name: Pause producers, collect and restore
         timeout-minutes: 450
         env:
           GC_PRODUCER_TOKENS_JSON: ${{ secrets.GC_PRODUCER_TOKENS_JSON }}
-        run: python -u scripts/reader_gc_maintenance.py run --journal output/maintenance/journal.json
+          LIMIT: ${{ inputs.limit || '0' }}
+          PLAN_ONLY: ${{ inputs.plan_only || 'false' }}
+        run: |
+          [[ "$LIMIT" =~ ^[0-9]+$ ]] || exit 1
+          args=(run --journal output/maintenance/journal.json --limit "$LIMIT")
+          if [[ "$PLAN_ONLY" == "true" ]]; then args+=(--plan-only); fi
+          python -u scripts/reader_gc_maintenance.py "${args[@]}"
       - name: Recover recorded producer state after an interrupted orchestration
         if: always()
         env:

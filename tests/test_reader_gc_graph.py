@@ -424,6 +424,55 @@ class ReaderGcGraphTests(unittest.TestCase):
         self.assertEqual(payload["retired_generations"], catalog["retired_generations"])
         self.assertEqual(payload["current"], {"generation": "c"})
 
+    def test_retirement_journal_can_reclaim_its_own_superseded_roots(self):
+        # GC's own bookkeeping used to be permanently unmanaged: the retirement
+        # journal said these roots were released, but no tier could delete them.
+        store = MemoryStore()
+        generation = "a" * 64
+        retired = [f"reader-index/v3/promotions/{generation}.json",
+                   f"reader-index/v3/generations/{generation}/catalog.json",
+                   "reader-index/processing/v3-" + "b" * 32 + ".json"]
+        kept = "reader-index/v3/promotions/" + "c" * 64 + ".json"
+        for path in retired + [kept]:
+            store.put(ASSETS, path, {"kind": "reader-v3-history", "generation": generation,
+                                     "resources": []})
+        store.put(ASSETS, "reader-index/v3/retirement.json", {
+            "version": 1, "kind": "reader-v3-retirement", "resources": [],
+            "retired_paths": retired, "replacement_acks": {"hf": True, "pages": True}})
+        report = gc.ReferenceGraph(store).build()
+        self.assertTrue(report["graph_complete"], report["blockers"])
+        self.assertEqual(report["buckets"][ASSETS]["retired"], sorted(retired))
+        self.assertEqual(report["buckets"][ASSETS]["candidates"], sorted(retired))
+        self.assertEqual(report["buckets"][ASSETS]["unmanaged"], [])
+        self.assertNotIn(kept, report["buckets"][ASSETS]["candidates"])
+
+    def test_gc_run_journals_are_retained_not_reported_as_unknown_formats(self):
+        store = MemoryStore()
+        store.put(ASSETS, "reader-index/gc/123/collection.json", {"version": 1})
+        store.put(ASSETS, "reader-index/gc/123/progress.json", {"version": 1})
+        report = gc.ReferenceGraph(store).build()
+        self.assertTrue(report["graph_complete"], report["blockers"])
+        self.assertEqual(report["buckets"][ASSETS]["retained"],
+                         ["reader-index/gc/123/collection.json",
+                          "reader-index/gc/123/progress.json"])
+        self.assertEqual(report["buckets"][ASSETS]["unmanaged"], [])
+        self.assertEqual(report["buckets"][ASSETS]["candidates"], [])
+
+    def test_retired_root_that_is_still_pinned_is_not_a_candidate(self):
+        store = MemoryStore()
+        path = "reader-index/v3/promotions/" + "a" * 64 + ".json"
+        store.put(ASSETS, path, {"kind": "reader-v3-history", "generation": "a" * 64,
+                                 "resources": []})
+        store.put(ASSETS, "reader-index/v3/retirement.json", {
+            "version": 1, "kind": "reader-v3-retirement", "resources": [],
+            "retired_paths": [path], "replacement_acks": {"hf": True, "pages": True}})
+        store.put(ASSETS, "reader-index/audit.json", {"resources": [
+            {"bucket": ASSETS, "path": path}]})
+        report = gc.ReferenceGraph(store).build()
+        self.assertTrue(report["graph_complete"], report["blockers"])
+        self.assertEqual(report["buckets"][ASSETS]["retired"], [])
+        self.assertNotIn(path, report["buckets"][ASSETS]["candidates"])
+
     def test_unknown_formats_are_reported_and_never_deleted(self):
         store = MemoryStore()
         store.put(ASSETS, "new-format/content.bin", b"data")

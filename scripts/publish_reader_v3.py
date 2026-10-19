@@ -775,6 +775,120 @@ def observe_consumer(store, surface, client):
             "projection_verified": True}
 
 
+ACKNOWLEDGMENTS = "reader-index/reader_gc_acknowledgments.json"
+
+
+def record_legacy_acknowledgments(store, *, apply=False):
+    """Record that both deployed consumers serve the current base generation.
+
+    The canonical Reader catalog can exceed 2 GB, and nothing in production ever
+    wrote ``acks`` into it, so ``compact_catalog`` could never drop history. This
+    writes one small receipt instead: it names the exact current generation, the
+    sidecar digest it binds, and the pinned projection the deployments serve,
+    which is what the GC collector needs before it may compact. It never claims a
+    generation the deployments do not serve.
+    """
+    try:
+        from .reader_gc_stream import catalog_identity
+    except ImportError:
+        from reader_gc_stream import catalog_identity
+    identity, digest = store.read_graph_json(ASSETS, "reader-index/reader_catalog.json",
+                                             parser=catalog_identity)
+    if identity["bound_sidecar_sha256"] is None:
+        raise ValueError("current catalog generation binds no canonical sidecar")
+    base_raw = store.read_bytes(ASSETS, "reader-index/reader_assets.json.gz")
+    projection_sha256 = hashlib.sha256(base_raw).hexdigest()
+    base = json.loads(gzip.decompress(base_raw))
+    canonical_sha256 = hashlib.sha256(json.dumps(
+        base, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    if canonical_sha256 != identity["bound_sidecar_sha256"]:
+        # The catalog's current generation binds an older sidecar than the one
+        # deployed consumers would receive. Nothing may be retired against it.
+        return {"applied": False, "reason": "canonical-sidecar-newer-than-catalog",
+                "generation": identity["current"]}
+    pointer, v3_catalog = current(store)
+    if not pointer:
+        raise ValueError("no deployed v3 projection to acknowledge")
+    pinned = v3_catalog.get("base_sidecar") or {}
+    if pinned.get("sha256") != projection_sha256:
+        # A stale pinned base means the deployments may still serve an older
+        # sidecar; acknowledging the newest catalog generation would authorize
+        # dropping references those deployments still use.
+        return {"applied": False, "reason": "pinned-sidecar-does-not-match-canonical",
+                "generation": identity["current"]}
+    entry = {"generation": identity["current"],
+             "sidecar_sha256": identity["bound_sidecar_sha256"],
+             "catalog_sha256": digest, "projection_sha256": projection_sha256,
+             "acknowledged_at": reader_lifecycle.now_iso()}
+    payload = {"version": 1, "kind": "reader-gc-acknowledgments", "current": entry}
+    if apply:
+        assert_writer(store)
+        if store.digest(ASSETS, "reader-index/reader_catalog.json") != digest:
+            raise ValueError("catalog changed during acknowledgment")
+        store.put_bytes(ASSETS, ACKNOWLEDGMENTS, encode(payload))
+        if json.loads(store.read_bytes(ASSETS, ACKNOWLEDGMENTS)) != payload:
+            raise ValueError("acknowledgment readback failed")
+    return {**payload, "applied": apply}
+
+
+def compact_legacy_catalog(store, *, apply=False, grace_days=0):
+    """Shrink the base catalog once both deployments are proven on its current generation.
+
+    This runs in the ordinary publish path so the 2 GB object does not need a
+    drained GC window to stay bounded. It only rewrites catalog metadata and
+    retired tombstones; content objects are still collected exclusively by the
+    drained collector. Refuses when the acknowledgment receipt does not match the
+    exact current generation and catalog digest.
+    """
+    try:
+        from .reader_gc_stream import catalog_identity, compact_catalog_stream
+    except ImportError:
+        from reader_gc_stream import catalog_identity, compact_catalog_stream
+    path = "reader-index/reader_catalog.json"
+    identity, digest = store.read_graph_json(ASSETS, path, parser=catalog_identity)
+    try:
+        receipt = json.loads(store.read_bytes(ASSETS, ACKNOWLEDGMENTS))
+    except FileNotFoundError:
+        return {"applied": False, "reason": "no-acknowledgment-receipt"}
+    current = receipt.get("current") or {}
+    if (receipt.get("version") != 1 or receipt.get("kind") != "reader-gc-acknowledgments"
+            or current.get("generation") != identity["current"]
+            or current.get("sidecar_sha256") != identity["bound_sidecar_sha256"]
+            or current.get("catalog_sha256") != digest):
+        return {"applied": False, "reason": "stale-acknowledgment-receipt"}
+    if hashlib.sha256(store.read_bytes(
+            ASSETS, "reader-index/reader_assets.json.gz")).hexdigest() != current.get("projection_sha256"):
+        # A newer sidecar may reference objects that only older generations
+        # list; the receipt no longer describes what is deployed.
+        return {"applied": False, "reason": "stale-acknowledgment-receipt"}
+
+    def build(chunks, compressed):
+        return compact_catalog_stream(chunks, compressed, current=identity["current"],
+                                      acknowledged=True, grace_days=grace_days)
+
+    encoded, _source_digest, stats = store.read_graph_json(ASSETS, path, parser=build)
+    wire = hashlib.sha256(encoded).hexdigest()
+    report = {"applied": apply, "before_digest": digest,
+              "after_digest": wire, "after_bytes": len(encoded),
+              "generations": stats["kept"], "retired": stats["dropped"]}
+    if not stats["dropped"]:
+        report["unchanged"] = True
+        return report
+    if apply:
+        assert_writer(store)
+        if store.digest(ASSETS, path) != digest:
+            raise ValueError("catalog changed during compaction")
+        if hashlib.sha256(store.read_bytes(
+                ASSETS, "reader-index/reader_assets.json.gz")).hexdigest() != current.get("projection_sha256"):
+            # A newer sidecar may already reference objects that only older
+            # generations list; never retire those references mid-publication.
+            raise ValueError("canonical sidecar changed during compaction")
+        store.put_bytes(ASSETS, path, encoded)
+        if store.digest(ASSETS, path) != wire:
+            raise ValueError("compacted catalog readback mismatch")
+    return report
+
+
 def acknowledge_all(store, client, *, apply=False, timeout_seconds=1200,
                     sleep_fn=time.sleep, clock=time.monotonic):
     """Acknowledge both consumers without turning propagation lag into a publish failure."""
@@ -862,7 +976,7 @@ class CentralHubStore(HubBucketStore):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("build-stage", "stage", "promote", "rollback", "withdraw", "ack", "ack-all", "inspect", "project", "auto", "build-task", "correct", "accept", "reject", "retry", "retire", "retire-ocr-progress", "unify", "repair-gbk"))
+    parser.add_argument("command", choices=("build-stage", "stage", "promote", "rollback", "withdraw", "ack", "ack-all", "acknowledge-legacy", "compact-legacy", "inspect", "project", "auto", "build-task", "correct", "accept", "reject", "retry", "retire", "retire-ocr-progress", "unify", "repair-gbk"))
     parser.add_argument("--resource", type=Path)
     parser.add_argument("--resource-json")
     parser.add_argument("--bundle", type=Path)
@@ -958,6 +1072,10 @@ def main():
         import httpx
         with httpx.Client(timeout=30, follow_redirects=True) as client:
             report = acknowledge_all(store, client, apply=args.apply)
+    elif args.command == "acknowledge-legacy":
+        report = record_legacy_acknowledgments(store, apply=args.apply)
+    elif args.command == "compact-legacy":
+        report = compact_legacy_catalog(store, apply=args.apply)
     elif args.command == "ack":
         if not args.surface:
             parser.error("ack requires --surface")

@@ -41,6 +41,9 @@ MANAGED_PREFIXES = (
     "chapters/", "media/", "native/", "derived/",
     "reader-index/snapshots/",
 )
+# Run journals are the audit trail of the collector itself, mirrored as Actions
+# artifacts. They are deliberately retained even though no root references them.
+RETAINED_PREFIXES = ("reader-index/gc/",)
 PATH_FIELDS = {
     "path", "paths", "object", "fallback", "manifest", "manifest_path", "root",
     "new_path", "reader_assets_path", "ocr_manifest", "p", "o", "i", "w", "j",
@@ -722,10 +725,23 @@ class ReferenceGraph:
         buckets = {}
         complete = not self.blockers
         for bucket, files in self.files.items():
+            retired = sorted(path for path in files if (bucket, path) in self.retired_roots
+                             and (bucket, path) not in self.references)
             unreferenced = sorted(path for path in files if (bucket, path) not in self.references
                                   and path.startswith(managed_prefixes(bucket)))
+            # Run journals are deliberate telemetry: the same bytes are uploaded as
+            # an Actions artifact, and the active run keeps writing them. They are
+            # neither a content candidate nor an unknown format.
+            retained = sorted(path for path in files if path.startswith(RETAINED_PREFIXES))
+            # A root the retirement journal explicitly released is not managed by
+            # content prefix, but it is still a deliberate, bounded retirement.
+            # Without this tier those paths stayed "unmanaged" forever and the GC
+            # criterion could not reclaim its own superseded roots.
+            reclaimed = sorted(set(unreferenced) | set(retired))
             unmanaged = sorted(path for path in files if (bucket, path) not in self.references
-                                and not path.startswith(managed_prefixes(bucket)))
+                                and not path.startswith(managed_prefixes(bucket))
+                                and (bucket, path) not in self.retired_roots
+                                and not path.startswith(RETAINED_PREFIXES))
             buckets[bucket] = {
                 "objects": len(files),
                 "referenced": sum((bucket, path) in self.references for path in files),
@@ -733,7 +749,9 @@ class ReferenceGraph:
                     "".join(Path(path).suffixes[-2:]).lower() if path.endswith(".gz")
                     else Path(path).suffix.lower() or "(none)" for path in files).items())),
                 "unreferenced": unreferenced,
-                "candidates": unreferenced if complete else [],
+                "retired": retired,
+                "retained": retained,
+                "candidates": reclaimed if complete else [],
                 "unmanaged": unmanaged,
             }
         return {

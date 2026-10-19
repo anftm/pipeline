@@ -25,10 +25,15 @@ def producer_path(path):
 
 
 def producer_repositories():
+    # Retired routing lanes may still own queued or rerun workflows. A routing
+    # change must not silently drop a repository from the drain fence.
     config = load_config()
-    return sorted({config["publisher_repository"], *[
-        lane.get("repository", lane["owner"] + "/pipeline")
-        for lane in [*config["native_lanes"], config["converted_lane"]]]})
+    repositories = set()
+    for routing in [config, *config.get("legacy_configs", [])]:
+        repositories.add(routing["publisher_repository"])
+        for lane in [*routing["native_lanes"], routing["converted_lane"]]:
+            repositories.add(lane.get("repository", lane["owner"] + "/pipeline"))
+    return sorted(repositories)
 
 
 class GitHubProducerFence:

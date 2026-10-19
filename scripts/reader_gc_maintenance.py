@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import time
 import uuid
@@ -21,6 +22,13 @@ except ImportError:
 ACTIVE = ("queued", "pending", "in_progress", "waiting", "requested")
 
 
+class MaintenanceAPIError(RuntimeError):
+    def __init__(self, repo, path, method, status):
+        self.status = status
+        super().__init__(f'maintenance API {method} failed: {repo}:{path} '
+                         f'(HTTP {status or "unknown"})')
+
+
 def api(repo, path, *, method="GET", body=None):
     tokens = json.loads(os.environ["GC_PRODUCER_TOKENS_JSON"])
     token = tokens.get(repo)
@@ -29,11 +37,92 @@ def api(repo, path, *, method="GET", body=None):
     command = ["gh", "api", f"repos/{repo}/{path}", "--method", method]
     if body is not None:
         command += ["--input", "-"]
-    result = subprocess.run(command, input=json.dumps(body) if body is not None else None,
-        env={**os.environ, "GH_TOKEN": token}, capture_output=True, text=True, timeout=120)
-    if result.returncode:
-        raise RuntimeError(f"maintenance API {method} failed: {repo}:{path}")
-    return json.loads(result.stdout) if result.stdout.strip() else {}
+    for attempt in range(3):
+        try:
+            result = subprocess.run(command, input=json.dumps(body) if body is not None else None,
+                env={**os.environ, "GH_TOKEN": token}, capture_output=True, text=True, timeout=120)
+        except subprocess.TimeoutExpired:
+            error = MaintenanceAPIError(repo, path, method, None)
+        else:
+            if not result.returncode:
+                return json.loads(result.stdout) if result.stdout.strip() else {}
+            match = re.search(r'\bHTTP (\d{3})\b', result.stderr or '')
+            error = MaintenanceAPIError(repo, path, method, int(match[1]) if match else None)
+        # Never blindly retry a mutation: cancellation, dispatch and rerun are not
+        # idempotent. Only a read may be repeated.
+        if method != "GET" or error.status not in {None, 408, 429, 500, 502, 503, 504} \
+                or attempt == 2:
+            raise error
+        time.sleep(2 ** attempt)
+
+
+def set_state(repo, path, body, expected):
+    """Idempotent PUT: read back an ambiguous outcome before any bounded retry."""
+    for attempt in range(3):
+        if expected(api(repo, path)):
+            return
+        try:
+            api(repo, path, method="PUT", body=body)
+        except MaintenanceAPIError as error:
+            if expected(api(repo, path)):
+                return
+            if error.status not in {None, 408, 429, 500, 502, 503, 504} or attempt == 2:
+                raise
+            time.sleep(2 ** attempt)
+            continue
+        if not expected(api(repo, path)):
+            raise RuntimeError("maintenance state mutation readback mismatch")
+        return
+
+
+def permissions(repo, desired):
+    # GET may expose read-only or newly added fields that PUT does not accept.
+    body = {key: desired[key] for key in ("enabled", "allowed_actions") if key in desired}
+    set_state(repo, "actions/permissions", body,
+              lambda value: all(value.get(key) == item for key, item in body.items()))
+
+
+def workflow_state(repo, workflow, enabled):
+    path = f"actions/workflows/{workflow['id']}"
+    desired = "active" if enabled else "disabled_manually"
+    for attempt in range(3):
+        if api(repo, path)["state"] == desired:
+            return
+        try:
+            api(repo, path + ("/enable" if enabled else "/disable"), method="PUT")
+        except MaintenanceAPIError as error:
+            if api(repo, path)["state"] == desired:
+                return
+            if error.status not in {None, 408, 429, 500, 502, 503, 504} or attempt == 2:
+                raise
+            time.sleep(2 ** attempt)
+            continue
+        if api(repo, path)["state"] != desired:
+            raise RuntimeError("workflow state readback mismatch")
+        return
+
+
+def preflight():
+    """Check every credential and inventory before disabling the first producer."""
+    result = {}
+    errors = []
+    for repo in producer_repositories():
+        try:
+            inventory = pages(repo, "actions/workflows", "workflows")
+            workflows = [w for w in inventory if producer_path(w["path"])]
+            if not any(w["path"].endswith("/pdf-account-worker.yml") for w in workflows):
+                raise RuntimeError("incomplete producer inventory")
+            result[repo] = {"permission": api(repo, "actions/permissions"), "workflows": [
+                {"id": w["id"], "state": w["state"], "path": w["path"]} for w in workflows],
+                "cancelled": []}
+        except (MaintenanceAPIError, RuntimeError) as error:
+            # Keep the GET-only failure readable without exposing any credential.
+            errors.append({"repository": repo, "error": type(error).__name__,
+                           "status": getattr(error, "status", None)})
+    if errors:
+        raise RuntimeError(f"maintenance preflight failed for {len(errors)} repositories: "
+                           + json.dumps(errors, sort_keys=True))
+    return result
 
 
 def pages(repo, path, field):
@@ -58,6 +147,8 @@ def restore(path):
     if not path.exists():
         return
     state = json.loads(path.read_text())
+    if state.get("preflight_only"):
+        return
     if state.get("dispatch_requested"):
         central = load_config()["publisher_repository"]
         run_id = state.get("collector_run_id")
@@ -77,14 +168,10 @@ def restore(path):
     for repo, record in state["repositories"].items():
         try:
             if record.get("permission_changed"):
-                api(repo, "actions/permissions", method="PUT", body=record["permission"])
-                if api(repo, "actions/permissions").get("enabled") != record["permission"].get("enabled"):
-                    raise RuntimeError("Actions restoration readback mismatch")
+                permissions(repo, record["permission"])
             for workflow in record["workflows"]:
                 if workflow["state"] == "active":
-                    api(repo, f"actions/workflows/{workflow['id']}/enable", method="PUT")
-                    if api(repo, f"actions/workflows/{workflow['id']}")["state"] != "active":
-                        raise RuntimeError("workflow restoration readback mismatch")
+                    workflow_state(repo, workflow, True)
             for run in record["cancelled"]:
                 if run.get("restored"):
                     continue
@@ -113,7 +200,7 @@ def restore(path):
         raise RuntimeError("maintenance restoration requires recovery; see journal")
 
 
-def run(path):
+def run(path, *, limit=0, apply=True):
     central = load_config()["publisher_repository"]
     if path.exists() and not json.loads(path.read_text()).get("restored"):
         raise RuntimeError("unfinished maintenance journal requires restoration first")
@@ -121,15 +208,15 @@ def run(path):
              "maintenance_id": uuid.uuid4().hex, "started_at": datetime.now(timezone.utc).isoformat()}
     journal(path, state)
     try:
-        for repo in producer_repositories():
-            workflows = [w for w in pages(repo, "actions/workflows", "workflows") if producer_path(w["path"])]
-            record = {"permission": api(repo, "actions/permissions"), "workflows": [
-                {"id": w["id"], "state": w["state"], "path": w["path"]} for w in workflows], "cancelled": []}
+        # A read-only preflight checks every credential and inventory before the
+        # first disable. A missing worker token must fail here, not mid-isolation.
+        inventory = preflight()
+        for repo, record in inventory.items():
             state["repositories"][repo] = record
             journal(path, state)
-            for workflow in workflows:
+            for workflow in record["workflows"]:
                 if workflow["state"] == "active":
-                    api(repo, f"actions/workflows/{workflow['id']}/disable", method="PUT")
+                    workflow_state(repo, workflow, False)
             for status in ACTIVE:
                 for task in pages(repo, f"actions/runs?status={status}", "workflow_runs"):
                     if not producer_path(task["path"]) or task["status"] != "queued":
@@ -145,8 +232,7 @@ def run(path):
             if repo != central and record["permission"].get("enabled"):
                 record["permission_changed"] = True
                 journal(path, state)
-                api(repo, "actions/permissions", method="PUT",
-                    body={**record["permission"], "enabled": False})
+                permissions(repo, {**record["permission"], "enabled": False})
         deadline = time.monotonic() + 3600
         while True:
             active = []
@@ -163,8 +249,9 @@ def run(path):
         state["dispatch_requested"] = True
         journal(path, state)
         api(central, "actions/workflows/reader-gc-collect.yml/dispatches", method="POST", body={
-            "ref": "main", "inputs": {"apply": "true", "grace_days": "0", "scope": "unreferenced",
-                                       "maintenance_id": identifier}})
+            "ref": "main", "inputs": {"apply": str(apply).lower(), "grace_days": "0",
+                                      "scope": "unreferenced", "reader_only": "true",
+                                      "limit": str(limit), "maintenance_id": identifier}})
         deadline = time.monotonic() + 360 * 60
         while True:
             runs = pages(central, "actions/workflows/reader-gc-collect.yml/runs", "workflow_runs")
@@ -205,7 +292,19 @@ def run(path):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("operation", choices=["run", "restore"])
+    parser.add_argument("operation", choices=["run", "restore", "preflight"])
     parser.add_argument("--journal", type=Path, required=True)
+    parser.add_argument("--limit", type=int, default=0)
+    parser.add_argument("--plan-only", action="store_true")
     arguments = parser.parse_args()
-    (run if arguments.operation == "run" else restore)(arguments.journal)
+    if arguments.limit < 0:
+        parser.error("limit must be non-negative")
+    if arguments.operation == "preflight":
+        inventory = preflight()
+        journal(arguments.journal, {"preflight_only": True, "repositories": inventory,
+                                    "remote_writes": 0})
+        print(f"GET-only maintenance preflight passed for {len(inventory)} repositories")
+    elif arguments.operation == "run":
+        run(arguments.journal, limit=arguments.limit, apply=not arguments.plan_only)
+    else:
+        restore(arguments.journal)
