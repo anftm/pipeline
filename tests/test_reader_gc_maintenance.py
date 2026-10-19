@@ -181,9 +181,51 @@ class MaintenanceTests(unittest.TestCase):
             maintenance.journal(path, {"repositories": {"owner/repo": {"workflows": [],
                 "cancelled": [{"id": 42, "restoration_requested": True, "restoration_attempt": 1}]}}})
             with patch.object(maintenance, "api", return_value={
-                    "status": "completed", "conclusion": "cancelled", "run_attempt": 1}) as api, \
-                    patch.object(maintenance, "pages", return_value=[{"id": 1}]):
-                with self.assertRaises(RuntimeError):
-                    maintenance.restore(path)
-                api.assert_called_once()
-            self.assertFalse(json.loads(path.read_text())["restored"])
+                    "status": "completed", "conclusion": "cancelled", "run_attempt": 1}) as api:
+                maintenance.restore(path)
+            state = json.loads(path.read_text())
+            self.assertTrue(state["restored"])
+            self.assertTrue(state["repositories"]["owner/repo"]["cancelled"][0]["rerun_skipped"])
+            self.assertFalse(any(call.args[1].endswith("/rerun") for call in api.call_args_list))
+
+    def test_not_yet_queued_cancellation_is_deferred_to_the_fence(self):
+        queued = {"id": 42, "status": "queued", "path": ".github/workflows/pdf-account-worker.yml"}
+        calls = []
+
+        def api(repo, path, *, method="GET", body=None):
+            calls.append((repo, path, method))
+            if path == "actions/workflows":
+                return [{"id": 1, "state": "active",
+                         "path": ".github/workflows/pdf-account-worker.yml"}]
+            if path.startswith("actions/workflows/1"):
+                return {"state": "disabled_manually"} if method == "GET" else {}
+            if path.startswith("actions/runs?status="):
+                return [queued] if path.endswith("queued") else []
+            if path.endswith("/cancel"):
+                raise maintenance.MaintenanceAPIError(repo, path, "POST", 409)
+            if "/attempts/" in path:
+                return {"id": 42, "status": "queued", "run_attempt": 1}
+            if path == "actions/runs":
+                return []
+            raise AssertionError(path)
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.json"
+            def pages(repo, request, field):
+                if request == "actions/workflows":
+                    return [{"id": 1, "state": "active",
+                             "path": ".github/workflows/pdf-account-worker.yml"}]
+                if "status=queued" in request:
+                    return [queued]
+                return []
+            with patch.object(maintenance, "producer_repositories", return_value=["central/repo"]), \
+                    patch.object(maintenance, "load_config",
+                                 return_value={"publisher_repository": "central/repo"}), \
+                    patch.object(maintenance, "ACTIVE", ("queued",)), \
+                    patch.object(maintenance, "pages", side_effect=pages), \
+                    patch.object(maintenance, "restore") as restore, \
+                    patch.object(maintenance, "api", side_effect=api):
+                with self.assertRaises(Exception):
+                    maintenance.run(path, apply=False)
+            state = json.loads(path.read_text())
+            self.assertTrue(state["repositories"]["central/repo"]["cancelled"][0].get("cancel_deferred"))

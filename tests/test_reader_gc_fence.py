@@ -22,6 +22,8 @@ class ResidualRunFenceTests(unittest.TestCase):
         if '/jobs?filter=all' in endpoint:
             return [{'total_count': 1, 'jobs': [{'status': 'completed', 'run_attempt': 1,
                                                'completed_at': '2026-10-10T00:00:00Z'}]}]
+        if '/check-suites/8/check-runs' in endpoint:
+            return [{'total_count': 0, 'check_runs': []}]
         if '/attempts/1' in endpoint:
             return [{**run, 'status': 'completed', 'conclusion': 'cancelled'}]
         if endpoint.endswith('/actions/runs/7'):
@@ -52,6 +54,64 @@ class ResidualRunFenceTests(unittest.TestCase):
             return self.api(endpoint)
         report = self.check(api)
         self.assertEqual(report['repositories'][0]['isolated_residual_runs'][0]['historical_jobs'], 0)
+
+    def test_central_terminal_residual_needs_no_repository_policy(self):
+        def api(endpoint):
+            if endpoint.endswith('/actions/permissions'):
+                raise RuntimeError('central policy is not readable')
+            return self.api(endpoint)
+        with patch('scripts.reader_gc_fence.producer_repositories', return_value=['owner/repo']), \
+                patch('scripts.reader_gc_fence.load_config',
+                      return_value={'publisher_repository': 'owner/repo'}):
+            report = GitHubProducerFence(api).check()
+        residual = report['repositories'][0]['isolated_residual_runs'][0]
+        self.assertEqual(residual['attempt_conclusion'], 'cancelled')
+        self.assertFalse(residual['ghost_residual'])
+
+    def test_central_old_run_without_jobs_is_a_ghost(self):
+        def api(endpoint):
+            if endpoint.endswith('/actions/permissions'):
+                raise RuntimeError('central policy is not readable')
+            if '/jobs?filter=all' in endpoint:
+                return [{'total_count': 0, 'jobs': []}]
+            if '/attempts/1' in endpoint:
+                return [{'id': 7, 'status': 'queued', 'run_attempt': 1}]
+            return self.api(endpoint)
+        with patch('scripts.reader_gc_fence.producer_repositories', return_value=['owner/repo']), \
+                patch('scripts.reader_gc_fence.load_config',
+                      return_value={'publisher_repository': 'owner/repo'}):
+            report = GitHubProducerFence(api).check()
+        residual = report['repositories'][0]['isolated_residual_runs'][0]
+        self.assertTrue(residual['ghost_residual'])
+        self.assertEqual(residual['historical_jobs'], 0)
+
+    def test_noncentral_run_without_jobs_still_blocks(self):
+        def api(endpoint):
+            if '/jobs?filter=all' in endpoint:
+                return [{'total_count': 0, 'jobs': []}]
+            if '/attempts/1' in endpoint:
+                return [{'id': 7, 'status': 'queued', 'run_attempt': 1}]
+            return self.api(endpoint)
+        with self.assertRaisesRegex(RuntimeError, 'no terminal execution attempt'):
+            self.check(api)
+
+    def test_central_recent_run_without_jobs_still_blocks(self):
+        def api(endpoint):
+            if endpoint.endswith('/actions/permissions'):
+                raise RuntimeError('central policy is not readable')
+            if '/jobs?filter=all' in endpoint:
+                return [{'total_count': 0, 'jobs': []}]
+            if '/attempts/1' in endpoint:
+                return [{'id': 7, 'status': 'queued', 'run_attempt': 1}]
+            if endpoint.endswith('/actions/runs/7'):
+                return [{'id': 7, 'status': 'queued', 'run_attempt': 1,
+                         'updated_at': '2026-10-19T23:59:00Z', 'check_suite_id': 8}]
+            return self.api(endpoint)
+        with patch('scripts.reader_gc_fence.producer_repositories', return_value=['owner/repo']), \
+                patch('scripts.reader_gc_fence.load_config',
+                      return_value={'publisher_repository': 'owner/repo'}):
+            with self.assertRaisesRegex(RuntimeError, 'no terminal execution attempt'):
+                GitHubProducerFence(api).check()
 
     def test_unfinished_attempt_or_job_blocks(self):
         for marker, response in (

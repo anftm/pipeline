@@ -207,23 +207,12 @@ def restore(path):
                     continue
                 current = api(repo, f"actions/runs/{run['id']}")
                 if current["status"] == "completed" and current.get("conclusion") == "cancelled":
-                    # A run cancelled while still waiting for a concurrency slot
-                    # has no jobs. Re-running it produces a permanent
-                    # "waiting for pending jobs" wrapper, so leave it terminal.
-                    if not pages(repo, f"actions/runs/{run['id']}/jobs?filter=all", "jobs"):
-                        run["restored"] = True
-                        journal(path, state)
-                        continue
-                    if run.get("restoration_requested"):
-                        if current.get("run_attempt", 1) <= run.get("restoration_attempt", 1):
-                            raise RuntimeError("ambiguous rerun response requires readback before retry")
-                        run["restored"] = True
-                        journal(path, state)
-                        continue
-                    run["restoration_requested"] = True
-                    run["restoration_attempt"] = current.get("run_attempt", 1)
-                    journal(path, state)
-                    api(repo, f"actions/runs/{run['id']}/rerun", method="POST")
+                    # Never re-run a cancellation performed by this window.
+                    # GitHub can leave a re-run of a queued/cancelled attempt in
+                    # a permanent "waiting for pending jobs" state, and a
+                    # partially executed build must not be replayed behind the
+                    # next publication. Record it for explicit re-dispatch.
+                    run["rerun_skipped"] = True
                 run["restored"] = True
                 journal(path, state)
             record["restored"] = True
@@ -262,10 +251,18 @@ def run(path, *, limit=0, apply=True):
                     journal(path, state)
                     try:
                         api(repo, f"actions/runs/{task['id']}/cancel", method="POST")
-                    except RuntimeError:
+                    except RuntimeError as error:
                         attempt = api(repo, f"actions/runs/{task['id']}/attempts/{task.get('run_attempt', 1)}")
-                        if attempt.get("status") != "completed":
-                            raise
+                        if attempt.get("status") == "completed":
+                            continue
+                        # GitHub rejects cancellation of a run that its
+                        # scheduler has not admitted yet (409). The fence
+                        # decides whether that old run has any executable job.
+                        if getattr(error, "status", None) == 409:
+                            record["cancelled"][-1]["cancel_deferred"] = True
+                            journal(path, state)
+                            continue
+                        raise
             if repo != central and record["permission"].get("enabled"):
                 disable_actions(repo, record)
                 journal(path, state)

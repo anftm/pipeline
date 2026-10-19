@@ -26,17 +26,13 @@ on:
         description: Apply after complete validation under the central writer lock
         type: boolean
         default: false
-      recovery:
-        description: Emergency one-off bypass of a stuck reader-sidecar queue (unify only)
-        type: boolean
-        default: false
 
 permissions:
   contents: read
   actions: write
 
 concurrency:
-  group: ${{ inputs.recovery == true && format('reader-sidecar-recovery-{0}', github.run_id) || 'reader-sidecar' }}
+  group: reader-sidecar
   cancel-in-progress: false
   queue: max
 
@@ -51,11 +47,6 @@ jobs:
     env:
       READER_V3_WRITE_PROTOCOL: central-reader-sidecar-v3-v1
     steps:
-      - name: Restrict emergency recovery mode
-        if: inputs.recovery && inputs.operation != 'unify' && inputs.operation != 'ack'
-        run: |
-          echo "recovery is limited to unify or ack" >&2
-          exit 1
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:

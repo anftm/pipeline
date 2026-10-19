@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import time
+from datetime import datetime, timezone
 
 try:
     from .pdf_worker_lanes import load_config
@@ -12,6 +13,18 @@ except ImportError:
 
 
 COLLECTOR = ".github/workflows/reader-gc-collect.yml"
+
+
+def age_minutes(stamp):
+    if not isinstance(stamp, str):
+        return 0
+    try:
+        value = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except ValueError:
+        return 0
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return max(0, (datetime.now(timezone.utc) - value).total_seconds() / 60)
 
 
 def producer_path(path):
@@ -65,10 +78,23 @@ class GitHubProducerFence:
             raise RuntimeError("invalid producer state response")
         return pages[0]
 
-    def isolated_residual(self, repo, run):
-        """A terminal attempt is not sufficient: repository execution must be off."""
-        permission = self.single(f"repos/{repo}/actions/permissions")
-        if permission.get("enabled") is not False:
+    def isolated_residual(self, repo, run, central=False):
+        """A terminal attempt is not sufficient: repository execution must be off.
+
+        The central repository hosts this maintenance run, so its repository-wide
+        Actions switch cannot be disabled by the same window. There the fence
+        instead requires every producer workflow to be disabled (checked by the
+        caller) and the residual run itself to have no executable job or check.
+        A scheduler-stuck old run with no jobs is reported as a ghost, never as
+        evidence that a producer may still write.
+        """
+        try:
+            permission = self.single(f"repos/{repo}/actions/permissions")
+        except RuntimeError:
+            if not central:
+                raise
+            permission = {}
+        if not central and permission.get("enabled") is not False:
             raise RuntimeError(f"producers have not drained: {repo}: {[run['id']]}")
         endpoint = f"repos/{repo}/actions/runs/{run['id']}"
         before = self.single(endpoint)
@@ -76,10 +102,6 @@ class GitHubProducerFence:
         if (before.get("id") != run["id"] or before.get("status") not in {"queued", "pending"}
                 or type(attempt) is not int or attempt < 1):
             raise RuntimeError("residual run identity/status mismatch")
-        terminal = self.single(endpoint + f"/attempts/{attempt}")
-        if (terminal.get("id") != run["id"] or terminal.get("run_attempt") != attempt
-                or terminal.get("status") != "completed" or not terminal.get("conclusion")):
-            raise RuntimeError("queued run has no terminal execution attempt")
         latest = self.api(endpoint + "/jobs?filter=latest&per_page=100")
         history = self.api(endpoint + "/jobs?filter=all&per_page=100")
         if any(page.get("total_count") != 0 or page.get("jobs") != [] for page in latest):
@@ -88,18 +110,32 @@ class GitHubProducerFence:
         if any(job.get("status") != "completed" or not job.get("completed_at")
                or job.get("run_attempt", 0) > attempt for job in jobs):
             raise RuntimeError(f"residual run history contains unfinished execution: {repo}: {run['id']}")
+        checks = self.api(f"repos/{repo}/check-suites/{before['check_suite_id']}/check-runs?per_page=100")
+        check_runs = [check for page in checks for check in page.get("check_runs", [])]
+        terminal = self.single(endpoint + f"/attempts/{attempt}")
+        terminal_ok = (terminal.get("id") == run["id"] and terminal.get("run_attempt") == attempt
+                       and terminal.get("status") == "completed" and terminal.get("conclusion"))
+        ghost = False
+        if not terminal_ok:
+            if not (central and not jobs and not check_runs and age_minutes(before.get("updated_at")) >= 30):
+                raise RuntimeError("queued run has no terminal execution attempt")
+            ghost = True
         after = self.single(endpoint)
         identity = ("id", "status", "run_attempt", "updated_at", "check_suite_id")
-        if (any(before.get(key) != after.get(key) for key in identity)
-                or self.single(f"repos/{repo}/actions/permissions").get("enabled") is not False):
+        if any(before.get(key) != after.get(key) for key in identity):
+            raise RuntimeError("residual run isolation changed during verification")
+        if not central and self.single(f"repos/{repo}/actions/permissions").get("enabled") is not False:
             raise RuntimeError("residual run isolation changed during verification")
         return {"id": run["id"], "status": after["status"], "run_attempt": attempt,
-                "attempt_status": terminal["status"], "attempt_conclusion": terminal["conclusion"],
-                "historical_jobs": len(jobs), "latest_jobs": 0, "repository_actions_enabled": False,
+                "attempt_status": terminal.get("status"), "attempt_conclusion": terminal.get("conclusion"),
+                "historical_jobs": len(jobs), "latest_jobs": 0, "check_runs": len(check_runs),
+                "ghost_residual": ghost,
+                "repository_actions_enabled": permission.get("enabled"),
                 "updated_at": after.get("updated_at")}
 
     def check(self):
         checked = []
+        central = load_config()["publisher_repository"]
         for repo in producer_repositories():
             residuals = []
             workflows = [w for page in self.api(f"repos/{repo}/actions/workflows?per_page=100")
@@ -116,7 +152,7 @@ class GitHubProducerFence:
                 for run in active:
                     if run["status"] not in {"queued", "pending"}:
                         raise RuntimeError(f"producers have not drained: {repo}: {[run['id']]}")
-                    residuals.append(self.isolated_residual(repo, run))
+                    residuals.append(self.isolated_residual(repo, run, central=(repo == central)))
             checked.append({"repository": repo, "disabled_workflows": [w["path"] for w in workflows],
                             "isolated_residual_runs": residuals})
         return {"kind": "reader-gc-producer-fence", "repositories": checked}
