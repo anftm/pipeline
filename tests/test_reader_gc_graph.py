@@ -450,11 +450,15 @@ class ReaderGcGraphTests(unittest.TestCase):
         store = MemoryStore()
         store.put(ASSETS, "reader-index/gc/123/collection.json", {"version": 1})
         store.put(ASSETS, "reader-index/gc/123/progress.json", {"version": 1})
+        store.put(ASSETS, "reader-index/reader_gc_acknowledgments.json", {
+            "version": 1, "kind": "reader-gc-acknowledgments",
+            "current": {"generation": "a" * 32, "catalog_sha256": "b" * 64}})
         report = gc.ReferenceGraph(store).build()
         self.assertTrue(report["graph_complete"], report["blockers"])
         self.assertEqual(report["buckets"][ASSETS]["retained"],
                          ["reader-index/gc/123/collection.json",
-                          "reader-index/gc/123/progress.json"])
+                          "reader-index/gc/123/progress.json",
+                          "reader-index/reader_gc_acknowledgments.json"])
         self.assertEqual(report["buckets"][ASSETS]["unmanaged"], [])
         self.assertEqual(report["buckets"][ASSETS]["candidates"], [])
 

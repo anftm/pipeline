@@ -42,8 +42,9 @@ MANAGED_PREFIXES = (
     "reader-index/snapshots/",
 )
 # Run journals are the audit trail of the collector itself, mirrored as Actions
-# artifacts. They are deliberately retained even though no root references them.
-RETAINED_PREFIXES = ("reader-index/gc/",)
+# artifacts. Control receipts are small point-in-time records. They are
+# deliberately retained even though no root references them.
+RETAINED_PREFIXES = ("reader-index/gc/", "reader-index/reader_gc_acknowledgments.json")
 PATH_FIELDS = {
     "path", "paths", "object", "fallback", "manifest", "manifest_path", "root",
     "new_path", "reader_assets_path", "ocr_manifest", "p", "o", "i", "w", "j",
@@ -72,7 +73,8 @@ def is_root(path: str, bucket: str | None = None) -> bool:
     if bucket == ccrd_lifecycle.BUCKET:
         return ccrd_lifecycle.is_root(path)
     name = posixpath.basename(path)
-    if path.startswith(("reader-index/generations/", "reader-index/gc/", "reader-index/snapshots/")):
+    if path.startswith((
+            "reader-index/generations/", "reader-index/snapshots/") + RETAINED_PREFIXES):
         return False
     return (path.startswith("reader-index/") and path.endswith((".json", ".json.gz"))) or (
         name == "index.json" or name.startswith("index-") and name.endswith(".json"))
@@ -396,6 +398,13 @@ class ReferenceGraph:
                         or not isinstance(payload.get("resources"), list)
                         or not isinstance(payload.get("retired_paths"), list)):
                     self.blockers.add(f"invalid retirement state: {bucket}:{path}")
+                    return False
+            elif payload.get("kind") == "reader-gc-acknowledgments":
+                if (payload.get("version") != 1
+                        or not isinstance(payload.get("current"), dict)
+                        or not isinstance(payload["current"].get("generation"), str)
+                        or not isinstance(payload["current"].get("catalog_sha256"), str)):
+                    self.blockers.add(f"invalid GC acknowledgment: {bucket}:{path}")
                     return False
             elif payload.get("kind") == "pdf-ocr-progress-index":
                 books = payload.get("books")
