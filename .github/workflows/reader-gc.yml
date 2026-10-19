@@ -54,8 +54,12 @@ jobs:
           [[ "$GRACE_DAYS" =~ ^[0-9]+$ ]] || exit 1
           # S3 reads avoid the Hub resolver pacing (0.3 s/read), which made a
           # full scan of ~75k roots and manifests exceed the job timeout.
+          # Report-only scans run alongside writers, so a moving snapshot is an
+          # expected incomplete report, not a failed check. Deletion still uses
+          # the drained maintenance window and requires graph_complete=true.
           args=(--output output/gc/reader-gc-report.json --grace-days "$GRACE_DAYS"
-                --storage s3 --workers 32 --max-rounds 30 --deadline-minutes 290)
+                --storage s3 --workers 32 --max-rounds 30 --deadline-minutes 290
+                --allow-incomplete)
           if [[ "$RECORD_OBSERVATIONS" == "true" ]]; then args+=(--record-observations); fi
           if [[ "$SKIP_INPUT_BUCKET" == "true" ]]; then args+=(--skip-input-bucket); fi
           python scripts/reader_gc_graph.py --snapshot-retries 1 "${args[@]}"

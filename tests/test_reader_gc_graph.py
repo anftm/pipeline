@@ -446,6 +446,11 @@ class ReaderGcGraphTests(unittest.TestCase):
         self.assertEqual(report["buckets"][ASSETS]["unmanaged"], [])
         self.assertNotIn(kept, report["buckets"][ASSETS]["candidates"])
 
+    def test_report_only_incomplete_graph_can_exit_zero(self):
+        self.assertEqual(gc.report_exit_code({"graph_complete": True}), 0)
+        self.assertEqual(gc.report_exit_code({"graph_complete": False}), 1)
+        self.assertEqual(gc.report_exit_code({"graph_complete": False}, allow_incomplete=True), 0)
+
     def test_gc_run_journals_are_retained_not_reported_as_unknown_formats(self):
         store = MemoryStore()
         store.put(ASSETS, "reader-index/gc/123/collection.json", {"version": 1})

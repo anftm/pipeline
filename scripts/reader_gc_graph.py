@@ -814,6 +814,15 @@ def plan_retention(state: dict, report: dict, grace_days: int, limit: int, today
                      "past_grace_paths": eligible, "deletion_authorized": False}
 
 
+def report_exit_code(report: dict, allow_incomplete: bool = False) -> int:
+    """A report-only scan may race with writers and intentionally stay incomplete.
+
+    Retention and deletion never use this escape hatch: they require a complete
+    graph and pause every producer for the authoritative scan.
+    """
+    return 0 if report.get("graph_complete") or allow_incomplete else 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
@@ -831,6 +840,8 @@ def main() -> int:
                         help="write an incomplete report instead of exceeding this wall-clock budget")
     parser.add_argument("--snapshot-retries", type=int, default=2,
                         help="retry transient root/object races before returning an incomplete graph")
+    parser.add_argument("--allow-incomplete", action="store_true",
+                        help="exit zero when a report-only scan cannot converge; never authorizes retention")
     args = parser.parse_args()
     if (args.grace_days < 0 or args.limit < 0 or args.generation_grace_days < 0
             or args.snapshot_retries < 0 or args.snapshot_retries > 5
@@ -866,7 +877,9 @@ def main() -> int:
         print(f"{bucket}: objects={counts['objects']} referenced={counts['referenced']} "
               f"unreferenced={len(counts['unreferenced'])} unmanaged={len(counts['unmanaged'])}")
     print(f"graph_complete={report['graph_complete']} deletion_enabled=False report={args.output}")
-    return 0 if report["graph_complete"] else 1
+    if not report["graph_complete"]:
+        print("::warning::Reader GC report did not converge; deletion_enabled=False")
+    return report_exit_code(report, args.allow_incomplete)
 
 
 if __name__ == "__main__":
