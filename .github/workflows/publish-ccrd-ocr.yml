@@ -1,20 +1,41 @@
 name: CCRD · Publish Verified OCR Release
 
 on:
+  schedule:
+    - cron: '17 */2 * * *'
+  workflow_run:
+    workflows: ['Publish Account PDF Worker Results', 'Publish v3 Reading Generation', 'Reader/桶 · Publish Account PDF Worker Results', 'Reader/桶 · Publish v3 Reading Generation']
+    types: [completed]
   workflow_dispatch:
     inputs:
+      automatic:
+        description: Discover and aggregate complete OCR; no proofreading or model calls
+        type: boolean
+        default: false
+      limit:
+        description: Maximum complete new or updated books per automatic batch (1..32)
+        type: string
+        default: '8'
+      retry_failures:
+        description: Retry quarantined exact inputs; ordinary schedules wait for changed inputs
+        type: boolean
+        default: false
+      source_json:
+        description: Optional exact repo/path JSON for the first automatic pilot; empty means all ready sources
+        type: string
+        default: '{}'
       stage_run_id:
         description: Successful central stage-ccrd-ocr-text.yml run containing the full approved artifact
         type: string
-        required: true
+        required: false
       release_path:
         description: Exact immutable releases/ocr-<generation>/manifest.json path
         type: string
-        required: true
+        required: false
       release_sha256:
         description: Approved full release manifest SHA-256
         type: string
-        required: true
+        required: false
       expected_parent:
         description: Existing OCR generation or none for the first additive release
         type: string
@@ -34,7 +55,7 @@ concurrency:
 
 jobs:
   publish:
-    if: github.repository == 'anftm/pipeline'
+    if: github.repository == 'anftm/pipeline' && github.event_name == 'workflow_dispatch' && !inputs.automatic
     runs-on: ubuntu-latest
     timeout-minutes: 40
     env:
@@ -93,5 +114,59 @@ jobs:
         with:
           name: ccrd-ocr-publication-receipt
           path: output/ccrd-publication.json
+          if-no-files-found: warn
+          retention-days: 30
+  automatic:
+    if: >-
+      github.repository == 'anftm/pipeline' &&
+      ((github.event_name == 'workflow_dispatch' && inputs.automatic) ||
+       (vars.CCRD_OCR_AUTO_ENABLED == 'true' &&
+        (github.event_name == 'schedule' ||
+         (github.event_name == 'workflow_run' &&
+          github.event.workflow_run.conclusion == 'success' &&
+          github.event.workflow_run.head_branch == 'main' &&
+          github.event.workflow_run.head_repository.full_name == github.repository &&
+          contains(fromJSON('[".github/workflows/pdf-account-publish.yml",".github/workflows/reader-v3-publish.yml"]'), github.event.workflow_run.path)))))
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      CCRD_OCR_WRITE_PROTOCOL: central-ccrd-ocr-publication-v1
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - run: pip install -r scripts/requirements.txt
+      - name: Aggregate complete OCR TXT and rebuild the complete independent OCR index
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_INPUT_TOKEN: ${{ secrets.HF_INPUT_TOKEN }}
+          APPLY: ${{ github.event_name != 'workflow_dispatch' || inputs.apply }}
+          LIMIT: ${{ inputs.limit || '8' }}
+          RETRY_FAILURES: ${{ inputs.retry_failures }}
+          SOURCE_JSON: ${{ inputs.source_json || '{}' }}
+        run: |
+          args=(--limit "$LIMIT" --source-json "$SOURCE_JSON" --output output/ccrd-ocr-auto/publication.json)
+          if [[ "$APPLY" == true ]]; then args+=(--apply --activate-space); fi
+          if [[ "$RETRY_FAILURES" == true ]]; then args+=(--retry-failures); fi
+          python -B scripts/auto_ccrd_ocr.py "${args[@]}"
+      - name: Verify the exact live generation, complete OCR IDs and readable full text
+        if: github.event_name != 'workflow_dispatch' || inputs.apply
+        timeout-minutes: 25
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          if jq -e '.generation' output/ccrd-ocr-auto/publication.json > /dev/null; then
+            python -B scripts/verify_ccrd_ocr_live.py --root output/ccrd-ocr-auto/candidate \
+              --receipt output/ccrd-ocr-auto/publication.json --output output/ccrd-ocr-auto/acceptance.json
+          fi
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: ccrd-ocr-automatic-receipt
+          path: |
+            output/ccrd-ocr-auto/publication.json
+            output/ccrd-ocr-auto/acceptance.json
+            output/ccrd-ocr-auto/candidate/release-receipt.json
           if-no-files-found: warn
           retention-days: 30

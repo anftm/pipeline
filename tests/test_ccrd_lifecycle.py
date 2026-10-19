@@ -124,6 +124,14 @@ class CcrdLifecycleTests(unittest.TestCase):
             collector.reject_unaccepted_ccrd_collection(self.store)
         self.assertEqual(self.store.objects, before)
 
+    def test_exact_ocr_quarantine_is_a_known_non_deleting_control_root(self):
+        self.put(CCRD, 'control/ocr-automation.json', {'version': 1, 'kind': 'ccrd-ocr-automation',
+            'resources': [], 'failures': {'repo\0book.pdf': {'key': 'repo\0book.pdf',
+                'fingerprint': 'a' * 64, 'error_type': 'ValueError'}}})
+        report = graph.ReferenceGraph(self.store).build()
+        self.assertTrue(report['graph_complete'], report['blockers'])
+        self.assertFalse(report['deletion_enabled'])
+
 
 if __name__ == '__main__':
     unittest.main()

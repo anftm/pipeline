@@ -61,7 +61,7 @@ jobs:
       - name: Export verified effective text without geometry
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: python -B scripts/export_reader_txt.py --spec output/ocr-export-spec.json --remote --output output/ccrd-ocr-candidate
+        run: python -B scripts/export_reader_txt.py --spec output/ocr-export-spec.json --remote --allow-unreviewed --output output/ccrd-ocr-candidate
       - name: Build only the independent OCR SQLite candidate
         env:
           BUILDER_SHA256: ${{ inputs.builder_sha256 }}

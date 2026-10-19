@@ -71,6 +71,14 @@ class ExportReaderTxtTests(unittest.TestCase):
         self.assertEqual(result["manifest"]["accepted_pages"], 0)
         self.assertEqual(result["manifest"]["quality"], "unreviewed")
 
+    def test_empty_whole_book_and_binary_controls_are_not_silently_cleaned(self):
+        for contents in (["", "", ""], ["●", "", ""], ["text\0damaged", "", ""]):
+            with self.subTest(contents=contents):
+                self.contents = contents
+                spec, _ = self.make_bundle(accepted=False)
+                with self.assertRaises(ValueError):
+                    exporter.build_export(spec, self.read, allow_unreviewed=True)
+
     def test_corrupt_page_blocks_the_entire_export(self):
         spec, _ = self.make_bundle()
         key = next(key for key in self.objects if key[1].endswith("page-000003.json.gz"))
@@ -127,6 +135,7 @@ class ExportReaderTxtTests(unittest.TestCase):
         self.assertIn("contents: read", workflow)
         self.assertIn("actions/upload-artifact@v7", workflow)
         self.assertIn("path: output/ccrd-ocr-candidate/", workflow)
+        self.assertIn("--allow-unreviewed", workflow)
         self.assertNotIn("reader-sidecar", workflow)
         self.assertNotIn("--apply", workflow)
         self.assertNotIn("schedule:", workflow)

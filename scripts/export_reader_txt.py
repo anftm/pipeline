@@ -124,14 +124,18 @@ def build_export(spec: dict, read, *, allow_unreviewed: bool = False, max_input_
             parts.append(PAGE_SEPARATOR)
             offset += len(PAGE_SEPARATOR)
         content = layer["text"]
+        if any(ord(char) < 32 and char not in "\t\r\n" for char in content):
+            raise ValueError("OCR text contains binary controls; keep the source quarantined")
         pages.append({"page": layer["page"], "start": offset, "end": offset + len(content),
                       "text_sha256": hashlib.sha256(content.encode()).hexdigest(),
                       "text_generation": layer["generation"], "quality": layer["quality"]})
         parts.append(content)
         offset += len(content)
     raw = "".join(parts).encode("utf-8")
-    if not raw:
+    if not any(layer["text"].strip() for layer in layers):
         raise ValueError("empty book cannot be admitted as readable OCR")
+    if not any(char.isalnum() for layer in layers for char in layer["text"]):
+        raise ValueError("OCR has no usable recognized text; inspect the source conversion")
     digest = hashlib.sha256(raw).hexdigest()
     original_path = PurePosixPath(original)
     readable = repo + "/" + str(original_path.with_suffix(".txt"))

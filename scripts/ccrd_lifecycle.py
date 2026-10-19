@@ -14,7 +14,7 @@ except ImportError:
 BUCKETS = (READER_ASSETS_BUCKET, PDF_PAGES_BUCKET, PDF_OCR_INPUT_BUCKET, BUCKET)
 MANAGED_PREFIXES = ('text/objects/', 'text/exports/', 'text/snapshots/', 'text/packs/',
                     'indexes/ocr/', 'releases/ocr-', 'staging/ocr/')
-CONTROL_KINDS = {'ccrd-ocr-current', 'ccrd-ocr-intent', 'ccrd-ocr-consumer', 'ccrd-ocr-retention', 'ccrd-ocr-id-registry'}
+CONTROL_KINDS = {'ccrd-ocr-current', 'ccrd-ocr-intent', 'ccrd-ocr-consumer', 'ccrd-ocr-retention', 'ccrd-ocr-id-registry', 'ccrd-ocr-automation'}
 
 
 def is_root(path: str) -> bool:
@@ -66,6 +66,15 @@ def references(payload: dict, path: str) -> list[dict]:
                     or not isinstance(value, dict) or not re.fullmatch(r'OCR:[1-9][0-9]*', str(value.get('doc_id', '')))
                     for key, value in ids.items()) or len({item['doc_id'] for item in ids.values()}) != len(ids)):
                 raise ValueError('invalid stable OCR ID registry')
+        if kind == 'ccrd-ocr-automation':
+            failures = payload.get('failures')
+            if not isinstance(failures, dict):
+                raise ValueError('invalid OCR quarantine state')
+            for key, failure in failures.items():
+                if (not isinstance(key, str) or not isinstance(failure, dict)
+                        or failure.get('key') != key or not isinstance(failure.get('error_type'), str)):
+                    raise ValueError('invalid exact OCR quarantine identity')
+                sha(failure.get('fingerprint'))
         return [resource(ref) for ref in payload['resources']]
     if payload.get('version') != 1:
         raise ValueError('unsupported CCRD lifecycle schema')

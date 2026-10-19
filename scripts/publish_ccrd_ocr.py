@@ -36,6 +36,67 @@ def resource(path, raw, role='runtime'):
     return {'bucket': contract.BUCKET, 'path': path, 'sha256': contract.digest(raw), 'bytes': len(raw), 'role': role}
 
 
+def verified_remote(store, ref):
+    lifecycle.resource(ref)
+    raw = store.read_bytes(ref['bucket'], ref['path'])
+    if len(raw) != ref['bytes'] or contract.digest(raw) != ref['sha256']:
+        raise ValueError('OCR remote resource checksum mismatch')
+    return raw
+
+
+def verify_text_upgrade(store, previous, replacement):
+    """Only an accepted descendant of the same complete source may replace text."""
+    fields = ('book_id', 'doc_id', 'readable_rel_path', 'origin_repo', 'origin_rel_path',
+              'origin_revision', 'origin_sha256', 'source_sha256', 'page_count')
+    if any(previous.get(key) != replacement.get(key) for key in fields):
+        raise ValueError('OCR update changes stable source identity')
+    if (replacement['accepted_pages'] < previous['accepted_pages']
+            or replacement['quality'] != 'partially-reviewed'
+            or any(old['quality'] != 'unreviewed' and new['quality'] == 'unreviewed'
+                   for old, new in zip(previous['pages'], replacement['pages']))
+            or any(old['text_generation'] != new['text_generation'] and new['quality'] == 'unreviewed'
+                   for old, new in zip(previous['pages'], replacement['pages']))):
+        raise ValueError('OCR update cannot downgrade accepted text')
+    from_refs = replacement['retained_reader_resources']
+    try:
+        from . import pdf_reading_v3 as v3
+    except ImportError:
+        import pdf_reading_v3 as v3
+    for ref in from_refs:
+        if not ref['path'].endswith('/text-layer-manifest.json'):
+            continue
+        manifest = v3.validate_text_manifest(v3.decode(verified_remote(store, ref)))
+        if manifest['generation'] != replacement['text_generation']:
+            continue
+        seen = set()
+        for _ in range(128):
+            if (manifest['source_sha256'] != replacement['source_sha256']
+                    or manifest['page_count'] != replacement['page_count']):
+                raise ValueError('OCR update ancestry changes source or page coverage')
+            if manifest['generation'] == previous['text_generation']:
+                return
+            parent = manifest.get('parent')
+            if not parent or (parent['bucket'], parent['path']) in seen:
+                break
+            seen.add((parent['bucket'], parent['path']))
+            manifest = v3.validate_text_manifest(v3.decode(verified_remote(store, parent)))
+    raise ValueError('OCR update is not a verified accepted text descendant')
+
+
+def verify_additive_update(store, previous, candidate):
+    old_release = json.loads(verified_remote(store, previous['release']))
+    lifecycle.references(old_release, previous['release']['path'])
+    new = {export['book_id']: (ref, export) for ref, export in
+           zip(candidate['manifest']['exports'], candidate['exports'])}
+    for old_ref in old_release['exports']:
+        old = json.loads(verified_remote(store, old_ref))
+        if old['book_id'] not in new:
+            raise ValueError('additive OCR promotion cannot drop an existing book')
+        new_ref, replacement = new[old['book_id']]
+        if new_ref != old_ref:
+            verify_text_upgrade(store, old, replacement)
+
+
 def optional_json(store, path):
     try:
         raw = store.read_bytes(contract.BUCKET, path)
@@ -101,9 +162,7 @@ def publish(store, root, path, sha256, base_metadata_sha256, expected_parent, *,
         ids[book] = {'doc_id': number, 'readable_rel_path': export['readable_rel_path']}
         used[number] = book
     if previous:
-        old_release = json.loads(store.read_bytes(contract.BUCKET, previous['release']['path']))
-        if not {ref['path'] for ref in old_release['exports']} <= {ref['path'] for ref in manifest['exports']}:
-            raise ValueError('first-stage additive promotion cannot silently drop or replace existing exports')
+        verify_additive_update(store, previous, candidate)
     release_ref = resource(path, files[path])
     retained = [resource(key, value) for key, value in sorted(files.items())]
     for export in candidate['exports']:
@@ -150,6 +209,38 @@ def publish(store, root, path, sha256, base_metadata_sha256, expected_parent, *,
     return report
 
 
+def activate_space(path, sha256, base_metadata_sha256, builder_sha256, *, apply=False):
+    """Preflight before publication; idempotently reconcile activation after it."""
+    from huggingface_hub import HfApi, CommitOperationAdd, hf_hub_download
+    token = os.environ.get('HF_TOKEN')
+    api = HfApi(token=token)
+    info = api.repo_info('vomebook/Search', repo_type='space')
+    def download(name):
+        return Path(hf_hub_download('vomebook/Search', name, repo_type='space', revision=info.sha, token=token)).read_bytes()
+    if (contract.digest(download('data/search_data.json.gz')) != base_metadata_sha256
+            or contract.digest(download('build_fulltext_db.py')) != builder_sha256
+            or download('ocr_release.py') != Path(contract.__file__).read_bytes()
+            or b'ocr-release.json' not in download('app.py')):
+        raise ValueError('Space is not the compatible prepared OCR consumer')
+    activation = {'version': 1, 'kind': 'ccrd-ocr-activation', 'bucket': contract.BUCKET,
+                  'path': path, 'sha256': sha256}
+    from huggingface_hub.errors import EntryNotFoundError
+    try:
+        unchanged = json.loads(download('data/ocr-release.json')) == activation
+    except EntryNotFoundError:
+        unchanged = False
+    report = {'space_revision': info.sha, 'space_activation_unchanged': unchanged}
+    if apply and not unchanged:
+        assert_writer()
+        commit = api.create_commit('vomebook/Search', repo_type='space', parent_commit=info.sha,
+            commit_message='Activate verified complete OCR text release',
+            operations=[CommitOperationAdd(path_in_repo='data/ocr-release.json',
+                                          path_or_fileobj=io.BytesIO(contract.canonical(activation)))])
+        report['space_revision'] = commit.oid
+    report['space_activation'] = 'production identity/search acceptance is separate'
+    return report
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', type=Path, required=True)
@@ -165,27 +256,17 @@ def main():
     if args.apply:
         assert_writer()
     store = HubBucketStore()
-    report = publish(store, args.root, args.release_path, args.release_sha256,
-                     args.base_metadata_sha256, expected, apply=args.apply)
+    candidate, _files = plan(args.root, args.release_path, args.release_sha256, args.base_metadata_sha256)
+    builder_sha256 = candidate['manifest']['builder_sha256']
     if args.activate_space:
         if not args.apply:
             raise ValueError('Space activation requires a published verified release')
-        from huggingface_hub import HfApi, CommitOperationAdd, hf_hub_download
-        token = os.environ.get('HF_TOKEN')
-        api = HfApi(token=token)
-        info = api.repo_info('vomebook/Search', repo_type='space')
-        base = Path(hf_hub_download('vomebook/Search', 'data/search_data.json.gz', repo_type='space', revision=info.sha, token=token))
-        runtime = Path(hf_hub_download('vomebook/Search', 'app.py', repo_type='space', revision=info.sha, token=token)).read_text()
-        if contract.digest(base.read_bytes()) != args.base_metadata_sha256 or 'ocr-release.json' not in runtime:
-            raise ValueError('Space is not the compatible prepared OCR consumer')
-        activation = {'version': 1, 'kind': 'ccrd-ocr-activation', 'bucket': contract.BUCKET,
-                      'path': args.release_path, 'sha256': args.release_sha256}
-        commit = api.create_commit('vomebook/Search', repo_type='space', parent_commit=info.sha,
-                                  commit_message='Activate verified additive OCR text release',
-                                  operations=[CommitOperationAdd(path_in_repo='data/ocr-release.json',
-                                                                 path_or_fileobj=io.BytesIO(contract.canonical(activation)))])
-        report['space_revision'] = commit.oid
-        report['space_activation'] = 'requested; production identity/search acceptance is separate'
+        activate_space(args.release_path, args.release_sha256, args.base_metadata_sha256, builder_sha256)
+    report = publish(store, args.root, args.release_path, args.release_sha256,
+                      args.base_metadata_sha256, expected, apply=args.apply)
+    if args.activate_space:
+        report.update(activate_space(args.release_path, args.release_sha256, args.base_metadata_sha256,
+                                     builder_sha256, apply=True))
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_bytes(contract.canonical(report))
     print(json.dumps(report, ensure_ascii=False, indent=2))

@@ -90,6 +90,15 @@ class PublishCcrdOcrTests(unittest.TestCase):
         self.assertEqual(self.store.objects[contract.BUCKET, self.text_path], b'different')
         self.assertNotIn((contract.BUCKET, publisher.CURRENT), self.store.objects)
 
+    def test_additive_update_never_silently_drops_a_previous_book(self):
+        self.publish(apply=True)
+        pointer, _ = publisher.optional_json(self.store, publisher.CURRENT)
+        candidate = {'manifest': {**self.release, 'exports': []}, 'exports': []}
+        writes = list(self.store.writes)
+        with self.assertRaisesRegex(ValueError, 'drop'):
+            publisher.verify_additive_update(self.store, pointer, candidate)
+        self.assertEqual(writes, self.store.writes)
+
     def test_actual_workflow_ownership_is_required_for_mutation(self):
         environment = {'GITHUB_ACTIONS': 'true', 'GITHUB_REPOSITORY': 'anftm/pipeline', 'GITHUB_RUN_ID': '123',
                        'GITHUB_WORKFLOW_REF': publisher.WORKFLOW, 'CCRD_OCR_WRITE_PROTOCOL': publisher.PROTOCOL}

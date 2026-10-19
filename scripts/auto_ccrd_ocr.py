@@ -1,0 +1,307 @@
+#!/usr/bin/env python3
+"""Admit complete OCR without proofreading; reuse the sole central CCRD writer."""
+from __future__ import annotations
+
+import argparse
+import copy
+import json
+from pathlib import Path
+import re
+
+try:
+    from . import ccrd_ocr_release as contract, ccrd_lifecycle as lifecycle
+    from . import export_reader_txt as exporter, build_ccrd_ocr_release as builder
+    from . import publish_ccrd_ocr as publisher, publish_reader_v3 as reading, shared
+except ImportError:
+    import ccrd_ocr_release as contract
+    import ccrd_lifecycle as lifecycle
+    import export_reader_txt as exporter
+    import build_ccrd_ocr_release as builder
+    import publish_ccrd_ocr as publisher
+    import publish_reader_v3 as reading
+    import shared
+
+
+REGISTRY = 'reader-index/pdf_ocr_manifest.json'
+DERIVED = 'reader-index/derived_pdf_manifest.json'
+STATE = 'control/ocr-automation.json'
+
+
+def configuration(value):
+    if (value.get('version') != 1
+            or not re.fullmatch(r'[0-9a-f]{40}', str(value.get('consumer_revision', '')))):
+        raise ValueError('OCR automation requires an approved immutable consumer')
+    contract.sha(value.get('builder_sha256')); contract.sha(value.get('base_metadata_sha256'))
+    return value
+
+
+def store_local(root, ref, raw):
+    lifecycle.resource(ref)
+    if ref['bucket'] != contract.BUCKET or contract.digest(raw) != ref['sha256'] or len(raw) != ref['bytes']:
+        raise ValueError('OCR local materialization checksum/bucket mismatch')
+    target = root / contract.safe_path(ref['path'])
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists() and target.read_bytes() != raw:
+        raise ValueError('conflicting OCR candidate object')
+    target.write_bytes(raw)
+
+
+def current_exports(store, root):
+    pointer, _raw = publisher.optional_json(store, publisher.CURRENT)
+    refs, exports = {}, {}
+    if pointer:
+        ref = pointer['release']
+        raw = publisher.verified_remote(store, ref)
+        manifest = json.loads(raw)
+        lifecycle.references(manifest, ref['path'])
+        if manifest['generation'] != pointer['generation']:
+            raise ValueError('OCR pointer/release generation mismatch')
+        store_local(root, ref, raw)
+        for ref in manifest['exports']:
+            raw = publisher.verified_remote(store, ref)
+            value = json.loads(raw)
+            text_ref = value['text']
+            store_local(root, ref, raw)
+            target = root / contract.safe_path(text_ref['path'])
+            if not target.exists():
+                store_local(root, text_ref, publisher.verified_remote(store, text_ref))
+            _record, value = contract.export_record(root, ref)
+            book = value['book_id']
+            if book in exports:
+                raise ValueError('duplicate live OCR book identity')
+            exports[book], refs[book] = value, ref
+    return pointer, refs, exports
+
+
+def discover(registry, derived, catalog, exports, state, *, retry_failures=False):
+    if registry.get('version') != 1 or not isinstance(registry.get('files'), dict):
+        raise ValueError('invalid complete-OCR registry')
+    if (derived.get('version') != 1 or derived.get('kind') != 'pdf-derived-source-index'
+            or not isinstance(derived.get('files'), list)):
+        raise ValueError('invalid derived source registry')
+    derivations = {item['key']: item for item in derived['files']}
+    if len(derivations) != len(derived['files']):
+        raise ValueError('duplicate derived source identity')
+    jobs, deferred, quarantined = [], [], []
+    for key, entry in sorted(registry['files'].items()):
+        if entry.get('status') != 'ready':
+            continue
+        book = contract.digest(key.encode())
+        active, old = catalog['files'].get(key), exports.get(book)
+        derived_entry = derivations.get(key) if entry.get('source_kind', 'upstream') != 'upstream' else None
+        identity = {'key': key, 'entry': entry, 'active': active, 'derivation': derived_entry}
+        fingerprint = contract.digest(contract.canonical(identity))
+        if not retry_failures and state['failures'].get(key, {}).get('fingerprint') == fingerprint:
+            quarantined.append(key)
+            continue
+        if (active and active['source_sha256'] != entry.get('source_sha256')):
+            deferred.append({'key': key, 'reason': 'Reader/source generation conflict; existing text protected'})
+            continue
+        has_effective = active and active.get('components', {}).get('text') == 'ready'
+        if not entry.get('text_layer') and not has_effective:
+            deferred.append({'key': key, 'reason': 'complete verified text companion not yet published by Reader'})
+            continue
+        if old and old['source_sha256'] == entry.get('source_sha256'):
+            retained = old['retained_reader_resources']
+            if ((has_effective and active['resource'] in retained)
+                    or (not has_effective and entry.get('text_layer') in retained)):
+                continue
+        jobs.append({**identity, 'book_id': book, 'fingerprint': fingerprint})
+    jobs.sort(key=lambda job: (job['book_id'] in exports,
+                              job['entry'].get('page_count', 1 << 63), job['key']))
+    return jobs, deferred, quarantined
+
+
+def export_spec(store, job, number):
+    entry, key = job['entry'], job['key']
+    repo, path = key.split('\0')
+    if entry.get('repo') != repo or entry.get('path') != path:
+        raise ValueError('OCR registry original source-key mismatch')
+    spec = {'origin_repo': repo, 'origin_rel_path': path, 'origin_revision': entry.get('source_revision'),
+            'origin_sha256': entry.get('source_sha256'), 'source_sha256': entry.get('source_sha256'),
+            'page_count': entry.get('page_count'), 'doc_number': number, 'text_manifest': entry.get('text_layer')}
+    active = job.get('active')
+    if active and active.get('components', {}).get('text') == 'ready':
+        ref = active['resource']
+        manifest = reading.v3.validate_reading_manifest(reading.v3.decode(publisher.verified_remote(store, ref)))
+        if (manifest['source_key'] != key or manifest['source_sha256'] != spec['source_sha256']
+                or manifest['page_count'] != spec['page_count']
+                or manifest['generation'] != active['reading_generation']):
+            raise ValueError('effective Reader/OCR identity mismatch')
+        spec.update(reading_manifest=ref, text_manifest=manifest.get('text_layer'))
+    if entry.get('source_kind', 'upstream') != 'upstream':
+        derivation = job.get('derivation')
+        if (not derivation or derivation.get('repo') != repo or derivation.get('source_path') != path
+                or derivation.get('source_revision') != spec['origin_revision']
+                or derivation.get('derived_sha256') != spec['source_sha256']
+                or derivation.get('derived_bytes') != entry.get('source_bytes')):
+            raise ValueError('derived OCR lacks matching original provenance')
+        bucket, relative = derivation.get('bucket'), contract.safe_path(derivation.get('manifest_path'))
+        if bucket not in {shared.PDF_PAGES_BUCKET, shared.READER_ASSETS_BUCKET} or not relative.startswith(('derived/', 'objects/')):
+            raise ValueError('unsupported derived provenance resource')
+        raw = store.read_bytes(bucket, relative)
+        spec.update(origin_sha256=derivation.get('source_sha256'), derivation_manifest={
+            'bucket': bucket, 'path': relative, 'sha256': contract.digest(raw), 'bytes': len(raw), 'role': 'provenance'})
+    exporter.source_identity(spec)
+    reading.v3.resource(spec['text_manifest'])
+    return spec
+
+
+def save_state(store, state):
+    publisher.assert_writer()
+    publisher.put_checked(store, STATE, contract.canonical(state))
+
+
+def reconcile(store, root, consumer_root, approved, *, limit=8, apply=False, plan_only=False,
+              retry_failures=False, activate=False, source=None, report=None):
+    if type(limit) is not int or not 1 <= limit <= 32:
+        raise ValueError('OCR batch must select 1..32 complete books, never page prefixes')
+    approved = configuration(approved)
+    if apply:
+        publisher.assert_writer()
+    root.mkdir(parents=True, exist_ok=True)
+    pointer, refs, exports = current_exports(store, root)
+    if pointer and pointer['base_metadata_sha256'] != approved['base_metadata_sha256']:
+        raise ValueError('OCR automation base differs from the approved consumer')
+    registry = json.loads(store.read_bytes(shared.READER_ASSETS_BUCKET, REGISTRY))
+    derived = json.loads(store.read_bytes(shared.PDF_PAGES_BUCKET, DERIVED))
+    _reader_pointer, catalog = reading.current(store)
+    state, _state_raw = publisher.optional_json(store, STATE)
+    state = state or {'version': 1, 'kind': 'ccrd-ocr-automation', 'failures': {}, 'resources': []}
+    if state.get('kind') != 'ccrd-ocr-automation' or not isinstance(state.get('failures'), dict):
+        raise ValueError('invalid durable OCR quarantine')
+    state = copy.deepcopy(state)
+    jobs, deferred, quarantined = discover(registry, derived, catalog, exports, state, retry_failures=retry_failures)
+    if source:
+        if not isinstance(source, dict) or set(source) != {'repo', 'path'}:
+            raise ValueError('exact automatic pilot source requires repo and path')
+        key = source['repo'] + '\0' + source['path']
+        if key not in registry['files']:
+            raise ValueError('exact automatic pilot source is not in the OCR registry')
+        jobs = [job for job in jobs if job['key'] == key]
+        if not jobs:
+            raise ValueError('exact automatic pilot source is unchanged, deferred or quarantined')
+    report = report if report is not None else {}
+    report.update(applied=apply, plan_only=plan_only, model_calls=0, deleted_objects=0,
+                  prior_documents=len(exports), eligible=len(jobs), batch_limit=limit,
+                  deferred=deferred, quarantined=quarantined, processed=[], failures=[])
+    report['source_scope'] = source or 'all-ready-complete-text'
+    if pointer:
+        report.update(generation=pointer['generation'], release=pointer['release'])
+    if plan_only:
+        report['selected'] = [job['key'] for job in jobs[:limit]]
+        return report
+    registry_ids, _ = publisher.optional_json(store, publisher.IDS)
+    ids = (registry_ids or {'ids': {}})['ids']
+    for book, value in exports.items():
+        if ids.get(book) != {'doc_id': value['doc_id'], 'readable_rel_path': value['readable_rel_path']}:
+            raise ValueError('live OCR export differs from the stable ID registry')
+    next_id = max([0, *[int(item['doc_id'].split(':')[1]) for item in ids.values()]]) + 1
+    changed = 0
+    for job in jobs:
+        if changed == limit:
+            break
+        old = exports.get(job['book_id'])
+        number = int(ids[job['book_id']]['doc_id'].split(':')[1]) if job['book_id'] in ids else next_id
+        try:
+            spec = export_spec(store, job, number)
+            result = exporter.build_export(spec, lambda ref: store.read_bytes(ref['bucket'], ref['path']), allow_unreviewed=True)
+            value = result['manifest']
+            if old and value['generation'] == old['generation']:
+                continue
+            if old:
+                publisher.verify_text_upgrade(store, old, value)
+            else:
+                next_id = max(next_id, number + 1)
+            if any(item['readable_rel_path'] == value['readable_rel_path'] and book != job['book_id']
+                   for book, item in exports.items()):
+                raise ValueError('OCR readable path collision; neither book may be overwritten')
+            for path, raw in result['files'].items():
+                store_local(root, publisher.resource(path, raw), raw)
+            raw = result['files'][result['manifest_path']]
+            ref = publisher.resource(result['manifest_path'], raw, 'provenance')
+            contract.export_record(root, ref)
+            refs[job['book_id']], exports[job['book_id']] = ref, value
+            state['failures'].pop(job['key'], None)
+            report['processed'].append({'key': job['key'], 'doc_id': value['doc_id'],
+                'page_count': value['page_count'], 'quality': value['quality'], 'accepted_pages': value['accepted_pages'],
+                'text': value['text'], 'export': ref, 'updated': old is not None})
+            changed += 1
+        except Exception as error:
+            # Quarantine only this exact input identity. Keep the old complete
+            # release active; the next automatic run can advance other books.
+            failure = {'key': job['key'], 'fingerprint': job['fingerprint'], 'error_type': type(error).__name__}
+            report['failures'].append(failure)
+            state['failures'][job['key']] = failure
+            if apply:
+                save_state(store, state)
+            raise
+    report['documents'] = len(exports)
+    if not changed:
+        report['unchanged'] = True
+        if activate and pointer:
+            report.update(publisher.activate_space(pointer['release']['path'], pointer['release']['sha256'],
+                approved['base_metadata_sha256'], approved['builder_sha256'], apply=apply))
+        return report
+    release = builder.build_release(root, list(refs.values()), consumer_root,
+                                    approved['builder_sha256'], approved['base_metadata_sha256'])
+    (root / 'release-receipt.json').write_bytes(contract.canonical(release))
+    if activate:
+        publisher.activate_space(release['path'], release['sha256'], approved['base_metadata_sha256'], approved['builder_sha256'])
+    report['publication'] = publisher.publish(store, root, release['path'], release['sha256'],
+        approved['base_metadata_sha256'], pointer['generation'] if pointer else None, apply=apply)
+    report.update(generation=report['publication']['generation'], release=report['publication']['release'])
+    if apply and state != (json.loads(_state_raw) if _state_raw else {'version': 1, 'kind': 'ccrd-ocr-automation', 'failures': {}, 'resources': []}):
+        save_state(store, state)
+    if activate:
+        report.update(publisher.activate_space(release['path'], release['sha256'], approved['base_metadata_sha256'],
+                                               approved['builder_sha256'], apply=apply))
+    return report
+
+
+def prepare_consumer(approved, root):
+    from huggingface_hub import hf_hub_download
+    import os
+    for name in ('build_fulltext_db.py', 'data/search_data.json.gz', 'ocr_release.py'):
+        source = Path(hf_hub_download('vomebook/Search', name, repo_type='space',
+            revision=approved['consumer_revision'], token=os.environ.get('HF_TOKEN')))
+        target = root / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(source.read_bytes())
+    if (contract.digest((root / 'build_fulltext_db.py').read_bytes()) != approved['builder_sha256']
+            or contract.digest((root / 'data/search_data.json.gz').read_bytes()) != approved['base_metadata_sha256']
+            or (root / 'ocr_release.py').read_bytes() != Path(contract.__file__).read_bytes()):
+        raise ValueError('pinned consumer differs from approved builder/base/contract')
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--config', type=Path, default=Path('ccrd-ocr-consumer.json'))
+    parser.add_argument('--root', type=Path, default=Path('output/ccrd-ocr-auto/candidate'))
+    parser.add_argument('--limit', type=int, default=8)
+    parser.add_argument('--plan-only', action='store_true')
+    parser.add_argument('--retry-failures', action='store_true')
+    parser.add_argument('--source-json', default='{}', help='Optional exact repo/path for a bounded automatic pilot')
+    parser.add_argument('--apply', action='store_true')
+    parser.add_argument('--activate-space', action='store_true')
+    parser.add_argument('--output', type=Path, required=True)
+    args = parser.parse_args()
+    if args.plan_only and args.apply:
+        raise ValueError('plan-only cannot apply')
+    approved = configuration(json.loads(args.config.read_text()))
+    consumer = args.root.parent / 'consumer'
+    report = {}
+    try:
+        if not args.plan_only:
+            prepare_consumer(approved, consumer)
+        reconcile(publisher.HubBucketStore(), args.root, consumer, approved, limit=args.limit,
+                  plan_only=args.plan_only, retry_failures=args.retry_failures, apply=args.apply,
+                  activate=args.activate_space, source=json.loads(args.source_json), report=report)
+    finally:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_bytes(contract.canonical(report))
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+
+
+if __name__ == '__main__':
+    main()
