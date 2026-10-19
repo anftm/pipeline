@@ -34,6 +34,7 @@ class ForceOcrBookTests(unittest.TestCase):
         self.probe = {"classification": "native-text", "page_count": 2, "page_chars": [800, 900]}
         self.presentation = {"strategy": "preserve-pdf", "complete": True, "reason": "bitonal-raster"}
         self.objects = {}
+        self.protections = {}
         self.uploads = 0
 
     def upload(self, bundle):
@@ -44,7 +45,13 @@ class ForceOcrBookTests(unittest.TestCase):
                 if path in self.objects:
                     self.assertEqual(self.objects[path], raw, "immutable object overwritten")
                 self.objects[path] = raw
-        return [f"reader-index/processing/test-{self.uploads}.json"]
+        prefix = next((bundle / "objects").glob("*/*/*")).relative_to(bundle).as_posix()
+        resources = [{"bucket": stages.shared.PDF_PAGES_BUCKET, "root": prefix}]
+        if (bundle / prefix / "ocr-input").is_dir():
+            resources.append({"bucket": stages.shared.PDF_OCR_INPUT_BUCKET, "root": prefix})
+        path = f"reader-index/processing/test-{self.uploads}.json"
+        self.protections[path] = publication.reader_lifecycle.processing_record(resources, "test", {})
+        return [path]
 
     def read(self, meta, suffix=None):
         raw = self.objects[meta["path"]]
@@ -131,6 +138,48 @@ class ForceOcrBookTests(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True):
             with self.assertRaises(RuntimeError):
                 repair.assert_publisher()
+
+    def test_handoff_verifies_recognition_page_closure_before_publishing(self):
+        report = self.prepare()
+        with patch.object(stages, "read_object", side_effect=self.read), \
+                patch.object(publication, "read_bucket_json", side_effect=lambda p, *a: self.protections[p]):
+            # This is the production failure: compact entry lacks recognized page paths.
+            with self.assertRaisesRegex(ValueError, "does not belong"):
+                publication.reader_lifecycle.processing_handoffs(
+                    [report["entry"]], "generation", lambda p: self.protections[p])
+            owner = repair.handoff_owner(report["entry"])
+            released = publication.reader_lifecycle.processing_handoffs(
+                [owner], "generation", lambda p: self.protections[p])
+            self.assertEqual(set(released), set(report["processing_roots"]))
+            self.assertTrue(all(r["status"] == "released" for r in released.values()))
+            foreign = "reader-index/processing/foreign.json"
+            self.protections[foreign] = publication.reader_lifecycle.processing_record(
+                [{"bucket": stages.shared.PDF_PAGES_BUCKET, "root": "objects/ff/foreign"}], "test", {})
+            bad = {**report["entry"], "processing_roots": [*report["processing_roots"], foreign]}
+            with self.assertRaisesRegex(ValueError, "does not belong"):
+                repair.handoff_owner(bad)
+
+    def test_recovery_publishes_compact_entry_then_hands_off_all_checkpoint_roots(self):
+        report = self.prepare()
+        order = []
+        def publish(api, repo, results):
+            order.append("publish")
+            self.assertEqual(results[0]["processing_roots"], [])
+            self.assertNotIn("pages", results[0])
+        def handoff(api, repo, results):
+            order.append("handoff")
+            self.assertEqual(len(results[0]["pages"]), 2)
+            self.assertEqual(results[0]["processing_roots"], report["processing_roots"])
+        with patch.dict(repair.APPROVED, {self.key: (self.digest, 2, "ch")}), \
+                patch.object(repair, "load_entry", return_value={**self.entry, **report["entry"]}), \
+                patch.object(repair, "assert_publisher"), \
+                patch.object(stages, "read_object", side_effect=self.read), \
+                patch.object(publication, "read_bucket_json", side_effect=lambda p, *a: self.protections[p]), \
+                patch.object(publication, "publish", side_effect=publish), \
+                patch.object(stages, "handoff_worker_results", side_effect=handoff):
+            result = repair.publish(object(), self.key, report, apply=True)
+        self.assertTrue(result["unchanged"])
+        self.assertEqual(order, ["publish", "handoff"])
         env = {"GITHUB_ACTIONS": "true", "GITHUB_REPOSITORY": "anftm/pipeline", "GITHUB_RUN_ID": "1",
                "GITHUB_WORKFLOW_REF": "anftm/pipeline/.github/workflows/force-ocr-book.yml@refs/heads/main",
                "FORCE_OCR_PUBLICATION_PROTOCOL": repair.PROTOCOL}
@@ -150,6 +199,12 @@ class ForceOcrBookTests(unittest.TestCase):
         self.assertIn("actions/upload-artifact@v7", [s.get("uses") for s in prepare["steps"]])
         self.assertNotIn("promote", repair.main.__code__.co_consts)
         self.assertTrue(producer_path(".github/workflows/force-ocr-book.yml"))
+        trigger = workflow.get("on", workflow.get(True))["workflow_dispatch"]["inputs"]
+        self.assertIn("prepared_run_id", trigger)
+        self.assertIn("inputs.prepared_run_id == ''", prepare["if"])
+        self.assertEqual(workflow["permissions"]["actions"], "read")
+        downloaded = next(s["with"] for s in publish["steps"] if s.get("uses") == "actions/download-artifact@v8")
+        self.assertIn("inputs.prepared_run_id", downloaded["run-id"])
 
 
 if __name__ == "__main__":

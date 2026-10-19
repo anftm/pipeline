@@ -22,6 +22,10 @@ on:
         default: auto
         type: choice
         options: [auto, ch, en]
+      prepared_run_id:
+        description: Reuse a completed trusted prepare job; publish only, never OCR again
+        default: ''
+        type: string
       apply:
         description: Prepare immutable OCR objects and serialize their publication
         default: false
@@ -29,6 +33,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: force-ocr-${{ inputs.source_sha256 }}
@@ -45,7 +50,7 @@ env:
 
 jobs:
   prepare:
-    if: github.repository == 'anftm/pipeline'
+    if: github.repository == 'anftm/pipeline' && inputs.prepared_run_id == ''
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     steps:
@@ -78,7 +83,9 @@ jobs:
 
   publish:
     needs: prepare
-    if: inputs.apply && github.repository == 'anftm/pipeline'
+    if: >-
+      always() && !cancelled() && inputs.apply && github.repository == 'anftm/pipeline' &&
+      ((inputs.prepared_run_id != '') || needs.prepare.result == 'success')
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     concurrency:
@@ -93,10 +100,34 @@ jobs:
         with:
           python-version: '3.11'
       - run: pip install -r scripts/requirements.txt
+      - name: Verify an explicitly reused preparation run
+        if: inputs.prepared_run_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREPARED_RUN: ${{ inputs.prepared_run_id }}
+        run: |
+          [[ "$PREPARED_RUN" =~ ^[0-9]+$ ]] || exit 1
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PREPARED_RUN" > prepared-run.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PREPARED_RUN/jobs?filter=latest&per_page=100" > prepared-jobs.json
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          run = json.loads(Path('prepared-run.json').read_text())
+          jobs = json.loads(Path('prepared-jobs.json').read_text())
+          if (str(run['id']) != os.environ['PREPARED_RUN'] or run['status'] != 'completed'
+                  or run['path'] != '.github/workflows/force-ocr-book.yml'
+                  or run['event'] != 'workflow_dispatch' or run['head_branch'] != 'main'
+                  or run['head_repository']['full_name'] != os.environ['GITHUB_REPOSITORY']
+                  or not any(job['name'] == 'prepare' and job['status'] == 'completed'
+                             and job['conclusion'] == 'success' for job in jobs['jobs'])):
+              raise ValueError('recovery requires a successful actual central prepare job')
+          PY
       - uses: actions/download-artifact@v8
         with:
           name: approved-ps-ocr
           path: output/force-ocr
+          run-id: ${{ inputs.prepared_run_id || github.run_id }}
+          github-token: ${{ github.token }}
       - name: Verify and publish only the approved OCR entry under the writer lock
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}

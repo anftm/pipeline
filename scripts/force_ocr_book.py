@@ -152,6 +152,34 @@ def assert_publisher():
         raise RuntimeError("forced OCR registry writes require the serialized central publish job")
 
 
+def handoff_owner(result):
+    """Prove render/recognition roots against the verified final page closure.
+
+    The compact registry entry directly references only the assembled text and
+    render manifest. Recognition objects are referenced *inside* the final OCR
+    manifest, so passing the compact entry to the generic handoff validator
+    incorrectly fails after publication. Expand only for this ownership check;
+    never duplicate all page text in the registry or relax the shared validator.
+    """
+    meta = {"path": result["ocr_manifest"], "sha256": result["ocr_manifest_sha256"],
+            "bytes": result["ocr_manifest_bytes"]}
+    manifest = json.loads(stages.read_object(meta, "/ocr-manifest.json"))
+    pages = manifest.get("pages", [])
+    if (manifest.get("kind") != "pdf-ocr" or manifest.get("complete") is not True
+            or manifest.get("source_sha256") != result["source_sha256"]
+            or manifest.get("page_count") != result["page_count"]
+            or manifest.get("text_layer") != result["text_layer"]
+            or [p.get("p") for p in pages] != list(range(1, result["page_count"] + 1))
+            or any(p.get("source") != "ocr" for p in pages)):
+        raise ValueError("processing handoff requires the complete approved OCR page closure")
+    owner = {**result, "pages": pages}
+    # Read-only preflight before publication: a foreign root must never cause a
+    # late failure after updating the registry/catalog.
+    publication.reader_lifecycle.processing_handoffs(
+        [owner], "ownership-preflight", lambda path: publication.read_bucket_json(path, os.environ.get("HF_TOKEN")))
+    return owner
+
+
 def publish(api, key, report, *, apply=False):
     current = load_entry(api, key)
     if (report.get("version") != 1 or report.get("kind") != PROTOCOL
@@ -174,7 +202,11 @@ def publish(api, key, report, *, apply=False):
         raise ValueError("OCR entry changed during preparation; refusing to overwrite it")
     if apply:
         assert_publisher()
-        publication.publish(api, ASSETS_REPO, [result])
+        owner = handoff_owner(result)
+        # The generic publisher verifies the full text bundle and commits the
+        # compact entry. Only then can the expanded page owner release roots.
+        publication.publish(api, ASSETS_REPO, [{**result, "processing_roots": []}])
+        stages.handoff_worker_results(api, ASSETS_REPO, [owner])
     return {"applied": apply, "unchanged": already, "source_key": key,
             "text_layer": result["text_layer"], "page_count": pages}
 
