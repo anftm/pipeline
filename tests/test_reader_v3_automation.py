@@ -466,19 +466,23 @@ class WaveTests(unittest.TestCase):
                 ({"active_usable": False, "active_revision": "effective", "active_accepted": False}, False),
                 ({"active_usable": False, "active_revision": "raw", "active_accepted": True}, False)):
             task = {"spec": spec, "text_probe": {**active_probe, "matches_active": False,
+                    "identity": ["candidate.json", "a" * 64, "e" * 64],
                     "candidate_usable": True, "candidate_revision": "raw",
                     "candidate_accepted": False, "same_primary": True}}
-            self.assertEqual(auto._can_replace_unusable_text(task, active), expected)
+            self.assertEqual(auto._can_replace_unusable_text(task, {**active, "reading_generation": "e" * 64}), expected)
         task = {"spec": spec, "text_probe": {"active_usable": False, "active_revision": "raw",
                 "active_accepted": False, "matches_active": False, "candidate_usable": True,
-                "candidate_revision": "raw", "candidate_accepted": False, "same_primary": False}}
-        self.assertFalse(auto._can_replace_unusable_text(task, active))
+                "candidate_revision": "raw", "candidate_accepted": False, "same_primary": False,
+                "identity": ["candidate.json", "a" * 64, "e" * 64]}}
+        self.assertFalse(auto._can_replace_unusable_text(task, {**active, "reading_generation": "e" * 64}))
         task["text_probe"]["same_primary"] = True
         task["spec"] = {**spec, "preview_only": True}
-        self.assertFalse(auto._can_replace_unusable_text(task, active))
+        self.assertFalse(auto._can_replace_unusable_text(task, {**active, "reading_generation": "e" * 64}))
         task["spec"] = spec
         task["text_probe"]["matches_active"] = True
-        self.assertFalse(auto._can_replace_unusable_text(task, active))
+        self.assertFalse(auto._can_replace_unusable_text(task, {**active, "reading_generation": "e" * 64}))
+        task["text_probe"]["matches_active"] = False
+        self.assertFalse(auto._can_replace_unusable_text(task, {**active, "reading_generation": "f" * 64}))
 
     def test_native_fallback_refuses_a_primary_without_complete_text(self):
         with patch.object(publication.pdf_ocr, "probe_pdf", return_value={"classification": "scan"}):
