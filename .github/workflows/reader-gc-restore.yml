@@ -1,0 +1,86 @@
+name: Reader GC Producer Restore
+
+on:
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: Producer repository to restore
+        required: true
+        default: rioholland79/pipeline
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: reader-gc-restore-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  restore:
+    if: github.repository == 'anftm/pipeline'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Re-enable repository Actions and producer workflows
+        env:
+          GC_PRODUCER_TOKENS_JSON: ${{ secrets.GC_PRODUCER_TOKENS_JSON }}
+          REPOSITORY: ${{ inputs.repository }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import urllib.error
+          import urllib.request
+
+          repo = os.environ["REPOSITORY"]
+          token = json.loads(os.environ["GC_PRODUCER_TOKENS_JSON"])[repo]
+          base = "https://api.github.com/repos/" + repo
+
+          def call(path, method="GET", payload=None):
+              data = None if payload is None else json.dumps(payload).encode()
+              request = urllib.request.Request(
+                  base + path, data=data, method=method,
+                  headers={"Authorization": "Bearer " + token,
+                           "Accept": "application/vnd.github+json",
+                           "Content-Type": "application/json"})
+              try:
+                  with urllib.request.urlopen(request, timeout=60) as response:
+                      body = response.read().decode("utf-8", "replace")
+                      return response.status, json.loads(body) if body else {}
+              except urllib.error.HTTPError as error:
+                  body = error.read().decode("utf-8", "replace")
+                  try:
+                      body = json.loads(body)
+                  except ValueError:
+                      pass
+                  return error.code, body
+
+          status, policy = call("/actions/permissions")
+          print("permissions", status, policy, flush=True)
+          if isinstance(policy, dict) and policy.get("enabled") is False:
+              body = {"enabled": True}
+              if policy.get("allowed_actions"):
+                  body["allowed_actions"] = policy["allowed_actions"]
+              status, result = call("/actions/permissions", "PUT", body)
+              print("enable-actions", status, result, flush=True)
+              if status not in (200, 204):
+                  status, result = call("/actions/permissions", "PUT", {"enabled": True})
+                  print("enable-actions-retry", status, result, flush=True)
+
+          status, inventory = call("/actions/workflows?per_page=100")
+          print("inventory", status, flush=True)
+          producer_names = {"force-ocr-book.yml", "publish-source-txt.yml",
+                            "publish-ccrd-index.yml", "promote-ccrd-generation.yml",
+                            "update-ccrd-source.yml", "publish-ccrd-ocr.yml"}
+          for workflow in inventory.get("workflows", []):
+              name = workflow["path"].rsplit("/", 1)[-1]
+              if not (name.startswith(("reader-", "pdf-", "lin-native-text", "migrate-pdf-"))
+                      or name in producer_names):
+                  continue
+              if workflow["state"] != "active":
+                  status, result = call(f"/actions/workflows/{workflow['id']}/enable", "PUT")
+                  print("enable", name, status, result, flush=True)
+              status, current = call(f"/actions/workflows/{workflow['id']}")
+              print("state", name, status, current.get("state"), flush=True)
+          PY
