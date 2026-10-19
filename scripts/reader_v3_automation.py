@@ -237,14 +237,13 @@ def _probe_text(store, task, catalog):
     probe = task.get("text_probe")
     if probe and probe.get("identity") == identity:
         return
-    generation = task.get("candidate_generation")
-    if generation == active["reading_generation"]:
-        # Same generation: the candidate already owns the live entry.
+    if task.get("catalog_generation") == active["reading_generation"]:
+        # This task's own promotion produced the live entry; no repair applies.
         task["text_probe"] = {"identity": identity, "matches_active": True}
         return
     try:
         candidate_body = publication.read_index(store, candidate)
-        generation = generation or candidate_body.get("reading_generation")
+        generation = candidate_body.get("reading_generation")
         task["candidate_generation"] = generation
         if generation == active["reading_generation"]:
             task["text_probe"] = {"identity": identity, "matches_active": True}
