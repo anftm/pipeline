@@ -59,6 +59,14 @@ REVIEWED_SOURCE_REPAIRS = {
         "reference_url": "https://www.prisoncensorship.info/archive/etext/chinese/classics/jiangqing1966to1976/091-120/104.html",
         "reference_sha256": "ccfe1bd8d5d6cc6fffb8c62d6c503ab1824be75c5a8e0c51fedb66b056a9d83e",
     },
+    "mlmrl-1968-03-21-mojibake-v1": {
+        "source_sha256": "6c1dc88c70a92b868186d19d9a4a8ce19b5a63dfd0961cfd80015974c66cbd11",
+        "offset": 16097,
+        "original_text": "瑁\0乐沟腥私\0ィ\0苹凳だ\0\0怠＝\0嗤\0尽熬拧の濉苯不八倒\0\0\0瞧笸级\0∫悦\0飨\0\0鳎\0指敝飨\0\0 ǖ奈薏\0准端玖畈浚\0\0〗伙啪\0\0\0∥颐呛焐\0抡\0 ā４佣氛\0形颐侵\0溃\0跎倨妗5.诵∑轿\0裁茨艹て谝\0卦诘衬谀兀烤褪撬\0撬Ａ矫媸址 ǎ\0蜃拧昂炱臁狈春炱欤\0颐潜匦胙勖餍牧粒\0朴于镀扑\0堑拿婺浚\0\0揽抗愦蟾锩\0褐冢\0揽咳嗣窠伙啪\0\0\0\0鱿嘈牛\0\0鲆揽浚\0湍苁镀埔磺谢等恕９膊\0橙斯饷骼诼洌\0炊粤矫媾桑\0矫媸址 ǎ\0醯怂Ａ矫媸址 ǎ\0〗\0峋龇炊运\0堑奶匚窳矫媸址 ǎ\0炊愿阋跄被疃\0?/p>",
+        "replacement_text": "惕，防止敌人进攻，破坏胜利果实。江青同志“九·五”讲话说过，他们企图动摇以毛主席为主，林副主席为辅的无产阶级司令部，动摇解放军，动摇我们红色新政权。从斗争中我们知道，刘少奇、邓小平为什么能长期隐藏在党内呢？就是他们耍两面手法，打着“红旗”反红旗，我们必须眼明心亮，善于识破他们的面目，要依靠广大革命群众，依靠人民解放军，要三个相信，三个依靠，就能识破一切坏人。共产党人光明磊落，反对两面派，两面手法，刘邓耍两面手法，小将坚决反对他们的特务两面手法，反对搞阴谋活动。\n\n",
+        "reference_url": "https://www.prisoncensorship.info/archive/etext/chinese/classics/jiangqing1966to1976/121-160/125.html",
+        "reference_sha256": "90daefc2119814ff52a0dda96e1ca1d5eb93efb84b799e6b6cdd349f997867ea",
+    },
 }
 
 

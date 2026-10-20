@@ -179,6 +179,7 @@ class TextStreamPublicationTests(unittest.TestCase):
         second = REVIEWED_SOURCE_REPAIRS["mlmrl-1967-04-16-mojibake-v1"]
         third = REVIEWED_SOURCE_REPAIRS["mlmrl-1967-07-21-mojibake-v1"]
         fourth = REVIEWED_SOURCE_REPAIRS["mlmrl-1967-09-01-mojibake-v1"]
+        fifth = REVIEWED_SOURCE_REPAIRS["mlmrl-1968-03-21-mojibake-v1"]
         self.assertNotEqual(first["source_sha256"], second["source_sha256"])
         self.assertNotEqual(first["reference_sha256"], second["reference_sha256"])
         self.assertEqual(second["source_sha256"], "7088b4a442c02e818ee63a26c9d30952fb1a78ce6fb35afe57aa75f071449f27")
@@ -203,8 +204,17 @@ class TextStreamPublicationTests(unittest.TestCase):
         self.assertIn("打倒你们，还有韩爱晶", fourth["replacement_text"])
         self.assertTrue(fourth["reference_url"].endswith("/104.html"))
         self.assertEqual(fourth["reference_sha256"], "ccfe1bd8d5d6cc6fffb8c62d6c503ab1824be75c5a8e0c51fedb66b056a9d83e")
+        self.assertEqual(fifth["source_sha256"], "6c1dc88c70a92b868186d19d9a4a8ce19b5a63dfd0961cfd80015974c66cbd11")
+        self.assertEqual(fifth["offset"], 16097)
+        self.assertEqual(fifth["original_text"].count("\0"), 55)
+        self.assertEqual(len(fifth["original_text"].encode()), 586)
+        self.assertNotIn("\0", fifth["replacement_text"])
+        self.assertTrue(fifth["replacement_text"].startswith("惕，防止敌人进攻"))
+        self.assertTrue(fifth["reference_url"].endswith("/125.html"))
+        self.assertEqual(fifth["reference_sha256"], "90daefc2119814ff52a0dda96e1ca1d5eb93efb84b799e6b6cdd349f997867ea")
         for recipe, repair in (("mlmrl-1967-02-01-mojibake-v1", first), ("mlmrl-1967-04-16-mojibake-v1", second),
-                               ("mlmrl-1967-07-21-mojibake-v1", third), ("mlmrl-1967-09-01-mojibake-v1", fourth)):
+                               ("mlmrl-1967-07-21-mojibake-v1", third), ("mlmrl-1967-09-01-mojibake-v1", fourth),
+                               ("mlmrl-1968-03-21-mojibake-v1", fifth)):
             # Even a matching damaged span never authorizes a different whole file.
             fake = b"prefix" + repair["original_text"].encode() + b"suffix"
             with self.subTest(recipe=recipe), self.assertRaisesRegex(TextEncodingError, "SHA-256"):
