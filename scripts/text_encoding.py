@@ -199,6 +199,193 @@ REVIEWED_SOURCE_REPAIRS = {
         "reference_sha256": "63728a12b71b4a295919531d7566f0489501b6fe12be90850f7dfd30759b5e5d",
         "reference_kind": "original-source-control-audit",
     },
+    "mlmrl-vomebook-gongnongbing-01-marker-v1": {
+        "source_sha256": "41c07731a679bdc4fdcdf4878ccdbdc3cf987c2910bb980234bf7c981c07ff62",
+        "mode": "legacy-marker-strip",
+        "source_encoding": "gb18030",
+        "marker_hex": "f8fa0702cb35f501",
+        "marker_count": 10,
+        "marker_offsets": [1025, 2057, 3089, 4121, 5153, 6185, 7217, 8249, 9281, 10313],
+        "reference_url": "https://huggingface.co/datasets/VoiceOfML/VOMEBOOK/blob/7f338fb4af738ccd6e8353b90db9c16023497555/%E9%A9%AC%E5%88%97%E4%B9%8B%E5%A3%B0ebook%E5%B0%8F%E7%BB%84%E7%AC%AC%E4%BA%8C%E6%89%B9%E6%88%90%E6%9E%9C%E9%9B%86%E6%88%90%E8%B5%9E%E5%8A%A9%E9%83%A8%E5%88%86/jiang/%E4%B8%AD%E5%9B%BD%E7%A4%BE%E4%BC%9A%E4%B8%BB%E4%B9%89%E6%97%B6%E4%BB%A3%E7%9A%84%E6%95%99%E8%82%B2%E9%9D%A9%E5%91%BD%20%E7%A0%94%E7%A9%B6%E8%B5%84%E6%96%99%E9%9B%86%E6%88%90pdf%EF%BC%88%E8%BF%91800%E7%A7%8D%EF%BC%89/%E5%B7%A5%E5%86%9C%E5%85%B5%E5%A4%A7%E5%AD%A6%E7%94%9F/%E4%BC%98%E7%A7%80%E5%B7%A5%E5%86%9C%E5%85%B5%E5%AD%A6%E5%91%98%E7%9A%84%E5%85%B1%E5%90%8C%E7%89%B9%E7%82%B9.txt",
+        "reference_sha256": "41c07731a679bdc4fdcdf4878ccdbdc3cf987c2910bb980234bf7c981c07ff62",
+        "reference_kind": "original-source-binary-marker-audit",
+    },
+    "mlmrl-vomebook-gongnongbing-02-marker-v1": {
+        "source_sha256": "a4b610eea8062b8d22d44896e507dd21596b55c8c344df2667b595f095fc57be",
+        "mode": "legacy-marker-strip",
+        "source_encoding": "gb18030",
+        "marker_hex": "f8fa0702cb35f501",
+        "marker_count": 16,
+        "marker_offsets": [1025, 2057, 3089, 4121, 5153, 6185, 7217, 8249, 9281, 10313, 11345, 12377, 13409, 14441, 15473, 16505],
+        "reference_url": "https://huggingface.co/datasets/VoiceOfML/VOMEBOOK/blob/7f338fb4af738ccd6e8353b90db9c16023497555/%E9%A9%AC%E5%88%97%E4%B9%8B%E5%A3%B0ebook%E5%B0%8F%E7%BB%84%E7%AC%AC%E4%BA%8C%E6%89%B9%E6%88%90%E6%9E%9C%E9%9B%86%E6%88%90%E8%B5%9E%E5%8A%A9%E9%83%A8%E5%88%86/jiang/%E4%B8%AD%E5%9B%BD%E7%A4%BE%E4%BC%9A%E4%B8%BB%E4%B9%89%E6%97%B6%E4%BB%A3%E7%9A%84%E6%95%99%E8%82%B2%E9%9D%A9%E5%91%BD%20%E7%A0%94%E7%A9%B6%E8%B5%84%E6%96%99%E9%9B%86%E6%88%90pdf%EF%BC%88%E8%BF%91800%E7%A7%8D%EF%BC%89/%E5%B7%A5%E5%86%9C%E5%85%B5%E5%A4%A7%E5%AD%A6%E7%94%9F/%E5%B7%A5%E5%86%9C%E5%85%B5%E5%AD%A6%E5%91%98%E4%B8%AD%E7%9A%84%E6%9D%B0%E5%87%BA%E4%BA%BA%E6%89%8D.txt",
+        "reference_sha256": "a4b610eea8062b8d22d44896e507dd21596b55c8c344df2667b595f095fc57be",
+        "reference_kind": "original-source-binary-marker-audit",
+    },
+    "mlmrl-vomebook-gongnongbing-03-marker-v1": {
+        "source_sha256": "975aecd3d7389f6e1b3526bdb682aa1e3b137bd33112466cf5d769a496a30984",
+        "mode": "legacy-marker-strip",
+        "source_encoding": "gb18030",
+        "marker_hex": "f8fa0702cb35f501",
+        "marker_count": 1,
+        "marker_offsets": [1025],
+        "reference_url": "https://huggingface.co/datasets/VoiceOfML/VOMEBOOK/blob/7f338fb4af738ccd6e8353b90db9c16023497555/%E9%A9%AC%E5%88%97%E4%B9%8B%E5%A3%B0ebook%E5%B0%8F%E7%BB%84%E7%AC%AC%E4%BA%8C%E6%89%B9%E6%88%90%E6%9E%9C%E9%9B%86%E6%88%90%E8%B5%9E%E5%8A%A9%E9%83%A8%E5%88%86/jiang/%E4%B8%AD%E5%9B%BD%E7%A4%BE%E4%BC%9A%E4%B8%BB%E4%B9%89%E6%97%B6%E4%BB%A3%E7%9A%84%E6%95%99%E8%82%B2%E9%9D%A9%E5%91%BD%20%E7%A0%94%E7%A9%B6%E8%B5%84%E6%96%99%E9%9B%86%E6%88%90pdf%EF%BC%88%E8%BF%91800%E7%A7%8D%EF%BC%89/%E5%B7%A5%E5%86%9C%E5%85%B5%E5%A4%A7%E5%AD%A6%E7%94%9F/%E5%B7%A5%E5%86%9C%E5%85%B5%E5%AD%A6%E5%91%98%E7%9A%84%E4%BC%98%E7%A7%80%E4%BB%A3%E8%A1%A8----%E4%BE%AF%E5%87%A1%E5%87%A1%E9%99%A2%E5%A3%AB.txt",
+        "reference_sha256": "975aecd3d7389f6e1b3526bdb682aa1e3b137bd33112466cf5d769a496a30984",
+        "reference_kind": "original-source-binary-marker-audit",
+    },
+    "mlmrl-vomebook-gongnongbing-04-marker-v1": {
+        "source_sha256": "ce604b101be5928e60cfec304a2c4b367bfd5abc40d024c7d374ed2d7d807e03",
+        "mode": "legacy-marker-strip",
+        "source_encoding": "gb18030",
+        "marker_hex": "f8fa0702cb35f501",
+        "marker_count": 2,
+        "marker_offsets": [1025, 2057],
+        "reference_url": "https://huggingface.co/datasets/VoiceOfML/VOMEBOOK/blob/7f338fb4af738ccd6e8353b90db9c16023497555/%E9%A9%AC%E5%88%97%E4%B9%8B%E5%A3%B0ebook%E5%B0%8F%E7%BB%84%E7%AC%AC%E4%BA%8C%E6%89%B9%E6%88%90%E6%9E%9C%E9%9B%86%E6%88%90%E8%B5%9E%E5%8A%A9%E9%83%A8%E5%88%86/jiang/%E4%B8%AD%E5%9B%BD%E7%A4%BE%E4%BC%9A%E4%B8%BB%E4%B9%89%E6%97%B6%E4%BB%A3%E7%9A%84%E6%95%99%E8%82%B2%E9%9D%A9%E5%91%BD%20%E7%A0%94%E7%A9%B6%E8%B5%84%E6%96%99%E9%9B%86%E6%88%90pdf%EF%BC%88%E8%BF%91800%E7%A7%8D%EF%BC%89/%E5%B7%A5%E5%86%9C%E5%85%B5%E5%A4%A7%E5%AD%A6%E7%94%9F/%E5%B7%A5%E5%86%9C%E5%85%B5%E5%AD%A6%E5%91%98%E7%9A%84%E4%BC%98%E7%A7%80%E4%BB%A3%E8%A1%A8----%E5%86%AF%E9%95%BF%E6%A0%B9%E6%95%99%E6%8E%88.txt",
+        "reference_sha256": "ce604b101be5928e60cfec304a2c4b367bfd5abc40d024c7d374ed2d7d807e03",
+        "reference_kind": "original-source-binary-marker-audit",
+    },
+    "mlmrl-vomebook-gongnongbing-05-marker-v1": {
+        "source_sha256": "8e52bcee214f448ac24aad805d6a827d35a48b3866d20aedfe3f724a7c5c1b4e",
+        "mode": "legacy-marker-strip",
+        "source_encoding": "gb18030",
+        "marker_hex": "f8fa0702cb35f501",
+        "marker_count": 1,
+        "marker_offsets": [1025],
+        "reference_url": "https://huggingface.co/datasets/VoiceOfML/VOMEBOOK/blob/7f338fb4af738ccd6e8353b90db9c16023497555/%E9%A9%AC%E5%88%97%E4%B9%8B%E5%A3%B0ebook%E5%B0%8F%E7%BB%84%E7%AC%AC%E4%BA%8C%E6%89%B9%E6%88%90%E6%9E%9C%E9%9B%86%E6%88%90%E8%B5%9E%E5%8A%A9%E9%83%A8%E5%88%86/jiang/%E4%B8%AD%E5%9B%BD%E7%A4%BE%E4%BC%9A%E4%B8%BB%E4%B9%89%E6%97%B6%E4%BB%A3%E7%9A%84%E6%95%99%E8%82%B2%E9%9D%A9%E5%91%BD%20%E7%A0%94%E7%A9%B6%E8%B5%84%E6%96%99%E9%9B%86%E6%88%90pdf%EF%BC%88%E8%BF%91800%E7%A7%8D%EF%BC%89/%E5%B7%A5%E5%86%9C%E5%85%B5%E5%A4%A7%E5%AD%A6%E7%94%9F/%E5%B7%A5%E5%86%9C%E5%85%B5%E5%AD%A6%E5%91%98%E7%9A%84%E4%BC%98%E7%A7%80%E4%BB%A3%E8%A1%A8----%E5%88%98%E5%A5%87%E8%91%86.txt",
+        "reference_sha256": "8e52bcee214f448ac24aad805d6a827d35a48b3866d20aedfe3f724a7c5c1b4e",
+        "reference_kind": "original-source-binary-marker-audit",
+    },
+    "mlmrl-vomebook-gongnongbing-06-marker-v1": {
+        "source_sha256": "3c9a6b0bb103304fcec6c44c2d6967d6538d433573d20fe03341e1c9c6f8e977",
+        "mode": "legacy-marker-strip",
+        "source_encoding": "gb18030",
+        "marker_hex": "f8fa0702cb35f501",
+        "marker_count": 1,
+        "marker_offsets": [1025],
+        "reference_url": "https://huggingface.co/datasets/VoiceOfML/VOMEBOOK/blob/7f338fb4af738ccd6e8353b90db9c16023497555/%E9%A9%AC%E5%88%97%E4%B9%8B%E5%A3%B0ebook%E5%B0%8F%E7%BB%84%E7%AC%AC%E4%BA%8C%E6%89%B9%E6%88%90%E6%9E%9C%E9%9B%86%E6%88%90%E8%B5%9E%E5%8A%A9%E9%83%A8%E5%88%86/jiang/%E4%B8%AD%E5%9B%BD%E7%A4%BE%E4%BC%9A%E4%B8%BB%E4%B9%89%E6%97%B6%E4%BB%A3%E7%9A%84%E6%95%99%E8%82%B2%E9%9D%A9%E5%91%BD%20%E7%A0%94%E7%A9%B6%E8%B5%84%E6%96%99%E9%9B%86%E6%88%90pdf%EF%BC%88%E8%BF%91800%E7%A7%8D%EF%BC%89/%E5%B7%A5%E5%86%9C%E5%85%B5%E5%A4%A7%E5%AD%A6%E7%94%9F/%E5%B7%A5%E5%86%9C%E5%85%B5%E5%AD%A6%E5%91%98%E7%9A%84%E4%BC%98%E7%A7%80%E4%BB%A3%E8%A1%A8----%E6%9D%A8%E5%8D%AB%E9%99%A2%E5%A3%AB.txt",
+        "reference_sha256": "3c9a6b0bb103304fcec6c44c2d6967d6538d433573d20fe03341e1c9c6f8e977",
+        "reference_kind": "original-source-binary-marker-audit",
+    },
+    "mlmrl-vomebook-gongnongbing-07-marker-v1": {
+        "source_sha256": "8b1a0f534226b5fc00131b08eb2838e02f29f216f3d591a8a850cb4e1df963fc",
+        "mode": "legacy-marker-strip",
+        "source_encoding": "gb18030",
+        "marker_hex": "f8fa0702cb35f501",
+        "marker_count": 6,
+        "marker_offsets": [1025, 2057, 3089, 4121, 5153, 6185],
+        "reference_url": "https://huggingface.co/datasets/VoiceOfML/VOMEBOOK/blob/7f338fb4af738ccd6e8353b90db9c16023497555/%E9%A9%AC%E5%88%97%E4%B9%8B%E5%A3%B0ebook%E5%B0%8F%E7%BB%84%E7%AC%AC%E4%BA%8C%E6%89%B9%E6%88%90%E6%9E%9C%E9%9B%86%E6%88%90%E8%B5%9E%E5%8A%A9%E9%83%A8%E5%88%86/jiang/%E4%B8%AD%E5%9B%BD%E7%A4%BE%E4%BC%9A%E4%B8%BB%E4%B9%89%E6%97%B6%E4%BB%A3%E7%9A%84%E6%95%99%E8%82%B2%E9%9D%A9%E5%91%BD%20%E7%A0%94%E7%A9%B6%E8%B5%84%E6%96%99%E9%9B%86%E6%88%90pdf%EF%BC%88%E8%BF%91800%E7%A7%8D%EF%BC%89/%E5%B7%A5%E5%86%9C%E5%85%B5%E5%A4%A7%E5%AD%A6%E7%94%9F/%E5%B7%A5%E5%86%9C%E5%85%B5%E5%AD%A6%E5%91%98%E7%9A%84%E4%BC%98%E7%A7%80%E4%BB%A3%E8%A1%A8----%E6%9D%A8%E6%9C%88%E6%AC%A3.txt",
+        "reference_sha256": "8b1a0f534226b5fc00131b08eb2838e02f29f216f3d591a8a850cb4e1df963fc",
+        "reference_kind": "original-source-binary-marker-audit",
+    },
+    "mlmrl-vomebook-gongnongbing-08-marker-v1": {
+        "source_sha256": "f36e761f4f5046dac84550faf3540c3babd5c3f7d6b05b392d192e8db39857c8",
+        "mode": "legacy-marker-strip",
+        "source_encoding": "gb18030",
+        "marker_hex": "f8fa0702cb35f501",
+        "marker_count": 3,
+        "marker_offsets": [1025, 2057, 3089],
+        "reference_url": "https://huggingface.co/datasets/VoiceOfML/VOMEBOOK/blob/7f338fb4af738ccd6e8353b90db9c16023497555/%E9%A9%AC%E5%88%97%E4%B9%8B%E5%A3%B0ebook%E5%B0%8F%E7%BB%84%E7%AC%AC%E4%BA%8C%E6%89%B9%E6%88%90%E6%9E%9C%E9%9B%86%E6%88%90%E8%B5%9E%E5%8A%A9%E9%83%A8%E5%88%86/jiang/%E4%B8%AD%E5%9B%BD%E7%A4%BE%E4%BC%9A%E4%B8%BB%E4%B9%89%E6%97%B6%E4%BB%A3%E7%9A%84%E6%95%99%E8%82%B2%E9%9D%A9%E5%91%BD%20%E7%A0%94%E7%A9%B6%E8%B5%84%E6%96%99%E9%9B%86%E6%88%90pdf%EF%BC%88%E8%BF%91800%E7%A7%8D%EF%BC%89/%E5%B7%A5%E5%86%9C%E5%85%B5%E5%A4%A7%E5%AD%A6%E7%94%9F/%E5%B7%A5%E5%86%9C%E5%85%B5%E5%AD%A6%E5%91%98%E7%9A%84%E4%BC%98%E7%A7%80%E4%BB%A3%E8%A1%A8----%E6%AF%95%E6%B7%91%E6%95%8F%20%E6%96%87%E5%AD%A6%E7%9A%84%E7%99%BD%E8%A1%A3%E5%A4%A9%E4%BD%BF.txt",
+        "reference_sha256": "f36e761f4f5046dac84550faf3540c3babd5c3f7d6b05b392d192e8db39857c8",
+        "reference_kind": "original-source-binary-marker-audit",
+    },
+    "mlmrl-vomebook-gongnongbing-09-marker-v1": {
+        "source_sha256": "6315e8e0389b1a47213bac077dd6054e86bd46b9369834365a53da92e7049be7",
+        "mode": "legacy-marker-strip",
+        "source_encoding": "gb18030",
+        "marker_hex": "f8fa0702cb35f501",
+        "marker_count": 3,
+        "marker_offsets": [1025, 2057, 3089],
+        "reference_url": "https://huggingface.co/datasets/VoiceOfML/VOMEBOOK/blob/7f338fb4af738ccd6e8353b90db9c16023497555/%E9%A9%AC%E5%88%97%E4%B9%8B%E5%A3%B0ebook%E5%B0%8F%E7%BB%84%E7%AC%AC%E4%BA%8C%E6%89%B9%E6%88%90%E6%9E%9C%E9%9B%86%E6%88%90%E8%B5%9E%E5%8A%A9%E9%83%A8%E5%88%86/jiang/%E4%B8%AD%E5%9B%BD%E7%A4%BE%E4%BC%9A%E4%B8%BB%E4%B9%89%E6%97%B6%E4%BB%A3%E7%9A%84%E6%95%99%E8%82%B2%E9%9D%A9%E5%91%BD%20%E7%A0%94%E7%A9%B6%E8%B5%84%E6%96%99%E9%9B%86%E6%88%90pdf%EF%BC%88%E8%BF%91800%E7%A7%8D%EF%BC%89/%E5%B7%A5%E5%86%9C%E5%85%B5%E5%A4%A7%E5%AD%A6%E7%94%9F/%E5%B7%A5%E5%86%9C%E5%85%B5%E5%AD%A6%E5%91%98%E7%9A%84%E4%BC%98%E7%A7%80%E4%BB%A3%E8%A1%A8----%E7%99%BD%E6%98%A5%E7%A4%BC%E9%99%A2%E5%A3%AB.txt",
+        "reference_sha256": "6315e8e0389b1a47213bac077dd6054e86bd46b9369834365a53da92e7049be7",
+        "reference_kind": "original-source-binary-marker-audit",
+    },
+    "mlmrl-vomebook-gongnongbing-10-marker-v1": {
+        "source_sha256": "694df25c2142e13cd79b460719e457916eda69a79c64d150d9ab2b7961772302",
+        "mode": "legacy-marker-strip",
+        "source_encoding": "gb18030",
+        "marker_hex": "f8fa0702cb35f501",
+        "marker_count": 1,
+        "marker_offsets": [1025],
+        "reference_url": "https://huggingface.co/datasets/VoiceOfML/VOMEBOOK/blob/7f338fb4af738ccd6e8353b90db9c16023497555/%E9%A9%AC%E5%88%97%E4%B9%8B%E5%A3%B0ebook%E5%B0%8F%E7%BB%84%E7%AC%AC%E4%BA%8C%E6%89%B9%E6%88%90%E6%9E%9C%E9%9B%86%E6%88%90%E8%B5%9E%E5%8A%A9%E9%83%A8%E5%88%86/jiang/%E4%B8%AD%E5%9B%BD%E7%A4%BE%E4%BC%9A%E4%B8%BB%E4%B9%89%E6%97%B6%E4%BB%A3%E7%9A%84%E6%95%99%E8%82%B2%E9%9D%A9%E5%91%BD%20%E7%A0%94%E7%A9%B6%E8%B5%84%E6%96%99%E9%9B%86%E6%88%90pdf%EF%BC%88%E8%BF%91800%E7%A7%8D%EF%BC%89/%E5%B7%A5%E5%86%9C%E5%85%B5%E5%A4%A7%E5%AD%A6%E7%94%9F/%E5%B7%A5%E5%86%9C%E5%85%B5%E5%AD%A6%E5%91%98%E7%9A%84%E4%BC%98%E7%A7%80%E4%BB%A3%E8%A1%A8----%E7%BA%AA%E5%B0%8F%E9%BE%99%E6%95%99%E6%8E%88.txt",
+        "reference_sha256": "694df25c2142e13cd79b460719e457916eda69a79c64d150d9ab2b7961772302",
+        "reference_kind": "original-source-binary-marker-audit",
+    },
+    "mlmrl-vomebook-gongnongbing-11-marker-v1": {
+        "source_sha256": "25b387a9dbc3c54758e3f1877f50f77a2b12c23493ad448e44cd8bb536f14bba",
+        "mode": "legacy-marker-strip",
+        "source_encoding": "gb18030",
+        "marker_hex": "f8fa0702cb35f501",
+        "marker_count": 15,
+        "marker_offsets": [1025, 2057, 3089, 4121, 5153, 6185, 7217, 8249, 9281, 10313, 11345, 12377, 13409, 14441, 15473],
+        "reference_url": "https://huggingface.co/datasets/VoiceOfML/VOMEBOOK/blob/7f338fb4af738ccd6e8353b90db9c16023497555/%E9%A9%AC%E5%88%97%E4%B9%8B%E5%A3%B0ebook%E5%B0%8F%E7%BB%84%E7%AC%AC%E4%BA%8C%E6%89%B9%E6%88%90%E6%9E%9C%E9%9B%86%E6%88%90%E8%B5%9E%E5%8A%A9%E9%83%A8%E5%88%86/jiang/%E4%B8%AD%E5%9B%BD%E7%A4%BE%E4%BC%9A%E4%B8%BB%E4%B9%89%E6%97%B6%E4%BB%A3%E7%9A%84%E6%95%99%E8%82%B2%E9%9D%A9%E5%91%BD%20%E7%A0%94%E7%A9%B6%E8%B5%84%E6%96%99%E9%9B%86%E6%88%90pdf%EF%BC%88%E8%BF%91800%E7%A7%8D%EF%BC%89/%E5%B7%A5%E5%86%9C%E5%85%B5%E5%A4%A7%E5%AD%A6%E7%94%9F/%E5%B7%A5%E5%86%9C%E5%85%B5%E5%AD%A6%E5%91%98%E7%9A%84%E4%BC%98%E7%A7%80%E4%BB%A3%E8%A1%A8----%E9%82%93%E6%96%87%E5%AE%BD%E9%99%A2%E5%A3%AB.txt",
+        "reference_sha256": "25b387a9dbc3c54758e3f1877f50f77a2b12c23493ad448e44cd8bb536f14bba",
+        "reference_kind": "original-source-binary-marker-audit",
+    },
+    "mlmrl-vomebook-gongnongbing-12-marker-v1": {
+        "source_sha256": "a147021796a7eb084844d6be7e958e7c4ec78cffb5b2464baa043b05e1280192",
+        "mode": "legacy-marker-strip",
+        "source_encoding": "gb18030",
+        "marker_hex": "f8fa0702cb35f501",
+        "marker_count": 1,
+        "marker_offsets": [1025],
+        "reference_url": "https://huggingface.co/datasets/VoiceOfML/VOMEBOOK/blob/7f338fb4af738ccd6e8353b90db9c16023497555/%E9%A9%AC%E5%88%97%E4%B9%8B%E5%A3%B0ebook%E5%B0%8F%E7%BB%84%E7%AC%AC%E4%BA%8C%E6%89%B9%E6%88%90%E6%9E%9C%E9%9B%86%E6%88%90%E8%B5%9E%E5%8A%A9%E9%83%A8%E5%88%86/jiang/%E4%B8%AD%E5%9B%BD%E7%A4%BE%E4%BC%9A%E4%B8%BB%E4%B9%89%E6%97%B6%E4%BB%A3%E7%9A%84%E6%95%99%E8%82%B2%E9%9D%A9%E5%91%BD%20%E7%A0%94%E7%A9%B6%E8%B5%84%E6%96%99%E9%9B%86%E6%88%90pdf%EF%BC%88%E8%BF%91800%E7%A7%8D%EF%BC%89/%E5%B7%A5%E5%86%9C%E5%85%B5%E5%A4%A7%E5%AD%A6%E7%94%9F/%E5%B7%A5%E5%86%9C%E5%85%B5%E5%AD%A6%E5%91%98%E7%9A%84%E4%BC%98%E7%A7%80%E4%BB%A3%E8%A1%A8----%E9%99%88%E8%B5%9B%E5%A8%9F%E9%99%A2%E5%A3%AB.txt",
+        "reference_sha256": "a147021796a7eb084844d6be7e958e7c4ec78cffb5b2464baa043b05e1280192",
+        "reference_kind": "original-source-binary-marker-audit",
+    },
+    "mlmrl-vomebook-gongnongbing-13-marker-v1": {
+        "source_sha256": "0a1e6651853877c4aa225b7d76fab862222f68f1a5c6c84c6476ab8a17c5d156",
+        "mode": "legacy-marker-strip",
+        "source_encoding": "gb18030",
+        "marker_hex": "f8fa0702cb35f501",
+        "marker_count": 3,
+        "marker_offsets": [1025, 2057, 3089],
+        "reference_url": "https://huggingface.co/datasets/VoiceOfML/VOMEBOOK/blob/7f338fb4af738ccd6e8353b90db9c16023497555/%E9%A9%AC%E5%88%97%E4%B9%8B%E5%A3%B0ebook%E5%B0%8F%E7%BB%84%E7%AC%AC%E4%BA%8C%E6%89%B9%E6%88%90%E6%9E%9C%E9%9B%86%E6%88%90%E8%B5%9E%E5%8A%A9%E9%83%A8%E5%88%86/jiang/%E4%B8%AD%E5%9B%BD%E7%A4%BE%E4%BC%9A%E4%B8%BB%E4%B9%89%E6%97%B6%E4%BB%A3%E7%9A%84%E6%95%99%E8%82%B2%E9%9D%A9%E5%91%BD%20%E7%A0%94%E7%A9%B6%E8%B5%84%E6%96%99%E9%9B%86%E6%88%90pdf%EF%BC%88%E8%BF%91800%E7%A7%8D%EF%BC%89/%E5%B7%A5%E5%86%9C%E5%85%B5%E5%A4%A7%E5%AD%A6%E7%94%9F/%E5%B7%A5%E5%86%9C%E5%85%B5%E5%AD%A6%E5%91%98%E7%9A%84%E4%BC%98%E7%A7%80%E4%BB%A3%E8%A1%A8----%E9%9F%A9%E5%BE%B7%E6%B0%91%E6%95%99%E6%8E%88.txt",
+        "reference_sha256": "0a1e6651853877c4aa225b7d76fab862222f68f1a5c6c84c6476ab8a17c5d156",
+        "reference_kind": "original-source-binary-marker-audit",
+    },
+    "mlmrl-vomebook-gongnongbing-14-marker-v1": {
+        "source_sha256": "acb250d436746b1ab8c36691b153818099dc5920637503491d37145db6c1ed3a",
+        "mode": "legacy-marker-strip",
+        "source_encoding": "gb18030",
+        "marker_hex": "f8fa0702cb35f501",
+        "marker_count": 2,
+        "marker_offsets": [1025, 2057],
+        "reference_url": "https://huggingface.co/datasets/VoiceOfML/VOMEBOOK/blob/7f338fb4af738ccd6e8353b90db9c16023497555/%E9%A9%AC%E5%88%97%E4%B9%8B%E5%A3%B0ebook%E5%B0%8F%E7%BB%84%E7%AC%AC%E4%BA%8C%E6%89%B9%E6%88%90%E6%9E%9C%E9%9B%86%E6%88%90%E8%B5%9E%E5%8A%A9%E9%83%A8%E5%88%86/jiang/%E4%B8%AD%E5%9B%BD%E7%A4%BE%E4%BC%9A%E4%B8%BB%E4%B9%89%E6%97%B6%E4%BB%A3%E7%9A%84%E6%95%99%E8%82%B2%E9%9D%A9%E5%91%BD%20%E7%A0%94%E7%A9%B6%E8%B5%84%E6%96%99%E9%9B%86%E6%88%90pdf%EF%BC%88%E8%BF%91800%E7%A7%8D%EF%BC%89/%E5%B7%A5%E5%86%9C%E5%85%B5%E5%A4%A7%E5%AD%A6%E7%94%9F/%E5%B7%A5%E5%86%9C%E5%85%B5%E5%AD%A6%E5%91%98%E7%9A%84%E4%BC%98%E7%A7%80%E4%BB%A3%E8%A1%A8----%E9%BB%84%E5%A5%87%E5%B8%86.txt",
+        "reference_sha256": "acb250d436746b1ab8c36691b153818099dc5920637503491d37145db6c1ed3a",
+        "reference_kind": "original-source-binary-marker-audit",
+    },
+    "mlmrl-vomebook-gongnongbing-15-marker-v1": {
+        "source_sha256": "0131979d3baaf2a783b8888ba7f12797220f043f6d4bb30e2525b3724dabe4e3",
+        "mode": "legacy-marker-strip",
+        "source_encoding": "gb18030",
+        "marker_hex": "f8fa0702cb35f501",
+        "marker_count": 3,
+        "marker_offsets": [1025, 2057, 3089],
+        "reference_url": "https://huggingface.co/datasets/VoiceOfML/VOMEBOOK/blob/7f338fb4af738ccd6e8353b90db9c16023497555/%E9%A9%AC%E5%88%97%E4%B9%8B%E5%A3%B0ebook%E5%B0%8F%E7%BB%84%E7%AC%AC%E4%BA%8C%E6%89%B9%E6%88%90%E6%9E%9C%E9%9B%86%E6%88%90%E8%B5%9E%E5%8A%A9%E9%83%A8%E5%88%86/jiang/%E4%B8%AD%E5%9B%BD%E7%A4%BE%E4%BC%9A%E4%B8%BB%E4%B9%89%E6%97%B6%E4%BB%A3%E7%9A%84%E6%95%99%E8%82%B2%E9%9D%A9%E5%91%BD%20%E7%A0%94%E7%A9%B6%E8%B5%84%E6%96%99%E9%9B%86%E6%88%90pdf%EF%BC%88%E8%BF%91800%E7%A7%8D%EF%BC%89/%E5%B7%A5%E5%86%9C%E5%85%B5%E5%A4%A7%E5%AD%A6%E7%94%9F/%E5%B7%A5%E5%86%9C%E5%85%B5%E5%AD%A6%E5%91%98%E7%9A%84%E4%BC%98%E7%A7%80%E4%BB%A3%E8%A1%A8%EF%BC%8C%E7%A7%91%E5%AD%A6%E7%BD%91%E5%8D%9A%E4%B8%BB----%E4%BD%95%E8%A3%95%E6%B0%91%E6%95%99%E6%8E%88.txt",
+        "reference_sha256": "0131979d3baaf2a783b8888ba7f12797220f043f6d4bb30e2525b3724dabe4e3",
+        "reference_kind": "original-source-binary-marker-audit",
+    },
+    "mlmrl-vomebook-gongnongbing-16-marker-v1": {
+        "source_sha256": "d01011b638e17ef423aca80968277fcba133538bc955b833d23b43e504c6bd6e",
+        "mode": "legacy-marker-strip",
+        "source_encoding": "gb18030",
+        "marker_hex": "f8fa0702cb35f501",
+        "marker_count": 28,
+        "marker_offsets": [1025, 2057, 3089, 4121, 5153, 6185, 7217, 8249, 9281, 10313, 11345, 12377, 13409, 14441, 15473, 16505, 17537, 18569, 19601, 20633, 21665, 22697, 23729, 24761, 25793, 26825, 27857, 28889],
+        "reference_url": "https://huggingface.co/datasets/VoiceOfML/VOMEBOOK/blob/7f338fb4af738ccd6e8353b90db9c16023497555/%E9%A9%AC%E5%88%97%E4%B9%8B%E5%A3%B0ebook%E5%B0%8F%E7%BB%84%E7%AC%AC%E4%BA%8C%E6%89%B9%E6%88%90%E6%9E%9C%E9%9B%86%E6%88%90%E8%B5%9E%E5%8A%A9%E9%83%A8%E5%88%86/jiang/%E4%B8%AD%E5%9B%BD%E7%A4%BE%E4%BC%9A%E4%B8%BB%E4%B9%89%E6%97%B6%E4%BB%A3%E7%9A%84%E6%95%99%E8%82%B2%E9%9D%A9%E5%91%BD%20%E7%A0%94%E7%A9%B6%E8%B5%84%E6%96%99%E9%9B%86%E6%88%90pdf%EF%BC%88%E8%BF%91800%E7%A7%8D%EF%BC%89/%E5%B7%A5%E5%86%9C%E5%85%B5%E5%A4%A7%E5%AD%A6%E7%94%9F/%E5%B7%A5%E5%86%9C%E5%85%B5%E5%AD%A6%E5%91%98%E9%AB%98%E9%BB%98%E6%B3%A2%EF%BC%9A%E6%96%87%E9%9D%A9%E5%8D%81%E5%B9%B4%E6%98%AF%E9%BB%84%E9%87%91%E6%97%B6%E6%9C%9F.txt",
+        "reference_sha256": "d01011b638e17ef423aca80968277fcba133538bc955b833d23b43e504c6bd6e",
+        "reference_kind": "original-source-binary-marker-audit",
+    },
+    "mlmrl-vomebook-gongnongbing-17-marker-v1": {
+        "source_sha256": "5b857ec40715e55a451cedf59bbd08b0d14ef1bc46c1226cc3447db8ba653a12",
+        "mode": "legacy-marker-strip",
+        "source_encoding": "gb18030",
+        "marker_hex": "f8fa0702cb35f501",
+        "marker_count": 1,
+        "marker_offsets": [1025],
+        "reference_url": "https://huggingface.co/datasets/VoiceOfML/VOMEBOOK/blob/7f338fb4af738ccd6e8353b90db9c16023497555/%E9%A9%AC%E5%88%97%E4%B9%8B%E5%A3%B0ebook%E5%B0%8F%E7%BB%84%E7%AC%AC%E4%BA%8C%E6%89%B9%E6%88%90%E6%9E%9C%E9%9B%86%E6%88%90%E8%B5%9E%E5%8A%A9%E9%83%A8%E5%88%86/jiang/%E4%B8%AD%E5%9B%BD%E7%A4%BE%E4%BC%9A%E4%B8%BB%E4%B9%89%E6%97%B6%E4%BB%A3%E7%9A%84%E6%95%99%E8%82%B2%E9%9D%A9%E5%91%BD%20%E7%A0%94%E7%A9%B6%E8%B5%84%E6%96%99%E9%9B%86%E6%88%90pdf%EF%BC%88%E8%BF%91800%E7%A7%8D%EF%BC%89/%E5%B7%A5%E5%86%9C%E5%85%B5%E5%A4%A7%E5%AD%A6%E7%94%9F/%E5%B7%A5%E5%86%9C%E5%85%B5%E5%AD%A6%E5%91%98%E9%AD%8F%E6%89%BF%E6%80%9D.txt",
+        "reference_sha256": "5b857ec40715e55a451cedf59bbd08b0d14ef1bc46c1226cc3447db8ba653a12",
+        "reference_kind": "original-source-binary-marker-audit",
+    },
 }
 
 
@@ -389,6 +576,70 @@ def normalize_utf8(raw: bytes, *, hint: str = "", encoding: str | None = None,
                     "removed_controls": len(offsets),
                     "original_characters": len(source_text),
                     "original_bytes": len(raw),
+                    "replacement_bytes": len(text.encode("utf-8")),
+                    "reference_url": repair["reference_url"],
+                    "reference_sha256": repair["reference_sha256"],
+                    "reference_kind": repair.get("reference_kind", ""),
+                },
+            }
+            return normalized, metadata
+        if repair.get("mode") == "legacy-marker-strip":
+            # A fixed binary marker was inserted into an otherwise complete
+            # legacy text. Only the exact reviewed marker occurrences are
+            # removed; the cleaned bytes must strict-decode and round-trip.
+            source_encoding_name = repair.get("source_encoding")
+            if not isinstance(source_encoding_name, str):
+                raise TextEncodingError("reviewed marker strip has no approved source encoding")
+            try:
+                expected_codec = codecs.lookup(source_encoding_name).name
+            except LookupError as error:
+                raise TextEncodingError("reviewed marker strip source encoding is unknown") from error
+            if expected_codec != "gb18030" or codec != expected_codec:
+                raise TextEncodingError("reviewed marker strip encoding differs from the approved recipe")
+            marker_hex = repair.get("marker_hex")
+            if not isinstance(marker_hex, str) or not re.fullmatch(r"(?:[0-9a-f]{2})+", marker_hex):
+                raise TextEncodingError("reviewed binary marker is invalid")
+            marker = bytes.fromhex(marker_hex)
+            offsets = repair.get("marker_offsets")
+            if (not isinstance(offsets, list) or not offsets
+                    or any(type(offset) is not int for offset in offsets)
+                    or offsets != sorted(offsets) or len(set(offsets)) != len(offsets)
+                    or repair.get("marker_count") != len(offsets)):
+                raise TextEncodingError("reviewed binary marker offsets are invalid")
+            for offset in offsets:
+                if offset < 0 or offset + len(marker) > len(raw) or raw[offset:offset + len(marker)] != marker:
+                    raise TextEncodingError("reviewed binary marker differs from the approved offset")
+            if any(left + len(marker) > right for left, right in zip(offsets, offsets[1:])):
+                raise TextEncodingError("reviewed binary marker offsets overlap")
+            pieces, previous = [], 0
+            for offset in offsets:
+                pieces.append(raw[previous:offset])
+                previous = offset + len(marker)
+            pieces.append(raw[previous:])
+            clean = b"".join(pieces)
+            if raw.count(marker) != len(offsets) or len(clean) != len(raw) - len(marker) * len(offsets):
+                raise TextEncodingError("reviewed binary marker count differs from the approved recipe")
+            try:
+                text = validate_text(clean.decode("gb18030", errors="strict"))
+            except UnicodeDecodeError as error:
+                raise TextEncodingError("reviewed marker strip does not leave strict GB18030 text") from error
+            if text.encode("gb18030", errors="strict") != clean:
+                raise TextEncodingError("reviewed marker strip cleaned source does not round-trip")
+            normalized = UTF8_BOM + text.encode("utf-8", errors="strict")
+            if normalized.decode("utf-8-sig", errors="strict") != text:
+                raise TextEncodingError("UTF-8 verification failed")
+            metadata = {
+                "encoding": "utf-8", "bom": True, "profile": PROFILE,
+                "source_encoding": "gb18030", "encoding_decision": "explicit",
+                "characters": len(text), "reviewed_source_repair": reviewed_source_repair,
+                "source_roundtrip_verified": True,
+                "normalization_recipe": "strict-legacy-binary-marker-strip-v1",
+                "replaced_source_span": {
+                    "marker_hex": marker_hex,
+                    "marker_count": len(offsets),
+                    "marker_offsets": offsets,
+                    "original_bytes": len(raw),
+                    "cleaned_bytes": len(clean),
                     "replacement_bytes": len(text.encode("utf-8")),
                     "reference_url": repair["reference_url"],
                     "reference_sha256": repair["reference_sha256"],

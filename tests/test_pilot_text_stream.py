@@ -43,6 +43,14 @@ def control_repair_fixture(raw, codec, offsets):
             "reference_kind": "fixture"}
 
 
+def marker_repair_fixture(raw, marker, offsets):
+    return {"source_sha256": hashlib.sha256(raw).hexdigest(), "mode": "legacy-marker-strip",
+            "source_encoding": "gb18030", "marker_hex": marker.hex(),
+            "marker_count": len(offsets), "marker_offsets": offsets,
+            "reference_url": "https://example.invalid/review.html", "reference_sha256": "a" * 64,
+            "reference_kind": "fixture"}
+
+
 class TextNormalizationTests(unittest.TestCase):
     def test_unicode_boms_and_unmarked_utf16_preserve_complete_text(self):
         text = "中文🌼 literal\ufffd\r\nnext\tline\n"
@@ -252,6 +260,34 @@ class TextNormalizationTests(unittest.TestCase):
             with self.assertRaises(TextEncodingError):
                 normalize_utf8(legacy_raw, encoding="utf-8",
                                reviewed_source_repair="legacy-control-fixture")
+
+    def test_reviewed_legacy_marker_strip_removes_only_exact_markers(self):
+        marker = bytes.fromhex("f8fa0702cb35f501")
+        text = "工农兵学员正文一" + marker.decode("gb18030", errors="ignore") + "正文二"
+        # Build raw bytes directly so the fixture marker positions are exact.
+        raw = "工农兵学员正文一".encode("gb18030") + marker + "正文二".encode("gb18030")
+        offsets = [len("工农兵学员正文一".encode("gb18030"))]
+        fixture = marker_repair_fixture(raw, marker, offsets)
+        with patch.dict(REVIEWED_SOURCE_REPAIRS, {"marker-fixture": fixture}):
+            with self.assertRaises((UnicodeError, TextEncodingError)):
+                normalize_utf8(raw)
+            output, metadata = normalize_utf8(raw, encoding="gb18030", reviewed_source_repair="marker-fixture")
+            self.assertEqual(output.decode("utf-8-sig"), "工农兵学员正文一正文二")
+            self.assertEqual(metadata["source_encoding"], "gb18030")
+            self.assertEqual(metadata["normalization_recipe"], "strict-legacy-binary-marker-strip-v1")
+            self.assertEqual(metadata["replaced_source_span"]["marker_count"], 1)
+            self.assertEqual(metadata["replaced_source_span"]["marker_offsets"], offsets)
+            self.assertTrue(metadata["source_roundtrip_verified"])
+            with self.assertRaisesRegex(TextEncodingError, "SHA-256"):
+                normalize_utf8(raw + b"x", encoding="gb18030", reviewed_source_repair="marker-fixture")
+            for bad in ({**fixture, "marker_offsets": [offsets[0] + 1]},
+                        {**fixture, "marker_hex": "00"},
+                        {**fixture, "marker_count": 2}):
+                with self.subTest(bad=bad), self.assertRaises(TextEncodingError):
+                    with patch.dict(REVIEWED_SOURCE_REPAIRS, {"marker-fixture": bad}):
+                        normalize_utf8(raw, encoding="gb18030", reviewed_source_repair="marker-fixture")
+            with self.assertRaises(TextEncodingError):
+                normalize_utf8(raw, encoding="utf-8", reviewed_source_repair="marker-fixture")
 
     def test_source_repair_refuses_unknown_recipes_byte_drift_and_other_encodings(self):
         raw = b"A\0B"
