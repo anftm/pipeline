@@ -67,6 +67,103 @@ REVIEWED_SOURCE_REPAIRS = {
         "reference_url": "https://www.prisoncensorship.info/archive/etext/chinese/classics/jiangqing1966to1976/121-160/125.html",
         "reference_sha256": "90daefc2119814ff52a0dda96e1ca1d5eb93efb84b799e6b6cdd349f997867ea",
     },
+    # These seven 马恩全集 sources are strict UTF-8 text whose tails contain
+    # PDF image bytes decoded as text. Each reviewed recipe replaces one exact
+    # suffix with the illustrated-section captions found between the image
+    # streams; no image bytes are treated as text. The full original SHA and
+    # the exact suffix SHA pin both the source and the removed span, and
+    # build_one retains the complete original as provenance.
+    "mlmrl-teachers-vol17-binary-images-v1": {
+        "source_sha256": "f570cd4e65c6404b3b61e91ff796b08a29349241a39687c5e6487b578beea76c",
+        "mode": "suffix-strip",
+        "offset_chars": 537609,
+        "original_suffix_characters": 710971,
+        "original_suffix_sha256": "a8446bfb7df7c45389f50f98db44702460b73f72e9d426d0d320c0521e8435ba",
+        "replacement_text": "==========\n\n## 巴黎的包围（1870—1871年）…………………………………………………………………………………………234—235\n\n==========\n\n## 普法战争（1870—1871年）……………………………………………………………………………………………276—277\n\n==========\n\n## 巴黎公社战斗行动图………………………………………………………………………………………………………380—381\n\n",
+        "replacement_sha256": "4f3a3b9e0e8e0cab9f820b7f90dda66b20308d2c9820002046a5ff2d6795466d",
+        "reference_url": "https://huggingface.co/datasets/VoiceOfML/Teachers/blob/6a915db1d3571c4fdd32d409e06e40704a9fd28f/A1%20%E9%A9%AC%E5%85%8B%E6%80%9D%26%E6%81%A9%E6%A0%BC%E6%96%AF/01-05%20%E9%A9%AC%E5%85%8B%E6%80%9D%E6%81%A9%E6%A0%BC%E6%96%AF%E5%85%A8%E9%9B%86%20%E6%96%87%E5%BA%93%E7%89%88/%E9%A9%AC%E6%81%A9%E5%85%A8%E9%9B%86%20%E7%AC%AC17%E5%8D%B7.txt",
+        "reference_sha256": "f570cd4e65c6404b3b61e91ff796b08a29349241a39687c5e6487b578beea76c",
+        "reference_kind": "original-source-binary-audit",
+        "image_spans": [{"start": 537609, "end": 709429, "characters": 171820}, {"start": 709504, "end": 825825, "characters": 116321}, {"start": 825900, "end": 1144775, "characters": 318875}, {"start": 1144847, "end": 1248580, "characters": 103733}],
+    },
+    "mlmrl-teachers-vol19-binary-images-v1": {
+        "source_sha256": "89ce21133aa4514e8a20893346387b22ec360693bbe8917e4cee968dc44a6c16",
+        "mode": "suffix-strip",
+        "offset_chars": 458527,
+        "original_suffix_characters": 311608,
+        "original_suffix_sha256": "08826549e28e9e1cac4e3086c89302763a3a0d58e639b274752b81fa6b4c4d1a",
+        "replacement_text": "==========\n\n## 弗·恩格斯“法兰克方言”一文中的日耳曼方言图………………………………………………………………………580—581\n\n",
+        "replacement_sha256": "c402dba73efd6b8bde0575d53ba5b01a9839bc3bf6e675454c4a41a3c8887486",
+        "reference_url": "https://huggingface.co/datasets/VoiceOfML/Teachers/blob/6a915db1d3571c4fdd32d409e06e40704a9fd28f/A1%20%E9%A9%AC%E5%85%8B%E6%80%9D%26%E6%81%A9%E6%A0%BC%E6%96%AF/01-05%20%E9%A9%AC%E5%85%8B%E6%80%9D%E6%81%A9%E6%A0%BC%E6%96%AF%E5%85%A8%E9%9B%86%20%E6%96%87%E5%BA%93%E7%89%88/%E9%A9%AC%E6%81%A9%E5%85%A8%E9%9B%86%20%E7%AC%AC19%E5%8D%B7.txt",
+        "reference_sha256": "89ce21133aa4514e8a20893346387b22ec360693bbe8917e4cee968dc44a6c16",
+        "reference_kind": "original-source-binary-audit",
+        "image_spans": [{"start": 458527, "end": 607840, "characters": 149313}, {"start": 607913, "end": 770135, "characters": 162222}],
+    },
+    "mlmrl-teachers-vol27-binary-images-v1": {
+        "source_sha256": "976194efce438bbfb6f4d14cf997f92a8c589d86c3dc5ea7db64f3e4e07918c5",
+        "mode": "suffix-strip",
+        "offset_chars": 514664,
+        "original_suffix_characters": 87240,
+        "original_suffix_sha256": "6c0c5aedf14faa062c58ea9fce4fb8050583d3f2ca009475e521dbbb36822c20",
+        "replacement_text": "==========\n\n## 弗·恩格斯所作的对普鲁士国王弗里德里希一威廉四世的讽刺画(1848年)…………………………………508-509\n\n",
+        "replacement_sha256": "5c845d75c6779b327bba16c2030eb925d3475d0c9685637d57e91f3e7c8f3a53",
+        "reference_url": "https://huggingface.co/datasets/VoiceOfML/Teachers/blob/6a915db1d3571c4fdd32d409e06e40704a9fd28f/A1%20%E9%A9%AC%E5%85%8B%E6%80%9D%26%E6%81%A9%E6%A0%BC%E6%96%AF/01-05%20%E9%A9%AC%E5%85%8B%E6%80%9D%E6%81%A9%E6%A0%BC%E6%96%AF%E5%85%A8%E9%9B%86%20%E6%96%87%E5%BA%93%E7%89%88/%E9%A9%AC%E6%81%A9%E5%85%A8%E9%9B%86%20%E7%AC%AC27%E5%8D%B7.txt",
+        "reference_sha256": "976194efce438bbfb6f4d14cf997f92a8c589d86c3dc5ea7db64f3e4e07918c5",
+        "reference_kind": "original-source-binary-audit",
+        "image_spans": [{"start": 514664, "end": 570053, "characters": 55389}, {"start": 570125, "end": 601904, "characters": 31779}],
+    },
+    "mlmrl-teachers-vol29-binary-images-v1": {
+        "source_sha256": "b8941a33a36f8204b3b8c5e15505616109024b99b9760c4f6967e097a066e772",
+        "mode": "suffix-strip",
+        "offset_chars": 528318,
+        "original_suffix_characters": 96278,
+        "original_suffix_sha256": "01bade35a88a407800c8cb9123368292e0829085c780db21658ee2d66472f28e",
+        "replacement_text": "",
+        "replacement_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "reference_url": "https://huggingface.co/datasets/VoiceOfML/Teachers/blob/6a915db1d3571c4fdd32d409e06e40704a9fd28f/A1%20%E9%A9%AC%E5%85%8B%E6%80%9D%26%E6%81%A9%E6%A0%BC%E6%96%AF/01-05%20%E9%A9%AC%E5%85%8B%E6%80%9D%E6%81%A9%E6%A0%BC%E6%96%AF%E5%85%A8%E9%9B%86%20%E6%96%87%E5%BA%93%E7%89%88/%E9%A9%AC%E6%81%A9%E5%85%A8%E9%9B%86%20%E7%AC%AC29%E5%8D%B7.txt",
+        "reference_sha256": "b8941a33a36f8204b3b8c5e15505616109024b99b9760c4f6967e097a066e772",
+        "reference_kind": "original-source-binary-audit",
+        "image_spans": [{"start": 528318, "end": 624596, "characters": 96278}],
+    },
+    "mlmrl-teachers-vol30-binary-images-v1": {
+        "source_sha256": "7fff85931cb404780097a3d5650396e64cfdfe0d8e0b8814ed76a95b12d28998",
+        "mode": "suffix-strip",
+        "offset_chars": 559830,
+        "original_suffix_characters": 61440,
+        "original_suffix_sha256": "07026424e1d0d94729fde5cbee21fd2983f9be11068dff38879b6a6ca9478043",
+        "replacement_text": "",
+        "replacement_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "reference_url": "https://huggingface.co/datasets/VoiceOfML/Teachers/blob/6a915db1d3571c4fdd32d409e06e40704a9fd28f/A1%20%E9%A9%AC%E5%85%8B%E6%80%9D%26%E6%81%A9%E6%A0%BC%E6%96%AF/01-05%20%E9%A9%AC%E5%85%8B%E6%80%9D%E6%81%A9%E6%A0%BC%E6%96%AF%E5%85%A8%E9%9B%86%20%E6%96%87%E5%BA%93%E7%89%88/%E9%A9%AC%E6%81%A9%E5%85%A8%E9%9B%86%20%E7%AC%AC30%E5%8D%B7.txt",
+        "reference_sha256": "7fff85931cb404780097a3d5650396e64cfdfe0d8e0b8814ed76a95b12d28998",
+        "reference_kind": "original-source-binary-audit",
+        "image_spans": [{"start": 559830, "end": 621270, "characters": 61440}],
+    },
+    "mlmrl-teachers-vol31-binary-images-v1": {
+        "source_sha256": "a67ded24b55b65dd68d858147932bfea48cc2cd1b25eb2a827c6a611b9206705",
+        "mode": "suffix-strip",
+        "offset_chars": 572724,
+        "original_suffix_characters": 60989,
+        "original_suffix_sha256": "74ba6b8affcc2e77ff8e3aabbae23e184e210669bd89bf2ce89153d9628aae8e",
+        "replacement_text": "",
+        "replacement_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "reference_url": "https://huggingface.co/datasets/VoiceOfML/Teachers/blob/6a915db1d3571c4fdd32d409e06e40704a9fd28f/A1%20%E9%A9%AC%E5%85%8B%E6%80%9D%26%E6%81%A9%E6%A0%BC%E6%96%AF/01-05%20%E9%A9%AC%E5%85%8B%E6%80%9D%E6%81%A9%E6%A0%BC%E6%96%AF%E5%85%A8%E9%9B%86%20%E6%96%87%E5%BA%93%E7%89%88/%E9%A9%AC%E6%81%A9%E5%85%A8%E9%9B%86%20%E7%AC%AC31%E5%8D%B7.txt",
+        "reference_sha256": "a67ded24b55b65dd68d858147932bfea48cc2cd1b25eb2a827c6a611b9206705",
+        "reference_kind": "original-source-binary-audit",
+        "image_spans": [{"start": 572724, "end": 633713, "characters": 60989}],
+    },
+    "mlmrl-teachers-vol43-binary-images-v1": {
+        "source_sha256": "de22762fd4c85e4346b10982c3537e41585a533011fc8e5c38b90897ebcd8880",
+        "mode": "suffix-strip",
+        "offset_chars": 429451,
+        "original_suffix_characters": 373854,
+        "original_suffix_sha256": "5673aa0cdf23e5469ff0d00119d9a0f179537854b63f298d5cc40291f7e63151",
+        "replacement_text": "",
+        "replacement_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "reference_url": "https://huggingface.co/datasets/VoiceOfML/Teachers/blob/6a915db1d3571c4fdd32d409e06e40704a9fd28f/A1%20%E9%A9%AC%E5%85%8B%E6%80%9D%26%E6%81%A9%E6%A0%BC%E6%96%AF/01-05%20%E9%A9%AC%E5%85%8B%E6%80%9D%E6%81%A9%E6%A0%BC%E6%96%AF%E5%85%A8%E9%9B%86%20%E6%96%87%E5%BA%93%E7%89%88/%E9%A9%AC%E6%81%A9%E5%85%A8%E9%9B%86%20%E7%AC%AC43%E5%8D%B7.txt",
+        "reference_sha256": "de22762fd4c85e4346b10982c3537e41585a533011fc8e5c38b90897ebcd8880",
+        "reference_kind": "original-source-binary-audit",
+        "image_spans": [{"start": 429451, "end": 803305, "characters": 373854}],
+    },
 }
 
 
@@ -202,6 +299,52 @@ def normalize_utf8(raw: bytes, *, hint: str = "", encoding: str | None = None,
         repair = REVIEWED_SOURCE_REPAIRS[reviewed_source_repair]
         if hashlib.sha256(raw).hexdigest() != repair["source_sha256"]:
             raise TextEncodingError("source differs from the complete approved repair SHA-256")
+        if repair.get("mode") == "suffix-strip":
+            # The reviewed tail is non-text image data decoded as text. The
+            # replacement retains only the caption sections between images.
+            if codec != "utf-8" or raw.startswith(UTF8_BOM):
+                raise TextEncodingError("reviewed suffix strip requires strict UTF-8 without a BOM")
+            try:
+                source_text = raw.decode("utf-8", errors="strict")
+            except UnicodeDecodeError as error:
+                raise TextEncodingError("reviewed suffix strip requires strict UTF-8") from error
+            offset_chars = repair.get("offset_chars")
+            if type(offset_chars) is not int or not 0 <= offset_chars <= len(source_text):
+                raise TextEncodingError("reviewed suffix offset is invalid")
+            suffix = source_text[offset_chars:]
+            if (len(suffix) != repair.get("original_suffix_characters")
+                    or hashlib.sha256(suffix.encode("utf-8")).hexdigest() != repair.get("original_suffix_sha256")):
+                raise TextEncodingError("reviewed source suffix differs from the approved span")
+            replacement_source = repair.get("replacement_text")
+            if not isinstance(replacement_source, str):
+                raise TextEncodingError("reviewed suffix replacement is invalid")
+            replacement_text = validate_text(replacement_source)
+            if hashlib.sha256(replacement_text.encode("utf-8")).hexdigest() != repair.get("replacement_sha256"):
+                raise TextEncodingError("reviewed suffix replacement differs from the approved SHA-256")
+            text = validate_text(source_text[:offset_chars] + replacement_text)
+            normalized = UTF8_BOM + text.encode("utf-8", errors="strict")
+            if normalized.decode("utf-8-sig", errors="strict") != text:
+                raise TextEncodingError("UTF-8 verification failed")
+            metadata = {
+                "encoding": "utf-8", "bom": True, "profile": PROFILE,
+                "source_encoding": "utf-8", "encoding_decision": "explicit",
+                "characters": len(text), "reviewed_source_repair": reviewed_source_repair,
+                "source_roundtrip_verified": True,
+                "normalization_recipe": "strict-utf8-reviewed-source-suffix-strip-v1",
+                "replaced_source_span": {
+                    "offset_chars": offset_chars,
+                    "original_characters": len(suffix),
+                    "original_bytes": len(suffix.encode("utf-8")),
+                    "original_suffix_sha256": repair["original_suffix_sha256"],
+                    "replacement_bytes": len(replacement_text.encode("utf-8")),
+                    "replacement_text": replacement_text,
+                    "image_spans": repair.get("image_spans", []),
+                    "reference_url": repair["reference_url"],
+                    "reference_sha256": repair["reference_sha256"],
+                    "reference_kind": repair.get("reference_kind", ""),
+                },
+            }
+            return normalized, metadata
         raw.decode("utf-8", errors="strict")
         offset = repair["offset"]
         old_span = repair["original_text"].encode("utf-8", errors="strict")

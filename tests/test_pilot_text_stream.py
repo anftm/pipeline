@@ -21,6 +21,19 @@ def repair_fixture(raw, old_span, replacement):
             "reference_url": "https://example.invalid/review.html", "reference_sha256": "a" * 64}
 
 
+def suffix_repair_fixture(raw, offset_chars, replacement):
+    text = raw.decode("utf-8")
+    suffix = text[offset_chars:]
+    return {"source_sha256": hashlib.sha256(raw).hexdigest(), "mode": "suffix-strip",
+            "offset_chars": offset_chars, "original_suffix_characters": len(suffix),
+            "original_suffix_sha256": hashlib.sha256(suffix.encode()).hexdigest(),
+            "replacement_text": replacement,
+            "replacement_sha256": hashlib.sha256(replacement.encode()).hexdigest(),
+            "reference_url": "https://example.invalid/review.html", "reference_sha256": "a" * 64,
+            "reference_kind": "fixture",
+            "image_spans": [{"start": offset_chars, "end": len(text), "characters": len(suffix)}]}
+
+
 class TextNormalizationTests(unittest.TestCase):
     def test_unicode_boms_and_unmarked_utf16_preserve_complete_text(self):
         text = "中文🌼 literal\ufffd\r\nnext\tline\n"
@@ -148,6 +161,49 @@ class TextNormalizationTests(unittest.TestCase):
                 retained = output.decode("utf-8-sig").encode(metadata["source_encoding"])
                 offset = fixture["offset"]
                 self.assertEqual(retained[:offset] + damaged.encode() + retained[offset + len(replacement.encode()):], raw)
+
+    def test_reviewed_suffix_strip_keeps_text_and_captions_only(self):
+        prefix = "完整前文\n\n## 图一说明\n\n"
+        image1 = "\x01\x02JFIF binary-ish payload\x1f"
+        caption = "==========\n\n## 图二说明\n\n"
+        image2 = "\x03\x04JFIF second payload\x1e"
+        text = prefix + image1 + caption + image2
+        raw = text.encode()
+        offset = len(prefix)
+        fixture = suffix_repair_fixture(raw, offset, caption)
+        with patch.dict(REVIEWED_SOURCE_REPAIRS, {"suffix-fixture": fixture}):
+            with self.assertRaises(TextEncodingError):
+                normalize_utf8(raw)
+            output, metadata = normalize_utf8(raw, encoding="utf-8", reviewed_source_repair="suffix-fixture")
+            self.assertEqual(output.decode("utf-8-sig"), prefix + caption)
+            self.assertEqual(metadata["reviewed_source_repair"], "suffix-fixture")
+            self.assertEqual(metadata["normalization_recipe"], "strict-utf8-reviewed-source-suffix-strip-v1")
+            self.assertTrue(metadata["source_roundtrip_verified"])
+            self.assertEqual(metadata["replaced_source_span"]["offset_chars"], offset)
+            self.assertEqual(metadata["replaced_source_span"]["original_characters"], len(text) - offset)
+            self.assertEqual(metadata["replaced_source_span"]["replacement_text"], caption)
+            self.assertEqual(metadata["replaced_source_span"]["image_spans"],
+                             [{"start": offset, "end": len(text), "characters": len(text) - offset}])
+            cleaned = output.decode("utf-8-sig")
+            self.assertEqual(cleaned[:offset] + text[offset:], text)
+            with self.assertRaisesRegex(TextEncodingError, "SHA-256"):
+                normalize_utf8(raw + b"x", encoding="utf-8", reviewed_source_repair="suffix-fixture")
+            for bad_offset in (offset + 1, len(text) + 1, -1, True):
+                with self.subTest(bad_offset=bad_offset), self.assertRaises(TextEncodingError):
+                    with patch.dict(REVIEWED_SOURCE_REPAIRS,
+                                    {"suffix-fixture": {**fixture, "offset_chars": bad_offset}}):
+                        normalize_utf8(raw, encoding="utf-8", reviewed_source_repair="suffix-fixture")
+            with patch.dict(REVIEWED_SOURCE_REPAIRS,
+                            {"suffix-fixture": {**fixture, "replacement_sha256": "0" * 64}}):
+                with self.assertRaisesRegex(TextEncodingError, "replacement"):
+                    normalize_utf8(raw, encoding="utf-8", reviewed_source_repair="suffix-fixture")
+            with patch.dict(REVIEWED_SOURCE_REPAIRS,
+                            {"suffix-fixture": {**fixture, "replacement_text": "bad\x00"}}):
+                with self.assertRaises(TextEncodingError):
+                    normalize_utf8(raw, encoding="utf-8", reviewed_source_repair="suffix-fixture")
+            for encoding in (None, "utf-8-sig", "gb18030"):
+                with self.subTest(encoding=encoding), self.assertRaises(TextEncodingError):
+                    normalize_utf8(raw, encoding=encoding, reviewed_source_repair="suffix-fixture")
 
     def test_source_repair_refuses_unknown_recipes_byte_drift_and_other_encodings(self):
         raw = b"A\0B"
