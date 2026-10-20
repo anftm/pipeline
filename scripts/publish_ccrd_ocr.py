@@ -213,7 +213,18 @@ def publish(store, root, path, sha256, base_metadata_sha256, expected_parent, *,
         verify_additive_update(store, previous, candidate)
     release_ref = resource(path, files[path])
     retained = [resource(key, value) for key, value in sorted(files.items())]
-    for export in candidate['exports']:
+    previous_exports = {}
+    if previous:
+        old_release = json.loads(verified_remote(store, previous['release']))
+        for old_ref in old_release['exports']:
+            old_export = json.loads(verified_remote(store, old_ref))
+            previous_exports[old_export['book_id']] = old_ref
+    for export_ref, export in zip(candidate['manifest']['exports'], candidate['exports']):
+        # Unchanged exports were already fully protected and verified by the
+        # live release. Rechecking thousands of old Reader page objects on every
+        # additive batch made publication needlessly slow and could stall it.
+        if previous_exports.get(export['book_id']) == export_ref:
+            continue
         retained.extend(export['retained_reader_resources'])
     intent = {'version': 1, 'kind': 'ccrd-ocr-intent', 'generation': manifest['generation'],
               'status': 'uploading', 'expected_parent': parent, 'resources': retained}
