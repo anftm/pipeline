@@ -132,6 +132,10 @@ def batch_bucket_files_with_retry(bucket: str, additions: list[tuple[str, str]],
 def pdf_pages_sidecar_entry(path: str, result: dict | None = None, current: dict | None = None) -> dict:
     """Compact search-sidecar entry for a published PDF page stream."""
     entry = {"s": 2, "m": "p", "p": path, "b": PDF_PAGES_BUCKET}
+    if (result or {}).get("source_format") == "djvu":
+        # A native DjVu stream has no browser-renderable primary; never keep a
+        # derived PDF companion from an earlier generation as the hybrid source.
+        return entry
     document = (result or {}).get("reader_assets_path", "")
     bucket = (result or {}).get("reader_assets_bucket", "")
     if not document and current:
@@ -141,6 +145,15 @@ def pdf_pages_sidecar_entry(path: str, result: dict | None = None, current: dict
             document, bucket = current.get("pd", ""), current.get("pdb", "")
     if document.endswith("/document.pdf") and bucket in {PDF_PAGES_BUCKET, READER_ASSETS_BUCKET}:
         entry.update(pd=document, pdb=bucket)
+    return entry
+
+
+def apply_pdf_pages_sidecar_entry(entry: dict, path: str, result: dict) -> dict:
+    """Update ``entry`` in place with a page-stream route for ``result``."""
+    entry.update(pdf_pages_sidecar_entry(path, result, entry))
+    if result.get("source_format") == "djvu":
+        entry.pop("pd", None)
+        entry.pop("pdb", None)
     return entry
 
 
@@ -175,7 +188,7 @@ def merge_pdf_ocr_sidecar_entry(current: dict | None, result: dict) -> dict | No
         # PDF route.  OCR recognition can publish after rendering, so keeping
         # the PDF in `p` would make Reader ignore the already available pages.
         if (isinstance(page_manifest, dict) and isinstance(page_manifest.get("path"), str)):
-            entry.update(pdf_pages_sidecar_entry(page_manifest["path"], result, entry))
+            apply_pdf_pages_sidecar_entry(entry, page_manifest["path"], result)
         entry.update({
             "o": result["ocr_manifest"],
             "om": result.get("classification", ""),

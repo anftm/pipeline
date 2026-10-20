@@ -15,13 +15,14 @@ from huggingface_hub import HfApi, hf_hub_download
 from huggingface_hub.errors import HfHubHTTPError
 
 try:
-    from . import pdf_assets, pdf_ocr, lin_pdf_text, shared
+    from . import pdf_assets, pdf_ocr, lin_pdf_text, shared, djvu_pages
     from .reader_bucket import materialize as materialize_bucket
 except ImportError:
     import pdf_assets
     import pdf_ocr
     import lin_pdf_text
     import shared
+    import djvu_pages
     from reader_bucket import materialize as materialize_bucket
 
 
@@ -84,9 +85,33 @@ def plan(records: list[dict], workers: int = 4, current: dict | None = None,
         and current_files[item["key"]].get("source_revision") == item.get("source_revision")
     )]
     def inspect(item: dict) -> dict:
+        item = dict(item)
+        fallback = item.pop("_derived_fallback", None)
         try:
             source = download_source(item)
+            if item.get("source_format") == "djvu":
+                kind = djvu_pages.sniff(source)
+                if kind == "pdf":
+                    # Some ``.djvu`` uploads are PDFs. Keep them on the existing
+                    # derived-PDF path and record that decision on its render.
+                    if not fallback:
+                        raise ValueError("DjVu-named PDF awaits its derived PDF")
+                    item = {**fallback, "djvu_pdf_fallback": "pdf-magic",
+                            "djvu_source_revision": item["source_revision"],
+                            "djvu_source_sha256": shared.hash_file(source)[0]}
+                    source = download_source(item)
+                elif kind != "djvu":
+                    raise ValueError("DjVu source has neither DjVu nor PDF magic bytes")
             digest, size = shared.hash_file(source)
+            if item.get("source_format") == "djvu":
+                probe = djvu_pages.probe(source)
+                inspected = {**item, "source_sha256": digest, "source_bytes": size, "probe": probe,
+                             "reader_presentation": djvu_pages.reader_presentation(source),
+                             "page_count": probe["page_count"], "status": "planned",
+                             "profile": pdf_ocr.asset_profile(), "force_image_render": True}
+                if render_estimator is not None:
+                    inspected["_render_cost"] = render_estimator(inspected, source)
+                return inspected
             probe = lin_pdf_text.probe(source) if lin_pdf_text.applies(item) else pdf_ocr.probe_pdf(source)
             presentation = pdf_ocr.reader_presentation(source)
             inspected = {**item, "source_sha256": digest, "source_bytes": size, "probe": probe,

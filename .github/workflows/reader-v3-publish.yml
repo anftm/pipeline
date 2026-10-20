@@ -59,6 +59,7 @@ jobs:
           HF_INPUT_TOKEN: ${{ secrets.HF_INPUT_TOKEN }}
           GH_TOKEN: ${{ github.token }}
           READER_V3_PREVIEW_FIRST: ${{ vars.READER_V3_PREVIEW_FIRST || 'false' }}
+          READER_V3_DJVU_MIGRATION: ${{ vars.READER_V3_DJVU_MIGRATION || 'false' }}
           OCR_CORRECTION_API_BASE: ${{ secrets.OCR_CORRECTION_API_BASE }}
           OCR_CORRECTION_API_KEY: ${{ secrets.OCR_CORRECTION_API_KEY }}
           OPERATION: ${{ inputs.operation }}

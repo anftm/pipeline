@@ -105,10 +105,14 @@ def primary_spec(key, entry):
             or type(size) is not int or not 1 <= size <= 512 * 1024 * 1024):
         raise ValueError("PDF entry lacks bounded complete source metadata")
     spec = {"source_key": key, "source_sha256": source, "vector_previews": True}
+    djvu = entry.get("source_format") == "djvu"
+    if djvu and entry.get("source_kind", "upstream") != "upstream":
+        raise ValueError("native DjVu primary must be the pinned original")
+    suffix = ".djvu" if djvu else ".pdf"
     if entry.get("source_kind", "upstream") == "upstream":
         origin = {"repo": entry.get("repo"), "path": entry.get("path"), "revision": entry.get("source_revision")}
         if (not isinstance(origin["repo"], str) or not re.fullmatch(r"VoiceOfML/[A-Za-z0-9._-]+", origin["repo"])
-                or not isinstance(origin["path"], str) or not origin["path"].lower().endswith(".pdf")
+                or not isinstance(origin["path"], str) or not origin["path"].lower().endswith(suffix)
                 or any(p in {"", ".", ".."} for p in origin["path"].split("/"))
                 or "\\" in origin["path"] or any(ord(c) < 32 for c in origin["path"])
                 or not isinstance(origin["revision"], str) or not re.fullmatch(r"[0-9a-f]{40}", origin["revision"])
@@ -116,7 +120,10 @@ def primary_spec(key, entry):
             raise ValueError("original source is not pinned")
         root = f"objects/{source[:2]}/{source}/{text.digest({'primary': 1})[:16]}"
         spec.update(primary_source=origin, primary={"bucket": shared.PDF_PAGES_BUCKET,
-                    "path": root + "/document.pdf", "sha256": source, "bytes": size, "role": "runtime"})
+                    "path": root + "/document" + suffix, "sha256": source, "bytes": size, "role": "runtime"})
+        if djvu:
+            # Separate key only for DjVu, so existing PDF task identities are unchanged.
+            spec["primary_format"] = "djvu"
     else:
         url = urlsplit(entry.get("source_url", ""))
         match = re.fullmatch(r"/buckets/(vomebook/(?:pdf-pages-v2|reader-assets-v2))/resolve/(.+)", url.path)
@@ -309,6 +316,55 @@ def _can_replace_unusable_text(task, active):
                 and probe["same_primary"])
 
 
+DERIVED_MANIFEST = "reader-index/derived_pdf_manifest.json"
+
+
+def djvu_migration_enabled():
+    return os.environ.get("READER_V3_DJVU_MIGRATION", "false").strip().lower() in {"1", "true", "yes"}
+
+
+def _probe_djvu_migration(store, task, catalog):
+    """Cache whether a native DjVu task may replace its live derived-PDF reading.
+
+    Only the same source key, whose live primary is the recorded derived PDF of
+    exactly this DjVu original, with raw (never accepted/effective) text.
+    """
+    spec = task["spec"]
+    active = catalog["files"].get(spec["source_key"])
+    if (not djvu_migration_enabled() or spec.get("primary_format") != "djvu" or spec.get("preview_only")
+            or not active or active["source_sha256"] == spec["source_sha256"]):
+        task.pop("djvu_migration", None)
+        return
+    probe = task.get("djvu_migration")
+    if probe and probe.get("active_generation") == active["reading_generation"]:
+        return
+    try:
+        manifest = publication.v3.decode(publication.v3.verified_read(
+            active["resource"], lambda item: store.read_bytes(item["bucket"], item["path"])))
+        derived = json.loads(store.read_bytes(shared.PDF_PAGES_BUCKET, DERIVED_MANIFEST))
+        entries = [item for item in derived.get("files", []) if isinstance(item, dict)
+                   and item.get("key") == spec["source_key"] and item.get("source_extension") == "djvu"]
+        primary = manifest["primary"]["resource"]
+        derived_match = any(item.get("source_sha256") == spec["source_sha256"]
+                            and item.get("derived_sha256") == active["source_sha256"] == primary["sha256"]
+                            and item.get("derived_bytes") == primary["bytes"] for item in entries)
+        summary = _text_summary(store, manifest)
+    except (FileNotFoundError, ValueError, KeyError, TypeError):
+        task.pop("djvu_migration", None)
+        return
+    task["djvu_migration"] = {"active_generation": active["reading_generation"],
+                              "active_source_sha256": active["source_sha256"],
+                              "allowed": bool(derived_match and manifest["primary"]["kind"] == "pdf"
+                                              and not summary["accepted"] and summary["revision"] != "effective")}
+
+
+def _can_migrate_djvu(task, active):
+    probe = task.get("djvu_migration")
+    return bool(djvu_migration_enabled() and probe and probe.get("allowed") and active
+                and probe["active_generation"] == active["reading_generation"]
+                and probe["active_source_sha256"] == active["source_sha256"])
+
+
 def _eligible(state, catalog, budget, now, priority_source=None, *, skip_building=False, store=None):
     eligible = []
     for identity, task in state["tasks"].items():
@@ -316,9 +372,10 @@ def _eligible(state, catalog, budget, now, priority_source=None, *, skip_buildin
         active = catalog["files"].get(spec["source_key"])
         if store is not None:
             _probe_text(store, task, catalog)
+            _probe_djvu_migration(store, task, catalog)
         text_upgrade = (active and active["source_sha256"] == spec["source_sha256"]
                         and active.get("components", {}).get("text") == "pending" and not spec.get("preview_only"))
-        replacement = _can_replace_unusable_text(task, active)
+        replacement = _can_replace_unusable_text(task, active) or _can_migrate_djvu(task, active)
         if active and not text_upgrade and not replacement:
             # A different raw recipe must never replace accepted or already published text.
             task["status"] = "published" if active["source_sha256"] == spec["source_sha256"] else "protected"
@@ -390,10 +447,12 @@ def _promote(store, task):
                     and active["source_sha256"] == task["spec"]["source_sha256"]
                     and active.get("components", {}).get("text") == "pending"
                     and not task["spec"].get("preview_only"))
-    if active and not (text_upgrade or _can_replace_unusable_text(task, active)):
+    migration = _can_migrate_djvu(task, active)
+    if active and not (text_upgrade or _can_replace_unusable_text(task, active) or migration):
         task["status"] = "protected"
     else:
-        promoted = publication.promote(store, task["candidate"], pointer["generation"] if pointer else None, apply=True)
+        promoted = publication.promote(store, task["candidate"], pointer["generation"] if pointer else None, apply=True,
+                                       **({"replace_source": active["source_sha256"]} if migration else {}))
         task.update(status="published", catalog_generation=promoted["generation"])
     task.pop("retry_at", None)
     task.pop("error_type", None)

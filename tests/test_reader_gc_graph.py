@@ -132,6 +132,38 @@ class ReaderGcGraphTests(unittest.TestCase):
         self.assertTrue(report["graph_complete"], report["blockers"])
         self.assertTrue(all(not value["candidates"] for value in report["buckets"].values()))
 
+    def test_native_djvu_reading_primary_is_retained_and_orphan_collectable(self):
+        import hashlib, shutil, tempfile
+        from pathlib import Path
+        from scripts import pdf_reading_v3 as v3
+        from tests.test_djvu_pages import TOOLS, build_djvu
+        if not TOOLS:
+            self.skipTest("djvulibre command-line tools are not installed")
+        store = MemoryStore()
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            raw = build_djvu(work).read_bytes()
+            source = hashlib.sha256(raw).hexdigest()
+            primary = f"objects/{source[:2]}/{source}/{'b' * 16}/document.djvu"
+            orphan = f"objects/{source[:2]}/{source}/{'c' * 16}/document.djvu"
+            store.put(PDF, primary, raw)
+            store.put(PDF, orphan, raw)
+            ref = {"bucket": PDF, "path": primary, "sha256": source, "bytes": len(raw), "role": "runtime"}
+            read = lambda item: store.read_bytes(item["bucket"], item["path"])
+            bundle = work / "bundle"
+            spec = v3.generate_previews({"source_key": "book", "source_sha256": source, "primary": ref}, read, bundle)
+            for path in (item for item in bundle.rglob("*") if item.is_file()):
+                store.put(PDF, path.relative_to(bundle).as_posix(), path.read_bytes())
+            reading, _ = v3.build_reading(spec, read, bundle)
+            for path in (item for item in bundle.rglob("*") if item.is_file()):
+                store.put(PDF, path.relative_to(bundle).as_posix(), path.read_bytes())
+        store.put(ASSETS, SIDECAR, {"v": 1, "f": {"book": {"s": 2, "m": "p", "p": reading["path"], "b": PDF}}})
+        graph = gc.ReferenceGraph(store)
+        report = graph.build()
+        self.assertTrue(report["graph_complete"], report["blockers"])
+        self.assertIn((PDF, primary), graph.references)
+        self.assertIn(orphan, report["buckets"][PDF]["candidates"])
+
     def test_v3_text_review_retains_cross_bucket_evidence_and_raw_provenance(self):
         from scripts import pdf_reading_v3 as v3, pdf_text_layer as text
         from tests.test_pdf_text_layer import raw_page
