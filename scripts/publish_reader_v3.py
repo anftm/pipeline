@@ -213,6 +213,11 @@ def assert_stager(store):
         check(BUILD_PROTOCOL)
 
 
+def disposable_evidence(ref):
+    return (ref.get("role") == "review" and ref.get("bucket") == shared.PDF_OCR_INPUT_BUCKET
+            and "/ocr-input/" in ref.get("path", "") and ref["path"].endswith(".png"))
+
+
 class CandidateReader:
     def __init__(self, store, bundle=None, *, cache_bytes=128 * 1024 * 1024):
         self.store, self.bundle = store, bundle.resolve() if bundle else None
@@ -224,6 +229,15 @@ class CandidateReader:
         self.cleanup_cache = weakref.finalize(self, shutil.rmtree, self.cache_directory, ignore_errors=True)
         self.lock = threading.RLock()
         self.read_stats = {"remote_reads": 0, "cache_hits": 0, "remote_bytes": 0}
+
+    def pin(self, ref):
+        """Record an exact reference without reading its bytes."""
+        v3.resource(ref)
+        key = (ref["bucket"], ref["path"])
+        with self.lock:
+            if key in self.refs and any(self.refs[key][field] != ref[field] for field in ("sha256", "bytes")):
+                raise ValueError("conflicting candidate reference digests")
+            self.refs.setdefault(key, dict(ref))
 
     def close(self):
         self.cleanup_cache()
@@ -287,6 +301,11 @@ class CandidateReader:
             key = min(set(self.refs) - seen)
             seen.add(key)
             ref = self.refs[key]
+            if disposable_evidence(ref):
+                # Lossless OCR-input PNGs named as review evidence stay pinned in
+                # the candidate, but are never read: corrections render the page
+                # from the primary PDF, and retired inputs may be collected.
+                continue
             if key in self.verified and not ref["path"].endswith((".json", ".json.gz")):
                 # Its complete exact bytes were already checked by this reader.
                 # Binary media have no nested dependencies; retain the pin but
@@ -302,6 +321,8 @@ class CandidateReader:
                         if value["path"].startswith("reader-index/v3/"):
                             index_resource(value)
                             read_index(self.store, value)
+                        elif disposable_evidence(value):
+                            self.pin(value)
                         else:
                             self(value)
                     else:

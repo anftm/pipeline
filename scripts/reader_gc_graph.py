@@ -112,6 +112,7 @@ class ReferenceGraph:
         self.catalog = {}
         self.retired_roots = set()
         self.retired_inputs = set()
+        self.retired_input_roots = set()
         self.progress = progress or (lambda *args, **kwargs: None)
         self.workers = max(1, workers)
         self.max_rounds = max(1, max_rounds)
@@ -190,6 +191,13 @@ class ReferenceGraph:
                 self.blockers.add("invalid retired OCR input identity")
             else:
                 self.retired_inputs.add((PDF_OCR_INPUT_BUCKET, path))
+        for root, item in (state.get("retired_input_roots") or {}).items():
+            match = re.fullmatch(r"objects/[0-9a-f]{2}/([0-9a-f]{64})/[0-9a-f]{16}/ocr-input", root)
+            if (not match or not isinstance(item, dict) or item.get("root") != root
+                    or item.get("bucket") != PDF_OCR_INPUT_BUCKET or item.get("source_sha256") != match[1]):
+                self.blockers.add("invalid retired OCR input root")
+            else:
+                self.retired_input_roots.add(root)
         for path in state["retired_paths"]:
             if not isinstance(path, str) or not re.fullmatch(
                     r"reader-index/(?:v3/(?:promotions/[0-9a-f]{64}\.json|generations/[0-9a-f]{64}/catalog\.json|candidates/[0-9a-f]{64}\.json)|processing/(?:v3|djvu|office-chapters)-[0-9a-f]{32}\.json)", path):
@@ -216,6 +224,13 @@ class ReferenceGraph:
             self.origin = None
             self.active_external_pin = False
 
+    def input_retired(self, ref) -> bool:
+        if ref in self.retired_inputs:
+            return True
+        bucket, path = ref
+        return (bucket == PDF_OCR_INPUT_BUCKET and path.endswith(".png")
+                and path.rsplit("/", 1)[0] in self.retired_input_roots)
+
     def mark(self, bucket: str, path: str, *, tree: bool = False, external_pin: bool = False):
         if bucket not in BUCKETS:
             self.blockers.add(f"unsupported reference bucket: {bucket}")
@@ -227,7 +242,7 @@ class ReferenceGraph:
         ref = (bucket, path)
         if external_pin or self.active_external_pin:
             self.external_pins.add(ref)
-        if ref in self.retired_inputs and ref not in self.external_pins and not tree:
+        if self.input_retired(ref) and ref not in self.external_pins and not tree:
             return
         self.references.add(ref)
         if not tree and self.origin is not None:
@@ -341,8 +356,8 @@ class ReferenceGraph:
                 # until then the root's resources stay protected.
                 self.handoffs[self.origin or (bucket, origin)] = generation
             context = value.get("bucket")
-            if value.get("role") == "review" and (context, value.get("path")) in self.retired_inputs:
-                self.blockers.add(f"retired input still has open review evidence: {context}:{value.get('path')}")
+            # Review evidence PNGs are pinned metadata only (corrections render
+            # from the primary PDF), so a retired input no longer blocks here.
             if context is not None:
                 if not isinstance(context, str) or context not in BUCKETS:
                     self.blockers.add(f"invalid bucket in {bucket}:{origin}")
@@ -678,7 +693,7 @@ class ReferenceGraph:
                 return ref[1] in self.root_names.get(ref[0], set())
             return ref[1] in self.files.get(ref[0], set())
         self.missing = {ref for origin, refs in self.direct.items() if alive(origin)
-                        for ref in refs if (ref not in self.retired_inputs or ref in self.external_pins)
+                        for ref in refs if (not self.input_retired(ref) or ref in self.external_pins)
                         and ref[0] in self.files and ref[1] not in self.files[ref[0]]}
         for ref, message in self.unreadable.items():
             if alive(ref):

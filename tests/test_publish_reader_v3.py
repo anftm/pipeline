@@ -311,6 +311,26 @@ class V3PublicationTests(unittest.TestCase):
         self.assertTrue(report["graph_complete"], report["blockers"])
         self.assertTrue(all(not value["candidates"] for value in report["buckets"].values()))
 
+    def test_closure_pins_review_png_evidence_without_reading_it(self):
+        from scripts import shared
+        source = "a" * 64
+        png = {"bucket": shared.PDF_OCR_INPUT_BUCKET, "role": "review", "sha256": "b" * 64, "bytes": 1234,
+               "path": f"objects/aa/{source}/0123456789abcdef/ocr-input/page-000001.png"}
+        raw = json.dumps({"tasks": [{"page": 1, "evidence": [png]}]}).encode()
+        review = {"bucket": shared.PDF_PAGES_BUCKET, "role": "provenance", "bytes": len(raw),
+                  "sha256": hashlib.sha256(raw).hexdigest(),
+                  "path": f"objects/aa/{source}/0123456789abcdef/text/review.json"}
+        store = Store()
+        store.objects[(review["bucket"], review["path"])] = raw
+        reader = publish.CandidateReader(store)
+        try:
+            reader(review)
+            reader.closure()  # the PNG is absent from the store: it must not be read
+        finally:
+            reader.close()
+        self.assertEqual(reader.refs[(png["bucket"], png["path"])], png)
+        self.assertNotIn((png["bucket"], png["path"]), reader.verified)
+
     def test_workflow_and_real_adapter_share_one_central_writer_contract(self):
         from unittest.mock import patch
         import os

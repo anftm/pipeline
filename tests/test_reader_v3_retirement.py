@@ -31,9 +31,14 @@ class RetirementTests(unittest.TestCase):
                 "repo\0book.pdf": {"status": "ready", "source_sha256": source, "ocr_manifest": ocr_path,
                     "ocr_manifest_bytes": len(raw), "ocr_manifest_sha256": hashlib.sha256(raw).hexdigest()}}}))
             result = retirement.run(store, apply=True)
-            self.assertEqual(result["released_input_objects"], 1)
+            self.assertEqual(result["released_input_roots"], 1)
+            self.assertEqual(result["released_input_pages"], 1)
             journal = json.loads(store.read_bytes(publication.ASSETS, retirement.STATE))
-            self.assertEqual(journal["retired_inputs"][input_path]["source_sha256"], source)
+            root = input_path.rsplit("/", 1)[0]
+            self.assertEqual(journal["retired_input_roots"][root]["source_sha256"], source)
+            # A second run reuses the journal without re-reading the book.
+            again = retirement.run(store, apply=True)
+            self.assertEqual(again["released_input_roots"], 1)
         finally:
             fixture.temp.cleanup()
 

@@ -69,7 +69,24 @@ class ReaderGcGraphTests(unittest.TestCase):
         self.assertTrue(report["graph_complete"], report["blockers"])
         self.assertIn((PDF, page_path), graph.references)
 
-    def test_retired_input_never_overrides_open_review_evidence(self):
+    def test_retired_input_root_releases_review_evidence_pngs(self):
+        store = MemoryStore()
+        source = "a" * 64
+        root = f"objects/aa/{source}/{'b' * 16}/ocr-input"
+        for n in (1, 2):
+            store.put(INPUT, f"{root}/page-00000{n}.png", b"input")
+        store.put(ASSETS, "reader-index/v3/retirement.json", {
+            "version": 1, "kind": "reader-v3-retirement", "resources": [], "retired_paths": [],
+            "replacement_acks": {"hf": True, "pages": True}, "retired_input_roots": {root: {
+                "bucket": INPUT, "root": root, "source_sha256": source, "pages": 2}}})
+        store.put(ASSETS, "reader-index/open-review.json", {"resources": [{
+            "bucket": INPUT, "path": f"{root}/page-000001.png", "role": "review"}]})
+        report = gc.ReferenceGraph(store).build()
+        self.assertTrue(report["graph_complete"], report["blockers"])
+        self.assertEqual(sorted(report["buckets"][INPUT]["candidates"]),
+                         [f"{root}/page-000001.png", f"{root}/page-000002.png"])
+
+    def test_retired_input_with_open_review_evidence_is_collectible(self):
         store = MemoryStore()
         source = "a" * 64
         path = f"objects/aa/{source}/{'b' * 16}/ocr-input/page-000001.png"
@@ -81,8 +98,8 @@ class ReaderGcGraphTests(unittest.TestCase):
         store.put(ASSETS, "reader-index/open-review.json", {"resources": [{
             "bucket": INPUT, "path": path, "role": "review"}]})
         report = gc.ReferenceGraph(store).build()
-        self.assertFalse(report["graph_complete"])
-        self.assertTrue(any("open review" in error for error in report["blockers"]))
+        self.assertTrue(report["graph_complete"], report["blockers"])
+        self.assertIn(path, report["buckets"][INPUT]["candidates"])
 
     def test_pinned_all_format_sidecar_keeps_resources_without_mutable_base_reference(self):
         store = MemoryStore()
