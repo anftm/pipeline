@@ -203,7 +203,7 @@ def save_state(store, state):
 
 
 def reconcile(store, root, consumer_root, approved, *, limit=8, apply=False, plan_only=False,
-              retry_failures=False, activate=False, source=None, report=None):
+              retry_failures=False, activate=False, source=None, report=None, rebase=False):
     if type(limit) is not int or not 1 <= limit <= 32:
         raise ValueError('OCR batch must select 1..32 complete books, never page prefixes')
     approved = configuration(approved)
@@ -212,7 +212,32 @@ def reconcile(store, root, consumer_root, approved, *, limit=8, apply=False, pla
     root.mkdir(parents=True, exist_ok=True)
     pointer, refs, exports = current_exports(store, root)
     if pointer and pointer['base_metadata_sha256'] != approved['base_metadata_sha256']:
-        raise ValueError('OCR automation base differs from the approved consumer')
+        if not rebase:
+            raise ValueError('OCR automation base differs from the approved consumer')
+        report = report if report is not None else {}
+        report.update(applied=apply, plan_only=plan_only, model_calls=0, deleted_objects=0,
+                      prior_documents=len(exports), rebase=True,
+                      base_metadata_sha256=approved['base_metadata_sha256'],
+                      source_scope='rebase-live-exports')
+        if plan_only:
+            report['selected'] = []
+            return report
+        release = builder.build_release(root, list(refs.values()), consumer_root,
+                                        approved['builder_sha256'], approved['base_metadata_sha256'])
+        (root / 'release-receipt.json').write_bytes(contract.canonical(release))
+        if activate:
+            publisher.activate_space(release['path'], release['sha256'],
+                                     approved['base_metadata_sha256'], approved['builder_sha256'])
+        report['publication'] = publisher.publish(
+            store, root, release['path'], release['sha256'],
+            approved['base_metadata_sha256'], pointer['generation'], apply=apply)
+        report.update(generation=report['publication']['generation'],
+                      release=report['publication']['release'], documents=len(exports))
+        if activate and apply:
+            report.update(publisher.activate_space(
+                release['path'], release['sha256'], approved['base_metadata_sha256'],
+                approved['builder_sha256'], apply=True))
+        return report
     registry = json.loads(store.read_bytes(shared.READER_ASSETS_BUCKET, REGISTRY))
     derived = json.loads(store.read_bytes(shared.PDF_PAGES_BUCKET, DERIVED))
     _reader_pointer, catalog = reading.current(store)
@@ -340,6 +365,8 @@ def main():
     parser.add_argument('--limit', type=int, default=8)
     parser.add_argument('--plan-only', action='store_true')
     parser.add_argument('--retry-failures', action='store_true')
+    parser.add_argument('--rebase', action='store_true',
+                        help='Rebuild a full OCR release when only the base metadata changed')
     parser.add_argument('--source-json', default='{}', help='Optional exact repo/path for a bounded automatic pilot')
     parser.add_argument('--apply', action='store_true')
     parser.add_argument('--activate-space', action='store_true')
@@ -355,7 +382,8 @@ def main():
             prepare_consumer(approved, consumer)
         reconcile(publisher.HubBucketStore(), args.root, consumer, approved, limit=args.limit,
                   plan_only=args.plan_only, retry_failures=args.retry_failures, apply=args.apply,
-                  activate=args.activate_space, source=json.loads(args.source_json), report=report)
+                  activate=args.activate_space, source=json.loads(args.source_json), report=report,
+                  rebase=args.rebase)
     finally:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_bytes(contract.canonical(report))

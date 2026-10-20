@@ -20,6 +20,10 @@ on:
         description: Retry quarantined exact inputs; ordinary schedules wait for changed inputs
         type: boolean
         default: false
+      rebase:
+        description: Rebuild the full OCR release when the base metadata changed, reusing live exports
+        type: boolean
+        default: false
       source_json:
         description: Optional exact repo/path JSON for the first automatic pilot; empty means all ready sources
         type: string
@@ -144,11 +148,13 @@ jobs:
           APPLY: ${{ github.event_name != 'workflow_dispatch' || inputs.apply }}
           LIMIT: ${{ inputs.limit || '8' }}
           RETRY_FAILURES: ${{ inputs.retry_failures }}
+          REBASE: ${{ inputs.rebase }}
           SOURCE_JSON: ${{ inputs.source_json || '{}' }}
         run: |
           args=(--limit "$LIMIT" --source-json "$SOURCE_JSON" --output output/ccrd-ocr-auto/publication.json)
           if [[ "$APPLY" == true ]]; then args+=(--apply --activate-space); fi
           if [[ "$RETRY_FAILURES" == true ]]; then args+=(--retry-failures); fi
+          if [[ "$REBASE" == true ]]; then args+=(--rebase); fi
           python -B scripts/auto_ccrd_ocr.py "${args[@]}"
       - name: Verify the exact live generation, complete OCR IDs and readable full text
         if: github.event_name != 'workflow_dispatch' || inputs.apply
