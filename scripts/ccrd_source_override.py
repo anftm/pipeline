@@ -323,12 +323,12 @@ def rewrite_metadata(root: Path) -> dict[str, int]:
     _write_gz(search_path, payload)
 
     tree_path = root / FOLDER_TREE
-    tree = _load_gz(tree_path)
+    tree = _load_gz(tree_path) if tree_path.is_file() else {}
     tree["CW"] = [_build_tree("CW", cw_records)]
     _write_gz(tree_path, tree)
 
     browser_path = root / FOLDER_BROWSER
-    browser = _load_gz(browser_path)
+    browser = _load_gz(browser_path) if browser_path.is_file() else {}
     browser["CW"] = _build_browser("CW", cw_records)
     _write_gz(browser_path, browser)
 
@@ -373,7 +373,7 @@ def _payload_for_records(root: Path, selected: list[dict], total: int, source: s
 def write_space_payloads(root: Path) -> None:
     """Regenerate the Space's first-page and sidebar payloads."""
     payload = _load_gz(root / SEARCH_DATA)
-    browser = _load_gz(root / FOLDER_BROWSER)
+    browser = _load_gz(root / FOLDER_BROWSER) if (root / FOLDER_BROWSER).is_file() else {}
     records = payload["records"]
     sources = payload["sources"]
     by_source: dict[str, list[dict]] = {}
