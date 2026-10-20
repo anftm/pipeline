@@ -34,6 +34,15 @@ def suffix_repair_fixture(raw, offset_chars, replacement):
             "image_spans": [{"start": offset_chars, "end": len(text), "characters": len(suffix)}]}
 
 
+def control_repair_fixture(raw, codec, offsets):
+    text = raw.decode(codec)
+    return {"source_sha256": hashlib.sha256(raw).hexdigest(), "mode": "control-strip",
+            "source_encoding": codec, "control_offsets": offsets,
+            "control_codepoints": [text[offset] for offset in offsets],
+            "reference_url": "https://example.invalid/review.html", "reference_sha256": "a" * 64,
+            "reference_kind": "fixture"}
+
+
 class TextNormalizationTests(unittest.TestCase):
     def test_unicode_boms_and_unmarked_utf16_preserve_complete_text(self):
         text = "中文🌼 literal\ufffd\r\nnext\tline\n"
@@ -204,6 +213,45 @@ class TextNormalizationTests(unittest.TestCase):
             for encoding in (None, "utf-8-sig", "gb18030"):
                 with self.subTest(encoding=encoding), self.assertRaises(TextEncodingError):
                     normalize_utf8(raw, encoding=encoding, reviewed_source_repair="suffix-fixture")
+
+    def test_reviewed_control_strip_removes_only_exact_controls(self):
+        text = "完整前文\x1e中间\x0e完整后文"
+        raw = text.encode()
+        offsets = [text.index("\x1e"), text.index("\x0e")]
+        fixture = control_repair_fixture(raw, "utf-8", offsets)
+        with patch.dict(REVIEWED_SOURCE_REPAIRS, {"control-fixture": fixture}):
+            with self.assertRaises(TextEncodingError):
+                normalize_utf8(raw)
+            output, metadata = normalize_utf8(raw, encoding="utf-8", reviewed_source_repair="control-fixture")
+            self.assertEqual(output.decode("utf-8-sig"), text.replace("\x1e", "").replace("\x0e", ""))
+            self.assertEqual(metadata["source_encoding"], "utf-8")
+            self.assertEqual(metadata["normalization_recipe"], "strict-reviewed-control-strip-v1")
+            self.assertEqual(metadata["replaced_source_span"]["control_offsets"], offsets)
+            self.assertEqual(metadata["replaced_source_span"]["removed_controls"], 2)
+            self.assertTrue(metadata["source_roundtrip_verified"])
+            with self.assertRaisesRegex(TextEncodingError, "SHA-256"):
+                normalize_utf8(raw + b"x", encoding="utf-8", reviewed_source_repair="control-fixture")
+            for bad in ({**fixture, "control_offsets": [offsets[0] + 1, offsets[1]]},
+                        {**fixture, "control_codepoints": ["\x1f", "\x0e"]},
+                        {**fixture, "control_offsets": [offsets[0]]}):
+                with self.subTest(bad=bad), self.assertRaises(TextEncodingError):
+                    with patch.dict(REVIEWED_SOURCE_REPAIRS, {"control-fixture": bad}):
+                        normalize_utf8(raw, encoding="utf-8", reviewed_source_repair="control-fixture")
+            with self.assertRaises(TextEncodingError):
+                normalize_utf8(raw, encoding="gb18030", reviewed_source_repair="control-fixture")
+
+        legacy = "中文\x10正文"
+        legacy_raw = legacy.encode("gb18030")
+        legacy_fixture = control_repair_fixture(legacy_raw, "gb18030", [legacy.index("\x10")])
+        with patch.dict(REVIEWED_SOURCE_REPAIRS, {"legacy-control-fixture": legacy_fixture}):
+            output, metadata = normalize_utf8(legacy_raw, encoding="gb18030",
+                                              reviewed_source_repair="legacy-control-fixture")
+            self.assertEqual(output.decode("utf-8-sig"), legacy.replace("\x10", ""))
+            self.assertEqual(metadata["source_encoding"], "gb18030")
+            self.assertEqual(metadata["replaced_source_span"]["removed_controls"], 1)
+            with self.assertRaises(TextEncodingError):
+                normalize_utf8(legacy_raw, encoding="utf-8",
+                               reviewed_source_repair="legacy-control-fixture")
 
     def test_source_repair_refuses_unknown_recipes_byte_drift_and_other_encodings(self):
         raw = b"A\0B"

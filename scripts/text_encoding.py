@@ -164,6 +164,41 @@ REVIEWED_SOURCE_REPAIRS = {
         "reference_kind": "original-source-binary-audit",
         "image_spans": [{"start": 429451, "end": 803305, "characters": 373854}],
     },
+    # Three batch-12 sources contain only isolated, invisible control bytes in
+    # otherwise complete text. These recipes name the exact source SHA, source
+    # encoding, control code points and character offsets. Only those controls
+    # are removed; every other character is retained, and the complete original
+    # is retained by build_one as provenance.
+    "mlmrl-teachers-lenin-vol42-control-v1": {
+        "source_sha256": "5fd9c39e11b3f54b7cf414d69dc11a5bd59713b73a7ff6bc652cd9eccf130475",
+        "mode": "control-strip",
+        "source_encoding": "utf-8",
+        "control_codepoints": ["\u001e"],
+        "control_offsets": [335660],
+        "reference_url": "https://huggingface.co/datasets/VoiceOfML/Teachers/blob/6a915db1d3571c4fdd32d409e06e40704a9fd28f/A2%20%E5%88%97%E5%AE%81/01-06%20%E5%88%97%E5%AE%81%E5%85%A8%E9%9B%86%20%E6%96%87%E5%BA%93%E7%89%88/%E5%88%97%E5%AE%81%E5%85%A8%E9%9B%86%20%E7%AC%AC42%E5%8D%B7.txt",
+        "reference_sha256": "5fd9c39e11b3f54b7cf414d69dc11a5bd59713b73a7ff6bc652cd9eccf130475",
+        "reference_kind": "original-source-control-audit",
+    },
+    "mlmrl-teachers-lenin-cw45-control-v1": {
+        "source_sha256": "7083023e0a961cac23eba03a3fe62d146be4cfec4ca25e542f859d4b76863846",
+        "mode": "control-strip",
+        "source_encoding": "utf-8",
+        "control_codepoints": ["\u000e", "\u000e", "\u000e"],
+        "control_offsets": [128947, 161032, 221769],
+        "reference_url": "https://huggingface.co/datasets/VoiceOfML/Teachers/blob/6a915db1d3571c4fdd32d409e06e40704a9fd28f/A2%20%E5%88%97%E5%AE%81/01-10%20%E5%88%97%E5%AE%81%E5%85%A8%E9%9B%86%20%E8%8B%B1%E6%96%87%E7%89%88%20%E6%96%87%E5%BA%93%E7%89%88/Volume%2045.txt",
+        "reference_sha256": "7083023e0a961cac23eba03a3fe62d146be4cfec4ca25e542f859d4b76863846",
+        "reference_kind": "original-source-control-audit",
+    },
+    "mlmrl-vomebook-476195375-control-v1": {
+        "source_sha256": "63728a12b71b4a295919531d7566f0489501b6fe12be90850f7dfd30759b5e5d",
+        "mode": "control-strip",
+        "source_encoding": "gb18030",
+        "control_codepoints": ["\u0010"],
+        "control_offsets": [276532],
+        "reference_url": "https://huggingface.co/datasets/VoiceOfML/VOMEBOOK/blob/7f338fb4af738ccd6e8353b90db9c16023497555/%E9%A9%AC%E5%88%97%E4%B9%8B%E5%A3%B0ebook%E5%B0%8F%E7%BB%84%E7%AC%AC%E4%B8%89%E6%89%B9%E6%88%90%E6%9E%9C%E9%9B%86%E6%88%90%E8%B5%9E%E5%8A%A9%E9%83%A8%E5%88%86/jiang2-%E8%B4%A1%E7%8C%AE/%E5%85%B3%E4%BA%8E%E8%BD%AC%E5%9F%BA%E5%9B%A0%E5%85%AC%E5%AE%B3%E7%9A%84%E7%BD%91%E9%A1%B5%E7%AD%89%E8%B5%84%E6%96%99/476195375.txt",
+        "reference_sha256": "63728a12b71b4a295919531d7566f0489501b6fe12be90850f7dfd30759b5e5d",
+        "reference_kind": "original-source-control-audit",
+    },
 }
 
 
@@ -294,11 +329,75 @@ def normalize_utf8(raw: bytes, *, hint: str = "", encoding: str | None = None,
             codec = codecs.lookup(encoding).name
         except (LookupError, TypeError) as error:
             raise TextEncodingError("unknown explicit text encoding") from error
-        if codec not in {"utf-8", "utf-8-sig"}:
-            raise TextEncodingError("reviewed source repair is limited to strict UTF-8 originals")
         repair = REVIEWED_SOURCE_REPAIRS[reviewed_source_repair]
         if hashlib.sha256(raw).hexdigest() != repair["source_sha256"]:
             raise TextEncodingError("source differs from the complete approved repair SHA-256")
+        if repair.get("mode") == "control-strip":
+            # Only invisible control artifacts at exact reviewed character
+            # offsets are removed. All other text and the complete source
+            # encoding round-trip are verified.
+            source_encoding_name = repair.get("source_encoding")
+            if not isinstance(source_encoding_name, str):
+                raise TextEncodingError("reviewed control strip has no approved source encoding")
+            try:
+                expected_codec = codecs.lookup(source_encoding_name).name
+            except LookupError as error:
+                raise TextEncodingError("reviewed control strip source encoding is unknown") from error
+            if expected_codec not in {"utf-8", "gb18030"} or codec != expected_codec:
+                raise TextEncodingError("reviewed control strip encoding differs from the approved recipe")
+            try:
+                source_text = raw.decode(codec, errors="strict")
+            except UnicodeDecodeError as error:
+                raise TextEncodingError("reviewed control strip source is not strict text") from error
+            if source_text.encode(codec, errors="strict") != raw:
+                raise TextEncodingError("reviewed control strip source does not round-trip")
+            offsets = repair.get("control_offsets")
+            codepoints = repair.get("control_codepoints")
+            if (not isinstance(offsets, list) or not offsets
+                    or any(type(offset) is not int for offset in offsets)
+                    or offsets != sorted(offsets) or len(set(offsets)) != len(offsets)
+                    or not isinstance(codepoints, list) or len(codepoints) != len(offsets)):
+                raise TextEncodingError("reviewed control offsets are invalid")
+            for offset, codepoint in zip(offsets, codepoints):
+                if (not isinstance(codepoint, str) or len(codepoint) != 1
+                        or ord(codepoint) >= 32 or codepoint in "\t\n\r\f"
+                        or offset < 0 or offset >= len(source_text)
+                        or source_text[offset] != codepoint):
+                    raise TextEncodingError("reviewed control differs from the approved offset")
+            drop = set(offsets)
+            text = validate_text("".join(char for index, char in enumerate(source_text) if index not in drop))
+            pieces, previous = [], 0
+            for offset, codepoint in zip(offsets, codepoints):
+                pieces.extend((source_text[previous:offset], codepoint))
+                previous = offset + 1
+            pieces.append(source_text[previous:])
+            reconstructed = "".join(pieces)
+            if reconstructed != source_text or reconstructed.encode(codec, errors="strict") != raw:
+                raise TextEncodingError("reviewed control removal does not reconstruct the complete original")
+            normalized = UTF8_BOM + text.encode("utf-8", errors="strict")
+            if normalized.decode("utf-8-sig", errors="strict") != text:
+                raise TextEncodingError("UTF-8 verification failed")
+            metadata = {
+                "encoding": "utf-8", "bom": True, "profile": PROFILE,
+                "source_encoding": codec, "encoding_decision": "explicit",
+                "characters": len(text), "reviewed_source_repair": reviewed_source_repair,
+                "source_roundtrip_verified": True,
+                "normalization_recipe": "strict-reviewed-control-strip-v1",
+                "replaced_source_span": {
+                    "control_codepoints": codepoints,
+                    "control_offsets": offsets,
+                    "removed_controls": len(offsets),
+                    "original_characters": len(source_text),
+                    "original_bytes": len(raw),
+                    "replacement_bytes": len(text.encode("utf-8")),
+                    "reference_url": repair["reference_url"],
+                    "reference_sha256": repair["reference_sha256"],
+                    "reference_kind": repair.get("reference_kind", ""),
+                },
+            }
+            return normalized, metadata
+        if codec not in {"utf-8", "utf-8-sig"}:
+            raise TextEncodingError("reviewed source repair is limited to strict UTF-8 originals")
         if repair.get("mode") == "suffix-strip":
             # The reviewed tail is non-text image data decoded as text. The
             # replacement retains only the caption sections between images.
