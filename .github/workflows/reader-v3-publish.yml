@@ -4,6 +4,8 @@ run-name: v3 ${{ inputs.operation || github.event_name }} / ${{ (inputs.apply ||
 on:
   schedule:
     - cron: '43 */2 * * *'
+    # Daily journal of newly releasable OCR inputs; reader-gc-collect deletes them.
+    - cron: '23 5 * * *'
   workflow_dispatch:
     inputs:
       operation:
@@ -75,6 +77,7 @@ jobs:
             # suspended from automation and runs only by explicit dispatch.
             OPERATION=auto
             APPLY=true
+            if [[ "$SCHEDULE" == '23 5 * * *' ]]; then OPERATION=retire; fi
           fi
           echo "operation=$OPERATION" >> "$GITHUB_OUTPUT"
           echo "apply=$APPLY" >> "$GITHUB_OUTPUT"

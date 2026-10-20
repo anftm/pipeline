@@ -2,6 +2,10 @@ name: Reader/桶 · GC Collect Unreferenced Objects
 run-name: Reader GC ${{ inputs.maintenance_id || github.run_id }}
 
 on:
+  # Daily, after the 05:23 v3 retire journal: delete only released OCR inputs.
+  # A schedule can never select the full graph collector.
+  schedule:
+    - cron: '23 7 * * *'
   workflow_dispatch:
     inputs:
       maintenance_id:
@@ -61,9 +65,9 @@ jobs:
           HF_INPUT_TOKEN: ${{ secrets.HF_INPUT_TOKEN }}
           GH_TOKEN: ${{ secrets.PDF_WORKER_READ_TOKEN }}
           GC_PRODUCER_TOKENS_JSON: ${{ secrets.GC_PRODUCER_TOKENS_JSON }}
-          APPLY: ${{ inputs.apply }}
-          GRACE_DAYS: ${{ inputs.grace_days }}
-          SCOPE: ${{ inputs.scope }}
+          APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
+          GRACE_DAYS: ${{ inputs.grace_days || '0' }}
+          SCOPE: ${{ github.event_name == 'schedule' && 'retired-ocr-inputs' || inputs.scope }}
           READER_ONLY: ${{ inputs.reader_only }}
           LIMIT: ${{ inputs.limit || '0' }}
           STORAGE: ${{ inputs.storage || 's3' }}
