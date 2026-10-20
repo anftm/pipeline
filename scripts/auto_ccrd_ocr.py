@@ -27,6 +27,23 @@ DERIVED = 'reader-index/derived_pdf_manifest.json'
 STATE = 'control/ocr-automation.json'
 
 
+class StaleRetainedProvenance(ValueError):
+    """The export references a Reader resource whose exact bytes changed."""
+
+
+def require_retained(store, value):
+    """Reject one stale export without blocking every other complete book."""
+    for ref in value.get('retained_reader_resources', []):
+        try:
+            raw = store.read_bytes(ref['bucket'], ref['path'])
+        except FileNotFoundError as error:
+            raise StaleRetainedProvenance(
+                f"retained resource is missing: {ref['bucket']}/{ref['path']}") from error
+        if len(raw) != ref['bytes'] or contract.digest(raw) != ref['sha256']:
+            raise StaleRetainedProvenance(
+                f"retained resource differs: {ref['bucket']}/{ref['path']}")
+
+
 def configuration(value):
     if (value.get('version') != 1
             or not re.fullmatch(r'[0-9a-f]{40}', str(value.get('consumer_revision', '')))):
@@ -284,6 +301,7 @@ def reconcile(store, root, consumer_root, approved, *, limit=8, apply=False, pla
             value = result['manifest']
             if old and value['generation'] == old['generation']:
                 continue
+            require_retained(store, value)
             if old:
                 publisher.verify_text_upgrade(store, old, value)
             else:
@@ -305,7 +323,7 @@ def reconcile(store, root, consumer_root, approved, *, limit=8, apply=False, pla
         except Exception as error:
             # Quarantine only this exact input identity. Keep the old complete
             # release active; the next automatic run can advance other books.
-            permanent = isinstance(error, exporter.PermanentTextRejection)
+            permanent = isinstance(error, (exporter.PermanentTextRejection, StaleRetainedProvenance))
             failure = {'key': job['key'], 'fingerprint': job['fingerprint'],
                        'quarantine': job['quarantine'], 'error_type': type(error).__name__}
             if permanent:
