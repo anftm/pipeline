@@ -43,6 +43,14 @@ REVIEWED_SOURCE_REPAIRS = {
         "reference_url": "https://www.prisoncensorship.info/archive/etext/chinese/classics/jiangqing1966to1976/061-090/088.html",
         "reference_sha256": "997d95c4b48cb826561209963d5d77ea100d5366f36b538c61dcacd16d6e5774",
     },
+    "mlmrl-1967-07-21-mojibake-v1": {
+        "source_sha256": "d31061576c29a154388f04ebd2219f66d2cfef9921e7a3f2154ac9e825e1aeb3",
+        "offset": 9887,
+        "original_text": "\0啥荚谟涡校\0诱饫锟梢钥闯觯\0诿\0飨\0斓枷碌母锩\0褐谑钦嬲\0祷さ持醒搿19.\0飨\0摹?/p>",
+        "replacement_text": "命派都在游行，从这里可以看出，在毛主席领导下的革命群众是真正拥护党中央、毛主席的。\n\n",
+        "reference_url": "https://www.prisoncensorship.info/archive/etext/chinese/classics/jiangqing1966to1976/091-120/100.html",
+        "reference_sha256": "0b7ff0cdfe2f7d91fa86afa431f53f987b1565ad127439920df576b526b15d0f",
+    },
 }
 
 

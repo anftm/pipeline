@@ -177,6 +177,7 @@ class TextStreamPublicationTests(unittest.TestCase):
     def test_article_repairs_have_distinct_complete_source_and_reference_identities(self):
         first = REVIEWED_SOURCE_REPAIRS["mlmrl-1967-02-01-mojibake-v1"]
         second = REVIEWED_SOURCE_REPAIRS["mlmrl-1967-04-16-mojibake-v1"]
+        third = REVIEWED_SOURCE_REPAIRS["mlmrl-1967-07-21-mojibake-v1"]
         self.assertNotEqual(first["source_sha256"], second["source_sha256"])
         self.assertNotEqual(first["reference_sha256"], second["reference_sha256"])
         self.assertEqual(second["source_sha256"], "7088b4a442c02e818ee63a26c9d30952fb1a78ce6fb35afe57aa75f071449f27")
@@ -184,7 +185,17 @@ class TextStreamPublicationTests(unittest.TestCase):
         self.assertEqual(second["original_text"].count("\0"), 22)
         self.assertEqual(len(second["original_text"].encode()), 328)
         self.assertTrue(second["reference_url"].endswith("/088.html"))
-        for recipe, repair in (("mlmrl-1967-02-01-mojibake-v1", first), ("mlmrl-1967-04-16-mojibake-v1", second)):
+        self.assertEqual(third["source_sha256"], "d31061576c29a154388f04ebd2219f66d2cfef9921e7a3f2154ac9e825e1aeb3")
+        self.assertEqual(third["offset"], 9887)
+        self.assertEqual(third["original_text"].count("\0"), 9)
+        self.assertEqual(len(third["original_text"].encode()), 106)
+        self.assertEqual(len(third["replacement_text"].encode()), 125)
+        self.assertNotIn("\0", third["replacement_text"])
+        self.assertIn("派都在游行，从这里可以看出", third["replacement_text"])
+        self.assertTrue(third["reference_url"].endswith("/100.html"))
+        self.assertEqual(third["reference_sha256"], "0b7ff0cdfe2f7d91fa86afa431f53f987b1565ad127439920df576b526b15d0f")
+        for recipe, repair in (("mlmrl-1967-02-01-mojibake-v1", first), ("mlmrl-1967-04-16-mojibake-v1", second),
+                               ("mlmrl-1967-07-21-mojibake-v1", third)):
             # Even a matching damaged span never authorizes a different whole file.
             fake = b"prefix" + repair["original_text"].encode() + b"suffix"
             with self.subTest(recipe=recipe), self.assertRaisesRegex(TextEncodingError, "SHA-256"):
