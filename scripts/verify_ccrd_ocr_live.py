@@ -124,7 +124,8 @@ def verify(root, receipt, *, metadata=None, wait_seconds=1200):
                 or item['DisplayPath'] != value['readable_rel_path']):
             raise ValueError('live OCR quality/path/generation mapping mismatch')
     checked, queries = [], []
-    for processed in receipt.get('processed', []):
+    processed = receipt.get('processed') or [{'doc_id': value['doc_id']} for value in loaded['exports']]
+    for processed in processed:
         number = processed['doc_id']
         body = loaded['text_paths'][number].read_bytes()
         item = by_id[number]
