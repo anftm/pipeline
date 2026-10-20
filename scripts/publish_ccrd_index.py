@@ -22,10 +22,20 @@ from huggingface_hub import batch_bucket_files, download_bucket_files
 
 try:
     from . import shared
-    from .ccrd_source_override import CORPUS_PATH, download_override
+    from .ccrd_source_override import (
+        CORPUS_MIGRATION_VERSION,
+        CORPUS_PATH,
+        download_override,
+        migrate_corpus,
+    )
 except ImportError:
     import shared
-    from ccrd_source_override import CORPUS_PATH, download_override
+    from ccrd_source_override import (
+        CORPUS_MIGRATION_VERSION,
+        CORPUS_PATH,
+        download_override,
+        migrate_corpus,
+    )
 
 
 SOURCE_ARCHIVE_URL = "https://github.com/anftm/pipeline/releases/download/ccrd/ccrd-corpus.tar.gz"
@@ -138,12 +148,9 @@ def main() -> int:
         search_data = checkout / "data/search_data.json.gz"
         if not search_data.exists():
             raise RuntimeError("source checkout lacks data/search_data.json.gz")
-        counts = expected_counts(search_data)
-        corpus_target = checkout / CORPUS_PATH
-        if not corpus_target.is_file():
-            raise RuntimeError(f"corpus lacks legacy CCRD target path: {CORPUS_PATH}")
-        print("Replacing the changing CCRD source text", flush=True)
-        override = download_override(corpus_target)
+        print("Applying the CW layout migration and replacing the changing source", flush=True)
+        override = download_override(checkout / CORPUS_PATH)
+        counts = migrate_corpus(checkout)
 
         print("Building CCRD full-text indexes", flush=True)
         subprocess.run([sys.executable, "build_fulltext_db.py"], cwd=checkout, check=True)
@@ -157,7 +164,10 @@ def main() -> int:
             databases[source] = inspect_database(path, counts[source])
             files[source] = path
 
-        generation = f"ccrd-{archive_digest[:16]}-{builder_digest[:16]}-{override['sha256'][:16]}"
+        generation = (
+            f"ccrd-{archive_digest[:16]}-{builder_digest[:16]}-"
+            f"{override['sha256'][:16]}-{CORPUS_MIGRATION_VERSION}"
+        )
         prefix = f"generations/{generation}"
         manifest = {
             "format": 1,
@@ -168,6 +178,7 @@ def main() -> int:
             },
             "builder": {"url": BUILDER_URL, "sha256": builder_digest},
             "source_overrides": {str(CORPUS_PATH): override},
+            "corpus_migration": CORPUS_MIGRATION_VERSION,
             "tokenizer_version": TOKENIZER_VERSION,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "databases": {

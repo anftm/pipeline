@@ -60,9 +60,19 @@ class CheckCCRDSourceChangedTests(unittest.TestCase):
         manifest = {
             "builder": {"sha256": checker.BUILDER_SHA256},
             "source_archive": {"sha256": checker.SOURCE_ARCHIVE_SHA256},
+            "corpus_migration": checker.CORPUS_MIGRATION_VERSION,
             "source_overrides": {str(checker.CORPUS_PATH): {"sha256": "s" * 64}},
         }
         self.assertEqual(self._run(manifest), "changed=false")
+
+    def test_corpus_layout_change_triggers_rebuild(self):
+        manifest = {
+            "builder": {"sha256": checker.BUILDER_SHA256},
+            "source_archive": {"sha256": checker.SOURCE_ARCHIVE_SHA256},
+            "corpus_migration": "old-layout",
+            "source_overrides": {str(checker.CORPUS_PATH): {"sha256": "s" * 64}},
+        }
+        self.assertEqual(self._run(manifest), "changed=true")
 
     def test_missing_manifest_triggers_rebuild(self):
         self.assertEqual(self._run(None), "changed=true")

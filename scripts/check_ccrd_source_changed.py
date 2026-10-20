@@ -11,7 +11,7 @@ from pathlib import Path
 
 from huggingface_hub import download_bucket_files
 
-from ccrd_source_override import CORPUS_PATH, download_override
+from ccrd_source_override import CORPUS_MIGRATION_VERSION, CORPUS_PATH, download_override
 from publish_ccrd_index import (
     BUCKET, BUILDER_SHA256, CURRENT_PATH, SOURCE_ARCHIVE_SHA256,
 )
@@ -57,6 +57,10 @@ def main() -> int:
         published_archive = (manifest.get("source_archive") or {}).get("sha256")
         if published_archive != SOURCE_ARCHIVE_SHA256:
             print(f"Corpus archive changed: {published_archive or '(missing)'} -> {SOURCE_ARCHIVE_SHA256}")
+            write_output(True)
+            return 0
+        if manifest.get("corpus_migration") != CORPUS_MIGRATION_VERSION:
+            print(f"Corpus layout migration changed: {manifest.get('corpus_migration') or '(missing)'} -> {CORPUS_MIGRATION_VERSION}")
             write_output(True)
             return 0
 
