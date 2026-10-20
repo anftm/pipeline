@@ -84,6 +84,33 @@ def metadata_counts(path: Path, expected_sha256: str) -> dict[str, int]:
     return counts
 
 
+def public_layout(records, base_slugs):
+    """Mirror CCRD `build_ocr_public_layout`: one logical source per origin repository.
+
+    Returns ({slug: count}, {doc_id: (slug, public_rel_path)}). Physical IDs and
+    TXT/download paths are unchanged; only the public source and path differ.
+    """
+    groups = {}
+    for record in records:
+        dirs = record.get('display_dirs') or []
+        if len(dirs) < 2 or not dirs[0] or not dirs[1]:
+            raise ValueError('OCR record lacks owner/repository hierarchy')
+        groups.setdefault((dirs[0], dirs[1]), []).append(record)
+    used, counts, mapping = set(base_slugs), {}, {}
+    for owner, repo in sorted(groups, key=lambda item: (item[1], item[0])):
+        slug = repo
+        if slug in used:
+            slug, suffix = f'OCR:{owner}-{repo}', 2
+            while slug in used:
+                slug, suffix = f'OCR:{owner}-{repo}-{suffix}', suffix + 1
+        used.add(slug)
+        counts[slug] = len(groups[(owner, repo)])
+        for record in groups[(owner, repo)]:
+            filename = record['display_rel_path'].rsplit('/', 1)[-1]
+            mapping[record['doc_id']] = (slug, '/'.join([repo, *record['display_dirs'][2:], filename]))
+    return counts, mapping
+
+
 def verify(root, receipt, *, metadata=None, wait_seconds=1200):
     generation, ref = receipt['generation'], receipt['release']
     raw = (root / contract.safe_path(ref['path'])).read_bytes()
@@ -110,18 +137,21 @@ def verify(root, receipt, *, metadata=None, wait_seconds=1200):
     if metadata is None:
         raise ValueError('base metadata archive is required for exact legacy counts')
     expected = metadata_counts(metadata, manifest['base_metadata_sha256'])
-    expected['OCR'] = len(loaded['records'])
+    ocr_counts, public = public_layout(loaded['records'], set(expected))
+    expected.update(ocr_counts)
+    slugs = sorted(ocr_counts)
     counts = {item['slug']: item['count'] for item in json_request('/api/sources')}
     if counts != expected:
         raise ValueError(f'live legacy/OCR counts differ: {counts!r} != {expected!r}')
-    results = all_results({'q': '', 'sources': ['OCR'], 'sort': 'name'})
+    results = all_results({'q': '', 'sources': slugs, 'sort': 'name'})
     by_id = {item['doc_id']: item for item in results}
     if set(by_id) != set(loaded['text_paths']):
         raise ValueError('live OCR complete ID set differs from the generated index')
     for value in loaded['exports']:
         item = by_id[value['doc_id']]
+        slug, path = public[value['doc_id']]
         if (item['TextQuality'] != value['quality'] or item['TextGeneration'] != value['text_generation']
-                or item['DisplayPath'] != value['readable_rel_path']):
+                or item['DisplayPath'] != path or item.get('Source') != slug):
             raise ValueError('live OCR quality/path/generation mapping mismatch')
     checked, queries = [], []
     processed = receipt.get('processed') or [{'doc_id': value['doc_id']} for value in loaded['exports']]
@@ -141,7 +171,7 @@ def verify(root, receipt, *, metadata=None, wait_seconds=1200):
         if phrase:
             expected = {doc_id for doc_id, target in loaded['text_paths'].items()
                         if phrase in unicodedata.normalize('NFKC', target.read_text(encoding='utf-8')).casefold()}
-            found = all_results({'q': phrase, 'sources': ['OCR'], 'fulltext': True, 'exact': True, 'search_paths': False})
+            found = all_results({'q': phrase, 'sources': slugs, 'fulltext': True, 'exact': True, 'search_paths': False})
             if {item['doc_id'] for item in found} != expected:
                 raise ValueError('live exact full-text IDs/totals differ from complete OCR text')
             queries.append({'q': phrase, 'total': len(expected)})

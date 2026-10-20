@@ -287,6 +287,14 @@ class AutoCcrdOcrTests(unittest.TestCase):
         path = self.root / 'search_data.json.gz'
         path.write_bytes(raw)
         self.assertEqual(live.metadata_counts(path, contract.digest(raw)), {'CCRD': 11, 'CW': 22})
+        records = [{'doc_id': 'OCR:1', 'display_dirs': ['VoiceOfML', 'GPCREducation', '化学'],
+                    'display_rel_path': 'VoiceOfML/GPCREducation/化学/a.txt'},
+                   {'doc_id': 'OCR:2', 'display_dirs': ['VoiceOfML', 'CW'],
+                    'display_rel_path': 'VoiceOfML/CW/b.txt'}]
+        counts, mapping = live.public_layout(records, {'CCRD', 'CW'})
+        self.assertEqual(counts, {'GPCREducation': 1, 'OCR:VoiceOfML-CW': 1})
+        self.assertEqual(mapping['OCR:1'], ('GPCREducation', 'GPCREducation/化学/a.txt'))
+        self.assertEqual(mapping['OCR:2'], ('OCR:VoiceOfML-CW', 'CW/b.txt'))
         path.write_bytes(raw + b'x')
         with self.assertRaisesRegex(ValueError, 'differs'):
             live.metadata_counts(path, contract.digest(raw))
