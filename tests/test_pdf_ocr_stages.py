@@ -207,6 +207,45 @@ class PdfOcrStagesTests(unittest.TestCase):
             retried = stages.plan_images({result["key"]: result}, {}, progress)
             self.assertEqual(retried["total_ocr_pages"], 1)
 
+    def test_recognition_adopts_unrecorded_existing_page_without_ocr(self):
+        result = self.render_fixture()
+        with patch.object(stages, "read_object", side_effect=self.read):
+            queue = stages.plan_images({result["key"]: result}, {}, {})
+            task = queue["shards"][0][0]
+            page = task["pages"][0]
+            root = stages.root_for(task["source_sha256"], task["key"], task["generation"] + task["profile"])
+            path = (root / "ocr" / f"page-{page['p']:06d}.json.gz").as_posix()
+            raw = gzip.compress(json.dumps({**pdf_ocr.page_payload(page["p"], page["width"], page["height"],
+                                                                   [{"t": "旧"}], "ocr"),
+                                            "text_spans": [], "layout": {}}).encode(), mtime=0)
+            with patch.object(stages, "remote_sizes", return_value={path: len(raw)}), \
+                    patch.object(stages, "read_existing_object", return_value=raw), \
+                    patch.object(pdf_ocr, "ocr_page", return_value=[]) as engine:
+                recognized = stages.recognize_task(task, self.root / "adopt", adopt_existing=True)
+            adopted = next(p for p in recognized["pages"] if p["p"] == page["p"])
+            self.assertEqual((adopted["os"], adopted["text"]), (hashlib.sha256(raw).hexdigest(), "旧"))
+            self.assertEqual(engine.call_count, len(task["pages"]) - 1)
+            wrong = gzip.compress(json.dumps(pdf_ocr.page_payload(page["p"] + 1, page["width"], page["height"],
+                                                                  [], "ocr")).encode(), mtime=0)
+            with patch.object(stages, "remote_sizes", return_value={path: len(wrong)}), \
+                    patch.object(stages, "read_existing_object", return_value=wrong), \
+                    patch.object(pdf_ocr, "ocr_page", return_value=[]):
+                rejected = stages.recognize_task(task, self.root / "adopt-wrong", adopt_existing=True)
+            self.assertTrue(any("not this page" in e["error"] for e in rejected["errors"]))
+
+    def test_default_valued_layout_option_does_not_requeue_ready_ocr(self):
+        result = self.render_fixture()
+        with patch.object(stages, "read_object", side_effect=self.read):
+            queue = stages.plan_images({result["key"]: result}, {}, {})
+            book = queue["books"][0]
+            base = book["profile"].partition("-layout-")[0]
+            ready = {**{k: v for k, v in book.items() if k not in {"pages", "saved"}}, "status": "ready",
+                     "profile": base + "-layout-layout-v1-0000000000000000",
+                     "layout_options": {"default": {"rotation": 0}, "pages": {}}}
+            self.assertEqual(stages.plan_images({result["key"]: result}, {result["key"]: ready}, {})["books"], [])
+            rotated = {**ready, "layout_options": {"default": {"rotation": 90}, "pages": {}}}
+            self.assertEqual(len(stages.plan_images({result["key"]: result}, {result["key"]: rotated}, {})["books"]), 1)
+
     def test_degenerate_three_pixel_page_is_retained_without_calling_ocr_engine(self):
         import io
         with Image.new("RGB", (2200, 3), "white") as image:

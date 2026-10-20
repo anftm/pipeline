@@ -111,6 +111,17 @@ def retry(operation):
         time.sleep(delay)
 
 
+def read_existing_object(path: str, bucket: str = shared.PDF_PAGES_BUCKET) -> bytes:
+    """Current bytes of an object whose digest is not yet known (adoption only)."""
+    def download():
+        response = get_session().get(
+            f"https://huggingface.co/buckets/{bucket}/resolve/{quote(path, safe='/')}",
+            headers={"Cache-Control": "no-cache"}, follow_redirects=True, timeout=120)
+        hf_raise_for_status(response)
+        return response.content
+    return retry(download)
+
+
 def remote_sizes(bucket: str, prefix: str, token) -> dict[str, int]:
     sizes = {}
     def listing():
@@ -899,6 +910,28 @@ def recognition_identity(entry, options):
     return f"{base}-layout-{ocr_layout.VERSION}-{digest}"
 
 
+LAYOUT_DEFAULTS = {"rotation": 0, "writing_mode": "auto", "join_soft_lines": True, "regions": []}
+
+
+def normalized_layout(options):
+    """Layout options without explicit defaults; `{"rotation": 0}` equals `{}`."""
+    def strip(value):
+        return {k: v for k, v in (value or {}).items() if LAYOUT_DEFAULTS.get(k, object()) != v}
+    options = options or {}
+    pages = {page: strip(value) for page, value in (options.get("pages") or {}).items()}
+    return {"default": strip(options.get("default")), "pages": {k: v for k, v in pages.items() if v}}
+
+
+def same_recognition_profile(old, entry):
+    """A ready OCR entry is current when only default-valued layout keys differ."""
+    if old.get("profile") == entry.get("profile"):
+        return True
+    old_base, old_sep, _ = str(old.get("profile") or "").partition("-layout-")
+    new_base, new_sep, _ = str(entry.get("profile") or "").partition("-layout-")
+    return bool(old_sep and new_sep and old_base == new_base and isinstance(old.get("layout_options"), dict)
+                and normalized_layout(old["layout_options"]) == normalized_layout(entry.get("layout_options")))
+
+
 def generation_for(book):
     return hashlib.sha256((book["render_manifest"]["sha256"] + book["profile"]).encode()).hexdigest()
 
@@ -987,7 +1020,7 @@ def plan_images(rendered, current, progress, limit=20, target=500, overrides=Non
                  "layout_options": options}
         old = current.get(key, {})
         if (old.get("status") in {"ready", "skipped"} and same_source(old, entry)
-                and old.get("profile") == entry.get("profile")
+                and same_recognition_profile(old, entry)
                 and old.get("source_sha256") == entry.get("source_sha256")
                 and old.get("page_manifest") == entry.get("page_manifest")):
             continue
@@ -1022,14 +1055,43 @@ def plan_images(rendered, current, progress, limit=20, target=500, overrides=Non
             "shard_count": len(shards), "shard_ids": list(range(len(shards))), "shards": shards}
 
 
-def recognize_task(task, bundle):
+def adopt_recognized_page(page, path, raw):
+    """Validate an existing page object at this generation's deterministic path."""
+    payload = json.loads(gzip.decompress(raw))
+    if (payload.get("kind") != "pdf-ocr-page" or payload.get("page") != page["p"] or payload.get("source") != "ocr"
+            or payload.get("width") != page["width"] or payload.get("height") != page["height"]
+            or not isinstance(payload.get("text"), str)
+            or not isinstance(payload.get("text_spans", []), list)):
+        raise ValueError(f"existing OCR object is not this page's result: {path}")
+    return payload
+
+
+def recognize_task(task, bundle, adopt_existing=False):
     root = root_for(task["source_sha256"], task["key"], task["generation"] + task["profile"])
     done, errors = [], []
     bundle.mkdir(parents=True, exist_ok=True)
+    # An earlier attempt may have uploaded pages it never recorded. The root is
+    # unique to this generation/profile/layout, so adopt those (validated)
+    # objects instead of re-recognizing; uploads never overwrite them anyway.
+    existing = (remote_sizes(shared.PDF_PAGES_BUCKET, (root / "ocr").as_posix() + "/", os.environ.get("HF_TOKEN"))
+                if adopt_existing else {})
     with tempfile.TemporaryDirectory(dir=bundle) as temp:
         png = Path(temp) / "input.png"
         for page in task["pages"]:
             try:
+                remote = (root / "ocr" / f"page-{page['p']:06d}.json.gz").as_posix()
+                if remote in existing:
+                    raw = read_existing_object(remote)
+                    payload = adopt_recognized_page(page, remote, raw)
+                    out = bundle / remote
+                    out.parent.mkdir(parents=True, exist_ok=True)
+                    out.write_bytes(raw)
+                    result = {**page, "chars": len(payload["text"]), "text": payload["text"],
+                              "text_spans": payload.get("text_spans", []), "layout": payload.get("layout", {})}
+                    set_page_meta(result, "o", metadata(out, bundle))
+                    done.append(result)
+                    print(f"OCR page {page['p']}: adopted existing object ({task['key']})", flush=True)
+                    continue
                 png.write_bytes(read_object(page_meta(page, "i"), ".png"))
                 from PIL import Image
                 config = task.get("layout_options", {})
@@ -1483,7 +1545,7 @@ def main():
                 if args.stage == "render":
                     result = render_book(task, source_path(task), Path(temp))
                 else:
-                    result = recognize_task(task, Path(temp))
+                    result = recognize_task(task, Path(temp), adopt_existing=True)
                 result["processing_roots"] = upload_objects(Path(temp))
             results.append(result)
         except Exception as exc:

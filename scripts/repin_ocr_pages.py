@@ -27,7 +27,6 @@ import hashlib
 import json
 import os
 from pathlib import Path
-from urllib.parse import quote
 
 try:
     from . import pdf_ocr_stages as stages, shared
@@ -38,14 +37,7 @@ except ImportError:
 
 def current_bytes(path: str) -> bytes:
     stages.pdf_ocr.validate_ocr_object_path(path, ".json.gz")
-
-    def download():
-        response = stages.get_session().get(
-            f"https://huggingface.co/buckets/{shared.PDF_PAGES_BUCKET}/resolve/{quote(path, safe='/')}",
-            headers={"Cache-Control": "no-cache"}, follow_redirects=True, timeout=120)
-        stages.hf_raise_for_status(response)
-        return response.content
-    return stages.retry(download)
+    return stages.read_existing_object(path)
 
 
 def adopt_pages(manifest: dict, read=current_bytes):
