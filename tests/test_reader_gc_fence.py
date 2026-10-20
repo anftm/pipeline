@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta, timezone
 import unittest
 from unittest.mock import patch
 
@@ -96,6 +97,7 @@ class ResidualRunFenceTests(unittest.TestCase):
             self.check(api)
 
     def test_central_recent_run_without_jobs_still_blocks(self):
+        recent = (datetime.now(timezone.utc) - timedelta(minutes=1)).strftime('%Y-%m-%dT%H:%M:%SZ')
         def api(endpoint):
             if endpoint.endswith('/actions/permissions'):
                 raise RuntimeError('central policy is not readable')
@@ -105,7 +107,7 @@ class ResidualRunFenceTests(unittest.TestCase):
                 return [{'id': 7, 'status': 'queued', 'run_attempt': 1}]
             if endpoint.endswith('/actions/runs/7'):
                 return [{'id': 7, 'status': 'queued', 'run_attempt': 1,
-                         'updated_at': '2026-10-19T23:59:00Z', 'check_suite_id': 8}]
+                         'updated_at': recent, 'check_suite_id': 8}]
             return self.api(endpoint)
         with patch('scripts.reader_gc_fence.producer_repositories', return_value=['owner/repo']), \
                 patch('scripts.reader_gc_fence.load_config',

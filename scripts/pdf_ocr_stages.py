@@ -1143,8 +1143,11 @@ def assemble_book(book, saved, bundle):
             layer, page_text = assembled_page(book, page, payload, language)
             layers.append(layer)
             texts.append(page_text)
+    # An explicit re-pin (repin_ocr_pages.py) assembles adopted page bytes into
+    # a distinct root; it must never collide with the stale manifest's root.
     root = root_for(book["source_sha256"], book["key"],
-                    book["render_manifest"]["sha256"] + book["profile"] + "|text-layer-v2-search-partitions")
+                    book["render_manifest"]["sha256"] + book["profile"] + "|text-layer-v2-search-partitions"
+                    + (f"|repin-{book['repin']}" if book.get("repin") else ""))
     text_layer_ref = pdf_reading_v3.build_text_bundle(layers, pages, root, bundle)
     text_path = bundle / root / "ocr" / "book-text.json.gz"
     pdf_ocr.write_gzip_json(text_path, {"version": 2, "kind": "pdf-book-text", "complete": True,

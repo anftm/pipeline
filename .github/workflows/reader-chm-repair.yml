@@ -64,6 +64,7 @@ jobs:
           [[ "$LIMIT" =~ ^[0-9]+$ ]] && ((10#$LIMIT >= 1 && 10#$LIMIT <= 100)) || exit 1
           args=(--extension chm --limit "$LIMIT" --shard-count 1 --shard-index 0 --plan-only)
           if [[ "$RETRY_FAILED" == "true" ]]; then args+=(--retry-failures); fi
+          if [[ "$FAILED_ONLY" == "true" ]]; then args+=(--failed-only); fi
           report=$(python scripts/pilot_epub_chapters.py "${args[@]}")
           echo "$report"
           mkdir -p output
@@ -105,9 +106,11 @@ jobs:
           READER_CONVERSION_WORKERS: "2"
           LIMIT: ${{ inputs.limit || '100' }}
           RETRY_FAILED: ${{ inputs.retry_failed || 'false' }}
+          FAILED_ONLY: ${{ inputs.failed_only || 'false' }}
         run: |
           args=(--extension chm --limit "$LIMIT" --shard-count 1 --shard-index 0 --apply --workers 2)
           if [[ "$RETRY_FAILED" == "true" ]]; then args+=(--retry-failures); fi
+          if [[ "$FAILED_ONLY" == "true" ]]; then args+=(--failed-only); fi
           python scripts/pilot_epub_chapters.py "${args[@]}"
       - name: Rebuild the canonical Reader sidecar and release handed-off roots
         env:

@@ -1,0 +1,52 @@
+name: Reader/桶 · Re-pin Drifted OCR Pages
+run-name: OCR re-pin / ${{ inputs.apply == true && 'apply' || 'plan' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      keys_json:
+        description: JSON array of exact OCR registry keys ("repo\u0000path")
+        type: string
+        required: true
+      apply:
+        description: Publish the re-pinned manifest; false only reports drift
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reader-sidecar
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  repin:
+    if: github.repository == 'anftm/pipeline'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - run: pip install -r scripts/requirements.txt
+      - name: Adopt existing OCR page bytes (no recognition) and publish
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          KEYS_JSON: ${{ inputs.keys_json }}
+          APPLY: ${{ inputs.apply }}
+        run: |
+          mapfile -d '' args < <(python -c 'import json,os,sys
+          keys=json.loads(os.environ["KEYS_JSON"])
+          assert isinstance(keys,list) and 1<=len(keys)<=20 and all(isinstance(k,str) and "\0" in k for k in keys)
+          for k in keys: sys.stdout.write("--key\0"+k.replace("\0","\\0")+"\0")')
+          if [[ "$APPLY" == true ]]; then args+=(--apply); fi
+          python -u scripts/repin_ocr_pages.py "${args[@]}"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: ocr-repin-report
+          path: output/ocr-repin/*.json
+          if-no-files-found: ignore
