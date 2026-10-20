@@ -111,7 +111,7 @@ class WorkerDispatchTests(unittest.TestCase):
         self.assertEqual(second["decision"], "deferred")
         self.assertEqual(len(self.api.posts), 1)
         self.assertEqual(self.api.posts[0], (f"repos/{REPO}/actions/workflows/{dispatch.WORKER}/dispatches",
-                                          {"ref": "main", "inputs": {"stage": "ocr", "limit": "20"}}))
+                                          {"ref": "main", "inputs": {"stage": "auto", "limit": "20"}}))
 
     def test_other_account_publishers_do_not_occupy_this_account(self):
         self.api.publishers.append(publisher(201, 101, "pending", "vomebook/pdf-pipeline"))
@@ -193,6 +193,55 @@ class WorkerDispatchTests(unittest.TestCase):
         artifact = next(s for s in steps if s.get("uses", "").startswith("actions/upload-artifact"))
         self.assertIn("output/pdf-ocr/dispatch.json", artifact["with"]["path"])
         self.assertGreater(steps.index(artifact), steps.index(handoffs[0]))
+
+
+class WatchdogTests(unittest.TestCase):
+    def test_only_idle_lanes_are_dispatched(self):
+        from datetime import datetime, timezone
+        config = pdf_worker_lanes.load_config()
+        central = config["publisher_repository"]
+        repos = dispatch.lane_repositories(config)
+        self.assertGreaterEqual(len(repos), 3)
+        busy_worker, pending_pub, idle = repos[:3]
+        recent = None
+        now = datetime(2026, 10, 20, 15, 0, tzinfo=timezone.utc)
+        posts = []
+
+        def api(method, path, payload=None):
+            if method == "POST":
+                posts.append((path, payload))
+                return {}
+            if path.startswith(f"repos/{central}/actions/workflows/{dispatch.PUBLISHER}/runs"):
+                rows = [{"id": 9, "status": "queued", "path": ".github/workflows/" + dispatch.PUBLISHER,
+                         "repository": {"full_name": central},
+                         "display_title": f"PDF publish ocr / {pending_pub} / 5"}] if "status=queued" in path else []
+                return {"workflow_runs": rows}
+            repo = path.split("/actions/")[0][len("repos/"):]
+            if "?status=" in path:
+                rows = [{"id": 7, "status": "in_progress", "path": ".github/workflows/" + dispatch.WORKER,
+                         "repository": {"full_name": repo}}] if repo == busy_worker and "in_progress" in path else []
+                return {"workflow_runs": rows}
+            stamp = "2026-10-20T14:50:00Z" if repo == recent else "2026-10-19T13:00:00Z"
+            return {"workflow_runs": [{"updated_at": stamp}]}
+
+        report = dispatch.watchdog(config, apply=True, api=api, now=now)
+        decisions = {lane["repository"]: lane["decision"] for lane in report["lanes"]}
+        self.assertEqual(set(decisions), set(repos))
+        self.assertEqual(decisions[pending_pub], "publication-pending")
+        dispatched = [path.split("/actions/")[0][len("repos/"):] for path, _ in posts]
+        self.assertNotIn(pending_pub, dispatched)
+        self.assertTrue(all(payload == {"ref": "main", "inputs": {"stage": "auto", "limit": "20"}}
+                            for _, payload in posts))
+        for repo, decision in decisions.items():
+            self.assertEqual(repo in dispatched, decision == "dispatch-requested")
+        self.assertEqual(decisions[busy_worker], "worker-active")
+        self.assertEqual(decisions[idle], "dispatch-requested")
+        # A worker that finished minutes ago may still be handing off.
+        posts.clear()
+        recent = idle
+        report = dispatch.watchdog(config, apply=True, api=api, now=now)
+        self.assertEqual({l["repository"]: l["decision"] for l in report["lanes"]}[idle], "recently-finished")
+        self.assertNotIn(idle, [p.split("/actions/")[0][len("repos/"):] for p, _ in posts])
 
 
 if __name__ == "__main__":

@@ -1,0 +1,41 @@
+name: Reader/桶 · PDF Lane Watchdog
+
+# Continuations normally chain worker -> central publisher -> next worker. A
+# failed callback, a disabled publisher during GC maintenance or an empty OCR
+# queue used to stop a lane permanently. This only dispatches `stage=auto` for a
+# lane with no active worker, no pending publication and no recent finish.
+on:
+  schedule:
+    - cron: "37 */2 * * *"
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: Dispatch idle lanes (false = report only)
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pdf-lane-watchdog
+  cancel-in-progress: false
+
+jobs:
+  watchdog:
+    if: github.repository == 'anftm/pipeline'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Re-kick idle PDF lanes
+        env:
+          GH_TOKEN: ${{ secrets.PDF_WORKER_READ_TOKEN }}
+          APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
+        run: |
+          args=(--watchdog --output output/pdf-ocr/watchdog.json)
+          if [[ "$APPLY" == "true" ]]; then args+=(--apply); fi
+          python scripts/pdf_worker_dispatch.py "${args[@]}"

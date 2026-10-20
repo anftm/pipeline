@@ -571,7 +571,7 @@ def recover_execution_timeouts(store, options, *, apply=False):
 
 
 def wave(store, *, apply=False, priority_source=None, now=None, wave_size=WAVE_SIZE,
-         build_runs=None, source_keys=None, promotion_limit=4, preview_first=False):
+         build_runs=None, source_keys=None, promotion_limit=8, preview_first=False):
     """Serialized step: collect parallel build results, promote them, plan the next wave.
 
     Runs under reader-sidecar. It never builds; ``build_task`` does that in the

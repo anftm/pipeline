@@ -1024,7 +1024,7 @@ def main():
                 from reader_v3_automation import wave
             report = wave(store, apply=args.apply, priority_source=priority,
                           wave_size=options.get("wave_size", 8), source_keys=options.get("source_keys"),
-                          promotion_limit=options.get("promotion_limit", 4),
+                          promotion_limit=options.get("promotion_limit", 8),
                           preview_first=options.get("preview_first", os.environ.get("READER_V3_PREVIEW_FIRST") == "true"))
     elif args.command == "build-task":
         try:

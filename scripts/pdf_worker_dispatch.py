@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Coalesce OCR continuation callbacks under the central reader-sidecar lock."""
+"""Coalesce PDF worker continuations and re-kick idle lanes."""
 
 import argparse
 import json
@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import subprocess
 import time
+from datetime import datetime, timedelta, timezone
 
 try:
     from . import pdf_worker_lanes
@@ -20,6 +21,10 @@ except ImportError:
 WORKER = "pdf-account-worker.yml"
 PUBLISHER = "pdf-account-publish.yml"
 ACTIVE_STATUSES = ("requested", "waiting", "pending", "queued", "in_progress")
+# The worker decides: OCR rendered pages first, otherwise render new PDFs.
+NEXT_BATCH = {"stage": "auto", "limit": "20"}
+# A finished worker needs a moment to dispatch its central publisher.
+IDLE_GRACE = timedelta(minutes=30)
 PUBLISH_TITLE = re.compile(r"PDF publish (render|ocr) / ([A-Za-z0-9-]+/[A-Za-z0-9._-]+) / ([1-9][0-9]*)")
 
 
@@ -136,7 +141,7 @@ def handoff(config, repository, after_run, publisher_run, *, apply=False, api=gi
     if checkpoint:
         checkpoint(report)
     api("POST", f"repos/{repository}/actions/workflows/{WORKER}/dispatches",
-        {"ref": "main", "inputs": {"stage": "ocr", "limit": "20"}})
+        {"ref": "main", "inputs": dict(NEXT_BATCH)})
     report["decision"] = "dispatch-requested"
     if checkpoint:
         checkpoint(report)
@@ -154,14 +159,63 @@ def handoff(config, repository, after_run, publisher_run, *, apply=False, api=gi
     raise RuntimeError("accepted OCR dispatch is not visible; inspect it before any retry")
 
 
+def lane_repositories(config):
+    return sorted({pdf_worker_lanes.repository_for_owner(config, lane["owner"])
+                   for lane in [*config["native_lanes"], config["converted_lane"]]})
+
+
+def watchdog(config, *, apply=False, api=github, now=None):
+    """Restart a lane whose continuation chain broke (failed callback,
+    disabled publisher, empty OCR queue). A lane with an active worker, a
+    pending central publication or a recently finished worker is left alone."""
+    now = now or datetime.now(timezone.utc)
+    central = config["publisher_repository"]
+    awaiting = set()
+    for run in active_runs(central, PUBLISHER, api):
+        title = PUBLISH_TITLE.fullmatch(run.get("display_title", ""))
+        if not title:
+            raise ValueError("cannot identify queued PDF publisher")
+        awaiting.add(title[2].lower())
+    report = {"version": 1, "kind": "pdf-worker-watchdog", "applied": apply, "lanes": []}
+    for repository in lane_repositories(config):
+        lane = {"repository": repository}
+        if repository.lower() in awaiting:
+            lane["decision"] = "publication-pending"
+        elif active_runs(repository, WORKER, api):
+            lane["decision"] = "worker-active"
+        else:
+            rows = api("GET", f"repos/{repository}/actions/workflows/{WORKER}/runs?per_page=1").get("workflow_runs")
+            if not isinstance(rows, list):
+                raise ValueError("invalid workflow history response")
+            finished = rows[0].get("updated_at") if rows else None
+            if finished and now - datetime.fromisoformat(finished.replace("Z", "+00:00")) < IDLE_GRACE:
+                lane["decision"] = "recently-finished"
+            else:
+                lane["decision"] = "dispatch-requested" if apply else "would-dispatch"
+                if apply:
+                    api("POST", f"repos/{repository}/actions/workflows/{WORKER}/dispatches",
+                        {"ref": "main", "inputs": dict(NEXT_BATCH)})
+        report["lanes"].append(lane)
+    return report
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--repository", required=True)
-    parser.add_argument("--after-run", type=int, required=True)
+    parser.add_argument("--watchdog", action="store_true", help="re-kick idle lanes instead of a continuation")
+    parser.add_argument("--repository")
+    parser.add_argument("--after-run", type=int)
     parser.add_argument("--publisher-run", type=int, default=os.environ.get("GITHUB_RUN_ID"))
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
+    if args.watchdog:
+        report = watchdog(pdf_worker_lanes.load_config(), apply=args.apply)
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+        return
+    if not args.repository or not args.after_run:
+        parser.error("--repository and --after-run are required for a continuation")
     def checkpoint(report):
         args.output.parent.mkdir(parents=True, exist_ok=True)
         pending = args.output.with_suffix(".pending.json")

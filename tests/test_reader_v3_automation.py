@@ -495,7 +495,7 @@ class WaveTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         build = yaml.safe_load((root / ".github/workflows/reader-v3-build.yml").read_text())
         self.assertEqual(build["concurrency"]["group"], "reader-v3-build")
-        self.assertEqual(build["jobs"]["build"]["strategy"]["max-parallel"], 2)
+        self.assertEqual(build["jobs"]["build"]["strategy"]["max-parallel"], 3)
         self.assertIn("build-task", build["jobs"]["build"]["steps"][-1]["run"])
         self.assertIn("operation=auto", build["jobs"]["promote"]["steps"][0]["run"])
         self.assertIn("!cancelled()", build["jobs"]["promote"]["if"])

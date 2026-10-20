@@ -1,14 +1,14 @@
 name: Reader/桶 · Account PDF Render and OCR Worker
-run-name: PDF ${{ inputs.stage || 'render' }} / ${{ github.repository_owner }}
+run-name: PDF ${{ inputs.stage || 'auto' }} / ${{ github.repository_owner }}
 
 on:
   workflow_dispatch:
     inputs:
       stage:
-        description: Render PDFs or recognize published PNG inputs
+        description: "auto: recognize rendered pages, else render new PDFs; render/ocr: force one stage"
         type: choice
-        options: [render, ocr]
-        default: render
+        options: [auto, render, ocr]
+        default: auto
       limit:
         description: Maximum pending books in this account's lane
         type: string
@@ -40,6 +40,7 @@ jobs:
       shard_ids: ${{ steps.plan.outputs.shard_ids }}
       shard_count: ${{ steps.plan.outputs.shard_count }}
       publisher: ${{ steps.plan.outputs.publisher }}
+      stage: ${{ steps.plan.outputs.stage }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -50,35 +51,35 @@ jobs:
           WORKER_OWNER: ${{ github.repository_owner }}
         run: python scripts/pdf_worker_lanes.py --owner "$WORKER_OWNER"
       - run: pip install -r scripts/requirements.txt
-      - name: Prepare render metadata
-        if: github.event_name == 'schedule' || inputs.stage == 'render'
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          FORCE_SYNC: "true"
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends poppler-utils poppler-data fonts-noto-cjk fonts-liberation
-          python scripts/fetch_and_parse.py
       - name: Plan only this account's sources
         id: plan
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           WORKER_OWNER: ${{ github.repository_owner }}
-          STAGE: ${{ inputs.stage || 'render' }}
+          STAGE: ${{ inputs.stage || 'auto' }}
           LIMIT: ${{ inputs.limit || '20' }}
           RETRY_FAILED_ONLY: ${{ inputs.retry_failed_only || 'false' }}
         run: |
           [[ "$LIMIT" =~ ^[0-9]+$ ]] && ((10#$LIMIT >= 1 && 10#$LIMIT <= 100)) || exit 1
+          [[ "$STAGE" =~ ^(auto|render|ocr)$ ]] || exit 1
           lane=$(python scripts/pdf_worker_lanes.py --owner "$WORKER_OWNER")
           args=(--worker-owner "$WORKER_OWNER" --worker-lane "$lane" --limit "$LIMIT")
-          if [[ "$STAGE" == render ]]; then
-             python scripts/pdf_ocr_stages.py plan-render --native-text-stream --target-render-seconds 6000 --retry-failed "${args[@]}"
-          elif [[ "$STAGE" == ocr ]]; then
-            if [[ "$RETRY_FAILED_ONLY" == "true" ]]; then args+=(--retry-failed-only); fi
-            python scripts/pdf_ocr_stages.py plan-ocr "${args[@]}"
-          else
-            exit 1
+          if [[ "$STAGE" != render ]]; then
+            ocr_args=("${args[@]}")
+            if [[ "$RETRY_FAILED_ONLY" == "true" ]]; then ocr_args+=(--retry-failed-only); fi
+            python scripts/pdf_ocr_stages.py plan-ocr "${ocr_args[@]}"
+            resolved=ocr
           fi
+          # auto: recognition first; render new PDFs only when nothing is waiting
+          # for OCR, so the lane never idles while either queue has work.
+          if [[ "$STAGE" == render || ( "$STAGE" == auto && "$(jq -r '.shard_count' output/pdf-ocr/queue.json)" == 0 ) ]]; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends poppler-utils poppler-data fonts-noto-cjk fonts-liberation
+            FORCE_SYNC=true python scripts/fetch_and_parse.py
+            python scripts/pdf_ocr_stages.py plan-render --native-text-stream --target-render-seconds 6000 --retry-failed "${args[@]}"
+            resolved=render
+          fi
+          echo "stage=$resolved" >> "$GITHUB_OUTPUT"
           echo "shard_ids=$(jq -c '.shard_ids' output/pdf-ocr/queue.json)" >> "$GITHUB_OUTPUT"
           echo "shard_count=$(jq -r '.shard_count' output/pdf-ocr/queue.json)" >> "$GITHUB_OUTPUT"
           echo "publisher=$(jq -r '.publisher_repository' pdf-worker-lanes.json)" >> "$GITHUB_OUTPUT"
@@ -108,13 +109,13 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install render dependencies
-        if: github.event_name == 'schedule' || inputs.stage == 'render'
+        if: needs.plan.outputs.stage == 'render'
         run: |
           pip install -r scripts/requirements.txt
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends poppler-utils poppler-data fonts-noto-cjk fonts-liberation
       - name: Install OCR dependencies
-        if: inputs.stage == 'ocr'
+        if: needs.plan.outputs.stage == 'ocr'
         run: pip install -r scripts/requirements.txt -r scripts/requirements-pdf-ocr.txt
       - uses: actions/download-artifact@v8
         with:
@@ -124,7 +125,7 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_INPUT_TOKEN: ${{ secrets.HF_INPUT_TOKEN }}
-          STAGE: ${{ inputs.stage || 'render' }}
+          STAGE: ${{ needs.plan.outputs.stage }}
           SHARD: ${{ matrix.shard }}
         run: python scripts/pdf_ocr_stages.py "$STAGE" --shard "$SHARD"
       - uses: actions/upload-artifact@v7
@@ -149,7 +150,7 @@ jobs:
           PUBLISHER: ${{ needs.plan.outputs.publisher }}
           WORKER_REPOSITORY: ${{ github.repository }}
           WORKER_RUN_ID: ${{ github.run_id }}
-          STAGE: ${{ inputs.stage || 'render' }}
+          STAGE: ${{ needs.plan.outputs.stage }}
         run: |
           gh workflow run pdf-account-publish.yml --repo "$PUBLISHER" --ref main \
             -f worker_repository="$WORKER_REPOSITORY" -f worker_run_id="$WORKER_RUN_ID" -f stage="$STAGE"

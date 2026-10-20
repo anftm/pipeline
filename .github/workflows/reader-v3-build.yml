@@ -26,8 +26,9 @@ jobs:
     timeout-minutes: 300
     strategy:
       fail-fast: false
-      # The resolver quota is shared by the account. Preserve the one-build cap.
-      max-parallel: 2
+      # The resolver quota is shared by the account. Builds read through the
+      # paced resolver; 3 keeps headroom for the serialized promote step.
+      max-parallel: 3
       matrix:
         task: ${{ fromJSON(inputs.tasks) }}
     env:
