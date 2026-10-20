@@ -17,9 +17,9 @@ on:
         type: string
         default: "0"
       scope:
-        description: Full unreferenced content collection or catalog-owned retired snapshots
+        description: "unreferenced: full drained graph collection; retired-catalog-snapshots; retired-ocr-inputs: only journaled OCR-input PNG roots (no drain needed, limit = roots)"
         type: choice
-        options: [unreferenced, retired-catalog-snapshots]
+        options: [unreferenced, retired-catalog-snapshots, retired-ocr-inputs]
         default: unreferenced
       reader_only:
         description: Delete only the original Reader buckets and keep the fourth domain intact
@@ -76,6 +76,12 @@ jobs:
         run: |
           [[ "$GRACE_DAYS" =~ ^[0-9]+$ ]] || exit 1
           [[ "$LIMIT" =~ ^[0-9]+$ ]] || exit 1
+          if [[ "$SCOPE" == retired-ocr-inputs ]]; then
+            iargs=(--limit "$LIMIT" --output output/gc/collection.json)
+            if [[ "$APPLY" == true ]]; then iargs+=(--apply); fi
+            python -u scripts/reader_gc_inputs.py "${iargs[@]}"
+            exit 0
+          fi
           args=(--grace-days "$GRACE_DAYS" --limit "$LIMIT" --storage "$STORAGE"
                 --output output/gc/collection.json)
           if [[ "$APPLY" == true ]]; then args+=(--apply); fi
