@@ -1,4 +1,4 @@
-name: Collect Unreferenced Reader Objects
+name: Reader/桶 · GC Collect Unreferenced Objects
 run-name: Reader GC ${{ inputs.maintenance_id || github.run_id }}
 
 on:

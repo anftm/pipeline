@@ -1,4 +1,4 @@
-name: Publish proofreading upstream
+name: 校对 · Publish Proofreading Upstream
 
 on:
   schedule:

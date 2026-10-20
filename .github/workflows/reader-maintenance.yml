@@ -1,4 +1,4 @@
-name: Automatic Reader Maintenance
+name: Reader/桶 · GC Automatic Maintenance
 
 on:
   schedule:

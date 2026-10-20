@@ -1,4 +1,4 @@
-name: Build v3 Reading Candidates
+name: Reader/桶 · Build v3 Reading Candidates
 run-name: v3 build wave / ${{ github.event_name }}
 
 # Heavy per-book builds stay outside reader-sidecar; promotion owns the writer.

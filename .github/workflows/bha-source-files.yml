@@ -1,30 +1,38 @@
-name: Optimize BHA source files
+name: BHA · Mirror and Optimize Source Files
 
 on:
   workflow_dispatch:
     inputs:
+      operation:
+        description: "mirror: copy sources from GitHub; optimize: rewrite the mirror in place (qpdf/WebP); both: mirror then optimize"
+        type: choice
+        default: mirror
+        options:
+          - mirror
+          - optimize
+          - both
       archive_id:
         description: Archive number 0-31, or all
         required: false
         default: all
         type: string
       webp_quality:
-        description: Lossy WebP quality for jpg/jpeg (1-100)
+        description: Lossy WebP quality for jpg/jpeg (1-100, optimize only)
         required: false
         default: "85"
         type: string
       reoptimize_images:
-        description: Re-encode existing WebP files with the current size limit
+        description: Re-encode existing WebP files with the current size limit (optimize only)
         required: false
         default: true
         type: boolean
       pdf_preview_dpi:
-        description: PDF preview rendering DPI
+        description: PDF preview rendering DPI (optimize only)
         required: false
         default: "150"
         type: string
       pdf_preview_quality:
-        description: PDF preview WebP quality (1-100)
+        description: PDF preview WebP quality (1-100, optimize only)
         required: false
         default: "85"
         type: string
@@ -34,25 +42,37 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  optimize:
+  mirror:
     runs-on: ubuntu-latest
     timeout-minutes: 360
+    env:
+      OPERATION: ${{ inputs.operation }}
+      HF_SOURCE_REPOSITORY: vomebook/BHA-Source-Files
+      REPO_START: ${{ inputs.archive_id == 'all' && '0' || inputs.archive_id }}
+      REPO_END: ${{ inputs.archive_id == 'all' && '31' || inputs.archive_id }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
       - name: Install transformation tools
+        if: env.OPERATION != 'mirror'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends qpdf poppler-utils poppler-data fonts-noto-cjk fonts-liberation webp
       - name: Install dependencies
         run: pip install -r scripts/requirements.txt
-      - name: Optimize source files
+      - name: Mirror source files
+        if: env.OPERATION != 'optimize'
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          HF_SOURCE_REPOSITORY: vomebook/BHA-Source-Files
+        run: python scripts/mirror_source_files.py
+      - name: Optimize source files
+        if: env.OPERATION != 'mirror'
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
           WEBP_QUALITY: ${{ inputs.webp_quality }}
           WEBP_MAX_DIMENSION: "2400"
           REOPTIMIZE_IMAGES: ${{ inputs.reoptimize_images }}
@@ -62,8 +82,6 @@ jobs:
           OPTIMIZE_CONCURRENCY: "8"
           OPTIMIZE_PACE_OBJECTS_PER_MINUTE: "200"
           OPTIMIZE_PACE_MAX_SLEEP_SECONDS: "300"
-          REPO_START: ${{ inputs.archive_id == 'all' && '0' || inputs.archive_id }}
-          REPO_END: ${{ inputs.archive_id == 'all' && '31' || inputs.archive_id }}
         run: |
           echo "WEBP_MAX_DIMENSION=${WEBP_MAX_DIMENSION} REOPTIMIZE_IMAGES=${REOPTIMIZE_IMAGES} PDF_PREVIEW_DPI=${PDF_PREVIEW_DPI} PDF_PREVIEW_QUALITY=${PDF_PREVIEW_QUALITY}"
           python scripts/optimize_source_files.py

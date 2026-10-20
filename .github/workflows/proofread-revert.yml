@@ -1,4 +1,4 @@
-name: Revert proofreading
+name: 校对 · Revert Proofreading
 
 on:
   workflow_dispatch:

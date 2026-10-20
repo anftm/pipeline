@@ -1,4 +1,4 @@
-name: OCR conflict review commands
+name: 校对 · OCR Conflict Review Commands
 
 on:
   issue_comment:

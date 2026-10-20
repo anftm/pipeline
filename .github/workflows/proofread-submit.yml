@@ -1,4 +1,4 @@
-name: Submit proofreading
+name: 校对 · Submit Proofreading
 
 on:
   workflow_dispatch:

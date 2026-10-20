@@ -1,4 +1,4 @@
-name: Repair Missing Reader Resources
+name: Reader/桶 · Repair Missing Reader Resources
 on:
   workflow_dispatch:
     inputs:

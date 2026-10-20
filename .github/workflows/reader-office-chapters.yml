@@ -1,4 +1,4 @@
-name: Build Office Chapter Streams
+name: Reader/桶 · Build Office Chapter Streams
 run-name: Office chapters ${{ inputs.apply == true && 'apply' || 'plan' }}
 
 on:

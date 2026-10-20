@@ -505,7 +505,7 @@ class WaveTests(unittest.TestCase):
         self.assertEqual(operation["env"]["GH_TOKEN"], "${{ github.token }}")
         env = {"GITHUB_ACTIONS": "true", "GITHUB_REPOSITORY": "anftm/pipeline", "GITHUB_RUN_ID": "1",
                "GITHUB_WORKFLOW_REF": "anftm/pipeline/.github/workflows/reader-v3-build.yml@refs/heads/main",
-               "READER_V3_BUILD_PROTOCOL": publication.BUILD_PROTOCOL, "GITHUB_WORKFLOW": "Build v3 Reading Candidates"}
+               "READER_V3_BUILD_PROTOCOL": publication.BUILD_PROTOCOL, "GITHUB_WORKFLOW": "Reader/桶 · Build v3 Reading Candidates"}
         store = publication.CentralHubStore.__new__(publication.CentralHubStore)
         with patch.dict("os.environ", env, clear=True):
             publication.assert_stager(store)  # builders may upload immutable candidates

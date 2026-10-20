@@ -317,7 +317,7 @@ class V3PublicationTests(unittest.TestCase):
         import yaml
         root = Path(__file__).resolve().parents[1]
         workflow = yaml.safe_load((root / ".github/workflows/reader-v3-publish.yml").read_text())
-        self.assertEqual(workflow["name"], "Publish v3 Reading Generation")
+        self.assertEqual(workflow["name"], "Reader/桶 · Publish v3 Reading Generation")
         self.assertEqual(workflow["concurrency"]["group"], "reader-sidecar")
         self.assertFalse(workflow["concurrency"]["cancel-in-progress"])
         self.assertNotIn("workflow_run", workflow[True])

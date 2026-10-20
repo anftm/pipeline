@@ -7,7 +7,7 @@ import yaml
 class ChmRepairWorkflowTests(unittest.TestCase):
     def test_chm_rebuild_uses_canonical_index_and_serializes_unification(self):
         root = Path(__file__).resolve().parents[1]
-        workflow = yaml.safe_load((root / ".github/workflows/repair-chm-conversions.yml").read_text())
+        workflow = yaml.safe_load((root / ".github/workflows/reader-chm-repair.yml").read_text())
         self.assertEqual(workflow["concurrency"]["group"], "reader-sidecar")
         self.assertFalse(workflow["concurrency"]["cancel-in-progress"])
         inputs = workflow[True]["workflow_dispatch"]["inputs"]

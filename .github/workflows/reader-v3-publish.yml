@@ -1,4 +1,4 @@
-name: Publish v3 Reading Generation
+name: Reader/桶 · Publish v3 Reading Generation
 run-name: v3 ${{ inputs.operation || github.event_name }} / ${{ (inputs.apply || github.event_name != 'workflow_dispatch') && 'apply' || 'verify' }}
 
 on:

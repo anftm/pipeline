@@ -955,7 +955,7 @@ class CentralHubStore(HubBucketStore):
         if (protocol != PROTOCOL or os.environ.get("GITHUB_ACTIONS") != "true"
                 or os.environ.get("GITHUB_REPOSITORY") != expected
                 or not os.environ.get("GITHUB_RUN_ID")
-                or os.environ.get("GITHUB_WORKFLOW") != "Publish v3 Reading Generation"
+                or os.environ.get("GITHUB_WORKFLOW") != "Reader/桶 · Publish v3 Reading Generation"
                 or os.environ.get("GITHUB_WORKFLOW_REF") != expected + "/.github/workflows/reader-v3-publish.yml@refs/heads/main"
                 or os.environ.get("READER_V3_WRITE_PROTOCOL") != PROTOCOL):
             raise RuntimeError("v3 mutation requires the central serialized workflow")

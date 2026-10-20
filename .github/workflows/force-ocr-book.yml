@@ -1,4 +1,4 @@
-name: Force OCR exact book
+name: Reader/桶 · Force OCR Exact Book
 run-name: Approved PS OCR / ${{ inputs.source_sha256 }} / ${{ inputs.apply && 'apply' || 'verify' }}
 
 on:

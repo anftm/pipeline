@@ -1,4 +1,4 @@
-name: Proofreading review commands
+name: 校对 · Proofreading Review Commands
 
 on:
   issue_comment:

@@ -1,4 +1,4 @@
-name: Submit parsing
+name: 校对 · Submit Parsing
 
 on:
   repository_dispatch:

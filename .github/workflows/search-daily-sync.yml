@@ -1,4 +1,4 @@
-name: Daily Sync
+name: 搜索 · Daily Sync
 
 on:
   schedule:
@@ -10,11 +10,24 @@ on:
         description: Rebuild and publish even when source revisions are unchanged
         type: boolean
         default: false
+      target:
+        description: "all: HF Space + Pages + state; hf-space: force-publish only the HF Search index (replaces Publish HF Search Index)"
+        type: choice
+        default: all
+        options:
+          - all
+          - hf-space
+
+concurrency:
+  group: daily-sync
+  cancel-in-progress: false
 
 jobs:
   sync:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      TARGET: ${{ inputs.target || 'all' }}
 
     steps:
       - name: Checkout pipeline repo
@@ -33,7 +46,7 @@ jobs:
         run: python scripts/fetch_and_parse.py
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          FORCE_SYNC: ${{ inputs.force_sync || 'false' }}
+          FORCE_SYNC: ${{ (inputs.force_sync || inputs.target == 'hf-space') && 'true' || 'false' }}
 
       - name: Sync to HF Space
         if: steps.fetch.outputs.data_changed == 'true'
@@ -42,7 +55,7 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
       - name: Sync to GitHub Pages
-        if: steps.fetch.outputs.data_changed == 'true'
+        if: steps.fetch.outputs.data_changed == 'true' && env.TARGET == 'all'
         run: python scripts/sync_to_pages.py
         env:
           PAGES_TOKEN: ${{ secrets.PAGES_TOKEN }}
@@ -50,7 +63,7 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
       - name: Deploy GitHub Pages
-        if: steps.fetch.outputs.data_changed == 'true'
+        if: steps.fetch.outputs.data_changed == 'true' && env.TARGET == 'all'
         env:
           PAGES_TOKEN: ${{ secrets.PAGES_TOKEN }}
           PAGES_REPO: ${{ secrets.PAGES_REPO }}
@@ -64,7 +77,8 @@ jobs:
             --data '{"ref":"main"}'
 
       - name: Commit updated state
-        if: steps.fetch.outputs.data_changed == 'true'
+        # An HF-only publication must not mark Pages as synchronized.
+        if: steps.fetch.outputs.data_changed == 'true' && env.TARGET == 'all'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"

@@ -33,8 +33,10 @@ def producer_path(path):
     return path.startswith(".github/workflows/") and path not in {
         COLLECTOR, ".github/workflows/reader-maintenance.yml"} and (
         name.startswith(("reader-", "pdf-", "lin-native-text", "migrate-pdf-")) or
+        # Retired/renamed filenames stay listed: their queued or rerun records
+        # can still exist after the workflow file moved.
         name in {"force-ocr-book.yml", "publish-source-txt.yml", "publish-ccrd-index.yml", "promote-ccrd-generation.yml",
-                 "update-ccrd-source.yml", "publish-ccrd-ocr.yml"})
+                 "update-ccrd-source.yml", "publish-ccrd-ocr.yml", "repair-chm-conversions.yml"})
 
 
 def producer_repositories():

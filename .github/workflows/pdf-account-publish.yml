@@ -1,4 +1,4 @@
-name: Publish Account PDF Worker Results
+name: Reader/桶 · Publish Account PDF Worker Results
 run-name: PDF publish ${{ inputs.stage }} / ${{ inputs.worker_repository }} / ${{ inputs.worker_run_id }}
 
 on:

@@ -1,4 +1,4 @@
-name: Rebuild CHM Chapter Streams with Source Fidelity
+name: Reader/桶 · Rebuild CHM Chapter Streams
 run-name: CHM source-text repair / ${{ inputs.apply == true && 'apply' || 'plan' }}
 
 on:

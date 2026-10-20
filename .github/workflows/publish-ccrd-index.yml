@@ -1,9 +1,22 @@
-name: Publish CCRD Index
+name: CCRD · Publish Index
 
 on:
   schedule:
     - cron: "0 3 * * 1"
   workflow_dispatch:
+    inputs:
+      operation:
+        description: "auto: rebuild when the source/builder changed; promote: point at an existing generation; source-text: refresh only the source TXT and Space"
+        type: choice
+        default: auto
+        options:
+          - auto
+          - promote
+          - source-text
+      generation:
+        description: Existing generation directory (operation=promote only)
+        required: false
+        default: ""
 
 concurrency:
   group: publish-ccrd-index
@@ -13,6 +26,8 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     timeout-minutes: 360
+    env:
+      OPERATION: ${{ inputs.operation || 'auto' }}
 
     steps:
       - name: Checkout pipeline repo
@@ -28,18 +43,31 @@ jobs:
 
       - name: Check CCRD source hash
         id: source
+        if: env.OPERATION == 'auto'
         run: python scripts/check_ccrd_source_changed.py
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
       - name: Build and publish CCRD indexes
-        if: steps.source.outputs.changed == 'true'
+        if: env.OPERATION == 'auto' && steps.source.outputs.changed == 'true'
         run: python scripts/publish_ccrd_index.py
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
+      - name: Promote an existing CCRD generation
+        if: env.OPERATION == 'promote'
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          GENERATION: ${{ inputs.generation }}
+        run: |
+          if [ -z "$GENERATION" ]; then
+            echo "operation=promote requires an existing generation directory" >&2
+            exit 1
+          fi
+          python scripts/promote_ccrd_generation.py "$GENERATION"
+
       - name: Update CCRD source text and trigger Space rebuild
-        if: steps.source.outputs.changed == 'true'
+        if: (env.OPERATION == 'auto' && steps.source.outputs.changed == 'true') || env.OPERATION == 'source-text'
         run: python scripts/update_ccrd_source_txt.py
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}

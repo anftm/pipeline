@@ -785,7 +785,7 @@ class TextStreamPublicationTests(unittest.TestCase):
 
     def test_workflow_reuses_bucket_path_and_is_in_the_gc_producer_fence(self):
         from scripts.reader_gc_fence import producer_path
-        workflow = Path(__file__).parents[1] / ".github/workflows/publish-source-txt.yml"
+        workflow = Path(__file__).parents[1] / ".github/workflows/reader-publish-text.yml"
         text = workflow.read_text(encoding="utf-8")
         self.assertIn("inputs.apply == true && 'reader-sidecar'", text)
         self.assertIn("reader-text-plan-{0}", text)
@@ -797,7 +797,7 @@ class TextStreamPublicationTests(unittest.TestCase):
         self.assertNotIn("run: ${{ inputs.encoding_overrides_json", text)
         self.assertIn("build_reader_assets_v2_sidecar.py --apply", text)
         self.assertNotIn("run: python scripts/publish_source_txt_once.py", text)
-        self.assertTrue(producer_path(".github/workflows/publish-source-txt.yml"))
+        self.assertTrue(producer_path(".github/workflows/reader-publish-text.yml"))
 
 
 if __name__ == "__main__":

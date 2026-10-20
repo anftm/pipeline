@@ -120,7 +120,7 @@ class PingSpacesTests(unittest.TestCase):
             self.assertEqual(ping.main(), 0)
 
     def test_workflow_is_six_hour_off_peak_read_only_and_bounded(self):
-        workflow = (Path(__file__).parents[1] / ".github/workflows/action.yaml").read_text()
+        workflow = (Path(__file__).parents[1] / ".github/workflows/ops-keep-spaces-alive.yml").read_text()
         self.assertIn("cron: '17 2,8,14,20 * * *'", workflow)
         self.assertIn("workflow_dispatch:", workflow)
         self.assertIn("timeout-minutes: 10", workflow)
