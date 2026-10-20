@@ -51,6 +51,14 @@ REVIEWED_SOURCE_REPAIRS = {
         "reference_url": "https://www.prisoncensorship.info/archive/etext/chinese/classics/jiangqing1966to1976/091-120/100.html",
         "reference_sha256": "0b7ff0cdfe2f7d91fa86afa431f53f987b1565ad127439920df576b526b15d0f",
     },
+    "mlmrl-1967-09-01-mojibake-v1": {
+        "source_sha256": "dd446bcf91636ffc0b8254311191641c9fd5bdf306a80e1cce7005880d72a32c",
+        "offset": 9831,
+        "original_text": "打鼓忝牵\0褂泻\0\0А(9)醮蟊觥(8)泛窭家彩钦庋\0；褂屑父鋈耍\0颐羌遣磺辶耍\0灰\0灰坏愎ρ沟么\0还\0\0矗\0\0焯旒亲∥\0嗣窳(12)鹿ΑＮ医驳貌欢裕\0梢曰鹕眨\0梢耘诤洹4.虻苟夹小５\0俏沂锹\0橙惹槎酝\0久墙不啊?/p>",
+        "replacement_text": "打倒你们，还有韩爱晶、王大宾、谭厚兰也是这样。还有几个人，我们记不清了，不要被一点功压得喘不过气来，要天天记住为人民立新功。我讲得不对，可以火烧，可以炮轰、打倒都行。但是我是满怀热情对同志们讲话。\n\n",
+        "reference_url": "https://www.prisoncensorship.info/archive/etext/chinese/classics/jiangqing1966to1976/091-120/104.html",
+        "reference_sha256": "ccfe1bd8d5d6cc6fffb8c62d6c503ab1824be75c5a8e0c51fedb66b056a9d83e",
+    },
 }
 
 
