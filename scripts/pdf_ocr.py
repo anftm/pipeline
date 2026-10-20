@@ -980,7 +980,17 @@ def validate_manifest(manifest: dict) -> dict:
 def source_records(search_data: Path, revisions: Path, assets_manifest: dict | None = None,
                    repo: str = "") -> list[dict]:
     records = pdf_assets.load_records(search_data, revisions, repo, "pdf")
+    try:
+        from . import djvu_pages
+    except ImportError:
+        import djvu_pages
+    # Gated: native DjVu originals enter the page pipeline directly instead of
+    # through their derived PDF. Default off keeps production unchanged.
+    native_djvu = {item["key"]: {**item, "source_format": "djvu"}
+                   for item in pdf_assets.load_records(search_data, revisions, repo, "djvu")
+                   if djvu_pages.native_enabled(item)} if djvu_pages.native_enabled() else {}
     original_sizes = {item["key"]: item.get("source_bytes") for item in records}
+    original_sizes.update({key: item.get("source_bytes") for key, item in native_djvu.items()})
     if assets_manifest:
         generated = pdf_assets.load_generated_records(
             assets_manifest, repo=repo, assets_revision=str(assets_manifest.get("revision", "main")),
@@ -1003,6 +1013,13 @@ def source_records(search_data: Path, revisions: Path, assets_manifest: dict | N
             if item.get("source_kind") == "generated" and key in original_sizes:
                 item = {**item, "original_source_bytes": original_sizes[key]}
             by_key[key] = item
+    for key, item in native_djvu.items():
+        # One record per key: the native original replaces its derived PDF, so a
+        # DjVu is never queued twice. The derivation is kept only for sources
+        # whose bytes turn out to be a PDF (sniffed at planning time).
+        derived = by_key.get(key)
+        by_key[key] = {**item, **({"_derived_fallback": derived}
+                                  if derived and derived.get("source_kind") == "generated" else {})}
     records = list(by_key.values())
     records.sort(key=lambda item: (item.get("repo", ""), item.get("path", ""), item.get("source_kind", "")))
     return records

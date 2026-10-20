@@ -31,7 +31,7 @@ from huggingface_hub.utils import get_session, hf_raise_for_status
 
 try:
     from . import pdf_ocr, pdf_assets, lin_pdf_text, pdf_render_schedule, pdf_worker_lanes, plan_pdf_ocr, publish_pdf_ocr_assets as publication, shared, ocr_layout, reader_lifecycle, pdf_text_layer, pdf_reading_v3
-    from . import pdf_ocr_progress
+    from . import pdf_ocr_progress, djvu_pages
     from .run_pdf_ocr import source_path, _bucket_retry_delay
     from .reader_bucket import index_path, publish_bytes, publish_json, publish_json_batch, publish_catalog, read_json as read_bucket_json
 except ImportError:
@@ -39,6 +39,7 @@ except ImportError:
     import pdf_render_schedule
     import pdf_worker_lanes
     import pdf_ocr_progress
+    import djvu_pages
     from run_pdf_ocr import source_path, _bucket_retry_delay
     from reader_bucket import index_path, publish_bytes, publish_json, publish_json_batch, publish_catalog, read_json as read_bucket_json
 
@@ -59,6 +60,24 @@ def render_profile() -> str:
             f"-webp-{pdf_ocr.WEBP_QUALITY}-{pdf_ocr.WEBP_MAX_DIMENSION}"
             f"-native-{pdf_ocr.MIN_NATIVE_PAGE_CHARS}-jxl-{int(pdf_ocr.JXL_ENABLED)}"
             f"-{pdf_ocr.JXL_DISTANCE:g}-{pdf_ocr.JXL_EFFORT}-reader-source-pixels-v2-clean-webp-80-native-stream-v1-preserve-bitonal-v1")
+
+
+def render_profile_for(item: dict) -> str:
+    """PDF and native DjVu renders never share a profile namespace."""
+    return djvu_pages.render_profile(render_profile()) if djvu_pages.is_native_item(item) else render_profile()
+
+
+def djvu_fallback_current(previous, item):
+    """A ``.djvu`` whose bytes are a PDF stays on its current derived-PDF render.
+
+    Native planning recorded that decision on the derived render entry. Do not
+    download and sniff the same pinned source again on every plan.
+    """
+    return bool(djvu_pages.is_native_item(item) and isinstance(previous, dict)
+                and previous.get("djvu_pdf_fallback") == "pdf-magic"
+                and previous.get("djvu_source_revision") == item.get("source_revision")
+                and previous.get("status") in {"ready", "skipped"}
+                and previous.get("render_profile") == render_profile())
 
 
 def root_for(source_sha: str, key: str, identity: str) -> Path:
@@ -293,7 +312,7 @@ def save_registry(api, repo, name, updates, merge=None, publish_streams=False):
                                                 "range_status": "failed", "classification": "native-text"}
                 entry = shared.preserve_pdf_sidecar_entry(sidecar["f"].get(key), value)
                 if value.get("page_manifest"):
-                    entry.update(shared.pdf_pages_sidecar_entry(value["page_manifest"]["path"], value, entry))
+                    shared.apply_pdf_pages_sidecar_entry(entry, value["page_manifest"]["path"], value)
                 if entry:
                     sidecar["f"][key] = entry
             token = os.environ.get("HF_TOKEN")
@@ -345,7 +364,7 @@ def save_registry(api, repo, name, updates, merge=None, publish_streams=False):
                                                    "range_status": "failed", "classification": "native-text"}
                     entry = shared.preserve_pdf_sidecar_entry(sidecar["f"].get(key), value)
                     if value.get("page_manifest"):
-                        entry.update(shared.pdf_pages_sidecar_entry(value["page_manifest"]["path"], value, entry))
+                        shared.apply_pdf_pages_sidecar_entry(entry, value["page_manifest"]["path"], value)
                     if entry:
                         sidecar["f"][key] = entry
             operations.append(CommitOperationAdd(path_in_repo=publication.SIDECAR_NAME,
@@ -429,7 +448,9 @@ def pending_render(records, rendered, ocr, retry_failed=False, partition="all"):
         if not render_partition_matches(item, partition):
             continue
         previous = rendered.get(item["key"])
-        if same_source(previous, item) and previous.get("render_profile") == render_profile():
+        if djvu_fallback_current(previous, item):
+            continue
+        if same_source(previous, item) and previous.get("render_profile") == render_profile_for(item):
             if previous.get("status") in {"ready", "skipped"}:
                 if not item.get("force_image_render") or previous.get("image_rendered"):
                     continue
@@ -485,7 +506,7 @@ def validate_range(book, start, end, descriptor):
 
 
 def estimate_render_cost(item, source, progress):
-    book = {**item, "render_profile": render_profile()}
+    book = {**item, "render_profile": render_profile_for(item)}
     previous = progress.get(book["key"], {})
     image_rendered = (not pdf_ocr.preserves_reader_pdf(book)
                       and bool(book.get("force_image_render") or book.get("probe", {}).get("classification") != "native-text"))
@@ -545,7 +566,7 @@ def sample_render_cost(book, source, output=None):
 def plan_render_ranges(queue, progress, target_seconds=None):
     if target_seconds is not None and pdf_render_schedule.finite_seconds(target_seconds, positive=True) is None:
         raise ValueError("render target seconds must be finite and positive")
-    books = [{**item, "render_profile": render_profile()}
+    books = [{**item, "render_profile": render_profile_for(item)}
               for shard in queue["shards"] for item in shard["records"]]
     tasks, saved = [], {}
     for book in books:
@@ -603,11 +624,28 @@ def render_book(item: dict, source: Path, bundle: Path, *, force_ocr_native=Fals
     source_sha, source_bytes = shared.hash_file(source)
     if item.get("source_sha256") and item["source_sha256"] != source_sha:
         raise ValueError("PDF source changed after planning")
-    lin_native = lin_pdf_text.applies(item)
-    probe = item.get("probe") or (lin_pdf_text.probe(source) if lin_native else pdf_ocr.probe_pdf(source))
-    presentation = item.get("reader_presentation") or pdf_ocr.reader_presentation(source)
+    djvu = djvu_pages.is_native_item(item)
+    if djvu:
+        if djvu_pages.sniff(source) != "djvu":
+            raise ValueError("native DjVu render requires DjVu source bytes")
+        if force_ocr_native:
+            raise ValueError("forced OCR is not defined for native DjVu sources")
+    lin_native = not djvu and lin_pdf_text.applies(item)
+    probe = item.get("probe") or (djvu_pages.probe(source) if djvu else
+                                  lin_pdf_text.probe(source) if lin_native else pdf_ocr.probe_pdf(source))
+    presentation = item.get("reader_presentation") or (
+        djvu_pages.reader_presentation(source) if djvu else pdf_ocr.reader_presentation(source))
     preserve_pdf = pdf_ocr.preserves_reader_pdf({"reader_presentation": presentation})
-    profile = render_profile() + ("-force-ocr-native-v1" if force_ocr_native else "")
+    if djvu and preserve_pdf:
+        raise ValueError("a DjVu source cannot be preserved as a Reader PDF")
+    djvu_infos = None
+    if djvu:
+        # The planner's probe is checked against the actual bytes; geometry is
+        # always read from the source rather than trusted from the queue.
+        djvu_infos = djvu_pages.inspect(source.read_bytes())
+        if len(djvu_infos) != probe["page_count"]:
+            raise ValueError("DjVu page count differs from planning probe")
+    profile = render_profile_for(item) + ("-force-ocr-native-v1" if force_ocr_native else "")
     if "start" in item and not 1 <= item["start"] <= item["end"] <= probe["page_count"]:
         raise ValueError("invalid render page range")
     base = {**public_item(item), "source_sha256": source_sha, "source_bytes": source_bytes,
@@ -620,10 +658,11 @@ def render_book(item: dict, source: Path, bundle: Path, *, force_ocr_native=Fals
     root = root_for(source_sha, item["key"], profile)
     bundle.mkdir(parents=True, exist_ok=True)
     pages = []
-    force_image_render = bool(item.get("force_image_render")) and not preserve_pdf
+    # Browsers cannot draw DjVu: its page images are the only Reader stream.
+    force_image_render = (bool(item.get("force_image_render")) or djvu) and not preserve_pdf
     first, last = item.get("start", 1), item.get("end", probe["page_count"])
     scan_images = (pdf_ocr.scan_reader_images(source, first, last)
-                   if not force_ocr_native and not preserve_pdf
+                   if not djvu and not force_ocr_native and not preserve_pdf
                    and any(chars == 0 for chars in probe["page_chars"][first - 1:last])
                    else {})
     native_text = {}
@@ -631,7 +670,11 @@ def render_book(item: dict, source: Path, bundle: Path, *, force_ocr_native=Fals
         native_numbers = [number for number in range(first, last + 1)
                           if probe["classification"] == "native-text"
                           or probe["page_chars"][number - 1] >= pdf_ocr.MIN_NATIVE_PAGE_CHARS]
-        native_text = pdf_ocr.native_pages(source, native_numbers)
+        if djvu:
+            texts = djvu_pages.text_pages(source, djvu_infos) if native_numbers else {}
+            native_text = {number: texts[number] for number in native_numbers}
+        else:
+            native_text = pdf_ocr.native_pages(source, native_numbers)
     page_started = time.perf_counter()
     with tempfile.TemporaryDirectory(dir=bundle) as temp, (
             lin_pdf_text.pymupdf.open(source) if lin_native else nullcontext(None)) as document:
@@ -653,9 +696,14 @@ def render_book(item: dict, source: Path, bundle: Path, *, force_ocr_native=Fals
             native = not force_ocr_native and (probe["classification"] == "native-text"
                      or probe["page_chars"][number - 1] >= pdf_ocr.MIN_NATIVE_PAGE_CHARS)
             reader_pixels = scan_images.get(number) if not native and probe["page_chars"][number - 1] == 0 else None
-            png, width, height = pdf_ocr.render_page(source, number, Path(temp), reader_pixels,
-                                                     reader_jxl=pdf_ocr.JXL_ENABLED and not preserve_pdf,
-                                                     **({"reader_images": False} if preserve_pdf else {}))
+            if djvu:
+                png, width, height = djvu_pages.render_page(source, number, Path(temp),
+                                                            info=djvu_infos[number - 1],
+                                                            reader_jxl=pdf_ocr.JXL_ENABLED)
+            else:
+                png, width, height = pdf_ocr.render_page(source, number, Path(temp), reader_pixels,
+                                                         reader_jxl=pdf_ocr.JXL_ENABLED and not preserve_pdf,
+                                                         **({"reader_images": False} if preserve_pdf else {}))
             page = {"p": number, "source": "native" if native else "ocr", "width": width, "height": height}
             for field, local, folder in (("i", png, "ocr-input"),
                                           ("w", png.with_suffix(".webp"), "pages")):
@@ -1201,11 +1249,11 @@ def publish_legacy_render(queue, results, api, repo):
                 images = json.loads(read_object(result["page_manifest"], "/page-manifest.json"))
                 if images.get("page_count") != manifest["page_count"]:
                     raise ValueError("render page manifest count mismatch")
-    results.extend({**public_item(x), "render_profile": render_profile()} for x in queue.get("failed", []))
+    results.extend({**public_item(x), "render_profile": render_profile_for(x)} for x in queue.get("failed", []))
     seen = {r["key"] for r in results}
     for item in planned.values():
         if item["key"] not in seen:
-            results.append({**public_item(item), "render_profile": render_profile(),
+            results.append({**public_item(item), "render_profile": render_profile_for(item),
                             "status": "failed", "error": "render worker result missing"})
     save_registry(api, repo, RENDER_REGISTRY, {r["key"]: r for r in results}, publish_streams=True)
     print(f"render publication: {len(results)} results, "
@@ -1329,7 +1377,7 @@ def main():
         if updates:
             save_registry(api, repo, RENDER_PROGRESS_REGISTRY, {r["key"]: r for r in updates},
                           merge=merge_render_ranges)
-        published = [{**public_item(x), "render_profile": render_profile()} for x in queue.get("failed", [])]
+        published = [{**public_item(x), "render_profile": render_profile_for(x)} for x in queue.get("failed", [])]
         for book in books.values():
             with tempfile.TemporaryDirectory(dir=args.output) as temp:
                 try:

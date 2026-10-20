@@ -42,7 +42,7 @@ class PublicationReviewRequired(ValueError):
 
 
 PUBLIC_OBJECT = re.compile(
-    r"objects/[0-9a-f]{2}/[0-9a-f]{64}/[0-9a-f]{16}/(?:document\.pdf|"
+    r"objects/[0-9a-f]{2}/[0-9a-f]{64}/[0-9a-f]{16}/(?:document\.pdf|document\.djvu|"
     r"reading-manifest\.json|page-map\.json\.gz|text-layer-manifest\.json|"
     r"text/(?:page-[0-9]{6}\.json\.gz|book-text\.json\.gz|search-[0-9]{6}-[0-9]{6}\.json\.gz|partition-[0-9]{6}-[0-9]{6}-manifest\.json)|"
     r"preview/(?:page-[0-9]{6}\.(?:png|webp|jpeg|svg)|partition-[0-9]{6}-[0-9]{6}-manifest\.json))")
@@ -386,23 +386,24 @@ def stage(store, ref, bundle=None, *, apply=False):
 
 
 def import_primary(spec, workspace):
-    """Materialize an original PDF from its immutable dataset revision."""
+    """Materialize an original PDF or native DjVu from its immutable dataset revision."""
     origin = spec.get("primary_source")
     if origin is None:
         return
     ref = v3.resource(spec["primary"])
     source = text.sha(spec.get("source_sha256"))
+    suffix = ".djvu" if spec.get("primary_format") == "djvu" else ".pdf"
     if (not isinstance(origin, dict) or not isinstance(origin.get("repo"), str)
             or not re.fullmatch(r"VoiceOfML/[A-Za-z0-9._-]+", origin["repo"])
             or not isinstance(origin.get("revision"), str)
             or not re.fullmatch(r"[0-9a-f]{40}", origin["revision"])
             or not isinstance(origin.get("path"), str)
             or any(part in {"", ".", ".."} for part in origin["path"].split("/"))
-            or "\\" in origin["path"] or not origin["path"].lower().endswith(".pdf")
+            or "\\" in origin["path"] or not origin["path"].lower().endswith(suffix)
             or spec.get("source_key") != origin["repo"] + "\0" + origin["path"]
             or ref["bucket"] != shared.PDF_PAGES_BUCKET or ref["role"] != "runtime"
             or ref["sha256"] != source or ref["bytes"] > 512 * 1024 * 1024
-            or not re.fullmatch(r"objects/" + source[:2] + "/" + source + r"/[0-9a-f]{16}/document\.pdf", ref["path"])):
+            or not re.fullmatch(r"objects/" + source[:2] + "/" + source + r"/[0-9a-f]{16}/document" + re.escape(suffix), ref["path"])):
         raise ValueError("primary import requires matching pinned original-source identity")
     from huggingface_hub import HfApi, hf_hub_download
     entries = HfApi().get_paths_info(origin["repo"], [origin["path"]], repo_type="dataset", revision=origin["revision"])
@@ -412,6 +413,8 @@ def import_primary(spec, workspace):
     raw = Path(cached).read_bytes()
     if len(raw) != ref["bytes"] or hashlib.sha256(raw).hexdigest() != source:
         raise ValueError("pinned primary source checksum mismatch")
+    if suffix == ".djvu" and v3.djvu_pages.sniff(raw) != "djvu":
+        raise ValueError("native DjVu primary lacks DjVu magic bytes")
     target = workspace / ref["path"]
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(raw)
@@ -493,6 +496,8 @@ def build_stage(store, spec, workspace, *, apply=False):
                            "total_seconds": round(time.monotonic() - started, 3)}
         return result
     if spec.get("rebuild_native_text"):
+        if spec.get("primary_format") == "djvu":
+            raise ValueError("native rebuild is defined only for PDF primaries")
         if spec.get("primary", {}).get("path") is None:
             raise ValueError("native rebuild requires primary PDF")
         primary = workspace / spec["primary"]["path"]
@@ -541,7 +546,9 @@ def build_stage(store, spec, workspace, *, apply=False):
     return result
 
 
-def promote(store, candidate_ref, expected_parent, *, apply=False):
+def promote(store, candidate_ref, expected_parent, *, apply=False, replace_source=None):
+    """``replace_source`` names the exact live source SHA a verified native
+    DjVu candidate may replace (derived-PDF migration); default never."""
     candidate = read_index(store, candidate_ref)
     if candidate.get("version") != 1 or candidate.get("kind") != "reader-reading-candidate":
         raise ValueError("invalid staged reading candidate")
@@ -577,7 +584,13 @@ def promote(store, candidate_ref, expected_parent, *, apply=False):
     previous_entry = old["files"].get(key)
     if previous_entry and not manifest.get("text_layer"):
         raise ValueError("preview-only publication cannot replace an existing reading")
-    if (previous_entry and previous_entry.get("components", {}).get("text") == "pending"):
+    migration = bool(replace_source and previous_entry
+                     and previous_entry["source_sha256"] == text.sha(replace_source)
+                     and previous_entry["source_sha256"] != manifest["source_sha256"]
+                     and manifest["primary"]["kind"] == "djvu" and manifest.get("text_layer"))
+    if replace_source and not migration:
+        raise ValueError("DjVu migration does not match the live reading")
+    if (previous_entry and not migration and previous_entry.get("components", {}).get("text") == "pending"):
         previous = v3.verify_reading(previous_entry["resource"], verified)
         def previews(value):
             return [page for part in value["preview"]["partitions"]

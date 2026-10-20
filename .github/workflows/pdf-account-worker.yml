@@ -59,6 +59,9 @@ jobs:
           STAGE: ${{ inputs.stage || 'auto' }}
           LIMIT: ${{ inputs.limit || '20' }}
           RETRY_FAILED_ONLY: ${{ inputs.retry_failed_only || 'false' }}
+          # Native DjVu admission (default off; "pilot" uses the exact key list).
+          PDF_DJVU_NATIVE: ${{ vars.PDF_DJVU_NATIVE || 'false' }}
+          PDF_DJVU_NATIVE_KEYS: ${{ vars.PDF_DJVU_NATIVE_KEYS || '' }}
         run: |
           [[ "$LIMIT" =~ ^[0-9]+$ ]] && ((10#$LIMIT >= 1 && 10#$LIMIT <= 100)) || exit 1
           [[ "$STAGE" =~ ^(auto|render|ocr)$ ]] || exit 1
@@ -74,7 +77,7 @@ jobs:
           # for OCR, so the lane never idles while either queue has work.
           if [[ "$STAGE" == render || ( "$STAGE" == auto && "$(jq -r '.shard_count' output/pdf-ocr/queue.json)" == 0 ) ]]; then
             sudo apt-get update
-            sudo apt-get install -y --no-install-recommends poppler-utils poppler-data fonts-noto-cjk fonts-liberation
+            sudo apt-get install -y --no-install-recommends poppler-utils poppler-data fonts-noto-cjk fonts-liberation djvulibre-bin
             FORCE_SYNC=true python scripts/fetch_and_parse.py
             python scripts/pdf_ocr_stages.py plan-render --native-text-stream --target-render-seconds 6000 --retry-failed "${args[@]}"
             resolved=render
@@ -113,7 +116,7 @@ jobs:
         run: |
           pip install -r scripts/requirements.txt
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends poppler-utils poppler-data fonts-noto-cjk fonts-liberation
+          sudo apt-get install -y --no-install-recommends poppler-utils poppler-data fonts-noto-cjk fonts-liberation djvulibre-bin
       - name: Install OCR dependencies
         if: needs.plan.outputs.stage == 'ocr'
         run: pip install -r scripts/requirements.txt -r scripts/requirements-pdf-ocr.txt
