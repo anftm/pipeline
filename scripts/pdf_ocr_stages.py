@@ -111,6 +111,40 @@ def retry(operation):
         time.sleep(delay)
 
 
+def remote_sizes(bucket: str, prefix: str, token) -> dict[str, int]:
+    sizes = {}
+    def listing():
+        for item in HfApi(token=token).list_bucket_tree(bucket, prefix=prefix, recursive=True, token=token):
+            if item.type == "file":
+                sizes[item.path] = getattr(item, "size", None)
+    retry(listing)
+    return sizes
+
+
+def fresh_additions(bucket: str, relative: str, additions: list, token) -> list:
+    """Never overwrite an existing immutable object.
+
+    Object paths are deterministic per source/profile, but recognition output is
+    not byte-reproducible. Re-uploading over a published page silently changed
+    bytes that registries, v3 text bundles and CCRD exports had pinned. An
+    identical-size object is kept as is; a differing one is a hard conflict, so
+    the book fails visibly instead of corrupting the published version.
+    """
+    if not additions:
+        return []
+    existing = remote_sizes(bucket, relative + "/", token)
+    fresh, conflicts = [], []
+    for local, path in additions:
+        size = existing.get(path)
+        if size is None:
+            fresh.append((local, path))
+        elif type(size) is int and size != Path(local).stat().st_size:
+            conflicts.append(path)
+    if conflicts:
+        raise ValueError(f"immutable object conflict for {len(conflicts)} object(s), e.g. {bucket}:{conflicts[0]}")
+    return fresh
+
+
 def upload_objects(bundle: Path) -> list[str]:
     """Sync only one book's immutable prefix, never recursively list the whole bucket."""
     records, roots = {}, []
@@ -159,15 +193,15 @@ def upload_objects(bundle: Path) -> list[str]:
         for path, record in records.items():
             heartbeats.enter_context(reader_lifecycle.processing_heartbeat(record,
                 lambda value, path=path: publish_json(path, value, token)))
+        input_token = os.environ.get("HF_INPUT_TOKEN") or os.environ.get("HF_TOKEN")
         for root, relative in roots:
-            pdf_additions = additions(root, relative)
+            pdf_additions = fresh_additions(shared.PDF_PAGES_BUCKET, relative, additions(root, relative), token)
             if pdf_additions:
                 shared.batch_bucket_files_with_retry(shared.PDF_PAGES_BUCKET, pdf_additions, token)
-            input_additions = additions(root, relative, input_bucket=True)
+            input_additions = fresh_additions(shared.PDF_OCR_INPUT_BUCKET, relative,
+                                              additions(root, relative, input_bucket=True), input_token)
             if input_additions:
-                shared.batch_bucket_files_with_retry(
-                    shared.PDF_OCR_INPUT_BUCKET, input_additions,
-                    os.environ.get("HF_INPUT_TOKEN") or os.environ.get("HF_TOKEN"))
+                shared.batch_bucket_files_with_retry(shared.PDF_OCR_INPUT_BUCKET, input_additions, input_token)
     uploaded = {path: {**reader_lifecycle.heartbeat_processing(record), "status": "uploaded"}
                 for path, record in records.items()}
     publish_json_batch(uploaded, token)

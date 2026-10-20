@@ -518,6 +518,7 @@ class PdfOcrStagesTests(unittest.TestCase):
         uploads = []
         with patch.object(stages.shared, "batch_bucket_files_with_retry",
                           side_effect=lambda bucket, additions, token: uploads.append((bucket, additions))), \
+                patch.object(stages, "remote_sizes", return_value={}), \
                 patch.object(stages, "publish_json_batch"):
             stages.upload_objects(self.root / "render")
         self.assertEqual({bucket for bucket, _additions in uploads},
@@ -526,6 +527,27 @@ class PdfOcrStagesTests(unittest.TestCase):
         remote_paths = [remote for _local, remote in pdf_upload]
         self.assertIn(result["render_manifest"]["path"], remote_paths)
         self.assertNotEqual({remote.split("/", 1)[0] for remote in remote_paths}, {stages.BUCKET})
+
+    def test_upload_never_overwrites_existing_immutable_objects(self):
+        result = self.render_fixture()
+        manifest = result["render_manifest"]["path"]
+        local = self.root / "render" / manifest
+        uploads = []
+        def put(bucket, additions, token):
+            uploads.extend(remote for _local, remote in additions)
+        with patch.object(stages.shared, "batch_bucket_files_with_retry", side_effect=put), \
+                patch.object(stages, "publish_json_batch"), \
+                patch.object(stages, "remote_sizes", side_effect=lambda bucket, prefix, token:
+                             {manifest: local.stat().st_size} if bucket == stages.shared.PDF_PAGES_BUCKET else {}):
+            stages.upload_objects(self.root / "render")
+        self.assertNotIn(manifest, uploads)
+        self.assertTrue(uploads)
+        with patch.object(stages.shared, "batch_bucket_files_with_retry", side_effect=put), \
+                patch.object(stages, "publish_json_batch"), \
+                patch.object(stages, "remote_sizes", side_effect=lambda bucket, prefix, token:
+                             {manifest: local.stat().st_size + 3} if bucket == stages.shared.PDF_PAGES_BUCKET else {}):
+            with self.assertRaisesRegex(ValueError, "immutable object conflict"):
+                stages.upload_objects(self.root / "render")
 
     def test_planner_includes_small_pdf_and_rebuilds_old_ocr_for_v2_index(self):
         item = {**self.item(), "source_bytes": 1024}

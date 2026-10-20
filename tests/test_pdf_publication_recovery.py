@@ -89,6 +89,7 @@ class PdfPublicationRecoveryTests(unittest.TestCase):
             def protect(records, token):
                 events.append(("protect", copy.deepcopy(records)))
             with patch.object(stages, "publish_json_batch", side_effect=protect), \
+                    patch.object(stages, "remote_sizes", return_value={}), \
                     patch.object(stages.shared, "batch_bucket_files_with_retry",
                                  side_effect=lambda bucket, additions, token: events.append(("upload", bucket, additions))):
                 paths = stages.upload_objects(bundle)

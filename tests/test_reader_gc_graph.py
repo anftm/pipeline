@@ -636,6 +636,7 @@ class ReaderGcGraphTests(unittest.TestCase):
                 events.append("upload")
                 raise ValueError("failed transfer")
             with patch.object(stages, "publish_json_batch", side_effect=protect), \
+                    patch.object(stages, "remote_sizes", return_value={}), \
                     patch.object(stages.shared, "batch_bucket_files_with_retry", side_effect=upload):
                 with self.assertRaises(ValueError):
                     stages.upload_objects(Path(directory))
