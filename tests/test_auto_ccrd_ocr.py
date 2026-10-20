@@ -1,5 +1,6 @@
 """Complete tiny OCR bundles and durable automation contracts; offline, no models."""
 import copy
+import gzip
 import json
 from pathlib import Path
 import tempfile
@@ -277,6 +278,18 @@ class AutoCcrdOcrTests(unittest.TestCase):
         with patch.object(live, 'json_request', side_effect=[first, {'total': 201, 'results': [{'doc_id': 'OCR:1'}]}]):
             with self.assertRaisesRegex(ValueError, 'duplicated'):
                 live.all_results({'sources': ['OCR']})
+
+    def test_live_acceptance_derives_legacy_counts_from_archived_metadata(self):
+        raw = gzip.compress(contract.canonical({'version': 1, 'sources': [
+            {'slug': 'CCRD', 'name': 'CCRD', 'count': 11},
+            {'slug': 'CW', 'name': 'CW', 'count': 22},
+        ], 'records': []}))
+        path = self.root / 'search_data.json.gz'
+        path.write_bytes(raw)
+        self.assertEqual(live.metadata_counts(path, contract.digest(raw)), {'CCRD': 11, 'CW': 22})
+        path.write_bytes(raw + b'x')
+        with self.assertRaisesRegex(ValueError, 'differs'):
+            live.metadata_counts(path, contract.digest(raw))
 
 
 if __name__ == '__main__':

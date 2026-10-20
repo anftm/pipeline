@@ -164,7 +164,9 @@ jobs:
         run: |
           if jq -e '.generation' output/ccrd-ocr-auto/publication.json > /dev/null; then
             python -B scripts/verify_ccrd_ocr_live.py --root output/ccrd-ocr-auto/candidate \
-              --receipt output/ccrd-ocr-auto/publication.json --output output/ccrd-ocr-auto/acceptance.json
+              --receipt output/ccrd-ocr-auto/publication.json \
+              --metadata output/ccrd-ocr-auto/consumer/data/search_data.json.gz \
+              --output output/ccrd-ocr-auto/acceptance.json
           fi
       - uses: actions/upload-artifact@v7
         if: always()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 from pathlib import Path
 import re
@@ -59,7 +60,31 @@ def all_results(payload):
     return results
 
 
-def verify(root, receipt, *, wait_seconds=1200):
+def metadata_counts(path: Path, expected_sha256: str) -> dict[str, int]:
+    """Read exact legacy counts from the archived base metadata, never constants."""
+    raw = path.read_bytes()
+    if contract.digest(raw) != expected_sha256:
+        raise ValueError('base metadata archive differs from the OCR release base')
+    try:
+        data = json.loads(gzip.decompress(raw))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError('invalid base metadata archive') from error
+    sources = data.get('sources')
+    if not isinstance(sources, list) or not sources:
+        raise ValueError('base metadata lacks sources')
+    counts = {}
+    for source in sources:
+        slug, count = source.get('slug'), source.get('count')
+        if (not isinstance(slug, str) or not slug or slug in counts
+                or type(count) is not int or count < 0):
+            raise ValueError('invalid base metadata source counts')
+        counts[slug] = count
+    if 'OCR' in counts:
+        raise ValueError('base metadata must not already contain the OCR source')
+    return counts
+
+
+def verify(root, receipt, *, metadata=None, wait_seconds=1200):
     generation, ref = receipt['generation'], receipt['release']
     raw = (root / contract.safe_path(ref['path'])).read_bytes()
     if len(raw) != ref['bytes'] or contract.digest(raw) != ref['sha256']:
@@ -82,9 +107,13 @@ def verify(root, receipt, *, wait_seconds=1200):
         if time.monotonic() >= deadline:
             raise TimeoutError('CCRD has not loaded the exact complete OCR generation')
         time.sleep(15)
+    if metadata is None:
+        raise ValueError('base metadata archive is required for exact legacy counts')
+    expected = metadata_counts(metadata, manifest['base_metadata_sha256'])
+    expected['OCR'] = len(loaded['records'])
     counts = {item['slug']: item['count'] for item in json_request('/api/sources')}
-    if counts != {'CCRD': 35586, 'CW': 11664, 'OCR': len(loaded['records'])}:
-        raise ValueError('live legacy/OCR counts differ from the complete release')
+    if counts != expected:
+        raise ValueError(f'live legacy/OCR counts differ: {counts!r} != {expected!r}')
     results = all_results({'q': '', 'sources': ['OCR'], 'sort': 'name'})
     by_id = {item['doc_id']: item for item in results}
     if set(by_id) != set(loaded['text_paths']):
@@ -126,9 +155,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', type=Path, required=True)
     parser.add_argument('--receipt', type=Path, required=True)
+    parser.add_argument('--metadata', type=Path, required=True,
+                        help='Exact base data/search_data.json.gz archived with the release')
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
-    report = verify(args.root, json.loads(args.receipt.read_text()))
+    report = verify(args.root, json.loads(args.receipt.read_text()), metadata=args.metadata)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_bytes(contract.canonical(report))
     print(json.dumps(report, ensure_ascii=False, indent=2))
