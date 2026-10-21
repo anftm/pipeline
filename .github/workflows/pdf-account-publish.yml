@@ -82,7 +82,6 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           PAGES_TOKEN: ${{ secrets.PAGES_TOKEN }}
           PAGES_REPO: ${{ secrets.PAGES_REPO }}
-          READER_ASSETS_REPO: vomebook/Reader-Assets
         run: python scripts/publish_search_reader_index.py
       - name: Capture deduplicated PDF/OCR progress
         if: always()
