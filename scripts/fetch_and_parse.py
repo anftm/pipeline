@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-每天拉取 9 个 HF 仓库的 直接目录.txt，生成 search_data.json。
+每天拉取 10 个 HF 仓库的 直接目录.txt，生成 search_data.json。
 仅当有仓库 commit SHA 变化时才重新生成。
 
 用法:
@@ -37,6 +37,7 @@ REPOS = [
     "VoiceOfML/A-Historical-Learning-Data",
     "VoiceOfML/MLMRL-Hub",
     "VoiceOfML/Omnibus",
+    "VoiceOfML/Marxists-Library",
 ]
 
 STATE_FILE = Path("state/commits.json")

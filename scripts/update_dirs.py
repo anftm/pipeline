@@ -19,6 +19,7 @@ REPOS = [
     "datasets/VoiceOfML/GPCREducation",
     "datasets/VoiceOfML/SovMaterials",
     "datasets/VoiceOfML/VOMEBOOK",
+    "datasets/VoiceOfML/Marxists-Library",
 ]
 
 HF_USERNAME = "VoiceOfML"
