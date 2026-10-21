@@ -1,7 +1,10 @@
 name: Reader/桶 · Publish UTF-8 Text
-run-name: UTF-8 text ${{ inputs.apply == true && 'publish' || 'plan' }} (${{ inputs.extension || 'all' }})
+run-name: UTF-8 text ${{ (github.event_name == 'schedule' || inputs.apply == true) && 'publish' || 'plan' }} (${{ inputs.extension || 'all' }})
 
 on:
+  schedule:
+    # Weekly after the daily search sync; manual dispatch handles one-off batches.
+    - cron: '0 3 * * 0'
   workflow_dispatch:
     inputs:
       extension:
@@ -44,7 +47,7 @@ permissions:
 concurrency:
   # A read-only plan owns no shared index. Every apply still uses the existing
   # serialized Reader writer lock, including a selected-source pilot.
-  group: ${{ inputs.apply == true && 'reader-sidecar' || format('reader-text-plan-{0}', github.run_id) }}
+  group: ${{ (github.event_name == 'schedule' || inputs.apply == true) && 'reader-sidecar' || format('reader-text-plan-{0}', github.run_id) }}
   cancel-in-progress: false
   queue: max
 
@@ -79,11 +82,11 @@ jobs:
         id: text
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          TEXT_EXTENSION: ${{ inputs.extension }}
-          TEXT_LIMIT: ${{ inputs.limit }}
-          TEXT_FORCE: ${{ inputs.force }}
-          TEXT_RETRY: ${{ inputs.retry_failures }}
-          TEXT_APPLY: ${{ inputs.apply }}
+          TEXT_EXTENSION: ${{ inputs.extension || 'all' }}
+          TEXT_LIMIT: ${{ inputs.limit || '0' }}
+          TEXT_FORCE: ${{ inputs.force || false }}
+          TEXT_RETRY: ${{ inputs.retry_failures || false }}
+          TEXT_APPLY: ${{ github.event_name == 'schedule' || inputs.apply == true }}
           TEXT_SELECTION: ${{ inputs.selection_json || '{}' }}
           TEXT_ENCODINGS: ${{ inputs.encoding_overrides_json || '{}' }}
         run: |
@@ -110,7 +113,7 @@ jobs:
             --report output/text-stream-report.json
 
       - name: Rebuild canonical mappings after verified checkpoints
-        if: always() && inputs.apply == true && steps.text.outputs.checkpoint_complete == 'true' && steps.text.outputs.published_count != '0'
+        if: always() && (github.event_name == 'schedule' || inputs.apply == true) && steps.text.outputs.checkpoint_complete == 'true' && steps.text.outputs.published_count != '0'
         id: sidecar
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}

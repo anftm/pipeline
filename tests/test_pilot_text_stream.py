@@ -415,7 +415,7 @@ class TextStreamPublicationTests(unittest.TestCase):
                 upload.assert_not_called()
 
     def test_utf8_sources_are_unchanged_and_selection_checksum_is_checked_first(self):
-        item = {"repo":"VoiceOfML/Test", "path":"plain.md", "extension":"md", "revision":"a" * 40}
+        item = {"repo":"VoiceOfML/Test", "path":"plain.txt", "extension":"txt", "revision":"a" * 40}
         raw = b"Complete **UTF-8** text.\r\n"
         with tempfile.TemporaryDirectory() as directory, \
              patch.object(stream, "download", side_effect=lambda url, target, token:target.write_bytes(raw)):
@@ -619,9 +619,9 @@ class TextStreamPublicationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory)
             source=root/"source.json";source.write_text(json.dumps([
-                {"Repo":"VoiceOfML/Test","File":"readme","Extension":"md","Folder":[]}]))
+                {"Repo":"VoiceOfML/Test","File":"readme","Extension":"txt","Folder":[]}]))
             revisions=root/"revisions.json";revisions.write_text(json.dumps({"VoiceOfML/Test":"a"*40}))
-            args=SimpleNamespace(search_data=source,revisions=revisions,extensions=["md"],limit=0,
+            args=SimpleNamespace(search_data=source,revisions=revisions,extensions=["txt"],limit=0,
                 checkpoint_size=64,bucket=stream.TARGET_BUCKET,apply=True,plan_only=False,
                 force=False,retry_failures=False,encoding_overrides=None,report=root/"report.json")
             with patch.object(stream,"parse_args",return_value=args), \
@@ -634,13 +634,13 @@ class TextStreamPublicationTests(unittest.TestCase):
                 self.assertEqual(publish.call_args.args[1:4], ([], [], {}))
                 checked = publish.call_args.kwargs["unchanged_utf8"]
                 self.assertEqual(len(checked), 1)
-                self.assertEqual(checked[0]["key"], "VoiceOfML/Test\0readme.md")
+                self.assertEqual(checked[0]["key"], "VoiceOfML/Test\0readme.txt")
                 report=json.loads(args.report.read_text())
                 self.assertEqual(report["published"],0)
                 self.assertEqual(len(report["unchanged_utf8"]),1)
 
     def test_utf8_ledger_preserves_every_mapping_and_advances_the_next_small_batch(self):
-        key = "VoiceOfML/Test\0readme.md"
+        key = "VoiceOfML/Test\0readme.txt"
         checked = {"key": key, "source_revision": "a" * 40, "source_sha256": "b" * 64,
                    "source_bytes": 17, "source_encoding": "utf-8"}
         previous = {"version": 1, "kind": "text-stream-index", "files": [{"key": key, "object": "old.txt"}]}
@@ -658,8 +658,8 @@ class TextStreamPublicationTests(unittest.TestCase):
         self.assertEqual(next_index["files"], previous["files"])
         self.assertEqual(uploads, [stream.ROOT + "/index.json"])
         body_read.assert_not_called()
-        sources = [{"repo": "VoiceOfML/Test", "path": "readme.md", "revision": "a" * 40},
-                   {"repo": "VoiceOfML/Test", "path": "next.md", "revision": "a" * 40}]
+        sources = [{"repo": "VoiceOfML/Test", "path": "readme.txt", "revision": "a" * 40},
+                   {"repo": "VoiceOfML/Test", "path": "next.txt", "revision": "a" * 40}]
         self.assertEqual(stream.pending_records(sources, next_index), [sources[1]])
         self.assertEqual(stream.pending_records(sources, next_index, force=True), sources)
         self.assertEqual(stream.pending_records([{**sources[0], "revision": "c" * 40}], next_index), [{**sources[0], "revision": "c" * 40}])
@@ -673,11 +673,11 @@ class TextStreamPublicationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "source.json"
-            source.write_text(json.dumps([{"Repo": "VoiceOfML/Test", "File": name, "Extension": "md", "Folder": []}
+            source.write_text(json.dumps([{"Repo": "VoiceOfML/Test", "File": name, "Extension": "txt", "Folder": []}
                                           for name in ("first", "second")]))
             revisions = root / "revisions.json"
             revisions.write_text(json.dumps({"VoiceOfML/Test": "a" * 40}))
-            args = SimpleNamespace(search_data=source, revisions=revisions, extensions=["md"], limit=1,
+            args = SimpleNamespace(search_data=source, revisions=revisions, extensions=["txt"], limit=1,
                 checkpoint_size=64, bucket=stream.TARGET_BUCKET, apply=True, plan_only=False,
                 force=False, retry_failures=False, encoding_overrides=None, report=root / "report.json")
             stored = [{"version": 1, "kind": "text-stream-index", "files": []}]
@@ -696,7 +696,7 @@ class TextStreamPublicationTests(unittest.TestCase):
                 self.assertEqual(stream.main(), 0)
                 self.assertEqual(stream.main(), 0)
                 self.assertEqual(stream.main(), 0)
-            self.assertEqual(seen, ["first.md", "second.md"])
+            self.assertEqual(seen, ["first.txt", "second.txt"])
             self.assertEqual(stored[0]["files"], [])
             self.assertEqual(len(stored[0]["verified_utf8"]), 2)
 
@@ -707,7 +707,7 @@ class TextStreamPublicationTests(unittest.TestCase):
             text = "中文文本和完整正文。\r\n"
             for index, codec in enumerate(("utf-8", "gb18030")):
                 raw = text.encode(codec)
-                item = {"repo": "VoiceOfML/Test", "path": f"book{index}.md", "extension": "md", "revision": "a" * 40}
+                item = {"repo": "VoiceOfML/Test", "path": f"book{index}.txt", "extension": "txt", "revision": "a" * 40}
                 with patch.object(stream, "download", side_effect=lambda url, target, token: target.write_bytes(raw)):
                     entry, files = stream.build_one(item, root / str(index), None, stream.TARGET_BUCKET)
                 self.assertEqual(entry["source_sha256"], hashlib.sha256(raw).hexdigest())
@@ -787,7 +787,7 @@ class TextStreamPublicationTests(unittest.TestCase):
         from scripts.reader_gc_fence import producer_path
         workflow = Path(__file__).parents[1] / ".github/workflows/reader-publish-text.yml"
         text = workflow.read_text(encoding="utf-8")
-        self.assertIn("inputs.apply == true && 'reader-sidecar'", text)
+        self.assertIn("github.event_name == 'schedule' || inputs.apply == true", text)
         self.assertIn("reader-text-plan-{0}", text)
         self.assertIn("--plan-only", text)
         self.assertIn("pilot_text_stream.py", text)

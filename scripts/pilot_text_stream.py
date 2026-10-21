@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import codecs
 import hashlib
 import json
 import os
@@ -17,12 +18,14 @@ import uuid
 from pathlib import Path
 
 try:
+    from .markdown_resources import MAX_IMAGE_BYTES, MarkdownResourceError, embed_markdown_images
     from .reader_assets import decode_search_payload, relative_path, source_url
     from .shared import batch_bucket_files_with_retry
     from .reader_bucket import read_bytes, read_json
     from .reader_lifecycle import processing_record
     from .text_encoding import PROFILE, REVIEWED_SOURCE_REPAIRS, normalize_utf8
 except ImportError:
+    from markdown_resources import MAX_IMAGE_BYTES, MarkdownResourceError, embed_markdown_images
     from reader_assets import decode_search_payload, relative_path, source_url
     from shared import batch_bucket_files_with_retry
     from reader_bucket import read_bytes, read_json
@@ -35,6 +38,7 @@ ROOT = "documents/text"
 SUPPORTED_EXTENSIONS = {"txt", "md", "markdown", "vcf", "ini"}
 MAX_SOURCE_BYTES = 512 * 1024 * 1024
 CHECKPOINT_BYTES = 64 * 1024 * 1024
+MARKDOWN_IMAGE_PROFILE = "strict-utf8-bom-v1-markdown-images-v1"
 
 
 class Utf8SourceUnchanged(Exception):
@@ -63,7 +67,9 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def download(url: str, target: Path, token: str | None) -> None:
+def download(url: str, target: Path, token: str | None, max_bytes: int | None = None) -> None:
+    if max_bytes is None:
+        max_bytes = MAX_SOURCE_BYTES
     parsed = urllib.parse.urlsplit(url)
     if parsed.scheme != "https" or parsed.hostname != "huggingface.co" or parsed.username or parsed.password:
         raise ValueError("text source must use the canonical HF HTTPS origin")
@@ -84,12 +90,12 @@ def download(url: str, target: Path, token: str | None) -> None:
         try:
             with opener.open(request, timeout=120) as response, target.open("wb") as output:
                 declared = response.headers.get("Content-Length")
-                if declared and int(declared) > MAX_SOURCE_BYTES:
+                if declared and int(declared) > max_bytes:
                     raise ValueError("text source exceeds the Reader document limit")
                 length = 0
                 while chunk := response.read(1024 * 1024):
                     length += len(chunk)
-                    if length > MAX_SOURCE_BYTES:
+                    if length > max_bytes:
                         raise ValueError("text source exceeds the Reader document limit")
                     output.write(chunk)
             return
@@ -201,7 +207,37 @@ def build_one(item: dict, work: Path, token: str | None, bucket: str,
     if expected_sha256 is not None and source_digest != expected_sha256:
         raise ValueError("source checksum differs from the approved selection")
     normalized, metadata = normalize_utf8(raw, hint=item["path"].rsplit("/", 1)[-1], **options)
-    if (skip_utf8 and metadata["source_encoding"] in {"utf-8", "utf-8-sig"}
+    embedded_images = []
+    profile = MARKDOWN_IMAGE_PROFILE if item["extension"] in {"md", "markdown"} else PROFILE
+    if item["extension"] in {"md", "markdown"}:
+        image_cache: dict[str, bytes] = {}
+
+        def read_image(path: str) -> bytes:
+            if path not in image_cache:
+                target = work / "images" / path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    download(source_url(item["repo"], item["revision"], path), target, token,
+                             max_bytes=MAX_IMAGE_BYTES)
+                except urllib.error.HTTPError as error:
+                    if error.code == 404:
+                        raise FileNotFoundError(path) from error
+                    raise
+                image_cache[path] = target.read_bytes()
+            return image_cache[path]
+
+        text = normalized.decode("utf-8-sig")
+        try:
+            text, embedded_images = embed_markdown_images(text, item["path"], read_image)
+        except MarkdownResourceError as error:
+            raise ValueError(f"Markdown resource error: {error}") from error
+        normalized = codecs.BOM_UTF8 + text.encode("utf-8")
+        if embedded_images:
+            metadata["embedded_images"] = len(embedded_images)
+            metadata["embedded_image_bytes"] = sum(image.bytes for image in embedded_images)
+            metadata["embedded_image_paths"] = [image.path for image in embedded_images]
+    if (skip_utf8 and item["extension"] not in {"md", "markdown"}
+            and metadata["source_encoding"] in {"utf-8", "utf-8-sig"}
             and not {"removed_prefix_byte", "reviewed_source_repair"}.intersection(metadata)):
         raise Utf8SourceUnchanged({"key": f"{item['repo']}\0{item['path']}",
             "source_revision": item["revision"], "source_sha256": source_digest,
@@ -215,7 +251,7 @@ def build_one(item: dict, work: Path, token: str | None, bucket: str,
     object_path = f"{root}/document.{output_ext}"
     # Version the manifest name too: an old producer may already have emitted
     # identical document bytes under a different metadata contract.
-    manifest_name = f"{PROFILE}-document-manifest.json"
+    manifest_name = f"{profile}-document-manifest.json"
     manifest_path = f"{root}/{manifest_name}"
     output = work / f"document.{output_ext}"
     output.write_bytes(normalized)
@@ -225,7 +261,7 @@ def build_one(item: dict, work: Path, token: str | None, bucket: str,
         "source_extension": ext,
         # Source identity belongs to the index entry. Identical normalized
         # content shares one immutable manifest, even across source encodings.
-        "profile": PROFILE, "encoding": "utf-8", "bom": True,
+        "profile": profile, "encoding": "utf-8", "bom": True,
         "bytes": len(normalized),
         "sha256": output_digest,
         "path": f"document.{output_ext}",
@@ -245,20 +281,34 @@ def build_one(item: dict, work: Path, token: str | None, bucket: str,
         "extension": ext, "source_revision": item["revision"], "source_sha256": source_digest,
         "mode": "document-stream", "bucket": bucket, "object": object_path,
         "manifest": manifest_path, "bytes": len(normalized), "sha256": output_digest,
-        **metadata,
+        **metadata, "profile": profile,
     }, files
 
 
+def expected_profile(item: dict) -> str:
+    return MARKDOWN_IMAGE_PROFILE if item.get("extension") in {"md", "markdown"} else PROFILE
+
+
 def pending_records(records: list[dict], previous: dict, *, force=False, retry_failures=False) -> list[dict]:
-    completed = {entry["key"]: entry.get("source_revision") for entry in previous.get("files", [])
-                 if entry.get("profile") == PROFILE}
-    failed = {entry["key"]: entry.get("source_revision") for entry in previous.get("failures", [])
-              if isinstance(entry, dict) and entry.get("profile") == PROFILE}
-    completed.update({entry["key"]: entry["source_revision"] for entry in previous.get("verified_utf8", [])
-                      if valid_utf8_checkpoint(entry)})
-    return [item for item in records if force or
-            completed.get(f"{item['repo']}\0{item['path']}") != item["revision"] and
-            (retry_failures or failed.get(f"{item['repo']}\0{item['path']}") != item["revision"])]
+    completed = {}
+    for entry in previous.get("files", []):
+        if isinstance(entry, dict):
+            completed[(entry.get("key"), entry.get("profile"))] = entry.get("source_revision")
+    failed = {}
+    for entry in previous.get("failures", []):
+        if isinstance(entry, dict):
+            failed[(entry.get("key"), entry.get("profile"))] = entry.get("source_revision")
+    for entry in previous.get("verified_utf8", []):
+        if valid_utf8_checkpoint(entry):
+            completed[(entry["key"], PROFILE)] = entry["source_revision"]
+    pending = []
+    for item in records:
+        key = f"{item['repo']}\0{item['path']}"
+        profile = expected_profile(item)
+        if force or (completed.get((key, profile)) != item["revision"] and
+                     (retry_failures or failed.get((key, profile)) != item["revision"])):
+            pending.append(item)
+    return pending
 
 
 def publish_checkpoint(previous: dict, entries: list[dict], failures: list[dict], uploads: dict,
@@ -364,7 +414,7 @@ def main() -> int:
     selected = pending
     if args.limit:
         selected = selected[:args.limit]
-    report = {"profile": PROFILE, "apply": args.apply, "plan_only": args.plan_only,
+    report = {"profile": PROFILE, "markdown_profile": MARKDOWN_IMAGE_PROFILE, "apply": args.apply, "plan_only": args.plan_only,
               "search_data_sha256": hashlib.sha256(args.search_data.read_bytes()).hexdigest(),
               "revisions_sha256": hashlib.sha256(args.revisions.read_bytes()).hexdigest(),
               "sources": len(records), "pending": len(pending), "selected": len(selected),
@@ -402,7 +452,7 @@ def main() -> int:
                     # It prevents a bounded next batch from selecting these files forever.
                     checked_utf8.append(unchanged.metadata)
                 except (ValueError, UnicodeError) as error:
-                    failures.append({"key": key, "source_revision": item["revision"], "profile": PROFILE,
+                    failures.append({"key": key, "source_revision": item["revision"], "profile": expected_profile(item),
                                       "error": f"{type(error).__name__}: {error}"})
                 else:
                     entries.append(entry)
@@ -423,7 +473,8 @@ def main() -> int:
             report["converted_sources"].extend({key:entry[key] for key in
                 ("key", "source_revision", "source_sha256", "source_encoding", "encoding_decision",
                  "object", "manifest", "sha256", "bytes", "characters", "preserved_controls", "source_roundtrip_verified",
-                  "removed_prefix_byte", "reviewed_source_repair", "replaced_source_span", "retained_source", "normalization_recipe")
+                  "removed_prefix_byte", "reviewed_source_repair", "replaced_source_span", "retained_source", "normalization_recipe",
+                  "profile", "embedded_images", "embedded_image_bytes", "embedded_image_paths")
                  if key in entry} for entry in entries)
             report["failures"].extend(failures)
             save()
