@@ -1632,7 +1632,11 @@ def main():
             results.append(result)
         # Keep completed book/range metadata even if a later task times out.
         pdf_ocr.write_json(args.output / f"results-{args.shard}.json", {"version": 1, "results": results})
-    return int(any(r.get("status") == "failed" or r.get("errors") for r in results))
+    # A single failed source is recorded in its result and retried explicitly;
+    # failing the shard would discard every other book rendered by this job.
+    print(f"{args.stage}: {len(results)} results, "
+          f"{sum(1 for r in results if r.get('status') == 'failed' or r.get('errors'))} failed", flush=True)
+    return 0
 
 
 if __name__ == "__main__":
