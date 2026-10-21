@@ -17,6 +17,10 @@ on:
         description: Retry only books currently failed in the OCR registry
         type: boolean
         default: false
+      retry_failed_render:
+        description: Re-render books whose source previously failed (for example a corrupt DjVu)
+        type: boolean
+        default: false
       keys:
         description: "Pinned repo/path sources for a native-DjVu pilot ('|' separated); requires stage=render"
         type: string
@@ -63,6 +67,7 @@ jobs:
           STAGE: ${{ inputs.stage || 'auto' }}
           LIMIT: ${{ inputs.limit || '20' }}
           RETRY_FAILED_ONLY: ${{ inputs.retry_failed_only || 'false' }}
+          RETRY_FAILED_RENDER: ${{ inputs.retry_failed_render || 'false' }}
           KEYS: ${{ inputs.keys || '' }}
           RENDER_FIRST: ${{ vars.PDF_RENDER_FIRST || 'false' }}
           # Native DjVu admission (default off; "pilot" uses the exact key list).
@@ -91,7 +96,9 @@ jobs:
             sudo apt-get update
             sudo apt-get install -y --no-install-recommends poppler-utils poppler-data fonts-noto-cjk fonts-liberation djvulibre-bin
             FORCE_SYNC=true python scripts/fetch_and_parse.py
-            python scripts/pdf_ocr_stages.py plan-render --native-text-stream --target-render-seconds 6000 --retry-failed "${args[@]}"
+            retry_args=()
+            if [[ "$RETRY_FAILED_RENDER" == "true" ]]; then retry_args+=(--retry-failed); fi
+            python scripts/pdf_ocr_stages.py plan-render --native-text-stream --target-render-seconds 6000 "${retry_args[@]}" "${args[@]}"
             resolved=render
           fi
           echo "stage=$resolved" >> "$GITHUB_OUTPUT"
