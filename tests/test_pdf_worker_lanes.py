@@ -245,7 +245,7 @@ class PdfWorkerLaneTests(unittest.TestCase):
         self.assertNotIn("publish-render", worker_commands)
         self.assertNotIn("publish-ocr", worker_commands)
         self.assertNotIn("publish_search_reader_index.py", worker_commands)
-        self.assertEqual(worker["jobs"]["build"]["strategy"]["max-parallel"], 1)
+        self.assertEqual(worker["jobs"]["build"]["strategy"]["max-parallel"], 10)
         self.assertNotIn("schedule", worker[True])
         self.assertIn("needs.plan.outputs.shard_count != '0'", worker["jobs"]["notify"]["if"])
         self.assertIn("retry_failed_only", worker[True]["workflow_dispatch"]["inputs"])

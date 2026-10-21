@@ -112,10 +112,11 @@ jobs:
     timeout-minutes: 350
     strategy:
       fail-fast: false
-      # All account lanes publish into the same HF buckets. Four shards per
-      # account multiplied across the eight repositories exhausts the shared
-      # resolver/Xet quotas before the serialized central publisher runs.
-      max-parallel: 1
+      # Converted-lane DjVu rollout runs ten shards in one account. The old
+      # eight-account/four-shard fan-out exhausted the shared resolver/Xet
+      # quotas; a single account at ten stays below that and keeps the serial
+      # central publisher fed.
+      max-parallel: 10
       matrix:
         shard: ${{ fromJSON(needs.plan.outputs.shard_ids) }}
     steps:
