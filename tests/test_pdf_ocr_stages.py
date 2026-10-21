@@ -67,6 +67,14 @@ class PdfOcrStagesTests(unittest.TestCase):
         self.store(bundle)
         return result
 
+    def test_whole_book_page_stream_carries_valid_pdf_outline(self):
+        toc = [{"title": "封面", "page": 1, "depth": 0}, {"title": "正文", "page": 2, "depth": 0}]
+        with patch.object(stages.pdf_assets, "extract_pdf_outline", return_value=toc):
+            result = self.render_fixture()
+        self.assertEqual(json.loads(self.read(result["page_manifest"]))["toc"], toc)
+        self.assertEqual(stages.valid_toc([{"title": "x", "page": 3, "depth": 0}], 2), [])
+        self.assertEqual(stages.valid_toc([{"title": "x", "page": 1, "depth": 0, "extra": 1}], 2), [])
+
     def test_render_persists_png_webp_jxl_and_native_text_before_ocr(self):
         result = self.render_fixture(native=True, jxl=True)
         manifest = json.loads(self.read(result["render_manifest"]))
@@ -304,9 +312,11 @@ class PdfOcrStagesTests(unittest.TestCase):
                 image.save(path)
                 image.save(path.with_suffix(".webp"))
             return path, 200, 300
+        toc = [{"title": "第一章", "page": 1, "depth": 0}, {"title": "第二节", "page": 4, "depth": 1}]
         with patch.object(stages, "RENDER_RANGE_THRESHOLD", 2), \
                 patch.object(stages, "RENDER_RANGE_PAGES", 2), \
                 patch.object(pdf_ocr, "JXL_ENABLED", False), \
+                patch.object(stages.pdf_assets, "extract_pdf_outline", return_value=toc) as outline, \
                 patch.object(pdf_ocr, "render_page", side_effect=render):
             planned = stages.plan_render_ranges(queue, {})
             tasks = [task for shard in planned["shards"] for task in shard["records"]]
@@ -337,6 +347,9 @@ class PdfOcrStagesTests(unittest.TestCase):
                 stages.validate_render(result, manifest)
                 self.assertEqual([p["p"] for p in manifest["pages"]], list(range(1, 6)))
                 self.assertEqual(manifest["page_manifest"]["version"], 2)
+                # Only the first range reads the outline; the assembled page stream carries it.
+                self.assertEqual(outline.call_count, 1)
+                self.assertEqual(json.loads(self.read(result["page_manifest"]))["toc"], toc)
                 with self.assertRaises(ValueError):
                     stages.validate_range(book, 3, 4, descriptors[stages.range_id(1, 2)])
                 self.objects[descriptors[stages.range_id(3, 4)]["path"]] = b"damaged"

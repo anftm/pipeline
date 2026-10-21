@@ -525,7 +525,20 @@ def range_identity(book):
                                            "source_kind", "render_profile", "page_count")}
 
 
-def validate_range(book, start, end, descriptor):
+def valid_toc(toc, page_count):
+    """Outline entries as written by pdf_assets.extract_pdf_outline, else []."""
+    if not isinstance(toc, list) or len(toc) > pdf_assets.MAX_PDF_OUTLINE_ENTRIES:
+        return []
+    for entry in toc:
+        if (not isinstance(entry, dict) or set(entry) != {"title", "page", "depth"}
+                or not isinstance(entry["title"], str) or not entry["title"]
+                or type(entry["page"]) is not int or not 1 <= entry["page"] <= page_count
+                or type(entry["depth"]) is not int or not 0 <= entry["depth"] <= pdf_assets.MAX_PDF_OUTLINE_DEPTH):
+            return []
+    return toc
+
+
+def validate_range(book, start, end, descriptor, *, with_toc=False):
     name = f"/render-range-{range_id(start, end)}.json"
     root = root_for(book["source_sha256"], book["key"], book["render_profile"])
     if descriptor.get("path") != (root / name.lstrip("/")).as_posix():
@@ -547,6 +560,8 @@ def validate_range(book, start, end, descriptor):
                                                     "image_rendered": payload.get("image_rendered", False), "pages": pages,
                                                     "classification": book["probe"]["classification"]},
                     page_numbers=range(start, end + 1))
+    if with_toc:
+        return pages, valid_toc(payload.get("toc", []), book["page_count"]) if start == 1 else []
     return pages
 
 
@@ -706,6 +721,10 @@ def render_book(item: dict, source: Path, bundle: Path, *, force_ocr_native=Fals
     # Browsers cannot draw DjVu: its page images are the only Reader stream.
     force_image_render = (bool(item.get("force_image_render")) or djvu) and not preserve_pdf
     first, last = item.get("start", 1), item.get("end", probe["page_count"])
+    # The page stream is the only Reader surface when PDF.js cannot open the
+    # primary (oversized, or a non-PDF source), so it carries the outline itself.
+    toc = (pdf_assets.extract_pdf_outline(source, probe["page_count"])
+           if first == 1 and not djvu and not preserve_pdf else [])
     scan_images = (pdf_ocr.scan_reader_images(source, first, last)
                    if not djvu and not force_ocr_native and not preserve_pdf
                    and any(chars == 0 for chars in probe["page_chars"][first - 1:last])
@@ -786,7 +805,8 @@ def render_book(item: dict, source: Path, bundle: Path, *, force_ocr_native=Fals
         descriptor = bundle / root / f"render-range-{range_id(start, end)}.json"
         pdf_ocr.write_json(descriptor, {**range_identity(base), "version": 1, "kind": "pdf-render-range",
                                         "image_rendered": any("w" in page for page in pages),
-                                        "start": start, "end": end, "pages": pages})
+                                        "start": start, "end": end, "pages": pages,
+                                        **({"toc": toc} if toc else {})})
         return {**range_identity(base), "status": "range", "start": start, "end": end,
                 "timing": timing,
                 "descriptor": metadata(descriptor, bundle)}
@@ -795,7 +815,7 @@ def render_book(item: dict, source: Path, bundle: Path, *, force_ocr_native=Fals
     if image_pages:
         page_manifest = bundle / root / "page-manifest.json"
         pdf_ocr.write_json(page_manifest, pdf_assets.compact_page_manifest(
-            source_sha, profile, image_pages, manifest_dir=root))
+            source_sha, profile, image_pages, toc, manifest_dir=root))
         page_manifest_meta = {**metadata(page_manifest, bundle), "version": pdf_assets.PAGE_MANIFEST_VERSION}
     manifest = {**base, "version": 1, "kind": "pdf-render", "complete": True,
                 "image_rendered": bool(image_pages), "pages": pages, "page_manifest": page_manifest_meta}
@@ -864,6 +884,7 @@ def merge_render_ranges(old, new):
 def assemble_render_book(book, descriptors, bundle):
     pages = []
     ranges = []
+    toc = []
     for key, descriptor in descriptors.items():
         bounds = pdf_render_schedule.parse_range(key, book["page_count"])
         if bounds is None:
@@ -872,7 +893,8 @@ def assemble_render_book(book, descriptors, bundle):
     for start, end, descriptor in sorted(ranges, key=lambda item: (item[0], item[1])):
         if start > len(pages) + 1:
             return None
-        incoming = validate_range(book, start, end, descriptor)
+        incoming, range_toc = validate_range(book, start, end, descriptor, with_toc=True)
+        toc = toc or range_toc
         overlap = min(len(incoming), max(0, len(pages) - start + 1))
         if pages[start - 1:start - 1 + overlap] != incoming[:overlap]:
             raise ValueError("conflicting overlapping render pages")
@@ -886,7 +908,7 @@ def assemble_render_book(book, descriptors, bundle):
         page_manifest = bundle / root / "page-manifest.json"
         page_manifest.parent.mkdir(parents=True, exist_ok=True)
         pdf_ocr.write_json(page_manifest, pdf_assets.compact_page_manifest(
-            book["source_sha256"], book["render_profile"], image_pages, manifest_dir=root))
+            book["source_sha256"], book["render_profile"], image_pages, toc, manifest_dir=root))
         page_manifest_meta = {**metadata(page_manifest, bundle), "version": pdf_assets.PAGE_MANIFEST_VERSION}
     base = {**public_item(book), "classification": book["probe"]["classification"],
             "render_profile": book["render_profile"], "profile": book["profile"]}
