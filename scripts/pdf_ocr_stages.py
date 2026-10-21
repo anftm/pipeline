@@ -493,6 +493,10 @@ def pending_render(records, rendered, ocr, retry_failed=False, partition="all"):
     for item in records:
         if not render_partition_matches(item, partition):
             continue
+        # A recorded unreadable source keeps the derived stream that is already
+        # published and recognized; never build a native stream for it.
+        if djvu_pages.native_exception(item) and djvu_pages.is_native_item(item):
+            continue
         previous = rendered.get(item["key"])
         if djvu_fallback_current(previous, item):
             continue

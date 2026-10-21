@@ -841,6 +841,16 @@ class PdfOcrStagesTests(unittest.TestCase):
         self.assertFalse(stages.ocr_publication_is_current(previous, {**book, "profile": "changed"}))
 
 
+    def test_recorded_unreadable_source_keeps_its_derived_stream(self):
+        exception = {"key": "repo\0book.djvu", "missing_source_pages": [330],
+                     "source_page_count": 731, "derived_page_count": 730}
+        native = {"key": "repo\0book.djvu", "repo": "repo", "path": "book.djvu",
+                  "source_format": "djvu", "source_kind": "upstream"}
+        with patch.object(stages.djvu_pages, "native_exceptions", return_value={native["key"]: exception}):
+            self.assertIs(stages.djvu_pages.native_exception(native), exception)
+            # The recorded exception never becomes a native render task.
+            self.assertEqual(stages.pending_render([native], {}, {}), [])
+
     def test_native_djvu_renders_before_other_converted_formats(self):
         native = {"key": "repo\0z.djvu", "repo": "repo", "path": "z.djvu", "source_format": "djvu",
                   "source_kind": "upstream"}

@@ -11,11 +11,13 @@ namespace so they cannot collide with PDF renders of a derived document.
 from __future__ import annotations
 
 import os
+import json
 import re
 import struct
 import subprocess
 import tempfile
 import warnings
+from functools import lru_cache
 from pathlib import Path
 
 try:
@@ -77,6 +79,44 @@ def sniff(path_or_bytes) -> str:
 
 def is_native_item(item: dict) -> bool:
     return item.get("source_format") == "djvu"
+
+
+EXCEPTIONS = Path(__file__).resolve().parents[1] / "djvu-native-exceptions.json"
+
+
+def native_exceptions() -> dict[str, dict]:
+    """Source keys whose recorded derived stream stays authoritative.
+
+    A DjVu whose bytes DjVuLibre cannot decode has no native page stream at all.
+    The recorded derived PDF is then the only readable form; keeping it is an
+    explicit, auditable exception rather than a silent fallback. Missing source
+    pages and the page shift are part of the record.
+    """
+    return _native_exceptions()
+
+
+@lru_cache(maxsize=1)
+def _native_exceptions() -> dict[str, dict]:
+    try:
+        value = json.loads(EXCEPTIONS.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    if value.get("version") != 1 or value.get("kind") != "djvu-native-exceptions":
+        raise ValueError("invalid native DjVu exception list")
+    books = value.get("books")
+    if not isinstance(books, list):
+        raise ValueError("invalid native DjVu exception list")
+    result = {}
+    for entry in books:
+        key = entry.get("key")
+        if not isinstance(key, str) or "\0" not in key:
+            raise ValueError("native DjVu exception lacks an exact key")
+        result[key] = entry
+    return result
+
+
+def native_exception(item: dict | None) -> dict | None:
+    return native_exceptions().get(str((item or {}).get("key") or ""))
 
 
 def render_profile(base: str) -> str:

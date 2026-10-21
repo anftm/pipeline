@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "kind": "djvu-native-exceptions",
+  "books": [
+    {
+      "key": "VoiceOfML/SovMaterials\u0000一手资料/苏联-俄罗斯历史/斯大林时代的古拉格/第6卷 暴动、骚乱与罢工.djvu",
+      "repo": "VoiceOfML/SovMaterials",
+      "path": "一手资料/苏联-俄罗斯历史/斯大林时代的古拉格/第6卷 暴动、骚乱与罢工.djvu",
+      "source_sha256": "f735e7763b74d972fb4531ad7d6c8848166c46f5ee3b37a98394dfe672c26429",
+      "source_page_count": 731,
+      "derived_sha256": "696d89f5b160b1121f4260183c07511e6df7dd7327bb2aafd779398725d2cdf5",
+      "derived_page_count": 730,
+      "missing_source_pages": [330],
+      "stream": "derived-pdf",
+      "reason": "ddjvu cannot decode source page 330 (JB2 image dimension is zero); the existing derived PDF omits exactly that page and every later page shifts by one",
+      "recorded": "2026-10-21"
+    }
+  ]
+}
