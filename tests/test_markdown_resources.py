@@ -1,5 +1,8 @@
+import io
 import unittest
 from unittest.mock import patch
+
+from PIL import Image
 
 from scripts import markdown_resources as resources
 
@@ -82,6 +85,16 @@ class MarkdownResourceTests(unittest.TestCase):
                 resources.embed_markdown_images(
                     "![a](images/a.png)\n![b](images/b.png)", "book/doc.md", lambda path: PNG
                 )
+
+    def test_bmp_is_converted_to_png(self):
+        buffer = io.BytesIO()
+        Image.new("RGB", (2, 2), (255, 0, 0)).save(buffer, "BMP")
+        bmp = buffer.getvalue()
+        output, images = resources.embed_markdown_images(
+            "![a](images/a.bmp)", "book/doc.md", lambda path: bmp
+        )
+        self.assertIn("data:image/png;base64,", output)
+        self.assertEqual(images[0].mime, "image/png")
 
     def test_plain_markdown_is_unchanged(self):
         text = "# Title\n\nNo local images here.\n"

@@ -9,6 +9,7 @@ closed: the caller must not publish a Markdown document with broken resources.
 from __future__ import annotations
 
 import base64
+import io
 import mimetypes
 import posixpath
 import re
@@ -16,9 +17,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
+from PIL import Image, UnidentifiedImageError
+
 MAX_IMAGE_BYTES = 16 * 1024 * 1024
 MAX_TOTAL_IMAGE_BYTES = 64 * 1024 * 1024
-IMAGE_SUFFIXES = {".gif", ".jpeg", ".jpg", ".png", ".webp"}
+IMAGE_SUFFIXES = {".bmp", ".gif", ".jpeg", ".jpg", ".png", ".webp"}
+MAX_IMAGE_PIXELS = 50_000_000
 
 INLINE_IMAGE_RE = re.compile(
     r"!\[([^\]]*)\]\(\s*(?:<([^>\n]+)>|([^\s)\n]+))(?:\s+[\"'][^\"']*[\"'])?\s*\)"
@@ -65,6 +69,22 @@ def _load_image(path: str, read_bytes) -> tuple[str, bytes]:
     data = read_bytes(path)
     if len(data) > MAX_IMAGE_BYTES:
         raise MarkdownResourceError(f"image exceeds per-file limit: {path}")
+    if suffix == ".bmp":
+        try:
+            with Image.open(io.BytesIO(data)) as image:
+                image.load()
+                if image.width * image.height > MAX_IMAGE_PIXELS:
+                    raise MarkdownResourceError(f"image exceeds pixel limit: {path}")
+                if image.mode not in {"RGB", "RGBA"}:
+                    image = image.convert("RGBA" if "A" in image.getbands() else "RGB")
+                output = io.BytesIO()
+                image.save(output, "PNG", optimize=True)
+        except (UnidentifiedImageError, OSError, ValueError) as error:
+            raise MarkdownResourceError(f"invalid BMP image: {path}") from error
+        converted = output.getvalue()
+        if len(converted) > MAX_IMAGE_BYTES:
+            raise MarkdownResourceError(f"converted image exceeds per-file limit: {path}")
+        return "image/png", converted
     mime = mimetypes.guess_type(path)[0]
     if mime not in {"image/gif", "image/jpeg", "image/png", "image/webp"}:
         raise MarkdownResourceError(f"unsupported image MIME: {path}")
