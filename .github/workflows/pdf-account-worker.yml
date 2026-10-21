@@ -64,12 +64,15 @@ jobs:
           LIMIT: ${{ inputs.limit || '20' }}
           RETRY_FAILED_ONLY: ${{ inputs.retry_failed_only || 'false' }}
           KEYS: ${{ inputs.keys || '' }}
+          RENDER_FIRST: ${{ vars.PDF_RENDER_FIRST || 'false' }}
           # Native DjVu admission (default off; "pilot" uses the exact key list).
           PDF_DJVU_NATIVE: ${{ vars.PDF_DJVU_NATIVE || 'false' }}
           PDF_DJVU_NATIVE_KEYS: ${{ vars.PDF_DJVU_NATIVE_KEYS || '' }}
         run: |
           [[ "$LIMIT" =~ ^[0-9]+$ ]] && ((10#$LIMIT >= 1 && 10#$LIMIT <= 100)) || exit 1
           [[ "$STAGE" =~ ^(auto|render|ocr)$ ]] || exit 1
+          # Native-DjVu rollout: keep the lane rendering instead of draining OCR.
+          if [[ "$STAGE" == "auto" && "$RENDER_FIRST" == "true" ]]; then STAGE=render; fi
           lane=$(python scripts/pdf_worker_lanes.py --owner "$WORKER_OWNER")
           args=(--worker-owner "$WORKER_OWNER" --worker-lane "$lane" --limit "$LIMIT")
           if [[ -n "$KEYS" ]]; then

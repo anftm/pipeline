@@ -841,6 +841,13 @@ class PdfOcrStagesTests(unittest.TestCase):
         self.assertFalse(stages.ocr_publication_is_current(previous, {**book, "profile": "changed"}))
 
 
+    def test_native_djvu_renders_before_other_converted_formats(self):
+        native = {"key": "repo\0z.djvu", "repo": "repo", "path": "z.djvu", "source_format": "djvu",
+                  "source_kind": "upstream"}
+        other = {"key": "repo\0a.caj", "repo": "repo", "path": "a.caj", "source_kind": "generated"}
+        self.assertEqual([x["key"] for x in stages.pending_render([other, native], {}, {})],
+                         ["repo\0z.djvu", "repo\0a.caj"])
+
     def test_pinned_native_keys_restrict_plan_and_reject_fallbacks(self):
         native = {"key": "repo\0b.djvu", "repo": "repo", "path": "b.djvu",
                   "source_format": "djvu", "source_bytes": 10}

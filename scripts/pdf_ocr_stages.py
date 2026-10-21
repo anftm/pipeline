@@ -504,9 +504,12 @@ def pending_render(records, rendered, ocr, retry_failed=False, partition="all"):
                 continue
         pending.append(item)
     # Repeatedly failed PDFs must not monopolize the first checkpoint and
-    # prevent untouched books from entering later batches.
+    # prevent untouched books from entering later batches. Native DjVu goes
+    # first so the converted lane finishes the direct-image rollout before
+    # spending capacity on other converted formats.
     return sorted(pending, key=lambda item: (
         rendered.get(item["key"], {}).get("status") == "failed",
+        0 if djvu_pages.is_native_item(item) else 1,
         item["repo"], item["path"], item["source_kind"],
     ))
 
