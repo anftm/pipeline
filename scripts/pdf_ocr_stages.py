@@ -13,6 +13,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -508,6 +509,35 @@ def pending_render(records, rendered, ocr, retry_failed=False, partition="all"):
         rendered.get(item["key"], {}).get("status") == "failed",
         item["repo"], item["path"], item["source_kind"],
     ))
+
+
+def pinned_keys(value: str) -> list[str]:
+    """Exact ``repo/path`` identities for a pinned native-DjVu pilot run."""
+    return [item.strip() for item in re.split(r"[|\n]", value) if item.strip()]
+
+
+def pin_render_records(records: list[dict], wanted: list[str]) -> list[dict]:
+    """Restrict a render plan to the requested native DjVu sources.
+
+    A pinned key that is not an admitted native DjVu is an error: a pilot must
+    never silently fall back to the derived-PDF path it exists to validate.
+    """
+    by_identity = {}
+    for item in records:
+        repo, path = str(item.get("repo") or ""), str(item.get("path") or "")
+        by_identity[f"{repo}/{path}"] = item
+        if item.get("key"):
+            by_identity[str(item["key"])] = item
+    missing = [value for value in wanted if value not in by_identity]
+    if missing:
+        raise ValueError("pinned source is not in this lane: " + ", ".join(missing))
+    pinned = []
+    for value in wanted:
+        item = by_identity[value]
+        if not djvu_pages.is_native_item(item) or not djvu_pages.native_enabled(item):
+            raise ValueError("pinned source is not an admitted native DjVu: " + value)
+        pinned.append(item)
+    return pinned
 
 
 def range_id(start, end):
@@ -1390,6 +1420,7 @@ def main():
     parser.add_argument("--shard", type=int, default=0)
     parser.add_argument("--limit", type=int, default=20)
     parser.add_argument("--checkpoint", type=int, default=0)
+    parser.add_argument("--keys", default="")
     parser.add_argument("--retry-failed", action="store_true")
     parser.add_argument("--partition", choices=("all", "small", "large"), default="all")
     parser.add_argument("--worker-lane", default="")
@@ -1416,6 +1447,10 @@ def main():
             parser.error("account cannot claim another PDF worker lane")
     if args.target_render_seconds is not None and (args.target_render_seconds < 1 or args.stage != "plan-render"):
         parser.error("--target-render-seconds requires plan-render and a positive value")
+    if args.keys and args.stage != "plan-render":
+        parser.error("--keys requires plan-render")
+    if args.keys and args.checkpoint:
+        parser.error("--keys cannot be combined with --checkpoint")
     if args.stage == "measure-render":
         if args.source is None:
             parser.error("measure-render requires --source")
@@ -1434,7 +1469,21 @@ def main():
             records = pdf_ocr.source_records(args.search_data, args.revisions, assets)
             if worker_config:
                 records = pdf_worker_lanes.select_records(worker_config, records, args.worker_lane, args.worker_owner)
+            wanted = pinned_keys(args.keys) if args.keys else []
+            if wanted:
+                if len(wanted) > args.limit:
+                    raise ValueError("pinned key count exceeds --limit")
+                records = pin_render_records(records, wanted)
             records = pending_render(records, rendered, current, args.retry_failed, args.partition)
+            if wanted:
+                present = set()
+                for item in records:
+                    present.add(f"{item.get('repo')}/{item.get('path')}")
+                    if item.get("key"):
+                        present.add(str(item["key"]))
+                absent = [value for value in wanted if value not in present]
+                if absent:
+                    raise ValueError("pinned source is not pending: " + ", ".join(absent))
             selected = pdf_ocr.queue(records, args.limit, args.checkpoint)
             render_progress = load_registry(api, repo, RENDER_PROGRESS_REGISTRY, revision)["files"]
             estimator = (lambda item, source: estimate_render_cost(item, source, render_progress)) \

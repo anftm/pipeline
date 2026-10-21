@@ -17,6 +17,10 @@ on:
         description: Retry only books currently failed in the OCR registry
         type: boolean
         default: false
+      keys:
+        description: "Pinned repo/path sources for a native-DjVu pilot ('|' separated); requires stage=render"
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -59,6 +63,7 @@ jobs:
           STAGE: ${{ inputs.stage || 'auto' }}
           LIMIT: ${{ inputs.limit || '20' }}
           RETRY_FAILED_ONLY: ${{ inputs.retry_failed_only || 'false' }}
+          KEYS: ${{ inputs.keys || '' }}
           # Native DjVu admission (default off; "pilot" uses the exact key list).
           PDF_DJVU_NATIVE: ${{ vars.PDF_DJVU_NATIVE || 'false' }}
           PDF_DJVU_NATIVE_KEYS: ${{ vars.PDF_DJVU_NATIVE_KEYS || '' }}
@@ -67,6 +72,10 @@ jobs:
           [[ "$STAGE" =~ ^(auto|render|ocr)$ ]] || exit 1
           lane=$(python scripts/pdf_worker_lanes.py --owner "$WORKER_OWNER")
           args=(--worker-owner "$WORKER_OWNER" --worker-lane "$lane" --limit "$LIMIT")
+          if [[ -n "$KEYS" ]]; then
+            [[ "$STAGE" == "render" ]] || { echo "keys requires stage=render"; exit 1; }
+            args+=(--keys "$KEYS")
+          fi
           if [[ "$STAGE" != render ]]; then
             ocr_args=("${args[@]}")
             if [[ "$RETRY_FAILED_ONLY" == "true" ]]; then ocr_args+=(--retry-failed-only); fi

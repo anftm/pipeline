@@ -841,5 +841,20 @@ class PdfOcrStagesTests(unittest.TestCase):
         self.assertFalse(stages.ocr_publication_is_current(previous, {**book, "profile": "changed"}))
 
 
+    def test_pinned_native_keys_restrict_plan_and_reject_fallbacks(self):
+        native = {"key": "repo\0b.djvu", "repo": "repo", "path": "b.djvu",
+                  "source_format": "djvu", "source_bytes": 10}
+        other = {**native, "key": "repo\0a.djvu", "path": "a.djvu"}
+        with patch.object(stages.djvu_pages, "native_enabled", return_value=True):
+            self.assertEqual([x["key"] for x in stages.pin_render_records(
+                [other, native], ["repo/b.djvu"])], ["repo\0b.djvu"])
+            with self.assertRaisesRegex(ValueError, "not in this lane"):
+                stages.pin_render_records([native], ["repo/missing.djvu"])
+            with self.assertRaisesRegex(ValueError, "not an admitted native DjVu"):
+                stages.pin_render_records([{**native, "source_format": "pdf"}], ["repo/b.djvu"])
+        self.assertEqual(stages.pinned_keys("repo/a.djvu|repo/b.djvu\nrepo/c.djvu"),
+                         ["repo/a.djvu", "repo/b.djvu", "repo/c.djvu"])
+
+
 if __name__ == "__main__":
     unittest.main()
