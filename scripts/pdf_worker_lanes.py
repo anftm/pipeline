@@ -151,7 +151,14 @@ def validate_queue(config, queue, owner, stage):
         records.extend({**books.get(item["key"], {}), **item}
                        for shard in queue["shards"] for item in shard["records"])
     for item in records:
-        if item.get("worker_lane") != lane or lane_for(routing, item) != lane:
+        # A ``.djvu`` whose bytes are a PDF is moved onto its derived render
+        # during planning, after lane selection. It keeps the native routing
+        # only for new queues; older artifacts may lack the field, and its
+        # lane is still unambiguous from the source extension.
+        routed = item.get("worker_lane")
+        if routed is None and item.get("djvu_pdf_fallback") == "pdf-magic":
+            routed = lane
+        if routed != lane or lane_for(routing, item) != lane:
             raise ValueError("PDF worker queue contains a different account's source")
 
 

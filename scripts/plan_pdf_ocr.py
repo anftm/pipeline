@@ -94,9 +94,14 @@ def plan(records: list[dict], workers: int = 4, current: dict | None = None,
                 if kind == "pdf":
                     # Some ``.djvu`` uploads are PDFs. Keep them on the existing
                     # derived-PDF path and record that decision on its render.
+                    # Routing fields come from the native record, because the
+                    # derived fallback was never passed through lane selection.
                     if not fallback:
                         raise ValueError("DjVu-named PDF awaits its derived PDF")
-                    item = {**fallback, "djvu_pdf_fallback": "pdf-magic",
+                    item = {**fallback,
+                            **{key: item[key] for key in ("worker_lane", "worker_owner", "routing_source_bytes")
+                               if key in item},
+                            "djvu_pdf_fallback": "pdf-magic",
                             "djvu_source_revision": item["source_revision"],
                             "djvu_source_sha256": shared.hash_file(source)[0]}
                     source = download_source(item)
