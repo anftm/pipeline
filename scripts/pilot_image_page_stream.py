@@ -15,10 +15,12 @@ import hashlib
 import json
 import os
 import tempfile
+import time
 import urllib.request
 from pathlib import Path
 
 from huggingface_hub import HfFileSystem
+from huggingface_hub.errors import HfHubHTTPError
 from PIL import Image, ImageFile
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
@@ -38,6 +40,9 @@ INDEX_PREFIX = "index-v2"
 INDEX_NAME = "index-v2.json"
 SUPPORTED_EXTENSIONS = {"jpg", "jpeg", "png", "bmp", "webp", "gif"}
 MAX_WEBP_EDGE = 8_192
+DOWNLOAD_INTERVAL_SECONDS = 0.35
+RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+DOWNLOAD_ATTEMPTS = 5
 
 
 def parse_args() -> argparse.Namespace:
@@ -60,14 +65,45 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def retry_delay(error: HfHubHTTPError, attempt: int) -> float:
+    response = getattr(error, "response", None)
+    headers = getattr(response, "headers", None) or {}
+    retry_after = headers.get("Retry-After")
+    if retry_after:
+        try:
+            return max(5.0, float(retry_after))
+        except (TypeError, ValueError):
+            pass
+    reset = headers.get("X-RateLimit-Reset")
+    if reset:
+        try:
+            return max(5.0, float(reset) - time.time() + 5.0)
+        except (TypeError, ValueError):
+            pass
+    return min(300.0, 30.0 * (2 ** attempt))
+
+
 def download(url: str, target: Path, token: str | None) -> None:
     from huggingface_hub.utils import get_session, hf_raise_for_status
-    with get_session().stream("GET", url, headers={"Authorization": f"Bearer {token}"} if token else {},
-                              follow_redirects=True, timeout=120) as response:
-        hf_raise_for_status(response)
-        with target.open("wb") as stream:
-            for chunk in response.iter_bytes():
-                stream.write(chunk)
+    for attempt in range(DOWNLOAD_ATTEMPTS):
+        try:
+            with get_session().stream("GET", url,
+                                      headers={"Authorization": f"Bearer {token}"} if token else {},
+                                      follow_redirects=True, timeout=120) as response:
+                hf_raise_for_status(response)
+                with target.open("wb") as stream:
+                    for chunk in response.iter_bytes():
+                        stream.write(chunk)
+            time.sleep(DOWNLOAD_INTERVAL_SECONDS)
+            return
+        except HfHubHTTPError as error:
+            status = getattr(getattr(error, "response", None), "status_code", None)
+            if status not in RETRYABLE_STATUS or attempt == DOWNLOAD_ATTEMPTS - 1:
+                raise
+            delay = retry_delay(error, attempt)
+            print(f"source download HTTP {status}; retrying in {delay:.0f}s "
+                  f"({attempt + 1}/{DOWNLOAD_ATTEMPTS})")
+            time.sleep(delay)
 
 
 def source_records(path: Path, revisions: dict, max_bytes: int, extension_filter: str) -> list[dict]:
