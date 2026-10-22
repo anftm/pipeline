@@ -108,7 +108,7 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           [[ "${{ inputs.limit || '0' }}" =~ ^[0-9]+$ ]] || exit 1
-          args=(--extension "${{ matrix.extension }}" --limit "${{ inputs.limit || '0' }}" --apply)
+          args=(--extension "${{ matrix.extension }}" --limit "${{ inputs.limit || '0' }}" --apply --strict)
           if [[ "${{ inputs.retry_failures }}" == "true" ]]; then args+=(--retry-failures); fi
           python scripts/pilot_static_pdf_stream.py "${args[@]}"
 

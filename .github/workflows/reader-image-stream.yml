@@ -92,8 +92,8 @@ jobs:
           REBUILD: ${{ inputs.rebuild || 'false' }}
         run: |
           [[ "$LIMIT" =~ ^[0-9]+$ ]] || exit 1
-          args=(--extension "$EXTENSION" --limit "$LIMIT" --shard-count 8 --shard-index "${{ matrix.shard }}" --apply)
-          if [[ "$REBUILD" == "true" ]]; then args+=(--rebuild --strict); fi
+          args=(--extension "$EXTENSION" --limit "$LIMIT" --shard-count 8 --shard-index "${{ matrix.shard }}" --apply --strict)
+          if [[ "$REBUILD" == "true" ]]; then args+=(--rebuild); fi
           python scripts/pilot_image_page_stream.py "${args[@]}"
 
   finalize:

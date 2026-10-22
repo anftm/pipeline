@@ -42,6 +42,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bucket", default=BUCKET)
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--retry-failures", action="store_true")
+    parser.add_argument("--strict", action="store_true",
+                        help="return a failure after checkpointing any source errors")
     return parser.parse_args()
 
 
@@ -205,6 +207,9 @@ def main() -> int:
             print(f"published={len(uploads)}")
         else:
             print("report-only; pass --apply to publish")
+        if args.strict and failures:
+            print(f"strict static PDF conversion failed for {len(failures)} source(s)")
+            return 1
     return 0
 
 
