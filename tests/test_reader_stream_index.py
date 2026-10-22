@@ -113,6 +113,14 @@ class ReaderStreamCheckpointTests(unittest.TestCase):
             self.assertEqual(index.unchanged_sources(rows, previous, "token"), {"repo\0same.mp3"})
         api.get_paths_info.assert_called_once_with("repo", ["same.mp3", "changed.mp3"], revision="new", repo_type="dataset")
 
+    def test_mislabeled_transcoded_checkpoint_is_requeued_even_with_same_source_sha(self):
+        bad = {"key": "repo\0book.wav", "source_revision": "same", "source_sha256": "a" * 64,
+               "profile": "ffmpeg-audio-mp3-v1", "object": "media/audio/wav/hash/audio.wav"}
+        self.assertNotIn(bad["key"], index.completed_revisions({"files": [bad]}))
+        with patch.object(index, "HfApi") as api:
+            self.assertEqual(index.unchanged_sources([{"key": bad["key"], "revision": "new"}], {"files": [bad]}, None), set())
+        api.return_value.get_paths_info.assert_not_called()
+
 
 class FormatProducerRegressionTests(unittest.TestCase):
     def test_media_publishes_actual_transcoded_filename_kind_and_digest(self):

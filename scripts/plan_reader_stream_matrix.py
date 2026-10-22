@@ -13,10 +13,10 @@ from huggingface_hub import HfFileSystem
 
 try:
     from .reader_assets import bucket_conversion_contract, decode_search_payload, relative_path
-    from .reader_stream_index import merge_shards, unchanged_sources
+    from .reader_stream_index import merge_shards, reusable_entry, unchanged_sources
 except ImportError:
     from reader_assets import bucket_conversion_contract, decode_search_payload, relative_path
-    from reader_stream_index import merge_shards, unchanged_sources
+    from reader_stream_index import merge_shards, reusable_entry, unchanged_sources
 
 
 KINDS = {
@@ -112,6 +112,8 @@ def completed_entries(index: dict, retry_failures: bool = False) -> dict[str, st
     for field in fields:
         for entry in index.get(field, []):
             if isinstance(entry, dict) and entry.get("key"):
+                if field == "files" and not reusable_entry(entry):
+                    continue
                 completed[entry["key"]] = entry.get("source_revision")
     return completed
 

@@ -43,6 +43,12 @@ def shard_for(key: str, count: int) -> int:
     return int.from_bytes(hashlib.sha256(key.encode()).digest()[:8], "big") % count
 
 
+def reusable_entry(entry: dict) -> bool:
+    expected = {"ffmpeg-audio-mp3-v1": "audio.mp3",
+                "ffmpeg-video-mp4-h264-aac-v1": "video.mp4"}.get(entry.get("profile"))
+    return expected is None or str(entry.get("object") or "").endswith("/" + expected)
+
+
 def merge_indexes(previous: dict, entries: list[dict], failures: list[dict], kind: str) -> dict:
     files = {entry["key"]: entry for entry in previous.get("files", [])}
     errors = {entry["key"]: entry for entry in previous.get("failures", [])}
@@ -53,13 +59,13 @@ def merge_indexes(previous: dict, entries: list[dict], failures: list[dict], kin
         files[entry["key"]] = entry
         # A successful old revision must not erase a newer revision's failure.
         failure = errors.get(entry["key"], {})
-        if (failure.get("source_revision") == entry.get("source_revision")
+        if (reusable_entry(entry) and failure.get("source_revision") == entry.get("source_revision")
                 and (not failure.get("profile") or failure.get("profile") == entry.get("profile"))):
             errors.pop(entry["key"], None)
     for failure in failures:
         key = failure["key"]
         current = files.get(key, {})
-        if (current.get("source_revision") == failure.get("source_revision")
+        if (reusable_entry(current) and current.get("source_revision") == failure.get("source_revision")
                 and (not failure.get("profile") or current.get("profile") == failure["profile"])):
             continue
         if errors.get(key, {}).get("checkpointed_at", "") <= failure.get("checkpointed_at", ""):
@@ -70,7 +76,7 @@ def merge_indexes(previous: dict, entries: list[dict], failures: list[dict], kin
 
 
 def completed_revisions(index: dict, retry_failures: bool = False) -> dict[str, str]:
-    result = {entry["key"]: entry.get("source_revision") for entry in index.get("files", [])}
+    result = {entry["key"]: entry.get("source_revision") for entry in index.get("files", []) if reusable_entry(entry)}
     if not retry_failures:
         result.update({entry["key"]: entry.get("source_revision") for entry in index.get("failures", [])})
     return result
@@ -83,7 +89,8 @@ def unchanged_sources(records: list[dict], index: dict, token: str | None) -> se
     for item in records:
         key = item.get("key") or f"{item['repo']}\0{item['path']}"
         entry = files.get(key, {})
-        if not entry.get("source_sha256") or entry.get("source_revision") == item["revision"]:
+        if (not reusable_entry(entry) or not entry.get("source_sha256")
+                or entry.get("source_revision") == item["revision"]):
             continue
         repo, path = key.split("\0", 1)
         groups.setdefault((repo, item["revision"]), []).append((path, key))
