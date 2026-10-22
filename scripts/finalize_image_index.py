@@ -18,7 +18,7 @@ def main() -> int:
         aws_secret_access_key=os.environ["HF_S3_SECRET_ACCESS_KEY"],
         config=Config(region_name="us-east-1", s3={"addressing_style": "path"}),
     )
-    prefix = "pages/image/index"
+    prefix = "pages/image/index-v2-"
     keys = []
     for page in client.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=prefix):
         keys.extend(item["Key"] for item in page.get("Contents", []) if item["Key"].endswith(".json"))
@@ -28,12 +28,12 @@ def main() -> int:
         for entry in payload.get("files", []):
             if isinstance(entry, dict) and entry.get("key"):
                 merged[entry["key"]] = entry
-    body = (json.dumps({"version": 1, "kind": "image-page-stream-index",
+    body = (json.dumps({"version": 1, "kind": "image-stream-index",
                        "files": [merged[key] for key in sorted(merged)]},
                        ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode()
-    client.put_object(Bucket=bucket, Key="pages/image/index.json", Body=body,
+    client.put_object(Bucket=bucket, Key="pages/image/index-v2.json", Body=body,
                       ContentType="application/json")
-    print(f"merged {len(merged)} image stream mapping(s) from {len(keys)} index file(s)")
+    print(f"merged {len(merged)} image asset mapping(s) from {len(keys)} index file(s)")
     return 0
 
 

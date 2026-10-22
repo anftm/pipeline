@@ -15,17 +15,17 @@ from pathlib import Path
 from huggingface_hub import HfFileSystem, batch_bucket_files
 
 try:
-    from .convert_reader_assets import validate_pdf_content
+    from .convert_reader_assets import convert_tiff, validate_pdf_content
     from .pilot_office_stream import converted_output, run_libreoffice
     from .reader_assets import decode_search_payload, relative_path, source_url
 except ImportError:
-    from convert_reader_assets import validate_pdf_content
+    from convert_reader_assets import convert_tiff, validate_pdf_content
     from pilot_office_stream import converted_output, run_libreoffice
     from reader_assets import decode_search_payload, relative_path, source_url
 
 
 BUCKET = "vomebook/reader-assets-v2"
-EXTENSIONS = {"ppt", "pptx", "pps", "wps", "ps"}
+EXTENSIONS = {"ppt", "pptx", "pps", "wps", "ps", "tif", "tiff"}
 
 
 def parse_args() -> argparse.Namespace:
@@ -79,7 +79,10 @@ def build(item: dict, work: Path, token: str | None) -> tuple[dict, dict[str, st
     source_hash = hashlib.sha256(source.read_bytes()).hexdigest()
     output_dir = work / "pdf"
     output_dir.mkdir()
-    if item["extension"] == "ps":
+    if item["extension"] in {"tif", "tiff"}:
+        output = output_dir / "document.pdf"
+        convert_tiff(source, output, work)
+    elif item["extension"] == "ps":
         output = output_dir / "document.pdf"
         subprocess.run(["gs", "-q", "-dSAFER", "-dBATCH", "-dNOPAUSE", "-sDEVICE=pdfwrite",
                         f"-sOutputFile={output}", str(source)], check=True, timeout=600)

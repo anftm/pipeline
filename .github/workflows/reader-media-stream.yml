@@ -1,0 +1,140 @@
+name: Reader/桶 · Build Media Streams
+run-name: Media streams ${{ (github.event_name == 'schedule' || inputs.apply == true) && 'apply' || 'plan' }} (${{ inputs.kind || 'all' }})
+
+on:
+  schedule:
+    # Audio/video daily; the native-codec probe decides whether a source is
+    # published as-is or transcoded to MP3/MP4 H.264/AAC.
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+    inputs:
+      kind:
+        description: Media kind, or all
+        required: true
+        default: all
+        type: choice
+        options: [all, audio, video, swf]
+      limit:
+        description: Maximum sources per shard; 0 means all pending
+        required: true
+        default: "0"
+        type: string
+      apply:
+        description: Convert and publish media streams
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: reader-media
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - run: pip install -r scripts/requirements.txt
+      - name: Fetch source metadata once
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          FORCE_SYNC: "true"
+        run: python scripts/fetch_and_parse.py
+      - name: Plan pending media workers
+        id: matrix
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python scripts/plan_reader_stream_matrix.py --kind media --extension "${{ inputs.kind || 'all' }}" --output output/media-matrix.json
+          echo "matrix=$(cat output/media-matrix.json)" >> "$GITHUB_OUTPUT"
+      - run: tar -czf output/media-plan.tgz output/search_data.json state/commits.json output/media-matrix.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: reader-media-plan
+          path: output/media-plan.tgz
+          retention-days: 1
+
+  media:
+    needs: plan
+    if: >-
+      (github.event_name == 'schedule' || inputs.apply == true) &&
+      fromJSON(needs.plan.outputs.matrix).include[0] != null
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix).include }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - run: |
+          pip install -r scripts/requirements.txt
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+      - uses: actions/download-artifact@v8
+        with:
+          name: reader-media-plan
+          path: output
+      - run: tar -xzf output/media-plan.tgz
+      - name: Build and publish media streams
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          [[ "${{ inputs.limit || '0' }}" =~ ^[0-9]+$ ]] || exit 1
+          python scripts/pilot_media_stream.py \
+            --kind "${{ matrix.extension }}" \
+            --limit "${{ inputs.limit || '0' }}" \
+            --shard-count 8 \
+            --shard-index "${{ matrix.shard }}" \
+            --apply
+
+  finalize:
+    needs: [plan, media]
+    if: >-
+      always() && needs.plan.result == 'success' &&
+      (github.event_name == 'schedule' || inputs.apply == true) &&
+      needs.media.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    concurrency:
+      group: reader-sidecar
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - run: pip install -r scripts/requirements.txt
+      - name: Merge canonical media indexes
+        env:
+          HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+          HF_S3_BUCKET: vomebook/reader-assets-v2
+        run: python scripts/finalize_media_indexes.py
+      - name: Rebuild canonical Reader sidecar
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: python scripts/build_reader_assets_v2_sidecar.py --apply
+      - name: Unify sidecar through the central v3 writer
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run reader-v3-publish.yml --repo "$GITHUB_REPOSITORY" --ref main \
+            -f operation=unify -f apply=true
+          echo "central v3 unify dispatched; current reader-sidecar lock will be released when this producer exits"

@@ -1,0 +1,133 @@
+name: Reader/桶 · Build Image WebP Assets
+
+on:
+  schedule:
+    - cron: "17 2 * * 0"
+  workflow_dispatch:
+    inputs:
+      extension:
+        description: Image extension, or all
+        required: true
+        default: all
+        type: choice
+        options: [all, jpg, jpeg, png, bmp, webp, gif]
+      limit:
+        description: Maximum sources per shard; 0 means all
+        required: true
+        default: "0"
+        type: string
+      rebuild:
+        description: Delete v2 indexes and rebuild every selected image
+        required: true
+        default: false
+        type: boolean
+      apply:
+        description: Convert and publish; false is report-only
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: reader-images
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - run: pip install -r scripts/requirements.txt
+      - name: Fetch source metadata once
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          FORCE_SYNC: "true"
+        run: python scripts/fetch_and_parse.py
+      - name: Reset v2 image indexes for a full rebuild
+        if: inputs.rebuild == true && inputs.apply == true
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: python scripts/reset_image_index.py --apply
+      - run: tar -czf output/image-plan.tgz output/search_data.json state/commits.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: reader-image-plan
+          path: output/image-plan.tgz
+          retention-days: 1
+
+  build:
+    needs: plan
+    if: github.event_name == 'schedule' || inputs.apply == true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - run: pip install -r scripts/requirements.txt
+      - uses: actions/download-artifact@v8
+        with:
+          name: reader-image-plan
+          path: output
+      - run: tar -xzf output/image-plan.tgz
+      - name: Build single-image WebP assets
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          EXTENSION: ${{ inputs.extension || 'all' }}
+          LIMIT: ${{ inputs.limit || '0' }}
+          REBUILD: ${{ inputs.rebuild || 'false' }}
+        run: |
+          [[ "$LIMIT" =~ ^[0-9]+$ ]] || exit 1
+          args=(--extension "$EXTENSION" --limit "$LIMIT" --shard-count 8 --shard-index "${{ matrix.shard }}" --apply)
+          if [[ "$REBUILD" == "true" ]]; then args+=(--rebuild --strict); fi
+          python scripts/pilot_image_page_stream.py "${args[@]}"
+
+  finalize:
+    needs: [plan, build]
+    if: >-
+      always() && needs.plan.result == 'success' &&
+      (github.event_name == 'schedule' || inputs.apply == true) &&
+      needs.build.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    concurrency:
+      group: reader-sidecar
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - run: pip install -r scripts/requirements.txt
+      - name: Merge v2 image indexes
+        env:
+          HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+          HF_S3_BUCKET: vomebook/reader-assets-v2
+        run: python scripts/finalize_image_index.py
+      - name: Rebuild canonical Reader sidecar
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: python scripts/build_reader_assets_v2_sidecar.py --apply
+      - name: Unify sidecar through the central v3 writer
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run reader-v3-publish.yml --repo "$GITHUB_REPOSITORY" --ref main \
+            -f operation=unify -f apply=true
+          echo "central v3 unify dispatched; current reader-sidecar lock will be released when this producer exits"

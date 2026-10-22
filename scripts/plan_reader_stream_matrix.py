@@ -18,7 +18,7 @@ except ImportError:
 
 
 KINDS = {
-    "image": {"extensions": ("jpg", "jpeg", "png", "bmp", "tif", "tiff", "webp"), "sharded": True},
+    "image": {"extensions": ("jpg", "jpeg", "png", "bmp", "webp", "gif"), "sharded": True},
     "media": {"extensions": ("audio", "video", "swf"), "sharded": True},
     "ebook": {"extensions": ("epub", "mobi", "azw3", "fb2", "chm"), "sharded": True},
     "office-chapters": {"extensions": ("doc", "docx", "odt", "rtf"), "sharded": False},
@@ -27,7 +27,7 @@ KINDS = {
     "office": {"extensions": ("doc", "docx", "odt", "rtf"), "sharded": False},
     "spreadsheet": {"extensions": ("xls", "xlsx", "csv", "ods"), "sharded": False},
     "web": {"extensions": ("html", "htm", "mht", "mhtml"), "sharded": False},
-    "static-pdf": {"extensions": ("ppt", "pptx", "pps", "wps", "ps"), "sharded": False},
+    "static-pdf": {"extensions": ("ppt", "pptx", "pps", "wps", "ps", "tif", "tiff"), "sharded": False},
 }
 
 

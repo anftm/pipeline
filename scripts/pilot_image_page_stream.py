@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Build and publish a small non-PDF image page-stream pilot."""
+"""Build and publish single-image WebP assets for ordinary image sources.
+
+TIF/TIFF stay on the PDF conversion path. Animated GIFs are reduced to their
+first frame and published as one static WebP. The canonical index is
+``pages/image/index-v2.json`` so a full rebuild never merges old page-stream
+entries; old ``pages/image/index.json`` remains untouched until the v2 index is
+complete and the Reader sidecar is switched.
+"""
 
 from __future__ import annotations
 
@@ -8,12 +15,11 @@ import hashlib
 import json
 import os
 import tempfile
-import urllib.parse
 import urllib.request
 from pathlib import Path
 
 from huggingface_hub import HfFileSystem
-from PIL import Image, ImageFile, ImageSequence
+from PIL import Image, ImageFile
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 Image.MAX_IMAGE_PIXELS = 300_000_000
@@ -28,10 +34,9 @@ except ImportError:
 
 TARGET_BUCKET = "vomebook/reader-assets-v2"
 IMAGE_ROOT = "pages/image"
-SUPPORTED_EXTENSIONS = {"jpg", "jpeg", "bmp", "tif", "tiff", "webp", "png"}
-# Keep a margin below the WebP encoder's hard dimension/pixel limits. Very
-# large source JPEGs can fit Pillow's decoder limit but still fail encoding at
-# the old 16,383 edge.
+INDEX_PREFIX = "index-v2"
+INDEX_NAME = "index-v2.json"
+SUPPORTED_EXTENSIONS = {"jpg", "jpeg", "png", "bmp", "webp", "gif"}
 MAX_WEBP_EDGE = 8_192
 
 
@@ -46,6 +51,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--extension", default="all")
     parser.add_argument("--bucket", default=TARGET_BUCKET)
     parser.add_argument("--apply", action="store_true")
+    parser.add_argument("--rebuild", action="store_true",
+                        help="ignore the existing v2 shard index (full rebuild)")
+    parser.add_argument("--strict", action="store_true",
+                        help="fail the shard if any selected image fails")
     parser.add_argument("--shard-count", type=int, default=1)
     parser.add_argument("--shard-index", type=int, default=0)
     return parser.parse_args()
@@ -95,64 +104,49 @@ def build_one(item: dict, work: Path, token: str | None, bucket: str) -> tuple[d
         raise ValueError("image source checksum differs from pinned repair identity")
     if item.get("bytes") and source.stat().st_size != item["bytes"]:
         raise ValueError("image source byte count differs from pinned metadata")
-    object_id = source_digest
     extension = item["extension"]
-    root = f"{IMAGE_ROOT}/{extension}/{object_id}"
-    manifest_path = f"{root}/page-manifest.json"
-    pages = work / "pages"
-    pages.mkdir()
-    page_entries = []
-    uploads: dict[str, str] = {}
+    root = f"{IMAGE_ROOT}/{extension}/{source_digest}"
+    output = work / "document.webp"
     with Image.open(source) as image:
         if image.width < 1 or image.height < 1:
             raise ValueError("image has invalid dimensions")
-        for number, frame in enumerate(ImageSequence.Iterator(image), start=1):
-            output = pages / f"page-{number:06d}.webp"
-            converted = frame.convert("RGB")
-            if max(converted.size) > MAX_WEBP_EDGE:
-                scale = MAX_WEBP_EDGE / max(converted.size)
-                resized = converted.resize(
-                    (max(1, round(converted.width * scale)),
-                     max(1, round(converted.height * scale))),
-                    Image.Resampling.LANCZOS,
-                )
-                converted.close()
-                converted = resized
-            converted.save(output, "WEBP", quality=85, method=6)
+        # GIF (and any other animated image) is represented by its first frame.
+        try:
+            image.seek(0)
+        except EOFError:
+            pass
+        converted = image.convert("RGB")
+        if max(converted.size) > MAX_WEBP_EDGE:
+            scale = MAX_WEBP_EDGE / max(converted.size)
+            resized = converted.resize(
+                (max(1, round(converted.width * scale)),
+                 max(1, round(converted.height * scale))),
+                Image.Resampling.LANCZOS,
+            )
             converted.close()
-            page_bytes = output.read_bytes()
-            page_digest = hashlib.sha256(page_bytes).hexdigest()
-            relative = f"pages/page-{number:06d}.webp"
-            remote = f"{root}/{relative}"
-            page_entries.append({"path": relative, "bytes": len(page_bytes), "sha256": page_digest})
-            uploads[remote] = str(output)
-    manifest = {
-        "kind": "image-page-stream",
-        "version": 1,
-        "source_extension": extension,
-        "source_sha256": source_digest,
-        "page_count": len(page_entries),
-        "pages": page_entries,
-    }
-    manifest_file = work / "page-manifest.json"
-    manifest_file.write_text(json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
-    uploads[manifest_path] = str(manifest_file)
+            converted = resized
+        converted.save(output, "WEBP", quality=85, method=6)
+        converted.close()
+    data = output.read_bytes()
+    remote = f"{root}/document.webp"
     return {
         "key": f"{item['repo']}\0{item['path']}",
         "repo": item["repo"],
-        "path": item["path"],
+        "source_path": item["path"],
         "extension": extension,
         "source_revision": item["revision"],
-        "source_bytes": len(source.read_bytes()),
+        "source_bytes": source.stat().st_size,
         "source_sha256": source_digest,
-        "mode": "page-stream",
+        "mode": "image",
         "bucket": bucket,
-        "manifest": manifest_path,
-        "page_count": len(page_entries),
-    }, uploads
+        "path": remote,
+        "bytes": len(data),
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "page_count": 1,
+    }, {remote: str(output)}
 
 
-def existing_index(bucket: str, token: str | None, name: str = "index.json") -> dict:
+def existing_index(bucket: str, token: str | None, name: str) -> dict:
     path = f"hf://buckets/{bucket}/{IMAGE_ROOT}/{name}"
     try:
         fs = HfFileSystem(token=token)
@@ -162,7 +156,7 @@ def existing_index(bucket: str, token: str | None, name: str = "index.json") -> 
             return payload
     except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError):
         pass
-    return {"version": 1, "kind": "image-page-stream-index", "files": []}
+    return {"version": 1, "kind": "image-stream-index", "files": []}
 
 
 def main() -> int:
@@ -177,9 +171,9 @@ def main() -> int:
     if extension != "all" and extension not in SUPPORTED_EXTENSIONS:
         raise ValueError(f"unsupported image extension: {extension}")
     selected = source_records(args.search_data, revisions, args.max_source_bytes, extension)
-    index_name = "index.json" if args.shard_count == 1 else f"index-{args.shard_index:02d}.json"
-    previous = existing_index(args.bucket, token, index_name)
-    canonical = existing_index(args.bucket, token)
+    index_name = INDEX_NAME if args.shard_count == 1 else f"{INDEX_PREFIX}-{args.shard_index:02d}.json"
+    previous = ({"version": 1, "kind": "image-stream-index", "files": []}
+                if args.rebuild else existing_index(args.bucket, token, index_name))
     completed = {
         entry.get("key"): entry.get("source_revision")
         for entry in previous.get("files", []) if isinstance(entry, dict)
@@ -195,12 +189,14 @@ def main() -> int:
         return 0
     uploads: dict[str, str] = {}
     entries = []
-    with tempfile.TemporaryDirectory(prefix="reader-image-pilot-") as directory:
+    failures = 0
+    with tempfile.TemporaryDirectory(prefix="reader-image-v2-") as directory:
         work_root = Path(directory)
         for index, item in enumerate(selected):
             try:
                 result, files = build_one(item, work_root / str(index), token, args.bucket)
             except Exception as error:
+                failures += 1
                 print(f"failed: {item['repo']}/{item['path']}: {type(error).__name__}: {error}")
                 continue
             entries.append(result)
@@ -208,21 +204,24 @@ def main() -> int:
         if not entries:
             print("no image source converted successfully")
             return 1
-        previous_files = {entry.get("key"): entry for entry in previous.get("files", []) if isinstance(entry, dict)}
-        previous_files.update({entry.get("key"): entry for entry in canonical.get("files", []) if isinstance(entry, dict)})
+        previous_files = {} if args.rebuild else {
+            entry.get("key"): entry for entry in previous.get("files", []) if isinstance(entry, dict)}
         previous_files.update({entry["key"]: entry for entry in entries})
-        index_payload = {"version": 1, "kind": "image-page-stream-index", "files": [
+        index_payload = {"version": 1, "kind": "image-stream-index", "files": [
             previous_files[key] for key in sorted(previous_files)
         ]}
-        index_file = work_root / "index.json"
+        index_file = work_root / index_name
         index_file.write_text(json.dumps(index_payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
         uploads[f"{IMAGE_ROOT}/{index_name}"] = str(index_file)
-        print(f"planned {len(entries)} image stream(s), {len(uploads)} object(s)")
+        print(f"planned {len(entries)} image asset(s), {len(uploads)} object(s), failures={failures}")
         if args.apply:
             batch_bucket_files_with_retry(args.bucket, [(local, remote) for remote, local in sorted(uploads.items())], token)
             print(f"published {len(uploads)} object(s) to {args.bucket}")
         else:
             print("report-only; pass --apply to publish")
+        if args.strict and failures:
+            print(f"strict image rebuild failed for {failures} source(s)")
+            return 1
     return 0
 
 

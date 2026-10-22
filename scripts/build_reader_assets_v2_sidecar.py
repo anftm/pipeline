@@ -125,19 +125,48 @@ def build(fs: HfFileSystem, assets_bucket: str, pdf_bucket: str, derived_path: s
         except FileNotFoundError:
             continue
         add_index(files, payload, {extension: "h"}, assets_bucket)
-    for extension in ("ppt", "pptx", "pps", "wps", "ps"):
-        payload = read_json(fs, assets_bucket, f"documents/pdf/{extension}/index.json")
+    for extension in ("ppt", "pptx", "pps", "wps", "ps", "tif", "tiff"):
+        try:
+            payload = read_json(fs, assets_bucket, f"documents/pdf/{extension}/index.json")
+        except FileNotFoundError:
+            continue
         add_index(files, payload, {extension: "p"}, assets_bucket)
     for extension in ("epub", "mobi", "azw3", "fb2", "chm"):
         payload = read_json(fs, assets_bucket, f"chapters/ebook/{extension}/index.json")
         add_index(files, payload, {extension: "e"}, assets_bucket, chapters=True)
-    image_payload = read_json(fs, assets_bucket, "pages/image/index.json")
+    old_image_payload = None
+    try:
+        old_image_payload = read_json(fs, assets_bucket, "pages/image/index.json")
+    except FileNotFoundError:
+        pass
+    try:
+        image_payload = read_json(fs, assets_bucket, "pages/image/index-v2.json")
+    except FileNotFoundError:
+        # Transitional only: the v2 index is built by a full image rebuild. Until
+        # it exists, keep serving the old page-stream index so other format
+        # publishes do not remove every image from the sidecar.
+        if old_image_payload is None:
+            raise
+        image_payload = old_image_payload
     for entry in image_payload.get("files", []):
         if not isinstance(entry, dict) or not entry.get("key"):
             continue
-        manifest = entry.get("manifest")
-        if isinstance(manifest, str):
-            files[entry["key"]] = {"s": 2, "m": "i", "p": manifest, "b": assets_bucket}
+        path = entry.get("path") if entry.get("mode") == "image" else None
+        if not isinstance(path, str):
+            path = entry.get("manifest")
+        if isinstance(path, str):
+            files[entry["key"]] = {"s": 2, "m": "i", "p": path, "b": assets_bucket}
+    # TIF/TIFF is moving to the PDF stream. Keep its old image entry only until
+    # the static-PDF producer has published the corresponding PDF mapping.
+    if old_image_payload is not None:
+        for entry in old_image_payload.get("files", []):
+            if not isinstance(entry, dict) or not entry.get("key") or entry["key"] in files:
+                continue
+            if str(entry.get("extension") or "").lower() not in {"tif", "tiff"}:
+                continue
+            manifest = entry.get("manifest")
+            if isinstance(manifest, str):
+                files[entry["key"]] = {"s": 2, "m": "i", "p": manifest, "b": assets_bucket}
     for kind, mode in (("audio", "a"), ("video", "v"), ("swf", "f")):
         payload = read_json(fs, assets_bucket, f"media/{kind}/index.json")
         for entry in payload.get("files", []):

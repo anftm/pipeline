@@ -1,0 +1,139 @@
+name: Reader/桶 · Build Static PDF Streams
+run-name: Static PDF ${{ (github.event_name == 'schedule' || inputs.apply == true) && 'apply' || 'plan' }} (${{ inputs.extension || 'all' }})
+
+on:
+  schedule:
+    # PPT-family and TIF/TIFF share the static PDF producer. Weekly is enough
+    # for the small pending set; manual dispatch handles one-off batches.
+    - cron: "23 4 * * 0"
+  workflow_dispatch:
+    inputs:
+      extension:
+        description: Static PDF format, or all
+        required: true
+        default: all
+        type: choice
+        options: [all, ppt, pptx, pps, wps, ps, tif, tiff]
+      limit:
+        description: Maximum sources; 0 means all pending
+        required: true
+        default: "0"
+        type: string
+      retry_failures:
+        description: Retry previously recorded failures
+        required: true
+        default: false
+        type: boolean
+      apply:
+        description: Convert and publish static PDFs
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: reader-static-pdf
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - run: pip install -r scripts/requirements.txt
+      - name: Fetch source metadata once
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          FORCE_SYNC: "true"
+        run: python scripts/fetch_and_parse.py
+      - name: Plan pending static PDF workers
+        id: matrix
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          args=(--kind static-pdf --extension "${{ inputs.extension || 'all' }}" --output output/static-pdf-matrix.json)
+          if [[ "${{ inputs.retry_failures }}" == "true" ]]; then args+=(--retry-failures); fi
+          python scripts/plan_reader_stream_matrix.py "${args[@]}"
+          echo "matrix=$(cat output/static-pdf-matrix.json)" >> "$GITHUB_OUTPUT"
+      - run: tar -czf output/static-pdf-plan.tgz output/search_data.json state/commits.json output/static-pdf-matrix.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: reader-static-pdf-plan
+          path: output/static-pdf-plan.tgz
+          retention-days: 1
+
+  stream:
+    needs: plan
+    if: >-
+      (github.event_name == 'schedule' || inputs.apply == true) &&
+      fromJSON(needs.plan.outputs.matrix).include[0] != null
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix).include }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - run: pip install -r scripts/requirements.txt
+      - name: Install PDF conversion tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libreoffice ghostscript poppler-utils fontconfig fonts-noto-cjk fonts-wqy-microhei
+      - uses: actions/download-artifact@v8
+        with:
+          name: reader-static-pdf-plan
+          path: output
+      - run: tar -xzf output/static-pdf-plan.tgz
+      - name: Convert and publish static PDF
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          [[ "${{ inputs.limit || '0' }}" =~ ^[0-9]+$ ]] || exit 1
+          args=(--extension "${{ matrix.extension }}" --limit "${{ inputs.limit || '0' }}" --apply)
+          if [[ "${{ inputs.retry_failures }}" == "true" ]]; then args+=(--retry-failures); fi
+          python scripts/pilot_static_pdf_stream.py "${args[@]}"
+
+  finalize:
+    needs: [plan, stream]
+    if: >-
+      always() && needs.plan.result == 'success' &&
+      (github.event_name == 'schedule' || inputs.apply == true) &&
+      needs.stream.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    concurrency:
+      group: reader-sidecar
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - run: pip install -r scripts/requirements.txt
+      - name: Rebuild canonical Reader sidecar
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: python scripts/build_reader_assets_v2_sidecar.py --apply
+      - name: Unify sidecar through the central v3 writer
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run reader-v3-publish.yml --repo "$GITHUB_REPOSITORY" --ref main \
+            -f operation=unify -f apply=true
+          echo "central v3 unify dispatched; current reader-sidecar lock will be released when this producer exits"
