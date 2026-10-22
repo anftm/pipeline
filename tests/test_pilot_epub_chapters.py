@@ -158,6 +158,7 @@ class ChmChapterPilotTests(unittest.TestCase):
             self.assertEqual(entry["source_extension"], "chm")
             self.assertEqual(entry["profile"], pilot_epub_chapters.CHM_PROFILE)
             self.assertTrue(entry["fallback"].startswith("native/ebook/chm/"))
+            self.assertIn(hashlib.sha256(b"native epub").hexdigest(), entry["fallback"])
             self.assertTrue(any(path.endswith("chapter-manifest.json") and path.startswith("chapters/ebook/chm/")
                                 for path in uploads))
             self.assertIn(entry["fallback"], uploads)

@@ -487,7 +487,8 @@ def build_one(item: dict, work: Path, token: str | None, bucket: str) -> tuple[d
                     f"CHM conversion failed ({type(primary_error).__name__}: {primary_error}); "
                     f"recovery failed ({type(recovery_error).__name__}: {recovery_error})"
                 ) from recovery_error
-        native_fallback = f"native/ebook/chm/{source_digest}/document.epub"
+        native_digest = hashlib.sha256(native_source.read_bytes()).hexdigest()
+        native_fallback = f"native/ebook/chm/{native_digest}/document.epub"
         root_extension = extension
     else:
         chapter_source = source
