@@ -40,6 +40,10 @@ SUPPORTED_EXTENSIONS = {"txt", "md", "markdown", "vcf", "ini"}
 MAX_SOURCE_BYTES = 512 * 1024 * 1024
 CHECKPOINT_BYTES = 64 * 1024 * 1024
 MARKDOWN_IMAGE_PROFILE = "strict-utf8-bom-v1-markdown-images-v1"
+# Inline Markdown image embedding is deliberately limited to the Marxists
+# Library. Other repositories keep their existing Markdown mappings; they are
+# not selected for this publisher.
+MARKDOWN_INLINE_REPOS = frozenset({"VoiceOfML/Marxists-Library"})
 
 
 class Utf8SourceUnchanged(Exception):
@@ -125,6 +129,8 @@ def select_records(path: Path, revisions: dict, extension: str | set[str]) -> li
         if ext not in SUPPORTED_EXTENSIONS or ext not in wanted:
             continue
         repo = str(record.get("Repo") or "")
+        if ext in {"md", "markdown"} and repo not in MARKDOWN_INLINE_REPOS:
+            continue
         revision = str(revisions.get(repo) or "")
         rel = relative_path(record)
         if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo) or not re.fullmatch(r"[0-9a-f]{40}", revision):
@@ -420,7 +426,9 @@ def main() -> int:
     selected = pending
     if args.limit:
         selected = selected[:args.limit]
-    report = {"profile": PROFILE, "markdown_profile": MARKDOWN_IMAGE_PROFILE, "apply": args.apply, "plan_only": args.plan_only,
+    report = {"profile": PROFILE, "markdown_profile": MARKDOWN_IMAGE_PROFILE,
+              "markdown_inline_repos": sorted(MARKDOWN_INLINE_REPOS),
+              "apply": args.apply, "plan_only": args.plan_only,
               "search_data_sha256": hashlib.sha256(args.search_data.read_bytes()).hexdigest(),
               "revisions_sha256": hashlib.sha256(args.revisions.read_bytes()).hexdigest(),
               "sources": len(records), "pending": len(pending), "selected": len(selected),
