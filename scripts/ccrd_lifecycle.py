@@ -40,6 +40,60 @@ def references(payload: dict, path: str) -> list[dict]:
     if not isinstance(payload, dict):
         raise ValueError('CCRD lifecycle document must be an object')
     kind = payload.get('kind')
+    if path == 'current.json' and payload.get('format') == 2:
+        databases = payload.get('databases')
+        metadata = payload.get('metadata')
+        archives = payload.get('archives')
+        if (payload.get('kind') != 'ccrd-four-source-generation'
+                or payload.get('tokenizer_version') != TOKENIZER
+                or not isinstance(databases, dict) or set(databases) != {'CCRD', 'CW', 'RMRB', 'PLA'}
+                or not isinstance(metadata, list) or not metadata
+                or not isinstance(archives, list) or not archives):
+            raise ValueError('unknown four-source CCRD pointer')
+        sha(payload.get('base_metadata_sha256'))
+        refs, parents = [], set()
+        for name, item in databases.items():
+            if (not isinstance(item, dict)
+                    or not re.fullmatch(r'generations/ccrd-[^/]+/' + name + r'\.sqlite3', item.get('path', ''))
+                    or type(item.get('documents')) is not int or item['documents'] < 1
+                    or item.get('fts_rows') != item['documents']):
+                raise ValueError('invalid four-source CCRD database identity')
+            if name in {'RMRB', 'PLA'} and (item.get('source') != name
+                    or item.get('index_profile') != 'newspaper-hybrid-texts-v1'
+                    or item.get('text_rows') != item['documents']):
+                raise ValueError('four-source newspaper database lacks complete TXT')
+            parents.add(item['path'].rsplit('/', 1)[0])
+            refs.append(resource({'bucket': BUCKET, 'path': item['path'], 'sha256': item.get('sha256'),
+                                  'bytes': item.get('bytes'), 'role': 'runtime'}))
+        if len(parents) != 1:
+            raise ValueError('four-source databases span generations')
+        prefix = next(iter(parents))
+        paths = set()
+        for ref in [*metadata, *archives]:
+            resource(ref)
+            if ref['bucket'] != BUCKET or not ref['path'].startswith(prefix + '/') or ref['path'] in paths:
+                raise ValueError('four-source metadata/archive reference outside its generation')
+            paths.add(ref['path'])
+            refs.append(ref)
+        if not any(ref['path'] == prefix + '/data/search_data.json.gz'
+                   and ref['sha256'] == payload['base_metadata_sha256'] for ref in metadata):
+            raise ValueError('four-source metadata does not retain its pinned base')
+        for name in ['RMRB', 'PLA']:
+            selected = [ref for ref in archives if ref.get('source') == name]
+            years = set()
+            minimum = 1946 if name == 'RMRB' else 1956
+            for ref in selected:
+                year = ref.get('year')
+                if (type(year) is not int or not minimum <= year <= 1976 or year in years
+                        or type(ref.get('documents')) is not int or ref['documents'] < 1
+                        or ref['path'] != f'{prefix}/archives/{name}/{name}-{year}.tar.gz'):
+                    raise ValueError('invalid newspaper yearly archive identity')
+                years.add(year)
+            if sum(ref['documents'] for ref in selected) != databases[name]['documents']:
+                raise ValueError('newspaper archives do not cover the complete document count')
+        if any(ref.get('source') not in {'RMRB', 'PLA'} for ref in archives):
+            raise ValueError('unknown newspaper archive source')
+        return refs
     if path == 'current.json' and payload.get('format') == 1:
         if payload.get('tokenizer_version') != TOKENIZER or set(payload.get('databases', {})) != {'CCRD', 'CW'}:
             raise ValueError('unknown legacy CCRD pointer')

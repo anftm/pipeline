@@ -132,6 +132,52 @@ class CcrdLifecycleTests(unittest.TestCase):
         self.assertTrue(report['graph_complete'], report['blockers'])
         self.assertFalse(report['deletion_enabled'])
 
+    def four_source_pointer(self):
+        prefix = 'generations/ccrd-four-source-fixture'
+        databases = {}
+        for source in ['CCRD', 'CW', 'RMRB', 'PLA']:
+            ref = self.put(CCRD, f'{prefix}/{source}.sqlite3', b'complete tiny database')
+            databases[source] = {key: ref[key] for key in ['path', 'sha256', 'bytes']}
+            databases[source].update(documents=1, fts_rows=1)
+            if source in {'RMRB', 'PLA'}:
+                databases[source].update(source=source, index_profile='newspaper-hybrid-texts-v1', text_rows=1)
+        metadata = self.put(CCRD, f'{prefix}/data/search_data.json.gz', b'coherent compressed metadata')
+        archives = []
+        for source in ['RMRB', 'PLA']:
+            ref = self.put(CCRD, f'{prefix}/archives/{source}/{source}-1976.tar.gz', b'checked complete year archive')
+            archives.append({**ref, 'source': source, 'year': 1976, 'documents': 1})
+        pointer = {'format': 2, 'kind': 'ccrd-four-source-generation', 'tokenizer_version': lifecycle.TOKENIZER,
+                   'base_metadata_sha256': metadata['sha256'], 'databases': databases,
+                   'metadata': [metadata], 'archives': archives}
+        self.put(CCRD, 'current.json', pointer)
+        return pointer
+
+    def test_four_source_pointer_retains_all_databases_metadata_and_txt_archives(self):
+        pointer = self.four_source_pointer()
+        refs = lifecycle.references(pointer, 'current.json')
+        self.assertEqual(len(refs), 7)
+        candidate = graph.ReferenceGraph(self.store)
+        report = candidate.build()
+        self.assertTrue(report['graph_complete'], report['blockers'])
+        for ref in refs:
+            self.assertIn((ref['bucket'], ref['path']), candidate.references)
+
+    def test_four_source_incomplete_archives_wrong_base_or_unknown_profile_fail_closed(self):
+        import copy
+        pointer = self.four_source_pointer()
+        for change in ['archive', 'base', 'profile', 'generation']:
+            value = copy.deepcopy(pointer)
+            if change == 'archive':
+                value['archives'].pop()
+            elif change == 'base':
+                value['base_metadata_sha256'] = 'f' * 64
+            elif change == 'profile':
+                value['databases']['PLA']['index_profile'] = 'lite'
+            else:
+                value['databases']['CW']['path'] = 'generations/ccrd-other/CW.sqlite3'
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                lifecycle.references(value, 'current.json')
+
 
 if __name__ == '__main__':
     unittest.main()
