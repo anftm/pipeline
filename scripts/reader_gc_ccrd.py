@@ -265,6 +265,9 @@ def accept_live(client, generation):
 def plan(store, *, keep_generations=2, limit=0, include_staging=False,
          client=None, verify_live=True, verify_contents=False):
     """Build a plan without writing or deleting anything."""
+    rollout, _ = read_json(store, 'control/newspaper-rollout.json', required=False)
+    if rollout and rollout.get('status') != 'committed':
+        raise Blocker('pending newspaper rollout retains the previous OCR generation; collection is blocked')
     if keep_generations < 2:
         raise ValueError("keep-generations must retain the current release and its rollback parent")
     if type(limit) is not int or limit < 0:

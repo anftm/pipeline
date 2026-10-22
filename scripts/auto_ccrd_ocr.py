@@ -228,6 +228,10 @@ def reconcile(store, root, consumer_root, approved, *, limit=8, apply=False, pla
     if type(limit) is not int or not 1 <= limit <= 32:
         raise ValueError('OCR batch must select 1..32 complete books, never page prefixes')
     approved = configuration(approved)
+    rollout, _rollout_raw = publisher.optional_json(store, 'control/newspaper-rollout.json')
+    if rollout and (rollout.get('status') != 'committed'
+                    or rollout.get('base_metadata_sha256') != approved['base_metadata_sha256']):
+        raise ValueError('newspaper rollout must finish and pin the approved consumer before OCR admission')
     if apply:
         publisher.assert_writer()
     root.mkdir(parents=True, exist_ok=True)

@@ -33,11 +33,11 @@ on:
         type: string
         required: false
       release_path:
-        description: Exact immutable releases/ocr-<generation>/manifest.json path
+        description: Exact OCR manifest path, or public anftm/pipeline Release transport URL for the full newspaper rollout
         type: string
         required: false
       release_sha256:
-        description: Approved full release manifest SHA-256
+        description: Approved full OCR manifest or newspaper transport descriptor SHA-256
         type: string
         required: false
       expected_parent:
@@ -59,7 +59,7 @@ concurrency:
 
 jobs:
   publish:
-    if: github.repository == 'anftm/pipeline' && github.event_name == 'workflow_dispatch' && !inputs.automatic
+    if: github.repository == 'anftm/pipeline' && github.event_name == 'workflow_dispatch' && !inputs.automatic && !startsWith(inputs.release_path, 'https://')
     runs-on: ubuntu-latest
     timeout-minutes: 40
     env:
@@ -123,7 +123,7 @@ jobs:
   automatic:
     if: >-
       github.repository == 'anftm/pipeline' &&
-      ((github.event_name == 'workflow_dispatch' && inputs.automatic) ||
+      ((github.event_name == 'workflow_dispatch' && inputs.automatic && !startsWith(inputs.release_path, 'https://')) ||
        (vars.CCRD_OCR_AUTO_ENABLED == 'true' &&
         (github.event_name == 'schedule' ||
          (github.event_name == 'workflow_run' &&
@@ -176,5 +176,61 @@ jobs:
             output/ccrd-ocr-auto/publication.json
             output/ccrd-ocr-auto/acceptance.json
             output/ccrd-ocr-auto/candidate/release-receipt.json
+          if-no-files-found: warn
+          retention-days: 30
+  newspapers:
+    if: github.repository == 'anftm/pipeline' && github.event_name == 'workflow_dispatch' && startsWith(inputs.release_path, 'https://') && !inputs.automatic
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    permissions:
+      contents: write
+      actions: read
+    env:
+      CCRD_OCR_WRITE_PROTOCOL: central-ccrd-ocr-publication-v1
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - run: pip install -r scripts/requirements.txt
+      - name: Materialize the exact full candidate, stream readback and coherently rebase OCR
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_INPUT_TOKEN: ${{ secrets.HF_INPUT_TOKEN }}
+          TRANSPORT_URL: ${{ inputs.release_path }}
+          TRANSPORT_SHA256: ${{ inputs.release_sha256 }}
+          APPLY: ${{ inputs.apply }}
+        run: |
+          args=()
+          if [[ "$APPLY" == true ]]; then args+=(--apply); fi
+          python -u scripts/publish_ccrd_newspapers.py --transport-url "$TRANSPORT_URL" \
+            --transport-sha256 "$TRANSPORT_SHA256" --root output/ccrd-newspapers \
+            --output output/ccrd-newspapers-publication.json "${args[@]}"
+      - name: Verify the exact production base, full metadata IDs, TXT and unchanged OCR IDs
+        if: inputs.apply
+        timeout-minutes: 45
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python -u scripts/verify_ccrd_newspapers_live.py --root output/ccrd-newspapers \
+            --receipt output/ccrd-newspapers-publication.json --output output/ccrd-newspapers-acceptance.json
+      - name: Pin the accepted coherent OCR consumer after production acceptance
+        if: inputs.apply
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python -B scripts/pin_ccrd_newspaper_consumer.py \
+            --publication output/ccrd-newspapers-publication.json \
+            --acceptance output/ccrd-newspapers-acceptance.json
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: ccrd-newspapers-publication-receipt
+          path: |
+            output/ccrd-newspapers-publication.json
+            output/ccrd-newspapers-acceptance.json
+            output/ccrd-newspapers/accepted-consumer.json
+            output/ccrd-newspapers/ocr-rebase/release-receipt.json
           if-no-files-found: warn
           retention-days: 30

@@ -14,7 +14,7 @@ except ImportError:
 BUCKETS = (READER_ASSETS_BUCKET, PDF_PAGES_BUCKET, PDF_OCR_INPUT_BUCKET, BUCKET)
 MANAGED_PREFIXES = ('text/objects/', 'text/exports/', 'text/snapshots/', 'text/packs/',
                     'indexes/ocr/', 'releases/ocr-', 'staging/ocr/')
-CONTROL_KINDS = {'ccrd-ocr-current', 'ccrd-ocr-intent', 'ccrd-ocr-consumer', 'ccrd-ocr-retention', 'ccrd-ocr-id-registry', 'ccrd-ocr-automation'}
+CONTROL_KINDS = {'ccrd-ocr-current', 'ccrd-ocr-intent', 'ccrd-ocr-consumer', 'ccrd-ocr-retention', 'ccrd-ocr-id-registry', 'ccrd-ocr-automation', 'ccrd-newspaper-rollout'}
 
 
 def is_root(path: str) -> bool:
@@ -22,7 +22,8 @@ def is_root(path: str) -> bool:
 
 
 def is_document(path: str) -> bool:
-    return is_root(path) or path.endswith('/manifest.json') and path.startswith(('text/', 'releases/ocr-'))
+    return (is_root(path) or path.endswith('/manifest.json') and path.startswith(('text/', 'releases/ocr-'))
+            or bool(re.fullmatch(r'generations/ccrd-four-[0-9a-f]{64}/manifest\.json', path)))
 
 
 def resource(ref: dict) -> dict:
@@ -40,7 +41,7 @@ def references(payload: dict, path: str) -> list[dict]:
     if not isinstance(payload, dict):
         raise ValueError('CCRD lifecycle document must be an object')
     kind = payload.get('kind')
-    if path == 'current.json' and payload.get('format') == 2:
+    if (path == 'current.json' or re.fullmatch(r'generations/ccrd-four-[0-9a-f]{64}/manifest\.json', path)) and payload.get('format') == 2:
         databases = payload.get('databases')
         metadata = payload.get('metadata')
         archives = payload.get('archives')
@@ -54,6 +55,8 @@ def references(payload: dict, path: str) -> list[dict]:
         generation = payload.get('generation')
         if not isinstance(generation, str) or not re.fullmatch(r'ccrd-[a-zA-Z0-9._-]+', generation):
             raise ValueError('invalid four-source generation name')
+        if path != 'current.json' and path != f'generations/{generation}/manifest.json':
+            raise ValueError('immutable four-source manifest path differs from its generation')
         refs = []
         for name, item in databases.items():
             if (not isinstance(item, dict)
@@ -113,6 +116,38 @@ def references(payload: dict, path: str) -> list[dict]:
     if kind in CONTROL_KINDS and path.startswith('control/'):
         if payload.get('version') != 1 or not isinstance(payload.get('resources'), list):
             raise ValueError('invalid CCRD control root')
+        if kind == 'ccrd-newspaper-rollout':
+            generation = payload.get('generation')
+            if (not isinstance(generation, str) or not re.fullmatch(r'ccrd-four-[0-9a-f]{64}', generation)
+                    or payload.get('status') not in {'staging', 'activated', 'committed'}
+                    or not re.fullmatch(r'[0-9a-f]{40}', str(payload.get('previous_space_revision', '')))):
+                raise ValueError('invalid protected newspaper rollout identity')
+            sha(payload.get('base_metadata_sha256'))
+            previous = payload.get('previous_ocr_pointer')
+            if not isinstance(previous, dict) or previous.get('kind') != 'ccrd-ocr-current':
+                raise ValueError('newspaper rollout lacks its complete previous OCR pointer')
+            references(previous, 'control/ocr-current.json')
+            activation = payload.get('index_activation', {})
+            if (activation.get('kind') != 'ccrd-index-activation' or activation.get('version') != 1
+                    or activation.get('bucket') != BUCKET
+                    or activation.get('path') != f'generations/{generation}/manifest.json'):
+                raise ValueError('newspaper rollout lacks its exact index activation')
+            sha(activation.get('sha256'))
+            ocr = payload.get('ocr_activation', {})
+            if (ocr.get('kind') != 'ccrd-ocr-activation' or ocr.get('version') != 1
+                    or ocr.get('bucket') != BUCKET
+                    or not re.fullmatch(r'releases/ocr-[0-9a-f]{64}/manifest\.json', str(ocr.get('path', '')))):
+                raise ValueError('newspaper rollout lacks its exact OCR activation')
+            sha(ocr.get('sha256'))
+            resources = payload['resources']
+            required = [activation]
+            if payload['status'] != 'committed':
+                required.extend([ocr, previous['release']])
+            for item in required:
+                if not any(all(ref.get(key) == item.get(key) for key in ['bucket', 'path', 'sha256']) for ref in resources):
+                    raise ValueError('newspaper rollout activation/rollback is not retained')
+            if payload['status'] in {'activated', 'committed'} and not re.fullmatch(r'[0-9a-f]{40}', str(payload.get('space_revision', ''))):
+                raise ValueError('committed newspaper rollout lacks an immutable Space revision')
         if kind == 'ccrd-ocr-current':
             sha(payload.get('generation'))
             resource(payload.get('release'))

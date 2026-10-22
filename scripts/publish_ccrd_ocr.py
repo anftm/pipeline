@@ -181,6 +181,13 @@ def plan(root, path, sha256, base_metadata_sha256):
 
 
 def publish(store, root, path, sha256, base_metadata_sha256, expected_parent, *, apply=False):
+    rollout, _ = optional_json(store, 'control/newspaper-rollout.json')
+    if rollout:
+        activation = rollout.get('ocr_activation', {})
+        if (rollout.get('base_metadata_sha256') != base_metadata_sha256
+                or rollout.get('status') != 'committed'
+                and (activation.get('path') != path or activation.get('sha256') != sha256)):
+            raise ValueError('pending newspaper rollout forbids a different OCR release/base')
     candidate, files = plan(root, path, sha256, base_metadata_sha256)
     manifest = candidate['manifest']
     previous, previous_raw = optional_json(store, CURRENT)
