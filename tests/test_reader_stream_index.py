@@ -75,7 +75,8 @@ class ReaderStreamCheckpointTests(unittest.TestCase):
     def test_content_is_protected_and_uploaded_before_checkpoint(self):
         events = []
         entry = {"key": "repo\0book.html", "source_revision": "rev", "object": "documents/web/html/hash/document.html"}
-        def upload(bucket, files, token):
+        def upload(bucket, files, token, **options):
+            self.assertEqual(options, {"reset_xet_on_retry": True})
             events.append([(remote, Path(local).read_bytes()) for local, remote in files])
         with tempfile.TemporaryDirectory() as temporary, patch.object(index, "batch_bucket_files_with_retry", side_effect=upload), \
                 patch.object(index, "remote_identity", side_effect=[None, (hashlib.sha256(b'body').hexdigest(), 4)]), \
@@ -96,7 +97,8 @@ class ReaderStreamCheckpointTests(unittest.TestCase):
     def test_failure_only_batch_persists_before_strict_exit_and_limit_counts_attempts(self):
         events = []
         source = {"repo": "repo", "revision": "rev", "extension": "html"}
-        def upload(_bucket, files, _token):
+        def upload(_bucket, files, _token, **options):
+            self.assertEqual(options, {"reset_xet_on_retry": True})
             events.extend(json.loads(Path(local).read_text()) for local, remote in files if remote.endswith("index.json"))
         with tempfile.TemporaryDirectory() as temporary, \
                 patch.object(index, "read_index", side_effect=lambda *args: events[-1] if events else {"files": []}), \
@@ -127,6 +129,29 @@ class ReaderStreamCheckpointTests(unittest.TestCase):
             self.assertEqual(upload.call_count, 2)
             self.assertFalse(any(remote.endswith("index.json") for call in upload.call_args_list
                                  for _local, remote in call.args[1]))
+
+    def test_failed_processing_root_upload_preserves_previous_checkpoint_and_blocks_content(self):
+        previous = {"files": [{"key": "repo\0old.epub", "source_revision": "saved"}], "failures": []}
+        entry = {"key": "repo\0new.epub", "source_revision": "new",
+                 "root": "chapters/ebook/epub/hash/version",
+                 "manifest": "chapters/ebook/epub/hash/version/chapter-manifest.json"}
+        error = RuntimeError("Previous task error: HTTP status client error (429 Too Many Requests), domain: xet-write-token")
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary)
+            manifest = work / "chapter-manifest.json"
+            manifest.write_bytes(b"{}")
+            with patch.object(index, "batch_bucket_files_with_retry", side_effect=error) as upload, \
+                    patch.object(index, "remote_identity") as identity:
+                with self.assertRaises(RuntimeError) as raised:
+                    index.publish_checkpoint(BUCKET, "chapters/ebook/epub/index-02.json", previous,
+                        [entry], [], {entry["manifest"]: str(manifest)}, work, None,
+                        apply=True, kind="ebook-chapter-stream-index")
+            self.assertIs(raised.exception, error)
+            upload.assert_called_once()
+            self.assertEqual(upload.call_args.kwargs, {"reset_xet_on_retry": True})
+            self.assertTrue(all(path.startswith("reader-index/processing/") for _, path in upload.call_args.args[1]))
+            identity.assert_not_called()
+        self.assertEqual(previous, {"files": [{"key": "repo\0old.epub", "source_revision": "saved"}], "failures": []})
 
     def test_s3_readback_streams_sha_and_missing_is_not_an_access_error(self):
         from botocore.exceptions import ClientError

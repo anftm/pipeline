@@ -2,9 +2,12 @@
 """Shared file hashing, hash sharding, and Hugging Face retry helpers."""
 
 import hashlib
+import math
 import os
 import random
+import re
 import time
+from email.utils import parsedate_to_datetime
 from collections.abc import Callable
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
@@ -94,11 +97,43 @@ def hf_retry_delay(attempt: int, cap: int = 60, max_shift: int = 5) -> int:
     return min(cap, 2 ** min(attempt, max_shift))
 
 
+def bucket_upload_retry_delay(error: BaseException, attempt: int) -> float:
+    """Respect a supplied reset countdown, or cool down an opaque Xet 429."""
+    response = getattr(error, "response", None)
+    headers = getattr(response, "headers", {}) or {}
+    retry_after = headers.get("Retry-After") or headers.get("retry-after")
+    if retry_after:
+        try:
+            seconds = float(retry_after)
+        except (TypeError, ValueError, OverflowError):
+            try:
+                seconds = parsedate_to_datetime(retry_after).timestamp() - time.time()
+            except (TypeError, ValueError, OverflowError, AttributeError):
+                seconds = None
+        if seconds is not None and math.isfinite(seconds):
+            return max(0, min(300, math.ceil(seconds)))
+    details = f"{error} {getattr(response, 'text', '')}"
+    match = re.search(r"\bretry\s+after\s+(\d+(?:\.\d+)?)\s+seconds\b", details, re.IGNORECASE)
+    if match:
+        return math.ceil(min(300, float(match.group(1))))
+    if hf_status_code(error) == 429 or re.search(r"\b429\b|too many requests", details, re.IGNORECASE):
+        # Native Xet errors can omit both headers and body. Seconds-scale retries
+        # then exhaust the whole budget inside a single rate-limit window.
+        return min(300, 60 * 2 ** min(attempt, 3))
+    return hf_retry_delay(attempt, cap=120, max_shift=7)
+
+
 def batch_bucket_files_with_retry(bucket: str, additions: list[tuple[str | Path | bytes, str]], token: str | None,
-                                  *, max_attempts: int = 12) -> None:
-    """Upload a bucket batch with bounded retry for HF/Xet throttling."""
+                                  *, max_attempts: int = 12, reset_xet_on_retry: bool = False) -> None:
+    """Upload the same bucket batch with bounded retry for HF/Xet throttling.
+
+    Session reset is opt-in for dedicated serial publishers only: aborting the
+    global Xet runtime would otherwise cancel unrelated concurrent operations.
+    """
     from huggingface_hub import batch_bucket_files
 
+    if type(max_attempts) is not int or max_attempts < 1:
+        raise ValueError("max_attempts must be a positive integer")
     for attempt in range(max_attempts):
         try:
             batch_bucket_files(bucket, add=additions, token=token)
@@ -107,22 +142,24 @@ def batch_bucket_files_with_retry(bucket: str, additions: list[tuple[str | Path 
             response = getattr(error, "response", None)
             status = getattr(response, "status_code", None)
             text = str(error).lower()
+            if status is None:
+                match = re.search(r"http status (?:client|server) error\s*\((\d{3})\b", text)
+                status = int(match.group(1)) if match else None
             retryable = (
                 status in {408, 425, 429, 500, 502, 503, 504}
-                or "too many requests" in text
-                or "xet-write-token" in text
-                or "timeout" in text
-                or isinstance(error, (ConnectionError, TimeoutError))
+                or (status is None and (
+                    "too many requests" in text or "xet-write-token" in text
+                    or "timeout" in text or isinstance(error, (ConnectionError, TimeoutError))))
             )
             if not retryable or attempt + 1 == max_attempts:
                 raise
-            headers = getattr(response, "headers", {}) or {}
-            retry_after = headers.get("Retry-After") or headers.get("retry-after")
-            try:
-                delay = max(0, min(300, int(float(retry_after)))) if retry_after else hf_retry_delay(
-                    attempt, cap=120)
-            except (TypeError, ValueError):
-                delay = hf_retry_delay(attempt, cap=120)
+            if reset_xet_on_retry and ("xet-write-token" in text or "previous task error" in text):
+                from huggingface_hub.utils._xet import abort_xet_session
+                # The failed batch has returned; this caller explicitly owns
+                # all Xet operations in the process. A fresh session avoids
+                # replaying a poisoned runtime's "Previous task error" forever.
+                abort_xet_session()
+            delay = bucket_upload_retry_delay(error, attempt)
             delay = min(300, delay + random.uniform(0, 3))
             print(f"transient HF bucket upload error ({status or type(error).__name__}); "
                   f"retrying in {delay:.1f}s (attempt {attempt + 1}/{max_attempts})", flush=True)

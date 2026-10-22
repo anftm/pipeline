@@ -199,7 +199,7 @@ def publish_checkpoint(bucket: str, path: str, previous: dict, entries: list[dic
     checkpoint.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
     if apply:
         if roots:
-            batch_bucket_files_with_retry(bucket, roots, token)
+            batch_bucket_files_with_retry(bucket, roots, token, reset_xet_on_retry=True)
         fs = HfFileSystem(token=token)
         identities = {remote: hash_file(Path(local)) for remote, local in uploads.items()}
         additions = []
@@ -210,14 +210,14 @@ def publish_checkpoint(bucket: str, path: str, previous: dict, entries: list[dic
             elif current != identities[remote]:
                 raise ValueError(f"immutable Reader stream object has different bytes: {remote}")
         if additions:
-            batch_bucket_files_with_retry(bucket, additions, token)
+            batch_bucket_files_with_retry(bucket, additions, token, reset_xet_on_retry=True)
         if uploads:
             # Reopen after upload, never infer completeness from upload success.
             fs = HfFileSystem(token=token)
             for remote in uploads:
                 if remote_identity(fs, bucket, remote) != identities[remote]:
                     raise ValueError(f"Reader stream object readback failed: {remote}")
-        batch_bucket_files_with_retry(bucket, [(str(checkpoint), path)], token)
+        batch_bucket_files_with_retry(bucket, [(str(checkpoint), path)], token, reset_xet_on_retry=True)
         if read_index(bucket, path, token, kind) != payload:
             raise ValueError(f"Reader stream checkpoint readback failed: {path}")
     return payload
