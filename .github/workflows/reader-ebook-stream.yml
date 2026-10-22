@@ -4,7 +4,7 @@ run-name: Ebook chapters ${{ (github.event_name == 'schedule' || inputs.apply ==
 on:
   schedule:
     # EPUB/MOBI/AZW3/FB2 only. CHM has its own daily producer.
-    - cron: "27 3 * * 0"
+    - cron: "27 3 * * 3"
   workflow_dispatch:
     inputs:
       extension:

@@ -5,7 +5,7 @@ on:
   schedule:
     # PPT-family and TIF/TIFF share the static PDF producer. Weekly is enough
     # for the small pending set; manual dispatch handles one-off batches.
-    - cron: "23 4 * * 0"
+    - cron: "23 4 * * 4"
   workflow_dispatch:
     inputs:
       extension:
