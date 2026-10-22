@@ -94,7 +94,7 @@ def hf_retry_delay(attempt: int, cap: int = 60, max_shift: int = 5) -> int:
     return min(cap, 2 ** min(attempt, max_shift))
 
 
-def batch_bucket_files_with_retry(bucket: str, additions: list[tuple[str, str]], token: str | None,
+def batch_bucket_files_with_retry(bucket: str, additions: list[tuple[str | Path | bytes, str]], token: str | None,
                                   *, max_attempts: int = 12) -> None:
     """Upload a bucket batch with bounded retry for HF/Xet throttling."""
     from huggingface_hub import batch_bucket_files

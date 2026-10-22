@@ -10,6 +10,64 @@ from scripts.reader_bucket_store import HubBucketStore, S3BucketStore
 
 
 class ReaderBucketStoreTests(unittest.TestCase):
+    def test_hub_put_bytes_retries_connection_style_xet_throttling(self):
+        error = ConnectionError(
+            "Network error: Request error: HTTP status client error "
+            "(429 Too Many Requests), domain: "
+            "https://huggingface.co/api/buckets/vomebook/ccrd-index/xet-write-token")
+        error.response = Mock(status_code=429, headers={"Retry-After": "4"})
+        payload = b"complete immutable OCR text"
+        with patch.dict("os.environ", {"HF_TOKEN": "ccrd-token"}), \
+                patch("huggingface_hub.HfApi"), \
+                patch("huggingface_hub.batch_bucket_files", side_effect=[error, None]) as upload, \
+                patch("scripts.shared.time.sleep") as sleep, \
+                patch("scripts.shared.random.uniform", return_value=0):
+            HubBucketStore().put_bytes("vomebook/ccrd-index", "text/objects/test.txt", payload)
+        self.assertEqual(upload.call_count, 2)
+        for call in upload.call_args_list:
+            self.assertEqual(call.args, ("vomebook/ccrd-index",))
+            self.assertEqual(call.kwargs, {
+                "add": [(payload, "text/objects/test.txt")], "token": "ccrd-token"})
+        sleep.assert_called_once_with(4)
+
+    def test_hub_put_json_retries_the_same_staged_bytes(self):
+        error = ConnectionError("429 Too Many Requests at xet-write-token")
+        uploaded = []
+
+        def upload(bucket, *, add, token):
+            local, remote = add[0]
+            uploaded.append((bucket, remote, Path(local).read_bytes(), token, local))
+            if len(uploaded) == 1:
+                raise error
+
+        with patch.dict("os.environ", {"HF_TOKEN": "ccrd-token"}), \
+                patch("huggingface_hub.HfApi"), \
+                patch("huggingface_hub.batch_bucket_files", side_effect=upload), \
+                patch("scripts.shared.time.sleep"), \
+                patch("scripts.shared.random.uniform", return_value=0):
+            HubBucketStore().put_json("vomebook/ccrd-index", "control/test.json", {"complete": True})
+        self.assertEqual(len(uploaded), 2)
+        self.assertEqual(uploaded[0], uploaded[1])
+        self.assertEqual(uploaded[0][2], b'{"complete": true}\n')
+        self.assertFalse(Path(uploaded[0][4]).exists())
+
+    def test_hub_upload_retries_are_bounded_and_do_not_hide_integrity_errors(self):
+        throttled = ConnectionError("429 Too Many Requests at xet-write-token")
+        with patch("huggingface_hub.HfApi"), \
+                patch("huggingface_hub.batch_bucket_files", side_effect=throttled) as upload, \
+                patch("scripts.shared.time.sleep") as sleep:
+            with self.assertRaises(ConnectionError):
+                HubBucketStore().put_bytes("vomebook/ccrd-index", "text/objects/test.txt", b"same")
+        self.assertEqual(upload.call_count, 12)
+        self.assertEqual(sleep.call_count, 11)
+        with patch("huggingface_hub.HfApi"), \
+                patch("huggingface_hub.batch_bucket_files", side_effect=ValueError("invalid payload")) as upload, \
+                patch("scripts.shared.time.sleep") as sleep:
+            with self.assertRaisesRegex(ValueError, "invalid payload"):
+                HubBucketStore().put_bytes("vomebook/ccrd-index", "text/objects/test.txt", b"same")
+        upload.assert_called_once()
+        sleep.assert_not_called()
+
     def test_root_digest_retries_partial_reads_from_a_fresh_hash(self):
         import hashlib
         import httpx

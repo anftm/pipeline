@@ -16,6 +16,11 @@ import threading
 from pathlib import Path
 from urllib.parse import quote
 
+try:
+    from .shared import batch_bucket_files_with_retry
+except ImportError:
+    from shared import batch_bucket_files_with_retry
+
 
 class S3NotFound(FileNotFoundError):
     pass
@@ -115,11 +120,10 @@ class HubBucketStore:
         return retry_read(read)
 
     def put_json(self, bucket: str, path: str, payload: dict) -> None:
-        from huggingface_hub import batch_bucket_files
         with tempfile.TemporaryDirectory(prefix="reader-gc-state-") as directory:
             target = Path(directory) / "state.json"
             target.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
-            batch_bucket_files(bucket, add=[(str(target), path)], token=self.token(bucket))
+            batch_bucket_files_with_retry(bucket, [(str(target), path)], self.token(bucket))
 
     def read_graph_json(self, bucket: str, path: str, parser=None):
         from huggingface_hub.utils import get_session, hf_raise_for_status
@@ -157,8 +161,7 @@ class HubBucketStore:
         return retry_read(read_digest)
 
     def put_bytes(self, bucket: str, path: str, payload: bytes) -> None:
-        from huggingface_hub import batch_bucket_files
-        batch_bucket_files(bucket, add=[(payload, path)], token=self.token(bucket))
+        batch_bucket_files_with_retry(bucket, [(payload, path)], self.token(bucket))
 
     def stat(self, bucket: str, path: str) -> int:
         key = (bucket, path)
