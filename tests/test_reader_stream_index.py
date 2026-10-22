@@ -259,6 +259,15 @@ class FormatProducerRegressionTests(unittest.TestCase):
                 self.assertNotIn("!= 'cancelled'", workflow["jobs"]["finalize"]["if"])
                 self.assertEqual(workflow["jobs"]["finalize"]["concurrency"]["group"], "reader-sidecar")
 
+    def test_media_backfill_cannot_race_daily_checkpoint_writes(self):
+        root = Path(__file__).resolve().parents[1] / ".github/workflows"
+        workflow = yaml.safe_load((root / "reader-media-backfill.yml").read_text())
+        self.assertEqual(workflow["concurrency"]["group"], "reader-media")
+        self.assertEqual(workflow["jobs"]["finalize"]["concurrency"]["group"], "reader-sidecar")
+        commands = "\n".join(s.get("run", "") for s in workflow["jobs"]["build"]["steps"])
+        self.assertIn("--apply --strict", commands)
+        self.assertNotIn("!= 'cancelled'", workflow["jobs"]["finalize"]["if"])
+
 
 if __name__ == "__main__":
     unittest.main()

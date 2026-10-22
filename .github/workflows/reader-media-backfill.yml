@@ -9,9 +9,19 @@ on:
         default: all
         type: choice
         options: [all, audio, video, swf]
+      retry_failures:
+        description: Retry previously recorded source failures
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  actions: write
 
 concurrency:
-  group: reader-sidecar
+  # Same source/checkpoint lock as the daily producer; publication locks below.
+  group: reader-media
   cancel-in-progress: false
   queue: max
 
@@ -31,13 +41,16 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           FORCE_SYNC: "true"
+          SKIP_SIZES: "true"
         run: python scripts/fetch_and_parse.py
       - name: Plan missing media workers
         id: matrix
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          python scripts/plan_reader_stream_matrix.py --kind media --extension "${{ inputs.kind || 'all' }}" --output output/media-matrix.json
+          args=(--kind media --extension "${{ inputs.kind || 'all' }}" --output output/media-matrix.json --verify-source-sha)
+          if [[ "${{ inputs.retry_failures }}" == "true" ]]; then args+=(--retry-failures); fi
+          python scripts/plan_reader_stream_matrix.py "${args[@]}"
           echo "matrix=$(cat output/media-matrix.json)" >> "$GITHUB_OUTPUT"
       - run: tar -czf output/media-plan.tgz output/search_data.json state/commits.json
       - uses: actions/upload-artifact@v7
@@ -52,7 +65,7 @@ jobs:
     timeout-minutes: 360
     strategy:
       fail-fast: false
-      max-parallel: 8
+      max-parallel: 2
       matrix:
         include: ${{ fromJSON(needs.plan.outputs.matrix).include }}
     steps:
@@ -72,12 +85,21 @@ jobs:
       - name: Backfill assigned media shard
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
         run: |
-          python scripts/pilot_media_stream.py --kind "${{ matrix.extension }}" --shard-count 8 --shard-index "${{ matrix.shard }}" --apply
+          args=(--kind "${{ matrix.extension }}" --shard-count 8 --shard-index "${{ matrix.shard }}" --apply --strict)
+          if [[ "${{ inputs.retry_failures }}" == "true" ]]; then args+=(--retry-failures); fi
+          python scripts/pilot_media_stream.py "${args[@]}"
   finalize:
     needs: [plan, build]
-    if: always() && needs.plan.result == 'success' && needs.build.result != 'cancelled'
+    if: always() && needs.plan.result == 'success' && (needs.build.result == 'success' || needs.build.result == 'skipped')
     runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    concurrency:
+      group: reader-sidecar
+      cancel-in-progress: false
+      queue: max
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -90,3 +112,11 @@ jobs:
           HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
           HF_S3_BUCKET: vomebook/reader-assets-v2
         run: python scripts/finalize_media_indexes.py
+      - name: Rebuild canonical Reader sidecar
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: python scripts/build_reader_assets_v2_sidecar.py --apply
+      - name: Unify the projection through the central v3 writer
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run reader-v3-publish.yml --repo "$GITHUB_REPOSITORY" --ref main -f operation=unify -f apply=true
