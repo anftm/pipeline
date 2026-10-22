@@ -25,8 +25,10 @@ from pathlib import Path
 
 try:
     from . import shared
+    from .ccrd_index_contract import require_legacy_metadata
 except ImportError:
     import shared
+    from ccrd_index_contract import require_legacy_metadata
 
 
 UPSTREAM_REPO = "https://raw.githubusercontent.com/ProletRevDicta/Prolet"
@@ -271,6 +273,7 @@ def rewrite_metadata(root: Path) -> dict[str, int]:
     if not search_path.is_file():
         raise RuntimeError(f"corpus lacks {SEARCH_DATA}")
     payload = _load_gz(search_path)
+    require_legacy_metadata(payload)
     records = payload.get("records", [])
     cw_records: list[dict] = []
     for record in records:
@@ -446,6 +449,8 @@ def _verify(root: Path) -> None:
 
 def migrate_corpus(root: Path) -> dict[str, int]:
     """Migrate an extracted corpus checkout and rewrite its metadata."""
+    # Refuse before any layout deletion, not only while rewriting JSON.
+    require_legacy_metadata(_load_gz(root / SEARCH_DATA))
     migrate_cw_tree(root)
     counts = rewrite_metadata(root)
     _verify(root)

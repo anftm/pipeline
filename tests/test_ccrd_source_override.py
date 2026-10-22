@@ -109,6 +109,25 @@ class CCRDSourceOverrideTests(unittest.TestCase):
         sidebar = json.loads((self.root / "data/sidebar/sources/CW.json").read_text(encoding="utf-8"))
         self.assertEqual([item["name"] for item in sidebar["folders"]], ["0000", "191X"])
 
+    def test_additive_newspaper_metadata_blocks_before_tree_deletion(self):
+        payload = read_gz(self.root / override.SEARCH_DATA)
+        payload['records'].append({'source': 'RMRB', 'doc_id': 'RMRB:1'})
+        payload['sources'].append({'slug': 'RMRB', 'name': '人民日报', 'count': 1})
+        write_gz(self.root / override.SEARCH_DATA, payload)
+        before = (self.root / override.SEARCH_DATA).read_bytes()
+        with self.assertRaisesRegex(ValueError, 'cannot rewrite'):
+            override.migrate_corpus(self.root)
+        self.assertEqual((self.root / override.SEARCH_DATA).read_bytes(), before)
+        self.assertTrue((self.root / 'CW/1/old.txt').is_file())
+        self.assertTrue((self.root / 'CW/2/0000/a.txt').is_file())
+
+    def test_direct_metadata_rewrite_cannot_drop_newspaper_sidebar_sources(self):
+        payload = read_gz(self.root / override.SEARCH_DATA)
+        payload['sources'].append({'slug': 'PLA', 'name': '解放军报', 'count': 1})
+        write_gz(self.root / override.SEARCH_DATA, payload)
+        with self.assertRaisesRegex(ValueError, 'cannot rewrite'):
+            override.rewrite_metadata(self.root)
+
 
 if __name__ == "__main__":
     unittest.main()

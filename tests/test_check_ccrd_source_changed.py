@@ -77,6 +77,11 @@ class CheckCCRDSourceChangedTests(unittest.TestCase):
     def test_missing_manifest_triggers_rebuild(self):
         self.assertEqual(self._run(None), "changed=true")
 
+    def test_four_source_generation_is_not_marked_for_legacy_rebuild(self):
+        manifest = {'format': 2, 'databases': {source: {} for source in ['CCRD', 'CW', 'RMRB', 'PLA']}}
+        with self.assertRaisesRegex(ValueError, 'cannot replace'):
+            self._run(manifest)
+
 
 if __name__ == "__main__":
     unittest.main()

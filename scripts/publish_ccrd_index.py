@@ -22,6 +22,7 @@ from huggingface_hub import batch_bucket_files, download_bucket_files
 
 try:
     from . import shared
+    from .ccrd_index_contract import require_legacy_manifest
     from .ccrd_source_override import (
         CORPUS_MIGRATION_VERSION,
         CORPUS_PATH,
@@ -30,6 +31,7 @@ try:
     )
 except ImportError:
     import shared
+    from ccrd_index_contract import require_legacy_manifest
     from ccrd_source_override import (
         CORPUS_MIGRATION_VERSION,
         CORPUS_PATH,
@@ -129,6 +131,8 @@ def main() -> int:
 
     workdir = Path(tempfile.mkdtemp(prefix="ccrd_index_"))
     try:
+        previous_manifest = read_current(workdir, token)
+        require_legacy_manifest(previous_manifest)
         archive = workdir / "ccrd-corpus.tar.gz"
         print("Downloading CCRD corpus release asset", flush=True)
         download(SOURCE_ARCHIVE_URL, archive)
@@ -194,7 +198,6 @@ def main() -> int:
         manifest_path = workdir / "current.json"
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
 
-        previous_manifest = read_current(workdir, token)
         print(f"Uploading completed generation {generation}", flush=True)
         batch_bucket_files(
             BUCKET,

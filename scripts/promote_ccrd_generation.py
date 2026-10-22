@@ -12,6 +12,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from huggingface_hub import batch_bucket_files, download_bucket_files
+try:
+    from .ccrd_index_contract import require_legacy_manifest
+except ImportError:
+    from ccrd_index_contract import require_legacy_manifest
 
 from publish_ccrd_index import (
     BUCKET,
@@ -41,6 +45,7 @@ def main() -> int:
     workdir = Path(tempfile.mkdtemp(prefix="ccrd_promote_"))
     try:
         previous = read_current(workdir, token)
+        require_legacy_manifest(previous)
         files = []
         for source in ("CCRD", "CW"):
             relative = f"generations/{generation}/{source}.sqlite3"
