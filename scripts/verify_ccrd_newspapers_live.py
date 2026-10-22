@@ -13,6 +13,7 @@ import json
 from pathlib import Path
 import time
 import unicodedata
+from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 import zipfile
 
@@ -37,7 +38,23 @@ def verify(root, receipt, *, wait_seconds=1800, space=None):
     expected_ids = {record['doc_id'] for record in expected['records']}
     deadline = time.monotonic() + wait_seconds
     while True:
-        status = ocr_live.json_request('/api/index-status')
+        try:
+            status = ocr_live.json_request('/api/index-status')
+        except HTTPError as error:
+            # A coherent commit can be building while the old image is in an
+            # error state. Keep the original deadline, never treat 503 as ready.
+            if error.code not in {408, 429, 500, 502, 503, 504}:
+                raise
+            error.close()
+            if time.monotonic() >= deadline:
+                raise TimeoutError('production remained unavailable before the exact generation was ready') from error
+            time.sleep(min(15, max(0, deadline - time.monotonic())))
+            continue
+        except (URLError, TimeoutError, ConnectionError) as error:
+            if time.monotonic() >= deadline:
+                raise TimeoutError('production remained unreachable before the exact generation was ready') from error
+            time.sleep(min(15, max(0, deadline - time.monotonic())))
+            continue
         bucket = status.get('bucket') or {}
         if (status.get('ready') is True and status.get('ocr_release') == receipt['OCR_generation']
                 and bucket.get('source') == 'space-activation' and bucket.get('generation') == generation

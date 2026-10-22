@@ -12,6 +12,7 @@ import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
+from urllib.error import HTTPError
 
 from scripts import ccrd_newspaper_transport as transport, ccrd_ocr_release as contract
 from scripts import publish_ccrd_newspapers as rollout, publish_ccrd_ocr as ocr
@@ -445,7 +446,13 @@ class NewspaperPublicationTests(unittest.TestCase):
             'source':'space-activation','generation':self.generation,
             'base_metadata_sha256':self.manifest['base_metadata_sha256']}}
         def request(path,payload=None):
-            if path=='/api/index-status': return status
+            if path=='/api/index-status':
+                nonlocal transient_status_requests
+                transient_status_requests += 1
+                if transient_status_requests == 1:
+                    raise HTTPError('https://fixture.invalid/api/index-status', 503,
+                                    'fixture previous image unavailable during build', {}, None)
+                return status
             if path=='/api/sources': return [{'slug':s,'count':1} for s in self.manifest['databases']]
             if path.startswith('/api/search/'):
                 source=path.rsplit('/',1)[1]
@@ -463,15 +470,23 @@ class NewspaperPublicationTests(unittest.TestCase):
                 return stream.getvalue()
             if path.startswith(('/api/download/','/txt/')): return '正文'.encode()
             raise AssertionError('unexpected metadata HTTP route: '+path)
+        transient_status_requests=0
         with patch.object(live.ocr_live,'json_request',side_effect=request), \
                 patch.object(live.ocr_live,'request',side_effect=request_bytes), \
                 patch.object(live.ocr_live,'all_results',return_value=[]), \
+                patch.object(live.time,'sleep'), \
                 patch.object(live.ocr_live,'verify',return_value={'generation':result['OCR_generation'],
                     'complete_id_set_verified':True}):
-            accepted=live.verify(self.root,result,space=self.space,wait_seconds=0)
+            accepted=live.verify(self.root,result,space=self.space,wait_seconds=30)
         self.assertTrue(accepted['mixed_zip_verified'])
+        self.assertGreaterEqual(transient_status_requests,3)
         self.assertEqual(accepted['full_base_metadata_ids'],4)
         self.assertEqual(set(accepted['selected_original_TXT_ids']),{'RMRB:1','PLA:1'})
+        for code,expected_error in [(503,TimeoutError),(401,HTTPError)]:
+            failure=HTTPError('https://fixture.invalid/api/index-status',code,'fixture response',{},None)
+            with self.subTest(status=code), patch.object(live.ocr_live,'json_request',side_effect=failure), \
+                    self.assertRaises(expected_error):
+                live.verify(self.root,result,space=self.space,wait_seconds=0)
 
     def test_consumer_state_commit_preserves_unrelated_upstream_and_rejects_competing_pin(self):
         remote=self.root/'git-remote'
