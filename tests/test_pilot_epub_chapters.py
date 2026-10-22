@@ -98,6 +98,13 @@ class ChmChapterPilotTests(unittest.TestCase):
         self.assertEqual(payload["files"], [])
         self.assertEqual(payload["failures"], [failure])
 
+    def test_new_revision_failure_is_not_hidden_by_preserved_old_success(self):
+        key = "repo\0book.epub"
+        previous = {"files": [{"key": key, "source_revision": "old"}],
+                    "failures": [{"key": key, "source_revision": "new"}]}
+        self.assertEqual(pilot_epub_chapters.completed_revisions(previous)[key], "new")
+        self.assertEqual(pilot_epub_chapters.completed_revisions(previous, retry_failures=True)[key], "old")
+
     def test_office_upload_processing_root_is_bucket_qualified(self):
         entry = {"key": "VoiceOfML/Test\0book.docx", "source_sha256": "a" * 64,
                  "root": "chapters/ebook/epub/" + "b" * 64 + "/" + "c" * 16}

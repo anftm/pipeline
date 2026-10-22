@@ -174,7 +174,7 @@ def completed_revisions(index: dict, retry_failures: bool = False, profile: str 
         for item in index.get("failures", []):
             if (isinstance(item, dict) and item.get("key")
                     and (profile is None or item.get("profile") == profile)):
-                completed.setdefault(item["key"], item.get("source_revision"))
+                completed[item["key"]] = item.get("source_revision")
     return completed
 
 
