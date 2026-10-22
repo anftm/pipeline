@@ -15,7 +15,8 @@ except ImportError:
     import ccrd_lifecycle as lifecycle
 
 
-def package(plan, papers, runtime, previous_runtime_sha256, release_url, output, *, oracle_process_receipt=None):
+def package(plan, papers, runtime, previous_runtime_sha256, release_url, output, *, oracle_process_receipt=None,
+            part_bytes=None):
     if (plan.get('sample_only') is not False or plan.get('complete_newspaper_audits') is not True
             or plan.get('kind') != 'ccrd-four-source-local-publication-plan'):
         raise ValueError('cannot transport a sample or incomplete newspaper plan')
@@ -39,6 +40,10 @@ def package(plan, papers, runtime, previous_runtime_sha256, release_url, output,
         raise ValueError('transport evidence does not describe the accepted full runtime and package')
     if any(value.get('remote_writes') != 0 for value in evidence.values()):
         raise ValueError('expected local-only acceptance evidence')
+    if part_bytes is None:
+        part_bytes = min(64 * 1024 ** 2, transport.MAX_PART)
+    if type(part_bytes) is not int or not 1 <= part_bytes <= transport.MAX_PART:
+        raise ValueError('transport part size must be positive and at most the accepted maximum')
     output.mkdir(parents=True, exist_ok=False)
     prefix = transport.release_prefix(release_url)
     files = []
@@ -57,8 +62,8 @@ def package(plan, papers, runtime, previous_runtime_sha256, release_url, output,
                 temporary = output / 'next-part.tmp'
                 digest, size = hashlib.sha256(), 0
                 with temporary.open('wb') as part:
-                    while size < transport.MAX_PART:
-                        block = stream.read(min(1024 * 1024, transport.MAX_PART - size))
+                    while size < part_bytes:
+                        block = stream.read(min(1024 * 1024, part_bytes - size))
                         if not block:
                             break
                         part.write(block)
@@ -85,6 +90,7 @@ def package(plan, papers, runtime, previous_runtime_sha256, release_url, output,
     target.write_bytes(lifecycle.canonical(value))
     result = {'descriptor': str(target), **transport.identity(target), 'files': len(files),
               'release_url': release_url, 'remote_writes': 0, 'publication_ready': False,
+              'max_part_bytes': part_bytes,
               'selected_oracle_process_receipt': str(evidence_paths['oracle-process-receipt.json'])}
     (output / 'local-transport-receipt.json').write_bytes(lifecycle.canonical(result))
     return result
@@ -97,13 +103,15 @@ def main():
     parser.add_argument('--runtime', type=Path, required=True)
     parser.add_argument('--previous-runtime-hashes', type=Path, required=True)
     parser.add_argument('--release-url', required=True)
+    parser.add_argument('--part-mib', type=int, default=64,
+                        help='Public Release upload part size; 64 MiB avoids long single-request timeouts')
     parser.add_argument('--oracle-process-receipt', type=Path, required=True,
                         help='Exact successful process receipt; failed/interrupted attempts remain untouched')
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
     result = package(json.loads(args.plan.read_text()), args.papers, args.runtime,
         json.loads(args.previous_runtime_hashes.read_text()), args.release_url, args.output,
-        oracle_process_receipt=args.oracle_process_receipt)
+        oracle_process_receipt=args.oracle_process_receipt, part_bytes=args.part_mib * 1024 ** 2)
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
