@@ -93,15 +93,16 @@ class SpaceCommitter:
         self.api = HfApi(token=os.environ.get('HF_TOKEN'))
 
     def head(self):
-        return self.api.repo_info(SPACE, repo_type='space').sha
+        return retry_read(lambda: self.api.repo_info(SPACE, repo_type='space')).sha
 
     def read(self, path, revision):
         from huggingface_hub import hf_hub_download
-        return Path(hf_hub_download(SPACE, path, repo_type='space', revision=revision,
-                                   token=os.environ.get('HF_TOKEN'))).read_bytes()
+        target = retry_read(lambda: hf_hub_download(SPACE, path, repo_type='space', revision=revision,
+                                                   token=os.environ.get('HF_TOKEN')))
+        return Path(target).read_bytes()
 
     def runtime_revision(self):
-        runtime = self.api.repo_info(SPACE, repo_type='space').runtime
+        runtime = retry_read(lambda: self.api.repo_info(SPACE, repo_type='space')).runtime
         # The SDK exposes the complete server payload separately from typed
         # hardware fields. Production acceptance requires the running image SHA.
         raw = runtime.raw if runtime is not None else {}

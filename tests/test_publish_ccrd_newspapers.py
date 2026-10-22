@@ -7,11 +7,12 @@ import io
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 import sqlite3
 import subprocess
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 from urllib.error import HTTPError
 
 from scripts import ccrd_newspaper_transport as transport, ccrd_ocr_release as contract
@@ -415,6 +416,31 @@ class NewspaperPublicationTests(unittest.TestCase):
         names=[step.get('name','') for step in job['steps']]
         self.assertLess(next(i for i,n in enumerate(names) if n.startswith('Verify the exact production')),
                         next(i for i,n in enumerate(names) if n.startswith('Pin the accepted')))
+
+    def test_space_read_retry_covers_429_and_transport_but_never_blindly_repeats_commit(self):
+        import httpx
+        from huggingface_hub.errors import HfHubHTTPError
+        request=httpx.Request('GET','https://huggingface.co/api/spaces/vomebook/Search')
+        limited=HfHubHTTPError('fixture limited',response=httpx.Response(429,request=request,
+                                                                     headers={'Retry-After':'1'}))
+        api=Mock()
+        api.repo_info.side_effect=[limited,SimpleNamespace(sha='a'*40),
+                                  limited,SimpleNamespace(runtime=SimpleNamespace(raw={'stage':'RUNNING','sha':'a'*40}))]
+        local=self.root/'downloaded-runtime.py';local.write_bytes(b'exact runtime bytes')
+        with patch('huggingface_hub.HfApi',return_value=api), \
+                patch('scripts.reader_bucket_store.time.sleep') as sleep:
+            space=rollout.SpaceCommitter()
+            self.assertEqual(space.head(),'a'*40)
+            self.assertEqual(space.runtime_revision(),'a'*40)
+            with patch('huggingface_hub.hf_hub_download',side_effect=[httpx.ReadTimeout('fixture'),str(local)]) as download:
+                self.assertEqual(space.read('app.py','a'*40),b'exact runtime bytes')
+                self.assertEqual(download.call_count,2)
+                self.assertTrue(all(call.kwargs['revision']=='a'*40 for call in download.call_args_list))
+            self.assertEqual(sleep.call_count,3)
+            api.create_commit.side_effect=limited
+            with self.assertRaises(HfHubHTTPError):
+                space.commit('a'*40,{'app.py':b'exact runtime bytes'})
+            api.create_commit.assert_called_once()
 
     def test_live_acceptance_uses_running_revision_not_nonexistent_metadata_HTTP_route(self):
         # Add real body/path metadata for this tiny accepted snapshot. The live

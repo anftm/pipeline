@@ -2,9 +2,10 @@
 import copy
 import json
 from pathlib import Path
+from types import SimpleNamespace
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 
 from scripts import ccrd_ocr_release as contract, publish_ccrd_ocr as publisher, publish_ccrd_index as legacy
 
@@ -181,6 +182,40 @@ class PublishCcrdOcrTests(unittest.TestCase):
                                ('GITHUB_REPOSITORY', 'other/repository'), ('CCRD_OCR_WRITE_PROTOCOL', 'fake')):
                 with self.subTest(key=key), patch.dict('os.environ', {key: value}), self.assertRaises(RuntimeError):
                     publisher.assert_writer()
+
+    def test_activation_preflight_retries_limited_reads_and_preserves_exact_builder_base(self):
+        import httpx
+        from huggingface_hub.errors import HfHubHTTPError
+        request=httpx.Request('GET','https://huggingface.co/api/spaces/vomebook/Search')
+        limited=HfHubHTTPError('fixture limited',response=httpx.Response(429,request=request,
+                                                                     headers={'Retry-After':'1'}))
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            raw_base=b'exact compressed base fixture';raw_builder=b'canonical builder fixture'
+            values={'data/search_data.json.gz':raw_base,'build_fulltext_db.py':raw_builder,
+                    'ocr_release.py':Path(contract.__file__).read_bytes(),
+                    'app.py':b'pinned data/ocr-release.json activation loader',
+                    'data/ocr-release.json':contract.canonical({'version':1,'kind':'ccrd-ocr-activation',
+                        'bucket':contract.BUCKET,'path':self.path,'sha256':contract.digest(self.raw)})}
+            paths={}
+            for name,raw in values.items():
+                target=root/name;target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes(raw);paths[name]=target
+            api=Mock();api.repo_info.side_effect=[limited,SimpleNamespace(sha='a'*40)]
+            calls=[]
+            def download(repo,name,**kwargs):
+                calls.append((name,kwargs))
+                if len(calls)==1:raise limited
+                return str(paths[name])
+            with patch('huggingface_hub.HfApi',return_value=api), \
+                    patch('huggingface_hub.hf_hub_download',side_effect=download), \
+                    patch('scripts.reader_bucket_store.time.sleep') as sleep:
+                result=publisher.activate_space(self.path,contract.digest(self.raw),
+                    contract.digest(raw_base),contract.digest(raw_builder),apply=False)
+            self.assertTrue(result['space_activation_unchanged'])
+            self.assertEqual(api.repo_info.call_count,2)
+            self.assertEqual(sleep.call_count,2)
+            self.assertTrue(all(kwargs['revision']=='a'*40 for name,kwargs in calls))
+            api.create_commit.assert_not_called()
 
     def test_legacy_parent_read_never_overwrites_new_manifest_or_hides_network_failure(self):
         with tempfile.TemporaryDirectory() as directory:

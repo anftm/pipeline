@@ -12,11 +12,11 @@ from pathlib import Path
 
 try:
     from . import ccrd_ocr_release as contract, ccrd_lifecycle as lifecycle
-    from .reader_bucket_store import HubBucketStore
+    from .reader_bucket_store import HubBucketStore, retry_read
 except ImportError:
     import ccrd_ocr_release as contract
     import ccrd_lifecycle as lifecycle
-    from reader_bucket_store import HubBucketStore
+    from reader_bucket_store import HubBucketStore, retry_read
 
 
 PROTOCOL = 'central-ccrd-ocr-publication-v1'
@@ -282,9 +282,10 @@ def activate_space(path, sha256, base_metadata_sha256, builder_sha256, *, apply=
     from huggingface_hub import HfApi, CommitOperationAdd, hf_hub_download
     token = os.environ.get('HF_TOKEN')
     api = HfApi(token=token)
-    info = api.repo_info('vomebook/Search', repo_type='space')
+    info = retry_read(lambda: api.repo_info('vomebook/Search', repo_type='space'))
     def download(name):
-        return Path(hf_hub_download('vomebook/Search', name, repo_type='space', revision=info.sha, token=token)).read_bytes()
+        target = retry_read(lambda: hf_hub_download('vomebook/Search', name, repo_type='space', revision=info.sha, token=token))
+        return Path(target).read_bytes()
     if (contract.digest(download('data/search_data.json.gz')) != base_metadata_sha256
             or contract.digest(download('build_fulltext_db.py')) != builder_sha256
             or download('ocr_release.py') != Path(contract.__file__).read_bytes()

@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from urllib.error import HTTPError, URLError
 from unittest.mock import patch
 
 from scripts import auto_ccrd_ocr as auto, ccrd_ocr_release as contract
@@ -302,6 +303,21 @@ class AutoCcrdOcrTests(unittest.TestCase):
         with patch.object(live, 'json_request', side_effect=[first, {'total': 201, 'results': [{'doc_id': 'OCR:1'}]}]):
             with self.assertRaisesRegex(ValueError, 'duplicated'):
                 live.all_results({'sources': ['OCR']})
+
+    def test_live_OCR_readiness_waits_through_503_but_keeps_deadline_and_exact_generation(self):
+        generation='a'*64
+        failure=HTTPError('https://fixture.invalid/api/index-status',503,'fixture starting',{},None)
+        with patch.object(live,'json_request',side_effect=[failure,URLError('fixture network'),
+                {'ready':True,'ocr_release':'b'*64},{'ready':True,'ocr_release':generation}]), \
+                patch.object(live.time,'sleep') as sleep:
+            self.assertEqual(live.wait_ready(generation,120)['ocr_release'],generation)
+            self.assertEqual(sleep.call_count,3)
+        failure=HTTPError('https://fixture.invalid/api/index-status',503,'fixture unavailable',{},None)
+        with patch.object(live,'json_request',side_effect=failure), self.assertRaises(TimeoutError):
+            live.wait_ready(generation,0)
+        denied=HTTPError('https://fixture.invalid/api/index-status',401,'fixture denied',{},None)
+        with patch.object(live,'json_request',side_effect=denied), self.assertRaises(HTTPError):
+            live.wait_ready(generation,120)
 
     def test_live_acceptance_derives_legacy_counts_from_archived_metadata(self):
         raw = gzip.compress(contract.canonical({'version': 1, 'sources': [

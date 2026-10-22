@@ -111,6 +111,28 @@ def public_layout(records, base_slugs):
     return counts, mapping
 
 
+def wait_ready(generation, wait_seconds):
+    deadline = time.monotonic() + wait_seconds
+    while True:
+        try:
+            status = json_request('/api/index-status')
+        except HTTPError as error:
+            if error.code not in {408, 429, 500, 502, 503, 504}:
+                raise
+            error.close()
+            if time.monotonic() >= deadline:
+                raise TimeoutError('CCRD remained unavailable before the exact complete OCR generation was ready') from error
+        except (URLError, TimeoutError, ConnectionError) as error:
+            if time.monotonic() >= deadline:
+                raise TimeoutError('CCRD remained unreachable before the exact complete OCR generation was ready') from error
+        else:
+            if status.get('ready') is True and status.get('ocr_release') == generation:
+                return status
+            if time.monotonic() >= deadline:
+                raise TimeoutError('CCRD has not loaded the exact complete OCR generation')
+        time.sleep(min(15, max(0, deadline - time.monotonic())))
+
+
 def verify(root, receipt, *, metadata=None, wait_seconds=1200):
     generation, ref = receipt['generation'], receipt['release']
     raw = (root / contract.safe_path(ref['path'])).read_bytes()
@@ -126,14 +148,7 @@ def verify(root, receipt, *, metadata=None, wait_seconds=1200):
     loaded = contract.load_release(root, ref['path'], ref['sha256'], manifest['base_metadata_sha256'])
     if loaded['manifest']['generation'] != generation:
         raise ValueError('acceptance generation differs from the published release')
-    deadline = time.monotonic() + wait_seconds
-    while True:
-        status = json_request('/api/index-status')
-        if status.get('ready') is True and status.get('ocr_release') == generation:
-            break
-        if time.monotonic() >= deadline:
-            raise TimeoutError('CCRD has not loaded the exact complete OCR generation')
-        time.sleep(15)
+    wait_ready(generation, wait_seconds)
     if metadata is None:
         raise ValueError('base metadata archive is required for exact legacy counts')
     expected = metadata_counts(metadata, manifest['base_metadata_sha256'])
