@@ -31,6 +31,10 @@ class StaleRetainedProvenance(ValueError):
     """The export references a Reader resource whose exact bytes changed."""
 
 
+class StaleDerivedProvenance(ValueError):
+    """The OCR registry points at an older derived PDF than the Reader manifest."""
+
+
 def require_retained(store, value):
     """Reject one stale export without blocking every other complete book."""
     for ref in value.get('retained_reader_resources', []):
@@ -185,14 +189,14 @@ def export_spec(store, job, number):
                     or value.get('source_sha256') != match.group(1)
                     or value.get('sha256') != spec['source_sha256']
                     or value.get('bytes') != entry.get('source_bytes')):
-                raise ValueError('derived OCR lacks matching original provenance')
+                raise StaleDerivedProvenance('derived OCR lacks matching original provenance')
             derivation = {'bucket': bucket, 'manifest_path': manifest_path,
                           'source_sha256': value['source_sha256'],
                           'derived_sha256': value['sha256'],
                           'derived_bytes': value['bytes']}
         if (not derivation or derivation.get('derived_sha256') != spec['source_sha256']
                 or derivation.get('derived_bytes') != entry.get('source_bytes')):
-            raise ValueError('derived OCR lacks matching original provenance')
+            raise StaleDerivedProvenance('derived OCR lacks matching original provenance')
         if derivation.get('repo') is not None or derivation.get('source_path') is not None:
             # The derived-source index carries a full original identity; require
             # it to match. A document-owned manifest has no repo/path fields and
@@ -323,7 +327,8 @@ def reconcile(store, root, consumer_root, approved, *, limit=8, apply=False, pla
         except Exception as error:
             # Quarantine only this exact input identity. Keep the old complete
             # release active; the next automatic run can advance other books.
-            permanent = isinstance(error, (exporter.PermanentTextRejection, StaleRetainedProvenance))
+            permanent = isinstance(error, (exporter.PermanentTextRejection, StaleRetainedProvenance,
+                                             StaleDerivedProvenance))
             failure = {'key': job['key'], 'fingerprint': job['fingerprint'],
                        'quarantine': job['quarantine'], 'error_type': type(error).__name__}
             if permanent:

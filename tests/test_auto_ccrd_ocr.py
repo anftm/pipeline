@@ -228,8 +228,32 @@ class AutoCcrdOcrTests(unittest.TestCase):
         self.assertEqual(result['manifest']['source_sha256'], entry['source_sha256'])
         manifest['sha256'] = 'c' * 64
         self.store.objects[shared.READER_ASSETS_BUCKET, path] = contract.canonical(manifest)
-        with self.assertRaisesRegex(ValueError, 'original provenance'):
+        with self.assertRaisesRegex(auto.StaleDerivedProvenance, 'original provenance'):
             auto.export_spec(self.store, jobs[0], 1)
+
+    def test_stale_derived_provenance_is_quarantined_not_a_batch_failure(self):
+        """One converted PDF whose manifest changed must not stop other books."""
+        key, entry = self.book('stale-derived')
+        original = 'f' * 64
+        stem = 'documents/pdf/ppt/' + original
+        entry.update(source_kind='generated', source_extension='ppt',
+                     reader_assets_bucket=shared.READER_ASSETS_BUCKET,
+                     reader_assets_path=stem + '/document.pdf', source_url='')
+        manifest = {'kind': 'static-pdf-document-stream', 'version': 1, 'path': 'document.pdf',
+                    'source_extension': 'ppt', 'source_sha256': original,
+                    'bytes': entry['source_bytes'], 'sha256': 'c' * 64}
+        self.store.objects[shared.READER_ASSETS_BUCKET, stem + '/document-manifest.json'] = contract.canonical(manifest)
+        with patch.object(auto.builder, 'build_release', side_effect=self.build), \
+                patch.object(publisher, 'plan', side_effect=self.plan), \
+                patch.object(publisher, 'assert_writer'):
+            report = self.run_auto('stale-derived-run', apply=True)
+        self.assertEqual([item['key'] for item in report['failures']], [key])
+        self.assertEqual(report['processed'], [])
+        state = json.loads(self.store.objects[(contract.BUCKET, auto.STATE)])
+        self.assertEqual(state['failures'][key]['error_type'], 'StaleDerivedProvenance')
+        again = self.run_auto('stale-derived-again', plan_only=True)
+        self.assertEqual(again['eligible'], 0)
+        self.assertEqual(again['quarantined'], [key])
 
     def test_only_accepted_descendant_updates_preserve_raw_and_previous_corrections(self):
         key, entry = self.book('upgrade')
