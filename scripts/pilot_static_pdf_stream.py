@@ -9,6 +9,8 @@ import json
 import os
 import subprocess
 import tempfile
+import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -26,6 +28,9 @@ except ImportError:
 
 BUCKET = "vomebook/reader-assets-v2"
 EXTENSIONS = {"ppt", "pptx", "pps", "wps", "ps", "tif", "tiff"}
+DOWNLOAD_INTERVAL_SECONDS = 0.35
+DOWNLOAD_ATTEMPTS = 5
+RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 
 
 def parse_args() -> argparse.Namespace:
@@ -40,12 +45,40 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def retry_delay(error: urllib.error.HTTPError, attempt: int) -> float:
+    headers = error.headers or {}
+    retry_after = headers.get("Retry-After")
+    if retry_after:
+        try:
+            return max(5.0, float(retry_after))
+        except (TypeError, ValueError):
+            pass
+    reset = headers.get("X-RateLimit-Reset")
+    if reset:
+        try:
+            return max(5.0, float(reset) - time.time() + 5.0)
+        except (TypeError, ValueError):
+            pass
+    return min(300.0, 30.0 * (2 ** attempt))
+
+
 def download(url: str, target: Path, token: str | None) -> None:
     request = urllib.request.Request(url)
     if token:
         request.add_header("Authorization", f"Bearer {token}")
-    with urllib.request.urlopen(request, timeout=180) as response:
-        target.write_bytes(response.read())
+    for attempt in range(DOWNLOAD_ATTEMPTS):
+        try:
+            with urllib.request.urlopen(request, timeout=180) as response:
+                target.write_bytes(response.read())
+            time.sleep(DOWNLOAD_INTERVAL_SECONDS)
+            return
+        except urllib.error.HTTPError as error:
+            if error.code not in RETRYABLE_STATUS or attempt == DOWNLOAD_ATTEMPTS - 1:
+                raise
+            delay = retry_delay(error, attempt)
+            print(f"source download HTTP {error.code}; retrying in {delay:.0f}s "
+                  f"({attempt + 1}/{DOWNLOAD_ATTEMPTS})")
+            time.sleep(delay)
 
 
 def existing_index(bucket: str, token: str | None, root: str) -> dict:
