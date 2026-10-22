@@ -35,7 +35,10 @@ def validate_index(value: dict, path: str) -> dict:
 
 def read_index(bucket: str, path: str, token: str | None, kind: str) -> dict:
     try:
-        with HfFileSystem(token=token).open(f"hf://buckets/{bucket}/{path}", "rb") as stream:
+        fs = HfFileSystem(token=token)
+        uri = f"hf://buckets/{bucket}/{path}"
+        fs.invalidate_cache(uri)
+        with fs.open(uri, "rb") as stream:
             value = json.loads(stream.read().decode("utf-8"))
     except FileNotFoundError:
         return {"version": 1, "kind": kind, "files": [], "failures": []}
@@ -62,7 +65,8 @@ def merge_indexes(previous: dict, entries: list[dict], failures: list[dict], kin
         files[entry["key"]] = entry
         # A successful old revision must not erase a newer revision's failure.
         failure = errors.get(entry["key"], {})
-        if (reusable_entry(entry) and failure.get("source_revision") == entry.get("source_revision")
+        if (reusable_entry(entry) and (failure.get("source_revision") == entry.get("source_revision")
+                or (entry.get("checkpointed_at") and failure.get("checkpointed_at", "") <= entry["checkpointed_at"]))
                 and (not failure.get("profile") or failure.get("profile") == entry.get("profile"))):
             errors.pop(entry["key"], None)
     for failure in failures:

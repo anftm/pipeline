@@ -1,4 +1,5 @@
 import io
+import hashlib
 import json
 import tempfile
 import unittest
@@ -73,7 +74,7 @@ class ReaderStreamCheckpointTests(unittest.TestCase):
         def upload(bucket, files, token):
             events.append([(remote, Path(local).read_bytes()) for local, remote in files])
         with tempfile.TemporaryDirectory() as temporary, patch.object(index, "batch_bucket_files_with_retry", side_effect=upload), \
-                patch.object(index, "remote_identity", side_effect=[None, (__import__('hashlib').sha256(b'body').hexdigest(), 4)]), \
+                patch.object(index, "remote_identity", side_effect=[None, (hashlib.sha256(b'body').hexdigest(), 4)]), \
                 patch.object(index, "read_index", side_effect=lambda *args: json.loads(events[-1][0][1])), \
                 patch.object(index, "HfFileSystem"):
             work = Path(temporary)
@@ -122,6 +123,22 @@ class ReaderStreamCheckpointTests(unittest.TestCase):
             self.assertFalse(any(remote.endswith("index.json") for call in upload.call_args_list
                                  for _local, remote in call.args[1]))
 
+    def test_s3_readback_streams_sha_and_missing_is_not_an_access_error(self):
+        from botocore.exceptions import ClientError
+        client = Mock()
+        client.get_object.return_value = {"Body": io.BytesIO(b"complete bytes")}
+        with patch.dict("os.environ", {"HF_S3_ACCESS_KEY_ID": "fixture", "HF_S3_SECRET_ACCESS_KEY": "fixture"}), \
+                patch.object(index, "s3_client", return_value=client):
+            self.assertEqual(index.remote_identity(Mock(), BUCKET, "documents/x"),
+                             (hashlib.sha256(b"complete bytes").hexdigest(), 14))
+            for code, expected in (("NoSuchKey", None), ("AccessDenied", PermissionError)):
+                client.get_object.side_effect = ClientError({"Error": {"Code": code}}, "GetObject")
+                if expected is None:
+                    self.assertIsNone(index.remote_identity(Mock(), BUCKET, "documents/x"))
+                else:
+                    with self.assertRaises(ClientError):
+                        index.remote_identity(Mock(), BUCKET, "documents/x")
+
     def test_source_sha_reuses_only_verified_lfs_identity_at_pinned_revision(self):
         rows = [{"key": "repo\0same.mp3", "revision": "new"}, {"key": "repo\0changed.mp3", "revision": "new"}]
         previous = {"files": [{"key": row["key"], "source_revision": "old", "source_sha256": "a" * 64} for row in rows]}
@@ -142,6 +159,22 @@ class ReaderStreamCheckpointTests(unittest.TestCase):
 
 
 class FormatProducerRegressionTests(unittest.TestCase):
+    def test_shared_source_download_honors_rate_limit_countdown(self):
+        import urllib.error
+        from scripts import convert_reader_assets as converter
+        error = urllib.error.HTTPError("https://example.test/source", 429, "limited", {"Retry-After": "27"}, io.BytesIO(b"limited"))
+        response = Mock(status=200, headers={})
+        response.__enter__ = lambda value: value
+        response.__exit__ = lambda *args: None
+        response.read.side_effect = [b"complete", b""]
+        with tempfile.TemporaryDirectory() as temporary, \
+                patch.object(converter.urllib.request, "urlopen", side_effect=[error, response]), \
+                patch.object(converter.time, "sleep") as sleep:
+            digest, size = converter.download_source("https://example.test/source", Path(temporary) / "source")
+        sleep.assert_called_once_with(27)
+        self.assertEqual(size, 8)
+        self.assertEqual(digest, hashlib.sha256(b"complete").hexdigest())
+
     def test_media_publishes_actual_transcoded_filename_kind_and_digest(self):
         cases = [("m4a", "audio", "audio.mp3"), ("mov", "video", "video.mp4"), ("asx", "audio", "audio.mp3")]
         for extension, mode, filename in cases:

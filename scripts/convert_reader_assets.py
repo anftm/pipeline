@@ -29,6 +29,8 @@ import os
 import posixpath
 import xml.etree.ElementTree as ET
 from email.parser import BytesParser
+from email.utils import parsedate_to_datetime
+from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 from lxml import html as lxml_html
@@ -129,6 +131,7 @@ def download_source(url: str, target: Path, *, max_bytes: int = MAX_SOURCE_BYTES
     # HF resolve URLs can briefly return 404 while a dataset revision is
     # propagating. Do not resume a stale partial file after that response.
     for attempt in range(5):
+        delay = attempt + 1
         offset = target.stat().st_size if target.exists() else 0
         headers = {"User-Agent": "VoiceOfML-Reader-Assets/1.0"}
         if offset:
@@ -167,14 +170,31 @@ def download_source(url: str, target: Path, *, max_bytes: int = MAX_SOURCE_BYTES
         except urllib.error.HTTPError as exc:
             if exc.code == 404:
                 target.unlink(missing_ok=True)
-            elif exc.code not in {408, 429} and exc.code < 500:
+            elif exc.code not in {408, 425, 429} and exc.code < 500:
                 raise
             error = exc
+            if exc.code in {408, 425, 429, 500, 502, 503, 504}:
+                retry_after = exc.headers.get("Retry-After") if exc.headers else None
+                if retry_after:
+                    try:
+                        delay = max(1, min(300, int(float(retry_after))))
+                    except (TypeError, ValueError, OverflowError):
+                        try:
+                            parsed = parsedate_to_datetime(retry_after)
+                            if parsed.tzinfo is None:
+                                parsed = parsed.replace(tzinfo=timezone.utc)
+                            delay = max(1, min(300, int((parsed - datetime.now(timezone.utc)).total_seconds())))
+                        except (TypeError, ValueError, OverflowError):
+                            pass
+                else:
+                    details = exc.read(8192).decode("utf-8", "replace")
+                    match = re.search(r"\bretry\s+after\s+(\d+(?:\.\d+)?)\s+seconds\b", details, re.I)
+                    delay = max(1, min(300, int(float(match.group(1))))) if match else min(120, 2 ** attempt)
         except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.IncompleteRead) as exc:
             error = exc
         if attempt == 4:
             raise error
-        time.sleep(attempt + 1)
+        time.sleep(delay)
     raise RuntimeError("source download retry limit reached")
 
 
