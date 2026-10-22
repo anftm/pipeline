@@ -93,7 +93,11 @@ jobs:
       - name: Install PDF conversion tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libreoffice ghostscript poppler-utils fontconfig fonts-noto-cjk fonts-wqy-microhei
+          if [[ "${{ matrix.extension }}" == "tif" || "${{ matrix.extension }}" == "tiff" ]]; then
+            sudo apt-get install -y --no-install-recommends poppler-utils
+          else
+            sudo apt-get install -y --no-install-recommends libreoffice ghostscript poppler-utils fontconfig fonts-noto-cjk fonts-wqy-microhei
+          fi
       - uses: actions/download-artifact@v8
         with:
           name: reader-static-pdf-plan
