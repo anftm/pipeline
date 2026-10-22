@@ -72,7 +72,10 @@ class ReaderStreamCheckpointTests(unittest.TestCase):
         entry = {"key": "repo\0book.html", "source_revision": "rev", "object": "documents/web/html/hash/document.html"}
         def upload(bucket, files, token):
             events.append([(remote, Path(local).read_bytes()) for local, remote in files])
-        with tempfile.TemporaryDirectory() as temporary, patch.object(index, "batch_bucket_files_with_retry", side_effect=upload):
+        with tempfile.TemporaryDirectory() as temporary, patch.object(index, "batch_bucket_files_with_retry", side_effect=upload), \
+                patch.object(index, "remote_identity", side_effect=[None, (__import__('hashlib').sha256(b'body').hexdigest(), 4)]), \
+                patch.object(index, "read_index", side_effect=lambda *args: json.loads(events[-1][0][1])), \
+                patch.object(index, "HfFileSystem"):
             work = Path(temporary)
             content = work / "document.html"
             content.write_bytes(b"body")
@@ -91,7 +94,7 @@ class ReaderStreamCheckpointTests(unittest.TestCase):
         def upload(_bucket, files, _token):
             events.extend(json.loads(Path(local).read_text()) for local, remote in files if remote.endswith("index.json"))
         with tempfile.TemporaryDirectory() as temporary, \
-                patch.object(index, "read_index", return_value={"files": []}), \
+                patch.object(index, "read_index", side_effect=lambda *args: events[-1] if events else {"files": []}), \
                 patch.object(index, "batch_bucket_files_with_retry", side_effect=upload):
             build = Mock(side_effect=RuntimeError("HTTP 429"))
             code = index.run_documents([{**source, "path": f"{i}.html"} for i in range(3)], bucket=BUCKET,
@@ -102,6 +105,22 @@ class ReaderStreamCheckpointTests(unittest.TestCase):
         self.assertEqual(len(events), 2)
         self.assertEqual(len(events[-1]["failures"]), 2)
         self.assertIn("HTTP 429", events[-1]["failures"][0]["error"])
+
+    def test_corrupt_content_readback_never_advances_index(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary)
+            content = work / "document.html"
+            content.write_bytes(b"body")
+            entry = {"key": "repo\0book.html", "source_revision": "rev", "object": "documents/web/html/hash/document.html"}
+            with patch.object(index, "batch_bucket_files_with_retry") as upload, \
+                    patch.object(index, "remote_identity", side_effect=[None, ("wrong", 1)]), \
+                    patch.object(index, "HfFileSystem"):
+                with self.assertRaisesRegex(ValueError, "readback failed"):
+                    index.publish_checkpoint(BUCKET, "documents/web/html/index.json", {"files": []},
+                        [entry], [], {entry["object"]: str(content)}, work, None, apply=True, kind="fixture")
+            self.assertEqual(upload.call_count, 2)
+            self.assertFalse(any(remote.endswith("index.json") for call in upload.call_args_list
+                                 for _local, remote in call.args[1]))
 
     def test_source_sha_reuses_only_verified_lfs_identity_at_pinned_revision(self):
         rows = [{"key": "repo\0same.mp3", "revision": "new"}, {"key": "repo\0changed.mp3", "revision": "new"}]

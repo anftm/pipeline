@@ -7,16 +7,19 @@ import json
 import os
 import shutil
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 
 from huggingface_hub import HfApi, HfFileSystem
 
 try:
     from . import reader_lifecycle
-    from .shared import batch_bucket_files_with_retry
+    from .shared import batch_bucket_files_with_retry, hash_file
+    from .reader_bucket_store import retry_s3
 except ImportError:
     import reader_lifecycle
-    from shared import batch_bucket_files_with_retry
+    from shared import batch_bucket_files_with_retry, hash_file
+    from reader_bucket_store import retry_s3
 
 
 def validate_index(value: dict, path: str) -> dict:
@@ -118,6 +121,45 @@ def source_failure(item: dict, error: Exception) -> dict:
             "error": f"{type(error).__name__}: {error}"[:2000]}
 
 
+@lru_cache(maxsize=1)
+def s3_client():
+    import boto3
+    from botocore.config import Config
+    return boto3.client("s3", endpoint_url="https://s3.hf.co/vomebook",
+        aws_access_key_id=os.environ["HF_S3_ACCESS_KEY_ID"],
+        aws_secret_access_key=os.environ["HF_S3_SECRET_ACCESS_KEY"],
+        config=Config(region_name="us-east-1", s3={"addressing_style": "path"},
+                      connect_timeout=10, read_timeout=60, retries={"mode": "adaptive", "max_attempts": 8}))
+
+
+def remote_identity(fs: HfFileSystem, bucket: str, path: str) -> tuple[str, int] | None:
+    if bucket == "vomebook/reader-assets-v2" and os.environ.get("HF_S3_ACCESS_KEY_ID") and os.environ.get("HF_S3_SECRET_ACCESS_KEY"):
+        def read():
+            response = s3_client().get_object(Bucket="reader-assets-v2", Key=path)
+            body = response["Body"]
+            digest, size = hashlib.sha256(), 0
+            try:
+                while chunk := body.read(1024 * 1024):
+                    digest.update(chunk)
+                    size += len(chunk)
+            finally:
+                body.close()
+            return digest.hexdigest(), size
+        try:
+            return retry_s3(read)
+        except FileNotFoundError:
+            return None
+    try:
+        with fs.open(f"hf://buckets/{bucket}/{path}", "rb") as stream:
+            digest, size = hashlib.sha256(), 0
+            while chunk := stream.read(1024 * 1024):
+                digest.update(chunk)
+                size += len(chunk)
+            return digest.hexdigest(), size
+    except FileNotFoundError:
+        return None
+
+
 def publish_checkpoint(bucket: str, path: str, previous: dict, entries: list[dict],
                        failures: list[dict], uploads: dict[str, str], work: Path,
                        token: str | None, *, apply: bool, kind: str) -> dict:
@@ -149,9 +191,26 @@ def publish_checkpoint(bucket: str, path: str, previous: dict, entries: list[dic
     if apply:
         if roots:
             batch_bucket_files_with_retry(bucket, roots, token)
+        fs = HfFileSystem(token=token)
+        identities = {remote: hash_file(Path(local)) for remote, local in uploads.items()}
+        additions = []
+        for remote, local in sorted(uploads.items()):
+            current = remote_identity(fs, bucket, remote)
+            if current is None:
+                additions.append((local, remote))
+            elif current != identities[remote]:
+                raise ValueError(f"immutable Reader stream object has different bytes: {remote}")
+        if additions:
+            batch_bucket_files_with_retry(bucket, additions, token)
         if uploads:
-            batch_bucket_files_with_retry(bucket, [(local, remote) for remote, local in sorted(uploads.items())], token)
+            # Reopen after upload, never infer completeness from upload success.
+            fs = HfFileSystem(token=token)
+            for remote in uploads:
+                if remote_identity(fs, bucket, remote) != identities[remote]:
+                    raise ValueError(f"Reader stream object readback failed: {remote}")
         batch_bucket_files_with_retry(bucket, [(str(checkpoint), path)], token)
+        if read_index(bucket, path, token, kind) != payload:
+            raise ValueError(f"Reader stream checkpoint readback failed: {path}")
     return payload
 
 
