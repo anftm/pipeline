@@ -589,6 +589,7 @@ class PdfOcrStagesTests(unittest.TestCase):
             uploads.extend(remote for _local, remote in additions)
         with patch.object(stages.shared, "batch_bucket_files_with_retry", side_effect=put), \
                 patch.object(stages, "publish_json_batch"), \
+                patch.object(stages, "remote_sha256", return_value=hashlib.sha256(local.read_bytes()).hexdigest()), \
                 patch.object(stages, "remote_sizes", side_effect=lambda bucket, prefix, token:
                              {manifest: local.stat().st_size} if bucket == stages.shared.PDF_PAGES_BUCKET else {}):
             stages.upload_objects(self.root / "render")
@@ -840,6 +841,39 @@ class PdfOcrStagesTests(unittest.TestCase):
         self.assertTrue(stages.ocr_publication_is_current(previous, book))
         self.assertFalse(stages.ocr_publication_is_current(previous, {**book, "profile": "changed"}))
 
+
+    def test_same_source_ignores_revision_drift_for_identical_bytes(self):
+        base = {"source_sha256": "a" * 64, "source_kind": "upstream", "reader_assets_path": None}
+        previous = {**base, "source_revision": "old"}
+        current = {**base, "source_revision": "new"}
+        self.assertTrue(stages.same_source(previous, current))
+        self.assertFalse(stages.same_source({**previous, "source_sha256": "b" * 64}, current))
+        legacy_previous = {"source_kind": "upstream", "reader_assets_path": None,
+                           "source_revision": "old"}
+        self.assertTrue(stages.same_source(legacy_previous, {**legacy_previous, "source_revision": "old"}))
+        self.assertFalse(stages.same_source(legacy_previous, {**legacy_previous, "source_revision": "new"}))
+
+    def test_same_size_json_descriptor_is_checked_by_sha(self):
+        descriptor = self.root / "render-range-000001-000010.json"
+        descriptor.write_bytes(b"{}")
+        with patch.object(stages, "remote_sizes", return_value={descriptor.name: 2}), \
+                patch.object(stages, "remote_sha256", return_value="0" * 64):
+            with self.assertRaisesRegex(ValueError, "immutable object conflict"):
+                stages.fresh_additions("bucket", "objects/x", [(str(descriptor), descriptor.name)], "token")
+        with patch.object(stages, "remote_sizes", return_value={descriptor.name: 2}), \
+                patch.object(stages, "remote_sha256", return_value=hashlib.sha256(b"{}").hexdigest()):
+            self.assertEqual(stages.fresh_additions("bucket", "objects/x",
+                                                    [(str(descriptor), descriptor.name)], "token"), [])
+
+    def test_ready_render_supersedes_revision_only_replay(self):
+        book = {"key": "repo\0book.djvu", "source_sha256": "a" * 64,
+                "source_revision": "new", "source_kind": "upstream",
+                "reader_assets_path": None, "render_profile": "profile", "page_count": 10}
+        ready = {**book, "status": "ready", "source_revision": "old"}
+        self.assertTrue(stages.render_result_is_current(ready, book))
+        self.assertFalse(stages.render_result_is_current({**ready, "page_count": 11}, book))
+        self.assertFalse(stages.render_result_is_current({**ready, "render_profile": "other"}, book))
+        self.assertFalse(stages.render_result_is_current({**ready, "status": "failed"}, book))
 
     def test_recorded_unreadable_source_keeps_its_derived_stream(self):
         exception = {"key": "repo\0book.djvu", "missing_source_pages": [330],

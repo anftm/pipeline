@@ -133,14 +133,30 @@ def remote_sizes(bucket: str, prefix: str, token) -> dict[str, int]:
     return sizes
 
 
+def remote_sha256(bucket: str, path: str, token) -> str:
+    """Hash one existing bucket object for immutable JSON descriptor checks."""
+    def download():
+        headers = {"Cache-Control": "no-cache"}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        response = get_session().get(
+            f"https://huggingface.co/buckets/{bucket}/resolve/{quote(path, safe='/')}",
+            headers=headers, follow_redirects=True, timeout=120)
+        hf_raise_for_status(response)
+        return hashlib.sha256(response.content).hexdigest()
+    return retry(download)
+
+
 def fresh_additions(bucket: str, relative: str, additions: list, token) -> list:
     """Never overwrite an existing immutable object.
 
     Object paths are deterministic per source/profile, but recognition output is
     not byte-reproducible. Re-uploading over a published page silently changed
     bytes that registries, v3 text bundles and CCRD exports had pinned. An
-    identical-size object is kept as is; a differing one is a hard conflict, so
-    the book fails visibly instead of corrupting the published version.
+    identical-size binary object is kept as is; a differing one is a hard
+    conflict. Small JSON descriptors are additionally checked by SHA because a
+    revision-only change can keep exactly the same byte length while changing
+    the payload, which previously let a stale range object masquerade as fresh.
     """
     if not additions:
         return []
@@ -152,6 +168,10 @@ def fresh_additions(bucket: str, relative: str, additions: list, token) -> list:
             fresh.append((local, path))
         elif type(size) is int and size != Path(local).stat().st_size:
             conflicts.append(path)
+        elif path.endswith(".json"):
+            local_sha = shared.hash_file(Path(local))[0]
+            if remote_sha256(bucket, path, token) != local_sha:
+                conflicts.append(path)
     if conflicts:
         raise ValueError(f"immutable object conflict for {len(conflicts)} object(s), e.g. {bucket}:{conflicts[0]}")
     return fresh
@@ -436,9 +456,38 @@ def save_registry(api, repo, name, updates, merge=None, publish_streams=False):
 
 
 def same_source(entry, item):
-    return bool(entry and entry.get("source_revision") == item.get("source_revision")
-                and entry.get("source_kind") == item.get("source_kind")
-                and entry.get("reader_assets_path") == item.get("reader_assets_path"))
+    """Same source bytes, not merely the same repository revision.
+
+    A repository-wide revision bump can leave a DJVU/PDF byte-identical. Render
+    roots are keyed by source SHA-256, so treating that revision as a new source
+    would requeue the book and collide with the immutable range objects already
+    published under the same root. Fall back to the revision only for legacy
+    entries that do not carry a source SHA.
+    """
+    if not entry or entry.get("source_kind") != item.get("source_kind"):
+        return False
+    if entry.get("reader_assets_path") != item.get("reader_assets_path"):
+        return False
+    source_sha = item.get("source_sha256")
+    if isinstance(source_sha, str) and len(source_sha) == 64:
+        return entry.get("source_sha256") == source_sha
+    return entry.get("source_revision") == item.get("source_revision")
+
+
+def render_result_is_current(existing, book):
+    """A ready render already owns this byte-identical source/profile.
+
+    This is the publication-side guard for repository revision drift: an older
+    artifact can still arrive for a book that is already published under the same
+    source SHA and render profile. Keeping the existing render avoids replacing
+    a valid immutable range with a revision-only duplicate.
+    """
+    return bool(isinstance(existing, dict)
+                and existing.get("status") in {"ready", "skipped"}
+                and same_source(existing, book)
+                and existing.get("source_sha256") == book.get("source_sha256")
+                and existing.get("render_profile") == book.get("render_profile")
+                and existing.get("page_count") == book.get("page_count"))
 
 
 def ocr_publication_is_current(previous, book):
@@ -1524,18 +1573,29 @@ def main():
                 raise ValueError("planned workers but no result artifacts found; refusing empty publication")
             publish_legacy_render(queue, results, api, repo)
             return 0
+        current = load_registry(api, repo, RENDER_REGISTRY)["files"]
         planned = {(item["key"], item["start"], item["end"]): item for item in expand_render_tasks(
             queue, [item for shard in queue["shards"] for item in shard["records"]])}
         books = {item["key"]: item for item in queue["books"]}
         completed_ranges = {key: dict(value) for key, value in queue.get("saved_ranges", {}).items()}
         range_timings = {}
+        superseded_ranges = set()
+        invalid_ranges = {}
         for result in results:
             item = planned.get((result["key"], result.get("start"), result.get("end")))
             if not item or any(result.get(field) != value for field, value in range_identity(item).items()):
                 raise ValueError("render result does not match source queue")
             if result.get("status") == "range":
+                if render_result_is_current(current.get(item["key"]), item):
+                    superseded_ranges.add(item["key"])
+                    continue
                 start, end = item["start"], item["end"]
-                validate_range(item, start, end, result["descriptor"])
+                try:
+                    validate_range(item, start, end, result["descriptor"])
+                except Exception as exc:
+                    invalid_ranges[item["key"]] = f"{type(exc).__name__}: {exc}"[:1000]
+                    print(f"render range rejected for {item['key']}: {invalid_ranges[item['key']]}", flush=True)
+                    continue
                 saved = completed_ranges.setdefault(item["key"], {})
                 key = range_id(start, end)
                 if key in saved and saved[key] != result["descriptor"]:
@@ -1547,15 +1607,26 @@ def main():
                         and pdf_render_schedule.finite_seconds(timing.get("setup_seconds")) is not None):
                     range_timings.setdefault(item["key"], {})[key] = timing
         updates = [{**range_identity(book), "ranges": completed_ranges[key]}
-                   for key, book in books.items() if key in completed_ranges]
+                   for key, book in books.items()
+                   if key in completed_ranges and key not in superseded_ranges]
         for update in updates:
             if update["key"] in range_timings:
                 update["range_timings"] = range_timings[update["key"]]
         if updates:
             save_registry(api, repo, RENDER_PROGRESS_REGISTRY, {r["key"]: r for r in updates},
                           merge=merge_render_ranges)
+        if superseded_ranges:
+            print(f"render publication: kept {len(superseded_ranges)} already-ready source revision(s)", flush=True)
+        if invalid_ranges:
+            print(f"render publication: {len(invalid_ranges)} book(s) retained for retry", flush=True)
         published = [{**public_item(x), "render_profile": render_profile_for(x)} for x in queue.get("failed", [])]
         for book in books.values():
+            key = book["key"]
+            if key in superseded_ranges:
+                continue
+            if key in invalid_ranges:
+                published.append({**public_item(book), "status": "failed", "error": invalid_ranges[key]})
+                continue
             with tempfile.TemporaryDirectory(dir=args.output) as temp:
                 try:
                     result = assemble_render_book(book, completed_ranges.get(book["key"], {}), Path(temp))
@@ -1571,7 +1642,8 @@ def main():
                 published.append(result or {**public_item(book), "status": "failed",
                                             "error": "render ranges incomplete; uploaded ranges retained for retry"})
         save_registry(api, repo, RENDER_REGISTRY, {r["key"]: r for r in published}, publish_streams=True)
-        handoff_worker_results(api, repo, [r for r in results if r.get("status") == "range"])
+        handoff_worker_results(api, repo, [r for r in results if r.get("status") == "range"
+                                           and r.get("key") not in invalid_ranges])
         print(f"render publication: {len(published)} results, "
               f"{sum(r.get('status') == 'ready' for r in published)} ready", flush=True)
         return 0
