@@ -51,23 +51,27 @@ def references(payload: dict, path: str) -> list[dict]:
                 or not isinstance(archives, list) or not archives):
             raise ValueError('unknown four-source CCRD pointer')
         sha(payload.get('base_metadata_sha256'))
-        refs, parents = [], set()
+        generation = payload.get('generation')
+        if not isinstance(generation, str) or not re.fullmatch(r'ccrd-[a-zA-Z0-9._-]+', generation):
+            raise ValueError('invalid four-source generation name')
+        refs = []
         for name, item in databases.items():
             if (not isinstance(item, dict)
-                    or not re.fullmatch(r'generations/ccrd-[^/]+/' + name + r'\.sqlite3', item.get('path', ''))
                     or type(item.get('documents')) is not int or item['documents'] < 1
                     or item.get('fts_rows') != item['documents']):
                 raise ValueError('invalid four-source CCRD database identity')
+            legacy_path = re.fullmatch(r'generations/ccrd-[^/]+/' + name + r'\.sqlite3', item.get('path', ''))
+            newspaper_path = (name in {'RMRB', 'PLA'}
+                and item.get('path') == f'indexes/newspapers/{name}/{item.get("sha256")}.sqlite3')
+            if not legacy_path and not newspaper_path:
+                raise ValueError('invalid immutable four-source database path')
             if name in {'RMRB', 'PLA'} and (item.get('source') != name
                     or item.get('index_profile') != 'newspaper-hybrid-texts-v1'
                     or item.get('text_rows') != item['documents']):
                 raise ValueError('four-source newspaper database lacks complete TXT')
-            parents.add(item['path'].rsplit('/', 1)[0])
             refs.append(resource({'bucket': BUCKET, 'path': item['path'], 'sha256': item.get('sha256'),
                                   'bytes': item.get('bytes'), 'role': 'runtime'}))
-        if len(parents) != 1:
-            raise ValueError('four-source databases span generations')
-        prefix = next(iter(parents))
+        prefix = f'generations/{generation}'
         paths = set()
         for ref in [*metadata, *archives]:
             resource(ref)

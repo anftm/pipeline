@@ -146,7 +146,8 @@ class CcrdLifecycleTests(unittest.TestCase):
         for source in ['RMRB', 'PLA']:
             ref = self.put(CCRD, f'{prefix}/archives/{source}/{source}-1976.tar.gz', b'checked complete year archive')
             archives.append({**ref, 'source': source, 'year': 1976, 'documents': 1})
-        pointer = {'format': 2, 'kind': 'ccrd-four-source-generation', 'tokenizer_version': lifecycle.TOKENIZER,
+        pointer = {'format': 2, 'kind': 'ccrd-four-source-generation', 'generation': prefix.split('/')[1],
+                   'tokenizer_version': lifecycle.TOKENIZER,
                    'base_metadata_sha256': metadata['sha256'], 'databases': databases,
                    'metadata': [metadata], 'archives': archives}
         self.put(CCRD, 'current.json', pointer)
@@ -174,9 +175,19 @@ class CcrdLifecycleTests(unittest.TestCase):
             elif change == 'profile':
                 value['databases']['PLA']['index_profile'] = 'lite'
             else:
-                value['databases']['CW']['path'] = 'generations/ccrd-other/CW.sqlite3'
+                value['generation'] = 'ccrd-other'
             with self.subTest(change=change), self.assertRaises(ValueError):
                 lifecycle.references(value, 'current.json')
+
+    def test_four_source_lifecycle_reuses_hash_addressed_newspaper_indexes(self):
+        pointer = self.four_source_pointer()
+        for name in ['RMRB', 'PLA']:
+            item = pointer['databases'][name]
+            item['path'] = f'indexes/newspapers/{name}/{item["sha256"]}.sqlite3'
+            self.store.objects[CCRD][item['path']] = b'complete tiny database'
+        self.put(CCRD, 'current.json', pointer)
+        report = graph.ReferenceGraph(self.store).build()
+        self.assertTrue(report['graph_complete'], report['blockers'])
 
 
 if __name__ == '__main__':
