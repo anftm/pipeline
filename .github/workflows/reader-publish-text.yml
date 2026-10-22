@@ -18,6 +18,11 @@ on:
         required: true
         type: string
         default: "0"
+      workers:
+        description: Parallel document builders per checkpoint (1-16)
+        required: true
+        type: string
+        default: "4"
       force:
         description: Rebuild even sources already verified under the current UTF-8 profile
         type: boolean
@@ -84,6 +89,7 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           TEXT_EXTENSION: ${{ inputs.extension || 'all' }}
           TEXT_LIMIT: ${{ inputs.limit || '0' }}
+          TEXT_WORKERS: ${{ inputs.workers || '4' }}
           TEXT_FORCE: ${{ inputs.force || false }}
           TEXT_RETRY: ${{ inputs.retry_failures || false }}
           TEXT_APPLY: ${{ github.event_name == 'schedule' || inputs.apply == true }}
@@ -91,6 +97,7 @@ jobs:
           TEXT_ENCODINGS: ${{ inputs.encoding_overrides_json || '{}' }}
         run: |
           [[ "$TEXT_LIMIT" =~ ^[0-9]+$ ]] || exit 1
+          [[ "$TEXT_WORKERS" =~ ^[0-9]+$ ]] || exit 1
           case "$TEXT_EXTENSION" in
             all) args=(--extension txt --extension md --extension markdown) ;;
             txt|md|markdown) args=(--extension "$TEXT_EXTENSION") ;;
@@ -107,7 +114,7 @@ jobs:
           overrides = json.loads(os.environ['TEXT_ENCODINGS'])
           Path('output/text-encoding-overrides.json').write_text(json.dumps(overrides), encoding='utf-8')
           PY
-          python scripts/pilot_text_stream.py "${args[@]}" --limit "$TEXT_LIMIT" \
+          python scripts/pilot_text_stream.py "${args[@]}" --limit "$TEXT_LIMIT" --workers "$TEXT_WORKERS" \
             --selection output/text-approved-selection.json \
             --encoding-overrides output/text-encoding-overrides.json \
             --report output/text-stream-report.json

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import codecs
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import os
@@ -56,6 +57,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--bucket", default=TARGET_BUCKET)
     parser.add_argument("--checkpoint-size", type=int, default=64)
+    parser.add_argument("--workers", type=int, default=1,
+                        help="parallel document builders within a checkpoint (1-16)")
     parser.add_argument("--encoding-overrides", type=Path)
     parser.add_argument("--selection", type=Path,
                         help="optional exact source-key to expected SHA-256 map for a guarded rollout")
@@ -374,6 +377,9 @@ def main() -> int:
     args = parse_args()
     if args.limit < 0 or not 1 <= args.checkpoint_size <= 256:
         raise ValueError("limit must be non-negative; checkpoint-size must be 1..256")
+    workers = getattr(args, "workers", 1)
+    if not 1 <= workers <= 16:
+        raise ValueError("workers must be 1..16")
     if args.apply and args.plan_only:
         raise ValueError("--apply and --plan-only are mutually exclusive")
     if args.bucket != TARGET_BUCKET:
@@ -432,53 +438,81 @@ def main() -> int:
         print(json.dumps(report, ensure_ascii=False), flush=True)
         return 0
     cursor = 0
-    while cursor < len(selected):
-        uploads, entries, failures, checked_utf8 = {}, [], [], []
-        with tempfile.TemporaryDirectory(prefix="reader-text-") as directory:
-            root = Path(directory)
-            batch_bytes = 0
-            for number in range(args.checkpoint_size):
-                if cursor >= len(selected):
-                    break
-                item = selected[cursor]
-                cursor += 1
-                key = f"{item['repo']}\0{item['path']}"
-                try:
-                    entry, files = build_one(item, root / str(number), token, args.bucket, overrides.get(key),
-                                             skip_utf8=True, expected_sha256=selection.get(key))
-                except Utf8SourceUnchanged as unchanged:
-                    report["unchanged_utf8"].append(unchanged.metadata)
-                    # The durable ledger changes no source byte or Reader mapping.
-                    # It prevents a bounded next batch from selecting these files forever.
-                    checked_utf8.append(unchanged.metadata)
-                except (ValueError, UnicodeError) as error:
-                    failures.append({"key": key, "source_revision": item["revision"], "profile": expected_profile(item),
-                                      "error": f"{type(error).__name__}: {error}"})
-                else:
-                    entries.append(entry)
-                    uploads.update(files)
-                    decision = entry["source_encoding"] + ":" + entry["encoding_decision"]
-                    report["decisions"][decision] = report["decisions"].get(decision, 0) + 1
-                batch_bytes += sum(path.stat().st_size for path in (root / str(number)).rglob("*") if path.is_file())
-                # This bounds staging, not document contents. A single complete
-                # permitted document may exceed the soft checkpoint byte budget.
-                if batch_bytes >= CHECKPOINT_BYTES:
-                    break
-            if args.apply and (entries or failures or checked_utf8):
-                previous = publish_checkpoint(previous, entries, failures, uploads, root, args.bucket, token,
-                                              unchanged_utf8=checked_utf8)
-                report["published"] += len(entries)
-            report["attempted"] = cursor
-            report["converted"] += len(entries)
-            report["converted_sources"].extend({key:entry[key] for key in
-                ("key", "source_revision", "source_sha256", "source_encoding", "encoding_decision",
-                 "object", "manifest", "sha256", "bytes", "characters", "preserved_controls", "source_roundtrip_verified",
-                  "removed_prefix_byte", "reviewed_source_repair", "replaced_source_span", "retained_source", "normalization_recipe",
-                  "profile", "embedded_images", "embedded_image_bytes", "embedded_image_paths")
-                 if key in entry} for entry in entries)
-            report["failures"].extend(failures)
-            save()
-            print(f"verified checkpoint: converted={report['converted']} failures={len(report['failures'])}", flush=True)
+
+    def staged_bytes(work: Path) -> int:
+        if not work.exists():
+            return 0
+        return sum(path.stat().st_size for path in work.rglob("*") if path.is_file())
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        while cursor < len(selected):
+            batch_start = cursor
+            uploads, entries, failures, checked_utf8 = {}, [], [], []
+            with tempfile.TemporaryDirectory(prefix="reader-text-") as directory:
+                root = Path(directory)
+                batch_bytes = 0
+
+                def build_item(job, batch_root=root):
+                    number, item = job
+                    work = batch_root / str(number)
+                    key = f"{item['repo']}\0{item['path']}"
+                    try:
+                        entry, files = build_one(item, work, token, args.bucket, overrides.get(key),
+                                                 skip_utf8=True, expected_sha256=selection.get(key))
+                    except Utf8SourceUnchanged as unchanged:
+                        return {"kind": "unchanged", "metadata": unchanged.metadata,
+                                "staged": staged_bytes(work)}
+                    except (ValueError, UnicodeError) as error:
+                        return {"kind": "failure",
+                                "failure": {"key": key, "source_revision": item["revision"],
+                                            "profile": expected_profile(item),
+                                            "error": f"{type(error).__name__}: {error}"},
+                                "staged": staged_bytes(work)}
+                    return {"kind": "entry", "entry": entry, "files": files,
+                            "staged": staged_bytes(work)}
+
+                while cursor < len(selected) and cursor - batch_start < args.checkpoint_size:
+                    size = min(workers, args.checkpoint_size - (cursor - batch_start),
+                               len(selected) - cursor)
+                    chunk = selected[cursor:cursor + size]
+                    jobs = [(cursor - batch_start + offset, item)
+                            for offset, item in enumerate(chunk)]
+                    cursor += len(chunk)
+                    for result in executor.map(build_item, jobs):
+                        if result["kind"] == "entry":
+                            entry = result["entry"]
+                            entries.append(entry)
+                            uploads.update(result["files"])
+                            decision = entry["source_encoding"] + ":" + entry["encoding_decision"]
+                            report["decisions"][decision] = report["decisions"].get(decision, 0) + 1
+                        elif result["kind"] == "unchanged":
+                            # The durable ledger changes no source byte or Reader mapping.
+                            # It prevents a bounded next batch from selecting these files forever.
+                            report["unchanged_utf8"].append(result["metadata"])
+                            checked_utf8.append(result["metadata"])
+                        else:
+                            failures.append(result["failure"])
+                        batch_bytes += result["staged"]
+                    # This bounds staging, not document contents. A single complete
+                    # permitted document may exceed the soft checkpoint byte budget;
+                    # parallel work can overshoot it by at most one worker chunk.
+                    if batch_bytes >= CHECKPOINT_BYTES:
+                        break
+                if args.apply and (entries or failures or checked_utf8):
+                    previous = publish_checkpoint(previous, entries, failures, uploads, root, args.bucket, token,
+                                                  unchanged_utf8=checked_utf8)
+                    report["published"] += len(entries)
+                report["attempted"] = cursor
+                report["converted"] += len(entries)
+                report["converted_sources"].extend({key:entry[key] for key in
+                    ("key", "source_revision", "source_sha256", "source_encoding", "encoding_decision",
+                     "object", "manifest", "sha256", "bytes", "characters", "preserved_controls", "source_roundtrip_verified",
+                      "removed_prefix_byte", "reviewed_source_repair", "replaced_source_span", "retained_source", "normalization_recipe",
+                      "profile", "embedded_images", "embedded_image_bytes", "embedded_image_paths")
+                     if key in entry} for entry in entries)
+                report["failures"].extend(failures)
+                save()
+                print(f"verified checkpoint: converted={report['converted']} failures={len(report['failures'])}", flush=True)
     report["checkpoint_complete"] = True
     report["unattempted"] = len(pending) - len(selected)
     scope_keys = {f"{item['repo']}\0{item['path']}" for item in records}

@@ -7,6 +7,8 @@ import os
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
+import threading
+import time
 import unittest
 import urllib.request
 from unittest.mock import patch
@@ -700,6 +702,56 @@ class TextStreamPublicationTests(unittest.TestCase):
             self.assertEqual(stored[0]["files"], [])
             self.assertEqual(len(stored[0]["verified_utf8"]), 2)
 
+    def test_workers_build_concurrently_and_publish_one_checkpoint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.json"
+            source.write_text(json.dumps([
+                {"Repo": "VoiceOfML/Test", "File": f"file{index}", "Extension": "txt", "Folder": []}
+                for index in range(8)
+            ]))
+            revisions = root / "revisions.json"
+            revisions.write_text(json.dumps({"VoiceOfML/Test": "a" * 40}))
+            args = SimpleNamespace(
+                search_data=source, revisions=revisions, extensions=["txt"], limit=0,
+                checkpoint_size=8, workers=4, bucket=stream.TARGET_BUCKET,
+                apply=True, plan_only=False, force=False, retry_failures=False,
+                encoding_overrides=None, report=root / "report.json",
+            )
+            lock = threading.Lock()
+            active = peak = 0
+            def build(item, work, token, bucket, encoding=None, *, skip_utf8=False, expected_sha256=None):
+                nonlocal active, peak
+                with lock:
+                    active += 1
+                    peak = max(peak, active)
+                time.sleep(0.05)
+                work.mkdir(parents=True, exist_ok=True)
+                local = work / "document.txt"
+                local.write_text("text", encoding="utf-8")
+                with lock:
+                    active -= 1
+                key = f"{item['repo']}\0{item['path']}"
+                return {
+                    "key": key, "source_revision": item["revision"], "profile": PROFILE,
+                    "source_encoding": "utf-8", "encoding_decision": "strict-utf8",
+                    "object": f"documents/text/txt/{key}/document.txt",
+                }, {f"documents/text/txt/{key}/document.txt": str(local)}
+            with patch.object(stream, "parse_args", return_value=args), \
+                    patch.object(stream, "existing_index",
+                                 return_value={"version": 1, "kind": "text-stream-index", "files": []}), \
+                    patch.object(stream, "build_one", side_effect=build), \
+                    patch.object(stream, "publish_checkpoint",
+                                 return_value={"version": 1, "kind": "text-stream-index", "files": []}) as publish:
+                self.assertEqual(stream.main(), 0)
+            self.assertGreaterEqual(peak, 2)
+            publish.assert_called_once()
+            self.assertEqual(len(publish.call_args.args[1]), 8)
+            self.assertEqual(publish.call_args.args[2], [])
+            report = json.loads(args.report.read_text())
+            self.assertEqual(report["converted"], 8)
+            self.assertEqual(report["published"], 8)
+
     def test_shared_content_has_one_deterministic_manifest_not_source_dependent_bytes(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -791,6 +843,9 @@ class TextStreamPublicationTests(unittest.TestCase):
         self.assertIn("reader-text-plan-{0}", text)
         self.assertIn("--plan-only", text)
         self.assertIn("pilot_text_stream.py", text)
+        self.assertIn("workers:", text)
+        self.assertIn("TEXT_WORKERS: ${{ inputs.workers || '4' }}", text)
+        self.assertIn('--workers "$TEXT_WORKERS"', text)
         self.assertIn("TEXT_ENCODINGS: ${{ inputs.encoding_overrides_json || '{}' }}", text)
         self.assertIn("json.loads(os.environ['TEXT_ENCODINGS'])", text)
         self.assertIn("--encoding-overrides output/text-encoding-overrides.json", text)
