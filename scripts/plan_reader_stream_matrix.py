@@ -13,11 +13,11 @@ from huggingface_hub import HfFileSystem
 
 try:
     from .reader_assets import bucket_conversion_contract, decode_search_payload, relative_path
-    from .reader_stream_index import merge_shards, reusable_entry, unchanged_sources
+    from .reader_stream_index import merge_shards, reusable_entry, unchanged_sources, validate_index
     from .reader_bucket_store import retry_read
 except ImportError:
     from reader_assets import bucket_conversion_contract, decode_search_payload, relative_path
-    from reader_stream_index import merge_shards, reusable_entry, unchanged_sources
+    from reader_stream_index import merge_shards, reusable_entry, unchanged_sources, validate_index
     from reader_bucket_store import retry_read
 
 
@@ -56,7 +56,7 @@ def read_json(fs: HfFileSystem, bucket: str, path: str) -> dict:
             value = json.loads(stream.read().decode("utf-8"))
         if not isinstance(value, dict):
             raise ValueError(f"invalid Reader stream index: {bucket}/{path}")
-        return value
+        return validate_index(value, f"{bucket}/{path}")
     try:
         return retry_read(load)
     except FileNotFoundError:

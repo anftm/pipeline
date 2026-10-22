@@ -18,7 +18,7 @@ class ReaderStreamMatrixIndexTests(unittest.TestCase):
                 read_json(fs, "bucket", "chapters/ebook/epub/index.json")
 
     def test_invalid_indexes_fail_closed(self):
-        for raw in (b"[]", b"not-json"):
+        for raw in (b"[]", b"not-json", b'{"files":{}}', b'{"files":[],"failures":{}}'):
             fs = Mock()
             fs.open.return_value = io.BytesIO(raw)
             with self.assertRaises(ValueError):
