@@ -61,7 +61,7 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           args=(--kind spreadsheet --extension "${{ inputs.extension || 'all' }}" --output output/spreadsheet-matrix.json --report output/spreadsheet-report.json)
-          if [[ "${{ inputs.retry_failures }}" == "true" ]]; then args+=(--retry-failures); fi
+          if [[ "${{ github.event_name }}" == "schedule" || "${{ inputs.retry_failures }}" == "true" ]]; then args+=(--retry-failures); fi
           python scripts/plan_reader_stream_matrix.py "${args[@]}"
           echo "matrix=$(cat output/spreadsheet-matrix.json)" >> "$GITHUB_OUTPUT"
       - run: tar -czf output/spreadsheet-plan.tgz output/search_data.json state/commits.json output/spreadsheet-matrix.json output/spreadsheet-report.json
@@ -107,7 +107,7 @@ jobs:
         run: |
           [[ "${{ inputs.limit || '0' }}" =~ ^[0-9]+$ ]] || exit 1
           args=(--extension "${{ matrix.extension }}" --limit "${{ inputs.limit || '0' }}" --apply --strict)
-          if [[ "${{ inputs.retry_failures }}" == "true" ]]; then args+=(--retry-failures); fi
+          if [[ "${{ github.event_name }}" == "schedule" || "${{ inputs.retry_failures }}" == "true" ]]; then args+=(--retry-failures); fi
           python scripts/pilot_spreadsheet_stream.py "${args[@]}"
 
   finalize:

@@ -78,7 +78,7 @@ jobs:
           else
             args+=(--extension "$requested")
           fi
-          if [[ "${{ inputs.retry_failures }}" == "true" ]]; then args+=(--retry-failures); fi
+          if [[ "${{ github.event_name }}" == "schedule" || "${{ inputs.retry_failures }}" == "true" ]]; then args+=(--retry-failures); fi
           python scripts/plan_reader_stream_matrix.py "${args[@]}"
           echo "matrix=$(cat output/ebook-matrix.json)" >> "$GITHUB_OUTPUT"
       - run: tar -czf output/ebook-plan.tgz output/search_data.json state/commits.json output/ebook-matrix.json output/ebook-report.json
@@ -129,7 +129,7 @@ jobs:
                 --max-source-bytes "${{ inputs.max_source_bytes || '0' }}"
                 --workers "${{ inputs.workers || '4' }}"
                 --shard-count 8 --shard-index "${{ matrix.shard }}" --apply --strict)
-          if [[ "${{ inputs.retry_failures }}" == "true" ]]; then args+=(--retry-failures); fi
+          if [[ "${{ github.event_name }}" == "schedule" || "${{ inputs.retry_failures }}" == "true" ]]; then args+=(--retry-failures); fi
           python scripts/pilot_epub_chapters.py "${args[@]}"
 
   finalize:

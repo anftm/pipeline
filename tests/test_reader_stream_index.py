@@ -47,6 +47,8 @@ class ReaderStreamCheckpointTests(unittest.TestCase):
         self.assertEqual(index.completed_revisions(result, True)[key], "old")
         recovered = {"key": key, "source_revision": "new"}
         self.assertEqual(index.merge_indexes(result, [recovered], [], "fixture")["failures"], [])
+        recovered = {**recovered, "source_revision": "newer", "checkpointed_at": "2026-10-22T15:00:00+00:00"}
+        self.assertEqual(index.merge_indexes({"files": [recovered]}, [], [failure], "fixture")["failures"], [])
 
     def test_new_chm_profile_failure_is_not_hidden_by_old_same_revision_success(self):
         good = {"key": "repo\0book.chm", "source_revision": "same", "profile": "old"}
@@ -250,6 +252,7 @@ class FormatProducerRegressionTests(unittest.TestCase):
                 commands = "\n".join(s.get("run", "") for s in workflow["jobs"][job]["steps"])
                 self.assertIn("--apply --strict", commands)
                 self.assertIn("--retry-failures", commands)
+                self.assertIn('== "schedule" ||', commands)
                 self.assertIn(f"needs.{job}.result == 'success'", workflow["jobs"]["finalize"]["if"])
                 self.assertIn(f"needs.{job}.result == 'skipped'", workflow["jobs"]["finalize"]["if"])
                 self.assertNotIn("!= 'cancelled'", workflow["jobs"]["finalize"]["if"])

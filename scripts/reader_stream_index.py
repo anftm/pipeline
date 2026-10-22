@@ -72,7 +72,8 @@ def merge_indexes(previous: dict, entries: list[dict], failures: list[dict], kin
     for failure in failures:
         key = failure["key"]
         current = files.get(key, {})
-        if (reusable_entry(current) and current.get("source_revision") == failure.get("source_revision")
+        if (reusable_entry(current) and (current.get("source_revision") == failure.get("source_revision")
+                or (current.get("checkpointed_at") and failure.get("checkpointed_at", "") <= current["checkpointed_at"]))
                 and (not failure.get("profile") or current.get("profile") == failure["profile"])):
             continue
         if errors.get(key, {}).get("checkpointed_at", "") <= failure.get("checkpointed_at", ""):
@@ -179,7 +180,7 @@ def publish_checkpoint(bucket: str, path: str, previous: dict, entries: list[dic
                                                          for other in resources if other != root)}
         identity = hashlib.sha256((entry["key"] + "\0" + "\0".join(sorted(resources))).encode()).hexdigest()[:32]
         record_path = f"reader-index/processing/stream-upload-{identity}.json"
-        entry["processing_roots"] = [record_path]
+        entry["processing_roots"] = sorted(set(entry.get("processing_roots", [])) | {record_path})
         record = reader_lifecycle.processing_record(
             [{"bucket": bucket, "root": root} for root in sorted(resources)],
             "reader-stream-upload", {"repository": os.environ.get("GITHUB_REPOSITORY", ""),
