@@ -209,6 +209,23 @@ class FormatProducerRegressionTests(unittest.TestCase):
                         "extension": extension, "revision": "rev"}, work / "book", None, BUCKET)
                 self.assertIn(entry["object"], uploads)
 
+    def test_legacy_xls_honors_configured_conversion_password(self):
+        from scripts import convert_reader_assets as converter
+        encrypted = Mock()
+        encrypted.is_encrypted.return_value = True
+        encrypted.decrypt.side_effect = lambda handle: handle.write(b"plaintext")
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary)
+            source = work / "source.xls"
+            source.write_bytes(converter.OLE_SIGNATURE + b"encrypted")
+            with patch.dict("os.environ", {"READER_CONVERSION_PASSWORD": "fixture"}), \
+                    patch("msoffcrypto.OfficeFile", return_value=encrypted), \
+                    patch.object(converter, "convert_spreadsheet_to_html") as convert:
+                converter.convert_file({"repo": "repo", "path": "book.xls", "extension": "xls",
+                    "profile": converter.SPREADSHEET_HTML_PROFILE}, source, work / "out.html", work)
+            encrypted.load_key.assert_called_once_with(password="fixture")
+            self.assertEqual(convert.call_args.args[0].read_bytes(), b"plaintext")
+
     def test_web_asset_identity_changes_with_inlined_resources(self):
         paths = []
         with tempfile.TemporaryDirectory() as temporary:

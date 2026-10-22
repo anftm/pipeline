@@ -2012,7 +2012,7 @@ def convert_file(item: dict, source: Path, target: Path, work: Path,
     office_profile = (work / "libreoffice-profile").resolve().as_uri()
     explicit_password = item.get("source_password") or source_password(item.get("repo", ""), item.get("path", ""))
     password = explicit_password
-    if not password and ext == "xlsx":
+    if not password and ext in {"xls", "xlsx"}:
         password = os.environ.get("READER_CONVERSION_PASSWORD", "")
     ole_xlsx = ext == "xlsx" and source.read_bytes()[:8] == OLE_SIGNATURE
     if (password or ole_xlsx) and ext in {"doc", "docx", "ppt", "pptx", "pps", "xls", "xlsx"}:
