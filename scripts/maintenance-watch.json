@@ -1,0 +1,37 @@
+{
+  "requirements": [
+    "scripts/requirements.txt",
+    "scripts/requirements-pdf-ocr.txt",
+    "scripts/requirements-spreadsheet-render.txt"
+  ],
+  "hf_datasets": [
+    "VoiceOfML/VOMEBOOK",
+    "VoiceOfML/SovMaterials",
+    "VoiceOfML/GPCREducation",
+    "VoiceOfML/Teachers",
+    "VoiceOfML/MLMRL-Library",
+    "VoiceOfML/Japanese-Materials",
+    "VoiceOfML/A-Historical-Learning-Data",
+    "VoiceOfML/MLMRL-Hub",
+    "VoiceOfML/Omnibus",
+    "VoiceOfML/Marxists-Library",
+    "vomebook/BHA-Source-Files"
+  ],
+  "hf_buckets": [],
+  "http_pages": [],
+  "manual_checks": [
+    {
+      "name": "百度网盘上游 1",
+      "url_env": "BAIDU_UPSTREAM_1_URL",
+      "interval_days": 30,
+      "note": "上游来自百度网盘；没有稳定的公开 revision API，请人工检查分享页后 ack。"
+    },
+    {
+      "name": "百度网盘上游 2",
+      "url_env": "BAIDU_UPSTREAM_2_URL",
+      "interval_days": 30,
+      "note": "上游来自百度网盘；没有稳定的公开 revision API，请人工检查分享页后 ack。"
+    }
+  ],
+  "github_repos": []
+}
