@@ -108,6 +108,7 @@ class ReaderStreamCheckpointTests(unittest.TestCase):
         self.assertEqual(len(events), 2)
         self.assertEqual(len(events[-1]["failures"]), 2)
         self.assertIn("HTTP 429", events[-1]["failures"][0]["error"])
+        self.assertTrue(events[-1]["failures"][0]["checkpointed_at"])
 
     def test_corrupt_content_readback_never_advances_index(self):
         with tempfile.TemporaryDirectory() as temporary:

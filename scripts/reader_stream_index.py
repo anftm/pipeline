@@ -15,11 +15,11 @@ from huggingface_hub import HfApi, HfFileSystem
 try:
     from . import reader_lifecycle
     from .shared import batch_bucket_files_with_retry, hash_file
-    from .reader_bucket_store import retry_s3
+    from .reader_bucket_store import retry_read, retry_s3
 except ImportError:
     import reader_lifecycle
     from shared import batch_bucket_files_with_retry, hash_file
-    from reader_bucket_store import retry_s3
+    from reader_bucket_store import retry_read, retry_s3
 
 
 def validate_index(value: dict, path: str) -> dict:
@@ -107,8 +107,8 @@ def unchanged_sources(records: list[dict], index: dict, token: str | None) -> se
     for (repo, revision), pairs in groups.items():
         for start in range(0, len(pairs), 100):
             batch = pairs[start:start + 100]
-            metadata = api.get_paths_info(repo, [path for path, _ in batch], revision=revision,
-                                          repo_type="dataset")
+            metadata = retry_read(lambda: api.get_paths_info(repo, [path for path, _ in batch],
+                                                            revision=revision, repo_type="dataset"))
             by_path = {entry.path: entry for entry in metadata}
             for path, key in batch:
                 remote = by_path.get(path)
@@ -170,6 +170,8 @@ def publish_checkpoint(bucket: str, path: str, previous: dict, entries: list[dic
                        token: str | None, *, apply: bool, kind: str) -> dict:
     """Protect/upload content before the index; even all-failed batches persist."""
     roots = []
+    for failure in failures:
+        failure.setdefault("checkpointed_at", datetime.now(timezone.utc).isoformat())
     for entry in entries:
         entry["checkpointed_at"] = datetime.now(timezone.utc).isoformat()
         resources = {entry["root"]} if entry.get("root") else set()
