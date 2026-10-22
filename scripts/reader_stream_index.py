@@ -34,15 +34,17 @@ def validate_index(value: dict, path: str) -> dict:
 
 
 def read_index(bucket: str, path: str, token: str | None, kind: str) -> dict:
-    try:
+    def load():
         fs = HfFileSystem(token=token)
         uri = f"hf://buckets/{bucket}/{path}"
         fs.invalidate_cache(uri)
         with fs.open(uri, "rb") as stream:
             value = json.loads(stream.read().decode("utf-8"))
+        return validate_index(value, f"{bucket}/{path}")
+    try:
+        return retry_read(load)
     except FileNotFoundError:
         return {"version": 1, "kind": kind, "files": [], "failures": []}
-    return validate_index(value, f"{bucket}/{path}")
 
 
 def shard_for(key: str, count: int) -> int:
