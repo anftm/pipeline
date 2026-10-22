@@ -111,7 +111,7 @@ jobs:
           RETRY_FAILED: ${{ inputs.retry_failed || 'false' }}
           FAILED_ONLY: ${{ inputs.failed_only || 'false' }}
         run: |
-          args=(--extension chm --limit "$LIMIT" --shard-count 1 --shard-index 0 --apply --workers 2)
+          args=(--extension chm --limit "$LIMIT" --shard-count 1 --shard-index 0 --apply --workers 2 --strict)
           if [[ "$RETRY_FAILED" == "true" ]]; then args+=(--retry-failures); fi
           if [[ "$FAILED_ONLY" == "true" ]]; then args+=(--failed-only); fi
           python scripts/pilot_epub_chapters.py "${args[@]}"

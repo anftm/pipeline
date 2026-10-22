@@ -13,8 +13,10 @@ from huggingface_hub import HfFileSystem
 
 try:
     from .reader_assets import bucket_conversion_contract, decode_search_payload, relative_path
+    from .reader_stream_index import merge_shards, unchanged_sources
 except ImportError:
     from reader_assets import bucket_conversion_contract, decode_search_payload, relative_path
+    from reader_stream_index import merge_shards, unchanged_sources
 
 
 KINDS = {
@@ -41,6 +43,8 @@ def args() -> argparse.Namespace:
     p.add_argument("--shard-count", type=int, default=8)
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--retry-failures", action="store_true")
+    p.add_argument("--verify-source-sha", action="store_true")
+    p.add_argument("--report", type=Path)
     return p.parse_args()
 
 
@@ -114,6 +118,8 @@ def completed_entries(index: dict, retry_failures: bool = False) -> dict[str, st
 
 def main() -> int:
     a = args()
+    if a.shard_count < 1:
+        raise ValueError("shard-count must be positive")
     config = KINDS[a.kind]
     requested = set(a.extensions or config["extensions"])
     wanted = set(config["extensions"]) if "all" in requested else requested
@@ -125,27 +131,49 @@ def main() -> int:
     token = os.environ.get("HF_TOKEN")
     fs = HfFileSystem(token=token)
     include = []
+    summaries = []
     for extension in sorted(wanted):
         candidates = [item for item in records if item["extension"] == extension]
         if config["sharded"]:
             canonical = read_json(fs, a.bucket, f"{root_for(a.kind, extension)}/index.json")
-            canonical_done = completed_entries(canonical, a.retry_failures)
+            indexes = [read_json(fs, a.bucket, f"{root_for(a.kind, extension)}/index-{shard:02d}.json")
+                       for shard in range(a.shard_count)]
+            source_extensions = {extension}
+            if a.kind == "media":
+                source_extensions = {str(x["key"].rsplit(".", 1)[-1]).lower() for x in candidates}
+            combined = merge_shards(canonical, [(number, index) for number, index in enumerate(indexes) if index],
+                                    "stream-index", source_extensions, a.shard_count)
+            unchanged = unchanged_sources(candidates, combined, token) if a.verify_source_sha else set()
+            pending_count = 0
             for shard in range(a.shard_count):
-                index = read_json(fs, a.bucket, f"{root_for(a.kind, extension)}/index-{shard:02d}.json")
+                index = indexes[shard]
                 completed = completed_entries(index, a.retry_failures)
-                completed.update(canonical_done)
+                completed.update(completed_entries(combined, a.retry_failures))
                 pending = [x for x in candidates if completed.get(x["key"]) != x["revision"] and
-                           int.from_bytes(hashlib.sha256(x["key"].encode()).digest()[:8], "big") % a.shard_count == shard]
+                            x["key"] not in unchanged and
+                            int.from_bytes(hashlib.sha256(x["key"].encode()).digest()[:8], "big") % a.shard_count == shard]
+                pending_count += len(pending)
                 if pending:
                     include.append({"extension": extension, "shard": shard})
+            summaries.append({"extension": extension, "sources": len(candidates), "pending": pending_count,
+                              "unchanged_sha": len(unchanged), "checkpoint_failures": len(combined.get("failures", []))})
         else:
             index = read_json(fs, a.bucket, f"{root_for(a.kind, extension)}/index.json")
             completed = completed_entries(index, a.retry_failures)
             if any(completed.get(x["key"]) != x["revision"] for x in candidates):
                 include.append({"extension": extension})
+            summaries.append({"extension": extension, "sources": len(candidates),
+                              "pending": sum(completed.get(x["key"]) != x["revision"] for x in candidates),
+                              "checkpoint_failures": len(index.get("failures", []))})
     a.output.parent.mkdir(parents=True, exist_ok=True)
     a.output.write_text(json.dumps({"include": include}, separators=(",", ":")) + "\n", encoding="utf-8")
     print(json.dumps({"include": include}, ensure_ascii=False))
+    if a.report:
+        a.report.parent.mkdir(parents=True, exist_ok=True)
+        a.report.write_text(json.dumps({"kind": a.kind, "extensions": summaries}, ensure_ascii=False,
+                                      indent=2) + "\n", encoding="utf-8")
+        for summary in summaries:
+            print(json.dumps(summary, ensure_ascii=False))
     return 0
 
 

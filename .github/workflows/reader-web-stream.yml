@@ -23,6 +23,11 @@ on:
         required: true
         default: false
         type: boolean
+      retry_failures:
+        description: Retry previously recorded failures
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -49,15 +54,18 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           FORCE_SYNC: "true"
+          SKIP_SIZES: "true"
         run: python scripts/fetch_and_parse.py
       - name: Plan pending web workers
         id: matrix
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          python scripts/plan_reader_stream_matrix.py --kind web --extension "${{ inputs.extension || 'all' }}" --output output/web-matrix.json
+          args=(--kind web --extension "${{ inputs.extension || 'all' }}" --output output/web-matrix.json --report output/web-report.json)
+          if [[ "${{ inputs.retry_failures }}" == "true" ]]; then args+=(--retry-failures); fi
+          python scripts/plan_reader_stream_matrix.py "${args[@]}"
           echo "matrix=$(cat output/web-matrix.json)" >> "$GITHUB_OUTPUT"
-      - run: tar -czf output/web-plan.tgz output/search_data.json state/commits.json output/web-matrix.json
+      - run: tar -czf output/web-plan.tgz output/search_data.json state/commits.json output/web-matrix.json output/web-report.json
       - uses: actions/upload-artifact@v7
         with:
           name: reader-web-plan
@@ -73,7 +81,7 @@ jobs:
     timeout-minutes: 360
     strategy:
       fail-fast: false
-      max-parallel: 4
+      max-parallel: 2
       matrix:
         include: ${{ fromJSON(needs.plan.outputs.matrix).include }}
     steps:
@@ -92,14 +100,16 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           [[ "${{ inputs.limit || '0' }}" =~ ^[0-9]+$ ]] || exit 1
-          python scripts/pilot_web_stream.py --extension "${{ matrix.extension }}" --limit "${{ inputs.limit || '0' }}" --apply
+          args=(--extension "${{ matrix.extension }}" --limit "${{ inputs.limit || '0' }}" --apply --strict)
+          if [[ "${{ inputs.retry_failures }}" == "true" ]]; then args+=(--retry-failures); fi
+          python scripts/pilot_web_stream.py "${args[@]}"
 
   finalize:
     needs: [plan, web-stream]
     if: >-
       always() && needs.plan.result == 'success' &&
       (github.event_name == 'schedule' || inputs.apply == true) &&
-      needs.web-stream.result == 'success'
+      (needs.web-stream.result == 'success' || needs.web-stream.result == 'skipped')
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     concurrency:

@@ -53,17 +53,18 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           FORCE_SYNC: "true"
+          SKIP_SIZES: "true"
         run: python scripts/fetch_and_parse.py
       - name: Plan pending spreadsheet workers
         id: matrix
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          args=(--kind spreadsheet --extension "${{ inputs.extension || 'all' }}" --output output/spreadsheet-matrix.json)
+          args=(--kind spreadsheet --extension "${{ inputs.extension || 'all' }}" --output output/spreadsheet-matrix.json --report output/spreadsheet-report.json)
           if [[ "${{ inputs.retry_failures }}" == "true" ]]; then args+=(--retry-failures); fi
           python scripts/plan_reader_stream_matrix.py "${args[@]}"
           echo "matrix=$(cat output/spreadsheet-matrix.json)" >> "$GITHUB_OUTPUT"
-      - run: tar -czf output/spreadsheet-plan.tgz output/search_data.json state/commits.json output/spreadsheet-matrix.json
+      - run: tar -czf output/spreadsheet-plan.tgz output/search_data.json state/commits.json output/spreadsheet-matrix.json output/spreadsheet-report.json
       - uses: actions/upload-artifact@v7
         with:
           name: reader-spreadsheet-plan
@@ -103,7 +104,7 @@ jobs:
           READER_CONVERSION_PASSWORD: ${{ secrets.READER_CONVERSION_PASSWORD }}
         run: |
           [[ "${{ inputs.limit || '0' }}" =~ ^[0-9]+$ ]] || exit 1
-          args=(--extension "${{ matrix.extension }}" --limit "${{ inputs.limit || '0' }}" --apply)
+          args=(--extension "${{ matrix.extension }}" --limit "${{ inputs.limit || '0' }}" --apply --strict)
           if [[ "${{ inputs.retry_failures }}" == "true" ]]; then args+=(--retry-failures); fi
           python scripts/pilot_spreadsheet_stream.py "${args[@]}"
 
@@ -112,7 +113,7 @@ jobs:
     if: >-
       always() && needs.plan.result == 'success' &&
       (github.event_name == 'schedule' || inputs.apply == true) &&
-      needs.spreadsheet-stream.result == 'success'
+      (needs.spreadsheet-stream.result == 'success' || needs.spreadsheet-stream.result == 'skipped')
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     concurrency:

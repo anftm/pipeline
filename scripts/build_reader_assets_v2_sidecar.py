@@ -96,6 +96,14 @@ def ebook_chapter_indexes(assets_bucket: str) -> list[tuple[str, str]]:
             for extension in EBOOK_EXTENSIONS]
 
 
+def stream_processing_indexes(assets_bucket: str) -> list[tuple[str, str]]:
+    return [(assets_bucket, f"documents/{family}/{extension}/index.json")
+            for family, extensions in (("web", ("html", "htm", "mht", "mhtml")),
+                                       ("spreadsheet", ("xls", "xlsx", "csv", "ods")))
+            for extension in extensions] + [(assets_bucket, f"media/{kind}/index.json")
+                                           for kind in ("audio", "video", "swf")]
+
+
 def build(fs: HfFileSystem, assets_bucket: str, pdf_bucket: str, derived_path: str,
           render_path: str, ocr_path: str) -> dict:
     files = {}
@@ -174,7 +182,8 @@ def build(fs: HfFileSystem, assets_bucket: str, pdf_bucket: str, derived_path: s
                 continue
             object_path = entry.get("object")
             if isinstance(object_path, str):
-                files[entry["key"]] = {"s": 2, "m": mode, "p": object_path, "b": assets_bucket}
+                actual_mode = {"audio": "a", "video": "v", "swf": "f"}.get(entry.get("mode"), mode)
+                files[entry["key"]] = {"s": 2, "m": actual_mode, "p": object_path, "b": assets_bucket}
 
     for index_path in (render_path, ocr_path):
         try:
@@ -216,6 +225,7 @@ def main() -> int:
         indexes = []
         for bucket, path in [(args.pdf_bucket, args.derived_manifest),
                              (args.assets_bucket, "documents/text/index.json"),
+                             *stream_processing_indexes(args.assets_bucket),
                              *ebook_chapter_indexes(args.assets_bucket)]:
             try:
                 payload = read_bucket_json(path, token, bucket=bucket)

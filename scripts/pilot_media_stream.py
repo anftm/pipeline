@@ -11,16 +11,18 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from huggingface_hub import HfFileSystem
-
 try:
     from .convert_reader_assets import convert_item
     from .reader_assets import bucket_conversion_contract, decode_search_payload, relative_path, source_url
-    from .shared import batch_bucket_files_with_retry
+    from .reader_stream_index import (
+        completed_revisions, merge_indexes, publish_checkpoint, read_index, source_failure, unchanged_sources,
+    )
 except ImportError:
     from convert_reader_assets import convert_item
     from reader_assets import bucket_conversion_contract, decode_search_payload, relative_path, source_url
-    from shared import batch_bucket_files_with_retry
+    from reader_stream_index import (
+        completed_revisions, merge_indexes, publish_checkpoint, read_index, source_failure, unchanged_sources,
+    )
 
 
 TARGET_BUCKET = "vomebook/reader-assets-v2"
@@ -41,19 +43,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--shard-index", type=int, default=0)
     parser.add_argument("--bucket", default=TARGET_BUCKET)
     parser.add_argument("--apply", action="store_true")
+    parser.add_argument("--retry-failures", action="store_true")
+    parser.add_argument("--strict", action="store_true")
     return parser.parse_args()
 
 
 def existing_index(bucket: str, token: str | None, root: str, name: str) -> dict:
-    try:
-        fs = HfFileSystem(token=token)
-        with fs.open(f"hf://buckets/{bucket}/{root}/{name}", "rb") as stream:
-            payload = json.loads(stream.read().decode("utf-8"))
-        if isinstance(payload, dict) and isinstance(payload.get("files"), list):
-            return payload
-    except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError):
-        pass
-    return {"version": 1, "kind": "media-stream-index", "files": []}
+    return read_index(bucket, f"{root}/{name}", token, "media-stream-index")
 
 
 def shard_for(key: str, count: int) -> int:
@@ -104,8 +100,12 @@ def build_one(item: dict, work: Path, bucket: str) -> tuple[dict, dict[str, str]
     if not artifact.is_file():
         raise ValueError(f"converted artifact missing: {result['path']}")
     source_digest = result["source_sha256"]
+    # Codec probing can change the format, filename and even ASX's media kind.
+    # Publish the converter's actual artifact rather than the input contract.
+    mode = result["reader_mode"]
+    output_name = artifact.name
     root_kind = "swf" if mode == "swf" else mode
-    remote_root = f"media/{root_kind}/{extension}/{source_digest}"
+    remote_root = f"media/{root_kind}/{extension}/{result['sha256']}"
     remote_path = f"{remote_root}/{output_name}"
     target = work / output_name
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -131,47 +131,45 @@ def main() -> int:
     index_name = "index.json" if args.shard_count == 1 else f"index-{args.shard_index:02d}.json"
     previous = existing_index(args.bucket, token, root, index_name)
     canonical = existing_index(args.bucket, token, root, "index.json")
-    completed = {entry.get("key"): entry.get("source_revision") for entry in previous.get("files", []) if isinstance(entry, dict)}
-    selected = [item for item in select_records(args.search_data, revisions, args.kind)
-                if shard_for(f"{item['repo']}\0{item['path']}", args.shard_count) == args.shard_index
+    # Historical shards contained complete canonical copies; retain only this
+    # shard's keys and let the canonical newer checkpoint win on conflicts.
+    previous = merge_indexes(previous, canonical.get("files", []), canonical.get("failures", []), "media-stream-index")
+    previous = {**previous, **{field: [e for e in previous.get(field, [])
+                  if shard_for(e["key"], args.shard_count) == args.shard_index] for field in ("files", "failures")}}
+    completed = completed_revisions(previous, args.retry_failures)
+    candidates = [item for item in select_records(args.search_data, revisions, args.kind)
+                  if shard_for(f"{item['repo']}\0{item['path']}", args.shard_count) == args.shard_index]
+    unchanged = unchanged_sources(candidates, previous, token)
+    selected = [item for item in candidates if f"{item['repo']}\0{item['path']}" not in unchanged
                 and completed.get(f"{item['repo']}\0{item['path']}") != item["revision"]]
+    print(f"unchanged_by_source_sha={len(unchanged)} pending={len(selected)}", flush=True)
     if args.limit:
         selected = selected[:args.limit]
     if not selected:
         print(f"no pending {args.kind} media sources")
         return 0
-    entries, uploads, failures = [], {}, []
+    converted, failed = 0, 0
     with tempfile.TemporaryDirectory(prefix=f"reader-{args.kind}-") as directory:
         work = Path(directory)
+        # A large or broken later source must not lose earlier successful work.
         for index, item in enumerate(selected):
+            entries, failures, uploads = [], [], {}
+            checkpoint_work = work / str(index)
+            checkpoint_work.mkdir(parents=True, exist_ok=True)
             try:
-                entry, files = build_one(item, work / str(index), args.bucket)
+                entry, uploads = build_one(item, checkpoint_work, args.bucket)
+                entries.append(entry)
+                converted += 1
             except Exception as error:
-                failures.append({"key": f"{item['repo']}\0{item['path']}", "repo": item["repo"],
-                                 "path": item["path"], "error": f"{type(error).__name__}: {error}"[:1000]})
-                print(f"failed: {item['repo']}/{item['path']}: {type(error).__name__}: {error}")
-                continue
-            entries.append(entry)
-            uploads.update(files)
-        if not entries and failures:
-            print(f"no {args.kind} media converted; failures={len(failures)}")
-            return 0
-        merged = {entry.get("key"): entry for entry in canonical.get("files", []) if isinstance(entry, dict)}
-        merged.update({entry.get("key"): entry for entry in previous.get("files", []) if isinstance(entry, dict)})
-        merged.update({entry["key"]: entry for entry in entries})
-        index_file = work / "index.json"
-        index_file.write_text(json.dumps({"version": 1, "kind": "media-stream-index",
-                                          "files": [merged[key] for key in sorted(merged)],
-                                          "failures": failures}, ensure_ascii=False,
-                                         sort_keys=True, indent=2) + "\n", encoding="utf-8")
-        uploads[f"{root}/{index_name}"] = str(index_file)
-        print(f"planned {len(entries)} {args.kind} media stream(s), {len(uploads)} object(s), failures={len(failures)}")
-        if args.apply:
-            batch_bucket_files_with_retry(args.bucket, [(local, remote) for remote, local in sorted(uploads.items())], token)
-            print(f"published {len(uploads)} object(s) to {args.bucket}")
-        else:
-            print("report-only; pass --apply to publish")
-    return 0
+                failures.append(source_failure(item, error))
+                failed += 1
+                print(f"failed: {item['repo']}/{item['path']}: {type(error).__name__}: {error}", flush=True)
+            previous = publish_checkpoint(args.bucket, f"{root}/{index_name}", previous,
+                                          entries, failures, uploads, checkpoint_work, token,
+                                          apply=args.apply, kind="media-stream-index")
+            print(f"checkpoint={root}/{index_name} converted={converted} failures={failed}", flush=True)
+            shutil.rmtree(checkpoint_work)
+    return 1 if args.strict and failed else 0
 
 
 if __name__ == "__main__":

@@ -64,6 +64,7 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           FORCE_SYNC: "true"
+          SKIP_SIZES: ${{ inputs.max_source_bytes != '' && inputs.max_source_bytes != '0' && 'false' || 'true' }}
         run: python scripts/fetch_and_parse.py
       - name: Plan pending ebook workers
         id: matrix
@@ -71,7 +72,7 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           requested="${{ inputs.extension || 'all' }}"
-          args=(--kind ebook --output output/ebook-matrix.json)
+          args=(--kind ebook --output output/ebook-matrix.json --verify-source-sha --report output/ebook-report.json)
           if [[ "$requested" == "all" ]]; then
             for extension in epub mobi azw3 fb2; do args+=(--extension "$extension"); done
           else
@@ -80,7 +81,7 @@ jobs:
           if [[ "${{ inputs.retry_failures }}" == "true" ]]; then args+=(--retry-failures); fi
           python scripts/plan_reader_stream_matrix.py "${args[@]}"
           echo "matrix=$(cat output/ebook-matrix.json)" >> "$GITHUB_OUTPUT"
-      - run: tar -czf output/ebook-plan.tgz output/search_data.json state/commits.json output/ebook-matrix.json
+      - run: tar -czf output/ebook-plan.tgz output/search_data.json state/commits.json output/ebook-matrix.json output/ebook-report.json
       - uses: actions/upload-artifact@v7
         with:
           name: reader-ebook-plan
@@ -96,7 +97,7 @@ jobs:
     timeout-minutes: 360
     strategy:
       fail-fast: false
-      max-parallel: 8
+      max-parallel: 2
       matrix:
         include: ${{ fromJSON(needs.plan.outputs.matrix).include }}
     steps:
@@ -125,7 +126,7 @@ jobs:
           args=(--extension "${{ matrix.extension }}" --limit "${{ inputs.limit || '0' }}"
                 --max-source-bytes "${{ inputs.max_source_bytes || '0' }}"
                 --workers "${{ inputs.workers || '4' }}"
-                --shard-count 8 --shard-index "${{ matrix.shard }}" --apply)
+                --shard-count 8 --shard-index "${{ matrix.shard }}" --apply --strict)
           if [[ "${{ inputs.retry_failures }}" == "true" ]]; then args+=(--retry-failures); fi
           python scripts/pilot_epub_chapters.py "${args[@]}"
 
@@ -134,7 +135,7 @@ jobs:
     if: >-
       always() && needs.plan.result == 'success' &&
       (github.event_name == 'schedule' || inputs.apply == true) &&
-      needs.ebook-stream.result == 'success'
+      (needs.ebook-stream.result == 'success' || needs.ebook-stream.result == 'skipped')
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     concurrency:
@@ -152,7 +153,15 @@ jobs:
           HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
           HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
           HF_S3_BUCKET: vomebook/reader-assets-v2
-        run: python scripts/finalize_ebook_indexes.py
+        run: |
+          args=()
+          requested="${{ inputs.extension || 'all' }}"
+          if [[ "$requested" == "all" ]]; then
+            for extension in epub mobi azw3 fb2; do args+=(--extension "$extension"); done
+          else
+            args+=(--extension "$requested")
+          fi
+          python scripts/finalize_ebook_indexes.py "${args[@]}"
       - name: Rebuild canonical Reader sidecar
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}

@@ -24,6 +24,11 @@ on:
         required: true
         default: false
         type: boolean
+      retry_failures:
+        description: Retry previously recorded failures
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -35,6 +40,26 @@ concurrency:
   queue: max
 
 jobs:
+  codecs:
+    if: github.event_name == 'schedule' || inputs.apply == true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - run: |
+          pip install -r scripts/requirements.txt
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+      - run: python scripts/verify_reader_media_codecs.py --output output/media-codecs.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: reader-media-codecs
+          path: output/media-codecs.json
+          retention-days: 14
+
   plan:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -50,15 +75,18 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           FORCE_SYNC: "true"
+          SKIP_SIZES: "true"
         run: python scripts/fetch_and_parse.py
       - name: Plan pending media workers
         id: matrix
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          python scripts/plan_reader_stream_matrix.py --kind media --extension "${{ inputs.kind || 'all' }}" --output output/media-matrix.json
+          args=(--kind media --extension "${{ inputs.kind || 'all' }}" --output output/media-matrix.json --verify-source-sha --report output/media-report.json)
+          if [[ "${{ inputs.retry_failures }}" == "true" ]]; then args+=(--retry-failures); fi
+          python scripts/plan_reader_stream_matrix.py "${args[@]}"
           echo "matrix=$(cat output/media-matrix.json)" >> "$GITHUB_OUTPUT"
-      - run: tar -czf output/media-plan.tgz output/search_data.json state/commits.json output/media-matrix.json
+      - run: tar -czf output/media-plan.tgz output/search_data.json state/commits.json output/media-matrix.json output/media-report.json
       - uses: actions/upload-artifact@v7
         with:
           name: reader-media-plan
@@ -74,7 +102,7 @@ jobs:
     timeout-minutes: 360
     strategy:
       fail-fast: false
-      max-parallel: 8
+      max-parallel: 2
       matrix:
         include: ${{ fromJSON(needs.plan.outputs.matrix).include }}
     steps:
@@ -96,19 +124,18 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           [[ "${{ inputs.limit || '0' }}" =~ ^[0-9]+$ ]] || exit 1
-          python scripts/pilot_media_stream.py \
-            --kind "${{ matrix.extension }}" \
-            --limit "${{ inputs.limit || '0' }}" \
-            --shard-count 8 \
-            --shard-index "${{ matrix.shard }}" \
-            --apply
+          args=(--kind "${{ matrix.extension }}" --limit "${{ inputs.limit || '0' }}"
+                --shard-count 8 --shard-index "${{ matrix.shard }}" --apply --strict)
+          if [[ "${{ inputs.retry_failures }}" == "true" ]]; then args+=(--retry-failures); fi
+          python scripts/pilot_media_stream.py "${args[@]}"
 
   finalize:
-    needs: [plan, media]
+    needs: [plan, media, codecs]
     if: >-
       always() && needs.plan.result == 'success' &&
+      needs.codecs.result == 'success' &&
       (github.event_name == 'schedule' || inputs.apply == true) &&
-      needs.media.result == 'success'
+      (needs.media.result == 'success' || needs.media.result == 'skipped')
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     concurrency:

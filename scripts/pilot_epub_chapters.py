@@ -37,6 +37,7 @@ try:
         bucket_conversion_contract, decode_search_payload, relative_path, source_password, source_url,
     )
     from .shared import batch_bucket_files_with_retry
+    from .reader_stream_index import publish_checkpoint, unchanged_sources
 except ImportError:
     from convert_reader_assets import convert_item, decode_html_source, sanitize_html
     from epub_chapters import build_bundle, bundle_version
@@ -50,6 +51,7 @@ except ImportError:
         bucket_conversion_contract, decode_search_payload, relative_path, source_password, source_url,
     )
     from shared import batch_bucket_files_with_retry
+    from reader_stream_index import publish_checkpoint, unchanged_sources
 
 
 TARGET_BUCKET = "vomebook/reader-assets-v2"
@@ -87,6 +89,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--extension", default="epub")
     parser.add_argument("--bucket", default=TARGET_BUCKET)
     parser.add_argument("--apply", action="store_true")
+    parser.add_argument("--strict", action="store_true")
     parser.add_argument("--plan-only", action="store_true",
                         help="report stale chapter sources without downloading or converting them")
     parser.add_argument("--workers", type=int, default=1,
@@ -536,6 +539,18 @@ def main() -> int:
     root_prefix = OFFICE_ROOT if extension in OFFICE_EXTENSIONS else f"chapters/ebook/{extension}"
     index_name = "index.json" if args.shard_count == 1 else f"index-{args.shard_index:02d}.json"
     previous = existing_index(args.bucket, token, root_prefix, index_name)
+    if args.shard_count > 1:
+        canonical = existing_index(args.bucket, token, root_prefix)
+        try:
+            from .reader_stream_index import merge_indexes
+        except ImportError:
+            from reader_stream_index import merge_indexes
+        previous = merge_indexes(previous, canonical.get("files", []), canonical.get("failures", []),
+                                 "ebook-chapter-stream-index")
+        previous = {**previous, **{field: [e for e in previous.get(field, [])
+                    if str(e.get("source_extension") or Path(e["key"].split("\0")[-1]).suffix.lstrip(".")).lower() == extension
+                    and shard_for(e["key"], args.shard_count) == args.shard_index]
+                    for field in ("files", "failures")}}
     if args.failed_only and not args.retry_failures:
         raise ValueError("--failed-only requires --retry-failures")
     expected_profile = chapter_profile(extension)
@@ -545,7 +560,10 @@ def main() -> int:
     selected = [item for item in select_records(args.search_data, revisions, args.max_source_bytes, extension)
                 if shard_for(f"{item['repo']}\0{item['path']}", args.shard_count) == args.shard_index
                 if not args.failed_only or f"{item['repo']}\0{item['path']}" in failure_keys
-                if completed.get(f"{item['repo']}\0{item['path']}") != item["revision"]]
+                 if completed.get(f"{item['repo']}\0{item['path']}") != item["revision"]]
+    if extension not in OFFICE_EXTENSIONS and extension != "chm":
+        unchanged = unchanged_sources(selected, previous, token)
+        selected = [item for item in selected if f"{item['repo']}\0{item['path']}" not in unchanged]
     if args.limit:
         selected = selected[:args.limit]
     if args.plan_only:
@@ -555,7 +573,7 @@ def main() -> int:
     if not selected:
         print("no pending chapter sources")
         return 0
-    uploads, entries, failures = {}, [], []
+    converted, failed = 0, 0
     with tempfile.TemporaryDirectory(prefix="reader-epub-") as directory:
         root = Path(directory)
 
@@ -569,64 +587,34 @@ def main() -> int:
                     "key": f"{item['repo']}\0{item['path']}",
                     "repo": item["repo"], "path": item["path"],
                     "source_revision": item["revision"],
+                    "source_extension": extension,
                     "profile": expected_profile,
                     "error": f"{type(error).__name__}: {error}",
                 }
                 return item, None, None, failure
 
-        pairs = list(enumerate(selected))
-        if args.workers == 1:
-            built = map(build_selected, pairs)
-            executor = None
-        else:
-            executor = ThreadPoolExecutor(max_workers=args.workers, thread_name_prefix="chm-convert")
-            built = executor.map(build_selected, pairs)
-        try:
-            for item, entry, files, failure in built:
-                if failure:
-                    failures.append(failure)
-                    print(f"failed: {item['repo']}/{item['path']}: {failure['error']}", flush=True)
-                    continue
-                entries.append(entry)
-                uploads.update(files)
-        finally:
-            if executor:
-                executor.shutdown(wait=True, cancel_futures=True)
-        merged = merge_index_entries(previous, entries)
-        index_file = root / "index.json"
-        payload = merged_index_payload(previous, entries, failures)
-        index_file.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
-                              encoding="utf-8")
-        processing_uploads = []
-        if args.apply:
-            for entry in entries:
-                processing_path, record = processing_record_for_entry(
-                    entry, args.bucket,
-                    {"repository": os.environ.get("GITHUB_REPOSITORY", ""),
-                     "run_id": os.environ.get("GITHUB_RUN_ID", ""),
-                     "attempt": os.environ.get("GITHUB_RUN_ATTEMPT", "")})
-                local_record = root / "processing-roots" / Path(processing_path).name
-                local_record.parent.mkdir(parents=True, exist_ok=True)
-                local_record.write_text(json.dumps(record, ensure_ascii=False, sort_keys=True,
-                                                   separators=(",", ":")) + "\n", encoding="utf-8")
-                processing_uploads.append((str(local_record), processing_path))
-                entry["processing_roots"] = [processing_path]
-                merged[entry["key"]] = entry
-            payload = {"version": 1, "kind": "ebook-chapter-stream-index",
-                       "files": [merged[key] for key in sorted(merged)],
-                       "failures": merge_index_failures(previous, entries, failures)}
-            index_file.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
-                                  encoding="utf-8")
-            if processing_uploads:
-                batch_bucket_files_with_retry(args.bucket, processing_uploads, token)
-        uploads[f"{root_prefix}/{index_name}"] = str(index_file)
-        print(f"planned {len(entries)} EPUB stream(s), {len(uploads)} object(s), failures={len(failures)}")
-        if args.apply:
-            batch_bucket_files_with_retry(args.bucket, [(local, remote) for remote, local in sorted(uploads.items())], token)
-            print(f"published {len(uploads)} object(s) to {args.bucket}")
-        else:
-            print("report-only; pass --apply to publish")
-    return 0
+        for start in range(0, len(selected), 10):
+            uploads, entries, failures = {}, [], []
+            pairs = list(enumerate(selected[start:start + 10], start))
+            with ThreadPoolExecutor(max_workers=args.workers, thread_name_prefix="chapter-convert") as executor:
+                for item, entry, files, failure in executor.map(build_selected, pairs):
+                    if failure:
+                        failures.append(failure)
+                        failed += 1
+                        print(f"failed: {item['repo']}/{item['path']}: {failure['error']}", flush=True)
+                    else:
+                        entries.append(entry)
+                        uploads.update(files)
+                        converted += 1
+            checkpoint_work = root / f"checkpoint-{start}"
+            checkpoint_work.mkdir()
+            previous = publish_checkpoint(args.bucket, f"{root_prefix}/{index_name}", previous,
+                                          entries, failures, uploads, checkpoint_work, token,
+                                          apply=args.apply, kind="ebook-chapter-stream-index")
+            print(f"checkpoint={root_prefix}/{index_name} converted={converted} failures={failed}", flush=True)
+            for index, _ in pairs:
+                shutil.rmtree(root / str(index), ignore_errors=True)
+    return 1 if args.strict and failed else 0
 
 
 if __name__ == "__main__":

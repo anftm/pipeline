@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 from scripts import build_reader_assets_v2_sidecar as sidecar
 from scripts.reader_lifecycle import processing_record
@@ -9,6 +10,26 @@ class ReaderSidecarHandoffTests(unittest.TestCase):
         indexes = sidecar.ebook_chapter_indexes("vomebook/reader-assets-v2")
         self.assertIn(("vomebook/reader-assets-v2", "chapters/ebook/chm/index.json"), indexes)
         self.assertEqual(len(indexes), 5)
+
+    def test_stream_upload_roots_are_included_in_catalog_handoff(self):
+        indexes = sidecar.stream_processing_indexes("vomebook/reader-assets-v2")
+        self.assertEqual(len(indexes), 11)
+        for path in ("documents/web/html/index.json", "documents/spreadsheet/csv/index.json", "media/audio/index.json"):
+            self.assertIn(("vomebook/reader-assets-v2", path), indexes)
+
+    def test_asx_audio_uses_converter_mode_not_video_category(self):
+        entry = {"key": "repo\0book.asx", "mode": "audio", "object": "media/audio/asx/hash/audio.mp3"}
+        def read(_fs, _bucket, path):
+            if path in {"render", "ocr"}:
+                return {"files": {}}
+            if path == "media/video/index.json":
+                return {"files": [entry]}
+            if path in {"pages/image/index.json", "pages/image/index-v2.json"}:
+                return {"files": []}
+            return {"files": []}
+        with patch.object(sidecar, "read_json", side_effect=read):
+            result = sidecar.build(None, "vomebook/reader-assets-v2", "vomebook/pdf-pages-v2", "derived", "render", "ocr")
+        self.assertEqual(result["f"][entry["key"]]["m"], "a")
 
     def test_only_new_processing_roots_are_published_as_released(self):
         bucket = "vomebook/reader-assets-v2"

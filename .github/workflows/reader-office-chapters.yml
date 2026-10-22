@@ -113,7 +113,7 @@ jobs:
             --extension "${{ matrix.extension }}" \
             --limit "${{ inputs.limit || '0' }}" \
             "${retry_args[@]}" \
-             --shard-count 1 --shard-index 0 --apply
+             --shard-count 1 --shard-index 0 --apply --strict
 
   finalize:
     needs: [plan, build]
