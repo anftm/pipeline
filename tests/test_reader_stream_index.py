@@ -14,6 +14,8 @@ from scripts import pilot_epub_chapters as ebook
 from scripts import pilot_media_stream as media
 from scripts import pilot_spreadsheet_stream as spreadsheet
 from scripts import pilot_web_stream as web
+from scripts import finalize_ebook_indexes as finalize_ebook
+from scripts import finalize_media_indexes as finalize_media
 
 
 BUCKET = "vomebook/reader-assets-v2"
@@ -159,6 +161,30 @@ class ReaderStreamCheckpointTests(unittest.TestCase):
         with patch.object(index, "HfApi") as api:
             self.assertEqual(index.unchanged_sources([{"key": bad["key"], "revision": "new"}], {"files": [bad]}, None), set())
         api.return_value.get_paths_info.assert_not_called()
+
+    def test_real_finalizer_entrypoints_preserve_canonical_and_read_back(self):
+        for module, option, family, extension in ((finalize_ebook, "--extension", "chapters/ebook", "epub"),
+                                                  (finalize_media, "--kind", "media", "audio")):
+            with self.subTest(module=module.__name__):
+                source_ext = "epub" if extension == "epub" else "mp3"
+                key = "repo\0book." + source_ext
+                shard = index.shard_for(key, 8)
+                root = f"{family}/{extension}"
+                canonical_path, shard_path = root + "/index.json", root + f"/index-{shard:02d}.json"
+                kept = {"key": "repo\0keep.docx", "source_revision": "office"}
+                values = {canonical_path: {"files": [kept]}, shard_path: {"files": [{"key": key, "source_revision": "rev"}]}}
+                client = Mock()
+                client.get_paginator.return_value.paginate.return_value = [{"Contents": [{"Key": shard_path}]}]
+                def get(**kwargs): return {"Body": io.BytesIO(json.dumps(values[kwargs["Key"]]).encode())}
+                def put(**kwargs): values[kwargs["Key"]] = json.loads(kwargs["Body"])
+                client.get_object.side_effect = get
+                client.put_object.side_effect = put
+                with patch.dict("os.environ", {"HF_S3_ACCESS_KEY_ID": "fixture", "HF_S3_SECRET_ACCESS_KEY": "fixture"}), \
+                        patch("sys.argv", ["finalize", option, extension]), \
+                        patch.object(module.boto3, "client", return_value=client):
+                    self.assertEqual(module.main(), 0)
+                self.assertEqual({e["key"] for e in values[canonical_path]["files"]}, {key, kept["key"]})
+                self.assertEqual(client.get_object.call_count, 3)
 
 
 class FormatProducerRegressionTests(unittest.TestCase):

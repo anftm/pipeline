@@ -10,16 +10,17 @@ import re
 
 import boto3
 from botocore.config import Config
-from botocore.exceptions import ClientError
 
 try:
     from .reader_stream_index import merge_shards, validate_index
     from .pilot_media_stream import MEDIA_EXTENSIONS
     from .reader_assets import bucket_conversion_contract
+    from .reader_bucket_store import retry_s3
 except ImportError:
     from reader_stream_index import merge_shards, validate_index
     from pilot_media_stream import MEDIA_EXTENSIONS
     from reader_assets import bucket_conversion_contract
+    from reader_bucket_store import retry_s3
 
 
 KINDS = ("audio", "video", "swf")
@@ -47,16 +48,18 @@ def main() -> int:
         if not keys:
             continue
         def read(key):
-            try:
+            def load():
                 response = client.get_object(Bucket=bucket, Key=key)
-            except ClientError as error:
-                if error.response.get("Error", {}).get("Code") in {"NoSuchKey", "404"}:
-                    return {"files": [], "failures": []}
-                raise
+                try:
+                    return validate_index(json.loads(response["Body"].read()), key)
+                finally:
+                    response["Body"].close()
             try:
-                return validate_index(json.loads(response["Body"].read()), key)
-            finally:
-                response["Body"].close()
+                return retry_s3(load)
+            except FileNotFoundError:
+                if key != f"{root}/index.json":
+                    raise
+                return {"files": [], "failures": []}
 
         canonical = read(f"{root}/index.json")
         shards = []
@@ -66,8 +69,10 @@ def main() -> int:
                       if (bucket_conversion_contract("", "", ext) or (None, None))[1] == kind}
         merged = merge_shards(canonical, shards, "media-stream-index", extensions)
         body = (json.dumps(merged, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode()
-        client.put_object(Bucket=bucket, Key=f"{root}/index.json", Body=body,
-                          ContentType="application/json")
+        retry_s3(lambda: client.put_object(Bucket=bucket, Key=f"{root}/index.json", Body=body,
+                                          ContentType="application/json"))
+        if read(f"{root}/index.json") != merged:
+            raise ValueError(f"canonical media index readback failed: {root}")
         print(f"{kind}: merged {len(merged['files'])} files, {len(merged['failures'])} failures from {len(keys)} shard indexes")
     return 0
 

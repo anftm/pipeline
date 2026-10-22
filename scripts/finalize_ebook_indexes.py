@@ -10,12 +10,13 @@ import re
 
 import boto3
 from botocore.config import Config
-from botocore.exceptions import ClientError
 
 try:
     from .reader_stream_index import merge_shards, validate_index
+    from .reader_bucket_store import retry_s3
 except ImportError:
     from reader_stream_index import merge_shards, validate_index
+    from reader_bucket_store import retry_s3
 
 
 EXTENSIONS = ("epub", "mobi", "azw3", "fb2", "chm")
@@ -43,16 +44,18 @@ def main() -> int:
         if not keys:
             continue
         def read(key):
-            try:
+            def load():
                 response = client.get_object(Bucket=bucket, Key=key)
-            except ClientError as error:
-                if error.response.get("Error", {}).get("Code") in {"NoSuchKey", "404"}:
-                    return {"files": [], "failures": []}
-                raise
+                try:
+                    return validate_index(json.loads(response["Body"].read()), key)
+                finally:
+                    response["Body"].close()
             try:
-                return validate_index(json.loads(response["Body"].read()), key)
-            finally:
-                response["Body"].close()
+                return retry_s3(load)
+            except FileNotFoundError:
+                if key != f"{root}/index.json":
+                    raise
+                return {"files": [], "failures": []}
 
         canonical = read(f"{root}/index.json")
         shards = []
@@ -60,8 +63,10 @@ def main() -> int:
             shards.append((int(key.rsplit("-", 1)[1].split(".")[0]), read(key)))
         merged = merge_shards(canonical, shards, "ebook-chapter-stream-index", {extension})
         body = (json.dumps(merged, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode()
-        client.put_object(Bucket=bucket, Key=f"{root}/index.json", Body=body,
-                          ContentType="application/json")
+        retry_s3(lambda: client.put_object(Bucket=bucket, Key=f"{root}/index.json", Body=body,
+                                          ContentType="application/json"))
+        if read(f"{root}/index.json") != merged:
+            raise ValueError(f"canonical ebook index readback failed: {root}")
         print(f"{extension}: merged {len(merged['files'])} files, {len(merged['failures'])} failures from {len(keys)} shard indexes")
     return 0
 
