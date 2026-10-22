@@ -10,6 +10,26 @@ PNG = b"\x89PNG\r\n\x1a\n" + b"0" * 20
 
 
 class MarkdownPublicationTests(unittest.TestCase):
+    def test_markdown_scope_is_the_marxists_library_only(self):
+        records = [
+            {"Repo": "VoiceOfML/Marxists-Library", "File": "a", "Extension": "md", "Folder": []},
+            {"Repo": "VoiceOfML/MLMRL-Hub", "File": "b", "Extension": "md", "Folder": []},
+            {"Repo": "VoiceOfML/Marxists-Library", "File": "c", "Extension": "txt", "Folder": []},
+            {"Repo": "VoiceOfML/MLMRL-Hub", "File": "d", "Extension": "txt", "Folder": []},
+        ]
+        revisions = {"VoiceOfML/Marxists-Library": "a" * 40, "VoiceOfML/MLMRL-Hub": "a" * 40}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "search.json"
+            path.write_text(json.dumps(records))
+            selected = stream.select_records(path, revisions, "all")
+            markdown_only = stream.select_records(path, revisions, "md")
+        self.assertCountEqual([(item["repo"], item["path"]) for item in selected],
+                              [("VoiceOfML/Marxists-Library", "a.md"),
+                               ("VoiceOfML/Marxists-Library", "c.txt"),
+                               ("VoiceOfML/MLMRL-Hub", "d.txt")])
+        self.assertEqual([(item["repo"], item["path"]) for item in markdown_only],
+                         [("VoiceOfML/Marxists-Library", "a.md")])
+
     def test_markdown_images_are_embedded_with_stable_profile(self):
         item = {"repo": "VoiceOfML/Test", "path": "a/doc.md", "extension": "md", "revision": "a" * 40}
         source = b"![x](images/x.png)\n"

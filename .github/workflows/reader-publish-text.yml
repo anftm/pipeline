@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       extension:
-        description: Text sources to normalize (all means txt/md/markdown)
+        description: Text sources to normalize (all means txt/md/markdown; Markdown is limited to Marxists-Library)
         required: true
         type: choice
         default: all
