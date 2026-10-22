@@ -614,6 +614,269 @@ def write_journal(store, report):
     return path
 
 
+
+LEGACY_CURRENT = "current.json"
+LEGACY_PREFIX = "generations/"
+LEGACY_JOURNAL_PREFIX = "reports/ccrd-legacy-gc/"
+SOURCES_URL = "https://vomebook-search.hf.space/api/sources"
+
+
+def legacy_pointer(store):
+    payload, raw = read_json(store, LEGACY_CURRENT)
+    if payload.get("format") != 1 or payload.get("tokenizer_version") != lifecycle.TOKENIZER:
+        raise Blocker("legacy CCRD pointer has an unknown format or tokenizer")
+    databases = payload.get("databases")
+    if not isinstance(databases, dict) or set(databases) != {"CCRD", "CW"}:
+        raise Blocker("legacy CCRD pointer must name CCRD and CW")
+    refs, active_dirs = {}, set()
+    for name, item in databases.items():
+        if not isinstance(item, dict):
+            raise Blocker(f"legacy CCRD pointer has no {name} identity")
+        path = item.get("path", "")
+        match = re.fullmatch(r"generations/([^/]+)/(CCRD|CW)\.sqlite3", path)
+        if not match or match.group(2) != name:
+            raise Blocker(f"legacy CCRD pointer has an invalid {name} path")
+        if (type(item.get("documents")) is not int or item["documents"] < 1
+                or item.get("fts_rows") != item["documents"]):
+            raise Blocker(f"legacy CCRD pointer has invalid {name} counts")
+        ref = {"bucket": BUCKET, "path": path, "sha256": item.get("sha256"),
+               "bytes": item.get("bytes"), "role": "runtime"}
+        lifecycle.resource(ref)
+        refs[path] = ref
+        active_dirs.add(match.group(1))
+    return payload, raw, refs, active_dirs
+
+
+def legacy_manifest(store, directory, sizes):
+    path = f"generations/{directory}/manifest.json"
+    if path not in sizes:
+        raise Blocker(f"missing legacy generation manifest: {path}")
+    payload, raw = read_json(store, path)
+    if payload.get("format") != 1 or payload.get("tokenizer_version") != lifecycle.TOKENIZER:
+        raise Blocker(f"{path}: unknown legacy generation schema")
+    if payload.get("created_at") is None:
+        raise Blocker(f"{path}: generation has no created_at")
+    try:
+        created = datetime.fromisoformat(str(payload["created_at"]).replace("Z", "+00:00"))
+    except ValueError:
+        raise Blocker(f"{path}: invalid created_at")
+    databases = payload.get("databases")
+    if not isinstance(databases, dict) or set(databases) != {"CCRD", "CW"}:
+        raise Blocker(f"{path}: generation must name CCRD and CW")
+    refs, missing = {path}, set()
+    for name, item in databases.items():
+        if not isinstance(item, dict):
+            raise Blocker(f"{path}: invalid {name} identity")
+        db_path = item.get("path", "")
+        if (not db_path.startswith(LEGACY_PREFIX) or not db_path.endswith(f"/{name}.sqlite3")
+                or type(item.get("documents")) is not int or item["documents"] < 1
+                or item.get("fts_rows") != item["documents"]):
+            raise Blocker(f"{path}: invalid {name} identity")
+        ref = {"bucket": BUCKET, "path": db_path, "sha256": item.get("sha256"),
+               "bytes": item.get("bytes"), "role": "runtime"}
+        lifecycle.resource(ref)
+        refs.add(db_path)
+        if db_path not in sizes:
+            missing.add(db_path)
+        elif sizes[db_path] != ref["bytes"]:
+            raise Blocker(f"{path}: {name} size differs from its manifest")
+    return {"dir": directory, "path": path, "created": created, "refs": refs,
+            "missing": missing, "databases": databases, "raw_bytes": len(raw)}
+
+
+def legacy_tree(store):
+    sizes = {}
+    try:
+        files = store.list_files(BUCKET, (LEGACY_PREFIX,))
+    except Exception as error:
+        raise Blocker(f"cannot inventory {LEGACY_PREFIX}: {error}")
+    for path in files:
+        known = getattr(store, "object_sizes", {}).get((BUCKET, path))
+        if type(known) is int and known >= 0:
+            sizes[path] = known
+            continue
+        try:
+            sizes[path] = store.stat(BUCKET, path)
+        except FileNotFoundError:
+            continue
+    dirs = {}
+    for path in sizes:
+        parts = path.split("/")
+        if len(parts) >= 3 and parts[0] == "generations":
+            dirs.setdefault(parts[1], set()).add(path)
+    return sizes, dirs
+
+
+def legacy_live(client, pointer):
+    if client is None:
+        raise Blocker("live CCRD status was not checked")
+    response = client.get(LIVE_STATUS, headers={"Cache-Control": "no-cache"}, timeout=60)
+    response.raise_for_status()
+    status = response.json()
+    bucket = status.get("bucket") or {}
+    if (status.get("ready") is not True or bucket.get("state") != "ready"
+            or bucket.get("source") != "bucket-pointer"
+            or set(bucket.get("sources") or []) != {"CCRD", "CW"}
+            or not {"CCRD", "CW"} <= set(status.get("loaded_sources") or [])):
+        raise Blocker("live CCRD is not serving the bucket legacy pointer")
+    sources = client.get(SOURCES_URL, headers={"Cache-Control": "no-cache"}, timeout=60)
+    sources.raise_for_status()
+    rows = sources.json()
+    if isinstance(rows, dict):
+        rows = rows.get("sources", [])
+    counts = {row.get("slug"): row.get("count") for row in rows if isinstance(row, dict)}
+    expected = {name: pointer["databases"][name]["documents"] for name in ("CCRD", "CW")}
+    if any(counts.get(name) != expected[name] for name in expected):
+        raise Blocker("live CCRD source counts differ from the bucket legacy pointer")
+    return {"bucket": bucket, "counts": counts, "checked_at": now()}
+
+
+def legacy_plan(store, *, keep_generations=2, limit=0, client=None, verify_live=True):
+    if type(keep_generations) is not int or keep_generations < 1:
+        raise ValueError("keep-generations must be a positive integer for legacy generations")
+    if type(limit) is not int or limit < 0:
+        raise ValueError("limit must not be negative")
+    pointer, pointer_raw, active_refs, active_dirs = legacy_pointer(store)
+    sizes, dirs = legacy_tree(store)
+    for path, ref in active_refs.items():
+        require_member(sizes, ref, "legacy pointer")
+    if not active_dirs or any(d not in dirs for d in active_dirs):
+        raise Blocker("legacy pointer names a missing generation directory")
+
+    manifests = {}
+    for directory, files in dirs.items():
+        if f"generations/{directory}/manifest.json" in files:
+            manifests[directory] = legacy_manifest(store, directory, sizes)
+    protected = set(active_refs)
+    for directory in active_dirs:
+        protected.update(dirs[directory])
+        manifest = manifests.get(directory)
+        if manifest is None:
+            raise Blocker(f"active legacy generation lacks a manifest: {directory}")
+        if manifest["missing"]:
+            raise Blocker(f"active legacy generation is incomplete: {directory}")
+        protected.update(manifest["refs"])
+
+    candidates = [d for d in manifests if d not in active_dirs]
+    ordered = sorted(candidates, key=lambda d: (manifests[d]["created"], d), reverse=True)
+    keep_old = max(0, keep_generations - len(active_dirs))
+    kept_old = ordered[:keep_old]
+    remaining = ordered[keep_old:]
+    oldest = sorted(remaining, key=lambda d: (manifests[d]["created"], d))
+    expiring = oldest[:limit] if limit else oldest
+    deferred = oldest[len(expiring):]
+
+    for directory in [*kept_old, *deferred]:
+        if manifests[directory]["missing"]:
+            raise Blocker(f"kept legacy generation is incomplete: {directory}")
+        protected.update(dirs[directory])
+        protected.update(manifests[directory]["refs"])
+    for directory in [*kept_old, *deferred]:
+        protected.add(manifests[directory]["path"])
+
+    generation_candidates = sorted(path for path in sizes
+                                   if path.startswith(LEGACY_PREFIX) and path not in protected)
+    if any(path.startswith("control/") for path in generation_candidates):
+        raise Blocker("legacy candidate list unexpectedly contains control documents")
+    live = legacy_live(client, pointer) if verify_live else None
+    if store.read_bytes(BUCKET, LEGACY_CURRENT) != pointer_raw:
+        raise Blocker("legacy CCRD pointer changed during planning")
+
+    rows = []
+    for directory in sorted(dirs):
+        manifest = manifests.get(directory)
+        rows.append({"directory": directory,
+                     "created_at": manifest["created"].isoformat() if manifest else None,
+                     "bytes": sum(sizes[path] for path in dirs[directory]),
+                     "documents": manifest["databases"] if manifest else None,
+                     "state": ("current" if directory in active_dirs else
+                               "kept" if directory in kept_old else
+                               "expiring" if directory in expiring else
+                               "deferred" if directory in deferred else
+                               "orphan")})
+    return {
+        "version": 1, "kind": "ccrd-legacy-gc-plan", "scope": "legacy-generations",
+        "observed_at": now(), "bucket": BUCKET, "current_dirs": sorted(active_dirs),
+        "pointer_sha256": digest(pointer_raw),
+        "documents": {name: pointer["databases"][name]["documents"] for name in ("CCRD", "CW")},
+        "live": live, "keep_generations": keep_generations,
+        "kept": kept_old, "expiring": expiring, "deferred": deferred,
+        "generations": rows,
+        "objects": {"managed": len(sizes), "managed_bytes": sum(sizes.values()),
+                    "protected": len(protected),
+                    "candidates": len(generation_candidates),
+                    "candidate_bytes": sum(sizes[path] for path in generation_candidates),
+                    "total_reclaimable_bytes": sum(sizes[path] for path in generation_candidates)},
+        "candidates": generation_candidates,
+        "candidate_sizes": {path: sizes[path] for path in generation_candidates},
+        "inventory_snapshot": sorted(sizes),
+        "protected_sizes": {path: sizes[path] for path in protected if path in sizes},
+        "deletion_enabled": False,
+    }
+
+
+def legacy_apply(store, report, *, client=None):
+    if report.get("kind") != "ccrd-legacy-gc-plan" or report.get("bucket") != BUCKET:
+        raise ValueError("not a legacy CCRD GC plan")
+    pointer, pointer_raw, _, _ = legacy_pointer(store)
+    if digest(pointer_raw) != report["pointer_sha256"]:
+        raise Blocker("legacy CCRD pointer changed before deletion")
+    if client is not None:
+        legacy_live(client, pointer)
+    sizes, _ = legacy_tree(store)
+    if sorted(sizes) != report["inventory_snapshot"]:
+        raise Blocker("legacy generations inventory changed before deletion")
+    for path, size in report["protected_sizes"].items():
+        if sizes.get(path) != size:
+            raise Blocker(f"kept legacy object changed before deletion: {path}")
+
+    candidates = list(report.get("candidates", []))
+    if any(not path.startswith(LEGACY_PREFIX) for path in candidates):
+        raise Blocker("refusing to delete outside generations/")
+    deleted_paths = set()
+    deleted_bytes = 0
+    try:
+        # Remove the manifest first: a retry then treats the directory as an
+        # orphan and can finish deleting its remaining files without guessing
+        # a retention timestamp.
+        for directory in report["expiring"]:
+            manifest = f"generations/{directory}/manifest.json"
+            if manifest in candidates and manifest not in deleted_paths:
+                store.delete(BUCKET, [manifest])
+                deleted_paths.add(manifest)
+                deleted_bytes += report["candidate_sizes"].get(manifest, 0)
+        for path in candidates:
+            if path in deleted_paths:
+                continue
+            store.delete(BUCKET, [path])
+            deleted_paths.add(path)
+            deleted_bytes += report["candidate_sizes"].get(path, 0)
+        remaining = set(store.list_files(BUCKET, (LEGACY_PREFIX,)))
+        if any(path in remaining for path in candidates):
+            raise RuntimeError("legacy deletion readback failed")
+    finally:
+        report["deleted"] = {"objects": len(deleted_paths), "bytes": deleted_bytes}
+        report["finished_at"] = now()
+    pointer_after, _ = read_json(store, LEGACY_CURRENT)
+    if pointer_after != pointer:
+        raise Blocker("legacy CCRD pointer changed during deletion")
+    if client is not None:
+        report["live_after"] = legacy_live(client, pointer)
+    report["deletion_enabled"] = True
+    report["applied"] = True
+    return report
+
+
+def write_legacy_journal(store, report):
+    stamp = report["observed_at"].replace(":", "").replace("-", "")
+    run = os.environ.get("GITHUB_RUN_ID", "local")
+    current = "-".join(report["current_dirs"])[:12]
+    path = f"{LEGACY_JOURNAL_PREFIX}{stamp}-{run}-{current}.json"
+    store.put_json(BUCKET, path, report)
+    report["journal"] = path
+    return path
+
+
 def write_output(path, report):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
@@ -622,64 +885,82 @@ def write_output(path, report):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--scope", choices=("ocr", "legacy-generations"), default="ocr",
+                        help="ocr: retired OCR releases; legacy-generations: old CCRD/CW indexes")
     parser.add_argument("--apply", action="store_true",
                         help="delete after planning; default is plan only")
     parser.add_argument("--keep-generations", type=int, default=2,
-                        help="current plus this many ancestors; minimum 2 (default: 2)")
+                        help="current plus this many ancestors; OCR minimum 2, legacy minimum 1")
     parser.add_argument("--limit", type=int, default=0,
                         help="maximum generations to expire in this run; zero means all")
     parser.add_argument("--include-staging", action="store_true",
-                        help="also reclaim abandoned staging/ocr objects")
+                        help="also reclaim abandoned staging/ocr objects (OCR scope)")
     parser.add_argument("--verify-contents", action="store_true",
-                        help="also re-read every kept TXT body (slow; publication already checked it)")
+                        help="also re-read kept TXT bodies (OCR scope; slow)")
     parser.add_argument("--skip-live", action="store_true",
                         help="skip live CCRD acceptance; only valid outside Actions")
     parser.add_argument("--output", type=Path, default=Path("output/gc/ccrd-ocr-gc.json"))
     args = parser.parse_args(argv)
     if args.limit < 0:
         parser.error("--limit must not be negative")
+    if args.scope == "ocr" and args.keep_generations < 2:
+        parser.error("OCR scope must retain the current release and its rollback parent")
+    if args.scope == "legacy-generations" and args.keep_generations < 1:
+        parser.error("legacy scope must retain at least the current generation")
+    if args.scope != "ocr" and (args.include_staging or args.verify_contents):
+        parser.error("--include-staging/--verify-contents only apply to OCR scope")
     if args.skip_live and os.environ.get("GITHUB_ACTIONS") == "true":
         parser.error("--skip-live is not allowed in Actions")
     if args.apply:
         assert_workflow_context(".github/workflows/reader-gc-ccrd.yml")
+
+    plan_kind = "ccrd-legacy-gc-plan" if args.scope == "legacy-generations" else "ccrd-ocr-gc-plan"
     store = HubBucketStore()
     with httpx.Client() as client:
         try:
-            report = plan(store, keep_generations=args.keep_generations, limit=args.limit,
-                          include_staging=args.include_staging, client=client,
-                          verify_live=not args.skip_live, verify_contents=args.verify_contents)
+            if args.scope == "legacy-generations":
+                report = legacy_plan(store, keep_generations=args.keep_generations,
+                                     limit=args.limit, client=client,
+                                     verify_live=not args.skip_live)
+            else:
+                report = plan(store, keep_generations=args.keep_generations, limit=args.limit,
+                              include_staging=args.include_staging, client=client,
+                              verify_live=not args.skip_live, verify_contents=args.verify_contents)
         except Blocker as error:
-            # A plan must still produce evidence when a safety gate trips.
-            report = {"version": 1, "kind": "ccrd-ocr-gc-plan", "observed_at": now(),
-                      "bucket": BUCKET, "current": None, "blockers": [str(error)],
+            report = {"version": 1, "kind": plan_kind, "scope": args.scope,
+                      "observed_at": now(), "bucket": BUCKET, "blockers": [str(error)],
                       "deletion_enabled": False, "applied": False}
             write_output(args.output, report)
-            print(json.dumps({"blockers": report["blockers"]}, ensure_ascii=False, indent=2))
+            print(json.dumps({"scope": args.scope, "blockers": report["blockers"]},
+                             ensure_ascii=False, indent=2))
             return 2 if args.apply else 0
-        # Preserve the plan artifact even if the destructive phase fails.
         write_output(args.output, report)
         if args.apply:
+            journal = write_legacy_journal if args.scope == "legacy-generations" else write_journal
             try:
                 report["phase"] = "planned"
-                write_journal(store, report)
-                apply(store, report, client=client)
+                journal(store, report)
+                if args.scope == "legacy-generations":
+                    legacy_apply(store, report, client=client)
+                else:
+                    apply(store, report, client=client)
                 report["phase"] = "applied"
-                write_journal(store, report)
+                journal(store, report)
             except Exception as error:
                 report["phase"] = "failed"
                 report["error"] = f"{type(error).__name__}: {error}"
                 try:
-                    write_journal(store, report)
+                    journal(store, report)
                 except Exception:
                     pass
                 raise
             finally:
                 write_output(args.output, report)
     write_output(args.output, report)
-    print(json.dumps({key: report[key] for key in
-                      ("current", "kept", "expiring", "deferred", "objects", "deleted",
-                       "blockers", "journal", "phase", "error")
-                      if key in report}, ensure_ascii=False, indent=2))
+    keys = ("scope", "current", "current_dirs", "kept", "expiring", "deferred", "objects",
+            "deleted", "blockers", "journal", "phase", "error")
+    print(json.dumps({key: report[key] for key in keys if key in report},
+                     ensure_ascii=False, indent=2))
     return 0
 
 

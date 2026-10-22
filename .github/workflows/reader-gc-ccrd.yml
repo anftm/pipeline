@@ -3,6 +3,11 @@ name: CCRD · GC Collect Retired OCR Generations
 on:
   workflow_dispatch:
     inputs:
+      scope:
+        description: "ocr: retired OCR releases; legacy-generations: old CCRD/CW indexes"
+        type: choice
+        options: [ocr, legacy-generations]
+        default: ocr
       apply:
         description: Retire expired control roots and delete their data; false is a plan only
         type: boolean
@@ -44,14 +49,20 @@ jobs:
       - name: Plan or collect retired OCR generations
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          SCOPE: ${{ inputs.scope }}
           APPLY: ${{ inputs.apply }}
           KEEP_GENERATIONS: ${{ inputs.keep_generations }}
           LIMIT: ${{ inputs.limit }}
           INCLUDE_STAGING: ${{ inputs.include_staging }}
         run: |
-          [[ "$KEEP_GENERATIONS" =~ ^[1-9][0-9]*$ ]] && (( KEEP_GENERATIONS >= 2 )) || exit 1
+          [[ "$KEEP_GENERATIONS" =~ ^[1-9][0-9]*$ ]] || exit 1
           [[ "$LIMIT" =~ ^[0-9]+$ ]] || exit 1
-          args=(--keep-generations "$KEEP_GENERATIONS" --limit "$LIMIT"
+          if [[ "$SCOPE" == ocr ]]; then
+            (( KEEP_GENERATIONS >= 2 )) || exit 1
+          else
+            (( KEEP_GENERATIONS >= 1 )) || exit 1
+          fi
+          args=(--scope "$SCOPE" --keep-generations "$KEEP_GENERATIONS" --limit "$LIMIT"
                 --output output/gc/ccrd-ocr-gc.json)
           if [[ "$APPLY" == true ]]; then args+=(--apply); fi
           if [[ "$INCLUDE_STAGING" == true ]]; then args+=(--include-staging); fi

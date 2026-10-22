@@ -284,3 +284,136 @@ class CcrdGcTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LegacyLive:
+    def __init__(self, generations, counts):
+        self.generations = generations
+        self.counts = counts
+
+    def get(self, url, **kwargs):
+        if url.endswith('/api/sources'):
+            return LegacySources(self.counts)
+        return LegacyStatus(self.generations)
+
+
+class LegacyStatus:
+    def __init__(self, generations):
+        self.generations = generations
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return {"ready": True, "ocr_release": "0" * 64,
+                "loaded_sources": ["CCRD", "CW"],
+                "bucket": {"state": "ready", "source": "bucket-pointer",
+                           "sources": ["CCRD", "CW"]}}
+
+
+class LegacySources:
+    def __init__(self, counts):
+        self.counts = counts
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return [{"slug": name, "count": self.counts[name]} for name in ("CCRD", "CW")]
+
+
+def build_legacy(*, cross_ref=False, orphan=False):
+    store = Store()
+    directories = ["gen-current", "gen-prev", "gen-old"]
+    entries = {}
+    for index, directory in enumerate(directories):
+        cw_docs = 100 - index
+        db_paths = {
+            "CCRD": f"generations/{directory}/CCRD.sqlite3",
+            "CW": f"generations/{directory}/CW.sqlite3",
+        }
+        store.put(db_paths["CCRD"], f"ccrd {directory}".encode())
+        store.put(db_paths["CW"], f"cw {directory}".encode())
+        databases = {}
+        for name, path in db_paths.items():
+            databases[name] = {"path": path, "bytes": len(store.objects[path]),
+                               "sha256": hashlib.sha256(store.objects[path]).hexdigest(),
+                               "documents": 3 if name == "CCRD" else cw_docs,
+                               "fts_rows": 3 if name == "CCRD" else cw_docs}
+        manifest = {"format": 1, "tokenizer_version": lifecycle.TOKENIZER,
+                    "created_at": f"2026-10-{20 - index:02d}T00:00:00+00:00",
+                    "databases": databases}
+        if cross_ref and directory == "gen-prev":
+            manifest["databases"]["CCRD"]["path"] = "generations/gen-old/CCRD.sqlite3"
+            body = b"ccrd gen-old"
+            manifest["databases"]["CCRD"]["bytes"] = len(body)
+            manifest["databases"]["CCRD"]["sha256"] = hashlib.sha256(body).hexdigest()
+        store.put(f"generations/{directory}/manifest.json", manifest)
+        entries[directory] = manifest
+    active = entries["gen-current"]["databases"]
+    store.put("current.json", {"format": 1, "tokenizer_version": lifecycle.TOKENIZER,
+                               "databases": active})
+    if orphan:
+        store.put("generations/gen-orphan/CCRD.sqlite3", b"orphan ccrd")
+        store.put("generations/gen-orphan/CW.sqlite3", b"orphan cw")
+    counts = {"CCRD": active["CCRD"]["documents"], "CW": active["CW"]["documents"]}
+    return store, directories, counts
+
+
+class LegacyGcTests(unittest.TestCase):
+    def test_plan_keeps_current_and_previous_and_reclaims_older(self):
+        store, directories, counts = build_legacy()
+        report = gc.legacy_plan(store, keep_generations=2,
+                                client=LegacyLive(directories, counts))
+        self.assertEqual(report["current_dirs"], ["gen-current"])
+        self.assertEqual(report["kept"], ["gen-prev"])
+        self.assertEqual(report["expiring"], ["gen-old"])
+        self.assertTrue(any(path.startswith("generations/gen-old/") for path in report["candidates"]))
+        self.assertFalse(any(path.startswith("generations/gen-current/") for path in report["candidates"]))
+        self.assertFalse(any(path.startswith("generations/gen-prev/") for path in report["candidates"]))
+        self.assertFalse(report["deletion_enabled"])
+
+    def test_apply_deletes_older_generation_and_keeps_pointer(self):
+        store, directories, counts = build_legacy()
+        report = gc.legacy_plan(store, keep_generations=2,
+                                client=LegacyLive(directories, counts))
+        gc.legacy_apply(store, report, client=LegacyLive(directories, counts))
+        self.assertIn("generations/gen-current/CCRD.sqlite3", store.objects)
+        self.assertIn("generations/gen-prev/CCRD.sqlite3", store.objects)
+        self.assertNotIn("generations/gen-old/CCRD.sqlite3", store.objects)
+        self.assertNotIn("generations/gen-old/manifest.json", store.objects)
+        self.assertIn("current.json", store.objects)
+        self.assertTrue(report["applied"])
+
+    def test_cross_directory_manifest_reference_is_protected(self):
+        store, directories, counts = build_legacy(cross_ref=True)
+        report = gc.legacy_plan(store, keep_generations=2,
+                                client=LegacyLive(directories, counts))
+        self.assertNotIn("generations/gen-old/CCRD.sqlite3", report["candidates"])
+        self.assertIn("generations/gen-old/CW.sqlite3", report["candidates"])
+        gc.legacy_apply(store, report, client=LegacyLive(directories, counts))
+        self.assertIn("generations/gen-old/CCRD.sqlite3", store.objects)
+
+    def test_limit_only_expires_oldest_and_defers_the_rest(self):
+        store, directories, counts = build_legacy()
+        report = gc.legacy_plan(store, keep_generations=2, limit=1,
+                                client=LegacyLive(directories, counts))
+        self.assertEqual(report["expiring"], ["gen-old"])
+        gc.legacy_apply(store, report, client=LegacyLive(directories, counts))
+        self.assertNotIn("generations/gen-old/manifest.json", store.objects)
+        self.assertIn("generations/gen-prev/manifest.json", store.objects)
+
+    def test_live_count_mismatch_blocks_before_deletion(self):
+        store, directories, counts = build_legacy()
+        wrong = {"CCRD": counts["CCRD"], "CW": counts["CW"] + 1}
+        with self.assertRaisesRegex(gc.Blocker, "source counts"):
+            gc.legacy_plan(store, keep_generations=2,
+                           client=LegacyLive(directories, wrong))
+        self.assertIn("generations/gen-old/CCRD.sqlite3", store.objects)
+
+    def test_missing_active_database_blocks(self):
+        store, directories, counts = build_legacy()
+        store.objects.pop("generations/gen-current/CCRD.sqlite3")
+        with self.assertRaisesRegex(gc.Blocker, "legacy pointer"):
+            gc.legacy_plan(store, keep_generations=2,
+                           client=LegacyLive(directories, counts))
