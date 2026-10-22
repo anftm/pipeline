@@ -105,6 +105,8 @@ jobs:
       - name: Reconvert from pinned original CHMs and verify source text
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
           READER_CHM_COMMAND_TIMEOUT: "1800"
           READER_CONVERSION_WORKERS: "2"
           LIMIT: ${{ inputs.limit || '100' }}
