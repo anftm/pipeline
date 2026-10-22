@@ -86,8 +86,10 @@ class HubBucketStore:
     def list_files(self, bucket: str, prefixes: tuple[str, ...]) -> set[str]:
         files = set()
         for prefix in prefixes:
-            for item in self.api.list_bucket_tree(bucket, prefix=prefix or None, recursive=True,
-                                                  token=self.token(bucket)):
+            def listing(prefix=prefix):
+                return list(self.api.list_bucket_tree(
+                    bucket, prefix=prefix or None, recursive=True, token=self.token(bucket)))
+            for item in retry_read(listing):
                 if item.type == "file":
                     files.add(item.path)
                     size = getattr(item, "size", None)
@@ -158,9 +160,30 @@ class HubBucketStore:
         from huggingface_hub import batch_bucket_files
         batch_bucket_files(bucket, add=[(payload, path)], token=self.token(bucket))
 
+    def stat(self, bucket: str, path: str) -> int:
+        key = (bucket, path)
+        if key in self.object_sizes:
+            return self.object_sizes[key]
+        from huggingface_hub.utils import get_session, hf_raise_for_status
+        token = self.token(bucket)
+        def head():
+            response = get_session().head(
+                f"https://huggingface.co/buckets/{bucket}/resolve/{quote(path, safe='/')}",
+                headers={"Authorization": f"Bearer {token}"} if token else {},
+                follow_redirects=True, timeout=120)
+            if response.status_code == 404:
+                raise FileNotFoundError(path)
+            hf_raise_for_status(response)
+            size = response.headers.get("Content-Length")
+            if size is None or not size.isdigit():
+                raise RuntimeError(f"bucket object has no exact size: {bucket}/{path}")
+            return int(size)
+        return retry_read(head)
+
     def delete(self, bucket: str, paths: list[str]) -> None:
         from huggingface_hub import batch_bucket_files
-        if bucket not in {"vomebook/reader-assets-v2", "vomebook/pdf-pages-v2", "melsm/pdf-archive-v2"}:
+        if bucket not in {"vomebook/reader-assets-v2", "vomebook/pdf-pages-v2", "melsm/pdf-archive-v2",
+                          "vomebook/ccrd-index"}:
             raise ValueError("GC deletion must target a current Reader bucket")
         if any(not path or path.startswith("/") or "\\" in path or "\0" in path
                or any(part in {"", ".", ".."} for part in path.split("/")) for path in paths):

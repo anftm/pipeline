@@ -1,0 +1,65 @@
+name: CCRD · GC Collect Retired OCR Generations
+
+on:
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: Retire expired control roots and delete their data; false is a plan only
+        type: boolean
+        default: false
+      keep_generations:
+        description: Keep the current release plus this many ancestors
+        type: string
+        default: "2"
+      limit:
+        description: Maximum generations to expire in this run; zero means all
+        type: string
+        default: "0"
+      include_staging:
+        description: Also reclaim abandoned staging/ocr objects
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# The CCRD publisher uses the same lock. This run therefore starts only when
+# no publication is active, and a queued publication waits for it to finish.
+concurrency:
+  group: publish-ccrd-index
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  collect:
+    if: github.repository == 'anftm/pipeline'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - run: pip install -r scripts/requirements.txt
+      - name: Plan or collect retired OCR generations
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          APPLY: ${{ inputs.apply }}
+          KEEP_GENERATIONS: ${{ inputs.keep_generations }}
+          LIMIT: ${{ inputs.limit }}
+          INCLUDE_STAGING: ${{ inputs.include_staging }}
+        run: |
+          [[ "$KEEP_GENERATIONS" =~ ^[1-9][0-9]*$ ]] && (( KEEP_GENERATIONS >= 2 )) || exit 1
+          [[ "$LIMIT" =~ ^[0-9]+$ ]] || exit 1
+          args=(--keep-generations "$KEEP_GENERATIONS" --limit "$LIMIT"
+                --output output/gc/ccrd-ocr-gc.json)
+          if [[ "$APPLY" == true ]]; then args+=(--apply); fi
+          if [[ "$INCLUDE_STAGING" == true ]]; then args+=(--include-staging); fi
+          python -u scripts/reader_gc_ccrd.py "${args[@]}"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: ccrd-ocr-gc
+          path: output/gc/*.json
+          retention-days: 30
+          if-no-files-found: error

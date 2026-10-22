@@ -31,7 +31,8 @@ def producer_path(path):
     path = path.split("@", 1)[0]
     name = path.rsplit("/", 1)[-1]
     return path.startswith(".github/workflows/") and path not in {
-        COLLECTOR, ".github/workflows/reader-maintenance.yml"} and (
+        COLLECTOR, ".github/workflows/reader-maintenance.yml",
+        ".github/workflows/reader-gc-ccrd.yml"} and (
         name.startswith(("reader-", "pdf-", "lin-native-text", "migrate-pdf-")) or
         # Retired/renamed filenames stay listed: their queued or rerun records
         # can still exist after the workflow file moved.
@@ -160,10 +161,14 @@ class GitHubProducerFence:
         return {"kind": "reader-gc-producer-fence", "repositories": checked}
 
 
-def assert_collector_context():
+def assert_workflow_context(workflow):
     repo = load_config()["publisher_repository"]
     if (os.environ.get("GITHUB_ACTIONS") != "true"
             or os.environ.get("GITHUB_REPOSITORY") != repo
-            or os.environ.get("GITHUB_WORKFLOW_REF") != repo + "/" + COLLECTOR + "@refs/heads/main"
+            or os.environ.get("GITHUB_WORKFLOW_REF") != repo + "/" + workflow + "@refs/heads/main"
             or not os.environ.get("GITHUB_RUN_ID")):
         raise RuntimeError("object collection requires the central maintenance workflow")
+
+
+def assert_collector_context():
+    assert_workflow_context(COLLECTOR)

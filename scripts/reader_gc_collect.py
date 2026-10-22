@@ -58,7 +58,9 @@ def reject_unaccepted_ccrd_collection(store) -> None:
     """New cross-domain publication is report-only until its deletion tier is accepted."""
     paths = store.list_files(graph.ccrd_lifecycle.BUCKET, ('control/', 'text/exports/', 'releases/ocr-'))
     if paths:
-        raise RuntimeError('four-bucket OCR-library collection is report-only; no deletion acceptance exists yet')
+        raise RuntimeError(
+            'four-bucket OCR-library collection is report-only; '
+            'use reader-gc-ccrd.yml for the separate CCRD OCR deletion tier')
 
 
 def observe_ccrd_projection(store, client):
@@ -87,7 +89,10 @@ def observe_ccrd_projection(store, client):
     status = response.json()
     if (status.get('ready') is not True or status.get('ocr_release') != pointer['generation']
             or release['generation'] != pointer['generation']
-            or not {'CCRD', 'CW', 'OCR'} <= set(status.get('loaded_sources', []))):
+            or not {'CCRD', 'CW'} <= set(status.get('loaded_sources', []))):
+        # `ocr_release` is set only after the Space pinned the exact OCR
+        # activation; the source list names logical OCR repositories, not a
+        # literal "OCR" database.
         raise ValueError('CCRD has not loaded the exact current OCR release')
     if store.read_bytes(bucket, 'control/ocr-current.json') != raw:
         raise RuntimeError('CCRD pointer changed during consumer acceptance')

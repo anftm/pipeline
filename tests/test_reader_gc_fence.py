@@ -1,8 +1,10 @@
 from datetime import datetime, timedelta, timezone
+import os
 import unittest
 from unittest.mock import patch
 
-from scripts.reader_gc_fence import GitHubProducerFence
+from scripts.reader_gc_fence import (GitHubProducerFence, assert_workflow_context,
+                                     producer_path)
 
 
 class ResidualRunFenceTests(unittest.TestCase):
@@ -146,3 +148,21 @@ class ResidualRunFenceTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class WorkflowClassificationTests(unittest.TestCase):
+    def test_ccrd_gc_is_not_a_reader_producer(self):
+        self.assertFalse(producer_path('.github/workflows/reader-gc-ccrd.yml'))
+        self.assertTrue(producer_path('.github/workflows/publish-ccrd-ocr.yml'))
+
+    def test_writer_guard_binds_to_the_exact_workflow_path(self):
+        environment = {
+            'GITHUB_ACTIONS': 'true',
+            'GITHUB_REPOSITORY': 'anftm/pipeline',
+            'GITHUB_WORKFLOW_REF': 'anftm/pipeline/.github/workflows/reader-gc-ccrd.yml@refs/heads/main',
+            'GITHUB_RUN_ID': '1',
+        }
+        with patch.dict(os.environ, environment, clear=False):
+            assert_workflow_context('.github/workflows/reader-gc-ccrd.yml')
+            with self.assertRaises(RuntimeError):
+                assert_workflow_context('.github/workflows/reader-gc-collect.yml')
