@@ -1,7 +1,10 @@
 name: Reader/桶 · Rebuild CHM Chapter Streams
-run-name: CHM source-text repair / ${{ inputs.apply == true && 'apply' || 'plan' }}
+run-name: CHM source-text repair / ${{ (github.event_name == 'schedule' || inputs.apply == true) && 'apply' || 'plan' }}
 
 on:
+  schedule:
+    # Drain the CHM backlog automatically; one 100-source batch per day.
+    - cron: "17 5 * * *"
   workflow_dispatch:
     inputs:
       limit:
@@ -82,7 +85,7 @@ jobs:
 
   rebuild:
     needs: plan
-    if: inputs.apply == true && needs.plan.outputs.count != '0'
+    if: (github.event_name == 'schedule' || inputs.apply == true) && needs.plan.outputs.count != '0'
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     steps:

@@ -10,6 +10,8 @@ class ChmRepairWorkflowTests(unittest.TestCase):
         workflow = yaml.safe_load((root / ".github/workflows/reader-chm-repair.yml").read_text())
         self.assertEqual(workflow["concurrency"]["group"], "reader-sidecar")
         self.assertFalse(workflow["concurrency"]["cancel-in-progress"])
+        self.assertEqual(workflow[True]["schedule"][0]["cron"], "17 5 * * *")
+        self.assertIn("github.event_name == 'schedule'", workflow["jobs"]["rebuild"]["if"])
         inputs = workflow[True]["workflow_dispatch"]["inputs"]
         self.assertFalse(inputs["apply"]["default"])
         self.assertEqual(inputs["limit"]["default"], "100")
