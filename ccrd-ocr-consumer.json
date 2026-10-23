@@ -1,6 +1,1 @@
-{
-  "version": 1,
-  "consumer_revision": "850feeca023fa9a4c00bc22eab7679cac2794b12",
-  "builder_sha256": "ed3cfbb2af5871c8a5d368512e939aa4164aebd71f43e1ff9af6cde3e0a02fac",
-  "base_metadata_sha256": "df09ba3cd6b80f78721f5605c41db5fb86e31fcd1c999e950b50c934f92f8edf"
-}
+{"base_metadata_sha256":"5732123b52db73bd5693a929b2d7f6c7d6a6371237619107ef33a06cac960da5","builder_sha256":"ed3cfbb2af5871c8a5d368512e939aa4164aebd71f43e1ff9af6cde3e0a02fac","consumer_revision":"98cb2a69520eb72c0e0c7fcf62726a8f12c46147","version":1}
