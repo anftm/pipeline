@@ -53,6 +53,8 @@ def targets(value):
         if (not match or match[2] != item["source_sha256"]
                 or not re.fullmatch("[0-9a-f]{64}", str(item["manifest_sha256"]))):
             raise ValueError("invalid pinned chapter manifest")
+        if path.rsplit(".", 1)[-1].lower() != match[1]:
+            raise ValueError("selected source extension differs from chapter index family")
         seen.add(key)
     return value
 
@@ -121,6 +123,10 @@ def rebuild(entry, selection, store, work):
         originals[relative] = digest(payload)
     if (bundle / "chapter-manifest.json").read_bytes() != manifest_raw:
         raise ValueError("chapter manifest changed during exact-root read")
+    for chapter in manifest["chapters"]:
+        payload = (bundle / chapter["path"]).read_bytes()
+        if len(payload) != chapter["bytes"] or digest(payload) != chapter["sha256"]:
+            raise ValueError("published chapter bytes/checksum differ from exact manifest")
     if epub_chapters.bundle_version(bundle) != root.rsplit("/", 1)[1]:
         raise ValueError("old chapter bundle content identity mismatch")
     old_search = verify_search((bundle / "epub-search-index.json.gz").read_bytes(), manifest)

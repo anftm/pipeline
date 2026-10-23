@@ -73,12 +73,14 @@ class ChapterSearchRepairTests(unittest.TestCase):
         self.assertEqual(manifest['search_index']['text_profile'], search['text_profile'])
 
     def test_corrupt_middle_resource_and_stale_selection_fail_before_publish(self):
-        for corrupt in ('manifest', 'resource'):
+        for corrupt in ('manifest', 'resource', 'chapter'):
             root, entry, selection, store = self.fixture()
             if corrupt == 'manifest':
                 selection['manifest_sha256'] = 'b' * 64
             else:
-                store.values[entry['root']+'/resources/image.png'] = b'corrupted image'
+                path = (entry['root']+'/resources/image.png' if corrupt == 'resource'
+                        else entry['root']+'/chapters/chapter-0001.xhtml')
+                store.values[path] = b'corrupted bytes'
             with self.subTest(corrupt=corrupt), patch.object(repair, 'publish_checkpoint') as publish:
                 with self.assertRaises(ValueError):
                     repair.run([selection], store, root/'repair')
@@ -87,7 +89,8 @@ class ChapterSearchRepairTests(unittest.TestCase):
     def test_exact_selection_validation_and_central_writer_guard(self):
         root, entry, selection, store = self.fixture()
         for invalid in ([], [selection, selection], [{**selection, 'manifest':'../outside'}],
-                        [{**selection, 'source_sha256':'b'*64}]):
+                        [{**selection, 'source_sha256':'b'*64}],
+                        [{**selection, 'key':'VoiceOfML/Test\0book.mobi'}]):
             with self.assertRaises(ValueError):
                 repair.targets(invalid)
         with patch.dict('os.environ', {}, clear=True):

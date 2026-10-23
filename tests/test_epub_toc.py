@@ -17,6 +17,21 @@ class EpubTocTests(unittest.TestCase):
                     '<html:p>真实空格&#160;尾部</html:p></html:body></html:html>')
         self.assertEqual(epub_chapters._chapter_text(document),
                          '标题 保留 &#0 和 &nbsp; 与 &amp; &lt;b&gt; 真实空格 尾部')
+        self.assertEqual(epub_chapters._document_title(document), '标题')
+
+    def test_bundle_text_title_and_search_use_one_entity_decode_from_served_xhtml(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary);source = root/'literal.epub';output = root/'bundle'
+            with zipfile.ZipFile(source, 'w') as archive:
+                archive.writestr('META-INF/container.xml', '<container><rootfiles><rootfile full-path="content.opf"/></rootfiles></container>')
+                archive.writestr('content.opf', '<package><manifest><item id="a" href="chapter.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="a"/></spine></package>')
+                archive.writestr('chapter.xhtml', '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Literal &amp;nbsp;</title></head><body><p>Visible &amp;#0 &amp;nbsp;</p></body></html>')
+            manifest = epub_chapters.build_bundle(source, output)
+            index = json.loads(gzip.decompress((output/'epub-search-index.json.gz').read_bytes()))
+            # Existing title precedence prefers the first readable body block.
+            self.assertEqual(manifest['chapters'][0]['title'], 'Visible &#0 &nbsp;')
+            self.assertEqual(index['text_profile'], 'dom-text-v1')
+            self.assertEqual(index['chapters'][0]['text'], 'Literal &nbsp; Visible &#0 &nbsp;')
 
     def test_written_search_profile_and_complete_text_are_checksum_bound(self):
         import hashlib
