@@ -1,11 +1,13 @@
 import hashlib
 import gzip
 import io
+from contextlib import redirect_stderr, redirect_stdout
 import json
 import tempfile
 import unittest
 import urllib.error
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from scripts import pilot_epub_chapters
@@ -90,6 +92,60 @@ class ChmChapterPilotTests(unittest.TestCase):
                                "profile": pilot_epub_chapters.CHM_PROFILE}], "failures": []}
         self.assertEqual(pilot_epub_chapters.completed_revisions(
             upgraded, profile=pilot_epub_chapters.CHM_PROFILE)[key], "same-revision")
+
+    def test_chm_repository_bump_reuses_only_current_profile_without_skipping_failed_retry(self):
+        def record(name):
+            return {"repo": "VoiceOfML/Test", "path": name + ".chm", "revision": "new"}
+        records = [record(name) for name in ("proven", "upgrade", "failed", "new", "unproven")]
+        def entry(name, profile=pilot_epub_chapters.CHM_PROFILE):
+            return {"key": "VoiceOfML/Test\0" + name + ".chm", "source_revision": "old",
+                    "source_sha256": "a" * 64, "profile": profile}
+        previous = {"files": [entry("proven"), entry("upgrade", "old-profile"), entry("failed"), entry("unproven")],
+                    "failures": [{**entry("failed"), "source_revision": "new", "error": "still needs retry"}]}
+        def verified(candidates, index, token):
+            self.assertEqual({e["key"] for e in index["files"]},
+                             {entry("proven")["key"], entry("unproven")["key"]})
+            return {entry("proven")["key"]}
+        with patch.object(pilot_epub_chapters, "unchanged_sources", side_effect=verified):
+            selected, report = pilot_epub_chapters.pending_chapter_sources(
+                records, previous, "chm", None, retry_failures=True)
+        self.assertEqual([r["path"] for r in selected], ['upgrade.chm', 'failed.chm', 'new.chm', 'unproven.chm'])
+        self.assertEqual(report, {"sources": 5, "unchanged_sha": 1, "pending_total": 4, "checkpoint_failures": 1})
+
+    def test_chm_failed_only_retry_and_office_do_not_gain_sha_shortcuts(self):
+        source = {"repo": "VoiceOfML/Test", "path": "failed.chm", "revision": "new"}
+        key = "VoiceOfML/Test\0failed.chm"
+        previous = {"files": [{"key": key, "source_revision": "old", "profile": pilot_epub_chapters.CHM_PROFILE}],
+                    "failures": [{"key": key, "source_revision": "new", "profile": pilot_epub_chapters.CHM_PROFILE}]}
+        with patch.object(pilot_epub_chapters, "unchanged_sources", return_value=set()) as verify:
+            selected, _ = pilot_epub_chapters.pending_chapter_sources(
+                [source], previous, "chm", None, retry_failures=True, failed_only=True)
+        self.assertEqual(selected, [source])
+        self.assertEqual(verify.call_args.args[1]["files"], [])
+        with patch.object(pilot_epub_chapters, "unchanged_sources") as verify:
+            selected, _ = pilot_epub_chapters.pending_chapter_sources(
+                [{**source, "path": "book.docx"}], {"files": []}, "docx", None)
+        verify.assert_not_called()
+        self.assertEqual(len(selected), 1)
+
+    def test_chm_plan_keeps_json_clean_when_metadata_retry_reports_progress(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary);revisions = root/'revisions.json';revisions.write_text('{}')
+            args = SimpleNamespace(limit=100, max_source_bytes=0, workers=1, shard_count=1, shard_index=0,
+                extension='chm', bucket='vomebook/reader-assets-v2', retry_failures=False, failed_only=False,
+                strict=False, apply=False, plan_only=True, revisions=revisions, search_data=root/'unused.json')
+            stdout, stderr = io.StringIO(), io.StringIO()
+            def reuse(*_):
+                print('transient Reader bucket read error; retrying')
+                return set()
+            with patch.object(pilot_epub_chapters, 'parse_args', return_value=args), \
+                    patch.object(pilot_epub_chapters, 'existing_index', return_value={'files': []}), \
+                    patch.object(pilot_epub_chapters, 'select_records', return_value=[]), \
+                    patch.object(pilot_epub_chapters, 'unchanged_sources', side_effect=reuse), \
+                    redirect_stdout(stdout), redirect_stderr(stderr):
+                self.assertEqual(pilot_epub_chapters.main(), 0)
+            self.assertEqual(json.loads(stdout.getvalue())['selected'], 0)
+            self.assertIn('retrying', stderr.getvalue())
 
     def test_failure_only_batch_can_publish_a_durable_failure_checkpoint(self):
         previous = {"files": [], "failures": []}

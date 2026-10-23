@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import redirect_stdout
 import html as html_lib
 import urllib.error
 import time
@@ -16,6 +17,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import urllib.request
 import zipfile
@@ -189,6 +191,33 @@ def chapter_profile(extension: str) -> str:
     if extension in OFFICE_EXTENSIONS:
         return OFFICE_PROFILE
     return EPUB_PROFILE
+
+
+def pending_chapter_sources(records: list[dict], previous: dict, extension: str,
+                            token: str | None, *, retry_failures: bool = False,
+                            failed_only: bool = False) -> tuple[list[dict], dict]:
+    """Reuse proven same-SHA chapters without hiding failures/profile upgrades."""
+    expected = chapter_profile(extension)
+    failure_keys = failed_keys(previous)
+    completed = completed_revisions(previous, retry_failures, expected if extension == "chm" else None)
+    pending = [item for item in records
+               if (not failed_only or f"{item['repo']}\0{item['path']}" in failure_keys)
+               and completed.get(f"{item['repo']}\0{item['path']}") != item["revision"]]
+    unchanged = set()
+    if extension not in OFFICE_EXTENSIONS:
+        reuse_index = previous
+        if extension == "chm":
+            # Old-profile CHMs require the source-text upgrade even when bytes
+            # are identical. An explicit failed retry must still actually run.
+            reuse_index = {**previous, "files": [entry for entry in previous.get("files", [])
+                if entry.get("profile") == expected and entry["key"] not in failure_keys]}
+        # Metadata retry progress must not corrupt the plan-only JSON consumed
+        # by the CHM workflow's command substitution.
+        with redirect_stdout(sys.stderr):
+            unchanged = unchanged_sources(pending, reuse_index, token)
+        pending = [item for item in pending if f"{item['repo']}\0{item['path']}" not in unchanged]
+    return pending, {"sources": len(records), "unchanged_sha": len(unchanged),
+                     "pending_total": len(pending), "checkpoint_failures": len(failure_keys)}
 
 
 def merge_index_failures(previous: dict, entries: list[dict], failures: list[dict]) -> list[dict]:
@@ -555,21 +584,15 @@ def main() -> int:
     if args.failed_only and not args.retry_failures:
         raise ValueError("--failed-only requires --retry-failures")
     expected_profile = chapter_profile(extension)
-    failure_keys = failed_keys(previous)
-    completed = completed_revisions(
-        previous, args.retry_failures, expected_profile if extension == "chm" else None)
-    selected = [item for item in select_records(args.search_data, revisions, args.max_source_bytes, extension)
-                if shard_for(f"{item['repo']}\0{item['path']}", args.shard_count) == args.shard_index
-                if not args.failed_only or f"{item['repo']}\0{item['path']}" in failure_keys
-                 if completed.get(f"{item['repo']}\0{item['path']}") != item["revision"]]
-    if extension not in OFFICE_EXTENSIONS and extension != "chm":
-        unchanged = unchanged_sources(selected, previous, token)
-        selected = [item for item in selected if f"{item['repo']}\0{item['path']}" not in unchanged]
+    records = [item for item in select_records(args.search_data, revisions, args.max_source_bytes, extension)
+               if shard_for(f"{item['repo']}\0{item['path']}", args.shard_count) == args.shard_index]
+    selected, plan = pending_chapter_sources(records, previous, extension, token,
+        retry_failures=args.retry_failures, failed_only=args.failed_only)
     if args.limit:
         selected = selected[:args.limit]
     if args.plan_only:
         print(json.dumps({"kind": "epub-chapter-plan", "extension": extension,
-                          "profile": expected_profile, "selected": len(selected)}, ensure_ascii=False), flush=True)
+                          "profile": expected_profile, **plan, "selected": len(selected)}, ensure_ascii=False), flush=True)
         return 0
     if not selected:
         print("no pending chapter sources")
