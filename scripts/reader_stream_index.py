@@ -146,8 +146,10 @@ def s3_client():
 
 def remote_identity(fs: HfFileSystem, bucket: str, path: str) -> tuple[str, int] | None:
     global _s3_readback_retry_at
-    if (bucket == "vomebook/reader-assets-v2" and os.environ.get("HF_S3_ACCESS_KEY_ID")
-            and os.environ.get("HF_S3_SECRET_ACCESS_KEY") and time.monotonic() >= _s3_readback_retry_at):
+    use_s3 = bool(bucket == "vomebook/reader-assets-v2" and os.environ.get("HF_S3_ACCESS_KEY_ID")
+                  and os.environ.get("HF_S3_SECRET_ACCESS_KEY"))
+    cooling_down = time.monotonic() < _s3_readback_retry_at
+    if use_s3:
         from botocore.exceptions import ClientError
 
         def read():
@@ -162,7 +164,9 @@ def remote_identity(fs: HfFileSystem, bucket: str, path: str) -> tuple[str, int]
                 body.close()
             return digest.hexdigest(), size
         try:
-            return retry_s3(read)
+            # During cooldown do not abandon S3: one attempt keeps the fast path
+            # available, and Hub is used only if that single read still fails.
+            return retry_s3(read, attempts=1) if cooling_down else retry_s3(read)
         except FileNotFoundError:
             return None
         except ClientError as error:

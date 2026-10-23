@@ -178,13 +178,15 @@ class ReaderStreamCheckpointTests(unittest.TestCase):
         expected = (hashlib.sha256(b"complete bytes").hexdigest(), 14)
         with patch.dict("os.environ", {"HF_S3_ACCESS_KEY_ID": "fixture", "HF_S3_SECRET_ACCESS_KEY": "fixture"}), \
                 patch.object(index, "_s3_readback_retry_at", 0), \
-                patch.object(index.time, "monotonic", side_effect=[10, 10, 20, 311, 311]), \
+                patch.object(index.time, "monotonic", side_effect=[10, 10, 20, 311, 700, 700]), \
                 patch.object(index, "retry_s3", side_effect=throttled) as s3:
             self.assertEqual(index.remote_identity(fs, BUCKET, "documents/x"), expected)
             self.assertEqual(index.remote_identity(fs, BUCKET, "documents/x"), expected)
-            self.assertEqual(s3.call_count, 1)
-            self.assertEqual(index.remote_identity(fs, BUCKET, "documents/x"), expected)
             self.assertEqual(s3.call_count, 2)
+            self.assertEqual([call.kwargs.get("attempts") for call in s3.call_args_list], [None, 1])
+            self.assertEqual(index.remote_identity(fs, BUCKET, "documents/x"), expected)
+            self.assertEqual(s3.call_count, 3)
+            self.assertEqual(s3.call_args_list[-1].kwargs.get("attempts"), None)
         self.assertEqual(fs.open.call_count, 3)
         for call in fs.open.call_args_list:
             self.assertEqual(call.args, (f"hf://buckets/{BUCKET}/documents/x", "rb"))
