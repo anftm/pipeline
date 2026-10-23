@@ -158,7 +158,7 @@ jobs:
           python -B scripts/auto_ccrd_ocr.py "${args[@]}"
       - name: Verify the exact live generation, complete OCR IDs and readable full text
         if: github.event_name != 'workflow_dispatch' || inputs.apply
-        timeout-minutes: 25
+        timeout-minutes: 45
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |

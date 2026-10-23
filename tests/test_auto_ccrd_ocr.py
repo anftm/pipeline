@@ -185,6 +185,51 @@ class AutoCcrdOcrTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'original provenance'):
             auto.export_spec(self.store, jobs[0], 1)
 
+    def test_in_progress_newspaper_rollout_fences_ocr_neutrally(self):
+        """A mid-flight rollout is a neutral skip, not a red batch failure."""
+        key, _entry = self.book('fenced')
+        rollout = {'version': 1, 'kind': 'ccrd-newspaper-rollout', 'status': 'staging',
+                   'generation': 'e' * 64, 'base_metadata_sha256': 'd' * 64}
+        with patch.object(auto.publisher, 'optional_json', return_value=(rollout, contract.canonical(rollout))), \
+                patch.object(auto.builder, 'build_release') as build, \
+                patch.object(publisher, 'assert_writer') as writer:
+            with self.assertRaises(auto.RolloutNotReady):
+                self.run_auto('fenced', apply=True)
+        build.assert_not_called(); writer.assert_not_called()
+        self.assertNotIn((contract.BUCKET, publisher.CURRENT), self.store.objects)
+
+    def test_committed_rollout_with_wrong_base_still_fails_loudly(self):
+        """A committed rollout on a different base is a real inconsistency, not a fence."""
+        self.book('mismatch')
+        rollout = {'version': 1, 'kind': 'ccrd-newspaper-rollout', 'status': 'committed',
+                   'generation': 'e' * 64, 'base_metadata_sha256': 'd' * 64}
+        with patch.object(auto.publisher, 'optional_json', return_value=(rollout, contract.canonical(rollout))), \
+                patch.object(publisher, 'assert_writer'):
+            with self.assertRaisesRegex(ValueError, 'committed newspaper rollout base differs'):
+                self.run_auto('mismatch', apply=True)
+
+    def test_cli_reports_in_progress_rollout_as_neutral_skip_receipt(self):
+        """main() must exit 0 and write a no-generation skip receipt, never a failure."""
+        import io
+        from contextlib import redirect_stdout
+        output = self.root / 'skip' / 'publication.json'
+        config = self.root / 'consumer.json'; config.write_bytes(contract.canonical(APPROVED))
+        with patch.object(auto, 'prepare_consumer'), \
+                patch.object(auto.publisher, 'HubBucketStore', return_value=self.store), \
+                patch.object(auto, 'reconcile', side_effect=auto.RolloutNotReady('fenced by staging rollout')):
+            argv = ['auto_ccrd_ocr.py', '--config', str(config), '--root', str(self.root / 'cand'),
+                    '--output', str(output), '--apply']
+            import sys
+            with patch.object(sys, 'argv', argv), redirect_stdout(io.StringIO()):
+                code = auto.main()
+        self.assertEqual(code, 0)
+        report = json.loads(output.read_bytes())
+        self.assertTrue(report['skipped'])
+        self.assertFalse(report['applied'])
+        self.assertEqual(report['phase'], 'newspaper-rollout-not-ready')
+        self.assertNotIn('generation', report)
+        self.assertIn('fenced by staging rollout', report['reason'])
+
     def test_unusable_source_text_is_a_terminal_disposition_not_a_batch_failure(self):
         """Unchanged binary-control sources must not fail every later batch."""
         key, entry = self.book('binary')
@@ -294,6 +339,11 @@ class AutoCcrdOcrTests(unittest.TestCase):
             self.assertIn(required, workflow)
         self.assertNotIn('OCR_CORRECTION_API', workflow)
         self.assertNotIn('download-artifact', workflow.rsplit('\n  automatic:\n', 1)[1])
+
+    def test_automatic_verify_step_has_headroom_over_observed_acceptance_time(self):
+        workflow = (Path(__file__).parents[1] / '.github/workflows/publish-ccrd-ocr.yml').read_text()
+        block = workflow.split('Verify the exact live generation', 1)[1].split('- uses: actions/upload-artifact', 1)[0]
+        self.assertIn('timeout-minutes: 45', block)
 
     def test_live_acceptance_reads_every_result_page_and_rejects_duplicate_ids(self):
         first = {'total': 201, 'results': [{'doc_id': f'OCR:{number}'} for number in range(1, 201)]}

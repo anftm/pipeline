@@ -35,6 +35,18 @@ class StaleDerivedProvenance(ValueError):
     """The OCR registry points at an older derived PDF than the Reader manifest."""
 
 
+class RolloutNotReady(Exception):
+    """A concurrent newspaper rollout is mid-flight; ordinary OCR is safely fenced.
+
+    This is a neutral, expected condition (not a failure): the shared writer and
+    journal are owned by the in-progress rollout, so an ordinary OCR batch must
+    not build/publish against a base that is about to change. The workflow
+    reports it as a skip rather than a red failure. A committed rollout whose
+    base still differs from the approved consumer is a real inconsistency and is
+    NOT treated this way.
+    """
+
+
 def require_retained(store, value):
     """Reject one stale export without blocking every other complete book."""
     for ref in value.get('retained_reader_resources', []):
@@ -229,9 +241,15 @@ def reconcile(store, root, consumer_root, approved, *, limit=8, apply=False, pla
         raise ValueError('OCR batch must select 1..32 complete books, never page prefixes')
     approved = configuration(approved)
     rollout, _rollout_raw = publisher.optional_json(store, 'control/newspaper-rollout.json')
-    if rollout and (rollout.get('status') != 'committed'
-                    or rollout.get('base_metadata_sha256') != approved['base_metadata_sha256']):
-        raise ValueError('newspaper rollout must finish and pin the approved consumer before OCR admission')
+    if rollout and rollout.get('status') != 'committed':
+        # Mid-flight rollout owns the shared writer/journal; fence is expected.
+        raise RolloutNotReady(
+            'in-progress newspaper rollout (%r) fences ordinary OCR admission until it commits'
+            % rollout.get('status'))
+    if rollout and rollout.get('base_metadata_sha256') != approved['base_metadata_sha256']:
+        # Committed rollout with a different base than the approved consumer is a
+        # genuine configuration inconsistency, not a transient fence: fail loudly.
+        raise ValueError('committed newspaper rollout base differs from the approved OCR consumer')
     if apply:
         publisher.assert_writer()
     root.mkdir(parents=True, exist_ok=True)
@@ -404,6 +422,7 @@ def main():
     approved = configuration(json.loads(args.config.read_text()))
     consumer = args.root.parent / 'consumer'
     report = {}
+    skipped = False
     try:
         if not args.plan_only:
             prepare_consumer(approved, consumer)
@@ -411,10 +430,23 @@ def main():
                   plan_only=args.plan_only, retry_failures=args.retry_failures, apply=args.apply,
                   activate=args.activate_space, source=json.loads(args.source_json), report=report,
                   rebase=args.rebase)
+    except RolloutNotReady as error:
+        # Expected transient fence during a concurrent newspaper rollout. Emit a
+        # neutral, explicit skip receipt (no ``generation`` key so the workflow's
+        # existing ``jq -e '.generation'`` guard skips live acceptance) and exit 0
+        # so scheduled/callback runs do not paint a red failure over real issues.
+        skipped = True
+        report.clear()
+        report.update(version=1, kind='ccrd-ocr-automation', phase='newspaper-rollout-not-ready',
+                      applied=False, skipped=True, reason=str(error), model_calls=0,
+                      deleted_objects=0, remote_writes=0)
+        print('::notice::ordinary OCR admission fenced by in-progress newspaper rollout: %s' % error)
     finally:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_bytes(contract.canonical(report))
     print(json.dumps(report, ensure_ascii=False, indent=2))
+    if skipped:
+        return 0
 
 
 if __name__ == '__main__':

@@ -266,7 +266,7 @@ class NewspaperPublicationTests(unittest.TestCase):
                          {'data/index-release.json','data/ocr-release.json'})
         journal = json.loads(self.store.read_bytes(BUCKET,rollout.JOURNAL))
         self.assertEqual(journal['status'],'activated')
-        with patch.object(ocr,'assert_writer'), self.assertRaisesRegex(ValueError,'rollout'):
+        with patch.object(ocr,'assert_writer'), self.assertRaisesRegex(auto.RolloutNotReady,'rollout'):
             auto.reconcile(self.store,self.root/'auto',self.root/'consumer',self.approved,plan_only=True)
         with self.assertRaisesRegex(gc.Blocker,'pending newspaper'):
             gc.plan(self.store)
