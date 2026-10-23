@@ -47,6 +47,7 @@ jobs:
     outputs:
       shard_ids: ${{ steps.plan.outputs.shard_ids }}
       shard_count: ${{ steps.plan.outputs.shard_count }}
+      book_count: ${{ steps.plan.outputs.book_count }}
       publisher: ${{ steps.plan.outputs.publisher }}
       stage: ${{ steps.plan.outputs.stage }}
     steps:
@@ -92,7 +93,11 @@ jobs:
           fi
           # auto: recognition first; render new PDFs only when nothing is waiting
           # for OCR, so the lane never idles while either queue has work.
-          if [[ "$STAGE" == render || ( "$STAGE" == auto && "$(jq -r '.shard_count' output/pdf-ocr/queue.json)" == 0 ) ]]; then
+          # Zero OCR shards is not "nothing to do": a fully native-text book
+          # still needs its complete text assembled and published centrally.
+          if [[ "$STAGE" == render || ( "$STAGE" == auto && \
+                "$(jq -r '.shard_count' output/pdf-ocr/queue.json)" == 0 && \
+                "$(jq -r '(.books // []) | length' output/pdf-ocr/queue.json)" == 0 ) ]]; then
             sudo apt-get update
             sudo apt-get install -y --no-install-recommends poppler-utils poppler-data fonts-noto-cjk fonts-liberation djvulibre-bin
             FORCE_SYNC=true python scripts/fetch_and_parse.py
@@ -104,6 +109,9 @@ jobs:
           echo "stage=$resolved" >> "$GITHUB_OUTPUT"
           echo "shard_ids=$(jq -c '.shard_ids' output/pdf-ocr/queue.json)" >> "$GITHUB_OUTPUT"
           echo "shard_count=$(jq -r '.shard_count' output/pdf-ocr/queue.json)" >> "$GITHUB_OUTPUT"
+          # A fully native-text DjVu book has no OCR pages to recognize, but its
+          # complete text still has to be assembled and published centrally.
+          echo "book_count=$(jq -r '(.books // []) | length' output/pdf-ocr/queue.json)" >> "$GITHUB_OUTPUT"
           echo "publisher=$(jq -r '.publisher_repository' pdf-worker-lanes.json)" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v7
         with:
@@ -163,7 +171,8 @@ jobs:
     needs: [plan, build]
     if: >-
       always() && !cancelled() && needs.plan.result == 'success' &&
-      needs.plan.outputs.shard_count != '0' && needs.build.result != 'cancelled'
+      (needs.plan.outputs.shard_count != '0' || needs.plan.outputs.book_count != '0') &&
+      needs.build.result != 'cancelled'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:

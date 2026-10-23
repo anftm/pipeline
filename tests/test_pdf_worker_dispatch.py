@@ -186,7 +186,7 @@ class WorkerDispatchTests(unittest.TestCase):
         handoffs = [s for s in steps if "pdf_worker_dispatch.py" in s.get("run", "")]
         self.assertEqual(len(handoffs), 1)
         self.assertIn("inputs.stage == 'render'", handoffs[0]["if"])
-        self.assertIn("steps.queue.outputs.shard_count != '0'", handoffs[0]["if"])
+        self.assertIn("inputs.stage == 'render' || inputs.stage == 'ocr'", handoffs[0]["if"])
         self.assertLess(next(i for i, s in enumerate(steps) if s.get("name") == "Publish Reader sidecar to Pages"),
                         steps.index(handoffs[0]))
         self.assertEqual(workflow["concurrency"]["group"], "reader-sidecar")

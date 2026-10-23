@@ -5,6 +5,7 @@ import json
 import sys
 import tempfile
 import unittest
+import yaml
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -954,6 +955,31 @@ class PdfOcrStagesTests(unittest.TestCase):
             self.assertIs(stages.djvu_pages.native_exception(native), exception)
             # The recorded exception never becomes a native render task.
             self.assertEqual(stages.pending_render([native], {}, {}), [])
+
+    def test_native_text_only_book_keeps_an_assembly_only_queue(self):
+        result = self.render_fixture(native_only=True)
+        with patch.object(stages, "read_object", side_effect=self.read):
+            queue = stages.plan_images({result["key"]: result}, {}, {})
+        self.assertEqual(queue["shard_count"], 0)
+        self.assertEqual(len(queue["books"]), 1)
+        self.assertEqual(queue["books"][0]["key"], result["key"])
+        self.assertEqual(sum(len(task["pages"]) for task in queue["shards"]), 0)
+
+    def test_worker_and_publisher_admit_zero_shard_native_text_assembly(self):
+        root = Path(__file__).resolve().parents[1] / ".github/workflows"
+        worker = yaml.safe_load((root / "pdf-account-worker.yml").read_text())
+        publisher = yaml.safe_load((root / "pdf-account-publish.yml").read_text())
+        self.assertIn("book_count", worker["jobs"]["plan"]["outputs"])
+        plan_commands = "\n".join(step.get("run", "") for step in worker["jobs"]["plan"]["steps"])
+        self.assertIn("book_count=$(jq -r '(.books // []) | length'", plan_commands)
+        self.assertIn('"$STAGE" == auto', plan_commands)
+        self.assertIn('output/pdf-ocr/queue.json)" == 0', plan_commands)
+        self.assertIn("(.books // []) | length", plan_commands)
+        notify = worker["jobs"]["notify"]["if"]
+        self.assertIn("needs.plan.outputs.shard_count != '0'", notify)
+        self.assertIn("needs.plan.outputs.book_count != '0'", notify)
+        conditions = "\n".join(step.get("if", "") for step in publisher["jobs"]["publish"]["steps"])
+        self.assertIn("inputs.stage == 'render' || inputs.stage == 'ocr'", conditions)
 
     def test_native_djvu_renders_before_other_converted_formats(self):
         native = {"key": "repo\0z.djvu", "repo": "repo", "path": "z.djvu", "source_format": "djvu",

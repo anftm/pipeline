@@ -91,7 +91,7 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: python scripts/pdf_progress_report.py --record --output output/pdf-ocr/pdf-progress.json
       - name: Admit at most one next OCR batch for this account
-        if: inputs.stage == 'render' || (inputs.stage == 'ocr' && steps.queue.outputs.shard_count != '0')
+        if: inputs.stage == 'render' || inputs.stage == 'ocr'
         env:
           GH_TOKEN: ${{ secrets.PDF_WORKER_READ_TOKEN }}
           WORKER_REPOSITORY: ${{ inputs.worker_repository }}
