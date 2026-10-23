@@ -169,6 +169,101 @@ class ReaderStreamCheckpointTests(unittest.TestCase):
                     with self.assertRaises(ClientError):
                         index.remote_identity(Mock(), BUCKET, "documents/x")
 
+    def test_exhausted_s3_throttling_verifies_same_hub_bytes_during_bounded_cooldown(self):
+        from botocore.exceptions import ClientError
+        throttled = ClientError({"Error": {"Code": "SlowDown"},
+                                 "ResponseMetadata": {"HTTPStatusCode": 503}}, "GetObject")
+        fs = Mock()
+        fs.open.side_effect = lambda *args: io.BytesIO(b"complete bytes")
+        expected = (hashlib.sha256(b"complete bytes").hexdigest(), 14)
+        with patch.dict("os.environ", {"HF_S3_ACCESS_KEY_ID": "fixture", "HF_S3_SECRET_ACCESS_KEY": "fixture"}), \
+                patch.object(index, "_s3_readback_retry_at", 0), \
+                patch.object(index.time, "monotonic", side_effect=[10, 10, 20, 311, 311]), \
+                patch.object(index, "retry_s3", side_effect=throttled) as s3:
+            self.assertEqual(index.remote_identity(fs, BUCKET, "documents/x"), expected)
+            self.assertEqual(index.remote_identity(fs, BUCKET, "documents/x"), expected)
+            self.assertEqual(s3.call_count, 1)
+            self.assertEqual(index.remote_identity(fs, BUCKET, "documents/x"), expected)
+            self.assertEqual(s3.call_count, 2)
+        self.assertEqual(fs.open.call_count, 3)
+        for call in fs.open.call_args_list:
+            self.assertEqual(call.args, (f"hf://buckets/{BUCKET}/documents/x", "rb"))
+        self.assertEqual(fs.invalidate_cache.call_count, 3)
+
+    def test_s3_access_and_integrity_errors_never_fall_back_to_hub(self):
+        from botocore.exceptions import ChecksumError, ClientError, NoCredentialsError, SSLError
+        for code in ("AccessDenied", "InvalidAccessKeyId", "SignatureDoesNotMatch"):
+            fs = Mock()
+            denied = ClientError({"Error": {"Code": code},
+                                  "ResponseMetadata": {"HTTPStatusCode": 403}}, "GetObject")
+            with self.subTest(code=code), \
+                    patch.dict("os.environ", {"HF_S3_ACCESS_KEY_ID": "fixture", "HF_S3_SECRET_ACCESS_KEY": "fixture"}), \
+                    patch.object(index, "_s3_readback_retry_at", 0), \
+                    patch.object(index, "retry_s3", side_effect=denied):
+                with self.assertRaises(ClientError):
+                    index.remote_identity(fs, BUCKET, "documents/x")
+            fs.open.assert_not_called()
+        for error in (ValueError("invalid stream identity"), NoCredentialsError(),
+                      ChecksumError(checksum_type="sha256", expected_checksum="expected", actual_checksum="wrong"),
+                      SSLError(endpoint_url="https://s3.hf.co", error="certificate mismatch")):
+            fs = Mock()
+            with self.subTest(error=type(error).__name__), \
+                    patch.dict("os.environ", {"HF_S3_ACCESS_KEY_ID": "fixture", "HF_S3_SECRET_ACCESS_KEY": "fixture"}), \
+                    patch.object(index, "_s3_readback_retry_at", 0), \
+                    patch.object(index, "retry_s3", side_effect=error):
+                with self.assertRaises(type(error)):
+                    index.remote_identity(fs, BUCKET, "documents/x")
+            fs.open.assert_not_called()
+
+    def test_hub_fallback_access_failure_is_not_a_missing_object(self):
+        from botocore.exceptions import ClientError
+        throttled = ClientError({"Error": {"Code": "SlowDown"}}, "GetObject")
+        fs = Mock()
+        fs.open.side_effect = PermissionError("Hub denied")
+        with patch.dict("os.environ", {"HF_S3_ACCESS_KEY_ID": "fixture", "HF_S3_SECRET_ACCESS_KEY": "fixture"}), \
+                patch.object(index, "_s3_readback_retry_at", 0), \
+                patch.object(index, "retry_s3", side_effect=throttled):
+            with self.assertRaisesRegex(PermissionError, "Hub denied"):
+                index.remote_identity(fs, BUCKET, "documents/x")
+        fs.open.assert_called_once()
+
+    def test_hub_readback_retries_partial_stream_from_fresh_hash(self):
+        import httpx
+        class Interrupted(io.BytesIO):
+            def read(self, size=-1):
+                if self.tell():
+                    raise httpx.RemoteProtocolError("stream interrupted")
+                return super().read(7)
+        fs = Mock()
+        fs.open.side_effect = [Interrupted(b"partial bytes"), io.BytesIO(b"complete bytes")]
+        with patch.dict("os.environ", {"HF_S3_ACCESS_KEY_ID": "", "HF_S3_SECRET_ACCESS_KEY": ""}), \
+                patch("scripts.reader_bucket_store.time.sleep"):
+            self.assertEqual(index.remote_identity(fs, BUCKET, "documents/x"),
+                             (hashlib.sha256(b"complete bytes").hexdigest(), 14))
+        self.assertEqual(fs.open.call_count, 2)
+
+    def test_corrupt_hub_fallback_after_s3_throttling_never_advances_checkpoint(self):
+        from botocore.exceptions import ClientError
+        throttled = ClientError({"Error": {"Code": "SlowDown"}}, "GetObject")
+        fs = Mock()
+        fs.open.side_effect = [FileNotFoundError("new object"), io.BytesIO(b"wrong bytes")]
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary)
+            content = work / "document.html"
+            content.write_bytes(b"body")
+            entry = {"key": "repo\0book.html", "source_revision": "rev", "object": "documents/web/hash/document.html"}
+            with patch.dict("os.environ", {"HF_S3_ACCESS_KEY_ID": "fixture", "HF_S3_SECRET_ACCESS_KEY": "fixture"}), \
+                    patch.object(index, "_s3_readback_retry_at", 0), \
+                    patch.object(index, "retry_s3", side_effect=throttled), \
+                    patch.object(index, "HfFileSystem", return_value=fs), \
+                    patch.object(index, "batch_bucket_files_with_retry") as upload:
+                with self.assertRaisesRegex(ValueError, "readback failed"):
+                    index.publish_checkpoint(BUCKET, "documents/web/index.json", {"files": []},
+                        [entry], [], {entry["object"]: str(content)}, work, None, apply=True, kind="fixture")
+            self.assertEqual(upload.call_count, 2)
+            self.assertFalse(any(remote.endswith("index.json") for call in upload.call_args_list
+                                 for _local, remote in call.args[1]))
+
     def test_source_sha_reuses_only_verified_lfs_identity_at_pinned_revision(self):
         rows = [{"key": "repo\0same.mp3", "revision": "new"}, {"key": "repo\0changed.mp3", "revision": "new"}]
         previous = {"files": [{"key": row["key"], "source_revision": "old", "source_sha256": "a" * 64} for row in rows]}

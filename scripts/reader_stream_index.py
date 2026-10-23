@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import shutil
+import time
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
@@ -15,11 +16,15 @@ from huggingface_hub import HfApi, HfFileSystem
 try:
     from . import reader_lifecycle
     from .shared import batch_bucket_files_with_retry, hash_file
-    from .reader_bucket_store import retry_read, retry_s3
+    from .reader_bucket_store import S3_RETRY_CODES, retry_read, retry_s3, s3_error_code
 except ImportError:
     import reader_lifecycle
     from shared import batch_bucket_files_with_retry, hash_file
-    from reader_bucket_store import retry_read, retry_s3
+    from reader_bucket_store import S3_RETRY_CODES, retry_read, retry_s3, s3_error_code
+
+
+S3_READBACK_COOLDOWN_SECONDS = 300
+_s3_readback_retry_at = 0.0
 
 
 def validate_index(value: dict, path: str) -> dict:
@@ -140,7 +145,11 @@ def s3_client():
 
 
 def remote_identity(fs: HfFileSystem, bucket: str, path: str) -> tuple[str, int] | None:
-    if bucket == "vomebook/reader-assets-v2" and os.environ.get("HF_S3_ACCESS_KEY_ID") and os.environ.get("HF_S3_SECRET_ACCESS_KEY"):
+    global _s3_readback_retry_at
+    if (bucket == "vomebook/reader-assets-v2" and os.environ.get("HF_S3_ACCESS_KEY_ID")
+            and os.environ.get("HF_S3_SECRET_ACCESS_KEY") and time.monotonic() >= _s3_readback_retry_at):
+        from botocore.exceptions import ClientError
+
         def read():
             response = s3_client().get_object(Bucket="reader-assets-v2", Key=path)
             body = response["Body"]
@@ -156,13 +165,28 @@ def remote_identity(fs: HfFileSystem, bucket: str, path: str) -> tuple[str, int]
             return retry_s3(read)
         except FileNotFoundError:
             return None
-    try:
-        with fs.open(f"hf://buckets/{bucket}/{path}", "rb") as stream:
+        except ClientError as error:
+            code, status = s3_error_code(error)
+            if str(code) not in S3_RETRY_CODES and status not in {500, 502, 503, 504}:
+                raise
+            # The upload may already exist. Never advance from an exhausted S3
+            # read: independently read the exact same current-bucket object.
+            _s3_readback_retry_at = time.monotonic() + S3_READBACK_COOLDOWN_SECONDS
+            print("transient S3 readback retries exhausted; verifying exact current-bucket bytes "
+                  f"through Hub for {S3_READBACK_COOLDOWN_SECONDS}s", flush=True)
+
+    def read_hub():
+        uri = f"hf://buckets/{bucket}/{path}"
+        fs.invalidate_cache(uri)
+        with fs.open(uri, "rb") as stream:
             digest, size = hashlib.sha256(), 0
             while chunk := stream.read(1024 * 1024):
                 digest.update(chunk)
                 size += len(chunk)
             return digest.hexdigest(), size
+
+    try:
+        return retry_read(read_hub)
     except FileNotFoundError:
         return None
 
