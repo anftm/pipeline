@@ -246,6 +246,8 @@ def validate_chapter_manifest(manifest: dict) -> dict:
                 or search_index.get("bytes", 0) <= 0
                 or not re.fullmatch(r"[0-9a-f]{64}", str(search_index.get("sha256", "")))):
             raise ValueError("invalid EPUB search index metadata")
+        if "text_profile" in search_index and search_index["text_profile"] != "dom-text-v1":
+            raise ValueError("unsupported EPUB search text profile")
     if manifest.get("fallback") is not None:
         validate_object_path(manifest["fallback"])
     return manifest

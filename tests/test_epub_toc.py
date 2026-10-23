@@ -1,4 +1,6 @@
 import tempfile
+import gzip
+import json
 import unittest
 import zipfile
 from pathlib import Path
@@ -7,6 +9,35 @@ from scripts import epub_chapters, reader_assets
 
 
 class EpubTocTests(unittest.TestCase):
+    def test_search_indexes_visible_literal_references_without_second_decode(self):
+        document = ('<html:html xmlns:html="http://www.w3.org/1999/xhtml">'
+                    '<html:head><html:title>标题</html:title></html:head><html:body>'
+                    '<html:p>保留 &amp;#0 和 &amp;nbsp; 与 &amp;amp; &amp;lt;b&amp;gt;</html:p>'
+                    '<html:style>不能检索样式</html:style><html:noscript>不能检索备用脚本</html:noscript>'
+                    '<html:p>真实空格&#160;尾部</html:p></html:body></html:html>')
+        self.assertEqual(epub_chapters._chapter_text(document),
+                         '标题 保留 &#0 和 &nbsp; 与 &amp; &lt;b&gt; 真实空格 尾部')
+
+    def test_written_search_profile_and_complete_text_are_checksum_bound(self):
+        import hashlib
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            body = b'<html><body><p>literal &amp;nbsp; tail</p></body></html>'
+            path = root / 'chapters/chapter-0001.xhtml'
+            path.parent.mkdir();path.write_bytes(body)
+            chapters = [dict(index=1, title='literal', path='chapters/chapter-0001.xhtml',
+                             bytes=len(body), sha256=hashlib.sha256(body).hexdigest())]
+            ref = epub_chapters.write_search_index(root, chapters)
+            raw = (root / ref['path']).read_bytes()
+            data = json.loads(gzip.decompress(raw))
+            self.assertEqual(ref['text_profile'], 'dom-text-v1')
+            self.assertEqual(data['text_profile'], ref['text_profile'])
+            self.assertEqual(data['chapters'][0]['text'], 'literal &nbsp; tail')
+            self.assertEqual(ref['sha256'], hashlib.sha256(raw).hexdigest())
+            path.write_bytes(body + b'changed')
+            with self.assertRaisesRegex(ValueError, 'chapter bytes differ'):
+                epub_chapters.write_search_index(root, chapters)
+
     def build(self, navigation, *, nav=False):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

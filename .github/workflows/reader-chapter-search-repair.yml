@@ -1,0 +1,71 @@
+name: Reader/桶 · Repair Exact Chapter Search
+run-name: Exact chapter search repair / ${{ inputs.apply && 'apply' || 'plan' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      targets_json:
+        description: Exact pinned keys, source SHA, old manifest and manifest SHA (1-32 sources)
+        required: true
+        type: string
+      apply:
+        description: Publish immutable repaired bundles and canonical checkpoint
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: reader-sidecar
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  repair:
+    if: github.repository == 'anftm/pipeline'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - run: pip install -r scripts/requirements.txt
+      - name: Save exact pinned selection without shell interpolation
+        env:
+          TARGETS_JSON: ${{ inputs.targets_json }}
+        run: |
+          mkdir -p output/search-repair
+          python -c 'import os,pathlib; pathlib.Path("output/search-repair/selection.json").write_text(os.environ["TARGETS_JSON"], encoding="utf-8")'
+      - name: Rebuild search only from verified complete published chapters
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+          APPLY: ${{ inputs.apply }}
+        run: |
+          args=(--selection output/search-repair/selection.json --work output/search-repair/bundles --report output/search-repair/report.json)
+          if [[ "$APPLY" == 'true' ]]; then args+=(--apply); fi
+          python scripts/repair_chapter_search.py "${args[@]}"
+      - name: Rebuild canonical sidecar and release handed-off roots
+        if: inputs.apply
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: python scripts/build_reader_assets_v2_sidecar.py --apply
+      - name: Unify through the existing central publisher
+        if: inputs.apply
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run reader-v3-publish.yml --repo "$GITHUB_REPOSITORY" --ref main -f operation=unify -f apply=true
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: chapter-search-repair-receipt
+          path: |
+            output/search-repair/selection.json
+            output/search-repair/report.json
+          if-no-files-found: warn
+          retention-days: 30

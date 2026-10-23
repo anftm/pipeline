@@ -16,6 +16,7 @@ from html.parser import HTMLParser
 
 MAX_CHAPTER_RESOURCES = 2000
 MAX_CHAPTER_RESOURCE_BYTES = 512 * 1024 * 1024
+SEARCH_TEXT_PROFILE = "dom-text-v1"
 
 try:
     from .convert_reader_assets import sanitize_css, sanitize_html, sanitize_xml_document
@@ -273,11 +274,11 @@ class _TextExtractor(HTMLParser):
         self.skip_depth = 0
 
     def handle_starttag(self, tag, attrs):
-        if tag.lower() in {"script", "style", "noscript"}:
+        if tag.rsplit(":", 1)[-1].lower() in {"script", "style", "noscript"}:
             self.skip_depth += 1
 
     def handle_endtag(self, tag):
-        if tag.lower() in {"script", "style", "noscript"} and self.skip_depth:
+        if tag.rsplit(":", 1)[-1].lower() in {"script", "style", "noscript"} and self.skip_depth:
             self.skip_depth -= 1
 
     def handle_data(self, data):
@@ -315,7 +316,27 @@ def _chapter_text(document: str) -> str:
     parser = _TextExtractor()
     parser.feed(document)
     parser.close()
-    return re.sub(r"\s+", " ", html.unescape(" ".join(parser.parts))).strip()
+    # HTMLParser already decoded markup references once. A second unescape
+    # would turn displayed literals such as '&nbsp;' or '&#0' into other text.
+    return re.sub(r"\s+", " ", " ".join(parser.parts)).strip()
+
+
+def write_search_index(output: Path, chapters: list[dict]) -> dict:
+    """Index exact verified chapter bytes; mark the DOM mapping convention."""
+    search_chapters = []
+    for chapter in chapters:
+        data = (output / chapter["path"]).read_bytes()
+        if len(data) != chapter["bytes"] or hashlib.sha256(data).hexdigest() != chapter["sha256"]:
+            raise ValueError("chapter bytes differ before search indexing")
+        search_chapters.append({"index": chapter["index"], "title": chapter["title"],
+                                "path": chapter["path"], "text": _chapter_text(data.decode("utf-8"))})
+    search_data = canonical_json({"version": 1, "kind": "epub-search-index",
+                                 "text_profile": SEARCH_TEXT_PROFILE, "chapters": search_chapters})
+    search_bytes = gzip.compress(search_data, mtime=0)
+    target = output / "epub-search-index.json.gz"
+    target.write_bytes(search_bytes)
+    return {"path": target.name, "bytes": len(search_bytes),
+            "sha256": hashlib.sha256(search_bytes).hexdigest(), "text_profile": SEARCH_TEXT_PROFILE}
 
 
 def build_bundle(epub: Path, output: Path, *, fallback: str | None = None,
@@ -339,7 +360,6 @@ def build_bundle(epub: Path, output: Path, *, fallback: str | None = None,
             if _local_name(node) == "item":
                 manifest[node.attrib.get("id", "")] = node.attrib
         chapters = []
-        search_chapters = []
         chapter_records = []
         resource_usage = Counter()
         toc_entries = _toc_entries(archive, opf_path, manifest, names)
@@ -461,12 +481,8 @@ def build_bundle(epub: Path, output: Path, *, fallback: str | None = None,
             target.write_text(clean, encoding="utf-8")
             data = target.read_bytes()
             chapters.append({"index": chapter_index, "title": record["title"], "source_path": record["source_path"], "path": target.relative_to(output).as_posix(), "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()})
-            search_chapters.append({"index": chapter_index, "title": record["title"], "path": target.relative_to(output).as_posix(), "text": _chapter_text(clean)})
-    search_data = canonical_json({"version": 1, "kind": "epub-search-index", "chapters": search_chapters})
-    search_bytes = gzip.compress(search_data, mtime=0)
-    search_target = output / "epub-search-index.json.gz"
-    search_target.write_bytes(search_bytes)
-    result = {"version": 1, "kind": "epub-chapters", "chapters": chapters, "search_index": {"path": search_target.relative_to(output).as_posix(), "bytes": len(search_bytes), "sha256": hashlib.sha256(search_bytes).hexdigest()}}
+    result = {"version": 1, "kind": "epub-chapters", "chapters": chapters,
+              "search_index": write_search_index(output, chapters)}
     result["toc"] = toc
     if fallback:
         result["fallback"] = fallback
