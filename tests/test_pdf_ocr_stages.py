@@ -496,8 +496,12 @@ class PdfOcrStagesTests(unittest.TestCase):
             descriptors[number] = stages.metadata(destination, range_bundle)
         self.store(range_bundle)
         updates = []
+        def registry_state(_api, _repo, name, **_kwargs):
+            return {"version": 1, "files": next(
+                (data for saved_name, data in reversed(updates) if saved_name == name), {})}
         with patch.object(stages, "RENDER_RANGE_THRESHOLD", 1), \
                 patch.object(stages, "RENDER_RANGE_PAGES", 1), \
+                patch.object(stages, "load_registry", side_effect=registry_state), \
                 patch.object(stages, "read_object", side_effect=self.read), \
                 patch.object(stages, "upload_objects", side_effect=self.store), \
                 patch.object(stages, "save_registry", side_effect=lambda api, repo, name, data, **kw:

@@ -1,3 +1,4 @@
+from pathlib import Path
 import unittest
 from unittest.mock import patch
 
@@ -6,6 +7,13 @@ from scripts.reader_lifecycle import processing_record
 
 
 class ReaderSidecarHandoffTests(unittest.TestCase):
+    def test_office_producer_releases_writer_lock_before_unify_runs(self):
+        root = Path(__file__).resolve().parents[1] / ".github" / "workflows"
+        source = (root / "reader-office-chapters.yml").read_text(encoding="utf-8")
+        self.assertIn('group: reader-sidecar', source)
+        self.assertIn('operation=unify -f apply=true', source)
+        self.assertNotIn('gh run watch', source)
+
     def test_sidecar_handoff_scans_all_ebook_chapter_indexes_including_chm(self):
         indexes = sidecar.ebook_chapter_indexes("vomebook/reader-assets-v2")
         self.assertIn(("vomebook/reader-assets-v2", "chapters/ebook/chm/index.json"), indexes)

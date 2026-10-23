@@ -29,12 +29,12 @@ class ReaderAssetContractTests(unittest.TestCase):
     def test_conversion_set_excludes_unsafe_or_native_media(self):
         self.assertEqual(
             set(reader_assets.CONVERTIBLE_EXTENSIONS),
-            {"doc", "docx", "epub", "htm", "html", "mobi", "azw3", "fb2", "odt", "rtf", "chm", "tif", "tiff", "djvu",
+            {"doc", "docx", "epub", "htm", "html", "mobi", "azw3", "fb2", "odt", "rtf", "chm", "tif", "tiff",
              "ppt", "pptx", "pps", "odp", "xls", "xlsx", "csv", "ods", "wps", "mht", "mhtml", "ps", "caj", "kdh",
              "ape", "wma", "amr", "flac", "m4a", "mpga", "wav", "asx", "swf", "flv", "f4v", "rm", "rmvb", "mkv", "avi", "mpg",
              "mpeg", "mts", "ts", "wmv", "mov", "mp4"},
         )
-        for extension in ("pdg", "dat", "mp3"):
+        for extension in ("pdg", "dat", "mp3", "djvu"):
             self.assertNotIn(extension, reader_assets.CONVERTIBLE_EXTENSIONS)
 
     def test_source_url_pins_revision_and_encodes_path(self):
@@ -59,7 +59,6 @@ class ReaderAssetContractTests(unittest.TestCase):
             "chm": ("calibre-chm-epub-v4-source-text", "epub", "document.epub"),
             "tif": ("pillow-pdf-v2", "pdf", "document.pdf"),
             "tiff": ("pillow-pdf-v2", "pdf", "document.pdf"),
-            "djvu": ("djvulibre-pdf-v2", "pdf", "document.pdf"),
             "ppt": ("libreoffice-pdf-office-v2", "pdf", "document.pdf"),
             "pptx": ("libreoffice-pdf-office-v2", "pdf", "document.pdf"),
             "pps": ("libreoffice-pdf-office-v2", "pdf", "document.pdf"),
@@ -709,7 +708,20 @@ class ScannerTests(unittest.TestCase):
         queue = scan_reader_assets.build_queue(
             records, self.revisions, reader_assets.empty_manifest(),
         )
-        self.assertEqual([item["extension"] for item in queue], ["tif", "mobi", "djvu", "doc", "pdf"])
+        self.assertEqual([item["extension"] for item in queue], ["tif", "mobi", "doc", "pdf"])
+
+    def test_retired_djvu_is_never_queued_but_keeps_its_live_source_key(self):
+        record = {"Repo": "VoiceOfML/Test", "File": "Book", "Extension": "djvu", "Folder": [], "Size": 10}
+        self.assertIsNone(reader_assets.source_conversion_contract(record["Repo"], "Book.djvu", "djvu"))
+        self.assertIsNone(reader_assets.bucket_conversion_contract(record["Repo"], "Book.djvu", "djvu"))
+        for bucket_migrate in (False, True):
+            with self.subTest(bucket_migrate=bucket_migrate):
+                self.assertEqual(scan_reader_assets.build_queue(
+                    [record], self.revisions, reader_assets.empty_manifest(),
+                    extension="djvu", force=True, retry_failed=True, bucket_migrate=bucket_migrate,
+                ), [])
+                self.assertEqual(scan_reader_assets.active_keys([record], bucket_migrate=bucket_migrate),
+                                 ["VoiceOfML/Test\0Book.djvu"])
 
     def test_exact_path_filter_selects_one_asset(self):
         queue = scan_reader_assets.build_queue(
@@ -852,28 +864,27 @@ class ConverterTests(unittest.TestCase):
             run.assert_not_called()
             self.assertEqual(target.read_bytes()[:5], b"%PDF-")
 
-    def test_djvu_conversion_uses_ddjvu_pdf_output(self):
+    def test_retired_djvu_conversion_rejects_even_pdf_magic_without_running_tools(self):
         with tempfile.TemporaryDirectory() as root:
             work = Path(root)
             source, target = work / "source.djvu", work / "document.pdf"
-            source.write_bytes(b"DJVU")
-            with patch.object(convert_reader_assets, "run_checked") as run:
-                convert_reader_assets.convert_file({"extension": "djvu"}, source, target, work)
-            self.assertEqual(run.call_args.args[0], [
-                "ddjvu", "-format=pdf", str(source), str(target),
-            ])
-            self.assertEqual(run.call_args.kwargs["timeout_seconds"], convert_reader_assets.DJVU_COMMAND_TIMEOUT_SECONDS)
+            source.write_bytes(b"%PDF-mislabeled")
+            with patch.object(convert_reader_assets, "run_checked") as run, \
+                    self.assertRaisesRegex(RuntimeError, "retired.*native DJVU"):
+                convert_reader_assets.convert_file({"extension": "djvu", "profile": reader_assets.NATIVE_MEDIA_PROFILE},
+                                                   source, target, work)
+            run.assert_not_called()
+            self.assertFalse(target.exists())
 
-    def test_djvu_conversion_retries_command_once(self):
+    def test_stale_djvu_generic_queue_fails_before_source_download_or_reuse(self):
         with tempfile.TemporaryDirectory() as root:
             work = Path(root)
-            source, target = work / "source.djvu", work / "document.pdf"
-            source.write_bytes(b"DJVU")
-            with patch.object(convert_reader_assets, "run_checked", side_effect=[
-                    convert_reader_assets.ReaderConversionCommandError("temporary"), None,
-            ]) as run, patch.object(convert_reader_assets.time, "sleep"):
-                convert_reader_assets.convert_file({"extension": "djvu"}, source, target, work)
-            self.assertEqual(run.call_count, 2)
+            with patch.object(convert_reader_assets, "download_source") as download, \
+                    patch.object(convert_reader_assets, "download_existing") as reuse, \
+                    self.assertRaisesRegex(RuntimeError, "retired.*native DJVU"):
+                convert_reader_assets.convert_item({"extension": "djvu"}, work)
+            download.assert_not_called()
+            reuse.assert_not_called()
 
     def test_audio_conversion_uses_bounded_mp3_contract(self):
         with tempfile.TemporaryDirectory() as root:
@@ -1497,19 +1508,6 @@ aW1hZ2U=
             bad_epub = root / "bad.epub"
             with zipfile.ZipFile(bad_epub, "w") as archive: archive.writestr("mimetype", "wrong")
             with self.assertRaises(RuntimeError): convert_reader_assets.validate_output(bad_epub, "epub")
-
-    def test_djvu_pdf_validation_checks_first_and_last_pages(self):
-        with tempfile.TemporaryDirectory() as root:
-            work, pdf = Path(root), Path(root) / "document.pdf"
-            pdf.write_bytes(b"%PDF-test")
-
-            def render(command, **_kwargs):
-                Path(command[-1]).with_suffix(".png").write_bytes(b"png")
-
-            with patch.object(convert_reader_assets, "command_output", return_value="Pages:           12\n"), \
-                    patch.object(convert_reader_assets, "run_checked", side_effect=render) as run:
-                convert_reader_assets.validate_djvu_pdf(pdf, work)
-            self.assertEqual([call.args[0][2] for call in run.call_args_list], ["1", "12"])
 
     def test_doc_conversion_uses_headless_libreoffice_to_docx(self):
         with tempfile.TemporaryDirectory() as root:
@@ -2238,9 +2236,9 @@ aW1hZ2U=
 
     def test_concurrent_duplicate_source_digest_converts_once(self):
         item = {
-            "key": "VoiceOfML/Test\0Book.djvu", "extension": "djvu",
-            "source_url": "https://example.test/book.djvu", "source_revision": "rev1",
-            "profile": "djvulibre-pdf-v1", "reader_mode": "pdf", "output_name": "document.pdf",
+            "key": "VoiceOfML/Test\0Book.ps", "extension": "ps",
+            "source_url": "https://example.test/book.ps", "source_revision": "rev1",
+            "profile": "ghostscript-pdf-v5", "reader_mode": "pdf", "output_name": "document.pdf",
         }
         with tempfile.TemporaryDirectory() as root:
             bundle = Path(root)
@@ -2254,12 +2252,11 @@ aW1hZ2U=
 
             with patch.object(convert_reader_assets, "download_source", side_effect=download), \
                     patch.object(convert_reader_assets, "convert_file", side_effect=convert) as conversion, \
-                    patch.object(convert_reader_assets, "validate_djvu_pdf"), \
                     patch.object(convert_reader_assets, "validate_reader_content"):
                 with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
                     results = list(executor.map(
                         lambda queued: convert_reader_assets.convert_item(queued, bundle),
-                        [item, {**item, "key": "VoiceOfML/Test\0Copy.djvu"}],
+                        [item, {**item, "key": "VoiceOfML/Test\0Copy.ps"}],
                     ))
 
             self.assertEqual(conversion.call_count, 1)
@@ -2268,14 +2265,14 @@ aW1hZ2U=
 
     def test_remote_artifact_is_reused_for_matching_source_and_profile(self):
         item = {
-            "key": "VoiceOfML/Test\0Moved.djvu", "extension": "djvu",
-            "source_url": "https://example.test/moved.djvu", "source_revision": "rev2",
-            "profile": "djvulibre-pdf-v1", "reader_mode": "pdf", "output_name": "document.pdf",
+            "key": "VoiceOfML/Test\0Moved.ps", "extension": "ps",
+            "source_url": "https://example.test/moved.ps", "source_revision": "rev2",
+            "profile": "ghostscript-pdf-v5", "reader_mode": "pdf", "output_name": "document.pdf",
         }
         digest = "a" * 64
         artifact = b"%PDF-reused"
-        reusable = {f"{digest}\0djvulibre-pdf-v1": {
-            "path": f"objects/aa/{digest}/djvulibre-pdf-v1/document.pdf",
+        reusable = {f"{digest}\0ghostscript-pdf-v5": {
+            "path": f"objects/aa/{digest}/ghostscript-pdf-v5/document.pdf",
             "bytes": len(artifact), "sha256": hashlib.sha256(artifact).hexdigest(),
         }}
         with tempfile.TemporaryDirectory() as root:
@@ -2299,13 +2296,13 @@ aW1hZ2U=
 
     def test_missing_remote_reusable_artifact_falls_back_to_conversion(self):
         item = {
-            "key": "VoiceOfML/Test\0Missing.djvu", "extension": "djvu",
-            "source_url": "https://example.test/missing.djvu", "source_revision": "rev1",
-            "profile": "djvulibre-pdf-v1", "reader_mode": "pdf", "output_name": "document.pdf",
+            "key": "VoiceOfML/Test\0Missing.ps", "extension": "ps",
+            "source_url": "https://example.test/missing.ps", "source_revision": "rev1",
+            "profile": "ghostscript-pdf-v5", "reader_mode": "pdf", "output_name": "document.pdf",
         }
         digest = "a" * 64
-        reusable = {f"{digest}\0djvulibre-pdf-v1": {
-            "path": f"objects/aa/{digest}/djvulibre-pdf-v1/document.pdf",
+        reusable = {f"{digest}\0ghostscript-pdf-v5": {
+            "path": f"objects/aa/{digest}/ghostscript-pdf-v5/document.pdf",
             "bytes": 12, "sha256": "b" * 64,
         }}
         with tempfile.TemporaryDirectory() as root:
@@ -2322,22 +2319,21 @@ aW1hZ2U=
             with patch.object(convert_reader_assets, "download_source", side_effect=download), \
                     patch.object(convert_reader_assets, "download_existing", side_effect=missing), \
                     patch.object(convert_reader_assets, "convert_file", side_effect=convert), \
-                    patch.object(convert_reader_assets, "validate_djvu_pdf"), \
                     patch.object(convert_reader_assets, "validate_reader_content"):
                 result = convert_reader_assets.convert_item(item, Path(root), reusable)
         self.assertFalse(result["reused"])
-        self.assertEqual(result["path"], reusable[f"{digest}\0djvulibre-pdf-v1"]["path"])
+        self.assertEqual(result["path"], reusable[f"{digest}\0ghostscript-pdf-v5"]["path"])
 
     def test_pdf_reuses_existing_dataset_artifact_path(self):
         item = {
-            "key": "VoiceOfML/Test\0Moved.djvu", "extension": "djvu",
-            "source_url": "https://example.test/moved.djvu", "source_revision": "rev2",
-            "profile": "djvulibre-pdf-v1", "reader_mode": "pdf", "output_name": "document.pdf",
+            "key": "VoiceOfML/Test\0Moved.ps", "extension": "ps",
+            "source_url": "https://example.test/moved.ps", "source_revision": "rev2",
+            "profile": "ghostscript-pdf-v5", "reader_mode": "pdf", "output_name": "document.pdf",
         }
         digest = "a" * 64
         artifact = b"%PDF-reused"
-        reusable = {f"{digest}\0djvulibre-pdf-v1": {
-            "path": f"objects/aa/{digest}/djvulibre-pdf-v1/document.pdf",
+        reusable = {f"{digest}\0ghostscript-pdf-v5": {
+            "path": f"objects/aa/{digest}/ghostscript-pdf-v5/document.pdf",
             "bytes": len(artifact), "sha256": hashlib.sha256(artifact).hexdigest(),
         }}
         with tempfile.TemporaryDirectory() as root:
@@ -2350,18 +2346,18 @@ aW1hZ2U=
                     patch.object(convert_reader_assets, "validate_reader_content"):
                 result = convert_reader_assets.convert_item(item, Path(root), reusable)
 
-        self.assertEqual(result["path"], reusable[f"{digest}\0djvulibre-pdf-v1"]["path"])
+        self.assertEqual(result["path"], reusable[f"{digest}\0ghostscript-pdf-v5"]["path"])
         self.assertTrue(result["reused"])
 
     def test_concurrent_remote_reuse_marks_both_results_reused(self):
         item = {
-            "key": "VoiceOfML/Test\0One.djvu", "extension": "djvu",
-            "source_url": "https://example.test/one.djvu", "source_revision": "rev2",
-            "profile": "djvulibre-pdf-v1", "reader_mode": "pdf", "output_name": "document.pdf",
+            "key": "VoiceOfML/Test\0One.ps", "extension": "ps",
+            "source_url": "https://example.test/one.ps", "source_revision": "rev2",
+            "profile": "ghostscript-pdf-v5", "reader_mode": "pdf", "output_name": "document.pdf",
         }
         digest = "a" * 64
         artifact = b"%PDF-reused"
-        reusable = {f"{digest}\0djvulibre-pdf-v1": {
+        reusable = {f"{digest}\0ghostscript-pdf-v5": {
             "path": "objects/existing.pdf", "bytes": len(artifact),
             "sha256": hashlib.sha256(artifact).hexdigest(), "reader_mode": "pdf",
         }}
@@ -2379,7 +2375,7 @@ aW1hZ2U=
                 with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
                     results = list(executor.map(
                         lambda queued: convert_reader_assets.convert_item(queued, Path(root), reusable),
-                        [item, {**item, "key": "VoiceOfML/Test\0Two.djvu"}],
+                        [item, {**item, "key": "VoiceOfML/Test\0Two.ps"}],
                     ))
         self.assertEqual(reused.call_count, 1)
         self.assertTrue(all(result["reused"] for result in results))
@@ -2729,6 +2725,24 @@ class PublicationTests(unittest.TestCase):
         )
         self.assertEqual(manifest["files"][key]["failed_source_revision"], "new")
         self.assertEqual(manifest["files"][key]["failed_profile"], "libreoffice-pdf-v2")
+        self.assertEqual(len(operations), 2)
+
+    def test_retiring_djvu_conversion_does_not_remove_a_live_legacy_mapping(self):
+        record = {"Repo": "VoiceOfML/Test", "File": "Book", "Extension": "djvu", "Folder": [], "Size": 10}
+        key = "VoiceOfML/Test\0Book.djvu"
+        existing = {
+            "status": "ready", "source_revision": "old", "source_sha256": "a" * 64,
+            "source_extension": "djvu", "profile": "djvulibre-pdf-v1", "reader_mode": "pdf",
+            "path": "objects/aa/document.pdf", "bytes": 10, "sha256": "b" * 64,
+        }
+        original = {"version": 1, "files": {key: existing}, "orphans": {}}
+        data = {"version": 1, "results": [], "authoritative_snapshot": True,
+                "active_keys": scan_reader_assets.active_keys([record])}
+        with tempfile.TemporaryDirectory() as root, \
+                patch.object(publish_reader_assets, "remote_manifest", return_value=original):
+            manifest, operations = publish_reader_assets.build_publish(
+                Mock(), "vomebook/Test", Path(root), data_override=data)
+        self.assertEqual(manifest, original)
         self.assertEqual(len(operations), 2)
 
     def test_publish_removes_inactive_mapping_and_marks_orphan(self):
@@ -3203,14 +3217,12 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("tesseract-ocr-chi-sim", workflow)
         self.assertIn("djvulibre-bin", workflow)
         self.assertIn("doc, docx, epub, htm, html, mobi, azw3, fb2, odt, rtf", workflow)
-        self.assertIn("chm, tif, tiff, djvu, ppt, pptx, pps, odp", workflow)
         self.assertIn("htm|html|swf) packages=()", workflow)
         self.assertIn("inputs.limit || '20'", workflow)
         self.assertIn("inputs.checkpoint_batches || '30'", workflow)
         self.assertIn("python scripts/publish_reader_assets.py", workflow)
         self.assertIn("python scripts/prepare_reader_assets_plan.py", workflow)
         self.assertNotIn("python - <<'PY'", workflow)
-        self.assertIn("djvu) packages=(djvulibre-bin qpdf poppler-utils)", workflow)
         self.assertIn("epub) packages=(calibre qpdf)", workflow)
         self.assertIn("mobi|azw3|fb2) packages=(calibre)", workflow)
         self.assertIn('python scripts/publish_reader_assets.py --bundles "${bundles[@]}"', workflow)
@@ -3230,7 +3242,6 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("CAJ2PDF_DIR: /opt/caj2pdf", workflow)
         self.assertIn("ape|wma|amr|mp3|wav|m4a|flac|mpga|mp4|mov|asx|flv|f4v|rm|rmvb|mkv|avi|mpg|mpeg|mts|ts|wmv) packages=(ffmpeg)", workflow)
         self.assertIn("READER_CONVERSION_WORKERS:", workflow)
-        self.assertIn("needs.plan.outputs.extension == 'djvu'", workflow)
         self.assertIn("needs.plan.outputs.count != '0'", workflow)
         self.assertIn("total_limit=$((20 * 10#${PER_SHARD_LIMIT} * 10#${CHECKPOINT_BATCHES}))", workflow)
         self.assertIn("queue-${SHARD_INDEX}.json", workflow)
@@ -3239,7 +3250,6 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("Reader metadata request failed; retrying", workflow)
         self.assertIn("inputs.retry_failed || github.event_name == 'schedule'", workflow)
         self.assertIn("READER_CHM_COMMAND_TIMEOUT:", workflow)
-        self.assertIn("READER_DJVU_COMMAND_TIMEOUT:", workflow)
         self.assertIn("Source metadata request failed; retrying", workflow)
         self.assertIn("for attempt in 1 2 3 4 5", workflow)
         self.assertIn("delay=$((30 * 2 ** (attempt - 1)))", workflow)

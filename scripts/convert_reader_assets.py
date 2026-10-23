@@ -111,9 +111,6 @@ EPUB_COMMAND_TIMEOUT_SECONDS = max(1800, int(os.environ.get(
 CHM_COMMAND_TIMEOUT_SECONDS = max(900, int(os.environ.get(
     "READER_CHM_COMMAND_TIMEOUT", str(COMMAND_TIMEOUT_SECONDS),
 )))
-DJVU_COMMAND_TIMEOUT_SECONDS = max(600, int(os.environ.get(
-    "READER_DJVU_COMMAND_TIMEOUT", str(COMMAND_TIMEOUT_SECONDS),
-)))
 MEDIA_COMMAND_TIMEOUT_SECONDS = int(os.environ.get(
     "READER_MEDIA_COMMAND_TIMEOUT", str(max(7200, COMMAND_TIMEOUT_SECONDS)),
 ))
@@ -1317,23 +1314,6 @@ def convert_caj_family(source: Path, target: Path, work: Path) -> None:
     run_checked(["python3", str(converter), "convert", str(source), "--output", str(target)], cwd=work)
 
 
-def validate_djvu_pdf(path: Path, work: Path) -> None:
-    info = command_output(["pdfinfo", str(path)], timeout_seconds=DJVU_COMMAND_TIMEOUT_SECONDS)
-    match = re.search(r"^Pages:\s+(\d+)\s*$", info, re.MULTILINE)
-    if not match or int(match.group(1)) < 1:
-        raise RuntimeError("converted DjVu PDF has no pages")
-    page_count = int(match.group(1))
-    for page in sorted({1, page_count}):
-        prefix = work / f"djvu-page-{page}"
-        run_checked([
-            "pdftoppm", "-f", str(page), "-l", str(page), "-singlefile", "-png", "-r", "72",
-            str(path), str(prefix),
-        ], timeout_seconds=DJVU_COMMAND_TIMEOUT_SECONDS)
-        rendered = prefix.with_suffix(".png")
-        if not rendered.is_file() or rendered.stat().st_size == 0:
-            raise RuntimeError(f"converted DjVu PDF page {page} is not renderable")
-
-
 def validate_pdf_content(path: Path, work: Path) -> None:
     info = command_output(["pdfinfo", str(path)])
     match = re.search(r"^Pages:\s+(\d+)\s*$", info, re.MULTILINE)
@@ -1986,6 +1966,8 @@ def convert_reader_image(source: Path, target: Path) -> None:
 def convert_file(item: dict, source: Path, target: Path, work: Path,
                  source_sha256: str = "", object_path: str = "") -> None:
     ext = item["extension"]
+    if str(ext).lower().lstrip(".") == "djvu":
+        raise RuntimeError("DJVU-to-PDF conversion is retired; use the native DJVU render/OCR worker")
     if item.get("profile") == NATIVE_MEDIA_PROFILE:
         shutil.copyfile(source, target)
         return
@@ -2132,21 +2114,6 @@ def convert_file(item: dict, source: Path, target: Path, work: Path,
         convert_chm(source, target, work)
     elif ext in {"tif", "tiff"}:
         convert_tiff(source, target, work)
-    elif ext == "djvu":
-        if source.read_bytes()[:5] == b"%PDF-":
-            run_checked(["qpdf", "--linearize", str(source), str(target)], timeout_seconds=DJVU_COMMAND_TIMEOUT_SECONDS)
-            return
-        last_error = None
-        for attempt in range(2):
-            try:
-                run_checked(["ddjvu", "-format=pdf", str(source), str(target)], timeout_seconds=DJVU_COMMAND_TIMEOUT_SECONDS)
-                break
-            except (ReaderConversionCommandError, ReaderConversionTimeout) as exc:
-                last_error = exc
-                target.unlink(missing_ok=True)
-                if attempt == 1:
-                    raise
-                time.sleep(2)
     elif ext in {"ppt", "pptx", "pps", "odp", "xls", "xlsx", "csv", "ods", "wps"}:
         if item.get("profile") == SPREADSHEET_HTML_PROFILE:
             spreadsheet_source = source
@@ -2337,6 +2304,10 @@ def validate_office_pdf(path: Path, item: dict, work: Path, source: Path | None 
 
 
 def convert_item(item: dict, bundle: Path, reusable: dict | None = None) -> dict:
+    if str(item["extension"]).lower().lstrip(".") == "djvu":
+        # A stale generic queue must not download, reuse or create a derivative.
+        # Native DjVu admission/probing belongs to the account render worker.
+        raise RuntimeError("DJVU-to-PDF conversion is retired; use the native DJVU render/OCR worker")
     with tempfile.TemporaryDirectory(prefix="reader-convert-") as root:
         work = Path(root)
         source = work / f"source.{item['extension']}"
@@ -2414,8 +2385,6 @@ def convert_item(item: dict, bundle: Path, reusable: dict | None = None) -> dict
                         validate_output(temporary, item["reader_mode"], native_media=item.get("profile") == NATIVE_MEDIA_PROFILE)
                     if item["extension"] in {"odt", "rtf", "chm"}:
                         validate_html_content(temporary)
-                    if item["extension"] == "djvu":
-                        validate_djvu_pdf(temporary, work)
                     if (item["extension"] in {"doc", "docx", "htm", "html", "ppt", "pptx", "pps", "odp", "xls", "xlsx", "csv", "ods", "wps"}
                             and item["reader_mode"] == "pdf"
                             and item.get("output_name") != "page-manifest.json"):

@@ -39,6 +39,16 @@ def build_djvu(directory: Path, rotation=0) -> Path:
 
 
 class PureDjvuTests(unittest.TestCase):
+    def test_only_native_worker_entrypoints_remain(self):
+        root = Path(__file__).resolve().parents[1]
+        self.assertFalse((root / ".github/workflows/reader-djvu-weekly.yml").exists())
+        self.assertFalse((root / "scripts/sync_djvu_pdf_derivatives.py").exists())
+        self.assertTrue((root / "scripts/djvu_pages.py").is_file())
+        worker = (root / ".github/workflows/pdf-account-worker.yml").read_text(encoding="utf-8")
+        self.assertIn("PDF_DJVU_NATIVE:", worker)
+        self.assertIn("djvulibre-bin", worker)
+        self.assertIn("scripts/pdf_ocr_stages.py plan-render", worker)
+
     def test_sniff_uses_magic_bytes_not_names(self):
         self.assertEqual(djvu_pages.sniff(b"AT&TFORM\0\0\0\0DJVU"), "djvu")
         self.assertEqual(djvu_pages.sniff(b"%PDF-1.7"), "pdf")

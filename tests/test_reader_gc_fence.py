@@ -50,6 +50,23 @@ class ResidualRunFenceTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'not drained'):
             self.check(api)
 
+    def test_deleted_djvu_workflow_still_blocks_for_residual_executable_runs(self):
+        path = '.github/workflows/reader-djvu-weekly.yml'
+        for status in ('in_progress', 'queued', 'pending'):
+            with self.subTest(status=status):
+                def api(endpoint):
+                    # The workflow inventory contains only the current worker;
+                    # deleted workflow records must still be checked by path.
+                    if f'/actions/runs?status={status}&' in endpoint:
+                        return [{'workflow_runs': [{'id': 7, 'status': status, 'path': path}]}]
+                    if '/actions/runs?status=' in endpoint:
+                        return [{'workflow_runs': []}]
+                    if '/jobs?filter=latest' in endpoint:
+                        return [{'total_count': 1, 'jobs': [{'status': 'queued'}]}]
+                    return self.api(endpoint)
+                with self.assertRaisesRegex(RuntimeError, 'not drained|latest execution job'):
+                    self.check(api)
+
     def test_cancelled_before_job_assignment_requires_the_same_isolation(self):
         def api(endpoint):
             if '/jobs?filter=all' in endpoint:
@@ -151,6 +168,11 @@ if __name__ == '__main__':
 
 
 class WorkflowClassificationTests(unittest.TestCase):
+    def test_retired_djvu_workflow_remains_a_producer_even_at_an_old_ref(self):
+        path = '.github/workflows/reader-djvu-weekly.yml'
+        self.assertTrue(producer_path(path))
+        self.assertTrue(producer_path(path + '@refs/heads/main'))
+
     def test_ccrd_gc_is_not_a_reader_producer(self):
         self.assertFalse(producer_path('.github/workflows/reader-gc-ccrd.yml'))
         self.assertTrue(producer_path('.github/workflows/publish-ccrd-ocr.yml'))

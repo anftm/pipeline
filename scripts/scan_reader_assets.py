@@ -180,7 +180,7 @@ def build_queue(records, revisions, manifest, *, repo="", extension="", exact_pa
             "conversion_dependencies": conversion_dependencies(ext, reader_mode),
         }
         selected.append(item)
-    priority = {"pdf": 9, "tif": 0, "tiff": 0, "epub": 1, "mobi": 1, "azw3": 1, "fb2": 1, "odt": 1, "rtf": 1, "chm": 1, "djvu": 2,
+    priority = {"pdf": 9, "tif": 0, "tiff": 0, "epub": 1, "mobi": 1, "azw3": 1, "fb2": 1, "odt": 1, "rtf": 1, "chm": 1,
                   "doc": 3, "docx": 3, "htm": 3, "html": 3, "txt": 3, "md": 3, "markdown": 3,
                    "jpg": 3, "jpeg": 3, "png": 3, "bmp": 3, "webp": 3,
                    "vcf": 3, "ini": 3, "caj": 3, "kdh": 3,
@@ -207,7 +207,10 @@ def active_keys(records, *, bucket_migrate=False) -> list[str]:
         contract = (bucket_conversion_contract(repo, path, extension, int(record.get("Size") or 0))
                     if bucket_migrate else
                     source_conversion_contract(repo, path, extension, int(record.get("Size") or 0)))
-        if contract is not None:
+        # Retiring the DjVu converter must not retire still-active legacy
+        # mappings during an authoritative generic publication. Native
+        # replacement and reference-safe retirement are separate operations.
+        if contract is not None or extension == "djvu":
             keys.append(asset_key(repo, path))
     return sorted(set(keys))
 

@@ -58,7 +58,6 @@ CONVERTIBLE_EXTENSIONS = {
     "chm": ("calibre-chm-epub-v4-source-text", "epub", "document.epub"),
     "tif": ("pillow-pdf-v2", "pdf", "document.pdf"),
     "tiff": ("pillow-pdf-v2", "pdf", "document.pdf"),
-    "djvu": ("djvulibre-pdf-v2", "pdf", "document.pdf"),
     "ppt": ("libreoffice-pdf-office-v2", "pdf", "document.pdf"),
     "pptx": ("libreoffice-pdf-office-v2", "pdf", "document.pdf"),
     "pps": ("libreoffice-pdf-office-v2", "pdf", "document.pdf"),
