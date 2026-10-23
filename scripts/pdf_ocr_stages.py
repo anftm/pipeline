@@ -474,6 +474,39 @@ def same_source(entry, item):
     return entry.get("source_revision") == item.get("source_revision")
 
 
+def pin_unchanged_render_sources(api, records, rendered):
+    """Prove old renders' LFS source bytes before the unprobed batch is selected."""
+    groups = {}
+    for item in records:
+        previous = rendered.get(item["key"], {})
+        revision = item.get("source_revision", "")
+        if (item.get("source_kind") != "upstream" or item.get("source_sha256")
+                or previous.get("source_kind") != "upstream"
+                or previous.get("reader_assets_path") != item.get("reader_assets_path")
+                or previous.get("status") not in {"ready", "skipped", "failed"}
+                or previous.get("render_profile") != render_profile_for(item)
+                or not re.fullmatch(r"[0-9a-f]{64}", str(previous.get("source_sha256", "")))
+                or not re.fullmatch(r"[0-9a-f]{40}", str(revision))
+                or previous.get("source_revision") == revision):
+            continue
+        groups.setdefault((item["repo"], revision), []).append(item)
+    verified = {}
+    for (repo, revision), items in groups.items():
+        for start in range(0, len(items), 100):
+            batch = items[start:start + 100]
+            metadata = retry(lambda: api.get_paths_info(
+                repo, [item["path"] for item in batch], repo_type="dataset", revision=revision))
+            by_path = {entry.path: entry for entry in metadata}
+            for item in batch:
+                remote = by_path.get(item["path"])
+                lfs = getattr(remote, "lfs", None)
+                digest = lfs.get("sha256") if isinstance(lfs, dict) else getattr(lfs, "sha256", None)
+                if digest and digest == rendered[item["key"]]["source_sha256"]:
+                    verified[item["key"]] = digest
+    return [{**item, "source_sha256": verified[item["key"]]} if item["key"] in verified else item
+            for item in records]
+
+
 def render_result_is_current(existing, book):
     """A ready render already owns this byte-identical source/profile.
 
@@ -1530,6 +1563,7 @@ def main():
                 if len(wanted) > args.limit:
                     raise ValueError("pinned key count exceeds --limit")
                 records = pin_render_records(records, wanted)
+            records = pin_unchanged_render_sources(api, records, rendered)
             records = pending_render(records, rendered, current, args.retry_failed, args.partition)
             if wanted:
                 present = set()

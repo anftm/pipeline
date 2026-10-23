@@ -857,6 +857,72 @@ class PdfOcrStagesTests(unittest.TestCase):
         self.assertTrue(stages.same_source(legacy_previous, {**legacy_previous, "source_revision": "old"}))
         self.assertFalse(stages.same_source(legacy_previous, {**legacy_previous, "source_revision": "new"}))
 
+    def test_unprobed_render_sources_reuse_only_pinned_matching_lfs_sha_before_limit(self):
+        from types import SimpleNamespace
+        def source(name):
+            return {"key": "repo\0" + name, "repo": "repo", "path": name, "source_kind": "upstream",
+                    "source_format": "djvu", "source_revision": "b" * 40}
+        records = [source(name) for name in ("same.djvu", "changed.djvu", "non-lfs.djvu", "missing.djvu")]
+        rendered = {item["key"]: {**item, "source_revision": "a" * 40, "source_sha256": "c" * 64,
+                                 "status": "ready", "image_rendered": True,
+                                 "render_profile": stages.render_profile_for(item)} for item in records}
+        api = Mock()
+        api.get_paths_info.return_value = [SimpleNamespace(path="same.djvu", lfs={"sha256": "c" * 64}),
+            SimpleNamespace(path="changed.djvu", lfs={"sha256": "d" * 64}),
+            SimpleNamespace(path="non-lfs.djvu", lfs=None)]
+        pinned = stages.pin_unchanged_render_sources(api, records, rendered)
+        self.assertEqual(pinned[0]["source_sha256"], "c" * 64)
+        self.assertTrue(all("source_sha256" not in item for item in records))
+        self.assertTrue(all("source_sha256" not in item for item in pinned[1:]))
+        self.assertEqual({item["key"] for item in stages.pending_render(pinned, rendered, {})},
+                         {item["key"] for item in records[1:]})
+        api.get_paths_info.assert_called_once_with("repo", [item["path"] for item in records],
+                                                   repo_type="dataset", revision="b" * 40)
+
+    def test_render_sha_pinning_keeps_profile_failure_and_metadata_access_guards(self):
+        from types import SimpleNamespace
+        item = {"key": "repo\0book.djvu", "repo": "repo", "path": "book.djvu", "source_kind": "upstream",
+                "source_format": "djvu", "source_revision": "b" * 40}
+        previous = {**item, "source_revision": "a" * 40, "source_sha256": "c" * 64, "status": "failed",
+                    "render_profile": stages.render_profile_for(item)}
+        api = Mock()
+        api.get_paths_info.return_value = [SimpleNamespace(path=item["path"], lfs=SimpleNamespace(sha256="c" * 64))]
+        pinned = stages.pin_unchanged_render_sources(api, [item], {item["key"]: previous})
+        self.assertEqual(stages.pending_render(pinned, {item["key"]: previous}, {}), [])
+        self.assertEqual(stages.pending_render(pinned, {item["key"]: previous}, {}, retry_failed=True), pinned)
+        for changed in ({**previous, "render_profile": "old-profile"}, {**previous, "source_kind": "generated"},
+                        {**previous, "reader_assets_path": "different"}, {**previous, "source_sha256": None}):
+            api.get_paths_info.reset_mock()
+            self.assertEqual(stages.pin_unchanged_render_sources(api, [item], {item["key"]: changed}), [item])
+            api.get_paths_info.assert_not_called()
+        api.get_paths_info.side_effect = PermissionError("metadata denied")
+        with patch.object(stages, "retry", side_effect=lambda operation: operation()), \
+                self.assertRaisesRegex(PermissionError, "metadata denied"):
+            stages.pin_unchanged_render_sources(api, [item], {item["key"]: previous})
+
+    def test_real_render_planner_pins_unprobed_sha_before_consuming_batch_limit(self):
+        from types import SimpleNamespace
+        item = {"key": "repo\0a.djvu", "repo": "repo", "path": "a.djvu", "source_kind": "upstream",
+                "source_format": "djvu", "source_revision": "b" * 40}
+        fresh = {**item, "key": "repo\0z.djvu", "path": "z.djvu"}
+        previous = {**item, "source_revision": "a" * 40, "source_sha256": "c" * 64,
+                    "status": "ready", "image_rendered": True, "render_profile": stages.render_profile_for(item)}
+        api = Mock()
+        api.get_paths_info.return_value = [SimpleNamespace(path="a.djvu", lfs={"sha256": "c" * 64})]
+        def registry(_api, _repo, name, *args):
+            return {"files": {item["key"]: previous} if name == stages.RENDER_REGISTRY else {}}
+        empty = {"shards": [], "books": [], "shard_count": 0}
+        with patch("sys.argv", ["stages", "plan-render", "--limit", "1", "--queue", str(self.root / "queue.json"),
+                                "--output", str(self.root / "plan")]), \
+                patch.object(stages, "HfApi", return_value=api), \
+                patch.object(stages, "load_registry", side_effect=registry), \
+                patch.object(stages, "load_pdf_sources", return_value={}), \
+                patch.object(stages.pdf_ocr, "source_records", return_value=[item, fresh]), \
+                patch.object(stages.plan_pdf_ocr, "plan", return_value=empty) as plan, \
+                patch.object(stages, "plan_render_ranges", return_value=empty):
+            self.assertEqual(stages.main(), 0)
+        self.assertEqual(plan.call_args.args[0], [fresh])
+
     def test_same_size_json_descriptor_is_checked_by_sha(self):
         descriptor = self.root / "render-range-000001-000010.json"
         descriptor.write_bytes(b"{}")
