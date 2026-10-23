@@ -9,6 +9,7 @@ import io
 import json
 import os
 from pathlib import Path
+import time
 
 try:
     from . import ccrd_ocr_release as contract, ccrd_lifecycle as lifecycle
@@ -23,6 +24,9 @@ PROTOCOL = 'central-ccrd-ocr-publication-v1'
 WORKFLOW = 'anftm/pipeline/.github/workflows/publish-ccrd-ocr.yml@refs/heads/main'
 CURRENT = 'control/ocr-current.json'
 IDS = 'control/ocr-ids.json'
+# Bucket batch failures that are safe to retry for idempotent, readback-verified
+# writes. HTTP 422 has been observed transiently on an unchanged control file.
+TRANSIENT_WRITE_STATUSES = frozenset({408, 422, 425, 429, 500, 502, 503, 504})
 
 
 def assert_writer():
@@ -123,7 +127,25 @@ def put_checked(store, path, raw, *, immutable=False, replace_unpromoted=False):
             # and from every release manifest, so replacing the candidate copy
             # cannot rewrite published history.
             print(f'completing interrupted upload for {path}', flush=True)
-    store.put_bytes(contract.BUCKET, path, raw)
+    for attempt in range(4):
+        try:
+            store.put_bytes(contract.BUCKET, path, raw)
+            break
+        except Exception as error:
+            # An ambiguous batch failure may already have written the exact
+            # bytes, and an idempotent overwrite can be rejected transiently
+            # (observed HTTP 422 on an unchanged control file). Re-read first so
+            # a retry never duplicates a write that landed, then retry only
+            # bounded transient statuses; permanent errors still fail at once.
+            try:
+                if store.read_bytes(contract.BUCKET, path) == raw:
+                    return
+            except FileNotFoundError:
+                pass
+            status = getattr(getattr(error, 'response', None), 'status_code', None)
+            if attempt == 3 or (type(status) is int and status not in TRANSIENT_WRITE_STATUSES):
+                raise
+            time.sleep(min(8, 2 ** attempt))
     if store.read_bytes(contract.BUCKET, path) != raw:
         raise ValueError('OCR-library upload readback mismatch')
 

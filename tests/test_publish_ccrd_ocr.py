@@ -164,6 +164,44 @@ class PublishCcrdOcrTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'immutable'):
             publisher.put_checked(self.store, self.text_path, b'other text', immutable=True)
 
+    def test_transient_bucket_write_retries_with_readback_and_never_blindly_duplicates(self):
+        import httpx
+        from huggingface_hub.errors import HfHubHTTPError
+        request = httpx.Request('POST', 'https://huggingface.co/api/buckets/vomebook/ccrd-index/batch')
+        rejected = HfHubHTTPError('fixture 422', response=httpx.Response(422, request=request))
+
+        class Flaky(Store):
+            def __init__(self, failures, *, land_before_failure=False):
+                super().__init__(); self.failures = failures; self.land = land_before_failure; self.calls = 0
+            def put_bytes(self, bucket, path, raw):
+                self.calls += 1
+                if self.land:
+                    self.objects[bucket, path] = raw
+                if self.calls <= self.failures:
+                    raise rejected
+                super().put_bytes(bucket, path, raw)
+
+        path = 'control/ocr-ids.json'
+        flaky = Flaky(2)
+        with patch.object(publisher.time, 'sleep') as sleep:
+            publisher.put_checked(flaky, path, b'{"ids":{}}\n')
+        self.assertEqual(flaky.objects[(contract.BUCKET, path)], b'{"ids":{}}\n')
+        self.assertEqual(flaky.calls, 3)
+        self.assertEqual(sleep.call_count, 2)
+
+        # Bytes that already landed are accepted from a readback, never re-sent.
+        landed = Flaky(1, land_before_failure=True)
+        with patch.object(publisher.time, 'sleep') as sleep:
+            publisher.put_checked(landed, path, b'exact landed bytes')
+        self.assertEqual(landed.calls, 1)
+        sleep.assert_not_called()
+
+        permanent = Flaky(10)
+        with patch.object(publisher.time, 'sleep'):
+            with self.assertRaises(HfHubHTTPError):
+                publisher.put_checked(permanent, path, b'never')
+        self.assertEqual(permanent.calls, 4)
+
     def test_additive_update_never_silently_drops_a_previous_book(self):
         self.publish(apply=True)
         pointer, _ = publisher.optional_json(self.store, publisher.CURRENT)
