@@ -1,0 +1,63 @@
+name: Reader/桶 · Audit OCR language and text usability
+
+on:
+  schedule:
+    # Weekly rotating slice; keeps the whole corpus audited without a big scan.
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: Books to audit in this run (0 = all)
+        type: string
+        default: '400'
+      offset:
+        description: Rotating offset into the sorted OCR registry
+        type: string
+        default: '0'
+      probe_limit:
+        description: OSD-probe this many text-less books (0 = skip)
+        type: string
+        default: '40'
+      upload:
+        description: Write reader-index/ocr_language_audit.json
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reader-audit
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    if: github.repository == 'anftm/pipeline'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - run: pip install -r scripts/requirements.txt
+      - name: Install OSD probe
+        run: sudo apt-get update && sudo apt-get install -y tesseract-ocr
+      - name: Audit published OCR language
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python scripts/audit_ocr_language.py \
+            --limit "${{ inputs.limit || '400' }}" \
+            --offset "${{ inputs.offset || '0' }}" \
+            --probe-limit "${{ inputs.probe_limit || '40' }}" \
+            --output output/ocr-language-audit.json \
+            --overrides-out output/ocr-language-overrides.json \
+            ${{ (github.event_name == 'schedule' || inputs.upload) && '--upload' || '' }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ocr-language-audit
+          path: |
+            output/ocr-language-audit.json
+            output/ocr-language-overrides.json
+          if-no-files-found: error
