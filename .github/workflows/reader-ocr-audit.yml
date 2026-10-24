@@ -27,7 +27,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: reader-audit
+  group: ${{ inputs.apply_flags && 'reader-sidecar' || 'reader-audit' }}
   cancel-in-progress: false
 
 jobs:
@@ -52,6 +52,7 @@ jobs:
             --offset "${{ inputs.offset || '0' }}" \
             --probe-limit "${{ inputs.probe_limit || '40' }}" \
             --frame-limit "${{ inputs.frame_limit || '40' }}" \
+            ${{ inputs.apply_flags && '--apply-flags' || '' }} \
             --output output/ocr-language-audit.json \
             --overrides-out output/ocr-language-overrides.json \
             ${{ (github.event_name == 'schedule' || inputs.upload) && '--upload' || '' }}

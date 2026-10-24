@@ -121,6 +121,23 @@ def audit(entries: dict, texts: dict, limit: int | None = None) -> dict:
             "books": books, "flags": flagged}
 
 
+def select_flag_updates(entries: dict, report: dict) -> list[dict]:
+    """Registry entries to mark as language_suspect, never rewriting text."""
+    updates = []
+    for key, row in report.get("flags", {}).items():
+        entry = entries.get(key)
+        if not isinstance(entry, dict) or entry.get("status") != "ready":
+            continue
+        if "script-mismatch" not in row.get("flags", []):
+            continue
+        if entry.get("language_source") == "override" or entry.get("language_suspect"):
+            continue
+        updates.append({**entry, "language_suspect": True,
+                        "language_check": {"observed_script": row.get("observed_script"),
+                                           "share": row.get("observed_share")}})
+    return updates
+
+
 def draft_overrides(flagged: dict, entries: dict) -> dict:
     overrides = {}
     for key, row in flagged.items():
@@ -259,6 +276,8 @@ def main() -> int:
                         help="sample rendered pages for boxed layout on this many books")
     parser.add_argument("--probe-limit", type=int, default=0,
                         help="OSD-probe this many text-less books from rendered pages")
+    parser.add_argument("--apply-flags", action="store_true",
+                        help="write language_suspect into the OCR registry (writer lock required)")
     parser.add_argument("--upload", action="store_true",
                         help="write the report to reader-index/ocr_language_audit.json")
     args = parser.parse_args()
@@ -305,6 +324,14 @@ def main() -> int:
     if args.overrides_out:
         args.overrides_out.write_text(json.dumps(draft_overrides(report["flags"], entries),
                                                  ensure_ascii=False, indent=1, sort_keys=True) + "\n")
+    if args.apply_flags:
+        import os
+        from huggingface_hub import HfApi
+        from scripts import publish_pdf_ocr_assets as publication
+        updates = select_flag_updates(entries, report)
+        if updates:
+            publication.publish(HfApi(token=os.environ["HF_TOKEN"]), "vomebook/Reader-Assets", updates)
+        report["flagged_applied"] = len(updates)
     if args.upload:
         store.put_json("vomebook/reader-assets-v2", "reader-index/ocr_language_audit.json", report)
     print(json.dumps({"checked": report["checked"], "flagged": report["flagged"],

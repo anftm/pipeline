@@ -75,6 +75,16 @@ class OcrLanguageAuditTests(unittest.TestCase):
         self.assertEqual(report["checked"], 2)
         self.assertEqual(list(report["flags"]), ["b"])
 
+    def test_flag_updates_skip_overrides_and_already_flagged_books(self):
+        entries = {"a": entry("ru"), "b": {**entry("ru"), "language_source": "override"},
+                   "c": {**entry("ru"), "language_suspect": True}}
+        report = {"flags": {key: {"flags": ["script-mismatch"], "observed_script": "Latin",
+                                  "observed_share": 1.0} for key in entries}}
+        updates = audit.select_flag_updates(entries, report)
+        self.assertEqual(len(updates), 1)
+        self.assertTrue(updates[0]["language_suspect"])
+        self.assertEqual(updates[0]["language_check"]["observed_script"], "Latin")
+
     def test_draft_overrides_only_covers_confirmed_script_mismatches(self):
         entries = {"a": entry("ru"), "b": entry("ch")}
         texts = {"a": ["Latin " * 200], "b": ["中文" * 200]}
