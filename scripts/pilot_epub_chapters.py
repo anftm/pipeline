@@ -169,6 +169,8 @@ def merge_index_entries(previous: dict, entries: list[dict]) -> dict[str, dict]:
 
 
 def completed_revisions(index: dict, retry_failures: bool = False, profile: str | None = None) -> dict[str, str]:
+    # An entry without a recorded profile predates profile identity and must be
+    # rebuilt when a profile is required; otherwise old bundles are reused.
     completed = {item["key"]: item.get("source_revision") for item in index.get("files", [])
                  if isinstance(item, dict) and item.get("key")
                  and (profile is None or item.get("profile") == profile)}
@@ -207,12 +209,11 @@ def pending_chapter_sources(records: list[dict], previous: dict, extension: str,
                and completed.get(f"{item['repo']}\0{item['path']}") != item["revision"]]
     unchanged = set()
     if extension not in OFFICE_EXTENSIONS:
-        reuse_index = previous
-        if extension == "chm":
-            # Old-profile CHMs require the source-text upgrade even when bytes
-            # are identical. An explicit failed retry must still actually run.
-            reuse_index = {**previous, "files": [entry for entry in previous.get("files", [])
-                if entry.get("profile") == expected and entry["key"] not in failure_keys]}
+        # A bundle built by an older or unrecorded profile must be rebuilt even
+        # when the source bytes are identical; otherwise a profile bump is
+        # silently discarded by the unchanged-source check.
+        reuse_index = {**previous, "files": [entry for entry in previous.get("files", [])
+            if entry.get("profile") == expected and entry["key"] not in failure_keys]}
         # Metadata retry progress must not corrupt the plan-only JSON consumed
         # by the CHM workflow's command substitution.
         with redirect_stdout(sys.stderr):
