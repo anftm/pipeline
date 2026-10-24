@@ -1,6 +1,123 @@
 {
  "kind": "ocr-language-overrides",
  "overrides": {
+  "VoiceOfML/GPCREducation\u0000《自然辩证法》杂志/1976年/自然辩证法杂志 1976年第1期.pdf": {
+   "evidence": {
+    "script": "Han",
+    "votes": {
+     "Han": 3
+    }
+   },
+   "language": "ch",
+   "source": "osd-triage-full-v1"
+  },
+  "VoiceOfML/GPCREducation\u0000《自然辩证法》杂志/自然辩证法资料选辑  2.pdf": {
+   "evidence": {
+    "script": "Han",
+    "votes": {
+     "Han": 3
+    }
+   },
+   "language": "ch",
+   "source": "osd-triage-full-v1"
+  },
+  "VoiceOfML/GPCREducation\u0000化学/1、農业化学/農药工业/農药工业 國外部分 下.pdf": {
+   "evidence": {
+    "script": "Cyrillic",
+    "votes": {
+     "Cyrillic": 1,
+     "Han": 1,
+     "Latin": 1
+    }
+   },
+   "language": "ru",
+   "source": "osd-triage-full-v1"
+  },
+  "VoiceOfML/GPCREducation\u0000化学/2、工业化学/热处理化学 （下册）.pdf": {
+   "evidence": {
+    "script": "Cyrillic",
+    "votes": {
+     "Cyrillic": 1,
+     "Han": 1
+    }
+   },
+   "language": "ru",
+   "source": "osd-triage-full-v1"
+  },
+  "VoiceOfML/GPCREducation\u0000化学/2、工业化学/英汉化学化工词汇补编 涂料部分.pdf": {
+   "evidence": {
+    "script": "Latin",
+    "votes": {
+     "Han": 1,
+     "Latin": 1
+    }
+   },
+   "language": "en",
+   "source": "osd-triage-full-v1"
+  },
+  "VoiceOfML/GPCREducation\u0000化学/2、工业化学/钢铁化学/钢铁原材料化学分析.pdf": {
+   "evidence": {
+    "script": "Cyrillic",
+    "votes": {
+     "Cyrillic": 1,
+     "Han": 1
+    }
+   },
+   "language": "ru",
+   "source": "osd-triage-full-v1"
+  },
+  "VoiceOfML/GPCREducation\u0000化学/化学专业基础词汇 日英汉对照.pdf": {
+   "evidence": {
+    "script": "Latin",
+    "votes": {
+     "Latin": 2
+    }
+   },
+   "language": "en",
+   "source": "osd-triage-full-v1"
+  },
+  "VoiceOfML/GPCREducation\u0000化学/化学工程/化学常用数据表 药学系.pdf": {
+   "evidence": {
+    "script": "Cyrillic",
+    "votes": {
+     "Cyrillic": 2,
+     "Latin": 1
+    }
+   },
+   "language": "ru",
+   "source": "osd-triage-full-v1"
+  },
+  "VoiceOfML/GPCREducation\u0000地理/各地区地理/海底世界  地理知识读物.pdf": {
+   "evidence": {
+    "script": "Han",
+    "votes": {
+     "Han": 3
+    }
+   },
+   "language": "ch",
+   "source": "osd-triage-full-v1"
+  },
+  "VoiceOfML/GPCREducation\u0000数学/初等数学/几何/初等几何  下  平面几何部分.pdf": {
+   "evidence": {
+    "script": "Han",
+    "votes": {
+     "Cyrillic": 1,
+     "Han": 2
+    }
+   },
+   "language": "ch",
+   "source": "osd-triage-full-v1"
+  },
+  "VoiceOfML/GPCREducation\u0000数学/初等数学/几何/初等数学  几何部分  上.pdf": {
+   "evidence": {
+    "script": "Han",
+    "votes": {
+     "Han": 3
+    }
+   },
+   "language": "ch",
+   "source": "osd-triage-full-v1"
+  },
   "VoiceOfML/GPCREducation\u0000英语/1、大学英语教材/英语 建工系農水专业用.pdf": {
    "evidence": {
     "pages": [
@@ -914,6 +1031,6 @@
    "source": "osd-triage-v1"
   }
  },
- "policy": "explicit exact-key overrides from OSD script probes on content pages",
+ "policy": "exact-key overrides corroborated by OSD script probes and, for CJK, by kana/Han ratios in published text",
  "version": 1
 }
