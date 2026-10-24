@@ -33,6 +33,25 @@ class EpubTocTests(unittest.TestCase):
             self.assertEqual(index['text_profile'], 'dom-text-v1')
             self.assertEqual(index['chapters'][0]['text'], 'Literal &nbsp; Visible &#0 &nbsp;')
 
+    def test_cover_only_navigation_is_rebuilt_from_readable_chapters(self):
+        records = [{"index": 1, "source_path": "titlepage.xhtml", "title": "Start"},
+                   {"index": 2, "source_path": "book.xhtml", "title": "第一章 起点"},
+                   {"index": 3, "source_path": "book2.xhtml", "title": "第二章 终点"}]
+        toc = epub_chapters.bundle_toc(
+            [{"title": "Start", "source_path": "titlepage.xhtml", "fragment": "", "depth": 0}], records)
+        self.assertEqual([item["chapter"] for item in toc], [2, 3])
+        self.assertEqual([item["title"] for item in toc], ["第一章 起点", "第二章 终点"])
+
+    def test_real_navigation_is_kept_even_when_it_starts_at_the_cover(self):
+        records = [{"index": 1, "source_path": "titlepage.xhtml", "title": "Cover"},
+                   {"index": 2, "source_path": "a.xhtml", "title": "一"},
+                   {"index": 3, "source_path": "b.xhtml", "title": "二"}]
+        entries = [{"title": "Cover", "source_path": "titlepage.xhtml", "fragment": "", "depth": 0},
+                   {"title": "一", "source_path": "a.xhtml", "fragment": "", "depth": 0},
+                   {"title": "二", "source_path": "b.xhtml", "fragment": "", "depth": 0}]
+        toc = epub_chapters.bundle_toc(entries, records)
+        self.assertEqual([item["chapter"] for item in toc], [1, 2, 3])
+
     def test_written_search_profile_and_complete_text_are_checksum_bound(self):
         import hashlib
         with tempfile.TemporaryDirectory() as temporary:

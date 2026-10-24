@@ -196,6 +196,28 @@ def _target_title(document: str, fragment: str = "", *, root=None) -> str:
     return ""
 
 
+COVER_TITLES = {"start", "cover", "titlepage", "title page", "封面", "扉页", "目录", "总目录"}
+
+
+def _cover_like(record: dict) -> bool:
+    title = str(record.get("title") or "").strip().lower()
+    return (record.get("source_path", "").lower().endswith(("titlepage.xhtml", "cover.xhtml"))
+            or title in COVER_TITLES)
+
+
+def _fallback_toc(records: list[dict]) -> list[dict]:
+    """A TOC whose only entry is the cover sends readers to a blank page."""
+    toc = []
+    for record in records:
+        if _cover_like(record):
+            continue
+        title = str(record.get("title") or "").strip()
+        if _placeholder_title(title):
+            title = f"章节 {record['index']}"
+        toc.append({"title": title, "chapter": record["index"], "fragment": "", "depth": 0})
+    return toc
+
+
 def bundle_toc(entries: list[dict], records: list[dict]) -> list[dict]:
     by_source = {record["source_path"]: record for record in reversed(records)}
     toc = []
@@ -229,6 +251,14 @@ def bundle_toc(entries: list[dict], records: list[dict]) -> list[dict]:
             fragment = ""
         toc.append({"title": title, "chapter": record["index"],
                     "fragment": fragment, "depth": entry["depth"]})
+    if all(_cover_like(next((r for r in records if r["index"] == item["chapter"]), {}))
+           for item in toc):
+        # Some packages declare only a cover/start page in their navigation.
+        # Readable chapters exist, so rebuild navigation from their titles
+        # rather than sending every reader to a blank cover.
+        rebuilt = _fallback_toc(records)
+        if rebuilt:
+            return rebuilt
     return toc
 
 
