@@ -149,6 +149,7 @@ def main() -> int:
     summaries = []
     for extension in sorted(wanted):
         candidates = [item for item in records if item["extension"] == extension]
+        expected = chapter_profile(extension) if chapter_profile else None
         if config["sharded"]:
             canonical = read_json(fs, a.bucket, f"{root_for(a.kind, extension)}/index.json")
             indexes = [read_json(fs, a.bucket, f"{root_for(a.kind, extension)}/index-{shard:02d}.json")
@@ -169,7 +170,6 @@ def main() -> int:
             pending_count = 0
             for shard in range(a.shard_count):
                 index = indexes[shard]
-                expected = chapter_profile(extension) if chapter_profile else None
                 completed = completed_entries(index, a.retry_failures, expected)
                 completed.update(completed_entries(combined, a.retry_failures, expected))
                 pending = [x for x in candidates if completed.get(x["key"]) != x["revision"] and
@@ -182,7 +182,6 @@ def main() -> int:
                               "unchanged_sha": len(unchanged), "checkpoint_failures": len(combined.get("failures", []))})
         else:
             index = read_json(fs, a.bucket, f"{root_for(a.kind, extension)}/index.json")
-            expected = chapter_profile(extension) if chapter_profile else None
             completed = completed_entries(index, a.retry_failures, expected)
             if any(completed.get(x["key"]) != x["revision"] for x in candidates):
                 include.append({"extension": extension})
