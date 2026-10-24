@@ -158,7 +158,14 @@ def main() -> int:
                 source_extensions = {str(x["key"].rsplit(".", 1)[-1]).lower() for x in candidates}
             combined = merge_shards(canonical, [(number, index) for number, index in enumerate(indexes) if index],
                                     "stream-index", source_extensions, a.shard_count)
-            unchanged = unchanged_sources(candidates, combined, token) if a.verify_source_sha else set()
+            if a.verify_source_sha:
+                # Reuse must obey the same profile gate as completion: a bundle
+                # from another profile is stale even when its bytes match.
+                reuse = {**combined, "files": [entry for entry in combined.get("files", [])
+                         if expected is None or entry.get("profile") == expected]}
+                unchanged = unchanged_sources(candidates, reuse, token)
+            else:
+                unchanged = set()
             pending_count = 0
             for shard in range(a.shard_count):
                 index = indexes[shard]
