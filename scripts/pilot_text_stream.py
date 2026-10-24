@@ -446,6 +446,7 @@ def main() -> int:
         print(json.dumps(report, ensure_ascii=False), flush=True)
         return 0
     cursor = 0
+    mapped = {entry.get("key") for entry in previous.get("files", []) if isinstance(entry, dict)}
 
     def staged_bytes(work: Path) -> int:
         if not work.exists():
@@ -464,9 +465,11 @@ def main() -> int:
                     number, item = job
                     work = batch_root / str(number)
                     key = f"{item['repo']}\0{item['path']}"
+                    # Already-valid UTF-8 still needs a Reader object when the
+                    # source has no mapping yet; without one it stays unreadable.
                     try:
                         entry, files = build_one(item, work, token, args.bucket, overrides.get(key),
-                                                 skip_utf8=True, expected_sha256=selection.get(key))
+                                                 skip_utf8=key in mapped, expected_sha256=selection.get(key))
                     except Utf8SourceUnchanged as unchanged:
                         return {"kind": "unchanged", "metadata": unchanged.metadata,
                                 "staged": staged_bytes(work)}

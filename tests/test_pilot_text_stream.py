@@ -408,8 +408,8 @@ class TextStreamPublicationTests(unittest.TestCase):
                 self.assertEqual(stream.main(), 1)
                 report = json.loads(args.report.read_text())
                 self.assertEqual(report["attempted"], 4)
-                self.assertEqual(report["converted"], 2)
-                self.assertEqual(len(report["unchanged_utf8"]), 1)
+                self.assertEqual(report["converted"], 3)
+                self.assertEqual(len(report["unchanged_utf8"]), 0)
                 self.assertEqual(report["published"], 0)
                 self.assertEqual(len(report["failures"]), 1)
                 self.assertTrue(report["checkpoint_complete"])
@@ -617,7 +617,7 @@ class TextStreamPublicationTests(unittest.TestCase):
         self.assertIn((stream.TARGET_BUCKET, original), graph.references)
         self.assertFalse(graph.missing)
 
-    def test_utf8_only_apply_checkpoints_verification_without_publishing_a_derivative(self):
+    def test_utf8_source_without_a_mapping_is_published_as_a_derivative(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory)
             source=root/"source.json";source.write_text(json.dumps([
@@ -633,13 +633,16 @@ class TextStreamPublicationTests(unittest.TestCase):
                  patch.dict(os.environ,{"HF_TOKEN":"test","GITHUB_OUTPUT":str(root/"outputs")}):
                 self.assertEqual(stream.main(),0)
                 publish.assert_called_once()
-                self.assertEqual(publish.call_args.args[1:4], ([], [], {}))
+                entries, failures, uploads = publish.call_args.args[1:4]
+                self.assertEqual(len(entries), 1)
+                self.assertEqual(entries[0]["key"], "VoiceOfML/Test\0readme.txt")
+                self.assertEqual(failures, [])
+                self.assertTrue(uploads)
                 checked = publish.call_args.kwargs["unchanged_utf8"]
-                self.assertEqual(len(checked), 1)
-                self.assertEqual(checked[0]["key"], "VoiceOfML/Test\0readme.txt")
+                self.assertEqual(checked, [])
                 report=json.loads(args.report.read_text())
-                self.assertEqual(report["published"],0)
-                self.assertEqual(len(report["unchanged_utf8"]),1)
+                self.assertEqual(report["published"],1)
+                self.assertEqual(len(report["unchanged_utf8"]),0)
 
     def test_utf8_ledger_preserves_every_mapping_and_advances_the_next_small_batch(self):
         key = "VoiceOfML/Test\0readme.txt"
@@ -683,24 +686,52 @@ class TextStreamPublicationTests(unittest.TestCase):
                 checkpoint_size=64, bucket=stream.TARGET_BUCKET, apply=True, plan_only=False,
                 force=False, retry_failures=False, encoding_overrides=None, report=root / "report.json")
             stored = [{"version": 1, "kind": "text-stream-index", "files": []}]
-            seen = []
+            seen, objects = [], {}
             def download(url, target, token):
                 seen.append(url.rsplit("/", 1)[-1]); target.write_bytes(b"# correct UTF-8\n")
             def upload(bucket, additions, token):
                 for local, remote in additions:
-                    self.assertEqual(remote, stream.ROOT + "/index.json")
-                    stored[0] = json.loads(Path(local).read_text())
+                    objects[remote] = Path(local).read_bytes()
+                    if remote == stream.ROOT + "/index.json":
+                        stored[0] = json.loads(Path(local).read_text())
+            def read(remote, token, bucket=None):
+                if remote not in objects:
+                    raise FileNotFoundError(remote)
+                return objects[remote]
             with patch.object(stream, "parse_args", return_value=args), \
                     patch.object(stream, "existing_index", side_effect=lambda *args: stored[0]), \
                     patch.object(stream, "download", side_effect=download), \
                     patch.object(stream, "batch_bucket_files_with_retry", side_effect=upload), \
+                    patch.object(stream, "read_bytes", side_effect=read), \
                     patch.dict(os.environ, {"HF_TOKEN": "test"}):
                 self.assertEqual(stream.main(), 0)
                 self.assertEqual(stream.main(), 0)
                 self.assertEqual(stream.main(), 0)
             self.assertEqual(seen, ["first.txt", "second.txt"])
-            self.assertEqual(stored[0]["files"], [])
-            self.assertEqual(len(stored[0]["verified_utf8"]), 2)
+            self.assertEqual(len(stored[0]["files"]), 2)
+            self.assertEqual(stored[0].get("verified_utf8", []), [])
+
+    def test_utf8_source_with_an_existing_mapping_stays_a_ledger_entry(self):
+        key = "VoiceOfML/Test\0readme.txt"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.json"
+            source.write_text(json.dumps([{"Repo": "VoiceOfML/Test", "File": "readme", "Extension": "txt", "Folder": []}]))
+            revisions = root / "revisions.json"
+            revisions.write_text(json.dumps({"VoiceOfML/Test": "a" * 40}))
+            args = SimpleNamespace(search_data=source, revisions=revisions, extensions=["txt"], limit=0,
+                checkpoint_size=64, bucket=stream.TARGET_BUCKET, apply=True, plan_only=False,
+                force=False, retry_failures=False, encoding_overrides=None, report=root / "report.json")
+            previous = {"version": 1, "kind": "text-stream-index", "files": [{"key": key, "object": "documents/text/txt/x/document.txt"}]}
+            with patch.object(stream, "parse_args", return_value=args), \
+                 patch.object(stream, "existing_index", return_value=previous), \
+                 patch.object(stream, "download", side_effect=lambda url, target, token: target.write_bytes(b"# Existing UTF-8\n")), \
+                 patch.object(stream, "publish_checkpoint", return_value=previous) as publish, \
+                 patch.dict(os.environ, {"HF_TOKEN": "test", "GITHUB_OUTPUT": str(root / "outputs")}):
+                self.assertEqual(stream.main(), 0)
+                entries, failures, uploads = publish.call_args.args[1:4]
+                self.assertEqual((entries, failures, uploads), ([], [], {}))
+                self.assertEqual(len(publish.call_args.kwargs["unchanged_utf8"]), 1)
 
     def test_workers_build_concurrently_and_publish_one_checkpoint(self):
         with tempfile.TemporaryDirectory() as directory:
