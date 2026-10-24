@@ -29,7 +29,7 @@ class ReaderAssetContractTests(unittest.TestCase):
     def test_conversion_set_excludes_unsafe_or_native_media(self):
         self.assertEqual(
             set(reader_assets.CONVERTIBLE_EXTENSIONS),
-            {"doc", "docx", "epub", "htm", "html", "mobi", "azw3", "fb2", "odt", "rtf", "chm", "tif", "tiff",
+            {"doc", "docx", "epub", "htm", "html", "mobi", "azw3", "fb2", "odt", "rtf", "chm",
              "ppt", "pptx", "pps", "odp", "xls", "xlsx", "csv", "ods", "wps", "mht", "mhtml", "ps", "caj", "kdh",
              "ape", "wma", "amr", "flac", "m4a", "mpga", "wav", "asx", "swf", "flv", "f4v", "rm", "rmvb", "mkv", "avi", "mpg",
              "mpeg", "mts", "ts", "wmv", "mov", "mp4"},
@@ -57,8 +57,6 @@ class ReaderAssetContractTests(unittest.TestCase):
             "odt": ("calibre-odt-html-v1", "html", "document.html"),
             "rtf": ("calibre-rtf-html-v1", "html", "document.html"),
             "chm": ("calibre-chm-epub-v4-source-text", "epub", "document.epub"),
-            "tif": ("pillow-pdf-v2", "pdf", "document.pdf"),
-            "tiff": ("pillow-pdf-v2", "pdf", "document.pdf"),
             "ppt": ("libreoffice-pdf-office-v2", "pdf", "document.pdf"),
             "pptx": ("libreoffice-pdf-office-v2", "pdf", "document.pdf"),
             "pps": ("libreoffice-pdf-office-v2", "pdf", "document.pdf"),
@@ -701,14 +699,13 @@ class ScannerTests(unittest.TestCase):
         records = [
             {"Repo": "VoiceOfML/Test", "File": "A", "Extension": "doc", "Folder": [], "Size": 1},
             {"Repo": "VoiceOfML/Test", "File": "B", "Extension": "mobi", "Folder": [], "Size": 1},
-            {"Repo": "VoiceOfML/Test", "File": "C", "Extension": "tif", "Folder": [], "Size": 1},
             {"Repo": "VoiceOfML/Test", "File": "D", "Extension": "djvu", "Folder": [], "Size": 1},
             {"Repo": "VoiceOfML/Test", "File": "E 密码123", "Extension": "pdf", "Folder": [], "Size": 1},
         ]
         queue = scan_reader_assets.build_queue(
             records, self.revisions, reader_assets.empty_manifest(),
         )
-        self.assertEqual([item["extension"] for item in queue], ["tif", "mobi", "doc", "pdf"])
+        self.assertEqual([item["extension"] for item in queue], ["mobi", "doc", "pdf"])
 
     def test_retired_djvu_is_never_queued_but_keeps_its_live_source_key(self):
         record = {"Repo": "VoiceOfML/Test", "File": "Book", "Extension": "djvu", "Folder": [], "Size": 10}

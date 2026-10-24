@@ -12,16 +12,16 @@ from scripts import pilot_static_pdf_stream as stream
 
 class StaticPdfCheckpointTests(unittest.TestCase):
     def test_strict_failure_checkpoints_successes_and_failures_before_exiting(self):
-        source = {"repo": "repo", "extension": "tif", "revision": "revision"}
-        old_entry = {"key": "repo\0old.tif", "source_revision": "revision", "extension": "tif"}
-        new_entry = {"key": "repo\0good.tif", "source_revision": "revision", "extension": "tif"}
+        source = {"repo": "repo", "extension": "ps", "revision": "revision"}
+        old_entry = {"key": "repo\0old.ps", "source_revision": "revision", "extension": "ps"}
+        new_entry = {"key": "repo\0good.ps", "source_revision": "revision", "extension": "ps"}
         previous = {"files": [old_entry], "failures": []}
         uploaded = {}
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             revisions = root / "commits.json"
             revisions.write_text('{}', encoding="utf-8")
-            args = SimpleNamespace(limit=0, extension="tif", bucket="bucket", apply=True,
+            args = SimpleNamespace(limit=0, extension="ps", bucket="bucket", apply=True,
                                    retry_failures=False, strict=True, revisions=revisions,
                                    search_data=root / "search_data.json")
             output = root / "document.pdf"
@@ -33,32 +33,32 @@ class StaticPdfCheckpointTests(unittest.TestCase):
 
             with patch.object(stream, "parse_args", return_value=args), \
                     patch.object(stream, "records", return_value=[
-                        {**source, "path": "old.tif"}, {**source, "path": "good.tif"},
-                        {**source, "path": "bad.tif"}]), \
+                        {**source, "path": "old.ps"}, {**source, "path": "good.ps"},
+                        {**source, "path": "bad.ps"}]), \
                     patch.object(stream, "existing_index", return_value=previous), \
                     patch.object(stream, "build", side_effect=[
                         (new_entry, {"document.pdf": str(output)}), RuntimeError("HTTP 429")]) as build, \
                     patch.object(stream, "batch_bucket_files", side_effect=upload):
                 self.assertEqual(stream.main(), 1)
             self.assertEqual(build.call_count, 2)
-            checkpoint = json.loads(uploaded["documents/pdf/tif/index.json"])
+            checkpoint = json.loads(uploaded["documents/pdf/ps/index.json"])
             self.assertEqual({entry["key"] for entry in checkpoint["files"]},
                              {old_entry["key"], new_entry["key"]})
-            self.assertEqual([failure["key"] for failure in checkpoint["failures"]], ["repo\0bad.tif"])
+            self.assertEqual([failure["key"] for failure in checkpoint["failures"]], ["repo\0bad.ps"])
             self.assertIn("HTTP 429", checkpoint["failures"][0]["error"])
             self.assertEqual(uploaded["document.pdf"], b"%PDF-fixture")
 
     def test_strict_retry_preserves_completed_files_and_clears_recovered_failures(self):
-        source = {"repo": "repo", "path": "retry.tif", "extension": "tif", "revision": "revision"}
-        recovered = {"key": "repo\0retry.tif", "source_revision": "revision", "extension": "tif"}
-        previous = {"files": [{"key": "repo\0old.tif", "source_revision": "revision"}],
-                    "failures": [{"key": "repo\0retry.tif", "source_revision": "revision"}]}
+        source = {"repo": "repo", "path": "retry.ps", "extension": "ps", "revision": "revision"}
+        recovered = {"key": "repo\0retry.ps", "source_revision": "revision", "extension": "ps"}
+        previous = {"files": [{"key": "repo\0old.ps", "source_revision": "revision"}],
+                    "failures": [{"key": "repo\0retry.ps", "source_revision": "revision"}]}
         uploaded = {}
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             revisions = root / "commits.json"
             revisions.write_text('{}', encoding="utf-8")
-            args = SimpleNamespace(limit=0, extension="tif", bucket="bucket", apply=True,
+            args = SimpleNamespace(limit=0, extension="ps", bucket="bucket", apply=True,
                                    retry_failures=True, strict=True, revisions=revisions,
                                    search_data=root / "search_data.json")
 
@@ -72,7 +72,7 @@ class StaticPdfCheckpointTests(unittest.TestCase):
                     patch.object(stream, "build", return_value=(recovered, {})), \
                     patch.object(stream, "batch_bucket_files", side_effect=upload):
                 self.assertEqual(stream.main(), 0)
-            checkpoint = json.loads(uploaded["documents/pdf/tif/index.json"])
+            checkpoint = json.loads(uploaded["documents/pdf/ps/index.json"])
             self.assertEqual(len(checkpoint["files"]), 2)
             self.assertEqual(checkpoint["failures"], [])
 

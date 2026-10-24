@@ -27,7 +27,7 @@ except ImportError:
 
 
 BUCKET = "vomebook/reader-assets-v2"
-EXTENSIONS = {"ppt", "pptx", "pps", "wps", "ps", "tif", "tiff"}
+EXTENSIONS = {"ppt", "pptx", "pps", "wps", "ps"}
 DOWNLOAD_INTERVAL_SECONDS = 0.35
 DOWNLOAD_ATTEMPTS = 5
 RETRYABLE_STATUS = {429, 500, 502, 503, 504}

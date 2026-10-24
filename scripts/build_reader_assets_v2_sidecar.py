@@ -164,8 +164,9 @@ def build(fs: HfFileSystem, assets_bucket: str, pdf_bucket: str, derived_path: s
             path = entry.get("manifest")
         if isinstance(path, str):
             files[entry["key"]] = {"s": 2, "m": "i", "p": path, "b": assets_bucket}
-    # TIF/TIFF is moving to the PDF stream. Keep its old image entry only until
-    # the static-PDF producer has published the corresponding PDF mapping.
+    # Legacy TIF/TIFF PDF conversions are still indexed until the image rebuild
+    # replaces every one of them with a single image or an image-page-stream.
+    # Image entries are written above, so they always win for the same key.
     if old_image_payload is not None:
         for entry in old_image_payload.get("files", []):
             if not isinstance(entry, dict) or not entry.get("key") or entry["key"] in files:

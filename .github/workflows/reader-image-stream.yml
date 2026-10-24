@@ -10,7 +10,7 @@ on:
         required: true
         default: all
         type: choice
-        options: [all, jpg, jpeg, png, bmp, webp, gif]
+        options: [all, jpg, jpeg, png, bmp, webp, gif, tif, tiff]
       limit:
         description: Maximum sources per shard; 0 means all
         required: true

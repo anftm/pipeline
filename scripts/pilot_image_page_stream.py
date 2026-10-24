@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Build and publish single-image WebP assets for ordinary image sources.
+"""Build and publish image assets for ordinary image sources.
 
-TIF/TIFF stay on the PDF conversion path. Animated GIFs are reduced to their
-first frame and published as one static WebP. The canonical index is
+Single-frame sources become one WebP (``mode: image``). Multi-page TIFFs keep
+their pages as an ``image-page-stream`` page manifest instead of being wrapped
+in a PDF. Animated GIFs are reduced to their first frame and published as one
+static WebP. The canonical index is
 ``pages/image/index-v2.json`` so a full rebuild never merges old page-stream
 entries; old ``pages/image/index.json`` remains untouched until the v2 index is
 complete and the Reader sidecar is switched.
@@ -38,7 +40,7 @@ TARGET_BUCKET = "vomebook/reader-assets-v2"
 IMAGE_ROOT = "pages/image"
 INDEX_PREFIX = "index-v2"
 INDEX_NAME = "index-v2.json"
-SUPPORTED_EXTENSIONS = {"jpg", "jpeg", "png", "bmp", "webp", "gif"}
+SUPPORTED_EXTENSIONS = {"jpg", "jpeg", "png", "bmp", "webp", "gif", "tif", "tiff"}
 MAX_WEBP_EDGE = 8_192
 DOWNLOAD_INTERVAL_SECONDS = 0.35
 RETRYABLE_STATUS = {429, 500, 502, 503, 504}
@@ -142,10 +144,11 @@ def build_one(item: dict, work: Path, token: str | None, bucket: str) -> tuple[d
         raise ValueError("image source byte count differs from pinned metadata")
     extension = item["extension"]
     root = f"{IMAGE_ROOT}/{extension}/{source_digest}"
-    output = work / "document.webp"
     with Image.open(source) as image:
         if image.width < 1 or image.height < 1:
             raise ValueError("image has invalid dimensions")
+        if extension in {"tif", "tiff"} and int(getattr(image, "n_frames", 1) or 1) > 1:
+            return build_pages(item, source, image, root, work, extension, source_digest, bucket)
         # GIF (and any other animated image) is represented by its first frame.
         try:
             image.seek(0)
@@ -161,8 +164,9 @@ def build_one(item: dict, work: Path, token: str | None, bucket: str) -> tuple[d
             )
             converted.close()
             converted = resized
-        converted.save(output, "WEBP", quality=85, method=6)
+        converted.save(work / "document.webp", "WEBP", quality=85, method=6)
         converted.close()
+    output = work / "document.webp"
     data = output.read_bytes()
     remote = f"{root}/document.webp"
     return {
@@ -180,6 +184,46 @@ def build_one(item: dict, work: Path, token: str | None, bucket: str) -> tuple[d
         "sha256": hashlib.sha256(data).hexdigest(),
         "page_count": 1,
     }, {remote: str(output)}
+
+
+def build_pages(item, source, image, root, work, extension, source_digest, bucket):
+    """Publish every TIFF frame as an image page stream, never a PDF wrapper."""
+    pages = work / "pages"
+    pages.mkdir(parents=True, exist_ok=True)
+    entries, uploads = [], {}
+    for number in range(1, int(image.n_frames) + 1):
+        image.seek(number - 1)
+        converted = image.convert("RGB")
+        if max(converted.size) > MAX_WEBP_EDGE:
+            scale = MAX_WEBP_EDGE / max(converted.size)
+            resized = converted.resize((max(1, round(converted.width * scale)),
+                                        max(1, round(converted.height * scale))),
+                                       Image.Resampling.LANCZOS)
+            converted.close()
+            converted = resized
+        target = pages / f"page-{number:06d}.webp"
+        converted.save(target, "WEBP", quality=85, method=6)
+        converted.close()
+        payload = target.read_bytes()
+        relative = f"pages/page-{number:06d}.webp"
+        entries.append({"path": relative, "bytes": len(payload),
+                        "sha256": hashlib.sha256(payload).hexdigest()})
+        uploads[f"{root}/{relative}"] = str(target)
+    manifest = {"kind": "image-page-stream", "version": 1, "source_extension": extension,
+                "source_sha256": source_digest, "page_count": len(entries), "pages": entries}
+    manifest_file = work / "page-manifest.json"
+    manifest_file.write_text(json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+                             encoding="utf-8")
+    remote = f"{root}/page-manifest.json"
+    uploads[remote] = str(manifest_file)
+    return {
+        "key": f"{item['repo']}\0{item['path']}", "repo": item["repo"],
+        "source_path": item["path"], "extension": extension,
+        "source_revision": item["revision"], "source_bytes": source.stat().st_size,
+        "source_sha256": source_digest, "mode": "page-stream", "bucket": bucket,
+        "manifest": remote, "page_count": len(entries),
+        "bytes": sum(entry["bytes"] for entry in entries),
+    }, uploads
 
 
 def existing_index(bucket: str, token: str | None, name: str) -> dict:
