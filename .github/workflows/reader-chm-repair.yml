@@ -32,11 +32,6 @@ permissions:
   contents: read
   actions: write
 
-concurrency:
-  group: reader-sidecar
-  cancel-in-progress: false
-  queue: max
-
 jobs:
   plan:
     if: github.repository == 'anftm/pipeline'
@@ -88,6 +83,10 @@ jobs:
     if: (github.event_name == 'schedule' || inputs.apply == true) && needs.plan.outputs.count != '0'
     runs-on: ubuntu-24.04
     timeout-minutes: 360
+    concurrency:
+      group: reader-sidecar
+      cancel-in-progress: false
+      queue: max
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
