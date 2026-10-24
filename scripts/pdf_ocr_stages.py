@@ -1047,7 +1047,7 @@ def recognition_identity(entry, options):
     # Recognition language/model belongs to the OCR worker. A language change
     # must reuse the published PNG render instead of forcing PDF rendering.
     language, backend = pdf_ocr.book_ocr_config(entry)
-    base = pdf_ocr.asset_profile(language, backend)
+    base = pdf_ocr.asset_profile(language, backend, entry.get("ocr_revision"))
     return f"{base}-layout-{ocr_layout.VERSION}-{digest}"
 
 
@@ -1164,8 +1164,10 @@ def plan_images(rendered, current, progress, limit=20, target=500, overrides=Non
         else:
             language, backend = pdf_ocr.book_ocr_config(entry)
             language_source = pdf_ocr.language_source(entry)
+        override = pdf_ocr.language_override(key) or {}
         entry = {**entry, "ocr_language": language, "ocr_backend": backend,
                  "language_source": language_source,
+                 **({"ocr_revision": override["revision"]} if override.get("revision") else {}),
                  "profile": recognition_identity({**entry, "ocr_language": language, "ocr_backend": backend}, options),
                  "layout_options": options}
         old = current.get(key, {})

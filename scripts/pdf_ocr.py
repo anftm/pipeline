@@ -181,12 +181,14 @@ def language_source(book: dict) -> str:
     return "filename"
 
 
-def asset_profile(language=None, backend=None) -> str:
+def asset_profile(language=None, backend=None, revision=None) -> str:
     language, version, backend = resolve_ocr_config(language, backend)
     model_profile = OCR_PROFILE if language == "ch" and version == "PP-OCRv6" and backend == "paddle_static" else (
         f"pdf-ocr-v1-{version.lower()}-medium-lang-{language}")
     if backend != "paddle_static":
         model_profile += f"-backend-{backend.replace('_', '-')}"
+    if revision:
+        model_profile += f"-rev-{revision}"
     return (f"{model_profile}-dpi-{OCR_DPI}-webp-{WEBP_QUALITY}-{WEBP_MAX_DIMENSION}"
             f"-native-{MIN_NATIVE_PAGE_CHARS}-{NATIVE_PAGE_RATIO:g}-maxpix-{MAX_PAGE_PIXELS}"
             f"-jxl-{int(JXL_ENABLED)}-{JXL_DISTANCE:g}-{JXL_EFFORT}")
@@ -201,6 +203,7 @@ def valid_published_profile(profile: str) -> bool:
         r"pdf-ocr-v1-pp-ocrv[56]-medium"
         r"(?:-lang-[a-z0-9_]+)?"
         r"(?:-backend-(?:paddle-onnxruntime|rapidocr-onnxruntime))?"
+        r"(?:-rev-[a-z0-9._-]+)?"
         r"-dpi-[0-9]+-webp-[0-9]+-[0-9]+"
         r"-native-[0-9]+(?:\.[0-9]+)?-[0-9]+(?:\.[0-9]+)?"
         r"-maxpix-[0-9]+-jxl-[01]-[0-9]+(?:\.[0-9]+)?-[0-9]+",
@@ -212,8 +215,8 @@ def ocr_profile_without_jxl(profile: str) -> str:
     return str(profile or "").split("-jxl-", 1)[0]
 
 
-def object_root(source_sha: str, key: str, language=None, backend=None) -> Path:
-    key_sha = hashlib.sha256(f"{key}\0{asset_profile(language, backend)}".encode("utf-8")).hexdigest()[:16]
+def object_root(source_sha: str, key: str, language=None, backend=None, revision=None) -> Path:
+    key_sha = hashlib.sha256(f"{key}\0{asset_profile(language, backend, revision)}".encode("utf-8")).hexdigest()[:16]
     return Path("objects") / source_sha[:2] / source_sha / key_sha
 
 

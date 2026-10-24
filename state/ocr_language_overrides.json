@@ -79,6 +79,16 @@
    "language": "japan",
    "source": "osd-triage-v1"
   },
+  "VoiceOfML/MLMRL-Hub\u0000000017/1870520043_484_新聞 2020.8.1.pdf": {
+   "backend": "rapidocr_onnxruntime",
+   "evidence": {
+    "page": "2",
+    "reason": "published page merges boxed lines and misplaces block boxes; local re-run of the same engine yields 39 clean lines"
+   },
+   "language": "ch",
+   "revision": "reocr-20261024",
+   "source": "layout-repro-v1"
+  },
   "VoiceOfML/MLMRL-Library\u0000安全培训/维基备份/软件/综合性资料/编程随想的博客/IT（信息技术）/IT/软件开发/网络相关/C & C++/Richard Stevens：UNIX Network Programming (共2卷 扫描版).djvu/第1卷 The Sockets Networking API@1998 (第2版).djvu": {
    "evidence": {
     "pages": [

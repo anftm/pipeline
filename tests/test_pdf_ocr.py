@@ -169,6 +169,13 @@ class PdfOcrContractTests(unittest.TestCase):
                 self.assertEqual(pdf_ocr.detect_language(key), language)
                 self.assertEqual(pdf_ocr.book_ocr_config({"key": key}), (language, backend))
 
+    def test_revision_suffix_changes_profile_and_stays_publishable(self):
+        base = pdf_ocr.asset_profile("ru", "paddle_onnxruntime")
+        revised = pdf_ocr.asset_profile("ru", "paddle_onnxruntime", "reocr-20261024")
+        self.assertNotEqual(base, revised)
+        self.assertIn("-rev-reocr-20261024", revised)
+        self.assertTrue(pdf_ocr.valid_published_profile(revised))
+
     def test_explicit_language_override_outranks_registry_and_filename(self):
         key = "repo\0中文目录/俄文书.pdf"
         with tempfile.TemporaryDirectory() as directory:
