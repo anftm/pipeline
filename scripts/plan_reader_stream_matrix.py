@@ -110,13 +110,16 @@ def root_for(kind: str, extension: str) -> str:
     }[kind]
 
 
-def completed_entries(index: dict, retry_failures: bool = False) -> dict[str, str]:
+def completed_entries(index: dict, retry_failures: bool = False,
+                      profile: str | None = None) -> dict[str, str]:
     completed = {}
     fields = ("files",) if retry_failures else ("files", "failures")
     for field in fields:
         for entry in index.get(field, []):
             if isinstance(entry, dict) and entry.get("key"):
                 if field == "files" and not reusable_entry(entry):
+                    continue
+                if profile is not None and entry.get("profile") != profile:
                     continue
                 completed[entry["key"]] = entry.get("source_revision")
     return completed
@@ -136,6 +139,12 @@ def main() -> int:
     records = selected_records(a.search_data, revisions, a.kind, wanted)
     token = os.environ.get("HF_TOKEN")
     fs = HfFileSystem(token=token)
+    chapter_profile = None
+    if a.kind in {"ebook", "office-chapters"}:
+        try:
+            from .pilot_epub_chapters import chapter_profile
+        except ImportError:
+            from pilot_epub_chapters import chapter_profile
     include = []
     summaries = []
     for extension in sorted(wanted):
@@ -153,8 +162,9 @@ def main() -> int:
             pending_count = 0
             for shard in range(a.shard_count):
                 index = indexes[shard]
-                completed = completed_entries(index, a.retry_failures)
-                completed.update(completed_entries(combined, a.retry_failures))
+                expected = chapter_profile(extension) if chapter_profile else None
+                completed = completed_entries(index, a.retry_failures, expected)
+                completed.update(completed_entries(combined, a.retry_failures, expected))
                 pending = [x for x in candidates if completed.get(x["key"]) != x["revision"] and
                             x["key"] not in unchanged and
                             int.from_bytes(hashlib.sha256(x["key"].encode()).digest()[:8], "big") % a.shard_count == shard]
@@ -165,7 +175,8 @@ def main() -> int:
                               "unchanged_sha": len(unchanged), "checkpoint_failures": len(combined.get("failures", []))})
         else:
             index = read_json(fs, a.bucket, f"{root_for(a.kind, extension)}/index.json")
-            completed = completed_entries(index, a.retry_failures)
+            expected = chapter_profile(extension) if chapter_profile else None
+            completed = completed_entries(index, a.retry_failures, expected)
             if any(completed.get(x["key"]) != x["revision"] for x in candidates):
                 include.append({"extension": extension})
             summaries.append({"extension": extension, "sources": len(candidates),
