@@ -63,7 +63,7 @@ OFFICE_EXTENSIONS = {"doc", "docx", "odt", "rtf"}
 OFFICE_ROOT = "chapters/ebook/epub"
 OFFICE_PROFILE = "office-epub-chapters-v1-flow-512"
 CHM_PROFILE = "chm-epub-chapters-v9-source-text"
-EPUB_PROFILE = "epub-chapters-v8-bucket"
+EPUB_PROFILE = "epub-chapters-v9-cover-toc"
 OFFICE_FLOW_SIZE_KB = 512
 OFFICE_COMMAND_TIMEOUT_SECONDS = 900
 OFFICE_LARGE_DOC_BYTES = 3 * 1024 * 1024
@@ -199,7 +199,9 @@ def pending_chapter_sources(records: list[dict], previous: dict, extension: str,
     """Reuse proven same-SHA chapters without hiding failures/profile upgrades."""
     expected = chapter_profile(extension)
     failure_keys = failed_keys(previous)
-    completed = completed_revisions(previous, retry_failures, expected if extension == "chm" else None)
+    # A profile bump must rebuild entries: an old navigation or bundle version
+    # cannot be reused just because the source bytes are unchanged.
+    completed = completed_revisions(previous, retry_failures, expected)
     pending = [item for item in records
                if (not failed_only or f"{item['repo']}\0{item['path']}" in failure_keys)
                and completed.get(f"{item['repo']}\0{item['path']}") != item["revision"]]
