@@ -319,6 +319,13 @@ def main() -> int:
             if any(page["boxed"] for page in pages):
                 frames[key] = pages
         report["boxed_pages"] = frames
+        # Boxed pages are flagged for review, not blocked: tables and forms
+        # legitimately use frames, and only recognition sampling can tell
+        # whether the text survived. Never auto re-OCR from this signal.
+        report["layout_risk"] = {
+            key: {"reason": "boxed-pages",
+                  "pages": [page["page"] for page in pages if page["boxed"]]}
+            for key, pages in frames.items()}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, ensure_ascii=False, indent=1) + "\n")
     if args.overrides_out:
