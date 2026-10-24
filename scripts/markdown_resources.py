@@ -45,6 +45,13 @@ class EmbeddedImage:
     bytes: int
 
 
+def _is_external(reference: str) -> bool:
+    """Only absolute http(s) images are left as links; local absolutes still fail."""
+    value = unquote(str(reference or "").strip())
+    parsed = urlsplit(value)
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
 def _local_path(reference: str, base: str) -> str:
     value = unquote(reference.strip())
     parsed = urlsplit(value)
@@ -124,12 +131,16 @@ def embed_markdown_images(text: str, source_path: str, read_bytes) -> tuple[str,
 
     def inline(match: re.Match[str]) -> str:
         reference = match.group(2) or match.group(3)
+        if _is_external(reference):
+            return match.group(0)
         mime, data, _path = load(reference)
         return f"![{match.group(1)}]({data_uri(mime, data)})"
 
     def html(match: re.Match[str]) -> str:
         group = 1 if match.group(1) is not None else 2 if match.group(2) is not None else 3
         reference = match.group(group)
+        if _is_external(reference):
+            return match.group(0)
         mime, data, _path = load(reference)
         start, end = match.span(group)
         whole = match.group(0)

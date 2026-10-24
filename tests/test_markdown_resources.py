@@ -56,7 +56,6 @@ class MarkdownResourceTests(unittest.TestCase):
             "../../etc/passwd",
             "/etc/passwd",
             "file:///etc/passwd",
-            "https://example.invalid/image.png",
             "//example.invalid/image.png",
             "images/a.png?x=1",
             "images/a.png#fragment",
@@ -67,6 +66,17 @@ class MarkdownResourceTests(unittest.TestCase):
                 resources.embed_markdown_images(
                     f"![a]({reference})", "book/doc.md", lambda path: PNG
                 )
+
+    def test_remote_http_images_are_left_as_links(self):
+        def local(path):
+            if path == "book/images/b.png":
+                return PNG
+            raise AssertionError("remote images must not be fetched")
+        text = "![a](https://example.invalid/image.png) ![b](images/b.png)"
+        output, embedded = resources.embed_markdown_images(text, "book/doc.md", local)
+        self.assertIn("![a](https://example.invalid/image.png)", output)
+        self.assertIn("data:image/png;base64,", output)
+        self.assertEqual([image.path for image in embedded], ["book/images/b.png"])
 
     def test_missing_and_unsupported_images_fail_closed(self):
         def missing(path):
