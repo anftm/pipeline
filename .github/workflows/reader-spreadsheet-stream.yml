@@ -115,7 +115,7 @@ jobs:
     if: >-
       always() && needs.plan.result == 'success' &&
       (github.event_name == 'schedule' || inputs.apply == true) &&
-      (needs.spreadsheet-stream.result == 'success' || needs.spreadsheet-stream.result == 'skipped')
+      needs.spreadsheet-stream.result == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     concurrency:

@@ -32,11 +32,6 @@ permissions:
   contents: read
   actions: write
 
-concurrency:
-  group: reader-sidecar
-  cancel-in-progress: false
-  queue: max
-
 jobs:
   plan:
     runs-on: ubuntu-24.04
@@ -122,8 +117,12 @@ jobs:
     if: >-
       always() && needs.plan.result == 'success' &&
       (github.event_name == 'schedule' || inputs.apply == true) &&
-      (needs.build.result == 'success' || needs.build.result == 'skipped')
+      needs.build.result == 'success'
     runs-on: ubuntu-24.04
+    concurrency:
+      group: reader-sidecar
+      cancel-in-progress: false
+      queue: max
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v7

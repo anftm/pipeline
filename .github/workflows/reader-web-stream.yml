@@ -111,7 +111,7 @@ jobs:
     if: >-
       always() && needs.plan.result == 'success' &&
       (github.event_name == 'schedule' || inputs.apply == true) &&
-      (needs.web-stream.result == 'success' || needs.web-stream.result == 'skipped')
+      needs.web-stream.result == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     concurrency:

@@ -137,7 +137,7 @@ jobs:
       always() && needs.plan.result == 'success' &&
       needs.codecs.result == 'success' &&
       (github.event_name == 'schedule' || inputs.apply == true) &&
-      (needs.media.result == 'success' || needs.media.result == 'skipped')
+      needs.media.result == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     concurrency:
