@@ -1,0 +1,909 @@
+{
+ "kind": "ocr-language-overrides",
+ "overrides": {
+  "VoiceOfML/GPCREducation\u0000英语/1、大学英语教材/英语 建工系農水专业用.pdf": {
+   "evidence": {
+    "pages": [
+     20,
+     93,
+     57
+    ],
+    "script": "Latin",
+    "votes": {
+     "Latin": 3
+    }
+   },
+   "language": "en",
+   "source": "osd-triage-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000内田义彦/内田义彦著作集 8 社会科学之为作品.pdf": {
+   "evidence": {
+    "pages": [
+     41,
+     188,
+     114
+    ],
+    "script": "Japanese",
+    "votes": {
+     "Japanese": 3
+    }
+   },
+   "language": "japan",
+   "source": "osd-triage-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000幸德秋水/幸德秋水全集 8.pdf": {
+   "evidence": {
+    "pages": [
+     64,
+     299,
+     182
+    ],
+    "script": "Japanese",
+    "votes": {
+     "Japanese": 2,
+     "Latin": 1
+    }
+   },
+   "language": "japan",
+   "source": "osd-triage-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本战后政经研究/宇野学派/二代/伊藤诚/马克思经济学方法同当代世界.pdf": {
+   "evidence": {
+    "pages": [
+     34,
+     159,
+     96
+    ],
+    "script": "Japanese",
+    "votes": {
+     "Japanese": 3
+    }
+   },
+   "language": "japan",
+   "source": "osd-triage-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000梅本克己/梅本克己著作集 第7卷 唯物史观和当代 附月报.pdf": {
+   "evidence": {
+    "pages": [
+     59,
+     272,
+     165,
+     378
+    ],
+    "script": "Japanese",
+    "votes": {
+     "Japanese": 2,
+     "Latin": 1
+    }
+   },
+   "language": "japan",
+   "source": "osd-triage-v1"
+  },
+  "VoiceOfML/MLMRL-Library\u0000安全培训/维基备份/软件/综合性资料/编程随想的博客/IT（信息技术）/IT/软件开发/网络相关/C & C++/Richard Stevens：UNIX Network Programming (共2卷 扫描版).djvu/第1卷 The Sockets Networking API@1998 (第2版).djvu": {
+   "evidence": {
+    "pages": [
+     111,
+     516,
+     313
+    ],
+    "script": "Latin",
+    "votes": {
+     "Latin": 3
+    }
+   },
+   "language": "en",
+   "source": "osd-triage-v1"
+  },
+  "VoiceOfML/SovMaterials\u0000一手资料/日记/哈尔德日记.djvu": {
+   "evidence": {
+    "pages": [
+     81,
+     377,
+     229
+    ],
+    "script": "Cyrillic",
+    "votes": {
+     "Cyrillic": 3
+    }
+   },
+   "language": "ru",
+   "source": "osd-triage-v1"
+  },
+  "VoiceOfML/SovMaterials\u0000一手资料/苏联-俄罗斯历史/俄罗斯、白俄罗斯和乌克兰苏维埃社会主义共和国的波兰战俘，1919-1922，文件与材料.djvu": {
+   "evidence": {
+    "pages": [
+     45,
+     208,
+     126
+    ],
+    "script": "Cyrillic",
+    "votes": {
+     "Cyrillic": 3
+    }
+   },
+   "language": "ru",
+   "source": "osd-triage-v1"
+  },
+  "VoiceOfML/SovMaterials\u0000一手资料/苏联-俄罗斯历史/帝国主义时代的国际关系1878-1917，沙皇和临时政府档案中的文件/第三部分，1914-1917/第3卷.djvu": {
+   "evidence": {
+    "pages": [
+     54,
+     251,
+     153
+    ],
+    "script": "Latin",
+    "votes": {
+     "Latin": 3
+    }
+   },
+   "language": "en",
+   "source": "osd-triage-v1"
+  },
+  "VoiceOfML/SovMaterials\u0000一手资料/苏联-俄罗斯历史/帝国主义时代的国际关系1878-1917，沙皇和临时政府档案中的文件/第三部分，1914-1917/第4卷.djvu": {
+   "evidence": {
+    "pages": [
+     49,
+     228,
+     139,
+     318
+    ],
+    "script": "Latin",
+    "votes": {
+     "Latin": 3
+    }
+   },
+   "language": "en",
+   "source": "osd-triage-v1"
+  },
+  "VoiceOfML/SovMaterials\u0000一手资料/苏联-俄罗斯历史/帝国主义时代的国际关系1878-1917，沙皇和临时政府档案中的文件/第三部分，1914-1917/第5卷.djvu": {
+   "evidence": {
+    "pages": [
+     59,
+     271,
+     165,
+     378
+    ],
+    "script": "Latin",
+    "votes": {
+     "Latin": 3
+    }
+   },
+   "language": "en",
+   "source": "osd-triage-v1"
+  },
+  "VoiceOfML/SovMaterials\u0000一手资料/苏联-俄罗斯历史/帝国主义时代的国际关系1878-1917，沙皇和临时政府档案中的文件/第三部分，1914-1917/第6卷上.djvu": {
+   "evidence": {
+    "pages": [
+     56,
+     258,
+     157,
+     359,
+     460
+    ],
+    "script": "Cyrillic",
+    "votes": {
+     "Cyrillic": 2
+    }
+   },
+   "language": "ru",
+   "source": "osd-triage-v1"
+  },
+  "VoiceOfML/SovMaterials\u0000一手资料/苏联-俄罗斯历史/帝国主义时代的国际关系1878-1917，沙皇和临时政府档案中的文件/第三部分，1914-1917/第6卷下.djvu": {
+   "evidence": {
+    "pages": [
+     45,
+     210,
+     128
+    ],
+    "script": "Cyrillic",
+    "votes": {
+     "Cyrillic": 3
+    }
+   },
+   "language": "ru",
+   "source": "osd-triage-v1"
+  },
+  "VoiceOfML/SovMaterials\u0000一手资料/苏联-俄罗斯历史/帝国主义时代的国际关系1878-1917，沙皇和临时政府档案中的文件/第三部分，1914-1917/第7卷上.djvu": {
+   "evidence": {
+    "pages": [
+     67,
+     309,
+     188
+    ],
+    "script": "Cyrillic",
+    "votes": {
+     "Cyrillic": 2,
+     "Latin": 1
+    }
+   },
+   "language": "ru",
+   "source": "osd-triage-v1"
+  },
+  "VoiceOfML/SovMaterials\u0000一手资料/苏联-俄罗斯历史/帝国主义时代的国际关系1878-1917，沙皇和临时政府档案中的文件/第三部分，1914-1917/第7卷下.djvu": {
+   "evidence": {
+    "pages": [
+     62,
+     289,
+     176
+    ],
+    "script": "Latin",
+    "votes": {
+     "Latin": 3
+    }
+   },
+   "language": "en",
+   "source": "osd-triage-v1"
+  },
+  "VoiceOfML/SovMaterials\u0000一手资料/苏联-俄罗斯历史/帝国主义时代的国际关系1878-1917，沙皇和临时政府档案中的文件/第三部分，1914-1917/第8卷上.djvu": {
+   "evidence": {
+    "pages": [
+     65,
+     300,
+     182,
+     417,
+     535
+    ],
+    "script": "Latin",
+    "votes": {
+     "Latin": 2
+    }
+   },
+   "language": "en",
+   "source": "osd-triage-v1"
+  },
+  "VoiceOfML/SovMaterials\u0000一手资料/苏联-俄罗斯历史/帝国主义时代的国际关系1878-1917，沙皇和临时政府档案中的文件/第三部分，1914-1917/第8卷下.djvu": {
+   "evidence": {
+    "pages": [
+     72,
+     336,
+     204
+    ],
+    "script": "Latin",
+    "votes": {
+     "Latin": 3
+    }
+   },
+   "language": "en",
+   "source": "osd-triage-v1"
+  },
+  "VoiceOfML/SovMaterials\u0000一手资料/苏联-俄罗斯历史/帝国主义时代的国际关系1878-1917，沙皇和临时政府档案中的文件/第三部分，1914-1917/第9卷.djvu": {
+   "evidence": {
+    "pages": [
+     94,
+     438,
+     266,
+     609
+    ],
+    "script": "Cyrillic",
+    "votes": {
+     "Cyrillic": 2,
+     "Latin": 1
+    }
+   },
+   "language": "ru",
+   "source": "osd-triage-v1"
+  },
+  "VoiceOfML/SovMaterials\u0000一手资料/苏联-俄罗斯历史/帝国主义时代的国际关系1878-1917，沙皇和临时政府档案中的文件/第二部分，1900-1913/第20卷上.djvu": {
+   "evidence": {
+    "pages": [
+     55,
+     254,
+     154
+    ],
+    "script": "Cyrillic",
+    "votes": {
+     "Cyrillic": 3
+    }
+   },
+   "language": "ru",
+   "source": "osd-triage-v1"
+  },
+  "VoiceOfML/SovMaterials\u0000一手资料/苏联-俄罗斯历史/帝国主义时代的国际关系1878-1917，沙皇和临时政府档案中的文件/第二部分，1900-1913/第20卷下.djvu": {
+   "evidence": {
+    "pages": [
+     60,
+     277,
+     168
+    ],
+    "script": "Cyrillic",
+    "votes": {
+     "Cyrillic": 3
+    }
+   },
+   "language": "ru",
+   "source": "osd-triage-v1"
+  },
+  "VoiceOfML/SovMaterials\u0000一手资料/苏联-俄罗斯历史/政治局与共产国际，1919-1943.djvu": {
+   "evidence": {
+    "pages": [
+     106,
+     490,
+     298
+    ],
+    "script": "Cyrillic",
+    "votes": {
+     "Cyrillic": 3
+    }
+   },
+   "language": "ru",
+   "source": "osd-triage-v1"
+  },
+  "VoiceOfML/SovMaterials\u0000一手资料/苏联-俄罗斯历史/斯大林时代的古拉格/第2卷 惩罚性制度：结构和人员.djvu": {
+   "evidence": {
+    "pages": [
+     76,
+     353,
+     215
+    ],
+    "script": "Cyrillic",
+    "votes": {
+     "Cyrillic": 3
+    }
+   },
+   "language": "ru",
+   "source": "osd-triage-v1"
+  },
+  "VoiceOfML/SovMaterials\u0000一手资料/苏联-俄罗斯历史/斯大林时代的古拉格/第4卷 古拉格的人口：拘留数量和条件.djvu": {
+   "evidence": {
+    "pages": [
+     68,
+     316,
+     192
+    ],
+    "script": "Cyrillic",
+    "votes": {
+     "Cyrillic": 3
+    }
+   },
+   "language": "ru",
+   "source": "osd-triage-v1"
+  },
+  "VoiceOfML/SovMaterials\u0000一手资料/苏联-俄罗斯历史/苏共中央主席团，会议记录、决议与文件，1954-1964，第2卷.djvu": {
+   "evidence": {
+    "pages": [
+     123,
+     572,
+     348
+    ],
+    "script": "Cyrillic",
+    "votes": {
+     "Cyrillic": 3
+    }
+   },
+   "language": "ru",
+   "source": "osd-triage-v1"
+  },
+  "VoiceOfML/SovMaterials\u0000一手资料/苏联-俄罗斯历史/苏共中央主席团，会议记录、决议与文件，1954-1964，第3卷.djvu": {
+   "evidence": {
+    "pages": [
+     140,
+     649,
+     395
+    ],
+    "script": "Cyrillic",
+    "votes": {
+     "Cyrillic": 3
+    }
+   },
+   "language": "ru",
+   "source": "osd-triage-v1"
+  },
+  "VoiceOfML/SovMaterials\u0000一手资料/苏联-俄罗斯历史/苏军的战斗编成/1.djvu": {
+   "evidence": {
+    "pages": [
+     10,
+     45,
+     27
+    ],
+    "script": "Cyrillic",
+    "votes": {
+     "Cyrillic": 3
+    }
+   },
+   "language": "ru",
+   "source": "osd-triage-v1"
+  },
+  "VoiceOfML/SovMaterials\u0000一手资料/苏联-俄罗斯历史/苏军的战斗编成/2.djvu": {
+   "evidence": {
+    "pages": [
+     29,
+     135,
+     82,
+     188,
+     241
+    ],
+    "script": "Latin",
+    "votes": {
+     "Latin": 1
+    }
+   },
+   "language": "en",
+   "source": "osd-triage-v1"
+  },
+  "VoiceOfML/SovMaterials\u0000一手资料/苏联-俄罗斯历史/苏军的战斗编成/5.djvu": {
+   "evidence": {
+    "pages": [
+     24,
+     110,
+     67
+    ],
+    "script": "Latin",
+    "votes": {
+     "Cyrillic": 1,
+     "Latin": 2
+    }
+   },
+   "language": "en",
+   "source": "osd-triage-v1"
+  },
+  "VoiceOfML/SovMaterials\u0000一手资料/苏联-俄罗斯历史/苏联档案文件系列/卢比扬卡：大清洗中的苏联国家精英与斯大林，1937-1938.djvu": {
+   "evidence": {
+    "pages": [
+     58,
+     270,
+     164
+    ],
+    "script": "Cyrillic",
+    "votes": {
+     "Cyrillic": 3
+    }
+   },
+   "language": "ru",
+   "source": "osd-triage-v1"
+  },
+  "VoiceOfML/SovMaterials\u0000一手资料/苏联-俄罗斯历史/苏联档案文件系列/德国国防军将军和军官们的叙述：德军战俘审讯文件材料，1944-1951.djvu": {
+   "evidence": {
+    "pages": [
+     63,
+     293,
+     178
+    ],
+    "script": "Cyrillic",
+    "votes": {
+     "Cyrillic": 3
+    }
+   },
+   "language": "ru",
+   "source": "osd-triage-v1"
+  },
+  "VoiceOfML/SovMaterials\u0000一手资料/苏联-俄罗斯历史/苏联档案文件系列/第三帝国外交的秘密，1944-1955.djvu": {
+   "evidence": {
+    "pages": [
+     97,
+     449,
+     273
+    ],
+    "script": "Cyrillic",
+    "votes": {
+     "Cyrillic": 3
+    }
+   },
+   "language": "ru",
+   "source": "osd-triage-v1"
+  },
+  "VoiceOfML/SovMaterials\u0000一手资料/苏联-俄罗斯历史/苏联档案文件系列/苏联与中东冲突1957-1967.djvu": {
+   "evidence": {
+    "pages": [
+     77,
+     357,
+     217
+    ],
+    "script": "Cyrillic",
+    "votes": {
+     "Cyrillic": 3
+    }
+   },
+   "language": "ru",
+   "source": "osd-triage-v1"
+  },
+  "VoiceOfML/SovMaterials\u0000一手资料/苏联-俄罗斯历史/苏联档案文件系列/苏联与纽伦堡审判.djvu": {
+   "evidence": {
+    "pages": [
+     68,
+     317,
+     193
+    ],
+    "script": "Cyrillic",
+    "votes": {
+     "Cyrillic": 3
+    }
+   },
+   "language": "ru",
+   "source": "osd-triage-v1"
+  },
+  "VoiceOfML/SovMaterials\u0000一手资料/苏联-俄罗斯历史/苏联档案文件系列/西伯利亚，1919-1920.djvu": {
+   "evidence": {
+    "pages": [
+     73,
+     338,
+     206
+    ],
+    "script": "Cyrillic",
+    "votes": {
+     "Cyrillic": 3
+    }
+   },
+   "language": "ru",
+   "source": "osd-triage-v1"
+  },
+  "VoiceOfML/SovMaterials\u0000一手资料/苏联-俄罗斯历史/苏联档案文件系列/西伯利亚，1920-1921.djvu": {
+   "evidence": {
+    "pages": [
+     85,
+     395,
+     240
+    ],
+    "script": "Cyrillic",
+    "votes": {
+     "Cyrillic": 3
+    }
+   },
+   "language": "ru",
+   "source": "osd-triage-v1"
+  },
+  "VoiceOfML/SovMaterials\u0000一手资料/苏联-俄罗斯历史/被波兰俘虏的红军士兵，1919-1922，文件集.djvu": {
+   "evidence": {
+    "pages": [
+     103,
+     478,
+     291
+    ],
+    "script": "Cyrillic",
+    "votes": {
+     "Cyrillic": 3
+    }
+   },
+   "language": "ru",
+   "source": "osd-triage-v1"
+  },
+  "VoiceOfML/SovMaterials\u0000俄苏史/20世纪俄罗斯人口，第2卷.djvu": {
+   "evidence": {
+    "pages": [
+     46,
+     213,
+     130
+    ],
+    "script": "Cyrillic",
+    "votes": {
+     "Cyrillic": 3
+    }
+   },
+   "language": "ru",
+   "source": "osd-triage-v1"
+  },
+  "VoiceOfML/SovMaterials\u0000俄苏史/20世纪俄罗斯人口，第3卷第2册.djvu": {
+   "evidence": {
+    "pages": [
+     31,
+     144,
+     88
+    ],
+    "script": "Cyrillic",
+    "votes": {
+     "Cyrillic": 3
+    }
+   },
+   "language": "ru",
+   "source": "osd-triage-v1"
+  },
+  "VoiceOfML/SovMaterials\u0000俄苏史/人民的悲剧：政治镇压受害者纪念书，第1卷.djvu": {
+   "evidence": {
+    "pages": [
+     38,
+     176,
+     107
+    ],
+    "script": "Cyrillic",
+    "votes": {
+     "Cyrillic": 3
+    }
+   },
+   "language": "ru",
+   "source": "osd-triage-v1"
+  },
+  "VoiceOfML/SovMaterials\u0000俄苏史/人民的悲剧：政治镇压受害者纪念书，第2卷.djvu": {
+   "evidence": {
+    "pages": [
+     38,
+     176,
+     107
+    ],
+    "script": "Cyrillic",
+    "votes": {
+     "Cyrillic": 3
+    }
+   },
+   "language": "ru",
+   "source": "osd-triage-v1"
+  },
+  "VoiceOfML/SovMaterials\u0000俄苏史/人民的悲剧：政治镇压受害者纪念书，第3卷.djvu": {
+   "evidence": {
+    "pages": [
+     34,
+     156,
+     95
+    ],
+    "script": "Cyrillic",
+    "votes": {
+     "Cyrillic": 3
+    }
+   },
+   "language": "ru",
+   "source": "osd-triage-v1"
+  },
+  "VoiceOfML/SovMaterials\u0000俄苏史/俄国内战与革命/Melg-Tshaik1.djvu": {
+   "evidence": {
+    "pages": [
+     9,
+     41,
+     25
+    ],
+    "script": "Cyrillic",
+    "votes": {
+     "Cyrillic": 3
+    }
+   },
+   "language": "ru",
+   "source": "osd-triage-v1"
+  },
+  "VoiceOfML/SovMaterials\u0000俄苏史/俄国内战与革命/关于俄国革命的德意志帝国外交档案.djvu": {
+   "evidence": {
+    "pages": [
+     20,
+     91,
+     55
+    ],
+    "script": "Latin",
+    "votes": {
+     "Latin": 3
+    }
+   },
+   "language": "en",
+   "source": "osd-triage-v1"
+  },
+  "VoiceOfML/SovMaterials\u0000俄苏史/俄国内战与革命/我们几乎轰炸莫斯科的那一天.djvu": {
+   "evidence": {
+    "pages": [
+     32,
+     150,
+     91
+    ],
+    "script": "Latin",
+    "votes": {
+     "Latin": 3
+    }
+   },
+   "language": "en",
+   "source": "osd-triage-v1"
+  },
+  "VoiceOfML/SovMaterials\u0000俄苏史/俄国内战与革命/美国远征军在北俄的作战史.djvu": {
+   "evidence": {
+    "pages": [
+     40,
+     188,
+     114,
+     261
+    ],
+    "script": "Latin",
+    "votes": {
+     "Latin": 3
+    }
+   },
+   "language": "en",
+   "source": "osd-triage-v1"
+  },
+  "VoiceOfML/SovMaterials\u0000俄苏史/苏德战争/20世纪战争中的俄罗斯和苏联.djvu": {
+   "evidence": {
+    "pages": [
+     69,
+     319,
+     194
+    ],
+    "script": "Cyrillic",
+    "votes": {
+     "Cyrillic": 3
+    }
+   },
+   "language": "ru",
+   "source": "osd-triage-v1"
+  },
+  "VoiceOfML/SovMaterials\u0000俄苏史/苏德战争/Deutsche Militärische Verluste Im Zweiten Weltkrieg.djvu": {
+   "evidence": {
+    "pages": [
+     21,
+     98,
+     60,
+     137
+    ],
+    "script": "Latin",
+    "votes": {
+     "Latin": 3
+    }
+   },
+   "language": "en",
+   "source": "osd-triage-v1"
+  },
+  "VoiceOfML/SovMaterials\u0000俄苏史/苏德战争/卫国战争史/伟大卫国战争史（6卷）/第6卷.djvu": {
+   "evidence": {
+    "pages": [
+     69,
+     318,
+     193
+    ],
+    "script": "Cyrillic",
+    "votes": {
+     "Cyrillic": 3
+    }
+   },
+   "language": "ru",
+   "source": "osd-triage-v1"
+  },
+  "VoiceOfML/SovMaterials\u0000俄苏史/苏德战争/巴格拉季昂行动：斯大林在白俄罗斯的闪电战.djvu": {
+   "evidence": {
+    "pages": [
+     50,
+     233,
+     142
+    ],
+    "script": "Cyrillic",
+    "votes": {
+     "Cyrillic": 3
+    }
+   },
+   "language": "ru",
+   "source": "osd-triage-v1"
+  },
+  "VoiceOfML/SovMaterials\u0000军事/军史/德国陆军1933-1945.djvu": {
+   "evidence": {
+    "pages": [
+     46,
+     212,
+     129
+    ],
+    "script": "Cyrillic",
+    "votes": {
+     "Cyrillic": 3
+    }
+   },
+   "language": "ru",
+   "source": "osd-triage-v1"
+  },
+  "VoiceOfML/SovMaterials\u0000经济史/苏联经济史.djvu": {
+   "evidence": {
+    "pages": [
+     55,
+     253,
+     154
+    ],
+    "script": "Cyrillic",
+    "votes": {
+     "Cyrillic": 3
+    }
+   },
+   "language": "ru",
+   "source": "osd-triage-v1"
+  },
+  "VoiceOfML/SovMaterials\u0000重要中文文献/斯大林著作外文版/I. V. 斯大林给 V. M. Molotov 的信。 1925-1936.djvu": {
+   "evidence": {
+    "pages": [
+     33,
+     154,
+     94
+    ],
+    "script": "Cyrillic",
+    "votes": {
+     "Cyrillic": 3
+    }
+   },
+   "language": "ru",
+   "source": "osd-triage-v1"
+  },
+  "VoiceOfML/SovMaterials\u0000重要中文文献/斯大林著作外文版/Stalin_Stihi.djvu": {
+   "evidence": {
+    "pages": [
+     10,
+     47,
+     29
+    ],
+    "script": "Cyrillic",
+    "votes": {
+     "Cyrillic": 3
+    }
+   },
+   "language": "ru",
+   "source": "osd-triage-v1"
+  },
+  "VoiceOfML/SovMaterials\u0000重要中文文献/斯大林著作外文版/T. 13 (2-2)。苏联国防人民委员会的命令。1941 年 6 月 22 日 - 1942 年.djvu": {
+   "evidence": {
+    "pages": [
+     49,
+     227,
+     138
+    ],
+    "script": "Cyrillic",
+    "votes": {
+     "Cyrillic": 3
+    }
+   },
+   "language": "ru",
+   "source": "osd-triage-v1"
+  },
+  "VoiceOfML/SovMaterials\u0000重要中文文献/斯大林著作外文版/T. 16 (5-1)。VGK 费率。文件和材料。1941年.djvu": {
+   "evidence": {
+    "pages": [
+     49,
+     228,
+     139
+    ],
+    "script": "Cyrillic",
+    "votes": {
+     "Cyrillic": 3
+    }
+   },
+   "language": "ru",
+   "source": "osd-triage-v1"
+  },
+  "VoiceOfML/SovMaterials\u0000重要中文文献/斯大林著作外文版/斯大林关于乌克兰的文章和演讲.djvu": {
+   "evidence": {
+    "pages": [
+     14,
+     65,
+     39
+    ],
+    "script": "Cyrillic",
+    "votes": {
+     "Cyrillic": 3
+    }
+   },
+   "language": "ru",
+   "source": "osd-triage-v1"
+  },
+  "VoiceOfML/SovMaterials\u0000重要中文文献/斯大林著作外文版/斯大林和卡加诺维奇。 1931-1936 年的通信.djvu": {
+   "evidence": {
+    "pages": [
+     91,
+     420,
+     255
+    ],
+    "script": "Cyrillic",
+    "votes": {
+     "Cyrillic": 3
+    }
+   },
+   "language": "ru",
+   "source": "osd-triage-v1"
+  },
+  "VoiceOfML/SovMaterials\u0000重要中文文献/斯大林著作外文版/约瑟夫·斯大林在家人的怀抱中。来自个人档案。M., 1993.djvu": {
+   "evidence": {
+    "pages": [
+     21,
+     96,
+     58
+    ],
+    "script": "Cyrillic",
+    "votes": {
+     "Cyrillic": 3
+    }
+   },
+   "language": "ru",
+   "source": "osd-triage-v1"
+  },
+  "VoiceOfML/SovMaterials\u0000重要中文文献/斯大林著作外文版/苏联1946年版斯大林全集第14卷（1934-1940）.djvu": {
+   "evidence": {
+    "pages": [
+     45,
+     209,
+     127
+    ],
+    "script": "Cyrillic",
+    "votes": {
+     "Cyrillic": 3
+    }
+   },
+   "language": "ru",
+   "source": "osd-triage-v1"
+  }
+ },
+ "policy": "explicit exact-key overrides from OSD script probes on content pages",
+ "version": 1
+}

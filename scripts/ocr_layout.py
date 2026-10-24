@@ -78,6 +78,40 @@ def gap_split(blocks, axis, minimum):
     return None
 
 
+def tolerant_gap_split(blocks, axis, minimum, max_mass):
+    """Find a gutter that only a few bridging blocks cross.
+
+    Newspaper mastheads and overhanging headings can cross a real column
+    gutter.  The strict splitter then gives up and reads row by row, which
+    interleaves the columns.  Accept a cut when the total width crossing it
+    stays below ``max_mass`` and both sides still hold text.
+    """
+    if len(blocks) < 4:
+        return None
+    edges = sorted({b["b"][axis] for b in blocks} | {b["b"][axis + 2] for b in blocks})
+    best = None
+    for left, right in zip(edges, edges[1:]):
+        if right - left < minimum:
+            continue
+        west = [b for b in blocks if b["b"][axis + 2] <= left]
+        east = [b for b in blocks if b["b"][axis] >= right]
+        crossing = [b for b in blocks if b not in west and b not in east]
+        mass = sum(min(b["b"][axis + 2], right) - max(b["b"][axis], left) for b in crossing)
+        if mass > max_mass or len(west) < 2 or len(east) < 2:
+            continue
+        # Both sides must be more than a single row, otherwise a word gap on
+        # one line would be mistaken for a column gutter.
+        def rows(group):
+            centers = sorted((b["b"][1] + b["b"][3]) / 2 for b in group)
+            return sum(1 for a, b in zip(centers, centers[1:]) if b - a > 1e-3) + 1
+        if rows(west) < 2 or rows(east) < 2:
+            continue
+        score = (round(mass, 6), len(crossing), -min(len(west), len(east)))
+        if best is None or score < best[0]:
+            best = (score, west, east, crossing)
+    return best[1:] if best else None
+
+
 def groups(blocks, mode, width, height, depth=0):
     if not blocks:
         return []
@@ -110,6 +144,22 @@ def groups(blocks, mode, width, height, depth=0):
             if mode == "horizontal-rtl":
                 cut = cut[::-1]
             return [g for part in cut for g in groups(part, mode, width, height, depth + 1)]
+        bridge = None if single_glyph_row else tolerant_gap_split(
+            blocks, 0, max(.018, .25 * line_height * height / width), .12)
+        if bridge:
+            west, east, crossing = bridge
+            body_top = min(b["b"][1] for b in west + east)
+            # Only bridge blocks that sit entirely above the column bodies are
+            # consumed as a masthead band; otherwise keep the previous order.
+            if crossing and all(b["b"][3] <= body_top for b in crossing):
+                if mode == "horizontal-rtl":
+                    west, east = east, west
+                return ([sorted(crossing, key=lambda b: (b["b"][1], b["b"][0], b["id"]))]
+                        + [g for part in (west, east) for g in groups(part, mode, width, height, depth + 1)])
+            if not crossing:
+                if mode == "horizontal-rtl":
+                    west, east = east, west
+                return [g for part in (west, east) for g in groups(part, mode, width, height, depth + 1)]
         # Wide headings may bridge columns: split off a distinctly separated
         # horizontal band, then reconsider columns inside each band.
         cut = gap_split(blocks, 1, max(.012, .7 * line_height))

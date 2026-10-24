@@ -169,6 +169,23 @@ class PdfOcrContractTests(unittest.TestCase):
                 self.assertEqual(pdf_ocr.detect_language(key), language)
                 self.assertEqual(pdf_ocr.book_ocr_config({"key": key}), (language, backend))
 
+    def test_explicit_language_override_outranks_registry_and_filename(self):
+        key = "repo\0中文目录/俄文书.pdf"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "overrides.json"
+            path.write_text(json.dumps({"version": 1, "overrides": {
+                key: {"language": "ru", "backend": "paddle_onnxruntime", "source": "osd-triage"}}}))
+            with patch.object(pdf_ocr, "LANGUAGE_OVERRIDES_PATH", path):
+                pdf_ocr._LANGUAGE_OVERRIDES = None
+                try:
+                    self.assertEqual(pdf_ocr.book_ocr_config({"key": key, "ocr_language": "ch"}),
+                                     ("ru", "paddle_onnxruntime"))
+                    self.assertEqual(pdf_ocr.language_source({"key": key, "ocr_language": "ch"}), "override")
+                    self.assertEqual(pdf_ocr.book_ocr_config({"key": "repo\0别的书.pdf"}),
+                                     ("ch", "rapidocr_onnxruntime"))
+                finally:
+                    pdf_ocr._LANGUAGE_OVERRIDES = None
+
     def test_gbk_repaired_reader_pdf_replaces_original_in_ocr_sources(self):
         repo, path = next(iter(pdf_ocr.reader_assets.KNOWN_GBK_PDFS))
         original = {"key": repo + "\0" + path, "repo": repo, "path": path,

@@ -50,6 +50,19 @@ class OcrLayoutTests(unittest.TestCase):
         result = layout.arrange(blocks, 1000, 1000)
         self.assertEqual([b["t"] for b in result["blocks"]], ["通栏标题", "左栏上", "左栏下", "右栏上", "右栏下"])
 
+    def test_narrow_newspaper_gutter_with_masthead_keeps_columns_apart(self):
+        # Two masthead lines bridge the column gutter, and the gutter is
+        # narrower than one line of type: the strict splitter cannot cut it.
+        blocks = [block("全世界无产者联合起来", [.1, .02, .9, .06]),
+                  block("本报编辑部", [.2, .07, .8, .10]),
+                  block("左一", [.1, .15, .47, .19]), block("右一", [.50, .15, .9, .19]),
+                  block("左二", [.1, .21, .47, .25]), block("右二", [.50, .21, .9, .25]),
+                  block("左三", [.1, .27, .47, .31]), block("右三", [.50, .27, .9, .31])]
+        result = layout.arrange(blocks, 1000, 1000)
+        self.assertEqual([b["t"] for b in result["blocks"]],
+                         ["全世界无产者联合起来", "本报编辑部", "左一", "左二", "左三",
+                          "右一", "右二", "右三"])
+
     def test_mixed_regions_use_explicit_order_and_direction(self):
         blocks = [block("横排标题", [.1, .01, .9, .06]), block("竖排左列", [.2, .2, .25, .8]),
                   block("竖排右列", [.7, .2, .75, .8]), block("横排页注", [.1, .9, .9, .95])]

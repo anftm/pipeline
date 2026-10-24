@@ -137,10 +137,48 @@ def detect_language(value: str) -> str:
 
 
 def book_ocr_config(book: dict):
-    language = book.get("ocr_language") or detect_language(book.get("key", ""))
-    backend = book.get("ocr_backend") or ("rapidocr_onnxruntime" if language in {"ch", "en"} else "paddle_onnxruntime")
+    override = language_override(book.get("key", ""))
+    language = (override or {}).get("language") or book.get("ocr_language") or detect_language(book.get("key", ""))
+    backend = ((override or {}).get("backend") or book.get("ocr_backend")
+               or ("rapidocr_onnxruntime" if language in {"ch", "en"} else "paddle_onnxruntime"))
     language, _, backend = resolve_ocr_config(language, backend)
     return language, backend
+
+
+LANGUAGE_OVERRIDES_PATH = Path(os.environ.get(
+    "PDF_OCR_LANGUAGE_OVERRIDES", "state/ocr_language_overrides.json"))
+_LANGUAGE_OVERRIDES = None
+
+
+def language_overrides() -> dict:
+    """Exact-key language overrides; explicit evidence outranks filenames."""
+    global _LANGUAGE_OVERRIDES
+    if _LANGUAGE_OVERRIDES is None:
+        try:
+            payload = json.loads(LANGUAGE_OVERRIDES_PATH.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            _LANGUAGE_OVERRIDES = {}
+        else:
+            if payload.get("version") != 1 or not isinstance(payload.get("overrides"), dict):
+                raise ValueError("invalid OCR language override file")
+            for key, value in payload["overrides"].items():
+                if not isinstance(key, str) or not key or not isinstance(value, dict):
+                    raise ValueError("invalid OCR language override entry")
+                resolve_ocr_config(value.get("language"), value.get("backend"))
+            _LANGUAGE_OVERRIDES = payload["overrides"]
+    return _LANGUAGE_OVERRIDES
+
+
+def language_override(key: str):
+    return language_overrides().get(key)
+
+
+def language_source(book: dict) -> str:
+    if language_override(book.get("key", "")):
+        return "override"
+    if book.get("ocr_language"):
+        return "registry"
+    return "filename"
 
 
 def asset_profile(language=None, backend=None) -> str:

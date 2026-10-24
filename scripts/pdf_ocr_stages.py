@@ -1152,11 +1152,20 @@ def plan_images(rendered, current, progress, limit=20, target=500, overrides=Non
         native_text = "\n".join(str(page.get("text") or "") for page in (manifest or {}).get("pages", []))
         if pdf_ocr.OCR_LANG != "auto":
             language, _, backend = pdf_ocr.resolve_ocr_config(pdf_ocr.OCR_LANG, pdf_ocr.OCR_BACKEND)
-        else:
-            language = pdf_ocr.detect_language(native_text) if native_text.strip() else pdf_ocr.book_ocr_config(entry)[0]
+            language_source = "global"
+        elif pdf_ocr.language_override(key):
+            language, backend = pdf_ocr.book_ocr_config(entry)
+            language_source = "override"
+        elif native_text.strip():
+            language = pdf_ocr.detect_language(native_text)
             backend = (pdf_ocr.OCR_BACKEND if pdf_ocr.OCR_BACKEND != "rapidocr_onnxruntime"
                        else ("rapidocr_onnxruntime" if language in {"ch", "en"} else "paddle_onnxruntime"))
+            language_source = "native-text"
+        else:
+            language, backend = pdf_ocr.book_ocr_config(entry)
+            language_source = pdf_ocr.language_source(entry)
         entry = {**entry, "ocr_language": language, "ocr_backend": backend,
+                 "language_source": language_source,
                  "profile": recognition_identity({**entry, "ocr_language": language, "ocr_backend": backend}, options),
                  "layout_options": options}
         old = current.get(key, {})
