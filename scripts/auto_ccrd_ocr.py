@@ -119,6 +119,10 @@ def discover(registry, derived, catalog, exports, state, *, retry_failures=False
     for key, entry in sorted(registry['files'].items()):
         if entry.get('status') != 'ready':
             continue
+        if entry.get('language_suspect'):
+            deferred.append({'key': key,
+                             'reason': 'language check suspects the declared language; text held back'})
+            continue
         book = contract.digest(key.encode())
         active, old = catalog['files'].get(key), exports.get(book)
         derived_entry = derivations.get(key) if entry.get('source_kind', 'upstream') != 'upstream' else None

@@ -120,6 +120,27 @@ def published(current: dict, results: list[dict]) -> bool:
     return bool(results)
 
 
+def annotate_language(result: dict, text: dict) -> dict:
+    """Mark text whose script contradicts the declared language.
+
+    Explicit overrides are trusted; everything else is judged from the
+    published page text so a wrong-language OCR never reaches search silently.
+    """
+    try:
+        from .audit_ocr_language import judge
+    except ImportError:
+        from audit_ocr_language import judge
+    if result.get("language_source") == "override":
+        return result
+    pages = [str(page.get("text") or "") for page in text.get("pages", [])]
+    row = judge(result.get("key", ""), {"ocr_language": result.get("ocr_language")}, pages)
+    if "script-mismatch" in row["flags"]:
+        result["language_suspect"] = True
+        result["language_check"] = {"observed_script": row["observed_script"],
+                                    "share": row["observed_share"]}
+    return result
+
+
 def verify_ready_objects(result: dict) -> None:
     """A ready registry entry must name readable, complete current-bucket objects."""
     token = os.environ.get("HF_TOKEN")
@@ -145,6 +166,7 @@ def verify_ready_objects(result: dict) -> None:
             or text.get("complete") is not True or text.get("page_count") != count
             or [page.get("page") for page in text.get("pages", [])] != list(range(1, count + 1))):
         raise ValueError("published book text is incomplete")
+    annotate_language(result, text)
     if manifest.get("text_layer") is not None:
         try:
             from .pdf_reading_v3 import verify_text_bundle

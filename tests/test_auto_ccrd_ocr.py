@@ -166,6 +166,14 @@ class AutoCcrdOcrTests(unittest.TestCase):
         self.assertEqual(result['deferred'][0]['key'], key)
         self.assertEqual(result['model_calls'], 0)
 
+    def test_language_suspect_is_deferred_not_published(self):
+        key, entry = self.book('suspect')
+        entry['language_suspect'] = True
+        result = self.run_auto('suspect-plan', plan_only=True)
+        self.assertEqual(result['eligible'], 0)
+        self.assertEqual(result['deferred'][0]['key'], key)
+        self.assertIn('language', result['deferred'][0]['reason'])
+
     def test_derived_original_is_not_confused_with_reader_primary(self):
         key, entry = self.book('derived')
         entry['source_kind'] = 'generated'
