@@ -117,7 +117,10 @@ def resolve_ocr_config(language=None, backend=None):
 
 
 def detect_language(value: str) -> str:
-    text = str(value or "")
+    # Only the file name is evidence. Repository and directory names are
+    # Latin-heavy and used to turn Chinese books into "en" guesses.
+    text = str(value or "").rsplit("\0", 1)[-1]
+    text = re.sub(r"\.[A-Za-z0-9]{1,5}$", "", text)
     counts = {
         "ch": sum("\u3400" <= c <= "\u9fff" for c in text),
         "japan": sum(("\u3040" <= c <= "\u30ff") for c in text),

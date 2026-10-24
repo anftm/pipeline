@@ -176,6 +176,11 @@ class PdfOcrContractTests(unittest.TestCase):
         self.assertIn("-rev-reocr-20261024", revised)
         self.assertTrue(pdf_ocr.valid_published_profile(revised))
 
+    def test_repository_path_is_not_language_evidence(self):
+        key = "VoiceOfML/GPCREducation\0地理/各地区地理/中国地理知识.pdf"
+        self.assertEqual(pdf_ocr.detect_language(key), "ch")
+        self.assertEqual(pdf_ocr.detect_language("VoiceOfML/English-Books\0Novel.pdf"), "en")
+
     def test_explicit_language_override_outranks_registry_and_filename(self):
         key = "repo\0中文目录/俄文书.pdf"
         with tempfile.TemporaryDirectory() as directory:

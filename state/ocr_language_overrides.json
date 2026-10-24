@@ -33,6 +33,15 @@
    "language": "ru",
    "source": "osd-triage-full-v1"
   },
+  "VoiceOfML/GPCREducation\u0000化学/2、工业化学/半导体化学/衬底制备.pdf": {
+   "evidence": {
+    "chars": 53595,
+    "script": "Han",
+    "share": 0.9766
+   },
+   "language": "ch",
+   "source": "text-triage-v1"
+  },
   "VoiceOfML/GPCREducation\u0000化学/2、工业化学/热处理化学 （下册）.pdf": {
    "evidence": {
     "script": "Cyrillic",
@@ -87,6 +96,87 @@
    "language": "ru",
    "source": "osd-triage-full-v1"
   },
+  "VoiceOfML/GPCREducation\u0000地理/各地区地理/中国/中国地理知识  第2辑.pdf": {
+   "evidence": {
+    "chars": 18524,
+    "script": "Han",
+    "share": 0.9637
+   },
+   "language": "ch",
+   "source": "text-triage-v1"
+  },
+  "VoiceOfML/GPCREducation\u0000地理/各地区地理/中国/杭州山水的由来.pdf": {
+   "evidence": {
+    "chars": 36851,
+    "script": "Han",
+    "share": 0.9801
+   },
+   "language": "ch",
+   "source": "text-triage-v1"
+  },
+  "VoiceOfML/GPCREducation\u0000地理/各地区地理/中国/珠江三角洲.pdf": {
+   "evidence": {
+    "chars": 21625,
+    "script": "Han",
+    "share": 0.9731
+   },
+   "language": "ch",
+   "source": "text-triage-v1"
+  },
+  "VoiceOfML/GPCREducation\u0000地理/各地区地理/地球的外貌.pdf": {
+   "evidence": {
+    "chars": 38732,
+    "script": "Han",
+    "share": 0.9838
+   },
+   "language": "ch",
+   "source": "text-triage-v1"
+  },
+  "VoiceOfML/GPCREducation\u0000地理/各地区地理/地理知识读物  东埔寨.pdf": {
+   "evidence": {
+    "chars": 23155,
+    "script": "Han",
+    "share": 0.9591
+   },
+   "language": "ch",
+   "source": "text-triage-v1"
+  },
+  "VoiceOfML/GPCREducation\u0000地理/各地区地理/地理知识读物  大洋洲及太平洋岛屿.pdf": {
+   "evidence": {
+    "chars": 13396,
+    "script": "Han",
+    "share": 0.9525
+   },
+   "language": "ch",
+   "source": "text-triage-v1"
+  },
+  "VoiceOfML/GPCREducation\u0000地理/各地区地理/地理知识读物  老挝.pdf": {
+   "evidence": {
+    "chars": 10221,
+    "script": "Han",
+    "share": 0.9308
+   },
+   "language": "ch",
+   "source": "text-triage-v1"
+  },
+  "VoiceOfML/GPCREducation\u0000地理/各地区地理/地理知识读物  非洲.pdf": {
+   "evidence": {
+    "chars": 49524,
+    "script": "Han",
+    "share": 0.9881
+   },
+   "language": "ch",
+   "source": "text-triage-v1"
+  },
+  "VoiceOfML/GPCREducation\u0000地理/各地区地理/地理知识读物  非洲地理.pdf": {
+   "evidence": {
+    "chars": 31987,
+    "script": "Han",
+    "share": 0.9785
+   },
+   "language": "ch",
+   "source": "text-triage-v1"
+  },
   "VoiceOfML/GPCREducation\u0000地理/各地区地理/海底世界  地理知识读物.pdf": {
    "evidence": {
     "script": "Han",
@@ -96,6 +186,78 @@
    },
    "language": "ch",
    "source": "osd-triage-full-v1"
+  },
+  "VoiceOfML/GPCREducation\u0000地理/各地区地理/潮汐.pdf": {
+   "evidence": {
+    "chars": 26360,
+    "script": "Han",
+    "share": 0.9706
+   },
+   "language": "ch",
+   "source": "text-triage-v1"
+  },
+  "VoiceOfML/GPCREducation\u0000地理/地理常识/地理集刊  (第六号)  (气候学).pdf": {
+   "evidence": {
+    "chars": 113168,
+    "script": "Han",
+    "share": 0.8095
+   },
+   "language": "ch",
+   "source": "text-triage-v1"
+  },
+  "VoiceOfML/GPCREducation\u0000地理/地理常识/地理集刊  (第四号)  (自然地图学).pdf": {
+   "evidence": {
+    "chars": 141980,
+    "script": "Han",
+    "share": 0.9858
+   },
+   "language": "ch",
+   "source": "text-triage-v1"
+  },
+  "VoiceOfML/GPCREducation\u0000地理/地理常识/地理集刊  第1号.pdf": {
+   "evidence": {
+    "chars": 64985,
+    "script": "Han",
+    "share": 0.9639
+   },
+   "language": "ch",
+   "source": "text-triage-v1"
+  },
+  "VoiceOfML/GPCREducation\u0000地理/地理常识/地理集刊  第2号.pdf": {
+   "evidence": {
+    "chars": 138361,
+    "script": "Han",
+    "share": 0.9216
+   },
+   "language": "ch",
+   "source": "text-triage-v1"
+  },
+  "VoiceOfML/GPCREducation\u0000地理/地理常识/地理集刊  第7号  历史地理学.pdf": {
+   "evidence": {
+    "chars": 98832,
+    "script": "Han",
+    "share": 0.9532
+   },
+   "language": "ch",
+   "source": "text-triage-v1"
+  },
+  "VoiceOfML/GPCREducation\u0000地理/地理常识/地理集刊  第8号  干旱区自然地理.pdf": {
+   "evidence": {
+    "chars": 152361,
+    "script": "Han",
+    "share": 0.9455
+   },
+   "language": "ch",
+   "source": "text-triage-v1"
+  },
+  "VoiceOfML/GPCREducation\u0000地理/地理常识/地理集刊  第9号  气候学.pdf": {
+   "evidence": {
+    "chars": 115060,
+    "script": "Han",
+    "share": 0.9255
+   },
+   "language": "ch",
+   "source": "text-triage-v1"
   },
   "VoiceOfML/GPCREducation\u0000数学/初等数学/几何/初等几何  下  平面几何部分.pdf": {
    "evidence": {
