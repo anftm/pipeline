@@ -141,7 +141,24 @@ jobs:
         with:
           python-version: '3.11'
       - run: pip install -r scripts/requirements.txt
+      - name: Coalesce queued automatic OCR runs
+        id: coalesce
+        if: github.event_name != 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          newer=$(gh api --paginate \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/publish-ccrd-ocr.yml/runs?per_page=100" \
+            --jq "[.workflow_runs[] | select(.id > $GITHUB_RUN_ID and (.status == \"pending\" or .status == \"queued\" or .status == \"in_progress\" or .status == \"waiting\"))] | length" \
+            | awk '{total += $1} END {print total + 0}')
+          if [ "$newer" -gt 0 ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::coalescing into a newer queued OCR run ($newer newer active/queued); this run does no work"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Aggregate complete OCR TXT and rebuild the complete independent OCR index
+        if: steps.coalesce.outputs.skip != 'true'
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_INPUT_TOKEN: ${{ secrets.HF_INPUT_TOKEN }}
@@ -157,7 +174,7 @@ jobs:
           if [[ "$REBASE" == true ]]; then args+=(--rebase); fi
           python -B scripts/auto_ccrd_ocr.py "${args[@]}"
       - name: Verify the exact live generation, complete OCR IDs and readable full text
-        if: github.event_name != 'workflow_dispatch' || inputs.apply
+        if: (github.event_name != 'workflow_dispatch' || inputs.apply) && steps.coalesce.outputs.skip != 'true'
         timeout-minutes: 45
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}

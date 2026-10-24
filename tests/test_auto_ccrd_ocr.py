@@ -347,6 +347,10 @@ class AutoCcrdOcrTests(unittest.TestCase):
             self.assertIn(required, workflow)
         self.assertNotIn('OCR_CORRECTION_API', workflow)
         self.assertNotIn('download-artifact', workflow.rsplit('\n  automatic:\n', 1)[1])
+        automatic = workflow.rsplit('\n  automatic:\n', 1)[1].split('\n  newspapers:\n', 1)[0]
+        self.assertIn('Coalesce queued automatic OCR runs', automatic)
+        self.assertIn("steps.coalesce.outputs.skip != 'true'", automatic)
+        self.assertIn('if: github.event_name != \'workflow_dispatch\'', automatic)
 
     def test_automatic_verify_step_has_headroom_over_observed_acceptance_time(self):
         workflow = (Path(__file__).parents[1] / '.github/workflows/publish-ccrd-ocr.yml').read_text()
