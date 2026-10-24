@@ -16,6 +16,26 @@ from scripts.build_reader_assets_index import build_index
 
 
 class PdfOcrStagesTests(unittest.TestCase):
+    def test_language_override_changes_recognition_profile(self):
+        key = "repo\0中文目录/俄文书.pdf"
+        options = stages.layout_options({}, key)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "overrides.json"
+            path.write_text(json.dumps({"version": 1, "overrides": {
+                key: {"language": "ru", "backend": "paddle_onnxruntime", "source": "osd-triage"}}}))
+            with patch.object(pdf_ocr, "LANGUAGE_OVERRIDES_PATH", path):
+                pdf_ocr._LANGUAGE_OVERRIDES = None
+                try:
+                    overridden = stages.recognition_identity(
+                        {"key": key, "ocr_language": "ch", "ocr_backend": "rapidocr_onnxruntime"}, options)
+                    self.assertIn("-lang-ru", overridden)
+                    self.assertIn("paddle-onnxruntime", overridden)
+                finally:
+                    pdf_ocr._LANGUAGE_OVERRIDES = None
+        plain = stages.recognition_identity(
+            {"key": key, "ocr_language": "ch", "ocr_backend": "rapidocr_onnxruntime"}, options)
+        self.assertNotEqual(overridden, plain)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
