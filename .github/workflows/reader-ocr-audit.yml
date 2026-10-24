@@ -51,6 +51,7 @@ jobs:
             --limit "${{ inputs.limit || '400' }}" \
             --offset "${{ inputs.offset || '0' }}" \
             --probe-limit "${{ inputs.probe_limit || '40' }}" \
+            --frame-limit "${{ inputs.frame_limit || '40' }}" \
             --output output/ocr-language-audit.json \
             --overrides-out output/ocr-language-overrides.json \
             ${{ (github.event_name == 'schedule' || inputs.upload) && '--upload' || '' }}

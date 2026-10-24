@@ -168,6 +168,56 @@ def probe_pages(store, render: dict, key: str, pages: int = 2) -> list[str]:
     return scripts
 
 
+def frame_lines(path, width: int = 800, threshold: int = 200, ratio: float = 0.5) -> dict:
+    """Count long straight lines that frame a page into boxes.
+
+    A boxed article page (subscription notices, newspaper panels) makes the
+    recognizer merge text across borders; text density and language alone do
+    not reveal that. Count runs of dark pixels longer than ``ratio`` of the
+    page edge instead of dark density, which text lines also produce.
+    """
+    import numpy as np
+    from PIL import Image
+    image = Image.open(path).convert("L")
+    if image.width > width:
+        image = image.resize((width, max(1, round(image.height * width / image.width))),
+                             Image.Resampling.BILINEAR)
+    dark = np.asarray(image) < threshold
+    height, width_px = dark.shape
+
+    def longest(row):
+        edges = np.flatnonzero(np.diff(np.concatenate(([0], row.astype(np.int8), [0]))))
+        return int((edges[1::2] - edges[0::2]).max()) if len(edges) else 0
+
+    horizontal = sum(1 for y in range(height) if longest(dark[y]) >= ratio * width_px)
+    vertical = sum(1 for x in range(width_px) if longest(dark[:, x]) >= ratio * height)
+    return {"horizontal": horizontal, "vertical": vertical,
+            "boxed": horizontal + vertical >= 8 and (horizontal >= 6 or vertical >= 4)}
+
+
+def page_frames(store, render: dict, key: str, percents=(25, 60)) -> list[dict]:
+    entry = render.get(key) or {}
+    if not entry.get("page_manifest") or not entry.get("page_count"):
+        return []
+    root = entry["page_manifest"]["path"].rsplit("/", 1)[0]
+    count = entry["page_count"]
+    found = []
+    for percent in percents:
+        page = max(1, min(count, round(count * percent / 100)))
+        try:
+            raw = store.read_bytes("vomebook/pdf-pages-v2", f"{root}/pages/page-{page:06d}.webp")
+        except FileNotFoundError:
+            continue
+        with tempfile.NamedTemporaryFile(suffix=".webp", delete=False) as handle:
+            handle.write(raw)
+            path = Path(handle.name)
+        try:
+            found.append({"page": page, **frame_lines(path)})
+        finally:
+            path.unlink(missing_ok=True)
+    return found
+
+
 def decode(raw: bytes) -> bytes:
     return gzip.decompress(raw) if raw[:2] == b"\x1f\x8b" else raw
 
@@ -205,6 +255,8 @@ def main() -> int:
     parser.add_argument("--overrides-out", type=Path)
     parser.add_argument("--limit", type=int)
     parser.add_argument("--offset", type=int, default=0)
+    parser.add_argument("--frame-limit", type=int, default=0,
+                        help="sample rendered pages for boxed layout on this many books")
     parser.add_argument("--probe-limit", type=int, default=0,
                         help="OSD-probe this many text-less books from rendered pages")
     parser.add_argument("--upload", action="store_true",
@@ -233,6 +285,21 @@ def main() -> int:
             probed[key] = {"script": script, "mismatch": bool(expected and expected != script)}
         report["osd_probe"] = probed
         report["osd_mismatch"] = sum(1 for value in probed.values() if value["mismatch"])
+    if args.frame_limit:
+        render = json.loads(decode(store.read_bytes(
+            "vomebook/reader-assets-v2", "reader-index/pdf_render_manifest.json")))["files"]
+        frames = {}
+        for key, entry in entries.items():
+            if len(frames) >= args.frame_limit:
+                break
+            if entry.get("status") != "ready":
+                continue
+            pages = page_frames(store, render, key)
+            if not pages:
+                continue
+            if any(page["boxed"] for page in pages):
+                frames[key] = pages
+        report["boxed_pages"] = frames
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, ensure_ascii=False, indent=1) + "\n")
     if args.overrides_out:

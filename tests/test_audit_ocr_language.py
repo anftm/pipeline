@@ -1,4 +1,8 @@
+import tempfile
 import unittest
+from pathlib import Path
+
+from PIL import Image, ImageDraw
 
 from scripts import audit_ocr_language as audit
 
@@ -42,6 +46,27 @@ class OcrLanguageAuditTests(unittest.TestCase):
         row = audit.judge("k", entry("ch"), ["短", "", ""])
         self.assertIn("low-text-density", row["flags"])
         self.assertIn("mostly-empty-pages", row["flags"])
+
+    def test_framed_page_is_flagged_but_text_page_is_not(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            boxed = root / "boxed.png"
+            image = Image.new("L", (800, 1100), 255)
+            draw = ImageDraw.Draw(image)
+            for top, bottom in ((60, 500), (540, 1040)):
+                draw.rectangle([60, top, 760, bottom], outline=0, width=6)
+                for y in range(top + 40, bottom - 30, 30):
+                    draw.rectangle([90, y, 730, y + 12], fill=0)
+            image.save(boxed)
+            text = root / "text.png"
+            image = Image.new("L", (800, 1100), 255)
+            draw = ImageDraw.Draw(image)
+            for y in range(80, 1030, 26):
+                for x in range(80, 700, 18):
+                    draw.rectangle([x, y, x + 12, y + 14], fill=0)
+            image.save(text)
+            self.assertTrue(audit.frame_lines(boxed)["boxed"])
+            self.assertFalse(audit.frame_lines(text)["boxed"])
 
     def test_audit_skips_non_ready_books_and_collects_flags(self):
         entries = {"a": entry("ch"), "b": entry("ru"), "c": entry("ch", "failed")}
