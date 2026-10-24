@@ -280,6 +280,132 @@
    "language": "ch",
    "source": "osd-triage-full-v1"
   },
+  "VoiceOfML/GPCREducation\u0000英语/0、中小学英语教材/中学课本 英语 第1册.pdf": {
+   "evidence": {
+    "chars": 9617,
+    "script": "Latin",
+    "share": 0.7419
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/GPCREducation\u0000英语/0、中小学英语教材/中学课本 英语 第2册.pdf": {
+   "evidence": {
+    "chars": 16424,
+    "script": "Latin",
+    "share": 0.8522
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/GPCREducation\u0000英语/0、中小学英语教材/中学课本 英语 第3册.pdf": {
+   "evidence": {
+    "chars": 22418,
+    "script": "Latin",
+    "share": 0.8454
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/GPCREducation\u0000英语/0、中小学英语教材/中学课本 英语 第4册.pdf": {
+   "evidence": {
+    "chars": 22014,
+    "script": "Latin",
+    "share": 0.8491
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/GPCREducation\u0000英语/0、中小学英语教材/小学英语/英语 第5册.pdf": {
+   "evidence": {
+    "chars": 17781,
+    "script": "Latin",
+    "share": 0.9194
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/GPCREducation\u0000英语/0、中小学英语教材/小学英语/英语 第6册.pdf": {
+   "evidence": {
+    "chars": 15229,
+    "script": "Latin",
+    "share": 0.9286
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/GPCREducation\u0000英语/0、中小学英语教材/广州市中学暂用课本 英语 第3册.pdf": {
+   "evidence": {
+    "chars": 26924,
+    "script": "Latin",
+    "share": 0.811
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/GPCREducation\u0000英语/0、中小学英语教材/广州市中学课本 英语 第1册.pdf": {
+   "evidence": {
+    "chars": 33890,
+    "script": "Latin",
+    "share": 0.8016
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/GPCREducation\u0000英语/0、中小学英语教材/广州市中学课本 英语 第2册.pdf": {
+   "evidence": {
+    "chars": 44597,
+    "script": "Latin",
+    "share": 0.8419
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/GPCREducation\u0000英语/0、中小学英语教材/英语 第2册.pdf": {
+   "evidence": {
+    "chars": 17732,
+    "script": "Latin",
+    "share": 0.839
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/GPCREducation\u0000英语/1、大学英语教材/上海市大学教材 英语 英语专业用 第2册 上 听力材料.pdf": {
+   "evidence": {
+    "chars": 20258,
+    "script": "Latin",
+    "share": 0.9715
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/GPCREducation\u0000英语/1、大学英语教材/上海市大学教材 英语 英语专业用 第2册 下 听力材料.pdf": {
+   "evidence": {
+    "chars": 21120,
+    "script": "Latin",
+    "share": 0.9723
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/GPCREducation\u0000英语/1、大学英语教材/英语 下 文科分册.pdf": {
+   "evidence": {
+    "chars": 230095,
+    "script": "Latin",
+    "share": 0.7999
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/GPCREducation\u0000英语/1、大学英语教材/英语 亚热带林专业试用 3.pdf": {
+   "evidence": {
+    "chars": 100250,
+    "script": "Latin",
+    "share": 0.9832
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
   "VoiceOfML/GPCREducation\u0000英语/1、大学英语教材/英语 建工系農水专业用.pdf": {
    "evidence": {
     "pages": [
@@ -295,6 +421,258 @@
    "language": "en",
    "source": "osd-triage-v1"
   },
+  "VoiceOfML/GPCREducation\u0000英语/1、大学英语教材/英语教材 第1册.pdf": {
+   "evidence": {
+    "chars": 89124,
+    "script": "Latin",
+    "share": 0.8148
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/GPCREducation\u0000英语/业余外语广播讲座/北京市业余外语广播讲座 英语 2.pdf": {
+   "evidence": {
+    "chars": 7628,
+    "script": "Latin",
+    "share": 0.7378
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/GPCREducation\u0000英语/业余外语广播讲座/广州业余英语广播讲座 中级班.pdf": {
+   "evidence": {
+    "chars": 4140,
+    "script": "Latin",
+    "share": 0.7343
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/GPCREducation\u0000英语/业余外语广播讲座/沈阳市业余外语广播讲座 英语 学习参考材料之二 第4、5、6册部分.pdf": {
+   "evidence": {
+    "chars": 24631,
+    "script": "Latin",
+    "share": 0.6429
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/GPCREducation\u0000英语/國际歌 汉、法、德、俄、英语.pdf": {
+   "evidence": {
+    "chars": 18527,
+    "script": "Latin",
+    "share": 0.6084
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/GPCREducation\u0000英语/工作英语会话手册/对外贸易英语会话手册 第1部分.pdf": {
+   "evidence": {
+    "chars": 351642,
+    "script": "Latin",
+    "share": 0.7867
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/GPCREducation\u0000英语/毛泽东语录（中英文对照版）.pdf": {
+   "evidence": {
+    "chars": 276642,
+    "script": "Latin",
+    "share": 0.7579
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/GPCREducation\u0000英语/科技英语/语法/科技英语语法手册 上 第1稿.pdf": {
+   "evidence": {
+    "chars": 125225,
+    "script": "Latin",
+    "share": 0.6395
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/GPCREducation\u0000英语/科技英语/语法/科技英语语法手册 下 第1稿.pdf": {
+   "evidence": {
+    "chars": 153167,
+    "script": "Latin",
+    "share": 0.6746
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u000020世纪30年代日本XXX私人史：一代记.pdf": {
+   "evidence": {
+    "chars": 236521,
+    "script": "Japanese",
+    "share": 0.5798
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000XXXの戦後八十年　「大衆的前衛党」の矛盾を問う.pdf": {
+   "evidence": {
+    "chars": 206505,
+    "script": "Japanese",
+    "share": 0.4547
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000【待重制】山本悬藏集.pdf": {
+   "evidence": {
+    "chars": 255397,
+    "script": "Japanese",
+    "share": 0.5188
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000【待重制】野吕荣太郎全集.pdf": {
+   "evidence": {
+    "chars": 505432,
+    "script": "Japanese",
+    "share": 0.5026
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000〜運動の経験を語り継ぐ〜　「戦後革命運動史講座」の記録.pdf": {
+   "evidence": {
+    "chars": 290650,
+    "script": "Japanese",
+    "share": 0.5475
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000伊藤野枝/最终版伊藤野枝全集 1 作品.pdf": {
+   "evidence": {
+    "chars": 292101,
+    "script": "Japanese",
+    "share": 0.6759
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000伊藤野枝/最终版伊藤野枝全集 2 评论•随笔•书信（上）：《踏青》时期.pdf": {
+   "evidence": {
+    "chars": 376877,
+    "script": "Japanese",
+    "share": 0.6472
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000伊藤野枝/最终版伊藤野枝全集 3 评论•随笔•书信（下）：《文明批评》及其后.pdf": {
+   "evidence": {
+    "chars": 335790,
+    "script": "Japanese",
+    "share": 0.6004
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000伊藤野枝/最终版伊藤野枝全集 4 译作&补遗等.pdf": {
+   "evidence": {
+    "chars": 427276,
+    "script": "Japanese",
+    "share": 0.6213
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000伊藤野枝/最终版伊藤野枝全集 月报.pdf": {
+   "evidence": {
+    "chars": 16871,
+    "script": "Japanese",
+    "share": 0.6225
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000作家太宰治之诞生：自“天皇”“帝大”之解放.pdf": {
+   "evidence": {
+    "chars": 128535,
+    "script": "Japanese",
+    "share": 0.5226
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000内田义彦/内田义彦著作集 1 经济学的诞生&思之曾至，思之将往.pdf": {
+   "evidence": {
+    "chars": 254963,
+    "script": "Japanese",
+    "share": 0.6186
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000内田义彦/内田义彦著作集 10 步履之迹.pdf": {
+   "evidence": {
+    "chars": 252987,
+    "script": "Japanese",
+    "share": 0.542
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000内田义彦/内田义彦著作集 2 经济学史讲义.pdf": {
+   "evidence": {
+    "chars": 283642,
+    "script": "Japanese",
+    "share": 0.6013
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000内田义彦/内田义彦著作集 3 经济学史•思想史研究.pdf": {
+   "evidence": {
+    "chars": 317056,
+    "script": "Japanese",
+    "share": 0.6125
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000内田义彦/内田义彦著作集 4 社会认识的进步&资本论的世界.pdf": {
+   "evidence": {
+    "chars": 343159,
+    "script": "Japanese",
+    "share": 0.6464
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000内田义彦/内田义彦著作集 5 日本资本主义的思想画像.pdf": {
+   "evidence": {
+    "chars": 254030,
+    "script": "Japanese",
+    "share": 0.6167
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000内田义彦/内田义彦著作集 6 学林拾阶&再访学林.pdf": {
+   "evidence": {
+    "chars": 308541,
+    "script": "Japanese",
+    "share": 0.6708
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000内田义彦/内田义彦著作集 7 试为对话.pdf": {
+   "evidence": {
+    "chars": 427581,
+    "script": "Japanese",
+    "share": 0.7261
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
   "VoiceOfML/Japanese-Materials\u0000内田义彦/内田义彦著作集 8 社会科学之为作品.pdf": {
    "evidence": {
     "pages": [
@@ -309,6 +687,483 @@
    },
    "language": "japan",
    "source": "osd-triage-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000内田义彦/内田义彦著作集 9 读书同社会科学.pdf": {
+   "evidence": {
+    "chars": 181679,
+    "script": "Japanese",
+    "share": 0.6873
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000内田义彦/内田义彦著作集 补卷 时代和学问.pdf": {
+   "evidence": {
+    "chars": 320405,
+    "script": "Japanese",
+    "share": 0.6012
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000北一辉/北一辉著作集 1 国体论及纯正社会主义.pdf": {
+   "evidence": {
+    "chars": 435755,
+    "script": "Japanese",
+    "share": 0.4689
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000北一辉/北一辉著作集 2 XXXX外史＆国家改造案原理大纲＆日本改造法案大纲.pdf": {
+   "evidence": {
+    "chars": 346811,
+    "script": "Japanese",
+    "share": 0.4396
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000占領下の労働争議.pdf": {
+   "evidence": {
+    "chars": 157688,
+    "script": "Japanese",
+    "share": 0.5546
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000图解日本左翼势力资料集成.pdf": {
+   "evidence": {
+    "chars": 920232,
+    "script": "Japanese",
+    "share": 0.4625
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000堺利彦/堺利彦 早期社会主义的思想领域.pdf": {
+   "evidence": {
+    "chars": 281813,
+    "script": "Japanese",
+    "share": 0.4631
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000堺利彦/堺利彦全集 1.pdf": {
+   "evidence": {
+    "chars": 381780,
+    "script": "Japanese",
+    "share": 0.6168
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000堺利彦/堺利彦全集 2.pdf": {
+   "evidence": {
+    "chars": 392792,
+    "script": "Japanese",
+    "share": 0.6852
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000堺利彦/堺利彦全集 3 附月报.pdf": {
+   "evidence": {
+    "chars": 381309,
+    "script": "Japanese",
+    "share": 0.6416
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000堺利彦/堺利彦全集 4 附月报.pdf": {
+   "evidence": {
+    "chars": 407960,
+    "script": "Japanese",
+    "share": 0.6342
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000堺利彦/堺利彦全集 5 附月报.pdf": {
+   "evidence": {
+    "chars": 405166,
+    "script": "Japanese",
+    "share": 0.6445
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000堺利彦/堺利彦全集 6 附月报.pdf": {
+   "evidence": {
+    "chars": 412592,
+    "script": "Japanese",
+    "share": 0.6154
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000堺利彦/堺利彦全集 月报No.4（第2卷附） 另一版本.pdf": {
+   "evidence": {
+    "chars": 6067,
+    "script": "Japanese",
+    "share": 0.653
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000大杉荣/大杉荣全集 10 译文•罗曼•罗兰：民众戏剧&克鲁泡特金（上）：互助论&告青年&法国大革命史（大革命研究）.pdf": {
+   "evidence": {
+    "chars": 382696,
+    "script": "Japanese",
+    "share": 0.5457
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000大杉荣/大杉荣全集 11 译文•克鲁泡特金（下）：一个革命家的回忆（自传）.pdf": {
+   "evidence": {
+    "chars": 361469,
+    "script": "Japanese",
+    "share": 0.6023
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000大杉荣/大杉荣全集 12 译文•法布尔：昆虫记（第1卷）&科学的奇迹.pdf": {
+   "evidence": {
+    "chars": 429038,
+    "script": "Japanese",
+    "share": 0.6594
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000大杉荣/大杉荣全集 3 1914.10-1916.1.pdf": {
+   "evidence": {
+    "chars": 251990,
+    "script": "Japanese",
+    "share": 0.4942
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000大杉荣/大杉荣全集 4 1916.3-1919.9.pdf": {
+   "evidence": {
+    "chars": 252586,
+    "script": "Japanese",
+    "share": 0.5825
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000大杉荣/大杉荣全集 5 1919.10-1921.12.pdf": {
+   "evidence": {
+    "chars": 258962,
+    "script": "Japanese",
+    "share": 0.5724
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000大杉荣/大杉荣全集 8 译文•摩尔：物质的起源和本质&勒庞：论物质非不灭&勒图尔诺：婚姻和家庭的进化.pdf": {
+   "evidence": {
+    "chars": 315682,
+    "script": "Japanese",
+    "share": 0.5466
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000大杉荣/大杉荣全集 9 译文•达尔文：物种起源.pdf": {
+   "evidence": {
+    "chars": 442409,
+    "script": "Japanese",
+    "share": 0.5407
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000山川均/山川均全集 1 1907-1918.6.pdf": {
+   "evidence": {
+    "chars": 563919,
+    "script": "Japanese",
+    "share": 0.558
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000山川均/山川均全集 10 1930.11-1931.9.pdf": {
+   "evidence": {
+    "chars": 518232,
+    "script": "Japanese",
+    "share": 0.5662
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000山川均/山川均全集 11 1931.9-1932.7.pdf": {
+   "evidence": {
+    "chars": 469985,
+    "script": "Japanese",
+    "share": 0.569
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000山川均/山川均全集 12 1932.9-1933.pdf": {
+   "evidence": {
+    "chars": 430722,
+    "script": "Japanese",
+    "share": 0.5725
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000山川均/山川均全集 13 1934-1936.11.pdf": {
+   "evidence": {
+    "chars": 457903,
+    "script": "Japanese",
+    "share": 0.5947
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000山川均/山川均全集 14 1936.12-1946.6.pdf": {
+   "evidence": {
+    "chars": 467695,
+    "script": "Japanese",
+    "share": 0.5843
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000山川均/山川均全集 15 1946.7-1947.7.pdf": {
+   "evidence": {
+    "chars": 438189,
+    "script": "Japanese",
+    "share": 0.6286
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000山川均/山川均全集 16 1947.8-1949.11.pdf": {
+   "evidence": {
+    "chars": 503098,
+    "script": "Japanese",
+    "share": 0.6179
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000山川均/山川均全集 17 1949.12-1952.pdf": {
+   "evidence": {
+    "chars": 469660,
+    "script": "Japanese",
+    "share": 0.6214
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000山川均/山川均全集 18 1953-1956.2.pdf": {
+   "evidence": {
+    "chars": 515583,
+    "script": "Japanese",
+    "share": 0.6342
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000山川均/山川均全集 19 1956.2-1958.1.pdf": {
+   "evidence": {
+    "chars": 438595,
+    "script": "Japanese",
+    "share": 0.6046
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000山川均/山川均全集 2 1918.6-1920.4.pdf": {
+   "evidence": {
+    "chars": 465663,
+    "script": "Japanese",
+    "share": 0.5879
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000山川均/山川均全集 20 向社会主义之道•访谈•年谱.pdf": {
+   "evidence": {
+    "chars": 556280,
+    "script": "Japanese",
+    "share": 0.6149
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000山川均/山川均全集 3 1920.4-1921.9.pdf": {
+   "evidence": {
+    "chars": 478027,
+    "script": "Japanese",
+    "share": 0.5966
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000山川均/山川均全集 4 1921.9-1922.10.pdf": {
+   "evidence": {
+    "chars": 486518,
+    "script": "Japanese",
+    "share": 0.5839
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000山川均/山川均全集 5 1922.10-1924.7.pdf": {
+   "evidence": {
+    "chars": 486271,
+    "script": "Japanese",
+    "share": 0.5673
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000山川均/山川均全集 6 1924.7-1926.2.pdf": {
+   "evidence": {
+    "chars": 494551,
+    "script": "Japanese",
+    "share": 0.561
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000山川均/山川均全集 7 1926.3-1927.7.pdf": {
+   "evidence": {
+    "chars": 458111,
+    "script": "Japanese",
+    "share": 0.5608
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000山川均/山川均全集 8 1927.7-1928.5.pdf": {
+   "evidence": {
+    "chars": 463038,
+    "script": "Japanese",
+    "share": 0.5815
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000山川均/山川均全集 9 1928.6-1930.10.pdf": {
+   "evidence": {
+    "chars": 449116,
+    "script": "Japanese",
+    "share": 0.5719
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000平成史 完全版.pdf": {
+   "evidence": {
+    "chars": 406234,
+    "script": "Japanese",
+    "share": 0.4864
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000平田清明/市民社会及社会主义.pdf": {
+   "evidence": {
+    "chars": 199674,
+    "script": "Japanese",
+    "share": 0.6078
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000平田清明/平田清明著作 解題と目録.pdf": {
+   "evidence": {
+    "chars": 181620,
+    "script": "Japanese",
+    "share": 0.4025
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000平田清明/法国古典经济学研究.pdf": {
+   "evidence": {
+    "chars": 367596,
+    "script": "Japanese",
+    "share": 0.569
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000幸德秋水/幸德秋水全集 1.pdf": {
+   "evidence": {
+    "chars": 288193,
+    "script": "Japanese",
+    "share": 0.5053
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000幸德秋水/幸德秋水全集 2.pdf": {
+   "evidence": {
+    "chars": 242819,
+    "script": "Japanese",
+    "share": 0.4683
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000幸德秋水/幸德秋水全集 3.pdf": {
+   "evidence": {
+    "chars": 199400,
+    "script": "Japanese",
+    "share": 0.4688
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000幸德秋水/幸德秋水全集 4.pdf": {
+   "evidence": {
+    "chars": 260220,
+    "script": "Japanese",
+    "share": 0.4743
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000幸德秋水/幸德秋水全集 5.pdf": {
+   "evidence": {
+    "chars": 253791,
+    "script": "Japanese",
+    "share": 0.4602
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000幸德秋水/幸德秋水全集 6.pdf": {
+   "evidence": {
+    "chars": 259687,
+    "script": "Japanese",
+    "share": 0.4847
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000幸德秋水/幸德秋水全集 7.pdf": {
+   "evidence": {
+    "chars": 211159,
+    "script": "Japanese",
+    "share": 0.5011
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
   },
   "VoiceOfML/Japanese-Materials\u0000幸德秋水/幸德秋水全集 8.pdf": {
    "evidence": {
@@ -326,6 +1181,465 @@
    "language": "japan",
    "source": "osd-triage-v1"
   },
+  "VoiceOfML/Japanese-Materials\u0000幸德秋水/幸德秋水全集 9.pdf": {
+   "evidence": {
+    "chars": 210701,
+    "script": "Japanese",
+    "share": 0.3971
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000幸德秋水/幸德秋水全集 补卷1 回忆其人.pdf": {
+   "evidence": {
+    "chars": 321270,
+    "script": "Japanese",
+    "share": 0.5208
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000幸德秋水/幸德秋水全集 补卷2 演说草稿·资料补遗.pdf": {
+   "evidence": {
+    "chars": 134826,
+    "script": "Japanese",
+    "share": 0.3672
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000广松涉/哲学家广松涉自白回忆录.pdf": {
+   "evidence": {
+    "chars": 142950,
+    "script": "Japanese",
+    "share": 0.6543
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000广松涉/广松涉哲学小品集.pdf": {
+   "evidence": {
+    "chars": 127963,
+    "script": "Japanese",
+    "share": 0.605
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000广松涉/广松涉文集 1 共同主观性及结构变动.pdf": {
+   "evidence": {
+    "chars": 200780,
+    "script": "Japanese",
+    "share": 0.5746
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000广松涉/广松涉著作集 1 世界交互主体的存在结构.pdf": {
+   "evidence": {
+    "chars": 419201,
+    "script": "Japanese",
+    "share": 0.5588
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000广松涉/广松涉著作集 10 马克思主义的哲学.pdf": {
+   "evidence": {
+    "chars": 406910,
+    "script": "Japanese",
+    "share": 0.5893
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000广松涉/广松涉著作集 11 唯物史观.pdf": {
+   "evidence": {
+    "chars": 436300,
+    "script": "Japanese",
+    "share": 0.5714
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000广松涉/广松涉著作集 12 《资本论》的哲学.pdf": {
+   "evidence": {
+    "chars": 400212,
+    "script": "Japanese",
+    "share": 0.5607
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000广松涉/广松涉著作集 13 物象化论.pdf": {
+   "evidence": {
+    "chars": 325821,
+    "script": "Japanese",
+    "share": 0.5694
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000广松涉/广松涉著作集 14 近代的超克.pdf": {
+   "evidence": {
+    "chars": 389554,
+    "script": "Japanese",
+    "share": 0.5673
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000广松涉/广松涉著作集 15 存在与意义（第1卷） 附年谱&著作目录.pdf": {
+   "evidence": {
+    "chars": 510119,
+    "script": "Japanese",
+    "share": 0.521
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000广松涉/广松涉著作集 16 存在与意义（第2卷） 附毕业论文.pdf": {
+   "evidence": {
+    "chars": 520405,
+    "script": "Japanese",
+    "share": 0.5275
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000广松涉/广松涉著作集 2 辩证法的逻辑.pdf": {
+   "evidence": {
+    "chars": 414990,
+    "script": "Japanese",
+    "share": 0.5796
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000广松涉/广松涉著作集 3 科学哲学.pdf": {
+   "evidence": {
+    "chars": 409864,
+    "script": "Japanese",
+    "share": 0.592
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000广松涉/广松涉著作集 4 身心问题•表情论.pdf": {
+   "evidence": {
+    "chars": 466149,
+    "script": "Japanese",
+    "share": 0.568
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000广松涉/广松涉著作集 5 角色存在论.pdf": {
+   "evidence": {
+    "chars": 374249,
+    "script": "Japanese",
+    "share": 0.5507
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000广松涉/广松涉著作集 6 社会行为论.pdf": {
+   "evidence": {
+    "chars": 420085,
+    "script": "Japanese",
+    "share": 0.5216
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000广松涉/广松涉著作集 7 哲学•哲学史论.pdf": {
+   "evidence": {
+    "chars": 424139,
+    "script": "Japanese",
+    "share": 0.5565
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000广松涉/广松涉著作集 8 马克思主义的形成过程.pdf": {
+   "evidence": {
+    "chars": 533243,
+    "script": "Japanese",
+    "share": 0.6062
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000广松涉/广松涉著作集 9 论恩格斯.pdf": {
+   "evidence": {
+    "chars": 463118,
+    "script": "Japanese",
+    "share": 0.6158
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000广松涉/广松涉：谈马克思和哲学——首发演讲集.pdf": {
+   "evidence": {
+    "chars": 162471,
+    "script": "Japanese",
+    "share": 0.6392
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000广松涉/新•读广松涉.pdf": {
+   "evidence": {
+    "chars": 291674,
+    "script": "Japanese",
+    "share": 0.6005
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000广松涉/读广松涉.pdf": {
+   "evidence": {
+    "chars": 408440,
+    "script": "Japanese",
+    "share": 0.5752
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000德田球一/【待重制】德田球一全集 1.pdf": {
+   "evidence": {
+    "chars": 222472,
+    "script": "Japanese",
+    "share": 0.5356
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000德田球一/【待重制】德田球一全集 2.pdf": {
+   "evidence": {
+    "chars": 244714,
+    "script": "Japanese",
+    "share": 0.6054
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000德田球一/【待重制】德田球一全集 3.pdf": {
+   "evidence": {
+    "chars": 248108,
+    "script": "Japanese",
+    "share": 0.6067
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000德田球一/【待重制】德田球一全集 4.pdf": {
+   "evidence": {
+    "chars": 227720,
+    "script": "Japanese",
+    "share": 0.6171
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000德田球一/【待重制】德田球一全集 5.pdf": {
+   "evidence": {
+    "chars": 233560,
+    "script": "Japanese",
+    "share": 0.685
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000德田球一/【待重制】德田球一全集 6.pdf": {
+   "evidence": {
+    "chars": 250259,
+    "script": "Japanese",
+    "share": 0.5728
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000新左翼•极端派全书.pdf": {
+   "evidence": {
+    "chars": 439038,
+    "script": "Japanese",
+    "share": 0.4425
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000无产政党的命运 日本的社会民主主义.pdf": {
+   "evidence": {
+    "chars": 247094,
+    "script": "Japanese",
+    "share": 0.3811
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日共-日修文件/赤旗/盲从XXX的集团——福田一派的虚和实（1972）.pdf": {
+   "evidence": {
+    "chars": 13834,
+    "script": "Japanese",
+    "share": 0.533
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本工会史：重盛寿治七十年之足迹.pdf": {
+   "evidence": {
+    "chars": 352569,
+    "script": "Japanese",
+    "share": 0.4134
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本战后政经研究/宇野学派/·经济学大系/8 日本经济论（下）.pdf": {
+   "evidence": {
+    "chars": 271557,
+    "script": "Japanese",
+    "share": 0.5813
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本战后政经研究/宇野学派/·资本论研究/资本论研究 Ⅴ 利息•地租.pdf": {
+   "evidence": {
+    "chars": 397241,
+    "script": "Japanese",
+    "share": 0.5862
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本战后政经研究/宇野学派/·马克思经济学的当代课题/马克思经济学的当代课题 Ⅰ全球资本主义 1 全球资本主义和国际组织•民族国家体系（上）：全球经济结构和动态.pdf": {
+   "evidence": {
+    "chars": 256339,
+    "script": "Japanese",
+    "share": 0.4546
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本战后政经研究/宇野学派/·马克思经济学的当代课题/马克思经济学的当代课题 Ⅰ全球资本主义 2 信息技术革命的范围.pdf": {
+   "evidence": {
+    "chars": 296522,
+    "script": "Japanese",
+    "share": 0.5377
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本战后政经研究/宇野学派/·马克思经济学的当代课题/马克思经济学的当代课题 Ⅰ全球资本主义 3 全球资本主义和企业系统转型.pdf": {
+   "evidence": {
+    "chars": 253739,
+    "script": "Japanese",
+    "share": 0.505
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本战后政经研究/宇野学派/·马克思经济学的当代课题/马克思经济学的当代课题 Ⅰ全球资本主义 4 全球资本主义和经济周期.pdf": {
+   "evidence": {
+    "chars": 234243,
+    "script": "Japanese",
+    "share": 0.4922
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本战后政经研究/宇野学派/·马克思经济学的当代课题/马克思经济学的当代课题 Ⅰ全球资本主义 5 金融体系的转型和危机.pdf": {
+   "evidence": {
+    "chars": 262356,
+    "script": "Japanese",
+    "share": 0.4947
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本战后政经研究/宇野学派/·马克思经济学的当代课题/马克思经济学的当代课题 Ⅰ全球资本主义 6 求索社会中的百态.pdf": {
+   "evidence": {
+    "chars": 265230,
+    "script": "Japanese",
+    "share": 0.5209
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本战后政经研究/宇野学派/·马克思经济学的当代课题/马克思经济学的当代课题 Ⅱ当代资本主义转型和经济学 3 当代马克思政治经济学前沿.pdf": {
+   "evidence": {
+    "chars": 283037,
+    "script": "Japanese",
+    "share": 0.5127
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本战后政经研究/宇野学派/三代/冲公祐/剩余政治经济学.pdf": {
+   "evidence": {
+    "chars": 184937,
+    "script": "Japanese",
+    "share": 0.5163
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本战后政经研究/宇野学派/三代/冲公祐/开卷即览 名著导读：无“富”时代的资本主义——重读马克思《资本论》.pdf": {
+   "evidence": {
+    "chars": 130701,
+    "script": "Japanese",
+    "share": 0.5428
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本战后政经研究/宇野学派/三代/小幡道昭/价值论批判.pdf": {
+   "evidence": {
+    "chars": 187013,
+    "script": "Japanese",
+    "share": 0.565
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本战后政经研究/宇野学派/三代/货币和信用 纯粹资本主义批判.pdf": {
+   "evidence": {
+    "chars": 253788,
+    "script": "Japanese",
+    "share": 0.5462
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本战后政经研究/宇野学派/三代/马克思市场理论的结构及变革.pdf": {
+   "evidence": {
+    "chars": 236483,
+    "script": "Japanese",
+    "share": 0.5452
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本战后政经研究/宇野学派/二代/伊藤诚/伊藤诚著作集 第2卷 价值和资本理论.pdf": {
+   "evidence": {
+    "chars": 363207,
+    "script": "Japanese",
+    "share": 0.5279
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本战后政经研究/宇野学派/二代/伊藤诚/伊藤诚著作集 第6卷 市场经济和社会主义.pdf": {
+   "evidence": {
+    "chars": 343005,
+    "script": "Japanese",
+    "share": 0.5032
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
   "VoiceOfML/Japanese-Materials\u0000日本战后政经研究/宇野学派/二代/伊藤诚/马克思经济学方法同当代世界.pdf": {
    "evidence": {
     "pages": [
@@ -340,6 +1654,483 @@
    },
    "language": "japan",
    "source": "osd-triage-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本战后政经研究/宇野学派/二代/加藤荣一/加藤荣一论文集（下） 福利国家制度.pdf": {
+   "evidence": {
+    "chars": 334242,
+    "script": "Japanese",
+    "share": 0.4499
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本战后政经研究/宇野学派/二代/岩田弘/岩田弘遗稿集.pdf": {
+   "evidence": {
+    "chars": 401662,
+    "script": "Japanese",
+    "share": 0.5683
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本战后政经研究/宇野学派/二代/日高普/为精神的通风 日高普著作集.pdf": {
+   "evidence": {
+    "chars": 252633,
+    "script": "Japanese",
+    "share": 0.675
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本战后政经研究/宇野学派/二代/日高普/开窗读书 日高普书评集.pdf": {
+   "evidence": {
+    "chars": 134229,
+    "script": "Japanese",
+    "share": 0.6514
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本战后政经研究/宇野学派/二代/日高普/経済学の弁証法——梅本克己氏の『マルクス主義における思想と科学』を読んで  载1965.5《思想》491号.pdf": {
+   "evidence": {
+    "chars": 11340,
+    "script": "Japanese",
+    "share": 0.6183
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本战后政经研究/宇野学派/二代/樱井毅/资本主义的农业起源和经济学.pdf": {
+   "evidence": {
+    "chars": 303451,
+    "script": "Japanese",
+    "share": 0.5658
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本战后政经研究/宇野学派/初代/大内力/大内力经济学大系 1 经济学方法论.pdf": {
+   "evidence": {
+    "chars": 280573,
+    "script": "Japanese",
+    "share": 0.5945
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本战后政经研究/宇野学派/初代/大内力/大内力经济学大系 2 经济原理（上）：流通·生产论.pdf": {
+   "evidence": {
+    "chars": 309920,
+    "script": "Japanese",
+    "share": 0.5907
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本战后政经研究/宇野学派/初代/大内力/大内力经济学大系 3 经济原理（下）：分配论.pdf": {
+   "evidence": {
+    "chars": 305324,
+    "script": "Japanese",
+    "share": 0.5706
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本战后政经研究/宇野学派/初代/大内力/大内力经济学大系 4 帝国主义论（上）：帝国主义前史.pdf": {
+   "evidence": {
+    "chars": 219259,
+    "script": "Japanese",
+    "share": 0.5277
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本战后政经研究/宇野学派/初代/大内力/大内力经济学大系 5 帝国主义论（下）：帝国主义正史.pdf": {
+   "evidence": {
+    "chars": 234572,
+    "script": "Japanese",
+    "share": 0.4991
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本战后政经研究/宇野学派/初代/大内力/大内力经济学大系 6 世界经济论.pdf": {
+   "evidence": {
+    "chars": 554871,
+    "script": "Japanese",
+    "share": 0.5318
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本战后政经研究/宇野学派/初代/大内力/大内力经济学大系 7 日本经济论（上）：日本资本主义的历史分析.pdf": {
+   "evidence": {
+    "chars": 540041,
+    "script": "Japanese",
+    "share": 0.5226
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本战后政经研究/宇野学派/初代/宇野弘藏/《资本论》同我.pdf": {
+   "evidence": {
+    "chars": 186706,
+    "script": "Japanese",
+    "share": 0.6503
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本战后政经研究/宇野学派/初代/宇野弘藏/宇野弘藏著作集 1 经济原理Ⅰ.pdf": {
+   "evidence": {
+    "chars": 431150,
+    "script": "Japanese",
+    "share": 0.568
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本战后政经研究/宇野学派/初代/宇野弘藏/宇野弘藏著作集 10 资本论同社会主义.pdf": {
+   "evidence": {
+    "chars": 394332,
+    "script": "Japanese",
+    "share": 0.6389
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本战后政经研究/宇野学派/初代/宇野弘藏/宇野弘藏著作集 2 经济原理Ⅱ.pdf": {
+   "evidence": {
+    "chars": 358971,
+    "script": "Japanese",
+    "share": 0.5791
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本战后政经研究/宇野学派/初代/宇野弘藏/宇野弘藏著作集 3 价值论.pdf": {
+   "evidence": {
+    "chars": 415090,
+    "script": "Japanese",
+    "share": 0.6004
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本战后政经研究/宇野学派/初代/宇野弘藏/宇野弘藏著作集 4 马克思经济学原理研究.pdf": {
+   "evidence": {
+    "chars": 368055,
+    "script": "Japanese",
+    "share": 0.5928
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本战后政经研究/宇野学派/初代/宇野弘藏/宇野弘藏著作集 5 经济危机理论.pdf": {
+   "evidence": {
+    "chars": 359950,
+    "script": "Japanese",
+    "share": 0.5733
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本战后政经研究/宇野学派/初代/宇野弘藏/宇野弘藏著作集 6 资本论的经济学.pdf": {
+   "evidence": {
+    "chars": 400138,
+    "script": "Japanese",
+    "share": 0.602
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本战后政经研究/宇野学派/初代/宇野弘藏/宇野弘藏著作集 7 经济政策理论.pdf": {
+   "evidence": {
+    "chars": 403044,
+    "script": "Japanese",
+    "share": 0.5445
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本战后政经研究/宇野学派/初代/宇野弘藏/宇野弘藏著作集 8 农业问题概论.pdf": {
+   "evidence": {
+    "chars": 379315,
+    "script": "Japanese",
+    "share": 0.5492
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本战后政经研究/宇野学派/初代/宇野弘藏/宇野弘藏著作集 9 经济学方法论.pdf": {
+   "evidence": {
+    "chars": 371101,
+    "script": "Japanese",
+    "share": 0.5845
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本战后政经研究/宇野学派/初代/宇野弘藏/宇野弘藏著作集 补卷 学术•人•书ーー随想•书评•未定稿等.pdf": {
+   "evidence": {
+    "chars": 411735,
+    "script": "Japanese",
+    "share": 0.5725
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本战后政经研究/宇野学派/初代/宇野弘藏/经济学之益.pdf": {
+   "evidence": {
+    "chars": 154904,
+    "script": "Japanese",
+    "share": 0.6732
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本战后政经研究/宇野学派/初代/宇野弘藏/谈经济学.pdf": {
+   "evidence": {
+    "chars": 152502,
+    "script": "Japanese",
+    "share": 0.6776
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本战后政经研究/宇野学派/初代/宇野弘藏/资本论五十年 上.pdf": {
+   "evidence": {
+    "chars": 302326,
+    "script": "Japanese",
+    "share": 0.7454
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本战后政经研究/宇野学派/初代/宇野弘藏/资本论五十年 下.pdf": {
+   "evidence": {
+    "chars": 304768,
+    "script": "Japanese",
+    "share": 0.7127
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本战后政经研究/正统学派·传统派·讲座派传人/·资本论体系/资本论体系 1 资本论体系的成立 附月报.pdf": {
+   "evidence": {
+    "chars": 408941,
+    "script": "Japanese",
+    "share": 0.5131
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本战后政经研究/正统学派·传统派·讲座派传人/·资本论体系/资本论体系 10 现代资本主义 附月报.pdf": {
+   "evidence": {
+    "chars": 424056,
+    "script": "Japanese",
+    "share": 0.4755
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本战后政经研究/正统学派·传统派·讲座派传人/·资本论体系/资本论体系 2 商品•货币.pdf": {
+   "evidence": {
+    "chars": 433537,
+    "script": "Japanese",
+    "share": 0.5298
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本战后政经研究/正统学派·传统派·讲座派传人/·资本论体系/资本论体系 3 剩余价值•资本积累.pdf": {
+   "evidence": {
+    "chars": 458836,
+    "script": "Japanese",
+    "share": 0.5009
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本战后政经研究/正统学派·传统派·讲座派传人/·资本论体系/资本论体系 4 资本流通•再生产.pdf": {
+   "evidence": {
+    "chars": 509012,
+    "script": "Japanese",
+    "share": 0.4905
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本战后政经研究/正统学派·传统派·讲座派传人/·资本论体系/资本论体系 5 利润•生产价格 附月报.pdf": {
+   "evidence": {
+    "chars": 514970,
+    "script": "Japanese",
+    "share": 0.4962
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本战后政经研究/正统学派·传统派·讲座派传人/·资本论体系/资本论体系 6 利息•信用.pdf": {
+   "evidence": {
+    "chars": 486644,
+    "script": "Japanese",
+    "share": 0.515
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本战后政经研究/正统学派·传统派·讲座派传人/·资本论体系/资本论体系 7 地租•收入.pdf": {
+   "evidence": {
+    "chars": 388526,
+    "script": "Japanese",
+    "share": 0.4986
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本战后政经研究/正统学派·传统派·讲座派传人/·资本论体系/资本论体系 8 国家•国际商业•全球市场.pdf": {
+   "evidence": {
+    "chars": 414201,
+    "script": "Japanese",
+    "share": 0.5083
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本战后政经研究/正统学派·传统派·讲座派传人/·资本论体系/资本论体系 9上 经济危机•产业周期体系.pdf": {
+   "evidence": {
+    "chars": 485743,
+    "script": "Japanese",
+    "share": 0.4865
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本战后政经研究/正统学派·传统派·讲座派传人/·资本论体系/资本论体系 9下 经济危机•产业周期理论的形成和发展.pdf": {
+   "evidence": {
+    "chars": 450981,
+    "script": "Japanese",
+    "share": 0.4864
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本战后政经研究/马克思的逆袭 政治经济学之复活.pdf": {
+   "evidence": {
+    "chars": 208436,
+    "script": "Japanese",
+    "share": 0.4795
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本社会XX史.pdf": {
+   "evidence": {
+    "chars": 148795,
+    "script": "Japanese",
+    "share": 0.4347
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000日本资本主义论争史.pdf": {
+   "evidence": {
+    "chars": 248369,
+    "script": "Japanese",
+    "share": 0.4376
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000望月清司论文选 德国史•马克思•第三世界.pdf": {
+   "evidence": {
+    "chars": 374335,
+    "script": "Japanese",
+    "share": 0.5263
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000本多延嘉著作选 1.pdf": {
+   "evidence": {
+    "chars": 310149,
+    "script": "Japanese",
+    "share": 0.5463
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000本多延嘉著作选 2.pdf": {
+   "evidence": {
+    "chars": 286241,
+    "script": "Japanese",
+    "share": 0.548
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000梅本克己/梅本克己著作集 第10卷 日记•年谱 附月报.pdf": {
+   "evidence": {
+    "chars": 241003,
+    "script": "Japanese",
+    "share": 0.6108
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000梅本克己/梅本克己著作集 第1卷 主体性理论（上） 附月报.pdf": {
+   "evidence": {
+    "chars": 314138,
+    "script": "Japanese",
+    "share": 0.6444
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000梅本克己/梅本克己著作集 第2卷 主体性理论（下） 附月报.pdf": {
+   "evidence": {
+    "chars": 306621,
+    "script": "Japanese",
+    "share": 0.6369
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000梅本克己/梅本克己著作集 第3卷 人论 附月报.pdf": {
+   "evidence": {
+    "chars": 276362,
+    "script": "Japanese",
+    "share": 0.6426
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000梅本克己/梅本克己著作集 第4卷 现代思想入门 附月报.pdf": {
+   "evidence": {
+    "chars": 268109,
+    "script": "Japanese",
+    "share": 0.6748
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000梅本克己/梅本克己著作集 第5卷 社会科学和意识形态 附月报.pdf": {
+   "evidence": {
+    "chars": 320451,
+    "script": "Japanese",
+    "share": 0.6159
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000梅本克己/梅本克己著作集 第6卷 唯物史观和人类史构想 附月报.pdf": {
+   "evidence": {
+    "chars": 303922,
+    "script": "Japanese",
+    "share": 0.6156
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
   },
   "VoiceOfML/Japanese-Materials\u0000梅本克己/梅本克己著作集 第7卷 唯物史观和当代 附月报.pdf": {
    "evidence": {
@@ -358,6 +2149,258 @@
    "language": "japan",
    "source": "osd-triage-v1"
   },
+  "VoiceOfML/Japanese-Materials\u0000梅本克己/梅本克己著作集 第8卷 革命和人 附月报.pdf": {
+   "evidence": {
+    "chars": 339589,
+    "script": "Japanese",
+    "share": 0.6676
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000梅本克己/梅本克己著作集 第9卷 宗教•文学•人 附月报.pdf": {
+   "evidence": {
+    "chars": 311242,
+    "script": "Japanese",
+    "share": 0.67
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000民社党三十五周年史.pdf": {
+   "evidence": {
+    "chars": 551700,
+    "script": "Japanese",
+    "share": 0.4544
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000民社党二十五周年史.pdf": {
+   "evidence": {
+    "chars": 462496,
+    "script": "Japanese",
+    "share": 0.452
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000河上肇/复苏的河上肇：近代中国知识之源.pdf": {
+   "evidence": {
+    "chars": 345252,
+    "script": "Japanese",
+    "share": 0.335
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000河上肇/河上肇全集 1 1898-1905.4.pdf": {
+   "evidence": {
+    "chars": 350899,
+    "script": "Japanese",
+    "share": 0.4399
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000河上肇/河上肇全集 10 1918.10-1920.3.pdf": {
+   "evidence": {
+    "chars": 428972,
+    "script": "Japanese",
+    "share": 0.491
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000河上肇/河上肇全集 11 1920.4-1922.5.pdf": {
+   "evidence": {
+    "chars": 437756,
+    "script": "Japanese",
+    "share": 0.5115
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000河上肇/河上肇全集 12 1922.6-1923.3.pdf": {
+   "evidence": {
+    "chars": 402116,
+    "script": "Japanese",
+    "share": 0.5188
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000河上肇/河上肇全集 13 1923.4-12.pdf": {
+   "evidence": {
+    "chars": 485506,
+    "script": "Japanese",
+    "share": 0.4338
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000河上肇/河上肇全集 14 1924-1926&关于唯物史观的自我清算（1927.2-1928）.pdf": {
+   "evidence": {
+    "chars": 436615,
+    "script": "Japanese",
+    "share": 0.5369
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000河上肇/河上肇全集 15 人口问题批判（1927）&马克思主义经济学（1928）&经济学大纲（1928）.pdf": {
+   "evidence": {
+    "chars": 384913,
+    "script": "Japanese",
+    "share": 0.5402
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000河上肇/河上肇全集 16 1927-1929.pdf": {
+   "evidence": {
+    "chars": 406121,
+    "script": "Japanese",
+    "share": 0.5769
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000河上肇/河上肇全集 17 马克思主义批判者的批判（1929）&马克思主义经济学的基础理论（1929）&和辻哲郎氏的来信及我对此的感想（1927）.pdf": {
+   "evidence": {
+    "chars": 331699,
+    "script": "Japanese",
+    "share": 0.5719
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000河上肇/河上肇全集 18 1930.1-5.pdf": {
+   "evidence": {
+    "chars": 323174,
+    "script": "Japanese",
+    "share": 0.571
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000河上肇/河上肇全集 续3 资本论入门（下）.pdf": {
+   "evidence": {
+    "chars": 395568,
+    "script": "Japanese",
+    "share": 0.5402
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000河上肇/河上肇全集 续5 自传（上）.pdf": {
+   "evidence": {
+    "chars": 388629,
+    "script": "Japanese",
+    "share": 0.5684
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000河上肇/河上肇全集 续6 自传（中）.pdf": {
+   "evidence": {
+    "chars": 401014,
+    "script": "Japanese",
+    "share": 0.5996
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000河上肇/河上肇全集 续7 自传（下）&补遗.pdf": {
+   "evidence": {
+    "chars": 377028,
+    "script": "Japanese",
+    "share": 0.5948
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000片山潜/都市社会主義　我社会主義.pdf": {
+   "evidence": {
+    "chars": 198707,
+    "script": "Japanese",
+    "share": 0.4363
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000福本和夫/福本和夫著作集 1 马克思主义理论研究Ⅰ.pdf": {
+   "evidence": {
+    "chars": 394941,
+    "script": "Japanese",
+    "share": 0.5146
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000福本和夫/福本和夫著作集 2 马克思主义理论研究Ⅱ.pdf": {
+   "evidence": {
+    "chars": 465573,
+    "script": "Japanese",
+    "share": 0.4062
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000第三国际同日本共产党资料集.pdf": {
+   "evidence": {
+    "chars": 451058,
+    "script": "Japanese",
+    "share": 0.5006
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000証言　戦後労働運動史.pdf": {
+   "evidence": {
+    "chars": 262661,
+    "script": "Japanese",
+    "share": 0.5818
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000读全共斗.pdf": {
+   "evidence": {
+    "chars": 338032,
+    "script": "Japanese",
+    "share": 0.6122
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000農民運動指導者の戦中•戦後　杉三元治郎•平野力三と労農派.pdf": {
+   "evidence": {
+    "chars": 308827,
+    "script": "Japanese",
+    "share": 0.3907
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000近代日本农民运动史研究.pdf": {
+   "evidence": {
+    "chars": 222958,
+    "script": "Japanese",
+    "share": 0.4333
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Japanese-Materials\u0000马克思历史理论研究.pdf": {
+   "evidence": {
+    "chars": 494145,
+    "script": "Japanese",
+    "share": 0.5514
+   },
+   "language": "japan",
+   "source": "osd+text-v1"
+  },
   "VoiceOfML/MLMRL-Hub\u0000000017/1870520043_484_新聞 2020.8.1.pdf": {
    "backend": "rapidocr_onnxruntime",
    "evidence": {
@@ -367,6 +2410,105 @@
    "language": "ch",
    "revision": "reocr-20261024",
    "source": "layout-repro-v1"
+  },
+  "VoiceOfML/MLMRL-Hub\u0000000345/1870520043_4198_08.pdf": {
+   "evidence": {
+    "chars": 508106,
+    "script": "Han",
+    "share": 0.9437
+   },
+   "language": "ch",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/MLMRL-Hub\u0000000345/1870520043_4200_10.pdf": {
+   "evidence": {
+    "chars": 363581,
+    "script": "Han",
+    "share": 0.9826
+   },
+   "language": "ch",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/MLMRL-Hub\u0000000345/1870520043_4201_11.pdf": {
+   "evidence": {
+    "chars": 512483,
+    "script": "Han",
+    "share": 0.9904
+   },
+   "language": "ch",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/MLMRL-Hub\u0000000604/1870520043_7020_【海德格尔研究】海德格尔的语言和思考.djvu": {
+   "evidence": {
+    "chars": 497912,
+    "script": "Latin",
+    "share": 1.0
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/MLMRL-Hub\u0000000721/1870520043_8215_2018農民工與新工人：當代中國階級問題硏究_氵番豙殳等_新竹_交通大學.pdf": {
+   "evidence": {
+    "chars": 337583,
+    "script": "Han",
+    "share": 0.8684
+   },
+   "language": "ch",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/MLMRL-Hub\u0000000795/1870520043_9054_【PDFT】食用野生植物图鉴【图鉴_植物_食物】Edible_Wild_Plants.pdf": {
+   "evidence": {
+    "chars": 102474,
+    "script": "Latin",
+    "share": 0.9859
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/MLMRL-Hub\u0000001038/1870520043_12160_文艺战线.pdf": {
+   "evidence": {
+    "chars": 394547,
+    "script": "Cyrillic",
+    "share": 0.0
+   },
+   "language": "ru",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/MLMRL-Library\u0000安全培训/维基备份/软件/综合性资料/编程随想的博客/IT（信息技术）/IT/软件开发/算法与数据结构/Donald Knuth：The Art of Computer Programming (共3卷 1998套装 扫描版).djvu/第1卷 Fundamental Algorithms@1997 (第3版).djvu": {
+   "evidence": {
+    "chars": 1100060,
+    "script": "Latin",
+    "share": 0.9975
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/MLMRL-Library\u0000安全培训/维基备份/软件/综合性资料/编程随想的博客/IT（信息技术）/IT/软件开发/算法与数据结构/Donald Knuth：The Art of Computer Programming (共3卷 1998套装 扫描版).djvu/第2卷 Seminumerical Algorithms@1997 (第3版).djvu": {
+   "evidence": {
+    "chars": 1341742,
+    "script": "Latin",
+    "share": 0.9954
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/MLMRL-Library\u0000安全培训/维基备份/软件/综合性资料/编程随想的博客/IT（信息技术）/IT/软件开发/算法与数据结构/Donald Knuth：The Art of Computer Programming (共3卷 1998套装 扫描版).djvu/第3卷 Sorting and Searching@1998 (第2版).djvu": {
+   "evidence": {
+    "chars": 1295008,
+    "script": "Latin",
+    "share": 0.9968
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/MLMRL-Library\u0000安全培训/维基备份/软件/综合性资料/编程随想的博客/IT（信息技术）/IT/软件开发/编程语言/C++/John Lakos：Large-Scale C++ Software Design@1996 (扫描版).djvu": {
+   "evidence": {
+    "chars": 1068630,
+    "script": "Latin",
+    "share": 0.9999
+   },
+   "language": "en",
+   "source": "osd+text-v1"
   },
   "VoiceOfML/MLMRL-Library\u0000安全培训/维基备份/软件/综合性资料/编程随想的博客/IT（信息技术）/IT/软件开发/网络相关/C & C++/Richard Stevens：UNIX Network Programming (共2卷 扫描版).djvu/第1卷 The Sockets Networking API@1998 (第2版).djvu": {
    "evidence": {
@@ -382,6 +2524,24 @@
    },
    "language": "en",
    "source": "osd-triage-v1"
+  },
+  "VoiceOfML/MLMRL-Library\u0000安全培训/维基备份/软件/综合性资料/编程随想的博客/IT（信息技术）/IT/软件开发/网络相关/C & C++/Richard Stevens：UNIX Network Programming (共2卷 扫描版).djvu/第2卷 Interprocess Communications@1999 (第2版).djvu": {
+   "evidence": {
+    "chars": 769532,
+    "script": "Latin",
+    "share": 1.0
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/MLMRL-Library\u0000安全培训/维基备份/软件/综合性资料/编程随想的博客/政治（含大量禁书）/政治/苏联/苏共历史/阿卜杜拉赫曼·阿夫托尔汉诺夫：The Communist Party Apparatus (扫描版).djvu": {
+   "evidence": {
+    "chars": 913975,
+    "script": "Latin",
+    "share": 1.0
+   },
+   "language": "en",
+   "source": "osd+text-v1"
   },
   "VoiceOfML/SovMaterials\u0000一手资料/日记/哈尔德日记.djvu": {
    "evidence": {
@@ -1191,6 +3351,420 @@
    },
    "language": "ru",
    "source": "osd-triage-v1"
+  },
+  "VoiceOfML/Teachers\u0000A1 马克思&恩格斯/01-07 马克思恩格斯全集 历史考证版 MEGA/1/MEGA1 Ⅰ著作与手稿 1-2 马克思（含书信） 1837-1844（1929）.djvu": {
+   "evidence": {
+    "chars": 687747,
+    "script": "Latin",
+    "share": 0.9998
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Teachers\u0000A1 马克思&恩格斯/01-07 马克思恩格斯全集 历史考证版 MEGA/1/MEGA1 Ⅰ著作与手稿 2 恩格斯 1838-1844（1930）.djvu": {
+   "evidence": {
+    "chars": 1384408,
+    "script": "Latin",
+    "share": 0.9987
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Teachers\u0000A1 马克思&恩格斯/01-07 马克思恩格斯全集 历史考证版 MEGA/1/MEGA1 Ⅰ著作与手稿 3 神圣家族&马克思书信 1844-1845（1932）.djvu": {
+   "evidence": {
+    "chars": 1363675,
+    "script": "Latin",
+    "share": 0.9998
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Teachers\u0000A1 马克思&恩格斯/01-07 马克思恩格斯全集 历史考证版 MEGA/1/MEGA1 Ⅰ著作与手稿 4 恩格斯 英国工人阶级状况等 1844.8-1846.7（1932）.djvu": {
+   "evidence": {
+    "chars": 1132004,
+    "script": "Latin",
+    "share": 1.0
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Teachers\u0000A1 马克思&恩格斯/01-07 马克思恩格斯全集 历史考证版 MEGA/1/MEGA1 Ⅰ著作与手稿 5 德意志意识形态 1845-1846（1932）.djvu": {
+   "evidence": {
+    "chars": 1424531,
+    "script": "Latin",
+    "share": 0.9999
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Teachers\u0000A1 马克思&恩格斯/01-07 马克思恩格斯全集 历史考证版 MEGA/1/MEGA1 Ⅰ著作与手稿 5 德意志意识形态 1845-1846（1933）.djvu": {
+   "evidence": {
+    "chars": 1424541,
+    "script": "Latin",
+    "share": 0.9999
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Teachers\u0000A1 马克思&恩格斯/01-07 马克思恩格斯全集 历史考证版 MEGA/1/MEGA1 Ⅰ著作与手稿 6 1846.5-1848.3（1932）.djvu": {
+   "evidence": {
+    "chars": 1522169,
+    "script": "Latin",
+    "share": 0.9999
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Teachers\u0000A1 马克思&恩格斯/01-07 马克思恩格斯全集 历史考证版 MEGA/1/MEGA1 Ⅰ著作与手稿 7 1848.3-12（1935）.djvu": {
+   "evidence": {
+    "chars": 1384120,
+    "script": "Latin",
+    "share": 0.9999
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Teachers\u0000A1 马克思&恩格斯/01-07 马克思恩格斯全集 历史考证版 MEGA/1/MEGA1 Ⅲ书信 2 1854-1860（1930）.djvu": {
+   "evidence": {
+    "chars": 995508,
+    "script": "Latin",
+    "share": 0.9998
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Teachers\u0000A1 马克思&恩格斯/01-07 马克思恩格斯全集 历史考证版 MEGA/1/MEGA1 Ⅲ书信 4 1868-1883（1931）.djvu": {
+   "evidence": {
+    "chars": 1382800,
+    "script": "Latin",
+    "share": 0.9999
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Teachers\u0000A1 马克思&恩格斯/01-07 马克思恩格斯全集 历史考证版 MEGA/1/MEGA1 反杜林论·自然辩证法 1873-1882（1935）.djvu": {
+   "evidence": {
+    "chars": 1774617,
+    "script": "Latin",
+    "share": 0.9998
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Teachers\u0000A1 马克思&恩格斯/01-07 马克思恩格斯全集 历史考证版 MEGA/2/Ⅰ作品与手稿/MEGA2 Ⅰ作品与手稿 1 马克思 1841-1843【文本】（1975）.djvu": {
+   "evidence": {
+    "chars": 1285572,
+    "script": "Cyrillic",
+    "share": 0.0
+   },
+   "language": "ru",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Teachers\u0000A1 马克思&恩格斯/01-07 马克思恩格斯全集 历史考证版 MEGA/2/Ⅰ作品与手稿/MEGA2 Ⅰ作品与手稿 1 马克思 1841-1843【资料】（1975）.djvu": {
+   "evidence": {
+    "chars": 746531,
+    "script": "Latin",
+    "share": 0.9981
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Teachers\u0000A1 马克思&恩格斯/01-07 马克思恩格斯全集 历史考证版 MEGA/2/Ⅰ作品与手稿/MEGA2 Ⅰ作品与手稿 10 1849.7-1851.6【资料】（1977）.djvu": {
+   "evidence": {
+    "chars": 932811,
+    "script": "Latin",
+    "share": 1.0
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Teachers\u0000A1 马克思&恩格斯/01-07 马克思恩格斯全集 历史考证版 MEGA/2/Ⅰ作品与手稿/MEGA2 Ⅰ作品与手稿 11 1851.7-1852【文本】（1985）.djvu": {
+   "evidence": {
+    "chars": 1191819,
+    "script": "Latin",
+    "share": 1.0
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Teachers\u0000A1 马克思&恩格斯/01-07 马克思恩格斯全集 历史考证版 MEGA/2/Ⅰ作品与手稿/MEGA2 Ⅰ作品与手稿 11 1851.7-1852【资料】（1985）.djvu": {
+   "evidence": {
+    "chars": 1114412,
+    "script": "Latin",
+    "share": 1.0
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Teachers\u0000A1 马克思&恩格斯/01-07 马克思恩格斯全集 历史考证版 MEGA/2/Ⅰ作品与手稿/MEGA2 Ⅰ作品与手稿 12 1853【资料】（1984）.djvu": {
+   "evidence": {
+    "chars": 1015828,
+    "script": "Latin",
+    "share": 1.0
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Teachers\u0000A1 马克思&恩格斯/01-07 马克思恩格斯全集 历史考证版 MEGA/2/Ⅰ作品与手稿/MEGA2 Ⅰ作品与手稿 13 1854【文本】（1985）.djvu": {
+   "evidence": {
+    "chars": 1297049,
+    "script": "Latin",
+    "share": 1.0
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Teachers\u0000A1 马克思&恩格斯/01-07 马克思恩格斯全集 历史考证版 MEGA/2/Ⅰ作品与手稿/MEGA2 Ⅰ作品与手稿 13 1854【资料】（1985）.djvu": {
+   "evidence": {
+    "chars": 819150,
+    "script": "Latin",
+    "share": 0.9999
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Teachers\u0000A1 马克思&恩格斯/01-07 马克思恩格斯全集 历史考证版 MEGA/2/Ⅰ作品与手稿/MEGA2 Ⅰ作品与手稿 14 1855【文本&资料】（2001）.djvu": {
+   "evidence": {
+    "chars": 2338253,
+    "script": "Latin",
+    "share": 1.0
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Teachers\u0000A1 马克思&恩格斯/01-07 马克思恩格斯全集 历史考证版 MEGA/2/Ⅰ作品与手稿/MEGA2 Ⅰ作品与手稿 18 1859.10-1860【文本】（1984）.djvu": {
+   "evidence": {
+    "chars": 1350768,
+    "script": "Latin",
+    "share": 1.0
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Teachers\u0000A1 马克思&恩格斯/01-07 马克思恩格斯全集 历史考证版 MEGA/2/Ⅰ作品与手稿/MEGA2 Ⅰ作品与手稿 18 1859.10-1860【资料】（1984）.djvu": {
+   "evidence": {
+    "chars": 832137,
+    "script": "Cyrillic",
+    "share": 0.0
+   },
+   "language": "ru",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Teachers\u0000A1 马克思&恩格斯/01-07 马克思恩格斯全集 历史考证版 MEGA/2/Ⅰ作品与手稿/MEGA2 Ⅰ作品与手稿 2 马克思 1843.3-1844.8【资料】（1982）.djvu": {
+   "evidence": {
+    "chars": 640073,
+    "script": "Latin",
+    "share": 0.9997
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Teachers\u0000A1 马克思&恩格斯/01-07 马克思恩格斯全集 历史考证版 MEGA/2/Ⅰ作品与手稿/MEGA2 Ⅰ作品与手稿 21 1867.9-1871.3【文本&资料】（2009）.djvu": {
+   "evidence": {
+    "chars": 3298995,
+    "script": "Latin",
+    "share": 1.0
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Teachers\u0000A1 马克思&恩格斯/01-07 马克思恩格斯全集 历史考证版 MEGA/2/Ⅰ作品与手稿/MEGA2 Ⅰ作品与手稿 22 1871.3-11【文本】（1978）.djvu": {
+   "evidence": {
+    "chars": 1327580,
+    "script": "Latin",
+    "share": 1.0
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Teachers\u0000A1 马克思&恩格斯/01-07 马克思恩格斯全集 历史考证版 MEGA/2/Ⅰ作品与手稿/MEGA2 Ⅰ作品与手稿 22 1871.3-11【资料】（1978）.djvu": {
+   "evidence": {
+    "chars": 1234331,
+    "script": "Latin",
+    "share": 0.9999
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Teachers\u0000A1 马克思&恩格斯/01-07 马克思恩格斯全集 历史考证版 MEGA/2/Ⅰ作品与手稿/MEGA2 Ⅰ作品与手稿 24 1872.12-1875.5【文本】（1984）.djvu": {
+   "evidence": {
+    "chars": 1256045,
+    "script": "Latin",
+    "share": 1.0
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Teachers\u0000A1 马克思&恩格斯/01-07 马克思恩格斯全集 历史考证版 MEGA/2/Ⅰ作品与手稿/MEGA2 Ⅰ作品与手稿 24 1872.12-1875.5【资料】（1984）.djvu": {
+   "evidence": {
+    "chars": 1423442,
+    "script": "Latin",
+    "share": 0.9999
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Teachers\u0000A1 马克思&恩格斯/01-07 马克思恩格斯全集 历史考证版 MEGA/2/Ⅰ作品与手稿/MEGA2 Ⅰ作品与手稿 25 1875.5-1883.3【文本】（1985）.djvu": {
+   "evidence": {
+    "chars": 1005663,
+    "script": "Latin",
+    "share": 1.0
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Teachers\u0000A1 马克思&恩格斯/01-07 马克思恩格斯全集 历史考证版 MEGA/2/Ⅰ作品与手稿/MEGA2 Ⅰ作品与手稿 25 1875.5-1883.3【资料】（1985）.djvu": {
+   "evidence": {
+    "chars": 1311096,
+    "script": "Latin",
+    "share": 0.9998
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Teachers\u0000A1 马克思&恩格斯/01-07 马克思恩格斯全集 历史考证版 MEGA/2/Ⅰ作品与手稿/MEGA2 Ⅰ作品与手稿 26 自然辩证法 1873-1882【文本】（1985）.djvu": {
+   "evidence": {
+    "chars": 1134725,
+    "script": "Latin",
+    "share": 0.9984
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Teachers\u0000A1 马克思&恩格斯/01-07 马克思恩格斯全集 历史考证版 MEGA/2/Ⅰ作品与手稿/MEGA2 Ⅰ作品与手稿 26 自然辩证法 1873-1882【资料】（1985）.djvu": {
+   "evidence": {
+    "chars": 779109,
+    "script": "Latin",
+    "share": 0.9996
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Teachers\u0000A1 马克思&恩格斯/01-07 马克思恩格斯全集 历史考证版 MEGA/2/Ⅰ作品与手稿/MEGA2 Ⅰ作品与手稿 27 反杜林论 1876-1878【文本】（1988）.djvu": {
+   "evidence": {
+    "chars": 1376485,
+    "script": "Latin",
+    "share": 0.9999
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Teachers\u0000A1 马克思&恩格斯/01-07 马克思恩格斯全集 历史考证版 MEGA/2/Ⅰ作品与手稿/MEGA2 Ⅰ作品与手稿 27 反杜林论 1876-1878【资料】（1988）.djvu": {
+   "evidence": {
+    "chars": 1249752,
+    "script": "Latin",
+    "share": 0.9997
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Teachers\u0000A1 马克思&恩格斯/01-07 马克思恩格斯全集 历史考证版 MEGA/2/Ⅰ作品与手稿/MEGA2 Ⅰ作品与手稿 3 恩格斯 1833-1843【文本】（1985）.djvu": {
+   "evidence": {
+    "chars": 1257659,
+    "script": "Latin",
+    "share": 1.0
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Teachers\u0000A1 马克思&恩格斯/01-07 马克思恩格斯全集 历史考证版 MEGA/2/Ⅰ作品与手稿/MEGA2 Ⅰ作品与手稿 3 恩格斯 1833-1843【资料】（1985）.djvu": {
+   "evidence": {
+    "chars": 1334557,
+    "script": "Latin",
+    "share": 1.0
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Teachers\u0000A1 马克思&恩格斯/01-07 马克思恩格斯全集 历史考证版 MEGA/2/Ⅱ《资本论》相关/MEGA2 Ⅱ《资本论》相关 1 政治经济学批判：1857-1858年经济学手稿【资料】（1981）.djvu": {
+   "evidence": {
+    "chars": 555725,
+    "script": "Latin",
+    "share": 0.9998
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Teachers\u0000A1 马克思&恩格斯/01-07 马克思恩格斯全集 历史考证版 MEGA/2/Ⅱ《资本论》相关/MEGA2 Ⅱ《资本论》相关 1下 政治经济学批判：1857-1858年经济学手稿（下）【文本】（1981）.djvu": {
+   "evidence": {
+    "chars": 963091,
+    "script": "Latin",
+    "share": 0.9999
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Teachers\u0000A1 马克思&恩格斯/01-07 马克思恩格斯全集 历史考证版 MEGA/2/Ⅱ《资本论》相关/MEGA2 Ⅱ《资本论》相关 2 政治经济学批判：1858-1861年经济学手稿【文本】（1980）.djvu": {
+   "evidence": {
+    "chars": 628158,
+    "script": "Latin",
+    "share": 0.998
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Teachers\u0000A1 马克思&恩格斯/01-07 马克思恩格斯全集 历史考证版 MEGA/2/Ⅱ《资本论》相关/MEGA2 Ⅱ《资本论》相关 2 政治经济学批判：1858-1861年经济学手稿【资料】（1980）.djvu": {
+   "evidence": {
+    "chars": 278289,
+    "script": "Latin",
+    "share": 0.999
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Teachers\u0000A1 马克思&恩格斯/01-07 马克思恩格斯全集 历史考证版 MEGA/2/Ⅱ《资本论》相关/MEGA2 Ⅱ《资本论》相关 3 政治经济学批判：1861-1863年经济学手稿【资料】（1982）.djvu": {
+   "evidence": {
+    "chars": 929352,
+    "script": "Latin",
+    "share": 0.9998
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Teachers\u0000A1 马克思&恩格斯/01-07 马克思恩格斯全集 历史考证版 MEGA/2/Ⅱ《资本论》相关/MEGA2 Ⅱ《资本论》相关 3-1 政治经济学批判：1861-1863年经济学手稿Ⅰ【文本】（1976）.djvu": {
+   "evidence": {
+    "chars": 759538,
+    "script": "Latin",
+    "share": 0.9975
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Teachers\u0000A1 马克思&恩格斯/01-07 马克思恩格斯全集 历史考证版 MEGA/2/Ⅱ《资本论》相关/MEGA2 Ⅱ《资本论》相关 3-1 政治经济学批判：1861-1863年经济学手稿Ⅰ【资料】（1976）.djvu": {
+   "evidence": {
+    "chars": 208410,
+    "script": "Latin",
+    "share": 0.9996
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Teachers\u0000A1 马克思&恩格斯/01-07 马克思恩格斯全集 历史考证版 MEGA/2/Ⅱ《资本论》相关/MEGA2 Ⅱ《资本论》相关 3-2 政治经济学批判：1861-1863年经济学手稿Ⅱ【文本】（1977）.djvu": {
+   "evidence": {
+    "chars": 721477,
+    "script": "Latin",
+    "share": 1.0
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Teachers\u0000A1 马克思&恩格斯/01-07 马克思恩格斯全集 历史考证版 MEGA/2/Ⅱ《资本论》相关/MEGA2 Ⅱ《资本论》相关 3-2 政治经济学批判：1861-1863年经济学手稿Ⅱ【资料】（1977）.djvu": {
+   "evidence": {
+    "chars": 147844,
+    "script": "Latin",
+    "share": 1.0
+   },
+   "language": "en",
+   "source": "osd+text-v1"
+  },
+  "VoiceOfML/Teachers\u0000A1 马克思&恩格斯/01-07 马克思恩格斯全集 历史考证版 MEGA/2/Ⅱ《资本论》相关/MEGA2 Ⅱ《资本论》相关 3-3 政治经济学批判：1861-1863年经济学手稿Ⅲ【文本】（1978）.djvu": {
+   "evidence": {
+    "chars": 1122681,
+    "script": "Latin",
+    "share": 1.0
+   },
+   "language": "en",
+   "source": "osd+text-v1"
   }
  },
  "policy": "exact-key overrides corroborated by OSD script probes and, for CJK, by kana/Han ratios in published text",
