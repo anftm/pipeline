@@ -18,8 +18,10 @@ from urllib.parse import quote
 
 try:
     from .shared import batch_bucket_files_with_retry
+    from .reader_gc_cache import cacheable, configured_cache, RequestPacer
 except ImportError:
     from shared import batch_bucket_files_with_retry
+    from reader_gc_cache import cacheable, configured_cache, RequestPacer
 
 
 class S3NotFound(FileNotFoundError):
@@ -49,7 +51,7 @@ def retry_read(operation):
     for attempt in range(12):
         try:
             return operation()
-        except HfHubHTTPError as error:
+        except (HfHubHTTPError, httpx.HTTPStatusError) as error:
             status = getattr(error.response, "status_code", None)
             if status not in {408, 429, 500, 502, 503, 504} or attempt == 11:
                 raise
@@ -251,6 +253,11 @@ class S3BucketStore:
         self._input_namespace = os.environ.get("HF_S3_INPUT_NAMESPACE", "melsm")
         self._input_bucket = os.environ.get("HF_S3_INPUT_BUCKET", "pdf-archive-v2")
         self._clients = {}
+        self._client_lock = threading.Lock()
+        self._pacers = {}
+        self.read_cache = configured_cache()
+        self.object_etags = {}
+        self.object_modified = {}
         self.object_sizes = {}
         # Listing and read-time ETags let the GC graph detect changed roots
         # without re-downloading every root.
@@ -273,10 +280,17 @@ class S3BucketStore:
         if not key or not secret:
             raise RuntimeError(f"S3 credentials are required for namespace {namespace}")
         cache_key = (namespace, key)
-        if cache_key not in self._clients:
-            self._clients[cache_key] = self._boto3.client(
-                "s3", endpoint_url=f"https://s3.hf.co/{namespace}",
-                aws_access_key_id=key, aws_secret_access_key=secret, config=self._config)
+        with self._client_lock:
+            if cache_key not in self._clients:
+                client = self._boto3.client(
+                    "s3", endpoint_url=f"https://s3.hf.co/{namespace}",
+                    aws_access_key_id=key, aws_secret_access_key=secret, config=self._config)
+                if os.environ.get('READER_GC_S3_RATE'):
+                    pacer = RequestPacer(float(os.environ['READER_GC_S3_RATE']))
+                    client.meta.events.register('before-send.s3', pacer.before_send)
+                    client.meta.events.register('needs-retry.s3', pacer.after_response)
+                    self._pacers[namespace] = pacer
+                self._clients[cache_key] = client
         return self._clients[cache_key]
 
     def _remember_etag(self, bucket: str, path: str, response) -> None:
@@ -319,17 +333,25 @@ class S3BucketStore:
             for result in pool.map(lambda shard: retry_s3(lambda: one(shard)), shards):
                 items.update(result)
         predicate = getattr(self, "root_predicate", None)
-        etags = (self.__dict__.setdefault("root_etags", {}).setdefault(bucket, {})
-                 if prefixes == ("",) and predicate else None)
+        etags = (self.__dict__.setdefault("root_etags", {}).setdefault(bucket, {}) if predicate else None)
+        object_etags = self.__dict__.setdefault('object_etags', {}).setdefault(bucket, {})
+        for key in list(object_etags):
+            if key.startswith(prefixes):
+                object_etags.pop(key)
         sizes = self.__dict__.setdefault("object_sizes", {})
         if etags is not None:
-            etags.clear()
+            for key in list(etags):
+                if key.startswith(prefixes):
+                    etags.pop(key)
         for key, item in items.items():
             size = item.get("Size")
             if type(size) is int and size >= 0:
                 sizes[(bucket, key)] = size
             if etags is not None and predicate(key):
                 etags[key] = item.get("ETag")
+            if cacheable(key):
+                object_etags[key] = item.get('ETag')
+                self.__dict__.setdefault('object_modified', {})[(bucket, key)] = item.get('LastModified')
         return set(items)
 
     def list_roots(self, bucket: str, parents: set[str]) -> dict[str, str | None]:
@@ -358,7 +380,32 @@ class S3BucketStore:
                 top.update(result)
         roots = {key: item.get("ETag") for key, item in top.items() if predicate(key)}
         self.__dict__.setdefault("root_etags", {}).setdefault(bucket, {}).update(roots)
+        self.__dict__.setdefault('object_etags', {}).setdefault(bucket, {}).update(
+            (key, item.get('ETag')) for key, item in top.items() if cacheable(key))
         return roots
+
+    def _cached(self, bucket, path, parser):
+        cache = getattr(self, 'read_cache', None)
+        etag = getattr(self, 'object_etags', {}).get(bucket, {}).get(path)
+        if cache and cacheable(path):
+            hit = cache.get(bucket, path, parser, etag)
+            if hit:
+                self._remember_etag(bucket, path, {'ETag': etag})
+                return hit
+        return None
+
+    def _cache_read(self, bucket, path, parser, raw, digest):
+        cache = getattr(self, 'read_cache', None)
+        if cache and cacheable(path):
+            etag = getattr(self, 'read_etags', {}).get((bucket, path))
+            cache.put(bucket, path, parser, etag, raw, digest)
+
+    def read_cached_bytes(self, bucket: str, path: str) -> bytes:
+        """Caller must list current identities first; ordinary reads stay fresh."""
+        cached = self._cached(bucket, path, 'raw-v1')
+        if cached:
+            return cached[0]
+        return self.read_bytes(bucket, path)
 
     def read_bytes(self, bucket: str, path: str) -> bytes:
         namespace, name = self._location(bucket)
@@ -370,6 +417,8 @@ class S3BucketStore:
             finally:
                 body.close()
             self._remember_etag(bucket, path, response)
+            import hashlib
+            self._cache_read(bucket, path, 'raw-v1', raw, hashlib.sha256(raw).hexdigest())
             return raw
         try:
             return retry_s3(read)
@@ -384,6 +433,14 @@ class S3BucketStore:
             from .reader_gc_stream import graph_json
         except ImportError:
             from reader_gc_stream import graph_json
+        default_parser = parser is None
+        if default_parser:
+            cached = self._cached(bucket, path, 'graph-json-v1')
+            if cached:
+                return json.loads(cached[0]), cached[1]
+            raw = self._cached(bucket, path, 'raw-v1')
+            if raw:
+                return graph_json([raw[0]], path.endswith('.gz'))
         parser = parser or graph_json
         namespace, name = self._location(bucket)
         def read():
@@ -394,6 +451,9 @@ class S3BucketStore:
             finally:
                 body.close()
             self._remember_etag(bucket, path, response)
+            if default_parser:
+                self._cache_read(bucket, path, 'graph-json-v1',
+                                 json.dumps(result[0], ensure_ascii=False, separators=(',', ':')).encode(), result[1])
             return result
         return retry_s3(read)
 

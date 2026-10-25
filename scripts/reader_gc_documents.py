@@ -43,6 +43,8 @@ CONTROL_KEEP = {'reader-index/v3/current.json', 'reader-index/v3/automation.json
 class Store(S3BucketStore):
     """S3 batches remove exact keys; the existing Hub writer owns control JSON."""
     def __init__(self):
+        os.environ.setdefault('READER_GC_S3_RATE', '6')
+        os.environ.setdefault('READER_S3_LIST_WORKERS', '4')
         super().__init__()
         self.writer = HubBucketStore()
 
@@ -118,7 +120,7 @@ def preflight(store, reset_id, client):
                     or ref['bucket'] == CCRD and ref['path'].startswith(ccrd_lifecycle.MANAGED_PREFIXES)):
                 raise ValueError('OCR retirement still has a live control reference: ' + path)
         return path, raw
-    with ThreadPoolExecutor(max_workers=16) as pool:
+    with ThreadPoolExecutor(max_workers=4) as pool:
         for path, raw in pool.map(read_control, sorted(control_paths)):
             pinned[CCRD, path] = raw
     return receipt, pinned, pointer, catalog
@@ -171,7 +173,120 @@ def processing_record_target(value):
                for ref in resources)
 
 
-def control_targets(store, receipt, pointer, catalog, workspace):
+def recover_processing_audit(store, records, receipt, run_id):
+    """Reuse a failed scan only if S3 proves the object predates that entire run."""
+    import io
+    import zipfile
+    import requests
+    repository = os.environ.get('GITHUB_REPOSITORY', '')
+    if repository != 'anftm/pipeline' or not re.fullmatch(r'[1-9][0-9]*', run_id):
+        raise ValueError('invalid processing recovery origin')
+    headers = {'Authorization': 'Bearer ' + os.environ['GH_TOKEN']}
+    base = f'https://api.github.com/repos/{repository}/actions/runs/{run_id}'
+    def get(url):
+        response = requests.get(url, headers=headers, timeout=(10, 120))
+        response.raise_for_status()
+        return response
+    run = get(base).json()
+    if (run.get('status') != 'completed' or run.get('path') != '.github/workflows/reader-gc-collect.yml'
+            or run.get('conclusion') != 'failure'
+            or run.get('display_title') != 'Reader GC ' + receipt['reset_id']):
+        raise ValueError('recovery requires a completed failed collector run')
+    began = datetime.fromisoformat(run['run_started_at'].replace('Z', '+00:00'))
+    artifacts = get(base + '/artifacts').json()['artifacts']
+    matches = [a for a in artifacts if a['name'] == 'reader-gc-collection' and not a['expired']]
+    if len(matches) != 1 or matches[0]['size_in_bytes'] > 64 * 1024 * 1024:
+        raise ValueError('processing recovery artifact missing or oversized')
+    archive = zipfile.ZipFile(io.BytesIO(get(matches[0]['archive_download_url']).content))
+    report = json.loads(archive.read('collection.json'))
+    if report.get('accepted_objects') != 0 or report.get('complete') is not False:
+        raise ValueError('recovery artifact is not a pre-deletion scan failure')
+    listed = getattr(store, 'object_etags', {}).get(reset.ASSETS, {})
+    modified = getattr(store, 'object_modified', {})
+    recovered = []
+    for line in gzip.decompress(archive.read('processing-retirement.jsonl.gz')).splitlines():
+        row = json.loads(line)
+        path = row['path']
+        version_time = modified.get((reset.ASSETS, path))
+        if (path not in records or not listed.get(path) or version_time is None or version_time >= began
+                or store.object_sizes.get((reset.ASSETS, path)) != row.get('bytes')):
+            continue
+        value = {**row, 'kind': 'reader-processing-roots'}
+        if not processing_record_target(value) or not re.fullmatch(r'[0-9a-f]{64}', row.get('sha256', '')):
+            raise ValueError('invalid processing recovery evidence')
+        recovered.append({**value, 'etag': listed[path], 'recovered_from_run': run_id})
+    print(json.dumps({'stage': 'processing-audit-recovery', 'run': run_id, 'reused': len(recovered)}), flush=True)
+    return recovered
+
+
+def scan_processing(store, records, receipt, workspace, *, persist=False, resume_run=None):
+    """Incremental classification pinned to current LIST/GET object versions."""
+    prefix = f"reader-index/gc/document-reset/{receipt['reset_id']}/document-control"
+    remote = prefix + '/processing-scan.json.gz'
+    local = workspace / 'processing-scan.json.gz'
+    prior = None
+    if local.is_file():
+        prior = reset.decode(local.read_bytes())
+    elif persist:
+        try:
+            prior = reset.decode(store.read_bytes(reset.ASSETS, remote))
+        except FileNotFoundError:
+            pass
+    if prior and (prior.get('version') != 1 or prior.get('kind') != 'reader-processing-scan'
+                  or prior.get('reset_id') != receipt['reset_id']):
+        raise ValueError('processing scan checkpoint identity mismatch')
+    listed = getattr(store, 'object_etags', {}).get(reset.ASSETS, {})
+    completed = {row['path']: row for row in (prior or {}).get('records', [])
+                 if row['path'] in records and row.get('etag') and row['etag'] == listed.get(row['path'])}
+    if resume_run and not prior:
+        completed.update((row['path'], row) for row in recover_processing_audit(store, records, receipt, resume_run))
+    reused = len(completed)
+    started, last_save = time.monotonic(), [0.0]
+    def save(force=False):
+        now = time.monotonic()
+        if not force and now - last_save[0] < 60:
+            return
+        payload = {'version': 1, 'kind': 'reader-processing-scan', 'reset_id': receipt['reset_id'],
+                   'total': len(records), 'read': len(completed), 'reused': reused,
+                   'records': list(completed.values()), 'updated_at': datetime.now(timezone.utc).isoformat()}
+        raw = gzip.compress(reset.encode(payload), compresslevel=1, mtime=0)
+        pending = local.with_suffix('.pending')
+        pending.write_bytes(raw)
+        pending.replace(local)
+        if persist:
+            store.put_bytes(reset.ASSETS, remote, raw)
+        last_save[0] = now
+        print(json.dumps({'stage': 'processing-scan', 'read': len(completed), 'total': len(records),
+                          'reused': reused, 'seconds': round(now - started)}), flush=True)
+    def read(path):
+        reader = getattr(store, 'read_cached_bytes', store.read_bytes)
+        raw = reader(reset.ASSETS, path)
+        value = reset.decode(raw)
+        processing_record_target(value)
+        etag = getattr(store, 'read_etags', {}).get((reset.ASSETS, path))
+        if etag and listed.get(path) and etag != listed[path]:
+            raise RuntimeError('processing record changed while scanning: ' + path)
+        return {'path': path, 'etag': etag, 'sha256': reset.digest(raw), 'bytes': len(raw),
+                **{key: value.get(key) for key in ('kind', 'operation', 'run', 'status', 'resources')}}
+    try:
+        save(force=True)
+        missing = sorted(set(records) - completed.keys())
+        # ordered_reads owns at most four futures; a failure cannot leave sixty
+        # thousand queued requests running and discard successful later reads.
+        for row in reset.shared.ordered_reads(read, missing, workers=4):
+            completed[row['path']] = row
+            save()
+    finally:
+        save(force=True)
+    selected = {path for path, row in completed.items() if processing_record_target(row)}
+    audit = workspace / 'processing-retirement.jsonl.gz'
+    with gzip.open(audit, 'wt', encoding='utf-8') as output:
+        for path in sorted(selected):
+            output.write(json.dumps(completed[path], ensure_ascii=False) + '\n')
+    return selected, audit
+
+
+def control_targets(store, receipt, pointer, catalog, workspace, *, persist=False, resume_run=None):
     files = store.list_files(reset.ASSETS, ('reader-index/',))
     keep = CONTROL_KEEP | {pointer['catalog']['path'],
         f"reader-index/v3/promotions/{pointer['generation']}.json",
@@ -182,25 +297,16 @@ def control_targets(store, receipt, pointer, catalog, workspace):
     prefixes = ('reader-index/v3/', 'reader-index/pdf_ocr_progress/',
                 'reader-index/generations/', 'reader-index/snapshots/')
     targets = {path for path in files if path.startswith(prefixes) and path not in keep}
-    records = sorted(path for path in files if path.startswith('reader-index/processing/'))
-    audit = workspace / 'processing-retirement.jsonl.gz'
-    with gzip.open(audit, 'wt', encoding='utf-8') as output, ThreadPoolExecutor(max_workers=64) as pool:
-        def read(path):
-            raw = store.read_bytes(reset.ASSETS, path)
-            value = reset.decode(raw)
-            return path, raw, value, processing_record_target(value)
-        for path, raw, value, selected in pool.map(read, records):
-            if selected:
-                targets.add(path)
-                output.write(json.dumps({'path': path, 'sha256': reset.digest(raw),
-                    'bytes': len(raw), 'operation': value.get('operation'), 'run': value.get('run'),
-                    'status': value.get('status'), 'resources': value['resources']}, ensure_ascii=False) + '\n')
+    records = {path for path in files if path.startswith('reader-index/processing/')}
+    selected, audit = scan_processing(store, records, receipt, workspace, persist=persist, resume_run=resume_run)
+    targets.update(selected)
     return files, targets, audit
 
 
-def inventory_scope(store, scope, receipt, pointer, catalog, workspace):
+def inventory_scope(store, scope, receipt, pointer, catalog, workspace, *, persist=False, resume_run=None):
     if scope == 'document-control':
-        files, targets, audit = control_targets(store, receipt, pointer, catalog, workspace)
+        files, targets, audit = control_targets(store, receipt, pointer, catalog, workspace,
+                                               persist=persist, resume_run=resume_run)
         return reset.ASSETS, ('reader-index/',), files, targets, audit
     bucket, prefixes = {
         'ocr-inputs': (reset.INPUTS, ('objects/',)),
@@ -266,6 +372,7 @@ def main():
     parser.add_argument('--scope', choices=SCOPES, required=True)
     parser.add_argument('--reset-id', required=True)
     parser.add_argument('--workers', type=int, default=8)
+    parser.add_argument('--resume-scan-run', default=None)
     parser.add_argument('--apply', action='store_true')
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
@@ -295,7 +402,8 @@ def main():
         audit = None
     else:
         bucket, prefixes, files, targets, audit = inventory_scope(
-            store, args.scope, receipt, pointer, catalog, args.output.parent)
+            store, args.scope, receipt, pointer, catalog, args.output.parent,
+            persist=args.apply, resume_run=args.resume_scan_run)
     report = {'version': 1, 'kind': 'reader-document-reset-collection', 'scope': args.scope,
               'reset_id': args.reset_id, 'bucket': bucket, 'planned_objects': len(targets),
               'planned_bytes': sum(store.object_sizes.get((bucket, p), 0) for p in targets),
@@ -313,6 +421,8 @@ def main():
                           accepted_objects=prior.get('accepted_objects', 0))
     plan = saved_plan or {'scope': args.scope, 'reset_id': args.reset_id, 'bucket': bucket,
                           'prefixes': list(prefixes), 'retained': sorted(files - targets),
+                          'control_etags': {path: store.object_etags.get(bucket, {}).get(path)
+                                            for path in sorted(targets) if args.scope == 'document-control'},
                           'targets': [[path, store.object_sizes[bucket, path]] for path in sorted(targets)]}
     plan_path = args.output.with_name(args.scope + '-targets.json.gz')
     plan_path.write_bytes(gzip.compress(reset.encode(plan), mtime=0))
@@ -339,11 +449,16 @@ def main():
             (b, p), expected = item
             if store.read_bytes(b, p) != expected:
                 raise RuntimeError('retirement control changed before deletion: ' + p)
-        with ThreadPoolExecutor(max_workers=16) as pool:
+        with ThreadPoolExecutor(max_workers=4) as pool:
             list(pool.map(check, pins.items()))
         expected_controls = {p for b, p in pins if b == CCRD and p.startswith('control/')}
         if store.list_files(CCRD, ('control/',)) != expected_controls:
             raise RuntimeError('OCR control inventory changed before deletion')
+        if args.scope == 'document-control':
+            latest = store.list_files(bucket, prefixes)
+            for path, expected in plan.get('control_etags', {}).items():
+                if path in latest and (not expected or store.object_etags[bucket].get(path) != expected):
+                    raise RuntimeError('selected control changed before deletion: ' + path)
     collect(store, bucket, prefixes, files, targets, workers=args.workers, journal=report,
             barrier=barrier, checkpoint=checkpoint)
 

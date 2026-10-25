@@ -1,6 +1,7 @@
 output/
 __pycache__/
 *.pyc
+.cache/reader-gc/
 
 # Local documentation; only the repository README.md is published.
 *.[mM][dD]

@@ -16,6 +16,10 @@ on:
         description: Collect objects after all Reader producers have been paused and drained
         type: boolean
         default: false
+      resume_scan_run:
+        description: Optional completed failed document-control scan to recover unchanged records
+        type: string
+        default: ''
       grace_days:
         description: Unreferenced object and superseded catalog retention in days
         type: string
@@ -53,12 +57,21 @@ jobs:
     if: github.repository == 'anftm/pipeline'
     runs-on: ubuntu-24.04
     timeout-minutes: 350
+    env:
+      READER_GC_CACHE: .cache/reader-gc/reads.sqlite3
+      READER_GC_S3_RATE: '6'
+      READER_S3_LIST_WORKERS: '4'
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
       - run: pip install -r scripts/requirements.txt
+      - uses: actions/cache/restore@v4
+        with:
+          path: .cache/reader-gc
+          key: reader-gc-reads-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: reader-gc-reads-v1-
       - name: Verify maintenance window and collect unreferenced objects
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -72,6 +85,7 @@ jobs:
           LIMIT: ${{ inputs.limit || '0' }}
           STORAGE: ${{ inputs.storage || 's3' }}
           RESET_ID: ${{ inputs.maintenance_id }}
+          RESUME_SCAN_RUN: ${{ inputs.resume_scan_run }}
           HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
           HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
           HF_S3_NAMESPACE: vomebook
@@ -84,6 +98,7 @@ jobs:
           case "$SCOPE" in
             document-control|document-pages|ocr-inputs|djvu-pdf|ocr-library)
               args=(--scope "$SCOPE" --reset-id "$RESET_ID" --output output/gc/collection.json)
+              if [[ -n "$RESUME_SCAN_RUN" ]]; then args+=(--resume-scan-run "$RESUME_SCAN_RUN"); fi
               if [[ "$APPLY" == true ]]; then args+=(--apply); fi
               python -u scripts/reader_gc_documents.py "${args[@]}"
               exit 0
@@ -101,6 +116,11 @@ jobs:
           if [[ "$READER_ONLY" == true ]]; then args+=(--reader-only); fi
           if [[ "$SCOPE" == retired-catalog-snapshots ]]; then args+=(--retired-snapshots-only); fi
           python -u scripts/reader_gc_collect.py "${args[@]}"
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: .cache/reader-gc
+          key: reader-gc-reads-v1-${{ github.run_id }}-${{ github.run_attempt }}
       - uses: actions/upload-artifact@v7
         if: always()
         with:
