@@ -21,18 +21,6 @@
    "language": "ch",
    "source": "osd-triage-full-v1"
   },
-  "VoiceOfML/GPCREducation\u0000化学/1、農业化学/農药工业/農药工业 國外部分 下.pdf": {
-   "evidence": {
-    "script": "Cyrillic",
-    "votes": {
-     "Cyrillic": 1,
-     "Han": 1,
-     "Latin": 1
-    }
-   },
-   "language": "ru",
-   "source": "osd-triage-full-v1"
-  },
   "VoiceOfML/GPCREducation\u0000化学/2、工业化学/半导体化学/衬底制备.pdf": {
    "evidence": {
     "chars": 53595,
@@ -41,17 +29,6 @@
    },
    "language": "ch",
    "source": "text-triage-v1"
-  },
-  "VoiceOfML/GPCREducation\u0000化学/2、工业化学/热处理化学 （下册）.pdf": {
-   "evidence": {
-    "script": "Cyrillic",
-    "votes": {
-     "Cyrillic": 1,
-     "Han": 1
-    }
-   },
-   "language": "ru",
-   "source": "osd-triage-full-v1"
   },
   "VoiceOfML/GPCREducation\u0000化学/2、工业化学/英汉化学化工词汇补编 涂料部分.pdf": {
    "evidence": {
@@ -62,17 +39,6 @@
     }
    },
    "language": "en",
-   "source": "osd-triage-full-v1"
-  },
-  "VoiceOfML/GPCREducation\u0000化学/2、工业化学/钢铁化学/钢铁原材料化学分析.pdf": {
-   "evidence": {
-    "script": "Cyrillic",
-    "votes": {
-     "Cyrillic": 1,
-     "Han": 1
-    }
-   },
-   "language": "ru",
    "source": "osd-triage-full-v1"
   },
   "VoiceOfML/GPCREducation\u0000化学/化学专业基础词汇 日英汉对照.pdf": {
@@ -3767,6 +3733,6 @@
    "source": "osd+text-v1"
   }
  },
- "policy": "exact-key overrides corroborated by OSD script probes and, for CJK, by kana/Han ratios in published text",
+ "policy": "exact-key overrides; Cyrillic requires 2+ OSD votes or text corroboration, CJK requires kana/Han share",
  "version": 1
 }
