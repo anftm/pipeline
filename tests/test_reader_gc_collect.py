@@ -334,6 +334,44 @@ class ReaderGcCollectTests(unittest.TestCase):
         self.assertTrue(journals[0]['plan_sha256'])
         self.assertNotIn('objects/orphan/document.pdf', store.objects[PDF])
 
+    def test_many_batches_reuse_fence_window_and_resume_with_fresh_references(self):
+        store = Store()
+        for i in range(20):
+            store.put(PDF, f'objects/orphan/{i}.pdf', b'page')
+        reference = graph.ReferenceGraph(store)
+        scanned = reference.build()
+        fence = Mock()
+        snapshots = []
+        deleted = collector.collect(store, fence, reference, scanned, {}, apply=True, batch_size=1,
+            checkpoint=lambda value: snapshots.append(json.loads(json.dumps(value))))
+        self.assertEqual(deleted['confirmed_deleted_objects'], 20)
+        self.assertLess(fence.check.call_count, 8)
+        # An interrupted transfer can have removed some original targets. A new
+        # reference to any surviving target must veto the old saved plan.
+        old_plan = snapshots[0]
+        store.put(PDF, 'objects/orphan/1.pdf', b'page')
+        store.put(ASSETS, SIDECAR, {'v': 1, 'f': {'book': {'b': PDF, 'p': 'objects/orphan/1.pdf'}}})
+        reference = graph.ReferenceGraph(store)
+        scanned = reference.build()
+        with self.assertRaisesRegex(RuntimeError, 'no longer eligible'):
+            collector.collect(store, Mock(), reference, scanned, {}, apply=True, resume=old_plan)
+        self.assertIn('objects/orphan/1.pdf', store.objects[PDF])
+
+    def test_resuming_partial_plan_keeps_original_counts_and_verifies_missing_targets(self):
+        store = Store()
+        for i in range(3):
+            store.put(PDF, f'objects/orphan/{i}.pdf', b'page')
+        reference = graph.ReferenceGraph(store)
+        scanned = reference.build()
+        plan = collector.collect(store, Mock(), reference, scanned, {}, apply=False)
+        store.delete(PDF, ['objects/orphan/0.pdf'])
+        reference = graph.ReferenceGraph(store)
+        scanned = reference.build()
+        result = collector.collect(store, Mock(), reference, scanned, {}, apply=True, resume=plan, workers=2)
+        self.assertEqual(result['confirmed_deleted_objects'], 3)
+        self.assertEqual(result['confirmed_deleted_bytes'], 12)
+        self.assertTrue(result['deleted_bytes_complete'])
+
     def test_retirement_writes_nothing_without_a_current_acknowledgment(self):
         store = Store()
         sidecar = {'v': 1, 'f': {}}

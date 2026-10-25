@@ -20,6 +20,10 @@ on:
         description: Optional completed failed document-control scan to recover unchanged records
         type: string
         default: ''
+      resume_run:
+        description: Optional exact full-graph deletion plan; revalidate current references before resuming
+        type: string
+        default: ''
       grace_days:
         description: Unreferenced object and superseded catalog retention in days
         type: string
@@ -86,6 +90,7 @@ jobs:
           STORAGE: ${{ inputs.storage || 's3' }}
           RESET_ID: ${{ inputs.maintenance_id }}
           RESUME_SCAN_RUN: ${{ inputs.resume_scan_run }}
+          RESUME_RUN: ${{ inputs.resume_run }}
           HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
           HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
           HF_S3_NAMESPACE: vomebook
@@ -114,6 +119,7 @@ jobs:
                 --output output/gc/collection.json)
           if [[ "$APPLY" == true ]]; then args+=(--apply); fi
           if [[ "$READER_ONLY" == true ]]; then args+=(--reader-only); fi
+          if [[ -n "$RESUME_RUN" ]]; then args+=(--resume-run "$RESUME_RUN"); fi
           if [[ "$SCOPE" == retired-catalog-snapshots ]]; then args+=(--retired-snapshots-only); fi
           python -u scripts/reader_gc_collect.py "${args[@]}"
       - uses: actions/cache/save@v4

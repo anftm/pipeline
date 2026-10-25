@@ -9,6 +9,7 @@ import json
 import os
 import re
 import time
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -283,15 +284,21 @@ def collect_retired_snapshots(store, fence, catalog, *, apply=False, checkpoint=
     return result
 
 
-def verify_roots(store, reference_graph):
+def verify_roots(store, reference_graph, collected_roots=frozenset()):
+    present_roots = set()
     for bucket, files in reference_graph.files.items():
         roots = (reference_graph.list_roots(bucket) if hasattr(reference_graph, "list_roots") else
                  {p for p in store.list_files(bucket, ("",)) if graph.is_root(p, bucket)})
-        if roots != {p for p in files if graph.is_root(p, bucket)}:
+        present_roots.update((bucket, path) for path in roots)
+        expected = {p for p in files if graph.is_root(p, bucket)}
+        retired = {p for b, p in collected_roots if b == bucket}
+        if roots - retired != expected - retired:
             raise RuntimeError("root inventory changed before deletion")
 
     def recheck_root(item):
         ref, expected = item
+        if ref in collected_roots and ref not in present_roots:
+            return
         if hasattr(reference_graph, "changed"):
             changed = reference_graph.changed(ref)
             if ref in reference_graph.unreadable:
@@ -306,7 +313,8 @@ def verify_roots(store, reference_graph):
 
 
 def collect(store, fence, reference_graph, report, catalog, *, grace_days=0, limit=0,
-            batch_size=500, apply=False, checkpoint=None, reader_only=False):
+            batch_size=500, apply=False, checkpoint=None, reader_only=False,
+            workers=1, resume=None):
     if not report["graph_complete"]:
         raise RuntimeError("reference graph is incomplete; no object deletion is authorized")
     if reader_only and set(reference_graph.files) != set(graph.BUCKETS):
@@ -321,12 +329,30 @@ def collect(store, fence, reference_graph, report, catalog, *, grace_days=0, lim
     excluded = {ref for ref in eligible if reader_only and ref[0] not in graph.READER_BUCKETS}
     eligible -= excluded
     selected = sorted(eligible)[:limit] if limit else sorted(eligible)
+    if resume:
+        previous = sorted((entry['bucket'], entry['path']) for entry in resume['targets'])
+        if (resume.get('plan_sha256') != hashlib.sha256(encode(previous)).hexdigest()
+                or resume.get('reader_only') != reader_only):
+            raise ValueError('saved collection plan identity mismatch')
+        if any(ref[1] in reference_graph.files.get(ref[0], set()) and ref not in eligible for ref in previous):
+            raise RuntimeError('a saved deletion target is no longer eligible')
+        selected = previous
+    if not 1 <= workers <= 8 or not 1 <= batch_size <= 1000:
+        raise ValueError('invalid deletion worker or batch limit')
+    sizes = getattr(store, 'object_sizes', {})
+    target_sizes = {f'{bucket}:{path}': sizes.get((bucket, path)) for bucket, path in selected}
+    if resume:
+        target_sizes = {**resume.get('target_sizes', {}),
+                        **{key: value for key, value in target_sizes.items() if value is not None}}
     result = {"planned_objects": len(selected), "confirmed_deleted_objects": 0,
               "confirmed_deleted_bytes": 0, "deleted_bytes_complete": True,
               "batches": [], "applied": apply, "reader_only": reader_only,
               "excluded_other_bucket_candidates": len(excluded),
-              "targets": [{"bucket": bucket, "path": path} for bucket, path in selected],
-              "plan_sha256": hashlib.sha256(encode(selected)).hexdigest()}
+               "targets": [{"bucket": bucket, "path": path} for bucket, path in selected],
+               "target_sizes": target_sizes,
+               "plan_sha256": hashlib.sha256(encode(selected)).hexdigest()}
+    if resume:
+        result['batches'] = [dict(entry) for entry in resume.get('batches', [])]
     if not apply:
         return result
     fence.check()
@@ -334,11 +360,22 @@ def collect(store, fence, reference_graph, report, catalog, *, grace_days=0, lim
     if checkpoint:
         # Persist the exact planned targets before the first delete request.
         checkpoint(result)
+    lock = threading.Lock()
+    last_barrier = [time.monotonic()]
+    def barrier():
+        fence.check()
+        verify_roots(store, reference_graph, frozenset(selected))
+        last_barrier[0] = time.monotonic()
+    def save():
+        if checkpoint:
+            checkpoint(result)
     for bucket in graph.BUCKETS:
         paths = [path for b, path in selected if b == bucket]
-        for offset in range(0, len(paths), batch_size):
-            fence.check()
-            batch = paths[offset:offset + batch_size]
+        if not paths:
+            continue
+        barrier()
+        existing_records = {(entry['bucket'], tuple(entry['paths'])): entry for entry in result['batches']}
+        def delete_batch(batch):
             if any((bucket, p) in reference_graph.references for p in batch):
                 raise RuntimeError("referenced object entered deletion batch")
             if any(not p.startswith(graph.managed_prefixes(bucket)) and not (
@@ -346,17 +383,29 @@ def collect(store, fence, reference_graph, report, catalog, *, grace_days=0, lim
                                           or (bucket, p) in reference_graph.retired_roots))
                     for p in batch):
                 raise RuntimeError("unmanaged object entered deletion batch")
-            record = {"bucket": bucket, "paths": batch, "status": "submitted"}
-            result["batches"].append(record)
-            if checkpoint:
-                checkpoint(result)
-            store.delete(bucket, batch)
-            record["status"] = "accepted"
-            if checkpoint:
-                checkpoint(result)
-        if not paths:
-            continue
-        fence.check()
+            with lock:
+                if time.monotonic() - last_barrier[0] >= 60:
+                    barrier()
+                record = existing_records.get((bucket, tuple(batch)))
+                # Re-listing and a fresh complete graph prove which objects
+                # survived a partial delete. No historical success hides a
+                # recreated object or bypasses a new reference.
+                present = [path for path in batch if path in reference_graph.files[bucket]]
+                if record is None:
+                    record = {"bucket": bucket, "paths": batch, "status": "submitted"}
+                    result['batches'].append(record)
+                else:
+                    record['status'] = 'submitted'
+                save()
+            if present:
+                store.delete(bucket, present)
+            with lock:
+                record['status'] = 'accepted'
+                save()
+        batches = [paths[offset:offset + batch_size] for offset in range(0, len(paths), batch_size)]
+        for _ in lifecycle.ordered_reads(delete_batch, batches, workers=workers):
+            pass
+        barrier()
         remaining = store.list_files(bucket, ("",))
         retained = {p for b, p in reference_graph.references if b == bucket
                     and p in reference_graph.files[bucket]}
@@ -365,9 +414,8 @@ def collect(store, fence, reference_graph, report, catalog, *, grace_days=0, lim
         if set(paths) & remaining:
             raise RuntimeError("bucket deletion readback still contains planned objects")
         result["confirmed_deleted_objects"] += len(paths)
-        sizes = getattr(store, "object_sizes", {})
-        result["confirmed_deleted_bytes"] += sum(sizes.get((bucket, p), 0) for p in paths)
-        result["deleted_bytes_complete"] &= all((bucket, p) in sizes for p in paths)
+        result["confirmed_deleted_bytes"] += sum(target_sizes.get(f'{bucket}:{p}') or 0 for p in paths)
+        result["deleted_bytes_complete"] &= all(target_sizes.get(f'{bucket}:{p}') is not None for p in paths)
         for record in result["batches"]:
             if record["bucket"] == bucket:
                 record["status"] = "verified-deleted"
@@ -391,8 +439,11 @@ def main():
                         help="Delete only the original Reader buckets; keep every four-domain reference")
     parser.add_argument("--storage", choices=("hub", "s3"), default="hub")
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument('--workers', type=int, default=4)
+    parser.add_argument('--resume-run', default='')
     args = parser.parse_args()
-    if args.grace_days < 0 or args.limit < 0:
+    if (args.grace_days < 0 or args.limit < 0 or not 1 <= args.workers <= 8
+            or args.resume_run and not re.fullmatch(r'[1-9][0-9]*', args.resume_run)):
         parser.error("grace and limit must be non-negative")
     if args.apply:
         assert_collector_context()
@@ -413,10 +464,13 @@ def main():
     def save():
         args.output.write_bytes(encode(report))
     run = os.environ.get("GITHUB_RUN_ID", "local")
-    def checkpoint(result):
+    last_checkpoint = [0.0]
+    def checkpoint(result, force=False):
         report["collection"] = result
         save()
-        store.put_bytes(ASSETS, f"reader-index/gc/{run}/collection.json", encode(result))
+        if force or time.monotonic() - last_checkpoint[0] >= 30:
+            store.put_bytes(ASSETS, f"reader-index/gc/{run}/collection.json", encode(result))
+            last_checkpoint[0] = time.monotonic()
     last_progress = 0
     def progress(stage, **counts):
         nonlocal last_progress
@@ -455,9 +509,13 @@ def main():
         save()
         progress("deletion-preflight", graph_complete=scanned["graph_complete"],
                  blockers=len(scanned["blockers"]))
+        resume = None
+        if args.resume_run:
+            resume = json.loads(store.read_bytes(ASSETS, f'reader-index/gc/{args.resume_run}/collection.json'))
         report["collection"] = collect(store, fence, reference_graph, scanned, catalog,
             grace_days=args.grace_days, limit=args.limit, apply=args.apply,
-            checkpoint=checkpoint if args.apply else None, reader_only=args.reader_only)
+            checkpoint=checkpoint if args.apply else None, reader_only=args.reader_only,
+            workers=args.workers, resume=resume)
         report["complete"] = True
         print(json.dumps({"catalog": report["catalog"], "collection": {
             k: v for k, v in report["collection"].items() if k != "batches"}}), flush=True)
@@ -467,6 +525,8 @@ def main():
     finally:
         report["finished_at"] = lifecycle.now_iso()
         save()
+        if args.apply and report.get('collection'):
+            checkpoint(report['collection'], force=True)
 
 
 if __name__ == "__main__":
