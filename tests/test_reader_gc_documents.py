@@ -59,3 +59,17 @@ class DocumentCollectionTests(unittest.TestCase):
             gc.collect(store, reset.INPUTS, ('objects/',), store.paths.copy(), store.paths.copy(),
                 workers=1, journal={}, barrier=fail, checkpoint=lambda value: None)
         self.assertEqual(store.deleted, [])
+
+    def test_resumed_plan_keeps_original_total_and_skips_accepted_batches(self):
+        paths = {'objects/' + str(i) for i in range(501)}
+        ordered = sorted(paths)
+        first = ordered[:500]
+        identity = reset.digest(reset.encode([reset.INPUTS, first]))
+        store = Store(paths)
+        store.paths.difference_update(first)
+        result = gc.collect(store, reset.INPUTS, ('objects/',), paths, paths,
+            workers=1, journal={'accepted_objects': 500, 'accepted_batches': [identity]},
+            barrier=lambda: None, checkpoint=lambda value: None)
+        self.assertEqual(store.deleted, ordered[500:])
+        self.assertEqual(result['accepted_objects'], 501)
+        self.assertEqual(result['confirmed_deleted_objects'], 501)

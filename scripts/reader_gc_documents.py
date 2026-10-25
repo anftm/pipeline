@@ -19,6 +19,7 @@ from pathlib import Path
 import re
 import threading
 import time
+from datetime import datetime, timezone
 
 try:
     from . import reader_document_reset as reset, ccrd_lifecycle
@@ -123,7 +124,7 @@ def preflight(store, reset_id, client):
     return receipt, pinned, pointer, catalog
 
 
-def djvu_targets(receipt):
+def djvu_targets(receipt, files=()):
     targets = set()
     for entry in receipt['djvu_derivatives']:
         if not reset.is_djvu(entry):
@@ -134,6 +135,12 @@ def djvu_targets(receipt):
                     r'derived/[A-Za-z0-9._-]+/[0-9a-f]{32}/(?:document\.pdf|derived-manifest\.json)', path):
                 raise ValueError('invalid DJVU derivative path')
             targets.add(path)
+    # Some v3 primary copies use the derived PDF SHA in objects/. They are the
+    # same retired derivative, not the original upstream PDF collection.
+    hashes = {entry.get('derived_sha256') for entry in receipt['djvu_derivatives']}
+    for path in files:
+        if re.fullmatch(reset.OBJECT + r'document\.pdf', path) and path.split('/')[2] in hashes:
+            targets.add(path)
     return targets
 
 
@@ -143,7 +150,7 @@ def classify(scope, bucket, path, receipt):
     if scope == 'document-pages':
         return bucket == reset.PAGES and bool(reset.PAGE_OUTPUT.fullmatch(path))
     if scope == 'djvu-pdf':
-        return bucket == reset.PAGES and path in djvu_targets(receipt)
+        return bucket == reset.PAGES and path in djvu_targets(receipt, (path,))
     if scope == 'ocr-library':
         return bucket == CCRD and bool(re.fullmatch(
             r'(?:indexes/ocr/[0-9a-f]{64}/OCR\.sqlite3|releases/ocr-[0-9a-f]{64}/manifest\.json|'
@@ -198,12 +205,12 @@ def inventory_scope(store, scope, receipt, pointer, catalog, workspace):
     bucket, prefixes = {
         'ocr-inputs': (reset.INPUTS, ('objects/',)),
         'document-pages': (reset.PAGES, ('objects/',)),
-        'djvu-pdf': (reset.PAGES, ('derived/',)),
+        'djvu-pdf': (reset.PAGES, ('derived/', 'objects/')),
         'ocr-library': (CCRD, ('text/objects/', 'text/exports/', 'indexes/ocr/', 'releases/ocr-')),
     }[scope]
     files = store.list_files(bucket, prefixes)
     if scope == 'djvu-pdf':
-        targets = files & djvu_targets(receipt)
+        targets = files & djvu_targets(receipt, files)
     else:
         targets = {path for path in files if classify(scope, bucket, path, receipt)}
     if scope in {'ocr-inputs', 'ocr-library'} and files != targets:
@@ -216,6 +223,9 @@ def collect(store, bucket, prefixes, files, targets, *, workers, journal, barrie
     paths = sorted(targets)
     chunks = [paths[i:i + 500] for i in range(0, len(paths), 500)]
     accepted = set(journal.get('accepted_batches', []))
+    batch_sizes = {reset.digest(reset.encode([bucket, batch])): len(batch) for batch in chunks}
+    if not accepted <= set(batch_sizes):
+        raise ValueError('collection journal belongs to a different exact plan')
     lock = threading.Lock()
     last_barrier = [time.monotonic()]
     def execute(index):
@@ -231,7 +241,7 @@ def collect(store, bucket, prefixes, files, targets, *, workers, journal, barrie
         with lock:
             accepted.add(identity)
             journal['accepted_batches'] = sorted(accepted)
-            journal['accepted_objects'] = journal.get('accepted_objects', 0) + len(batch)
+            journal['accepted_objects'] = sum(batch_sizes[key] for key in accepted)
             checkpoint(journal)
     barrier()
     with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -269,18 +279,46 @@ def main():
     fence.check()
     with httpx.Client(timeout=120, follow_redirects=True) as client:
         receipt, pins, pointer, catalog = preflight(store, args.reset_id, client)
-    bucket, prefixes, files, targets, audit = inventory_scope(
-        store, args.scope, receipt, pointer, catalog, args.output.parent)
+    prefix = f'reader-index/gc/document-reset/{args.reset_id}/{args.scope}'
+    try:
+        saved_plan = reset.decode(store.read_bytes(reset.ASSETS, prefix + '/targets.json.gz'))
+    except FileNotFoundError:
+        saved_plan = None
+    if saved_plan:
+        if saved_plan.get('scope') != args.scope or saved_plan.get('reset_id') != args.reset_id:
+            raise ValueError('saved collection scope mismatch')
+        bucket, prefixes = saved_plan['bucket'], tuple(saved_plan['prefixes'])
+        targets = {row[0] for row in saved_plan['targets']}
+        files = targets | set(saved_plan['retained'])
+        for path, size in saved_plan['targets']:
+            store.object_sizes[bucket, path] = size
+        audit = None
+    else:
+        bucket, prefixes, files, targets, audit = inventory_scope(
+            store, args.scope, receipt, pointer, catalog, args.output.parent)
     report = {'version': 1, 'kind': 'reader-document-reset-collection', 'scope': args.scope,
               'reset_id': args.reset_id, 'bucket': bucket, 'planned_objects': len(targets),
               'planned_bytes': sum(store.object_sizes.get((bucket, p), 0) for p in targets),
               'plan_sha256': reset.digest(reset.encode(sorted(targets))), 'applied': args.apply,
               'complete': False, 'accepted_batches': [], 'accepted_objects': 0}
+    if saved_plan:
+        try:
+            prior = reset.decode(store.read_bytes(reset.ASSETS, prefix + '/collection.json'))
+        except FileNotFoundError:
+            prior = None
+        if prior:
+            if prior['plan_sha256'] != report['plan_sha256']:
+                raise ValueError('saved deletion journal checksum mismatch')
+            report.update(accepted_batches=prior.get('accepted_batches', []),
+                          accepted_objects=prior.get('accepted_objects', 0))
+    plan = saved_plan or {'scope': args.scope, 'reset_id': args.reset_id, 'bucket': bucket,
+                          'prefixes': list(prefixes), 'retained': sorted(files - targets),
+                          'targets': [[path, store.object_sizes[bucket, path]] for path in sorted(targets)]}
     plan_path = args.output.with_name(args.scope + '-targets.json.gz')
-    plan_path.write_bytes(gzip.compress(reset.encode(sorted(targets)), mtime=0))
-    prefix = f'reader-index/gc/document-reset/{args.reset_id}/{args.scope}'
+    plan_path.write_bytes(gzip.compress(reset.encode(plan), mtime=0))
     last_save = [0.0]
     def checkpoint(value):
+        value['updated_at'] = datetime.now(timezone.utc).isoformat()
         temporary = args.output.with_suffix('.pending')
         temporary.write_bytes(reset.encode(value))
         temporary.replace(args.output)
@@ -291,7 +329,8 @@ def main():
     checkpoint(report)
     if not args.apply:
         return
-    store.put_bytes(reset.ASSETS, prefix + '/targets.json.gz', plan_path.read_bytes())
+    if not saved_plan:
+        store.put_bytes(reset.ASSETS, prefix + '/targets.json.gz', plan_path.read_bytes())
     if audit:
         store.put_bytes(reset.ASSETS, prefix + '/processing-retirement.jsonl.gz', audit.read_bytes())
     def barrier():
