@@ -141,19 +141,23 @@ jobs:
         with:
           python-version: '3.11'
       - run: pip install -r scripts/requirements.txt
-      - name: Coalesce queued automatic OCR runs
+      - name: Coalesce automatic OCR runs to a single flight
         id: coalesce
         if: github.event_name != 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          newer=$(gh api --paginate \
+          # One publish at a time. A docker Space reload takes 20-40 minutes, so
+          # every extra queued run would only watch the same loader. Any run
+          # that starts while an older one is still active skips: the active
+          # run discovers work when it starts and will publish the latest state.
+          others=$(gh api --paginate \
             "repos/$GITHUB_REPOSITORY/actions/workflows/publish-ccrd-ocr.yml/runs?per_page=100" \
-            --jq "[.workflow_runs[] | select(.id > $GITHUB_RUN_ID and (.status == \"pending\" or .status == \"queued\" or .status == \"in_progress\" or .status == \"waiting\"))] | length" \
+            --jq "[.workflow_runs[] | select(.id != $GITHUB_RUN_ID and (.status == \"pending\" or .status == \"queued\" or .status == \"in_progress\" or .status == \"waiting\" or .status == \"requested\"))] | length" \
             | awk '{total += $1} END {print total + 0}')
-          if [ "$newer" -gt 0 ]; then
+          if [ "$others" -gt 0 ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "::notice::coalescing into a newer queued OCR run ($newer newer active/queued); this run does no work"
+            echo "::notice::another OCR publish is active ($others); folding this run into it"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
