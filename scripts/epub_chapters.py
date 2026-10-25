@@ -249,6 +249,8 @@ def bundle_toc(entries: list[dict], records: list[dict]) -> list[dict]:
             # Keep a usable chapter destination when the source TOC points at
             # an anchor omitted by the source document or its sanitizer.
             fragment = ""
+        if root is not None:
+            fragment = usable_toc_fragment(root, fragment, title)
         toc.append({"title": title, "chapter": record["index"],
                     "fragment": fragment, "depth": entry["depth"]})
     if all(_cover_like(next((r for r in records if r["index"] == item["chapter"]), {}))
@@ -260,6 +262,122 @@ def bundle_toc(entries: list[dict], records: list[dict]) -> list[dict]:
         if rebuilt:
             return rebuilt
     return toc
+
+
+def _normalized_label(value: str) -> str:
+    return re.sub(r"[\s\u00a0]+", "", str(value or "")).casefold()
+
+
+def _heading_node(root, fragment: str, title: str):
+    """Find the heading a navigation label names, ignoring the source anchor.
+
+    Some source packages point several navigation entries at the same in-page
+    footnote anchor (duokan "note1"/"footnote1"), or at an anchor whose text is not
+    the label. Trusting that anchor sends readers to the wrong poem or section, so a
+    label that matches a heading in this document wins over a shared/generic anchor.
+    """
+    label = _normalized_label(title)
+    if len(label) < 2:
+        return None
+    candidates = []
+    for node in root.iter():
+        if _local_name(node) not in {"h1", "h2", "h3", "h4", "h5", "h6", "p", "div"}:
+            continue
+        text = _normalized_label(_node_text(node))
+        if not text or len(text) > 120:
+            continue
+        if text == label:
+            candidates.append((0, node))
+        elif text.startswith(label) or label.startswith(text[: len(label)]):
+            candidates.append((1, node))
+        elif label in text:
+            candidates.append((2, node))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0])
+    return candidates[0][1]
+
+
+def _chapter_headings(clean: str) -> list[str]:
+    """Normalized heading labels of one sanitized chapter, in document order.
+
+    Sanitized MOBI/EPUB documents keep the `html:` prefix and often put the visible title in
+    the `title` attribute of an empty heading element, so both shapes have to be read.
+    """
+    labels = []
+    # Self-closing headings (<h1 title="..." />) are common in converted books, so match the
+    # opening tag and treat the element as empty unless a body follows before the next tag.
+    for match in re.finditer(r"<(?:html:)?h([1-6])\b([^>]*?)(?:/>|>(.*?)</(?:html:)?h\1>)",
+                             clean, re.I | re.S):
+        text = _normalized_label(re.sub(r"<[^>]+>", "", match.group(3) or ""))
+        if not text:
+            attribute = re.search(r'\btitle\s*=\s*"([^"]*)"', match.group(2))
+            text = _normalized_label(attribute.group(1)) if attribute else ""
+        if text:
+            labels.append(text)
+    return labels
+
+
+def _label_matches(label: str, headings: list[str]) -> bool:
+    if not label:
+        return False
+    for heading in headings:
+        if heading == label or heading.startswith(label) or label.startswith(heading):
+            return True
+    return False
+
+
+def relocate_toc_entries(toc_entries: list[dict], records: list[dict]) -> list[dict]:
+    """Point navigation entries at the chapter that actually contains their label.
+
+    Some source packages carry a navigation anchor that names a footnote and lands in the
+    wrong physical document (duokan MOBI conversions do this for every entry), so a label
+    that is absent from its assigned chapter is looked up in the chapters that readably own
+    that heading. Entries whose label cannot be found keep their source destination.
+    """
+    headings = {}
+    for record in records:
+        headings[record["index"]] = _chapter_headings(record.get("clean") or "")
+    located = []
+    for entry in toc_entries:
+        label = _normalized_label(entry["title"])
+        record = next((item for item in records if item["source_path"] == entry["source_path"]), None)
+        if record is not None and _label_matches(label, headings.get(record["index"], [])):
+            located.append(dict(entry))
+            continue
+        match = next((item for item in records
+                      if _label_matches(label, headings.get(item["index"], []))), None)
+        if match is None:
+            located.append(dict(entry))
+            continue
+        relocated = dict(entry)
+        relocated["source_path"] = match["source_path"]
+        relocated["fragment"] = ""
+        located.append(relocated)
+    return located
+
+
+def usable_toc_fragment(root, fragment: str, title: str) -> str:
+    """Return the anchor the reader should land on for this navigation label.
+
+    A label that names a heading in this document is always preferred: sharing an anchor
+    between entries (or pointing at a footnote/generic anchor) is what makes a directory
+    jump land on the wrong verse. Without a matching heading the source anchor stays, and a
+    missing anchor falls back to the chapter start.
+    """
+    node = _heading_node(root, fragment, title)
+    if node is None:
+        if not fragment:
+            return ""
+        return fragment if any(node.get("id") == fragment or node.get("name") == fragment
+                               for node in root.iter()) else ""
+    for key in ("id", "name"):
+        value = str(node.get(key) or "").strip()
+        if value:
+            return value
+    # A heading without an id cannot be targeted; keep the source anchor only if it exists.
+    return fragment if any(node.get("id") == fragment or node.get("name") == fragment
+                           for node in root.iter()) else ""
 
 
 def link_inline_toc(clean: str, record: dict, chapter_paths: dict[str, str],
@@ -458,7 +576,7 @@ def build_bundle(epub: Path, output: Path, *, fallback: str | None = None,
             resource_usage.update(resources)
         if not chapter_records:
             raise ValueError("EPUB spine has no readable chapters")
-        toc = bundle_toc(toc_entries, chapter_records)
+        toc = bundle_toc(relocate_toc_entries(toc_entries, chapter_records), chapter_records)
         # Resolve links only after every readable spine item has its final name.
         # Original filenames cannot be used after chapters move into the bundle.
         chapter_paths = {}

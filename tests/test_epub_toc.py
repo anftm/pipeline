@@ -103,9 +103,64 @@ class EpubTocTests(unittest.TestCase):
         result = self.build('<ncx><navMap><navPoint><navLabel><text>Unknown Text</text></navLabel><content src="book.xhtml#missing"/></navPoint></navMap></ncx>')
         self.assertEqual(result['toc'][0]['title'], '章节 1')
 
-    def test_missing_navigation_fragment_falls_back_to_chapter_start(self):
+    def test_missing_navigation_fragment_uses_the_matching_heading(self):
+        # The source anchor is gone, but the label names a heading in this chapter, so the
+        # directory can still land on it instead of the chapter start.
         result = self.build('<ncx><navMap><navPoint><navLabel><text>第一卷</text></navLabel><content src="book.xhtml#missing"/></navPoint></navMap></ncx>')
-        self.assertEqual(result['toc'], [dict(title='第一卷', chapter=1, fragment='', depth=0)])
+        self.assertEqual(result['toc'], [dict(title='第一卷', chapter=1, fragment='卷一', depth=0)])
+
+    def test_unresolvable_navigation_fragment_falls_back_to_chapter_start(self):
+        result = self.build('<ncx><navMap><navPoint><navLabel><text>不相干的标题</text></navLabel><content src="book.xhtml#missing"/></navPoint></navMap></ncx>')
+        self.assertEqual(result['toc'], [dict(title='不相干的标题', chapter=1, fragment='', depth=0)])
+
+    def test_shared_footnote_anchor_is_replaced_by_the_named_heading(self):
+        # Several entries pointing at one in-page footnote anchor (duokan "note1") must land
+        # on their own heading, not on the first verse that owns that anchor.
+        navigation = ('<ncx><navMap>'
+                      '<navPoint><navLabel><text>一月三日</text></navLabel><content src="book.xhtml#day"/></navPoint>'
+                      '<navPoint><navLabel><text>第二卷</text></navLabel><content src="book.xhtml#day"/></navPoint>'
+                      '</navMap></ncx>')
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        source = root / 'book.epub'
+        with zipfile.ZipFile(source, 'w') as archive:
+            archive.writestr('META-INF/container.xml', '<container><rootfiles><rootfile full-path="O/content.opf"/></rootfiles></container>')
+            archive.writestr('O/content.opf', '<package><manifest><item id="toc" href="toc.ncx" media-type="application/x-dtbncx+xml"/><item id="a" href="book.xhtml" media-type="application/xhtml+xml"/></manifest><spine toc="toc"><itemref idref="a"/></spine></package>')
+            archive.writestr('O/toc.ncx', navigation)
+            archive.writestr('O/book.xhtml', '<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+                                            '<h1 id="day">一月三日</h1><p>正文</p>'
+                                            '<h1 id="two">第二卷</h1><p>后文</p></body></html>')
+        result = epub_chapters.build_bundle(source, root / 'bundle')
+        self.assertEqual(result['toc'], [
+            dict(title='一月三日', chapter=1, fragment='day', depth=0),
+            dict(title='第二卷', chapter=1, fragment='two', depth=0)])
+
+    def test_navigation_entry_moves_to_the_chapter_that_owns_its_label(self):
+        # A converted MOBI can point every entry at one footnote anchor in the wrong
+        # document; the label must decide the destination.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / 'book.epub'
+            navigation = ('<ncx><navMap>'
+                          '<navPoint><navLabel><text>第二首</text></navLabel><content src="one.xhtml#note1"/></navPoint>'
+                          '<navPoint><navLabel><text>第一首</text></navLabel><content src="one.xhtml#note1"/></navPoint>'
+                          '</navMap></ncx>')
+            with zipfile.ZipFile(source, 'w') as archive:
+                archive.writestr('META-INF/container.xml', '<container><rootfiles><rootfile full-path="content.opf"/></rootfiles></container>')
+                archive.writestr('content.opf', '<package><manifest><item id="toc" href="toc.ncx" media-type="application/x-dtbncx+xml"/><item id="a" href="one.xhtml" media-type="application/xhtml+xml"/><item id="b" href="two.xhtml" media-type="application/xhtml+xml"/></manifest><spine toc="toc"><itemref idref="a"/><itemref idref="b"/></spine></package>')
+                archive.writestr('toc.ncx', navigation)
+                archive.writestr('one.xhtml', '<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+                                              '<h1 id="note1">第一首</h1><p>甲</p></body></html>')
+                archive.writestr('two.xhtml', '<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+                                              '<h1 title="第二首" id="t2"></h1><p>乙</p></body></html>')
+            result = epub_chapters.build_bundle(source, root / 'bundle')
+            self.assertEqual([(item['title'], item['chapter']) for item in result['toc']],
+                             [('第二首', 2), ('第一首', 1)])
+
+    def test_self_closing_heading_title_is_read(self):
+        self.assertEqual(epub_chapters._chapter_headings('<html:body><html:h1 title="第一首" id="a" />'
+                                                         '<html:p>正文</html:p></html:body>'), ['第一首'])
 
     def test_manifest_rejects_bad_navigation_target(self):
         result = self.build('<ncx><navMap/></ncx>')
