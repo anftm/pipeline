@@ -1129,6 +1129,38 @@ def reuse_recognized_pages(old, entry, pages):
         return {}
 
 
+def reuse_progress_pages(previous, entry, pages):
+    """Reuse already-recognised pages after a profile bump.
+
+    A profile change gives the book a new generation, but recognition output
+    for an unchanged page image is still valid. Without this, every profile
+    bump silently discards complete OCR and the book is reported as
+    "pages incomplete" even though nothing failed.
+    """
+    saved_pages = previous.get("pages") if isinstance(previous, dict) else None
+    if not isinstance(saved_pages, dict) or not saved_pages:
+        return {}
+    saved = {}
+    for page in pages:
+        if page.get("source") != "ocr":
+            continue
+        prior = saved_pages.get(str(page["p"]))
+        if not isinstance(prior, dict):
+            continue
+        if (page_meta(prior, "i").get("sha256") != page_meta(page, "i").get("sha256")
+                or page_meta(prior, "i").get("bytes") != page_meta(page, "i").get("bytes")):
+            continue
+        output = {**page, **{field: prior[field] for field in
+                             ("o", "os", "ob", "text", "text_spans", "layout", "chars")
+                             if field in prior}}
+        try:
+            pdf_ocr.validate_ocr_object_path(output["o"], f"page-{page['p']:06d}.json.gz")
+        except (KeyError, TypeError, ValueError):
+            continue
+        saved[str(page["p"])] = output
+    return saved
+
+
 def plan_images(rendered, current, progress, limit=20, target=500, overrides=None,
                 retry_failed_only=False):
     if limit < 1 or target < 1:
@@ -1183,8 +1215,11 @@ def plan_images(rendered, current, progress, limit=20, target=500, overrides=Non
             continue
         generation = generation_for(entry)
         previous = progress.get(key, {})
-        saved = previous.get("pages", {}) if previous.get("generation") == generation else reuse_recognized_pages(
-            old, entry, manifest["pages"])
+        if previous.get("generation") == generation:
+            saved = previous.get("pages", {})
+        else:
+            saved = (reuse_progress_pages(previous, entry, manifest["pages"])
+                     or reuse_recognized_pages(old, entry, manifest["pages"]))
         book = {**entry, "pages": manifest["pages"], "saved": saved}
         books.append(book)
         pending = [p for p in manifest["pages"] if p["source"] == "ocr" and str(p["p"]) not in saved]
