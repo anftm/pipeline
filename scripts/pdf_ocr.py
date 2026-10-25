@@ -241,7 +241,7 @@ def valid_published_profile(profile: str) -> bool:
         r"(?:-backend-(?:paddle-onnxruntime|rapidocr-onnxruntime|ndlocr-onnxruntime))?"
         r"(?:-models-det6(?:small|medium)-rec[56](?:small|medium|mobile)-rapid310)?"
         r"(?:-horizontal-crops-v1)?"
-        r"(?:-models-ndl202604-[0-9a-f]{12}-(?:adapter[1234]|adapter5-segmented|adapter6-folios-headings))?"
+        r"(?:-models-ndl202604-[0-9a-f]{12}-(?:adapter[1234]|adapter5-segmented|adapter6-folios-headings|adapter7-long-dash-pixels|adapter8-faint-dashes-sections|adapter9-edge-dashes-sections|adapter10-spaced-sections|adapter11-space-boundaries))?"
         r"(?:-rev-[a-z0-9._-]+)?"
         r"-dpi-[0-9]+-webp-[0-9]+-[0-9]+"
         r"-native-[0-9]+(?:\.[0-9]+)?-[0-9]+(?:\.[0-9]+)?"

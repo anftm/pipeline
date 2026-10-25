@@ -223,6 +223,17 @@ def soft_boundary(previous, current, group, mode):
 
 def inline_boundary(previous, current, mode, width, height):
     if mode.startswith("vertical"):
+        proof=current.get('segmentation',{})
+        before=previous.get('segmentation',{})
+        index=current.get('segmentation_part')
+        if (proof.get('profile')=='vertical-blank-sections-v2-title-spaces' and proof.get('accepted')
+                and before==proof and type(index) is int and index>0
+                and previous.get('segmentation_part')==index-1 and index<len(proof.get('parts',[]))
+                and proof['parts'][index].get('separator_before')=='　'):
+            a,b=previous['b'],current['b']
+            column_width=min(a[2]-a[0],b[2]-b[0])
+            if (abs(a[0]-b[0])<.25*column_width and 0<b[1]-a[3]<1.6*column_width*width/height):
+                return '　'
         return None
     a, b = previous["b"], current["b"]
     overlap = min(a[3], b[3]) - max(a[1], b[1])
@@ -317,5 +328,19 @@ def restore_coordinates(payload, clockwise):
                 block["q"] = [list(map_point_back(x, y, clockwise)) for x, y in block["q"]]
     for span in payload["text_spans"]:
         span["box"] = map_box_back(span["box"], clockwise)
+    for table in payload['layout'].get('tables', []):
+        # Logical row/column numbers stay in reading order. Axes are qualified
+        # by their rotation; cells and polygons map to original page pixels.
+        table['grid_rotation_clockwise'] = clockwise
+        table['grid_box'] = list(table['box'])
+        table['box'] = map_box_back(table['box'], clockwise)
+        for cell in table['cells']:
+            cell['box'] = map_box_back(cell['box'], clockwise)
+            if cell.get('dot_leader'):
+                cell['dot_leader']['boxes']=[map_box_back(box,clockwise) for box in cell['dot_leader']['boxes']]
+        for edge in table.get('review', []):
+            if 'segments' in edge:
+                edge['segments'] = [[*map_point_back(x0,y0,clockwise),*map_point_back(x1,y1,clockwise)]
+                                    for x0,y0,x1,y1 in edge['segments']]
     payload["layout"]["rotation_clockwise"] = clockwise
     return payload

@@ -1102,7 +1102,7 @@ def recognition_identity(entry, options):
                'script_evidence': ocr_script_evidence.PROFILE,
                'language_policy': ocr_quality.ROUTING_PROFILE,
                'mixed_native': 'native-raster-text-v3-rule-evidence',
-               'tables': 'ruled-table-geometry-v2-cell-offsets-diagonal-header-crops-v1',
+               'tables': 'ruled-table-geometry-v3-sparse-rows-rotated-diagonal-header-crops-v1-sparse-cell-pixels-v2',
               'language_routing': entry.get('language_source') or pdf_ocr.language_source(entry)}
     digest = hashlib.sha256(json.dumps(recipe, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:16]
     # Recognition language/model belongs to the OCR worker. A language change
@@ -1407,17 +1407,21 @@ def recognize_task(task, bundle, adopt_existing=False):
                     language = evidence['language']
                     evidence = ocr_script_evidence.corroborate(png, evidence, blocks)
                 table = None
-                if language in {'ch', 'chinese_cht'} and not degenerate and not rotation and not page.get('native_components'):
+                if language in {'ch', 'chinese_cht'} and not degenerate and not page.get('native_components'):
                     try:
-                        from . import ocr_table_geometry, ocr_diagonal_header
+                        from . import ocr_table_geometry, ocr_diagonal_header, ocr_sparse_cells
                     except ImportError:
-                        import ocr_table_geometry, ocr_diagonal_header
+                        import ocr_table_geometry, ocr_diagonal_header, ocr_sparse_cells
                     with Image.open(png) as image:
                         table = ocr_table_geometry.detect(image, blocks)
                         if table:
                             blocks, table, table_evidence = ocr_diagonal_header.recognize(image, table, blocks, pdf_ocr, language, backend)
                             if table_evidence:
                                 models.setdefault('diagnostics', {})['table_headers'] = table_evidence
+                            if table:
+                                blocks,table,cell_evidence=ocr_sparse_cells.recognize(image,table,blocks,pdf_ocr,language,backend)
+                                if cell_evidence:
+                                    models.setdefault('diagnostics',{})['table_cells']=cell_evidence
                 payload = pdf_ocr.page_payload(page["p"], page["width"], page["height"], blocks, "ocr")
                 if page.get('native_rejection'):
                     payload['native_rejection'] = page['native_rejection']

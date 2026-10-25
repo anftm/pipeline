@@ -84,3 +84,19 @@ class ScriptEvidenceTests(unittest.TestCase):
             row = result['independent_script']['regions'][0]
             self.assertEqual(row['primary'], blocks[0]['t'])
             self.assertIn('TimeoutExpired', row['error'])
+
+    def test_three_short_table_headers_keep_the_existing_character_threshold(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp)
+            (root/'chi_sim.traineddata').write_bytes(b'fixture-model')
+            image=root/'page.png';Image.new('L',(900,600),255).save(image)
+            blocks=[{'t':t,'b':[.05+i*.3,.1,.29+i*.3,.2]} for i,t in enumerate(
+                ['原子量以氧单位计','最常见的原子价','化整数后数值'])]
+            original={'language':'ch','planned_language':'ch','source':'page-image','scripts':[]}
+            def recognize(command,**kwargs):
+                index=int(Path(command[1]).stem)
+                return SimpleNamespace(returncode=0,stderr='',stdout='level\ttext\n5\t'+blocks[index]['t']+'\n')
+            with patch.dict('os.environ',{'OCR_SCRIPT_MODEL_DIR':temp}),patch.object(evidence.subprocess,'run',side_effect=recognize):
+                result=evidence.corroborate(image,original,blocks)
+            self.assertTrue(result['independent_script']['corroborated'])
+            self.assertEqual(len(result['independent_script']['regions']),3)

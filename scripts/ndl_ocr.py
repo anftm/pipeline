@@ -16,7 +16,7 @@ import tempfile
 import time
 
 REVISION = 'd001dad2013ceabb5736ff8d637474e443eb73c2'
-PROFILE = 'ndl202604-' + REVISION[:12] + '-adapter6-folios-headings'
+PROFILE = 'ndl202604-' + REVISION[:12] + '-adapter11-space-boundaries'
 ASSETS = {
     'det': ('model/deim-s-1024x1024.onnx', 'c156ce0c4e704bc3bf7e4016d0a87b949cffa8b3724f4b4cc696b8284c3c7373'),
     'rec': ('model/parseq-ndl-24x384-50-tiny-300epoch-tegaki3-r8data-202604.onnx',
@@ -319,12 +319,36 @@ class Engine:
                                   'detector_class': line['class'], 'detector_confidence': line['confidence'],
                                   'recognizer': selected['model'], 'segmentation': proof})
                 return {'segmented_blocks': parts}
+            try:
+                from . import ocr_long_dash
+            except ImportError:
+                import ocr_long_dash
+            original_crop=image[y0:y1,x0:x1]
+            parts,section_evidence=ocr_long_dash.split_sections(original_crop,text,self.read_line,
+                                                               inline_spaces=line['class']!=10)
+            section_meta=({'section':sum((x0+x1)/2>cut for cut in cuts),
+                           'section_boundaries':[cut/width for cut in cuts]} if cuts else {})
+            if parts:
+                segmented=[]
+                for part_index,part in enumerate(parts):
+                    a,b,c,d=part['crop_box']
+                    selected=max(part['attempts'],key=lambda r:r['confidence'])
+                    content,dash_evidence=ocr_long_dash.recognize(original_crop[b:d,a:c],part['text'],self.read_line)
+                    segmented.append({'t':content,'b':[(x0+a)/width,(y0+b)/height,(x0+c)/width,(y0+d)/height],
+                        'c':round(min(r['confidence'] for r in part['attempts']),4),'s':'ocr',
+                        'detector_confidence':line['confidence'],'detector_class':line['class'],
+                        'recognizer':selected['model'],'segmentation':section_evidence,
+                        'segmentation_part':part_index,**section_meta,
+                        **({'long_dash':dash_evidence} if dash_evidence else {})})
+                return {'segmented_blocks':segmented}
+            text, dash_evidence = ocr_long_dash.recognize(original_crop,text,self.read_line)
             return {'t': text, 'b': [x0 / width, y0 / height, x1 / width, y1 / height],
                     'c': round(confidence, 4), 's': 'ocr', 'detector_confidence': line['confidence'],
                     'detector_class': line['class'], 'recognizer': model,
                     **({'alternatives': alternatives} if alternatives else {}),
-                    **({'section': sum((x0 + x1) / 2 > cut for cut in cuts),
-                        'section_boundaries': [cut / width for cut in cuts]} if cuts else {})}
+                    **({'long_dash':dash_evidence} if dash_evidence else {}),
+                    **({'section_check':section_evidence} if section_evidence else {}),
+                    **section_meta}
         with ThreadPoolExecutor(max_workers=2) as pool:
             results = list(pool.map(recognize_line, lines))
         blocks = [block for result in results for block in result.get('segmented_blocks', [result])]

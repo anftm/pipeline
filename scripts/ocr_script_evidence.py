@@ -18,7 +18,7 @@ except ImportError:
     import audit_ocr_language as languages
 
 
-PROFILE = 'script-crops-v3-japanese-routing'
+PROFILE = 'script-crops-v4-three-regions-per-band'
 
 
 def recover_chinese_route(path, evidence, blocks, models, recognize):
@@ -81,7 +81,10 @@ def corroborate(path, evidence, blocks):
     for lower, upper in [(0., .34), (.34, .67), (.67, 1.01)]:
         candidates = [b for b in blocks if lower <= (b['b'][1] + b['b'][3]) / 2 < upper
                       and len(letters(b['t'])) >= 6]
-        selected.extend(sorted(candidates, key=lambda b: len(letters(b['t'])), reverse=True)[:2])
+        # Sparse scientific tables may put all longer labels in the header.
+        # Check another independent label before applying the same 18-character
+        # corroboration threshold; two short headings alone are insufficient.
+        selected.extend(sorted(candidates, key=lambda b: len(letters(b['t'])), reverse=True)[:3])
     rows = []
     with Image.open(path) as image, tempfile.TemporaryDirectory(dir=Path(path).parent) as temp:
         for number, block in enumerate(selected):

@@ -1999,6 +1999,16 @@
    "language": "japan",
    "source": "osd+text-v1"
   },
+  "VoiceOfML/Japanese-Materials\u0000日本资本主义论争群像（战前·战时）.pdf": {
+   "evidence": {
+    "script": "Japanese",
+    "source_sha256": "c1f658ec808976a3f911cf0cca85a6241699d0832ec0b17111131f1307e27cb6",
+    "physical_pages": [10, 166],
+    "basis": "Original spread images: vertical Japanese prose and chronological tables; confirmed kana and right-to-left printed page order"
+   },
+   "language": "japan",
+   "source": "source-image-review-20261025"
+  },
   "VoiceOfML/Japanese-Materials\u0000日本资本主义论争史.pdf": {
    "evidence": {
     "chars": 248369,

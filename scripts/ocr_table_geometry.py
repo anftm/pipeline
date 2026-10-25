@@ -4,7 +4,7 @@ from __future__ import annotations
 import hashlib
 import statistics
 
-PROFILE = 'ruled-table-geometry-v2-cell-offsets'
+PROFILE = 'ruled-table-geometry-v3-sparse-rows-rotated'
 
 
 def clusters(values, tolerance):
@@ -18,6 +18,10 @@ def clusters(values, tolerance):
 
 
 def detect(image, blocks):
+    return detect_dense(image, blocks) or detect_sparse(image, blocks)
+
+
+def detect_dense(image, blocks):
     """Admit a regular ruled grid only with independently visible long columns.
 
     Every boundary records pixel support; open edges are inferred from repeated
@@ -41,7 +45,14 @@ def detect(image, blocks):
     if len(vertical) < 6:
         return None
     columns = clusters([((s[0]+s[2])/2,abs(s[3]-s[1])) for s in vertical],max(4,width*.008))
+    columns = [x for x in columns if sum(abs(s[3]-s[1]) for s in vertical
+                                        if abs((s[0]+s[2])/2-x)<=width*.012)>=height*.15]
     if len(columns) < 6:
+        return None
+    # An apparatus drawing has several short pipes but no repeated column
+    # boundaries running through the body. Require independent long support.
+    if sum(sum(abs(s[3]-s[1]) for s in vertical if abs((s[0]+s[2])/2-x)<=width*.012)
+           >=height*.35 for x in columns)<4:
         return None
     ink = cv2.adaptiveThreshold(gray,255,cv2.ADAPTIVE_THRESH_GAUSSIAN_C,cv2.THRESH_BINARY_INV,31,15)
     hmask = cv2.morphologyEx(ink,cv2.MORPH_CLOSE,np.ones((1,max(3,round(width*.01))),np.uint8))
@@ -195,6 +206,145 @@ def detect(image, blocks):
             'review':review,'character_accuracy':'unreviewed'}
 
 
+def detect_sparse(image, blocks):
+    """Recover narrow tables and unruled rows from long boundaries and text bands."""
+    import cv2
+    import numpy as np
+    gray = np.asarray(image.convert('L'))
+    height, width = gray.shape
+    found = cv2.createLineSegmentDetector().detect(gray)[0]
+    if found is None:
+        return None
+    segments = found.reshape(-1, 4)
+    vertical = [s for s in segments if abs(s[1]-s[3])>=height*.06 and abs(s[0]-s[2])<=width*.012]
+    horizontal = [s for s in segments if abs(s[0]-s[2])>=width*.06 and abs(s[1]-s[3])<=height*.018]
+    xs = clusters([((s[0]+s[2])/2, abs(s[3]-s[1])) for s in vertical], max(4, width*.006))
+    xs = [float(x) for x in xs if sum(abs(s[3]-s[1]) for s in vertical
+                                     if abs((s[0]+s[2])/2-x)<=width*.008)>=height*.45]
+    if len(xs)<2:
+        return None
+    ys = clusters([((s[1]+s[3])/2, abs(s[2]-s[0])) for s in horizontal], max(4, height*.007))
+    rules = []
+    for y in ys:
+        lines = [s for s in horizontal if abs((s[1]+s[3])/2-y)<=height*.01]
+        if sum(abs(s[0]-s[2]) for s in lines)<width*.35:
+            continue
+        rules.append((float(y), float(min(min(s[0],s[2]) for s in lines)),
+                      float(max(max(s[0],s[2]) for s in lines))))
+    wide = [r for r in rules if r[2]-r[1]>=width*.55]
+    if len(wide)<3 or wide[-1][0]-wide[0][0]<height*.4:
+        return None
+    top, bottom = wide[0][0], wide[-1][0]
+    left, right = min(wide[0][1],wide[-1][1]), max(wide[0][2],wide[-1][2])
+    xs = [x for x in xs if left+width*.025<x<right-width*.025]
+    if not 2<=len(xs)<=6:
+        return None
+    xs = [left, *xs, right]
+    ys = [r[0] for r in rules if top<=r[0]<=bottom]
+    if len(ys)<3:
+        return None
+    # Long unruled body bands need repeated independently positioned text in
+    # multiple columns. Do not infer rows from a dictionary or expected values.
+    inferred = []
+    for lo, hi in zip(ys, ys[1:]):
+        selected = [b for b in blocks if left/width<(b['b'][0]+b['b'][2])/2<right/width
+                    and lo/height<(b['b'][1]+b['b'][3])/2<hi/height]
+        # Printed columns can slope across a scan. Anchor candidate rows in a
+        # single well-populated column, then require support from other columns.
+        by_column = [[b for b in selected if xs[c]<(b['b'][0]+b['b'][2])*width/2<xs[c+1]]
+                     for c in range(len(xs)-1)]
+        def regularity(col):
+            candidates = sorted((b['b'][1]+b['b'][3])*height/2 for b in col
+                                if (b['b'][3]-b['b'][1])*height<height*.05)
+            if len(candidates)<5:
+                return (-1, 0)
+            gaps = np.diff(candidates)
+            step = float(np.median(gaps))
+            return (-float(np.median(np.abs(gaps-step)) + np.max(np.abs(gaps-step)))/max(step,1), len(candidates))
+        anchor = max(by_column, key=regularity, default=[])
+        centers = clusters([((b['b'][1]+b['b'][3])*height/2, 1) for b in anchor
+                            if (b['b'][3]-b['b'][1])*height<height*.05], max(3, height*.008))
+        bands = []
+        for center in centers:
+            members = [b for b in selected if abs((b['b'][1]+b['b'][3])*height/2-center)<=height*.016]
+            columns = {next((c for c in range(len(xs)-1)
+                            if xs[c]<(b['b'][0]+b['b'][2])*width/2<xs[c+1]), -1) for b in members}
+            if len(columns)>=3:
+                bands.append(center)
+        if hi-lo>height*.22 and len(bands)>=5:
+            gaps = np.diff(bands)
+            step = float(np.median(gaps))
+            if max(gaps)>step*1.7 or min(gaps)<step*.5:
+                return None
+            inferred.extend((a+b)/2 for a,b in zip(bands,bands[1:]))
+    if any(b-a>height*.3 for a,b in zip(ys,ys[1:])) and not inferred:
+        return None
+    ys = sorted([*ys, *inferred])
+    if len(ys)<6:
+        return None
+    # Missing rules only join header slots. Inferred body rows still represent
+    # separate logical cells even though the original has no horizontal lines.
+    first_body = next((r for r in range(len(ys)-1) if ys[r+1] in inferred), len(ys)-1)
+    ink = cv2.adaptiveThreshold(gray,255,cv2.ADAPTIVE_THRESH_GAUSSIAN_C,cv2.THRESH_BINARY_INV,31,15)
+    vmask = cv2.morphologyEx(ink,cv2.MORPH_OPEN,np.ones((max(8,round(height*.025)),1),np.uint8))
+    hmask = cv2.morphologyEx(ink,cv2.MORPH_OPEN,np.ones((1,max(8,round(width*.025))),np.uint8))
+    nr,nc=len(ys)-1,len(xs)-1
+    parents=list(range(nr*nc))
+    def find(slot):
+        while parents[slot]!=slot:
+            parents[slot]=parents[parents[slot]]
+            slot=parents[slot]
+        return slot
+    def merge(a,b):
+        parents[find(a)]=find(b)
+    edges=[]
+    if inferred:
+        for row in range(first_body):
+            for col in range(nc):
+                if col+1<nc:
+                    x=round(xs[col+1]);lo,hi=round(ys[row]+3),round(ys[row+1]-3)
+                    support=float((vmask[lo:hi,max(0,x-6):x+7]>0).any(axis=1).mean()) if hi>lo else 1.
+                    short_rules=[s for s in segments if abs(s[3]-s[1])>=height*.02
+                                 and abs(s[2]-s[0])<=width*.012 and abs((s[0]+s[2])/2-x)<=width*.007]
+                    support=float(max(support,min(1.,sum(max(0,min(hi,max(s[1],s[3]))-max(lo,min(s[1],s[3])))
+                                                         for s in short_rules)/max(1,hi-lo))))
+                    edges.append({'axis':'vertical','row':row,'column':col+1,'support':round(support,4)})
+                    if support<.12:merge(row*nc+col,row*nc+col+1)
+                if row+1<first_body:
+                    y=round(ys[row+1]);lo,hi=round(xs[col]+4),round(xs[col+1]-4)
+                    support=float((hmask[max(0,y-6):y+7,lo:hi]>0).any(axis=0).mean()) if hi>lo else 1.
+                    edges.append({'axis':'horizontal','row':row+1,'column':col,'support':round(support,4)})
+                    if support<.12:merge(row*nc+col,(row+1)*nc+col)
+    unions={}
+    for row in range(nr):
+        for col in range(nc):unions.setdefault(find(row*nc+col),[]).append((row,col))
+    cells = []
+    review=[]
+    for slots in unions.values():
+        r0,c0=min(r for r,c in slots),min(c for r,c in slots)
+        r1,c1=max(r for r,c in slots)+1,max(c for r,c in slots)+1
+        rectangular=len(slots)==(r1-r0)*(c1-c0)
+        if not rectangular:
+            review.append({'code':'nonrectangular-cell-union','members':[list(p) for p in slots]})
+        for row,col,end_row,end_col in ([(r0,c0,r1,c1)] if rectangular else [(r,c,r+1,c+1) for r,c in slots]):
+            a,b=xs[col],xs[end_col]
+            lo,hi=ys[row],ys[end_row]
+            members = [i for i,block in enumerate(blocks)
+                       if a/width<=(block['b'][0]+block['b'][2])/2<b/width
+                       and lo/height<=(block['b'][1]+block['b'][3])/2<hi/height]
+            members.sort(key=lambda i:(round(blocks[i]['b'][1]*height/8),blocks[i]['b'][0]))
+            cells.append({'row':row,'column':col,'rowspan':end_row-row,'colspan':end_col-col,
+                          'box':[a/width,lo/height,b/width,hi/height], 'blocks':members,
+                          'text':'\n'.join(blocks[i]['t'] for i in members),
+                          'boundary_status':'text-band' if lo in inferred or hi in inferred else 'supported'})
+    cells.sort(key=lambda c:(c['row'],c['column']))
+    return {'profile':PROFILE,'source_pixels_sha256':hashlib.sha256(gray.tobytes()).hexdigest(),
+            'box':[left/width,top/height,right/width,bottom/height],
+            'columns':[x/width for x in xs],'rows':[y/height for y in ys],
+            'cells':cells,'edges':edges, 'body_rows':[first_body if inferred else 1,len(ys)-2], 'review':review,
+            'inferred_rows':[y/height for y in inferred], 'character_accuracy':'unreviewed'}
+
+
 def arrange(blocks, width, height, table, options=None, *, include_writing_modes=False):
     """Emit tab-separated cells with every recognized block and coordinate intact."""
     import copy
@@ -266,6 +416,13 @@ def arrange(blocks, width, height, table, options=None, *, include_writing_modes
         for number,index in enumerate(cell['blocks']):
             # Separators carry geometry only, never synthesized words or zeros.
             separator='\n' if number else ''
+            if number:
+                previous=blocks[cell['blocks'][number-1]]
+                current=blocks[index]
+                overlap=min(previous['b'][3],current['b'][3])-max(previous['b'][1],current['b'][1])
+                line_height=min(previous['b'][3]-previous['b'][1],current['b'][3]-current['b'][1])
+                if (overlap>=.5*line_height and current['b'][0]>=previous['b'][2]-.01):
+                    separator='' if ocr_layout.cjk(previous['t'][-1:]) and ocr_layout.cjk(current['t'][:1]) else ' '
             if number and blocks[index].get('table_header_side'):
                 previous=blocks[cell['blocks'][number-1]]
                 separator='' if previous.get('table_header_side')==blocks[index]['table_header_side'] else '\n'

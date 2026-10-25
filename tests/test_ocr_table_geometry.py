@@ -4,7 +4,7 @@ import unittest
 
 from PIL import Image, ImageDraw
 
-from scripts import ocr_table_geometry as tables, pdf_text_layer
+from scripts import ocr_table_geometry as tables, pdf_text_layer, ocr_layout
 
 
 def fixture():
@@ -85,3 +85,65 @@ class TableGeometryTests(unittest.TestCase):
         for y in range(100, 821, 60):
             draw.text((100, y), 'Prose with numbers 1 2 3 and no grid', fill='black')
         self.assertIsNone(tables.detect(plain, []))
+
+    def test_three_column_table_retains_wrapped_cells_after_quarter_turn(self):
+        image = Image.new('RGB', (1000, 700), 'white')
+        draw = ImageDraw.Draw(image)
+        for y in range(100, 591, 70):
+            draw.line((80, y, 930, y), fill='black', width=2)
+        for x in (230, 550):
+            draw.line((x, 100, x, 590), fill='black', width=2)
+        blocks = []
+        for row in range(7):
+            for col, (left, right) in enumerate(((90, 220), (240, 540), (560, 920))):
+                y = 112+70*row
+                blocks.append({'t':f'{row}:{col}', 'c':1, 's':'ocr',
+                               'b':[left/1000,y/700,right/1000,(y+15)/700]})
+                if col == 2:
+                    blocks.append({'t':f'续行{row}', 'c':1, 's':'ocr',
+                                   'b':[left/1000,(y+22)/700,right/1000,(y+37)/700]})
+        grid = tables.detect(image, blocks)
+        self.assertIsNotNone(grid)
+        self.assertEqual(len(grid['cells']), 21)
+        self.assertEqual(len(grid['cells'][2]['blocks']), 2)
+        arranged = tables.arrange(blocks, 1000, 700, grid)
+        content = arranged['text']
+        restored = ocr_layout.restore_coordinates(arranged, 270)
+        payload = {'kind':'pdf-ocr-page','source':'ocr','page':26,'width':700,'height':1000,**restored}
+        layer = pdf_text_layer.from_page(payload, 'a'*64, 'ch')
+        self.assertEqual(layer['text'], content)
+        self.assertEqual(layer['tables'][0]['grid_rotation_clockwise'], 270)
+        self.assertEqual(layer['tables'][0]['cells'][2]['region_ids'], ['b2','b3'])
+        self.assertEqual(layer['tables'][0]['cells'][2]['box'], ocr_layout.map_box_back(grid['cells'][2]['box'],270))
+        for region in layer['regions']:
+            self.assertEqual(layer['text'][region['start']:region['end']],region['text'])
+
+    def test_unruled_numeric_rows_need_aligned_evidence_in_multiple_columns(self):
+        image = Image.new('RGB',(1000,700),'white')
+        draw = ImageDraw.Draw(image)
+        for y in (100,150,200,600):
+            draw.line((80,y,930 if y != 150 else 700,y),fill='black',width=2)
+        for x in (230,350,510,700):
+            draw.line((x,200,x,600),fill='black',width=2)
+        blocks=[]
+        for row in range(10):
+            for col,x in enumerate((100,260,390,570,760)):
+                y=215+row*38
+                blocks.append({'t':str(row*10+col),'c':1,'s':'ocr','b':[x/1000,y/700,(x+60)/1000,(y+18)/700]})
+        grid=tables.detect(image,blocks)
+        self.assertIsNotNone(grid)
+        self.assertEqual(len(grid['inferred_rows']),9)
+        self.assertEqual(len([c for c in grid['cells'] if c['row']>=2]),10*5)
+        self.assertEqual(sum(c['rowspan']*c['colspan'] for c in grid['cells']),12*5)
+        rows=[c for c in grid['cells'] if c['row']==2]
+        self.assertEqual([c['text'] for c in rows],['0','1','2','3','4'])
+        self.assertIsNone(tables.detect(image,[]))
+
+    def test_short_apparatus_pipes_do_not_establish_table_columns(self):
+        image=Image.new('RGB',(800,1000),'white')
+        draw=ImageDraw.Draw(image)
+        for x in range(100,701,90):
+            draw.line((x,400,x,500),fill='black',width=2)
+        for y in range(100,901,60):
+            draw.line((120,y,650,y),fill='black',width=1)
+        self.assertIsNone(tables.detect(image,[]))
