@@ -139,6 +139,7 @@ class ReferenceGraph:
         self.external_pins = set()
         self.externally_traversed = set()
         self.active_external_pin = False
+        self.released_processing = {}
 
     def read_catalog(self, ref):
         parser = functools.partial(catalog_json, grace_days=self.generation_grace_days)
@@ -231,6 +232,7 @@ class ReferenceGraph:
             self.externally_traversed.add(ref)
         self.direct[ref] = set()
         self.handoffs.pop(ref, None)
+        self.released_processing.pop(ref, None)
         try:
             if not self.validate(payload, *ref):
                 return
@@ -370,6 +372,11 @@ class ReferenceGraph:
             if origin.startswith("reader-index/processing/") and value.get("status") == "released":
                 generation = value.get("generation")
                 if self.handoff_resolved(generation):
+                    if value.get('kind') == 'reader-processing-roots':
+                        self.released_processing[self.origin or (bucket, origin)] = {
+                            'generation': generation, 'sha256': self.loaded_digests.get((bucket, origin)),
+                            'operation': value.get('operation'), 'run': value.get('run'),
+                            'released_at': value.get('released_at')}
                     return
                 # Resolve against every catalog version read during the scan;
                 # until then the root's resources stay protected.
@@ -546,8 +553,12 @@ class ReferenceGraph:
                     return False
                 if payload["kind"] == "pdf-pages":
                     root = posixpath.dirname(path)
+                    codec = payload.get('codec', 'webp')
+                    if codec not in {'webp', 'jxl'}:
+                        self.blockers.add(f"unknown page codec: {bucket}:{path}")
+                        return False
                     for number in range(1, count + 1):
-                        self.mark(bucket, f"{root}/pages/page-{number:06d}.webp")
+                        self.mark(bucket, f"{root}/pages/page-{number:06d}.{codec}")
         return True
 
     def inventory(self, bucket):
@@ -705,6 +716,14 @@ class ReferenceGraph:
         return False
 
     def finalize(self):
+        # A completed handoff lets the accepted catalog own the resources. Keep
+        # the small audit in the collection plan; retire old processing records
+        # across every format instead of repeatedly scanning them forever.
+        explicit = set().union(*self.direct.values()) if self.direct else set()
+        for ref in self.released_processing:
+            if ref not in self.external_pins and ref not in explicit:
+                self.retired_roots.add(ref)
+                self.references.discard(ref)
         def alive(ref):
             if ref in self.retired_roots and ref not in self.external_pins:
                 return False
@@ -813,6 +832,9 @@ class ReferenceGraph:
             "blockers": sorted(self.blockers), "buckets": buckets,
             "missing": [f"{b}:{p}" for b, p in sorted(self.missing)],
             "ambiguous_paths": sorted(self.ambiguous),
+            "processing_retirements": [{"bucket": bucket, "path": path, **evidence}
+                for (bucket, path), evidence in sorted(self.released_processing.items())
+                if (bucket, path) in self.retired_roots and (bucket, path) not in self.references],
             "roots": [f"{b}:{p}" for b, p in sorted(self.root_hashes)],
         }
 

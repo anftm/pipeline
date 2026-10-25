@@ -372,6 +372,33 @@ class ReaderGcCollectTests(unittest.TestCase):
         self.assertEqual(result['confirmed_deleted_bytes'], 12)
         self.assertTrue(result['deleted_bytes_complete'])
 
+    def test_all_format_successful_processing_handoffs_retire_but_failed_and_open_stay(self):
+        store = Store()
+        sidecar = {'v': 1, 'f': {}}
+        catalog, generation = reader_lifecycle.catalog_generation(sidecar)
+        store.put(ASSETS, collector.CATALOG, catalog)
+        roots = ['pages/image/tif/a', 'chapters/ebook/epub/b', 'documents/text/txt/c', 'documents/html/doc/d']
+        records = []
+        for i, root in enumerate(roots):
+            path = f'reader-index/processing/{i}.json'
+            store.put(ASSETS, path, {'kind': 'reader-processing-roots', 'status': 'released',
+                'generation': generation, 'operation': 'upload', 'resources': [{'bucket': ASSETS, 'root': root}]})
+            records.append(path)
+        for status in ['processing', 'uploaded', 'failed']:
+            store.put(ASSETS, f'reader-index/processing/{status}.json', {
+                'kind': 'reader-processing-roots', 'status': status,
+                'resources': [{'bucket': ASSETS, 'root': 'documents/text/txt/protected'}]})
+        store.put(ASSETS, 'documents/text/txt/protected/document.txt', b'protected')
+        reference = graph.ReferenceGraph(store)
+        scanned = reference.build()
+        self.assertTrue(scanned['graph_complete'], scanned['blockers'])
+        result = collector.collect(store, Mock(), reference, scanned, {}, apply=True, batch_size=1)
+        self.assertEqual(result['confirmed_deleted_objects'], 4)
+        self.assertEqual({e['path'] for e in result['processing_retirements']}, set(records))
+        self.assertIn('documents/text/txt/protected/document.txt', store.objects[ASSETS])
+        for status in ['processing', 'uploaded', 'failed']:
+            self.assertIn(f'reader-index/processing/{status}.json', store.objects[ASSETS])
+
     def test_retirement_writes_nothing_without_a_current_acknowledgment(self):
         store = Store()
         sidecar = {'v': 1, 'f': {}}

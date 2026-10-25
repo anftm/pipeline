@@ -344,12 +344,15 @@ def collect(store, fence, reference_graph, report, catalog, *, grace_days=0, lim
     if resume:
         target_sizes = {**resume.get('target_sizes', {}),
                         **{key: value for key, value in target_sizes.items() if value is not None}}
+    selected_set = set(selected)
     result = {"planned_objects": len(selected), "confirmed_deleted_objects": 0,
               "confirmed_deleted_bytes": 0, "deleted_bytes_complete": True,
               "batches": [], "applied": apply, "reader_only": reader_only,
               "excluded_other_bucket_candidates": len(excluded),
                "targets": [{"bucket": bucket, "path": path} for bucket, path in selected],
                "target_sizes": target_sizes,
+               "processing_retirements": [entry for entry in report.get('processing_retirements', [])
+                    if (entry['bucket'], entry['path']) in selected_set],
                "plan_sha256": hashlib.sha256(encode(selected)).hexdigest()}
     if resume:
         result['batches'] = [dict(entry) for entry in resume.get('batches', [])]
