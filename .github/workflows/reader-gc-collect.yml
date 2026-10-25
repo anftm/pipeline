@@ -2,10 +2,7 @@ name: Reader/桶 · GC Collect Unreferenced Objects
 run-name: Reader GC ${{ inputs.maintenance_id || github.run_id }}
 
 on:
-  # Daily, after the 05:23 v3 retire journal: delete only released OCR inputs.
-  # A schedule can never select the full graph collector.
-  schedule:
-    - cron: '23 7 * * *'
+  # reader-maintenance.yml owns scheduling, isolation and automatic restoration.
   workflow_dispatch:
     inputs:
       maintenance_id:
@@ -24,14 +21,18 @@ on:
         description: Optional exact full-graph deletion plan; revalidate current references before resuming
         type: string
         default: ''
+      auto_resume:
+        description: Resume the last incomplete automatic plan after checking current references
+        type: boolean
+        default: false
       grace_days:
         description: Unreferenced object and superseded catalog retention in days
         type: string
         default: "0"
       scope:
-        description: "unreferenced: full drained graph collection; retired-catalog-snapshots; retired-ocr-inputs: only journaled OCR-input PNG roots (no drain needed, limit = roots)"
+        description: "unreferenced: full sweep; retired-assets: all format retirement receipts; retired-ocr-inputs: released PNGs. All apply scopes require the maintenance fence."
         type: choice
-        options: [unreferenced, retired-catalog-snapshots, retired-ocr-inputs, document-control, document-pages, ocr-inputs, djvu-pdf, ocr-library]
+        options: [unreferenced, retired-assets, retired-catalog-snapshots, retired-ocr-inputs, document-control, document-pages, ocr-inputs, djvu-pdf, ocr-library]
         default: unreferenced
       reader_only:
         description: Delete only the original Reader buckets and keep the fourth domain intact
@@ -82,15 +83,16 @@ jobs:
           HF_INPUT_TOKEN: ${{ secrets.HF_INPUT_TOKEN }}
           GH_TOKEN: ${{ secrets.PDF_WORKER_READ_TOKEN }}
           GC_PRODUCER_TOKENS_JSON: ${{ secrets.GC_PRODUCER_TOKENS_JSON }}
-          APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
+          APPLY: ${{ inputs.apply }}
           GRACE_DAYS: ${{ inputs.grace_days || '0' }}
-          SCOPE: ${{ github.event_name == 'schedule' && 'retired-ocr-inputs' || inputs.scope }}
+          SCOPE: ${{ inputs.scope }}
           READER_ONLY: ${{ inputs.reader_only }}
           LIMIT: ${{ inputs.limit || '0' }}
           STORAGE: ${{ inputs.storage || 's3' }}
           RESET_ID: ${{ inputs.maintenance_id }}
           RESUME_SCAN_RUN: ${{ inputs.resume_scan_run }}
           RESUME_RUN: ${{ inputs.resume_run }}
+          AUTO_RESUME: ${{ inputs.auto_resume }}
           HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
           HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
           HF_S3_NAMESPACE: vomebook
@@ -120,6 +122,8 @@ jobs:
           if [[ "$APPLY" == true ]]; then args+=(--apply); fi
           if [[ "$READER_ONLY" == true ]]; then args+=(--reader-only); fi
           if [[ -n "$RESUME_RUN" ]]; then args+=(--resume-run "$RESUME_RUN"); fi
+          if [[ "$AUTO_RESUME" == true ]]; then args+=(--auto-resume); fi
+          if [[ "$SCOPE" == retired-assets ]]; then args+=(--retired-assets-only); fi
           if [[ "$SCOPE" == retired-catalog-snapshots ]]; then args+=(--retired-snapshots-only); fi
           python -u scripts/reader_gc_collect.py "${args[@]}"
       - uses: actions/cache/save@v4

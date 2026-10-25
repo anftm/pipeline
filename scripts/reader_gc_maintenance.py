@@ -20,6 +20,21 @@ except ImportError:
 
 
 ACTIVE = ("queued", "pending", "in_progress", "waiting", "requested")
+DURABLE_JOURNAL = 'reader-index/gc/maintenance/current.json'
+_STORE = None
+
+
+def durable_store():
+    global _STORE
+    if os.environ.get('READER_GC_DURABLE_MAINTENANCE') != 'true':
+        return None
+    if _STORE is None:
+        try:
+            from .reader_gc_store import CollectionStore
+        except ImportError:
+            from reader_gc_store import CollectionStore
+        _STORE = CollectionStore()
+    return _STORE
 
 
 class MaintenanceAPIError(RuntimeError):
@@ -101,6 +116,7 @@ def disable_actions(repo, record):
         if error.status not in {401, 403, 404}:
             raise
         record["permission_denied"] = error.status
+        record.pop('permission_changed', None)
         return False
     record["permission_changed"] = True
     return True
@@ -171,6 +187,49 @@ def journal(path, state):
     temporary = path.with_suffix(".pending")
     temporary.write_text(json.dumps(state, sort_keys=True, indent=2) + "\n")
     temporary.replace(path)
+    store = durable_store()
+    if store and not state.get('preflight_only'):
+        raw = path.read_bytes()
+        store.put_bytes('vomebook/reader-assets-v2', DURABLE_JOURNAL, raw)
+        if store.read_bytes('vomebook/reader-assets-v2', DURABLE_JOURNAL) != raw:
+            raise RuntimeError('maintenance journal readback mismatch')
+
+
+def recover(path):
+    """Recover a killed runner before taking a new snapshot of producer state."""
+    store = durable_store()
+    if not store:
+        return
+    try:
+        raw = store.read_bytes('vomebook/reader-assets-v2', DURABLE_JOURNAL)
+    except FileNotFoundError:
+        return
+    state = json.loads(raw)
+    if (state.get('kind') != 'reader-maintenance-journal' or state.get('version') != 1
+            or not isinstance(state.get('repositories'), dict)):
+        raise RuntimeError('invalid durable maintenance journal')
+    if not state.get('restored'):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(raw)
+        restore(path)
+
+
+def kick_restored(path, state):
+    """New work uses fresh queues; never rerun cancelled immutable task attempts."""
+    central = load_config()['publisher_repository']
+    enabled = {w['path'].rsplit('/', 1)[-1] for w in state['repositories'].get(central, {}).get('workflows', [])
+               if w['state'] == 'active'}
+    for name, inputs in [('pdf-lane-watchdog.yml', {'apply': 'true'}),
+                         ('reader-v3-publish.yml', {'operation': 'auto', 'apply': 'true'})]:
+        if name not in enabled or name in state.setdefault('resumption_dispatches', {}):
+            continue
+        # Persist before dispatch. An ambiguous request is left to the scheduled
+        # watchdog instead of submitting the same continuation twice.
+        state['resumption_dispatches'][name] = 'requested'
+        journal(path, state)
+        api(central, 'actions/workflows/' + name + '/dispatches', method='POST', body={'ref': 'main', 'inputs': inputs})
+        state['resumption_dispatches'][name] = 'accepted'
+        journal(path, state)
 
 
 def restore(path):
@@ -224,10 +283,14 @@ def restore(path):
     journal(path, state)
     if errors:
         raise RuntimeError("maintenance restoration requires recovery; see journal")
+    kick_restored(path, state)
 
 
-def run(path, *, limit=0, apply=True):
+def run(path, *, limit=0, apply=True, scope='unreferenced'):
+    if scope not in {'unreferenced', 'retired-assets'}:
+        raise ValueError('invalid automatic collection scope')
     central = load_config()["publisher_repository"]
+    recover(path)
     if path.exists() and not json.loads(path.read_text()).get("restored"):
         raise RuntimeError("unfinished maintenance journal requires restoration first")
     state = {"version": 1, "kind": "reader-maintenance-journal", "repositories": {},
@@ -264,6 +327,10 @@ def run(path, *, limit=0, apply=True):
                             continue
                         raise
             if repo != central and record["permission"].get("enabled"):
+                # Record recovery intent before the mutation, including an
+                # ambiguous successful PUT followed by a killed runner.
+                record['permission_changed'] = True
+                journal(path, state)
                 disable_actions(repo, record)
                 journal(path, state)
         deadline = time.monotonic() + 3600
@@ -283,7 +350,7 @@ def run(path, *, limit=0, apply=True):
         journal(path, state)
         api(central, "actions/workflows/reader-gc-collect.yml/dispatches", method="POST", body={
             "ref": "main", "inputs": {"apply": str(apply).lower(), "grace_days": "0",
-                                      "scope": "unreferenced", "reader_only": "true",
+                                      "scope": scope, "reader_only": "true", "auto_resume": "true",
                                       "limit": str(limit), "maintenance_id": identifier}})
         deadline = time.monotonic() + 360 * 60
         while True:
@@ -329,6 +396,7 @@ if __name__ == "__main__":
     parser.add_argument("--journal", type=Path, required=True)
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--plan-only", action="store_true")
+    parser.add_argument('--scope', choices=['unreferenced', 'retired-assets'], default='unreferenced')
     arguments = parser.parse_args()
     if arguments.limit < 0:
         parser.error("limit must be non-negative")
@@ -338,6 +406,6 @@ if __name__ == "__main__":
                                     "remote_writes": 0})
         print(f"GET-only maintenance preflight passed for {len(inventory)} repositories")
     elif arguments.operation == "run":
-        run(arguments.journal, limit=arguments.limit, apply=not arguments.plan_only)
+        run(arguments.journal, limit=arguments.limit, apply=not arguments.plan_only, scope=arguments.scope)
     else:
         restore(arguments.journal)

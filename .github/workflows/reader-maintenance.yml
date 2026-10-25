@@ -2,7 +2,7 @@ name: Reader/桶 · GC Automatic Maintenance
 
 on:
   schedule:
-    - cron: '13 2 * * 1'
+    - cron: '13 2 * * *'
   workflow_dispatch:
     inputs:
       limit:
@@ -15,6 +15,11 @@ on:
         required: true
         default: false
         type: boolean
+      scope:
+        description: Journaled retired assets, or a full sweep for older unjournaled objects
+        type: choice
+        options: [retired-assets, unreferenced]
+        default: retired-assets
 
 permissions:
   contents: read
@@ -29,11 +34,17 @@ jobs:
     if: github.repository == 'anftm/pipeline'
     runs-on: ubuntu-24.04
     timeout-minutes: 500
+    env:
+      READER_GC_DURABLE_MAINTENANCE: 'true'
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+      HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: '3.11'
+      - run: pip install -r scripts/requirements.txt
       - name: Verify every producer credential before isolation
         env:
           GC_PRODUCER_TOKENS_JSON: ${{ secrets.GC_PRODUCER_TOKENS_JSON }}
@@ -44,9 +55,12 @@ jobs:
           GC_PRODUCER_TOKENS_JSON: ${{ secrets.GC_PRODUCER_TOKENS_JSON }}
           LIMIT: ${{ inputs.limit || '0' }}
           PLAN_ONLY: ${{ inputs.plan_only || 'false' }}
+          SCOPE: ${{ inputs.scope || 'retired-assets' }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           [[ "$LIMIT" =~ ^[0-9]+$ ]] || exit 1
-          args=(run --journal output/maintenance/journal.json --limit "$LIMIT")
+          if [[ "$EVENT_NAME" == schedule && "$(date -u +%u)" == 1 ]]; then SCOPE=unreferenced; fi
+          args=(run --journal output/maintenance/journal.json --limit "$LIMIT" --scope "$SCOPE")
           if [[ "$PLAN_ONLY" == "true" ]]; then args+=(--plan-only); fi
           python -u scripts/reader_gc_maintenance.py "${args[@]}"
       - name: Recover recorded producer state after an interrupted orchestration

@@ -87,7 +87,7 @@ def release_processing_roots(indexes: list[dict], generation: str, read, publish
     updates = reader_lifecycle.processing_handoffs(results, generation, read)
     for path, record in updates.items():
         publish(path, record)
-    return len(updates)
+    return sum(path.startswith('reader-index/processing/') for path in updates)
 
 
 def ebook_chapter_indexes(assets_bucket: str) -> list[tuple[str, str]]:

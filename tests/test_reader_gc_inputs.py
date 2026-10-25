@@ -1,5 +1,7 @@
 import json
 import unittest
+import hashlib
+from unittest.mock import patch
 
 from scripts import reader_gc_inputs as inputs
 
@@ -79,13 +81,47 @@ class RetiredInputTests(unittest.TestCase):
         self.assertEqual(report["planned_objects"], 2)
 
     def test_ccrd_retained_input_is_kept(self):
-        self.store.put(inputs.CCRD, "control/ocr-current.json", {"release": {"path": "releases/r/manifest.json"}})
-        self.store.put(inputs.CCRD, "releases/r/manifest.json", {"exports": [{"path": "text/exports/e.json"}]})
-        self.store.put(inputs.CCRD, "text/exports/e.json", {"retained_reader_resources": [
-            {"bucket": inputs.INPUT, "path": f"{ROOT}/page-000001.png"}]})
+        self.pin_input()
         report = inputs.plan(self.store)
         self.assertEqual(report["planned_objects"], 0)
         self.assertEqual(report["skipped"], {"ccrd-retained": 1})
+
+    def pin_input(self):
+        ref = {'bucket': inputs.INPUT, 'path': f'{ROOT}/page-000001.png',
+               'bytes': 3, 'sha256': hashlib.sha256(b'png').hexdigest(), 'role': 'review'}
+        self.store.put(inputs.CCRD, 'control/intents/' + 'd' * 64 + '.json', {
+            'version': 1, 'kind': 'ccrd-ocr-intent', 'status': 'uploading', 'generation': 'd' * 64,
+            'expected_parent': None, 'resources': [ref]})
+
+    def test_registry_change_after_plan_blocks_the_first_delete(self):
+        report = inputs.plan(self.store)
+        self.registry(status='ready', digest='d' * 64)
+        with self.assertRaisesRegex(RuntimeError, 'registry changed'):
+            inputs.collect(self.store, report)
+        self.assertEqual(self.store.deleted, [])
+
+    def test_new_upload_pin_after_plan_blocks_deletion(self):
+        report = inputs.plan(self.store)
+        self.pin_input()
+        with self.assertRaisesRegex(RuntimeError, 'CCRD retained'):
+            inputs.collect(self.store, report)
+        self.assertEqual(self.store.deleted, [])
+
+    def test_partial_delete_failure_keeps_evidence_and_next_plan_completes(self):
+        report = inputs.plan(self.store)
+        delete = self.store.delete
+        def partial(bucket, paths):
+            delete(bucket, paths[:1])
+            raise OSError('lost acknowledgement')
+        checkpoints = []
+        with patch.object(self.store, 'delete', side_effect=partial), self.assertRaises(OSError):
+            inputs.collect(self.store, report, checkpoint=lambda r: checkpoints.append(json.loads(json.dumps(r))))
+        self.assertEqual(checkpoints[-1]['roots'][0]['status'], 'submitted')
+        self.assertNotIn('deleted', checkpoints[-1])
+        retry = inputs.plan(self.store)
+        self.assertEqual(retry['planned_objects'], 1)
+        inputs.collect(self.store, retry)
+        self.assertEqual(retry['deleted']['objects'], 1)
 
 
 if __name__ == "__main__":

@@ -217,6 +217,17 @@ class ReferenceGraph:
                     or item.get("bucket") != PDF_OCR_INPUT_BUCKET or item.get("source_sha256") != match[1]):
                 self.blockers.add("invalid retired OCR input root")
             else:
+                released_at = item.get('released_at')
+                if released_at:
+                    try:
+                        released = datetime.fromisoformat(str(released_at).replace('Z', '+00:00'))
+                        if released.tzinfo is None:
+                            raise ValueError('release time needs timezone')
+                    except ValueError:
+                        self.blockers.add('invalid retired OCR input release time')
+                        continue
+                    if datetime.now(timezone.utc) - released < timedelta(days=30):
+                        continue
                 self.retired_input_roots.add(root)
         for path in state["retired_paths"]:
             if not isinstance(path, str) or not re.fullmatch(
@@ -319,8 +330,10 @@ class ReferenceGraph:
             if len(matches) > 1:
                 self.ambiguous.add(value)
             if not matches:
-                if "/ocr-input/" in value or value.lower().endswith(".jxl"):
+                if "/ocr-input/" in value:
                     bucket = PDF_OCR_INPUT_BUCKET
+                elif value.lower().endswith('.jxl'):
+                    bucket = PDF_PAGES_BUCKET
                 self.mark(bucket, value, tree=field == "root")
             for candidate in matches:
                 self.mark(candidate, value, tree=field == "root")
@@ -405,8 +418,11 @@ class ReferenceGraph:
                     target = value.get("b")
                 if key == "p" and isinstance(value.get("b"), str):
                     target = value["b"]
-                if key in {"i", "j"} and isinstance(item, str) and not target:
+                if key == 'i' and isinstance(item, str) and not target:
                     target = PDF_OCR_INPUT_BUCKET
+                if key == 'j' and isinstance(item, str) and not target:
+                    matches = [b for b in (PDF_PAGES_BUCKET, PDF_OCR_INPUT_BUCKET) if item in self.files.get(b, set())]
+                    target = matches[0] if len(matches) == 1 else PDF_PAGES_BUCKET
                 if isinstance(target, str):
                     if target not in BUCKETS:
                         self.blockers.add(f"unsupported reference bucket: {target}")
@@ -736,7 +752,7 @@ class ReferenceGraph:
         self.ignored_retired_pins = {ref for origin, refs in self.direct.items()
                                      for ref in refs if self.input_retired(ref)}
         self.missing = {ref for origin, refs in self.direct.items() if alive(origin)
-                        for ref in refs if not self.input_retired(ref)
+                         for ref in refs if (not self.input_retired(ref) or ref in self.external_pins)
                         and ref[0] in self.files and ref[1] not in self.files[ref[0]]}
         for ref, message in self.unreadable.items():
             if alive(ref):

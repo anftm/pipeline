@@ -667,6 +667,17 @@ def commit_catalog(store, catalog, pointer, *, apply=False):
         store.put_bytes(ASSETS, history_path, encode(history))
     if current(store)[0] != pointer:
         raise ValueError("reading pointer changed before promotion")
+    if pointer:
+        try:
+            from . import reader_gc_retirement as retirement
+        except ImportError:
+            import reader_gc_retirement as retirement
+        _, prior = current(store)
+        hint = retirement.record([entry['resource'] for entry in prior['files'].values()],
+                                 [entry['resource'] for entry in catalog['files'].values()],
+                                 generation, 'v3-replacement')
+        if hint:
+            store.put_bytes(ASSETS, hint[0], retirement.encode(hint[1]))
     store.put_bytes(ASSETS, POINTER, encode(new_pointer))
     if current(store)[0] != new_pointer:
         raise ValueError("reading pointer verification failed")

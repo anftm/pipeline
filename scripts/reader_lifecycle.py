@@ -143,6 +143,13 @@ def processing_handoffs(results, generation, read):
             validate_processing_handoff(record, result)
         released = release_processing(record, generation)
         if released != record:
+            try:
+                from . import reader_gc_retirement as retirement
+            except ImportError:
+                import reader_gc_retirement as retirement
+            hint = retirement.handoff(record, generation)
+            if hint:
+                updates[hint[0]] = hint[1]
             updates[path] = released
     return updates
 

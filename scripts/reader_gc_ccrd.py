@@ -20,6 +20,7 @@ import hashlib
 import json
 import os
 import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -265,14 +266,26 @@ def accept_live(client, generation):
 def plan(store, *, keep_generations=2, limit=0, include_staging=False,
          client=None, verify_live=True, verify_contents=False):
     """Build a plan without writing or deleting anything."""
-    rollout, _ = read_json(store, 'control/newspaper-rollout.json', required=False)
+    rollout, rollout_raw = read_json(store, 'control/newspaper-rollout.json', required=False)
     if rollout and rollout.get('status') != 'committed':
         raise Blocker('pending newspaper rollout retains the previous OCR generation; collection is blocked')
     if keep_generations < 2:
         raise ValueError("keep-generations must retain the current release and its rollback parent")
     if type(limit) is not int or limit < 0:
         raise ValueError("limit must not be negative")
-    pointer, pointer_raw = read_json(store, CURRENT)
+    pointer, pointer_raw = read_json(store, CURRENT, required=False)
+    if pointer is None:
+        # A deliberately withdrawn library is a normal scheduled no-op. Any
+        # leftover content requires its saved reset plan, never guessed deletion.
+        remaining = store.list_files(BUCKET, lifecycle.MANAGED_PREFIXES)
+        if remaining:
+            raise Blocker('OCR pointer absent with remaining data; resume the explicit withdrawal plan')
+        if verify_live:
+            accept_live(client, None)
+        return {'version': 1, 'kind': 'ccrd-ocr-gc-plan', 'observed_at': now(),
+                'bucket': BUCKET, 'current': None, 'reason': 'no-active-ocr-library',
+                'kept': [], 'expiring': [], 'deferred': [], 'candidates': [],
+                'objects': {'candidates': 0, 'candidate_bytes': 0}, 'deletion_enabled': False}
     if pointer.get("kind") != "ccrd-ocr-current" or pointer.get("version") != 1:
         raise Blocker("current OCR pointer has an unknown schema")
     generation = pointer.get("generation")
@@ -288,6 +301,8 @@ def plan(store, *, keep_generations=2, limit=0, include_staging=False,
     sizes = inventory(store, include_staging)
 
     intents, retained, control_snapshot = {}, {}, set()
+    control_hashes = {CURRENT: digest(pointer_raw),
+                      'control/newspaper-rollout.json': digest(rollout_raw) if rollout_raw is not None else None}
     for path in sorted(store.list_files(BUCKET, ("control/intents/",))):
         intent, raw = read_json(store, path)
         gen = generation_of(path, "control/intents/")
@@ -302,6 +317,7 @@ def plan(store, *, keep_generations=2, limit=0, include_staging=False,
         intents[gen] = {"path": path, "status": status, "parent": intent.get("expected_parent"),
                         "payload": intent, "raw": raw}
         control_snapshot.add(path)
+        control_hashes[path] = digest(raw)
     for path in sorted(store.list_files(BUCKET, ("control/retained/",))):
         history, raw = read_json(store, path)
         gen = generation_of(path, "control/retained/")
@@ -320,6 +336,7 @@ def plan(store, *, keep_generations=2, limit=0, include_staging=False,
         else:
             raise Blocker(f"{path}: unknown retention status")
         control_snapshot.add(path)
+        control_hashes[path] = digest(raw)
 
     chain, cursor = [], generation
     while cursor:
@@ -391,7 +408,8 @@ def plan(store, *, keep_generations=2, limit=0, include_staging=False,
     protected.update(ref["path"] for ref in pointer.get("resources", []))
     ids_payload = None
     for name in (IDS, AUTOMATION, CONSUMER):
-        payload, _ = read_json(store, name, required=(name == IDS))
+        payload, control_raw = read_json(store, name, required=(name == IDS))
+        control_hashes[name] = digest(control_raw) if control_raw is not None else None
         if payload is None:
             continue
         if name == IDS:
@@ -492,6 +510,8 @@ def plan(store, *, keep_generations=2, limit=0, include_staging=False,
                         "open_intents": open_intents},
         "limit": limit,
         "control_snapshot": sorted(control_snapshot),
+        'control_hashes': control_hashes,
+        'protected_sizes': {path: sizes[path] for path in protected if path in sizes},
         "legacy_generations": legacy_inventory(store),
         "deletion_enabled": False,
     }
@@ -515,7 +535,7 @@ def retired_intent(intent, stamp):
     return retired
 
 
-def apply(store, report, *, client=None):
+def apply(store, report, *, client=None, checkpoint=None, batch_size=500):
     """Retire expired control roots, then delete the planned data objects.
 
     The caller holds the publish-ccrd-index lock. The pointer, the control
@@ -525,6 +545,15 @@ def apply(store, report, *, client=None):
     """
     if report.get("kind") != "ccrd-ocr-gc-plan" or report.get("bucket") != BUCKET:
         raise ValueError("not a CCRD OCR GC plan")
+    if not 1 <= batch_size <= 1000:
+        raise ValueError('invalid CCRD deletion batch size')
+    if report.get('reason') == 'no-active-ocr-library':
+        if read_json(store, CURRENT, required=False)[0] is not None or store.list_files(BUCKET, lifecycle.MANAGED_PREFIXES):
+            raise Blocker('OCR library changed after empty plan')
+        if client is not None:
+            accept_live(client, None)
+        report.update(applied=True, complete=True, deleted={'objects': 0, 'bytes': 0, 'control': 0})
+        return report
     if client is not None:
         accept_live(client, report["current"])
     pointer, _ = read_json(store, CURRENT)
@@ -534,6 +563,16 @@ def apply(store, report, *, client=None):
         | set(store.list_files(BUCKET, ("control/retained/",)))
     if current_control != set(report["control_snapshot"]):
         raise Blocker("OCR control history changed before deletion")
+    expected_controls = dict(report['control_hashes'])
+    def barrier():
+        controls = set(store.list_files(BUCKET, ('control/intents/', 'control/retained/')))
+        if controls != set(report['control_snapshot']):
+            raise Blocker('OCR control history changed during deletion')
+        for path, expected in expected_controls.items():
+            _, raw = read_json(store, path, required=expected is not None)
+            if (digest(raw) if raw is not None else None) != expected:
+                raise Blocker('OCR control content changed before deletion: ' + path)
+    barrier()
 
     retire = sorted(set(report.get("retire_intents", [])))
     retire_retention = sorted(set(report.get("retire_retention", [])))
@@ -552,6 +591,7 @@ def apply(store, report, *, client=None):
             if intent.get("status") != "committed":
                 raise Blocker(f"intent changed before retirement: {intent_path}")
             store.put_json(BUCKET, intent_path, retired_intent(intent, now()))
+            expected_controls[intent_path] = digest(store.read_bytes(BUCKET, intent_path))
         elif intent.get("status") != "retired":
             raise Blocker(f"unexpected intent status before cleanup: {intent_path}")
 
@@ -564,6 +604,7 @@ def apply(store, report, *, client=None):
             if history is None or history.get("status", "committed") != "committed":
                 raise Blocker(f"retention changed before retirement: {retention_path}")
             store.put_json(BUCKET, retention_path, retired_retention(history_raw, now()))
+            expected_controls[retention_path] = digest(store.read_bytes(BUCKET, retention_path))
         elif history is not None and history.get("status") != "retired":
             raise Blocker(f"unexpected retention status before cleanup: {retention_path}")
     for gen in report["expiring"]:
@@ -582,17 +623,36 @@ def apply(store, report, *, client=None):
         raise Blocker("refusing to delete a control document as data")
     deleted_objects = 0
     deleted_bytes = 0
+    report['batches'] = []
+    report['complete'] = False
     try:
-        for path in candidates:
-            deleted_bytes += report.get("candidate_sizes", {}).get(path, 0)
-            store.delete(BUCKET, [path])
-            deleted_objects += 1
+        for start in range(0, len(candidates), batch_size):
+            barrier()
+            paths = candidates[start:start + batch_size]
+            batch = {'paths': paths, 'status': 'submitted'}
+            report['batches'].append(batch)
+            if checkpoint:
+                checkpoint(report)
+            store.delete(BUCKET, paths)
+            batch['status'] = 'accepted'
+            deleted_bytes += sum(report.get('candidate_sizes', {}).get(path, 0) for path in paths)
+            deleted_objects += len(paths)
+            report['accepted'] = {'objects': deleted_objects, 'bytes': deleted_bytes}
+            if checkpoint:
+                checkpoint(report)
         if candidates:
             remaining = set(store.list_files(BUCKET, lifecycle.MANAGED_PREFIXES))
             if any(path in remaining for path in candidates):
                 raise RuntimeError("data deletion readback failed")
+            if not set(report['protected_sizes']) <= remaining:
+                raise RuntimeError('retained CCRD object disappeared during collection')
+        barrier()
+        for batch in report['batches']:
+            batch['status'] = 'verified-deleted'
+        report['complete'] = True
     finally:
-        report["deleted"] = {"objects": deleted_objects, "bytes": deleted_bytes,
+        report["deleted"] = {"objects": deleted_objects if report['complete'] else 0,
+                             "bytes": deleted_bytes if report['complete'] else 0,
                              "control": 0, "intents_retired": len(retire),
                              "retention_retired": len(retire_retention)}
         report["finished_at"] = now()
@@ -611,7 +671,7 @@ def apply(store, report, *, client=None):
 def write_journal(store, report):
     stamp = report["observed_at"].replace(":", "").replace("-", "")
     run = os.environ.get("GITHUB_RUN_ID", "local")
-    path = f"{JOURNAL_PREFIX}{stamp}-{run}-{report['current'][:12]}.json"
+    path = f"{JOURNAL_PREFIX}{stamp}-{run}-{str(report['current'])[:12]}.json"
     store.put_json(BUCKET, path, report)
     report["journal"] = path
     return path
@@ -946,7 +1006,13 @@ def main(argv=None):
                 if args.scope == "legacy-generations":
                     legacy_apply(store, report, client=client)
                 else:
-                    apply(store, report, client=client)
+                    last_save = [0.0]
+                    def checkpoint(value):
+                        write_output(args.output, value)
+                        if time.monotonic() - last_save[0] > 30:
+                            journal(store, value)
+                            last_save[0] = time.monotonic()
+                    apply(store, report, client=client, checkpoint=checkpoint)
                 report["phase"] = "applied"
                 journal(store, report)
             except Exception as error:

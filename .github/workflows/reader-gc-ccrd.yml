@@ -1,6 +1,8 @@
 name: CCRD · GC Collect Retired OCR Generations
 
 on:
+  schedule:
+    - cron: '23 9 * * *'
   workflow_dispatch:
     inputs:
       scope:
@@ -49,11 +51,11 @@ jobs:
       - name: Plan or collect retired OCR generations
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          SCOPE: ${{ inputs.scope }}
-          APPLY: ${{ inputs.apply }}
-          KEEP_GENERATIONS: ${{ inputs.keep_generations }}
-          LIMIT: ${{ inputs.limit }}
-          INCLUDE_STAGING: ${{ inputs.include_staging }}
+          SCOPE: ${{ inputs.scope || 'ocr' }}
+          APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
+          KEEP_GENERATIONS: ${{ inputs.keep_generations || '2' }}
+          LIMIT: ${{ inputs.limit || '0' }}
+          INCLUDE_STAGING: ${{ inputs.include_staging || 'false' }}
         run: |
           [[ "$KEEP_GENERATIONS" =~ ^[1-9][0-9]*$ ]] || exit 1
           [[ "$LIMIT" =~ ^[0-9]+$ ]] || exit 1

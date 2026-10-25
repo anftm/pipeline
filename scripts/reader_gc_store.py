@@ -1,4 +1,4 @@
-"""Fast verified S3 reads with the existing, three-bucket-only Hub mutation API."""
+"""Fast verified S3 reads and bounded Reader mutations through the Hub API."""
 try:
     from .reader_bucket_store import S3BucketStore, HubBucketStore
 except ImportError:
@@ -20,4 +20,6 @@ class CollectionStore(S3BucketStore):
         # Do not inherit S3BucketStore's unrestricted low-level delete method.
         # Fourth-bucket objects, legacy originals and unknown namespaces are not
         # authorized by this reader-only collection tier.
+        if bucket not in {'vomebook/reader-assets-v2', 'vomebook/pdf-pages-v2', 'melsm/pdf-archive-v2'}:
+            raise ValueError('Reader collection cannot delete the separate CCRD domain')
         self.writer.delete(bucket, paths)

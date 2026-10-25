@@ -14,13 +14,14 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 try:
-    from . import reader_gc_graph as graph, reader_lifecycle as lifecycle
+    from . import reader_gc_graph as graph, reader_lifecycle as lifecycle, reader_gc_retirement as retirement
     from .reader_bucket_store import HubBucketStore
     from .reader_gc_fence import GitHubProducerFence, assert_collector_context
     from .publish_reader_v3 import current, project_sidecar, observe_consumer
 except ImportError:
     import reader_gc_graph as graph
     import reader_lifecycle as lifecycle
+    import reader_gc_retirement as retirement
     from reader_bucket_store import HubBucketStore
     from reader_gc_fence import GitHubProducerFence, assert_collector_context
     from publish_reader_v3 import current, project_sidecar, observe_consumer
@@ -314,20 +315,26 @@ def verify_roots(store, reference_graph, collected_roots=frozenset()):
 
 def collect(store, fence, reference_graph, report, catalog, *, grace_days=0, limit=0,
             batch_size=500, apply=False, checkpoint=None, reader_only=False,
-            workers=1, resume=None):
+            workers=1, resume=None, retirement_roots=None):
     if not report["graph_complete"]:
         raise RuntimeError("reference graph is incomplete; no object deletion is authorized")
     if reader_only and set(reference_graph.files) != set(graph.BUCKETS):
         raise RuntimeError("reader-only deletion requires the complete four-bucket reference closure")
     if apply and not reader_only:
         reject_unaccepted_ccrd_collection(store)
-    state, retention = graph.plan_retention(graph.read_gc_state(store), report, grace_days, limit)
+    # Persist observations for every candidate even when this window has a small
+    # deletion budget. Applying a limit here used to reset/lose later candidates.
+    state, retention = graph.plan_retention(graph.read_gc_state(store), report, grace_days, 0)
     eligible = {tuple(key.split(":", 1)) for key in retention["past_grace_paths"]}
     snapshots = retired_snapshots(catalog)
     eligible.update((ASSETS, path) for path in snapshots if path in reference_graph.files.get(ASSETS, set())
                     and (ASSETS, path) not in reference_graph.references)
     excluded = {ref for ref in eligible if reader_only and ref[0] not in graph.READER_BUCKETS}
     eligible -= excluded
+    if retirement_roots is not None:
+        eligible = {ref for ref in eligible if retirement.within(*ref, retirement_roots)
+                    or reference_graph.input_retired(ref) or ref in reference_graph.retired_roots
+                    or ref[0] == ASSETS and ref[1] in snapshots}
     selected = sorted(eligible)[:limit] if limit else sorted(eligible)
     if resume:
         previous = sorted((entry['bucket'], entry['path']) for entry in resume['targets'])
@@ -353,13 +360,24 @@ def collect(store, fence, reference_graph, report, catalog, *, grace_days=0, lim
                "target_sizes": target_sizes,
                "processing_retirements": [entry for entry in report.get('processing_retirements', [])
                     if (entry['bucket'], entry['path']) in selected_set],
-               "plan_sha256": hashlib.sha256(encode(selected)).hexdigest()}
+                "plan_sha256": hashlib.sha256(encode(selected)).hexdigest(),
+                "scope": 'retired-assets' if retirement_roots is not None else 'unreferenced',
+                "complete": False}
     if resume:
         result['batches'] = [dict(entry) for entry in resume.get('batches', [])]
     if not apply:
         return result
     fence.check()
     verify_roots(store, reference_graph)
+    store.put_json(ASSETS, 'reader-index/reader_gc_state.json', state)
+    # This collector owns the state mutation; include its new digest in the
+    # root barrier instead of rejecting our own retention checkpoint.
+    state_ref = (ASSETS, 'reader-index/reader_gc_state.json')
+    reference_graph.files.setdefault(ASSETS, set()).add(state_ref[1])
+    reference_graph.root_names.setdefault(ASSETS, set()).add(state_ref[1])
+    reference_graph.references.add(state_ref)
+    reference_graph.root_hashes[state_ref] = snapshot_digest(store, *state_ref)
+    reference_graph.fingerprints[state_ref] = ('sha256', reference_graph.root_hashes[state_ref])
     if checkpoint:
         # Persist the exact planned targets before the first delete request.
         checkpoint(result)
@@ -428,6 +446,9 @@ def collect(store, fence, reference_graph, report, catalog, *, grace_days=0, lim
             checkpoint(result)
         print(f"{bucket}: verified deletion of {len(paths)} objects", flush=True)
     store.put_json(ASSETS, "reader-index/reader_gc_state.json", state)
+    result['complete'] = True
+    if checkpoint:
+        checkpoint(result)
     return result
 
 
@@ -444,6 +465,8 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument('--workers', type=int, default=4)
     parser.add_argument('--resume-run', default='')
+    parser.add_argument('--retired-assets-only', action='store_true')
+    parser.add_argument('--auto-resume', action='store_true')
     args = parser.parse_args()
     if (args.grace_days < 0 or args.limit < 0 or not 1 <= args.workers <= 8
             or args.resume_run and not re.fullmatch(r'[1-9][0-9]*', args.resume_run)):
@@ -467,12 +490,15 @@ def main():
     def save():
         args.output.write_bytes(encode(report))
     run = os.environ.get("GITHUB_RUN_ID", "local")
+    scope = 'retired-assets' if args.retired_assets_only else 'unreferenced'
     last_checkpoint = [0.0]
     def checkpoint(result, force=False):
         report["collection"] = result
         save()
-        if force or time.monotonic() - last_checkpoint[0] >= 30:
+        if force or result.get('complete') or time.monotonic() - last_checkpoint[0] >= 30:
             store.put_bytes(ASSETS, f"reader-index/gc/{run}/collection.json", encode(result))
+            if args.auto_resume:
+                retirement.save_cursor(store, run, scope, result, result.get('complete', False))
             last_checkpoint[0] = time.monotonic()
     last_progress = 0
     def progress(stage, **counts):
@@ -513,12 +539,31 @@ def main():
         progress("deletion-preflight", graph_complete=scanned["graph_complete"],
                  blockers=len(scanned["blockers"]))
         resume = None
-        if args.resume_run:
+        if args.auto_resume and not args.resume_run:
+            saved, resume = retirement.pending_plan(store)
+            if saved:
+                args.resume_run = saved['run_id']
+                scope = saved['scope']
+                args.retired_assets_only = scope == 'retired-assets'
+        if args.resume_run and resume is None:
             resume = json.loads(store.read_bytes(ASSETS, f'reader-index/gc/{args.resume_run}/collection.json'))
+            if args.auto_resume and resume.get('complete'):
+                resume = None
+        hints = retirement.load(store) if args.retired_assets_only else None
+        report['retirement_receipts'] = len(hints or {})
+        if resume and args.auto_resume:
+            changed = [r for r in resume['targets'] if (r['bucket'], r['path']) in reference_graph.references]
+            if changed:
+                # Current ownership wins. Keep the old audit, invalidate its
+                # deletion authority and plan the remaining eligible objects.
+                report['superseded_plan'] = {'run_id': args.resume_run, 'plan_sha256': resume['plan_sha256'],
+                                             'reason': 'targets-referenced-again', 'retained': changed}
+                resume = None
         report["collection"] = collect(store, fence, reference_graph, scanned, catalog,
             grace_days=args.grace_days, limit=args.limit, apply=args.apply,
             checkpoint=checkpoint if args.apply else None, reader_only=args.reader_only,
-            workers=args.workers, resume=resume)
+            workers=args.workers, resume=resume,
+            retirement_roots=retirement.targets(hints) if hints is not None else None)
         report["complete"] = True
         print(json.dumps({"catalog": report["catalog"], "collection": {
             k: v for k, v in report["collection"].items() if k != "batches"}}), flush=True)

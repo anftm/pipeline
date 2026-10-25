@@ -2,6 +2,7 @@
 import hashlib
 import json
 import unittest
+from unittest.mock import patch
 
 from scripts import ccrd_lifecycle as lifecycle, reader_gc_ccrd as gc
 
@@ -158,6 +159,44 @@ def build_store(*, generations=4, open_upload=False, branch=False):
 
 
 class CcrdGcTests(unittest.TestCase):
+    def test_withdrawn_empty_library_is_a_successful_scheduled_noop(self):
+        store = Store()
+        store.put(gc.IDS, {'version': 1, 'kind': 'ccrd-ocr-id-registry', 'ids': {}, 'resources': []})
+        report = gc.plan(store, client=Live(None))
+        gc.apply(store, report, client=Live(None))
+        self.assertTrue(report['complete'])
+        self.assertEqual(report['deleted']['objects'], 0)
+        self.assertIn(gc.IDS, store.objects)
+
+    def test_partial_delete_is_not_counted_until_readback_and_retries_complete(self):
+        store, releases = build_store()
+        live = Live(releases[-1]['generation'])
+        report = gc.plan(store, client=live)
+        original = store.delete
+        def partial(bucket, paths):
+            original(bucket, paths[:1])
+            raise OSError('lost delete response')
+        saved = []
+        with patch.object(store, 'delete', side_effect=partial), self.assertRaises(OSError):
+            gc.apply(store, report, client=live, checkpoint=lambda value: saved.append(json.loads(json.dumps(value))))
+        self.assertEqual(report['deleted']['objects'], 0)
+        self.assertEqual(saved[-1]['batches'][0]['status'], 'submitted')
+        retry = gc.plan(store, client=live)
+        gc.apply(store, retry, client=live)
+        self.assertTrue(retry['complete'])
+        for release in releases[-2:]:
+            self.assertTrue(set(release['paths']) <= set(store.objects))
+
+    def test_same_named_control_with_new_pin_blocks_deletion(self):
+        store, releases = build_store()
+        report = gc.plan(store, client=Live(releases[-1]['generation']))
+        auto = json.loads(store.objects[gc.AUTOMATION])
+        auto['resources'].append(releases[0]['text'])
+        store.put(gc.AUTOMATION, auto)
+        with self.assertRaisesRegex(gc.Blocker, 'content changed'):
+            gc.apply(store, report, client=Live(releases[-1]['generation']))
+        self.assertEqual(store.deleted, [])
+
     def test_plan_keeps_current_and_parent_and_reclaims_only_expired_closures(self):
         store, releases = build_store()
         report = gc.plan(store, keep_generations=2, client=Live(releases[-1]["generation"]))

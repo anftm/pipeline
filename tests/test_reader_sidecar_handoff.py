@@ -52,7 +52,9 @@ class ReaderSidecarHandoffTests(unittest.TestCase):
             [{"files": [entry]}], "d" * 32, values.__getitem__,
             lambda name, value: (written.append(name), values.__setitem__(name, value)))
         self.assertEqual(count, 1)
-        self.assertEqual(written, [path])
+        self.assertIn(path, written)
+        receipt = next(name for name in written if name.startswith('reader-index/gc/retirements/'))
+        self.assertEqual(values[receipt]['roots'], [{'bucket': bucket, 'root': root.rsplit('/', 1)[0]}])
         self.assertEqual(values[path]["status"], "released")
         self.assertEqual(values[path]["generation"], "d" * 32)
 
@@ -75,7 +77,7 @@ class ReaderSidecarHandoffTests(unittest.TestCase):
             [{"files": [entry]}], "c" * 32, lambda _: record,
             lambda name, value: written.append((name, value)))
         self.assertEqual(count, 1)
-        self.assertEqual(written[0][1]["status"], "released")
+        self.assertEqual(next(value for name, value in written if name == path)['status'], 'released')
 
 
 if __name__ == "__main__":

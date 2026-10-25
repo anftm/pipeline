@@ -184,6 +184,15 @@ def publish_catalog(sidecar: dict, token: str | None = None,
     except FileNotFoundError:
         previous = reader_lifecycle.empty_catalog()
     catalog, generation = reader_lifecycle.catalog_generation(sidecar, copy.deepcopy(previous), references)
+    try:
+        from . import reader_gc_retirement as retirement
+    except ImportError:
+        import reader_gc_retirement as retirement
+    old_id = (previous.get('current') or {}).get('generation')
+    retired = retirement.record(previous.get('generations', {}).get(old_id, {}).get('references', []),
+                                catalog['generations'][generation]['references'], generation, 'catalog-replacement')
+    if retired:
+        publish_json(retired[0], retired[1], token)
     snapshot = json.dumps(sidecar, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
     snapshot_path = f"{INDEX_PREFIX}/generations/{generation}/reader_assets.json.gz"
     entry = catalog["generations"][generation]
