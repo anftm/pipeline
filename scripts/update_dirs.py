@@ -102,13 +102,19 @@ def process_repo(repo_path):
             print(f"  mul.py 失败: {result.stderr.strip()[:300]}")
             return False
 
+        # A source commit can delete the generated catalogues (for example a
+        # cleanup of embedded image copies). Regenerate whenever either file is
+        # missing, not only when the tracked content differs.
+        missing = [name for name in DIRECTORY_FILES if not os.path.isfile(os.path.join(repo_dir, name))]
         result = run_cmd(["git", "status", "--porcelain", "--", *DIRECTORY_FILES], cwd=repo_dir)
         if result.returncode != 0:
             print("  git status 失败")
             return False
-        if not result.stdout.strip():
+        if not result.stdout.strip() and not missing:
             print("  目录文件无变化，跳过 push")
             return True
+        if missing:
+            print("  目录文件缺失，强制重建: " + ", ".join(missing))
 
         run_cmd(["git", "add", *DIRECTORY_FILES], cwd=repo_dir)
         run_cmd([

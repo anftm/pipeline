@@ -181,6 +181,34 @@ class FetchAndParseTests(unittest.TestCase):
             self.assertEqual(result, 1)
             self.assertFalse(output_file.exists())
 
+    def test_missing_catalog_falls_back_to_the_repository_tree(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_path = Path(temporary)
+            state_file = temporary_path / "commits.json"
+            output_file = temporary_path / "search.json"
+            state_file.write_text(json.dumps({repo: "old-sha" for repo in self.module.REPOS}), encoding="utf-8")
+            tree = [{"type": "file", "path": "丛书/第一卷.pdf", "size": 10},
+                    {"type": "file", "path": "README.md", "size": 1},
+                    {"type": "directory", "path": "丛书", "size": 0}]
+
+            def get_text(url, _token):
+                # Only the broken catalogue repo 404s; others still use text.
+                return "" if self.module.REPOS[-1] in url else "A docx\n"
+
+            with patch.object(self.module, "STATE_FILE", state_file), \
+                 patch.object(self.module, "OUTPUT_FILE", output_file), \
+                 patch.object(self.module, "get_repo_sha", return_value="new-sha"), \
+                 patch.object(self.module, "http_get_text", side_effect=get_text), \
+                 patch.object(self.module, "http_get_json_page", return_value=(tree, "")), \
+                 patch.object(self.module, "batch_get_sizes", return_value={}), \
+                 patch.object(self.module, "OUTPUT_DIR", temporary_path), \
+                 patch.dict(os.environ, {"FORCE_SYNC": "true"}, clear=True):
+                self.assertEqual(self.module.main(), 0)
+
+            payload = json.loads(output_file.read_text())
+            files = [item[1] for item in payload["rc"]]
+            self.assertIn("第一卷", files)
+
     def test_catalog_and_sizes_are_fetched_from_the_captured_revision(self):
         with tempfile.TemporaryDirectory() as temporary:
             temporary_path = Path(temporary)

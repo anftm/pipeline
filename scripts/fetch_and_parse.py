@@ -322,6 +322,49 @@ def batch_get_sizes(repo: str, revision: str, paths: list[str], token: str, max_
 
     return size_map
 
+def http_get_json_page(url: str, token: str = "") -> tuple[object, str]:
+    """GET one Hub tree page and its ``rel=next`` link."""
+    try:
+        with _open_with_retries(_make_request(url, token), timeout=60) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            link = resp.headers.get("Link", "") or ""
+    except Exception as error:
+        print(f"  ⚠ HTTP GET JSON 失败 [{url}]: {error}")
+        return {}, ""
+    match = re.search(r'<([^>]+)>;\s*rel="next"', link)
+    return data, match.group(1) if match else ""
+
+
+def tree_records(repo: str, revision: str, token: str) -> list[dict]:
+    """Rebuild catalogue records from the Hub file tree.
+
+    A source commit can delete the generated ``直接目录.txt`` (its LFS copies
+    are occasionally pruned); the search build must still describe the
+    repository instead of failing the whole daily sync.
+    """
+    records, url, skipped = [], f"{API_DATASETS}/{repo}/tree/{revision}?recursive=true&limit=1000", set()
+    while url:
+        data, url = http_get_json_page(url, token)
+        if not isinstance(data, list):
+            return []
+        for item in data:
+            if item.get("type") != "file":
+                continue
+            path = str(item.get("path") or "")
+            name = path.rsplit("/", 1)[-1]
+            if not path or name in {"README.md", "直接目录.txt", "树形目录.txt", "mul.py"}:
+                continue
+            folders, _, filename = path.rpartition("/")
+            stem, dot, extension = filename.rpartition(".")
+            if dot and extension.lower() in {"gitattributes"}:
+                continue
+            records.append({"Repo": repo, "File": stem if dot else filename,
+                            "Extension": extension.lower() if dot else "",
+                            "Folder": folders.split("/") if folders else [],
+                            "Size": item.get("size") or "", "HasTxt": False})
+    return records
+
+
 def parse_one_line(line: str, repo: str, size_map: dict) -> dict | None:
     """
     解析 txt 中的一行路径，返回一条 JSON 记录。不合法则返回 None。
@@ -601,8 +644,15 @@ def main():
         print(f"   📄 下载: {txt_url}")
         txt_content = http_get_text(txt_url, token)
         if not txt_content:
-            print(f"   ❌ 无法下载，停止生成")
-            failed_catalogs.append(repo)
+            print("   ⚠ 目录文件缺失，改用仓库文件树重建")
+            rebuilt = tree_records(repo, revision, token)
+            if not rebuilt:
+                print("   ❌ 无法下载且文件树为空，停止生成")
+                failed_catalogs.append(repo)
+                continue
+            print(f"   ✅ 文件树重建 {len(rebuilt)} 条记录")
+            all_records.extend(rebuilt)
+            time.sleep(0.5)
             continue
 
         # 2. 先解析（Size 暂时为空）
