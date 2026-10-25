@@ -17,6 +17,7 @@ from scripts import pdf_ocr_stages as stages
 
 
 ASSETS, PDF, INPUT = gc.READER_BUCKETS
+CCRD = gc.ccrd_lifecycle.BUCKET
 SIDECAR = "reader-index/reader_assets.json.gz"
 
 
@@ -85,6 +86,21 @@ class ReaderGcGraphTests(unittest.TestCase):
         self.assertTrue(report["graph_complete"], report["blockers"])
         self.assertEqual(sorted(report["buckets"][INPUT]["candidates"]),
                          [f"{root}/page-000001.png", f"{root}/page-000002.png"])
+
+    def test_provenance_drift_warns_but_does_not_block(self):
+        graph = gc.ReferenceGraph(MemoryStore())
+        ref = (ASSETS, "documents/pdf/pptx/" + "a" * 64 + "/document-manifest.json")
+        blocked = graph.note_checksum(ref, {"role": "provenance"})
+        self.assertFalse(blocked)
+        self.assertEqual(graph.blockers, set())
+        self.assertTrue(any("provenance checksum drifted" in w for w in graph.resource_warnings))
+
+    def test_runtime_drift_still_blocks(self):
+        graph = gc.ReferenceGraph(MemoryStore())
+        ref = (ASSETS, "documents/pdf/pptx/" + "a" * 64 + "/document-manifest.json")
+        blocked = graph.note_checksum(ref, {"role": "runtime"})
+        self.assertTrue(blocked)
+        self.assertIn("retained resource checksum mismatch", " ".join(graph.blockers))
 
     def test_stale_pin_of_retired_input_is_not_a_missing_reference(self):
         store = MemoryStore()

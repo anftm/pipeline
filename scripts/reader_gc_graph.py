@@ -135,6 +135,7 @@ class ReferenceGraph:
         self.root_names = {}
         self.expected_resources = {}
         self.loaded_digests = {}
+        self.resource_warnings = []
         self.external_pins = set()
         self.externally_traversed = set()
         self.active_external_pin = False
@@ -171,6 +172,20 @@ class ReferenceGraph:
                 etag = getattr(self.store, "read_etags", {}).get(ref)
                 self.fingerprints[ref] = ("etag", etag) if etag else ("sha256", digest)
         return payload
+
+    def note_checksum(self, ref, expected) -> bool:
+        """Record a retained-resource drift; only runtime roles block.
+
+        Provenance bytes (a converted document manifest) are advisory: the
+        export's text and document identity are verified independently, so a
+        rewritten manifest must not mark the whole graph incomplete.
+        """
+        if expected.get("role") == "provenance":
+            with self.lock:
+                self.resource_warnings.append(f"provenance checksum drifted: {ref[0]}:{ref[1]}")
+            return False
+        self.blockers.add(f"retained resource checksum mismatch: {ref[0]}:{ref[1]}")
+        return True
 
     def handoff_resolved(self, generation) -> bool:
         return isinstance(generation, str) and (
@@ -319,7 +334,7 @@ class ReferenceGraph:
                     continue
                 self.expected_resources[key] = ref
                 if key in self.loaded_digests and self.loaded_digests[key] != ref['sha256']:
-                    self.blockers.add(f"retained resource checksum mismatch: {key[0]}:{key[1]}")
+                    self.note_checksum(key, ref)
                 self.mark(*key, external_pin=True)
             return
         if isinstance(value, dict):
@@ -399,8 +414,8 @@ class ReferenceGraph:
         ref = (bucket, path)
         expected = self.expected_resources.get(ref)
         if expected and self.loaded_digests.get(ref) != expected['sha256']:
-            self.blockers.add(f"retained resource checksum mismatch: {bucket}:{path}")
-            return False
+            if self.note_checksum(ref, expected):
+                return False
         if bucket == ccrd_lifecycle.BUCKET:
             try:
                 ccrd_lifecycle.references(payload, path)
@@ -790,6 +805,7 @@ class ReferenceGraph:
                            "references from earlier root versions unioned conservatively",
             "scanned_at": datetime.now(timezone.utc).isoformat(),
             "deletion_enabled": False,
+            "warnings": sorted(set(self.resource_warnings)),
             "deletion_blockers": ["remaining producers lack shared mutation coordination"],
             "blockers": sorted(self.blockers), "buckets": buckets,
             "missing": [f"{b}:{p}" for b, p in sorted(self.missing)],
