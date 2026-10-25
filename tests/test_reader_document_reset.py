@@ -18,6 +18,7 @@ class DocumentResetTests(unittest.TestCase):
             'repo\0image.tif': {'s': 2, 'm': 'i', 'b': reset.ASSETS, 'p': 'pages/image/tif/keep/page-manifest.json'},
             'repo\0image.png': {'s': 2, 'm': 'i', 'b': reset.ASSETS, 'p': 'pages/image/png/keep/document.webp'},
             'repo\0book.epub': {'s': 2, 'm': 'e', 'b': reset.ASSETS, 'p': 'chapters/ebook/epub/keep/chapter-manifest.json'},
+            'repo\0failed.pdf': {'s': 4, 'om': 'failed', 'oe': 'OCR pages incomplete'},
         }}
         derived = {'version': 1, 'kind': 'pdf-derived-source-index', 'files': [
             {'key': 'repo\0scan.djvu', 'source_extension': 'djvu', 'new_path': 'derived/old/djvu/document.pdf'},
@@ -41,6 +42,7 @@ class DocumentResetTests(unittest.TestCase):
             self.assertEqual(after['f'][key], before['f'][key])
         self.assertNotIn('repo\0scan.pdf', after['f'])
         self.assertNotIn('repo\0scan.djvu', after['f'])
+        self.assertEqual(after['f']['repo\0failed.pdf'], {'s': 4})
         self.assertEqual(after['f']['repo\0article.caj']['p'], 'derived/old/caj/document.pdf')
         pointer, catalog = publication.current(store)
         self.assertEqual(catalog['files'], {})

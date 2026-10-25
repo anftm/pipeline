@@ -141,6 +141,11 @@ def clean_sidecar(sidecar, derived, static_indexes=()):
         if djvu:
             entry.pop('pd', None)
             entry.pop('pdb', None)
+        if entry.get('s') == 4:
+            # Diagnostic fields are archived in the original registries. HF
+            # deliberately exposes only the unavailable route for this status.
+            for field in ('om', 'oe', 'op', 'ob', 'o'):
+                entry.pop(field, None)
         if entry != old:
             changed.append(key)
             if entry:
@@ -200,7 +205,7 @@ def withdraw(store, options, *, apply=False):
         if previous.get('status') == 'withdrawn':
             if digest(store.read_bytes(ASSETS, SIDECAR)) != previous['sidecar_sha256']:
                 raise ValueError('sidecar moved after document withdrawal')
-            return previous
+            return normalize_withdrawn(store, previous, apply=apply)
         raise ValueError('unfinished reset requires its exact saved plan')
     plan_path = f'reader-index/gc/document-reset/{reset_id}/plan.json.gz'
     try:
@@ -339,4 +344,44 @@ def apply_withdrawal(store, plan):
     store.put_bytes(ASSETS, RECEIPT, encode(report))
     if store.read_bytes(ASSETS, SIDECAR) != packed or store.read_bytes(ASSETS, RECEIPT) != encode(report):
         raise ValueError('withdrawal readback mismatch')
+    return report
+
+
+def normalize_withdrawn(store, receipt, *, apply=False):
+    """Remove legacy failure diagnostics from the already withdrawn projection."""
+    raw = store.read_bytes(ASSETS, SIDECAR)
+    sidecar = decode(raw)
+    changed = False
+    for entry in sidecar['f'].values():
+        if entry.get('s') != 4:
+            continue
+        for field in ('om', 'oe', 'op', 'ob', 'o'):
+            if field in entry:
+                entry.pop(field)
+                changed = True
+    if not changed:
+        return receipt
+    if not apply:
+        return {**receipt, 'normalization_pending': True}
+    publication.assert_writer(store)
+    pointer, catalog = publication.current(store)
+    if catalog['files'] or catalog.get('document_reset') != receipt['reset_id']:
+        raise ValueError('withdrawn catalog moved')
+    packed = gzip.compress(encode(sidecar), mtime=0)
+    before, _ = current_base_catalog(store)
+    legacy, generation = lifecycle.catalog_generation(sidecar, before)
+    legacy['generations'] = {generation: legacy['generations'][generation]}
+    path = f'reader-index/generations/{generation}/reader_assets.json.gz'
+    legacy['generations'][generation]['snapshot'] = publication.metadata(ASSETS, path, packed)
+    snapshot = publication.metadata(ASSETS, f'reader-index/snapshots/{digest(packed)}/reader_assets.json.gz', packed)
+    publication.immutable_put(store, ASSETS, path, packed)
+    publication.immutable_put(store, ASSETS, snapshot['path'], packed)
+    store.put_bytes(ASSETS, SIDECAR, packed)
+    store.put_bytes(ASSETS, 'reader-index/reader_catalog.json', encode(legacy))
+    result = publication.commit_catalog(store, {'version': 3, 'kind': 'reader-reading-catalog',
+        'files': {}, 'base_sidecar': snapshot, 'parent_generation': pointer['generation'],
+        'document_reset': receipt['reset_id']}, pointer, apply=True)
+    report = {**receipt, 'generation': result['generation'], 'base_generation': generation,
+              'base_snapshot': snapshot, 'sidecar_sha256': digest(packed)}
+    store.put_bytes(ASSETS, RECEIPT, encode(report))
     return report
