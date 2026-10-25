@@ -58,7 +58,7 @@ jobs:
           # expected incomplete report, not a failed check. Deletion still uses
           # the drained maintenance window and requires graph_complete=true.
           args=(--output output/gc/reader-gc-report.json --grace-days "$GRACE_DAYS"
-                --storage s3 --workers 32 --max-rounds 30 --deadline-minutes 290
+                --storage s3 --workers 96 --max-rounds 40 --deadline-minutes 330
                 --allow-incomplete)
           if [[ "$RECORD_OBSERVATIONS" == "true" ]]; then args+=(--record-observations); fi
           if [[ "$SKIP_INPUT_BUCKET" == "true" ]]; then args+=(--skip-input-bucket); fi
