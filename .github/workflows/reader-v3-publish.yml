@@ -10,7 +10,7 @@ on:
     inputs:
       operation:
         type: choice
-        options: [build-stage, stage, promote, rollback, withdraw, ack, inspect, auto, correct, accept, reject, retry, retire, retire-ocr-progress, unify, repair-gbk]
+        options: [build-stage, stage, promote, rollback, withdraw, ack, inspect, auto, correct, accept, reject, retry, retire, retire-ocr-progress, unify, repair-gbk, reset-documents]
         default: inspect
       resource_json:
         description: Pinned build-stage spec or qualified reading/candidate/rollback resource JSON
@@ -60,6 +60,7 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_INPUT_TOKEN: ${{ secrets.HF_INPUT_TOKEN }}
           GH_TOKEN: ${{ github.token }}
+          GC_PRODUCER_TOKENS_JSON: ${{ secrets.GC_PRODUCER_TOKENS_JSON }}
           READER_V3_PREVIEW_FIRST: ${{ vars.READER_V3_PREVIEW_FIRST || 'false' }}
           READER_V3_DJVU_MIGRATION: ${{ vars.READER_V3_DJVU_MIGRATION || 'false' }}
           OCR_CORRECTION_API_BASE: ${{ secrets.OCR_CORRECTION_API_BASE }}
@@ -85,7 +86,7 @@ jobs:
           args=("$OPERATION" --output output/v3/publication.json)
           case "$OPERATION" in
             build-stage|stage|promote|rollback|withdraw) args+=(--resource-json "$RESOURCE_JSON" --expected-parent "$EXPECTED_PARENT") ;;
-            auto|correct|accept|reject|retry|repair-gbk|unify) args+=(--resource-json "$RESOURCE_JSON") ;;
+            auto|correct|accept|reject|retry|repair-gbk|unify|reset-documents) args+=(--resource-json "$RESOURCE_JSON") ;;
             retire|retire-ocr-progress) ;;
             ack) args+=(--surface "$SURFACE") ;;
             inspect) ;;
@@ -111,7 +112,7 @@ jobs:
         if: >-
           steps.operation.outputs.apply == 'true' &&
           (steps.operation.outputs.operation == 'auto' ||
-           (steps.operation.outputs.changed == 'true' && contains(fromJSON('["correct","accept","promote","rollback","withdraw","repair-gbk","unify"]'), steps.operation.outputs.operation)))
+            (steps.operation.outputs.changed == 'true' && contains(fromJSON('["correct","accept","promote","rollback","withdraw","repair-gbk","unify","reset-documents"]'), steps.operation.outputs.operation)))
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           PAGES_TOKEN: ${{ secrets.PAGES_TOKEN }}
@@ -123,7 +124,7 @@ jobs:
           steps.operation.outputs.apply == 'true' &&
           (
             steps.operation.outputs.operation == 'auto' ||
-            (steps.operation.outputs.changed == 'true' && contains(fromJSON('["auto","correct","accept","promote","rollback","withdraw","repair-gbk","unify"]'), steps.operation.outputs.operation))
+            (steps.operation.outputs.changed == 'true' && contains(fromJSON('["auto","correct","accept","promote","rollback","withdraw","repair-gbk","unify","reset-documents"]'), steps.operation.outputs.operation))
           )
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -158,7 +159,8 @@ jobs:
       - name: Write deduplicated PDF/OCR progress report
         if: >-
           always() && steps.operation.outputs.operation != 'unify' &&
-          steps.operation.outputs.operation != 'inspect' && steps.operation.outputs.operation != 'ack'
+          steps.operation.outputs.operation != 'inspect' && steps.operation.outputs.operation != 'ack' &&
+          steps.operation.outputs.operation != 'reset-documents'
         timeout-minutes: 10
         continue-on-error: true
         env:

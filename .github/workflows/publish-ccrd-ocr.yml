@@ -164,6 +164,8 @@ jobs:
       - name: Aggregate complete OCR TXT and rebuild the complete independent OCR index
         if: steps.coalesce.outputs.skip != 'true'
         env:
+          GH_TOKEN: ${{ github.token }}
+          GC_PRODUCER_TOKENS_JSON: ${{ secrets.GC_PRODUCER_TOKENS_JSON }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_INPUT_TOKEN: ${{ secrets.HF_INPUT_TOKEN }}
           APPLY: ${{ github.event_name != 'workflow_dispatch' || inputs.apply }}

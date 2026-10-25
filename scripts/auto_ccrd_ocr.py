@@ -423,6 +423,17 @@ def main():
     args = parser.parse_args()
     if args.plan_only and args.apply:
         raise ValueError('plan-only cannot apply')
+    options = json.loads(args.source_json)
+    if options.get('operation') == 'reset-documents':
+        try:
+            from .ccrd_ocr_reset import withdraw
+        except ImportError:
+            from ccrd_ocr_reset import withdraw
+        report = withdraw(options, apply=args.apply)
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_bytes(contract.canonical(report))
+        print(json.dumps({'status': report['status'], 'reset_id': report['reset_id']}))
+        return 0
     approved = configuration(json.loads(args.config.read_text()))
     consumer = args.root.parent / 'consumer'
     report = {}

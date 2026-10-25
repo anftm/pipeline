@@ -1010,7 +1010,7 @@ class CentralHubStore(HubBucketStore):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("build-stage", "stage", "promote", "rollback", "withdraw", "ack", "ack-all", "acknowledge-legacy", "compact-legacy", "inspect", "project", "auto", "build-task", "correct", "accept", "reject", "retry", "retire", "retire-ocr-progress", "unify", "repair-gbk"))
+    parser.add_argument("command", choices=("build-stage", "stage", "promote", "rollback", "withdraw", "ack", "ack-all", "acknowledge-legacy", "compact-legacy", "inspect", "project", "auto", "build-task", "correct", "accept", "reject", "retry", "retire", "retire-ocr-progress", "unify", "repair-gbk", "reset-documents"))
     parser.add_argument("--resource", type=Path)
     parser.add_argument("--resource-json")
     parser.add_argument("--bundle", type=Path)
@@ -1020,7 +1020,16 @@ def main():
     parser.add_argument("--surface", choices=("hf", "pages"))
     args = parser.parse_args()
     store = CentralHubStore()
-    if args.command == "unify":
+    if args.command == "reset-documents":
+        try:
+            from .reader_document_reset import withdraw as reset_documents, DocumentProducerFence
+        except ImportError:
+            from reader_document_reset import withdraw as reset_documents, DocumentProducerFence
+        if args.apply:
+            store.assert_serialized_writer(PROTOCOL)
+            DocumentProducerFence().check()
+        report = reset_documents(store, json.loads(args.resource_json or '{}'), apply=args.apply)
+    elif args.command == "unify":
         report = unify(store, apply=args.apply)
     elif args.command == "repair-gbk":
         try:
