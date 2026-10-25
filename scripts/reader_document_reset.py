@@ -256,6 +256,27 @@ def withdraw(store, options, *, apply=False):
         except FileNotFoundError:
             pass
         updates[path] = encode({'version': 1, 'kind': kind, 'tasks': {}, 'days': {}})
+    repair_path = 'reader-index/resource_repairs.json'
+    try:
+        repair_raw = store.read_bytes(ASSETS, repair_path)
+    except FileNotFoundError:
+        pass
+    else:
+        repairs = decode(repair_raw)
+        if not isinstance(repairs.get('files'), dict):
+            raise ValueError('invalid repair registry')
+        archives[repair_path] = repair_raw
+        repairs['files'] = {key: value for key, value in repairs['files'].items()
+                            if not any(ref.get('bucket') in {PAGES, INPUTS}
+                                       for ref in value.get('resources', []))}
+        updates[repair_path] = encode(repairs)
+    consumer_path = 'reader-index/reader_gc_consumers.json'
+    try:
+        archives[consumer_path] = store.read_bytes(ASSETS, consumer_path)
+    except FileNotFoundError:
+        pass
+    updates[consumer_path] = encode({'version': 1, 'kind': 'reader-gc-consumers', 'receipts': {},
+                                     'resources': lifecycle.sidecar_references(cleaned)})
     report = {'version': 1, 'kind': 'reader-document-reset', 'reset_id': reset_id,
               'status': 'planned', 'created_at': lifecycle.now_iso(),
               'changed_keys': changed, 'removed_v3_books': len(catalog['files']),
