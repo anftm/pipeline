@@ -23,7 +23,9 @@ class SpaceCheck:
 SPACES = (
     SpaceCheck("Hitokoto", "https://vomebook-hitokoto.hf.space/"),
     SpaceCheck("HF Search", "https://voiceofml-search.hf.space/"),
-    SpaceCheck("CCRD Search", "https://vomebook-search.hf.space/"),
+    # A docker Space restart plus a large OCR release load exceeds the old
+    # 90s window; readiness is the loader's own /api/index-status flag.
+    SpaceCheck("CCRD Search", "https://vomebook-search.hf.space/api/index-status", True, 300),
     SpaceCheck("BHA Search", "https://vomebook-bha-search.hf.space/api/health", True, 300),
 )
 REQUEST_TIMEOUT_SECONDS = 30
@@ -39,6 +41,11 @@ def bha_ready(payload: object) -> bool:
         and payload.get("index_status") == "ready"
         and payload.get("es") is True
     )
+
+
+def ccrd_ready(payload: object) -> bool:
+    """CCRD reports readiness on its own loader endpoint."""
+    return isinstance(payload, dict) and payload.get("ready") is True
 
 
 def probe(space: SpaceCheck, timeout: float) -> tuple[bool, bool, str]:
@@ -69,6 +76,10 @@ def probe(space: SpaceCheck, timeout: float) -> tuple[bool, bool, str]:
         payload = json.loads(body)
     except (ValueError, UnicodeError):
         return False, True, "HTTP 200; invalid BHA health JSON"
+    if space.name == "CCRD Search":
+        if not ccrd_ready(payload):
+            return False, True, "HTTP 200; CCRD loader is not ready"
+        return True, False, "HTTP 200; CCRD ready"
     if not bha_ready(payload):
         return False, True, "HTTP 200; BHA search is not ready"
     return True, False, "HTTP 200; BHA ok=true, index_ready=true, index_status=ready, es=true"

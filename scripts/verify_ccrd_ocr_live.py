@@ -112,6 +112,13 @@ def public_layout(records, base_slugs):
 
 
 def wait_ready(generation, wait_seconds):
+    """Wait for the loader to publish our generation.
+
+    A docker Space restart plus a large release load routinely exceeds 20
+    minutes, so a timeout here means "still loading", not "publication
+    failed": report that ambiguity in the message instead of claiming the
+    release was rejected.
+    """
     deadline = time.monotonic() + wait_seconds
     while True:
         try:
@@ -129,11 +136,13 @@ def wait_ready(generation, wait_seconds):
             if status.get('ready') is True and status.get('ocr_release') == generation:
                 return status
             if time.monotonic() >= deadline:
-                raise TimeoutError('CCRD has not loaded the exact complete OCR generation')
+                raise TimeoutError(
+                    f'CCRD still shows {status.get("ocr_release")!r} after {wait_seconds}s; '
+                    'the release may still be loading')
         time.sleep(min(15, max(0, deadline - time.monotonic())))
 
 
-def verify(root, receipt, *, metadata=None, wait_seconds=1200):
+def verify(root, receipt, *, metadata=None, wait_seconds=2400):
     generation, ref = receipt['generation'], receipt['release']
     raw = (root / contract.safe_path(ref['path'])).read_bytes()
     if len(raw) != ref['bytes'] or contract.digest(raw) != ref['sha256']:

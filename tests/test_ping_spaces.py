@@ -133,5 +133,16 @@ class PingSpacesTests(unittest.TestCase):
         self.assertEqual(BHA.url, "https://vomebook-bha-search.hf.space/api/health")
 
 
+class CcrdReadinessTests(unittest.TestCase):
+    def test_ccrd_uses_loader_readiness_not_a_bare_200(self):
+        space = next(s for s in ping.SPACES if s.name == "CCRD Search")
+        self.assertTrue(space.bha_health)
+        self.assertEqual(space.url, "https://vomebook-search.hf.space/api/index-status")
+        self.assertGreaterEqual(space.wait_seconds, 300)
+        self.assertTrue(ping.ccrd_ready({"ready": True, "ocr_release": "a" * 64}))
+        self.assertFalse(ping.ccrd_ready({"ready": False}))
+        self.assertFalse(ping.ccrd_ready({}))
+
+
 if __name__ == "__main__":
     unittest.main()
