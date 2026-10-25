@@ -86,6 +86,24 @@ class ReaderGcGraphTests(unittest.TestCase):
         self.assertEqual(sorted(report["buckets"][INPUT]["candidates"]),
                          [f"{root}/page-000001.png", f"{root}/page-000002.png"])
 
+    def test_stale_pin_of_retired_input_is_not_a_missing_reference(self):
+        store = MemoryStore()
+        source = "a" * 64
+        root = f"objects/aa/{source}/{'b' * 16}/ocr-input"
+        path = f"{root}/page-000001.png"
+        # The PNG is already collected, but an older manifest still names it.
+        store.put(ASSETS, "reader-index/v3/retirement.json", {
+            "version": 1, "kind": "reader-v3-retirement", "resources": [], "retired_paths": [],
+            "replacement_acks": {"hf": True, "pages": True}, "retired_input_roots": {root: {
+                "bucket": INPUT, "root": root, "source_sha256": source, "pages": 1}}})
+        store.put(PDF, "objects/aa/" + "c" * 64 + "/" + "d" * 16 + "/ocr-manifest.json", {
+            "version": 1, "kind": "pdf-ocr", "complete": True, "page_count": 1,
+            "source_sha256": "c" * 64, "profile": "p", "pages": [
+                {"p": 1, "source": "ocr", "i": path, "o": "objects/x.json.gz"}]})
+        report = gc.ReferenceGraph(store).build()
+        self.assertEqual(report["missing"], [])
+        self.assertNotIn("referenced objects are missing", report["blockers"])
+
     def test_retired_input_with_open_review_evidence_is_collectible(self):
         store = MemoryStore()
         source = "a" * 64

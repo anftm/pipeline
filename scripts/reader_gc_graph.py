@@ -113,6 +113,7 @@ class ReferenceGraph:
         self.retired_roots = set()
         self.retired_inputs = set()
         self.retired_input_roots = set()
+        self.ignored_retired_pins = set()
         self.progress = progress or (lambda *args, **kwargs: None)
         self.workers = max(1, workers)
         self.max_rounds = max(1, max_rounds)
@@ -692,8 +693,13 @@ class ReferenceGraph:
             if is_root(ref[1], ref[0]):
                 return ref[1] in self.root_names.get(ref[0], set())
             return ref[1] in self.files.get(ref[0], set())
+        # A journaled OCR input root is a deliberate deletion, not a missing
+        # reference. Older catalogs and CCRD releases may still pin those PNGs;
+        # the journal supersedes them, so a stale pin must never block the graph.
+        self.ignored_retired_pins = {ref for origin, refs in self.direct.items()
+                                     for ref in refs if self.input_retired(ref)}
         self.missing = {ref for origin, refs in self.direct.items() if alive(origin)
-                        for ref in refs if (not self.input_retired(ref) or ref in self.external_pins)
+                        for ref in refs if not self.input_retired(ref)
                         and ref[0] in self.files and ref[1] not in self.files[ref[0]]}
         for ref, message in self.unreadable.items():
             if alive(ref):
