@@ -117,6 +117,6 @@ class CacheTests(unittest.TestCase):
                              (reset.ASSETS, paths[1]): datetime(2026, 10, 25, 9, tzinfo=timezone.utc)},
             object_sizes={(reset.ASSETS, p): 100 for p in paths})
         with patch.dict('os.environ', {'GITHUB_REPOSITORY': 'anftm/pipeline', 'GH_TOKEN': 'mock'}), \
-                patch('requests.get', side_effect=replies):
+                patch('httpx.get', side_effect=replies):
             recovered = gc.recover_processing_audit(store, set(paths), {'reset_id': 'test-reset'}, '123')
         self.assertEqual([row['path'] for row in recovered], [paths[0]])

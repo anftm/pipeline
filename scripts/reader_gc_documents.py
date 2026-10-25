@@ -177,14 +177,14 @@ def recover_processing_audit(store, records, receipt, run_id):
     """Reuse a failed scan only if S3 proves the object predates that entire run."""
     import io
     import zipfile
-    import requests
+    import httpx
     repository = os.environ.get('GITHUB_REPOSITORY', '')
     if repository != 'anftm/pipeline' or not re.fullmatch(r'[1-9][0-9]*', run_id):
         raise ValueError('invalid processing recovery origin')
     headers = {'Authorization': 'Bearer ' + os.environ['GH_TOKEN']}
     base = f'https://api.github.com/repos/{repository}/actions/runs/{run_id}'
     def get(url):
-        response = requests.get(url, headers=headers, timeout=(10, 120))
+        response = httpx.get(url, headers=headers, timeout=120, follow_redirects=True)
         response.raise_for_status()
         return response
     run = get(base).json()
