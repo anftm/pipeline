@@ -8,6 +8,7 @@ import unittest
 
 from scripts import export_reader_txt as exporter, pdf_reading_v3 as v3, pdf_text_layer as text, shared
 from tests.test_pdf_text_layer import raw_page
+from tests.test_reader_text_admission import recognized_layers, PROFILE
 
 
 class ExportReaderTxtTests(unittest.TestCase):
@@ -19,11 +20,11 @@ class ExportReaderTxtTests(unittest.TestCase):
         self.contents = ["原始手机😀", "", "手。机\nABC 原始末页"]
         self.spec = {"origin_repo": "VoiceOfML/VOMEBOOK", "origin_rel_path": "中文目录/子目录/book.v2.pdf",
                      "origin_revision": "b" * 40, "origin_sha256": "a" * 64,
-                     "source_sha256": "a" * 64, "page_count": 3, "doc_number": 7}
+                     "source_sha256": "a" * 64, "page_count": 3, "doc_number": 7,
+                     'recognition_profile': PROFILE}
 
     def make_bundle(self, *, accepted=True):
-        layers = [text.from_page({**raw_page(content), "page": number}, "a" * 64)
-                  for number, content in enumerate(self.contents, 1)]
+        layers = recognized_layers(self.contents, 'a' * 64, self.objects)
         if accepted:
             first = layers[0]
             proposal = {"kind": "pdf-text-correction", "version": 1, "base_generation": first["generation"],
@@ -120,6 +121,19 @@ class ExportReaderTxtTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "budget"):
             exporter.build_export(spec, self.read, max_input_bytes=1)
 
+    def test_cache_eviction_preserves_every_page_and_checks_last_raw_evidence(self):
+        spec, layers = self.make_bundle()
+        small = exporter.build_export(spec, self.read, cache_bytes=2048)
+        normal = exporter.build_export(spec, self.read)
+        self.assertEqual(small['files'], normal['files'])
+        self.assertGreater(small['input_bytes_read'], 2048)
+        self.assertLessEqual(small['peak_cached_input_bytes'], 2048)
+        self.assertEqual(small['manifest']['body_admission']['quality_check']['checked_pages'], 3)
+        raw_ref = layers[-1]['provenance']['raw_resource']
+        self.objects[raw_ref['bucket'], raw_ref['path']] += b'late corruption'
+        with self.assertRaisesRegex(ValueError, 'checksum'):
+            exporter.build_export(spec, self.read, cache_bytes=2048)
+
     def test_export_manifest_retains_checked_reader_resources(self):
         spec, _ = self.make_bundle()
         result = exporter.build_export(spec, self.read)
@@ -127,6 +141,32 @@ class ExportReaderTxtTests(unittest.TestCase):
         self.assertIn(spec["text_manifest"], refs)
         self.assertTrue(any(ref["path"].endswith("page-000003.json.gz") for ref in refs))
         self.assertEqual(result["manifest"]["text"]["sha256"], hashlib.sha256(result["files"][result["manifest"]["text"]["path"]]).hexdigest())
+
+    def test_batch_retains_every_book_id_page_and_accepted_correction(self):
+        spec, layers = self.make_bundle()
+        second = {**spec, 'origin_rel_path': 'second.pdf', 'doc_number': 8}
+        output = self.bundle / 'batch'
+        receipt = exporter.export_specs([spec, second], self.read, output)
+        self.assertEqual((receipt['books'], receipt['pages'], receipt['remote_writes']), (2, 6, 0))
+        refs = json.loads((output / 'export-refs.json').read_bytes())
+        manifests = [json.loads((output / ref['path']).read_bytes()) for ref in refs]
+        self.assertEqual([m['doc_id'] for m in manifests], ['OCR:7', 'OCR:8'])
+        for manifest in manifests:
+            self.assertEqual(manifest['accepted_pages'], 1)
+            self.assertEqual(manifest['page_count'], 3)
+            self.assertEqual((output / manifest['text']['path']).read_text(), '\n\n'.join(l['text'] for l in layers))
+
+    def test_batch_rejects_collisions_and_never_stages_a_partial_release(self):
+        spec, _ = self.make_bundle()
+        for specs in ([spec, spec], [spec, {**spec, 'origin_rel_path': 'other.pdf'}],
+                      [spec, {**spec, 'doc_number': 8}], [], [spec] * 33):
+            with self.subTest(specs=len(specs)), self.assertRaises(ValueError):
+                exporter.export_specs(specs, self.read, self.bundle / 'duplicate')
+        bad = {**spec, 'origin_rel_path': 'other.pdf', 'doc_number': 8, 'page_count': 2}
+        target = self.bundle / 'partial'
+        with self.assertRaises(ValueError):
+            exporter.export_specs([spec, bad], self.read, target)
+        self.assertFalse(target.exists())
 
     def test_workflow_can_only_stage_an_artifact_outside_the_writer_lock(self):
         workflow = (Path(__file__).parents[1] / ".github/workflows/stage-ccrd-ocr-text.yml").read_text()

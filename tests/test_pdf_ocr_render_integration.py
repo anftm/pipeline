@@ -8,10 +8,48 @@ from unittest.mock import patch
 
 from PIL import Image, ImageDraw
 
-from scripts import pdf_ocr, pdf_ocr_stages as stages, plan_pdf_ocr
+from scripts import pdf_ocr, pdf_ocr_stages as stages, plan_pdf_ocr, ocr_quality, pdf_assets
 
 
 class RealPdfRenderingTests(unittest.TestCase):
+    def test_native_text_and_highlight_offsets_use_the_same_order(self):
+        import gzip
+        import pymupdf
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / 'native.pdf'
+            document = pymupdf.open()
+            page = document.new_page()
+            page.insert_text((50, 60), 'First native line with several words and punctuation.')
+            page.insert_text((50, 90), 'Second native line is searchable with aligned coordinates.')
+            document.save(source)
+            document.close()
+            result = stages.render_book({'key': 'test\0native.pdf', 'source_revision': 'test'}, source, root / 'bundle')
+            manifest = json.loads((root / 'bundle' / result['render_manifest']['path']).read_text())
+            payload = json.loads(gzip.decompress((root / 'bundle' / manifest['pages'][0]['o']).read_bytes()))
+            self.assertEqual(ocr_quality.check_page(payload)['status'], 'passed')
+            for span in payload['text_spans']:
+                self.assertEqual(payload['text'][span['start']:span['end']], payload['raw_blocks'][span['block']]['t'])
+            self.assertIn('First native line', payload['extracted_text'])
+
+    def test_legacy_document_entrypoint_emits_real_jxl_with_manifest_integrity(self):
+        import imagecodecs
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source, bundle = root / 'scan.pdf', root / 'bundle'
+            bundle.mkdir()
+            with Image.new('RGB', (300, 400), 'white') as image:
+                ImageDraw.Draw(image).text((25, 80), 'Page image', fill='black')
+                image.save(source, 'PDF', resolution=150)
+            with patch.object(pdf_assets, 'LARGE_BYTES', 0):
+                result = pdf_assets.build_item({'key': 'test\0scan.pdf', 'extension': 'pdf'}, source, bundle)
+            manifest = json.loads((bundle / result['page_manifest']['path']).read_text())
+            self.assertEqual(manifest['codec'], 'jxl')
+            self.assertEqual(result['strategy'], 'sampled-jxl')
+            raw = (bundle / result['pages'][0]['path']).read_bytes()
+            self.assertEqual(imagecodecs.jpegxl_decode(raw).shape[:2], (400, 300))
+            self.assertEqual(manifest['images'][0]['bytes'], len(raw))
+
     def test_time_estimator_samples_real_pages_locally_and_builds_a_compact_queue(self):
         with tempfile.TemporaryDirectory() as temp:
             source = Path(temp) / "sample.pdf"
@@ -49,8 +87,9 @@ class RealPdfRenderingTests(unittest.TestCase):
             with Image.open(bundle / page["i"]) as png:
                 self.assertEqual(png.format, "PNG")
                 self.assertEqual(png.size, (600, 800))
-            with Image.open(bundle / page["w"]) as webp:
-                self.assertEqual(webp.format, "WEBP")
+            self.assertNotIn('w', page)
+            self.assertEqual(pdf_ocr.reader_page_codec.geometry((bundle / page['j']).read_bytes()), [300, 400])
+            self.assertEqual(page['jbucket'], stages.shared.PDF_PAGES_BUCKET)
             self.assertNotIn("o", page)
 
     def test_low_resolution_full_page_scan_preserves_ocr_pixels_but_not_reader_upscale(self):
@@ -70,11 +109,10 @@ class RealPdfRenderingTests(unittest.TestCase):
                 bundle = root / "bundle"
                 result = stages.render_book({"key": "test\0low-res.pdf", "source_revision": "test"}, source, bundle)
             page = json.loads((bundle / result["render_manifest"]["path"]).read_text())["pages"][0]
-            with Image.open(bundle / page["i"]) as png, Image.open(bundle / page["w"]) as webp:
+            with Image.open(bundle / page["i"]) as png:
                 self.assertGreater(png.width, 300)
                 self.assertGreater(png.height, 400)
-                self.assertLessEqual(webp.width, 300)
-                self.assertLessEqual(webp.height, 400)
+            self.assertNotIn('w', page)
             self.assertEqual((bundle / page["j"]).read_bytes(), b"jxl")
 
     def test_small_embedded_image_is_not_treated_as_full_page_scan(self):
@@ -85,20 +123,19 @@ class RealPdfRenderingTests(unittest.TestCase):
         with patch.object(pdf_ocr, "_run", side_effect=inspect):
             self.assertEqual(pdf_ocr.scan_reader_images(Path("sample.pdf"), 1, 1), {})
 
-    def test_reader_jxl_and_webp_share_the_reading_cap_without_changing_ocr_png(self):
+    def test_reader_jxl_respects_reading_cap_without_webp_or_changing_ocr_png(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             source = root / "large-page.pdf"
             with Image.new("RGB", (800, 1100), "white") as image:
                 image.save(source, "PDF", resolution=150)
             png, width, height = pdf_ocr.render_page(source, 1, root, reader_jxl=True)
-            reader_png = png.with_name(png.stem + "-reader.png")
-            with Image.open(png) as full, Image.open(reader_png) as reader, \
-                    Image.open(png.with_suffix(".webp")) as webp:
+            reader_png = png.with_name(png.stem + "-reader.ppm")
+            with Image.open(png) as full, Image.open(reader_png) as reader:
                 self.assertEqual(full.size, (width, height))
                 self.assertGreater(full.height, 1800)
-                self.assertEqual(reader.size, webp.size)
                 self.assertEqual(reader.height, 1800)
+            self.assertFalse(png.with_suffix('.webp').exists())
 
     def test_unresolved_font_warning_refuses_an_unreliable_ocr_page(self):
         """A missing CMap/CJK font must fail the render, not OCR a blank page."""
@@ -133,7 +170,10 @@ class RealPdfRenderingTests(unittest.TestCase):
                     with self.subTest(jxl=jxl), patch.object(pdf_ocr, "reader_webp_quality",
                                                            wraps=pdf_ocr.reader_webp_quality) as select:
                         pdf_ocr.render_page(source, 1, root, (128, 128), reader_jxl=jxl)
-                        self.assertEqual(select.call_args.args[1], True)
+                        if jxl:
+                            select.assert_not_called()
+                        else:
+                            self.assertEqual(select.call_args.args[1], True)
 
 
 if __name__ == "__main__":

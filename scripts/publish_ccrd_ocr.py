@@ -12,11 +12,12 @@ from pathlib import Path
 import time
 
 try:
-    from . import ccrd_ocr_release as contract, ccrd_lifecycle as lifecycle
+    from . import ccrd_ocr_release as contract, ccrd_lifecycle as lifecycle, reader_text_admission
     from .reader_bucket_store import HubBucketStore, retry_read
 except ImportError:
     import ccrd_ocr_release as contract
     import ccrd_lifecycle as lifecycle
+    import reader_text_admission
     from reader_bucket_store import HubBucketStore, retry_read
 
 
@@ -49,11 +50,20 @@ def verified_remote(store, ref):
 
 
 def verify_text_upgrade(store, previous, replacement):
-    """Only an accepted descendant of the same complete source may replace text."""
+    """Admit improved recognition while preserving every accepted correction."""
     fields = ('book_id', 'doc_id', 'readable_rel_path', 'origin_repo', 'origin_rel_path',
               'origin_revision', 'origin_sha256', 'source_sha256', 'page_count')
     if any(previous.get(key) != replacement.get(key) for key in fields):
         raise ValueError('OCR update changes stable source identity')
+    if replacement.get('body_admission'):
+        reader_text_admission.verify_export(replacement, lambda ref: store.read_bytes(ref['bucket'], ref['path']))
+        if (len(previous['pages']) != replacement['page_count'] or len(replacement['pages']) != replacement['page_count']
+                or replacement['accepted_pages'] < previous['accepted_pages']):
+            raise ValueError('OCR update cannot downgrade accepted text')
+        changed_accepted = [old for old, new in zip(previous['pages'], replacement['pages'])
+                            if old['quality'] != 'unreviewed' and old['text_generation'] != new['text_generation']]
+        if not changed_accepted:
+            return
     if (replacement['accepted_pages'] < previous['accepted_pages']
             or replacement['quality'] != 'partially-reviewed'
             or any(old['quality'] != 'unreviewed' and new['quality'] == 'unreviewed'
@@ -254,6 +264,7 @@ def publish(store, root, path, sha256, base_metadata_sha256, expected_parent, *,
         # additive batch made publication needlessly slow and could stall it.
         if previous_exports.get(export['book_id']) == export_ref:
             continue
+        reader_text_admission.verify_export(export, lambda ref: store.read_bytes(ref['bucket'], ref['path']))
         retained.extend(export['retained_reader_resources'])
     intent = {'version': 1, 'kind': 'ccrd-ocr-intent', 'generation': manifest['generation'],
               'status': 'uploading', 'expected_parent': parent, 'resources': retained}

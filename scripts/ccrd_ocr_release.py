@@ -83,6 +83,23 @@ def export_record(root: Path, ref: dict) -> tuple[dict, dict]:
         raise ValueError("plain OCR export must not hide a BOM in its indexed text")
     identity = {key: export[key] for key in ("recipe", "origin_repo", "origin_rel_path", "origin_revision", "origin_sha256",
                 "source_sha256", "doc_id", "text_generation", "txt_sha256")}
+    if 'body_admission' in export or 'body_admission_sha256' in export:
+        admission = export.get('body_admission', {})
+        summary = admission.get('quality_check', {})
+        if (admission.get('policy') != 'complete-body-quality-v1'
+                or admission.get('source_sha256') != export.get('source_sha256')
+                or admission.get('text_generation') != export.get('text_generation')
+                or summary.get('status') != 'passed' or summary.get('issues') != []
+                or summary.get('checked_pages') != export.get('page_count')
+                or summary.get('page_count') != export.get('page_count')
+                or [p.get('page') for p in admission.get('pages', [])] != list(range(1, export.get('page_count', 0) + 1))
+                or any(p.get('quality_check', {}).get('status') != 'passed'
+                       or p.get('quality_check', {}).get('issues') != []
+                       or p.get('quality_check', {}).get('page') != p.get('page')
+                       for p in admission.get('pages', []))
+                or digest(canonical(admission).rstrip(b'\n')) != export.get('body_admission_sha256')):
+            raise ValueError('invalid complete-body quality admission')
+        identity['body_admission_sha256'] = sha(export['body_admission_sha256'])
     if export.get("source_sha256_role") != "reader-primary":
         raise ValueError("OCR source/derived digest roles must be explicit")
     for field in ("origin_sha256", "source_sha256", "text_generation", "txt_sha256", "generation", "book_id"):

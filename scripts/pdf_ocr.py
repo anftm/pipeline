@@ -13,6 +13,7 @@ import argparse
 import gzip
 import hashlib
 import html
+import importlib.metadata
 import json
 import os
 import re
@@ -25,11 +26,12 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 try:
-    from . import pdf_assets, reader_assets, shared
+    from . import pdf_assets, reader_assets, shared, reader_page_codec
 except ImportError:
     import pdf_assets
     import reader_assets
     import shared
+    import reader_page_codec
 
 
 OCR_MANIFEST_NAME = "ocr-manifest.json"
@@ -39,7 +41,7 @@ OCR_PROFILE = "pdf-ocr-v1-pp-ocrv6-medium"
 OCR_LANG = os.environ.get("PDF_OCR_LANG", "auto").strip().lower() or "auto"
 OCR_VERSION_OVERRIDE = os.environ.get("PDF_OCR_VERSION", "").strip() or None
 OCR_BACKEND = os.environ.get("PDF_OCR_BACKEND", "rapidocr_onnxruntime").strip().lower() or "rapidocr_onnxruntime"
-OCR_BACKENDS = frozenset({"paddle_static", "paddle_onnxruntime", "rapidocr_onnxruntime"})
+OCR_BACKENDS = frozenset({"paddle_static", "paddle_onnxruntime", "rapidocr_onnxruntime", "ndlocr_onnxruntime"})
 PP_OCRV6_LANGS = frozenset({
     "ch", "chinese_cht", "en", "japan", "af", "az", "bs", "ca", "cs", "cy", "da", "de",
     "es", "et", "eu", "fi", "fr", "ga", "gl", "hr", "hu", "id", "is", "it", "ku", "la",
@@ -59,6 +61,8 @@ PP_OCRV5_LANGS = frozenset({
 
 
 def ocr_version() -> str:
+    if OCR_LANG == 'japan' and OCR_BACKEND in {'rapidocr_onnxruntime', 'ndlocr_onnxruntime'}:
+        return 'NDLOCR-Lite-202604'
     version = OCR_VERSION_OVERRIDE or ("PP-OCRv6" if OCR_LANG in PP_OCRV6_LANGS else "PP-OCRv5")
     if version not in {"PP-OCRv5", "PP-OCRv6"}:
         raise ValueError(f"unsupported PDF_OCR_VERSION: {version}")
@@ -71,18 +75,19 @@ def ocr_version() -> str:
 if OCR_BACKEND not in OCR_BACKENDS:
     raise ValueError(f"unsupported PDF_OCR_BACKEND: {OCR_BACKEND}")
 OCR_VERSION = ocr_version() if OCR_LANG != "auto" else "auto"
-OCR_ENGINE = f"{OCR_BACKEND} / {OCR_VERSION} / CPU / {OCR_LANG}"
+OCR_ENGINE = f"{'ndlocr_onnxruntime' if OCR_LANG == 'japan' and OCR_BACKEND == 'rapidocr_onnxruntime' else OCR_BACKEND} / {OCR_VERSION} / CPU / {OCR_LANG}"
 OCR_DPI = int(os.environ.get("PDF_OCR_DPI", "300"))
 WEBP_QUALITY = int(os.environ.get("PDF_WEBP_QUALITY", "85"))
 WEBP_MAX_DIMENSION = int(os.environ.get("PDF_WEBP_MAX_DIMENSION", "1800"))
-JXL_ENABLED = os.environ.get("PDF_JXL_ENABLED", "0").lower() in {"1", "true", "yes"}
-JXL_DISTANCE = float(os.environ.get("PDF_JXL_DISTANCE", "1.5"))
-JXL_EFFORT = int(os.environ.get("PDF_JXL_EFFORT", "7"))
+JXL_ENABLED = os.environ.get("PDF_JXL_ENABLED", "1").lower() in {"1", "true", "yes"}
 MIN_NATIVE_PAGE_CHARS = int(os.environ.get("PDF_OCR_MIN_NATIVE_PAGE_CHARS", "48"))
 NATIVE_PAGE_RATIO = float(os.environ.get("PDF_OCR_NATIVE_PAGE_RATIO", "0.90"))
 MAX_PAGE_PIXELS = int(os.environ.get("PDF_OCR_MAX_PAGE_PIXELS", "50000000"))
 COMMAND_TIMEOUT = int(os.environ.get("PDF_OCR_COMMAND_TIMEOUT", "600"))
 OCR_TIMEOUT = int(os.environ.get("PDF_OCR_PAGE_TIMEOUT", "300"))
+RAPID_MODEL_SIZE = os.environ.get('PDF_OCR_MODEL_SIZE', 'small').strip().lower()
+RAPID_THREADS = int(os.environ.get('PDF_OCR_THREADS', '2'))
+RAPID_REC_BATCH = int(os.environ.get('PDF_OCR_REC_BATCH', '16'))
 TEXT_PROBE_BATCH_PAGES = 100
 NATIVE_TEXT_BATCH_PAGES = 50
 MI = 1024 * 1024
@@ -104,11 +109,15 @@ def resolve_ocr_config(language=None, backend=None):
     if language == "auto":
         language = "ch"
     if backend == "auto":
-        backend = "rapidocr_onnxruntime" if language in {"ch", "en"} else "paddle_onnxruntime"
+        backend = "rapidocr_onnxruntime"
+    if language == 'japan' and backend == 'rapidocr_onnxruntime':
+        backend = 'ndlocr_onnxruntime'
+    if backend == 'ndlocr_onnxruntime' and language != 'japan':
+        raise ValueError('NDLOCR models require Japanese page evidence')
     if backend not in OCR_BACKENDS:
         raise ValueError(f"unsupported PDF_OCR_BACKEND: {backend}")
-    if backend == "rapidocr_onnxruntime" and language not in {"ch", "en"}:
-        backend = "paddle_onnxruntime"
+    if backend == 'ndlocr_onnxruntime':
+        return language, 'NDLOCR-Lite-202604', backend
     version = OCR_VERSION_OVERRIDE or ("PP-OCRv6" if language in PP_OCRV6_LANGS else "PP-OCRv5")
     supported = PP_OCRV6_LANGS if version == "PP-OCRv6" else PP_OCRV5_LANGS
     if version not in {"PP-OCRv5", "PP-OCRv6"} or language not in supported:
@@ -119,8 +128,12 @@ def resolve_ocr_config(language=None, backend=None):
 def detect_language(value: str) -> str:
     # Only the file name is evidence. Repository and directory names are
     # Latin-heavy and used to turn Chinese books into "en" guesses.
-    text = str(value or "").rsplit("\0", 1)[-1]
+    text = str(value or "").rsplit("\0", 1)[-1].replace('\\', '/').rsplit('/', 1)[-1]
     text = re.sub(r"\.[A-Za-z0-9]{1,5}$", "", text)
+    return detect_text_language(text)
+
+
+def detect_text_language(text: str) -> str:
     counts = {
         "ch": sum("\u3400" <= c <= "\u9fff" for c in text),
         "japan": sum(("\u3040" <= c <= "\u30ff") for c in text),
@@ -130,6 +143,11 @@ def detect_language(value: str) -> str:
         "en": sum(("A" <= c <= "Z") or ("a" <= c <= "z") for c in text),
     }
     non_latin = {key: value for key, value in counts.items() if key != "en" and value}
+    # Kana and Hangul disambiguate texts which also contain many Han characters.
+    if counts['japan'] >= 1 and counts['japan'] >= counts['ch'] * .015:
+        return 'japan'
+    if counts['korean'] >= 2 and counts['korean'] >= counts['ch'] * .015:
+        return 'korean'
     strongest = max(non_latin, key=non_latin.get) if non_latin else "en"
     if counts[strongest] < 2 and not non_latin:
         return "ch"
@@ -141,9 +159,10 @@ def detect_language(value: str) -> str:
 
 def book_ocr_config(book: dict):
     override = language_override(book.get("key", ""))
-    language = (override or {}).get("language") or book.get("ocr_language") or detect_language(book.get("key", ""))
+    language = ((override or {}).get('language') or (OCR_LANG if OCR_LANG != 'auto' else None)
+                or book.get('ocr_language') or detect_language(book.get('key', '')))
     backend = ((override or {}).get("backend") or book.get("ocr_backend")
-               or ("rapidocr_onnxruntime" if language in {"ch", "en"} else "paddle_onnxruntime"))
+               or OCR_BACKEND)
     language, _, backend = resolve_ocr_config(language, backend)
     return language, backend
 
@@ -179,6 +198,8 @@ def language_override(key: str):
 def language_source(book: dict) -> str:
     if language_override(book.get("key", "")):
         return "override"
+    if OCR_LANG != 'auto':
+        return 'global'
     if book.get("ocr_language"):
         return "registry"
     return "filename"
@@ -186,30 +207,45 @@ def language_source(book: dict) -> str:
 
 def asset_profile(language=None, backend=None, revision=None) -> str:
     language, version, backend = resolve_ocr_config(language, backend)
+    size = (RAPID_MODEL_SIZE if version == 'PP-OCRv6' else 'mobile') if backend == 'rapidocr_onnxruntime' else (
+        'tiny' if backend == 'ndlocr_onnxruntime' else 'medium')
     model_profile = OCR_PROFILE if language == "ch" and version == "PP-OCRv6" and backend == "paddle_static" else (
-        f"pdf-ocr-v1-{version.lower()}-medium-lang-{language}")
+        f"pdf-ocr-v1-{version.lower()}-{size}-lang-{language}")
     if backend != "paddle_static":
         model_profile += f"-backend-{backend.replace('_', '-')}"
+    if backend == 'rapidocr_onnxruntime':
+        model_profile += f'-models-det6{RAPID_MODEL_SIZE}-rec{version[-1]}{RAPID_MODEL_SIZE if version == "PP-OCRv6" else "mobile"}-rapid310'
+        if rapid_language(language) in {'cyrillic', 'en', 'latin', 'de', 'fr', 'el'}:
+            model_profile += '-horizontal-crops-v1'
+    if backend == 'ndlocr_onnxruntime':
+        try:
+            from . import ndl_ocr
+        except ImportError:
+            import ndl_ocr
+        model_profile += '-models-' + ndl_ocr.PROFILE
     if revision:
         model_profile += f"-rev-{revision}"
     return (f"{model_profile}-dpi-{OCR_DPI}-webp-{WEBP_QUALITY}-{WEBP_MAX_DIMENSION}"
             f"-native-{MIN_NATIVE_PAGE_CHARS}-{NATIVE_PAGE_RATIO:g}-maxpix-{MAX_PAGE_PIXELS}"
-            f"-jxl-{int(JXL_ENABLED)}-{JXL_DISTANCE:g}-{JXL_EFFORT}")
+            f"-jxl-{int(JXL_ENABLED)}-adaptive")
 
 
 def valid_published_profile(profile: str) -> bool:
     candidate = str(profile or "")
     base, separator, layout = candidate.partition("-layout-")
-    if separator and not re.fullmatch(r"v1-[0-9a-f]{16}", layout):
+    if separator and not re.fullmatch(r"(?:layout-)?v[123]-[0-9a-f]{16}", layout):
         return False
     return bool(re.fullmatch(
-        r"pdf-ocr-v1-pp-ocrv[56]-medium"
+        r"pdf-ocr-v1-(?:pp-ocrv[56]|ndlocr-lite-202604)-(?:medium|small|mobile|tiny)"
         r"(?:-lang-[a-z0-9_]+)?"
-        r"(?:-backend-(?:paddle-onnxruntime|rapidocr-onnxruntime))?"
+        r"(?:-backend-(?:paddle-onnxruntime|rapidocr-onnxruntime|ndlocr-onnxruntime))?"
+        r"(?:-models-det6(?:small|medium)-rec[56](?:small|medium|mobile)-rapid310)?"
+        r"(?:-horizontal-crops-v1)?"
+        r"(?:-models-ndl202604-[0-9a-f]{12}-(?:adapter[1234]|adapter5-segmented|adapter6-folios-headings))?"
         r"(?:-rev-[a-z0-9._-]+)?"
         r"-dpi-[0-9]+-webp-[0-9]+-[0-9]+"
         r"-native-[0-9]+(?:\.[0-9]+)?-[0-9]+(?:\.[0-9]+)?"
-        r"-maxpix-[0-9]+-jxl-[01]-[0-9]+(?:\.[0-9]+)?-[0-9]+",
+        r"-maxpix-[0-9]+-jxl-[01]-(?:adaptive|[0-9]+(?:\.[0-9]+)?-[0-9]+)(?:-quality-v1)?",
         base,
     ))
 
@@ -347,6 +383,29 @@ def native_pages(path: Path, pages, batch_size: int = NATIVE_TEXT_BATCH_PAGES) -
                     output.update(_native_pages_single(path, page, page))
                 except (RuntimeError, OSError):
                     raise
+    if Path(path).is_file():
+        try:
+            from .pdf_bitmap_text import BitmapText
+            from . import pdf_native_geometry, pdf_mixed_text
+        except ImportError:
+            from pdf_bitmap_text import BitmapText
+            import pdf_native_geometry, pdf_mixed_text
+        extractor = BitmapText(path)
+        try:
+            for number in numbers:
+                if not any(info[2] == 'Type3' for info in extractor.document[number - 1].get_fonts()):
+                    output[number] = pdf_native_geometry.refine(extractor.document[number - 1], output[number])
+                    output[number]['raster_evidence'] = pdf_mixed_text.inspect(extractor.document[number - 1])
+                    continue
+                recovered = extractor.extract(number)
+                original = output[number]
+                if recovered:
+                    output[number] = {**recovered, 'extracted_text': original['text'],
+                                      'extracted_blocks': original['blocks']}
+                else:
+                    original['native_evidence'] = {'reasons': ['unverified-type3-font']}
+        finally:
+            extractor.close()
     return output
 
 
@@ -522,10 +581,12 @@ def normalize_rapid_result(result, width: int, height: int) -> list[dict]:
         boxes = result.get("boxes", boxes)
         texts = result.get("txts", result.get("texts", texts))
         scores = result.get("scores", scores)
-    if boxes is None or texts is None:
+    if boxes is None and texts is None:
         # RapidOCR reports a normal blank page as an empty detection result.
         # Keep the page in the v2 index instead of turning it into a failed task.
         return []
+    if boxes is None or texts is None or scores is None or not len(boxes) == len(texts) == len(scores):
+        raise RuntimeError("RapidOCR detection/recognition result lengths differ")
     blocks = []
     score_values = scores if scores is not None else [1.0] * len(texts)
     for polygon, text, score in zip(boxes, texts, score_values):
@@ -538,25 +599,155 @@ def normalize_rapid_result(result, width: int, height: int) -> list[dict]:
 
 
 _OCR_ENGINE_INSTANCES = {}
+_MODEL_DIGESTS = {}
+_VERTICAL_AUDITOR = None
+
+
+def audit_vertical_recognition(engine, crops, detection, recognition):
+    """Check Japanese vertical text with an independent recognizer on the same pixels.
+
+    PP-OCRv6 can be highly confident while dropping small kana and punctuation.
+    Keep both strings as evidence; disagreements never silently rewrite text.
+    """
+    import numpy as np
+    from rapidocr import RapidOCR, ModelType, OCRVersion
+    from rapidocr.ch_ppocr_rec import TextRecInput
+    try:
+        from . import ocr_quality
+    except ImportError:
+        import ocr_quality
+    language = getattr(engine.cfg.Rec.lang_type, 'value', engine.cfg.Rec.lang_type)
+    if language != 'japan':
+        return None
+    indices = []
+    for index, box in enumerate(detection.boxes):
+        width = max(np.linalg.norm(box[0] - box[1]), np.linalg.norm(box[2] - box[3]))
+        height = max(np.linalg.norm(box[0] - box[3]), np.linalg.norm(box[1] - box[2]))
+        if height > 3 * width and len(recognition.txts[index]) >= 4:
+            indices.append(index)
+    if not indices:
+        return None
+    global _VERTICAL_AUDITOR
+    try:
+        if _VERTICAL_AUDITOR is None:
+            _VERTICAL_AUDITOR = RapidOCR(params={
+                'Rec.lang_type': 'japan', 'Rec.ocr_version': OCRVersion.PPOCRV4,
+                'Rec.model_type': ModelType.MOBILE, 'Rec.rec_batch_num': RAPID_REC_BATCH,
+                'EngineConfig.onnxruntime.intra_op_num_threads': RAPID_THREADS,
+                'EngineConfig.onnxruntime.inter_op_num_threads': 1})
+        recognizer = _VERTICAL_AUDITOR._load_rec_model()
+        output = recognizer(TextRecInput(img=[crops[i] for i in indices], return_word_box=False))
+        path = Path(recognizer.session.session._model_path)
+        rows = [{'region': i, 'primary': recognition.txts[i], 'secondary': text,
+                 'primary_confidence': float(recognition.scores[i]), 'secondary_confidence': float(confidence)}
+                for i, text, confidence in zip(indices, output.txts, output.scores)]
+        return ocr_quality.compare_recognizers(rows, {'rec': {'file': path.name,
+            'sha256': shared.hash_file(path)[0], 'version': 'PP-OCRv4', 'size': 'mobile'}})
+    except Exception as exc:
+        return {'status': 'review', 'issues': [ocr_quality.issue('vertical-recognition-audit-unavailable',
+                'review', error=f'{type(exc).__name__}: {exc}'[:300])]}
+
+
+def strict_rapid_steps(engine, image, operations):
+    """RapidOCR 3.10 swallows stage errors; keep only genuine no-detection results."""
+    from rapidocr.main import RapidOCRError
+    from rapidocr.ch_ppocr_cls import TextClsOutput
+    from rapidocr.ch_ppocr_det import TextDetOutput
+    from rapidocr.ch_ppocr_rec import TextRecOutput
+    engine.reader_diagnostics = {}
+    engine.reader_secondary_models = {}
+    try:
+        crops, detection = engine.detect_and_crop(image, operations)
+    except RapidOCRError as exc:
+        if str(exc) != "The text detection result is empty":
+            raise
+        engine.reader_diagnostics = {"detected_regions": 0, "recognized_regions": 0}
+        return TextDetOutput(), TextClsOutput(), TextRecOutput(), []
+    recognition = engine.recognize_txt(crops)
+    if recognition.txts is None or len(recognition.txts) != len(crops):
+        raise RuntimeError("RapidOCR did not recognize every detected region")
+    line_evidence = []
+    if getattr(engine, 'reader_horizontal_crops', False):
+        try:
+            from . import ocr_line_geometry
+        except ImportError:
+            import ocr_line_geometry
+        crops, line_evidence = ocr_line_geometry.split(crops, detection, recognition)
+        if line_evidence:
+            recognition = engine.recognize_txt(crops)
+            if recognition.txts is None or len(recognition.txts) != len(crops):
+                raise RuntimeError('RapidOCR did not recognize every separated line')
+    engine.reader_diagnostics = {"detected_regions": len(crops),
+                                 "recognized_regions": sum(bool(t.strip()) for t in recognition.txts),
+                                 "empty_regions": [i for i, t in enumerate(recognition.txts) if not t.strip()]}
+    if getattr(engine, 'reader_horizontal_crops', False):
+        engine.reader_diagnostics['line_geometry'] = {'profile': ocr_line_geometry.PROFILE,
+            'automatic_quarter_turn': False, 'splits': line_evidence}
+    secondary = audit_vertical_recognition(engine, crops, detection, recognition)
+    if secondary is not None:
+        engine.reader_diagnostics['secondary_check'] = secondary
+    return detection, TextClsOutput(), recognition, crops
 
 
 def get_ocr_engine(language=None, backend=None):
     language, version, backend = resolve_ocr_config(language, backend)
-    cache_key = (language, version, backend)
+    if backend == 'ndlocr_onnxruntime':
+        try:
+            from . import ndl_ocr
+        except ImportError:
+            import ndl_ocr
+        return ndl_ocr.engine()
+    cache_key = (language, version, backend, RAPID_MODEL_SIZE, RAPID_THREADS, RAPID_REC_BATCH)
     if cache_key not in _OCR_ENGINE_INSTANCES:
         if backend == "rapidocr_onnxruntime":
             try:
-                from rapidocr import EngineType, LangDet, LangRec, OCRVersion, RapidOCR
+                from rapidocr import EngineType, ModelType, OCRVersion, RapidOCR
             except ImportError as exc:
                 raise RuntimeError("RapidOCR ONNX dependencies are not installed") from exc
             rapid_version = getattr(OCRVersion, version.replace("-", "").upper())
-            rapid_det_lang = getattr(LangDet, language.upper())
-            rapid_rec_lang = getattr(LangRec, language.upper())
-            _OCR_ENGINE_INSTANCES[cache_key] = RapidOCR(params={
+            if RAPID_MODEL_SIZE not in {'small', 'medium'} or not 1 <= RAPID_THREADS <= 16 or not 1 <= RAPID_REC_BATCH <= 64:
+                raise ValueError('invalid RapidOCR model or CPU configuration')
+            class DocumentOCR(RapidOCR):
+                reader_horizontal_crops = rapid_language(language) in {'cyrillic', 'en', 'latin', 'de', 'fr', 'el'}
+
+                def run_ocr_steps(self, image, operations):
+                    return strict_rapid_steps(self, image, operations)
+
+                def build_final_output(self, original, detection, classification, recognition, crops, operations):
+                    # RapidOCR drops empty recognitions when building its output.
+                    # Preserve their original page positions for graphic-rule
+                    # classification and lossless failure evidence.
+                    if detection.boxes is not None and recognition.txts is not None:
+                        from rapidocr.main import map_boxes_to_original
+                        h, w = original.shape[:2]
+                        boxes = map_boxes_to_original(detection.boxes.copy(), operations, h, w)
+                        self.reader_diagnostics['detection_regions'] = [
+                            {'region': i, 'text': value,
+                             'b': [float(box[:, 0].min())/w, float(box[:, 1].min())/h,
+                                   float(box[:, 0].max())/w, float(box[:, 1].max())/h],
+                             'q': [[float(x)/w, float(y)/h] for x, y in box]}
+                            for i, (box, value) in enumerate(zip(boxes, recognition.txts))]
+                    return super().build_final_output(original, detection, classification, recognition, crops, operations)
+
+                def crop_text_regions(self, image, boxes):
+                    if not self.reader_horizontal_crops:
+                        return super().crop_text_regions(image, boxes)
+                    try:
+                        from . import ocr_line_geometry
+                    except ImportError:
+                        import ocr_line_geometry
+                    return [ocr_line_geometry.crop(image, box) for box in boxes]
+
+            _OCR_ENGINE_INSTANCES[cache_key] = DocumentOCR(params={
                 "Det.engine_type": EngineType.ONNXRUNTIME, "Cls.engine_type": EngineType.ONNXRUNTIME,
-                "Rec.engine_type": EngineType.ONNXRUNTIME, "Det.lang_type": rapid_det_lang,
-                "Rec.lang_type": rapid_rec_lang, "Det.ocr_version": rapid_version,
+                "Rec.engine_type": EngineType.ONNXRUNTIME, "Det.lang_type": 'ch',
+                "Rec.lang_type": rapid_language(language), "Det.ocr_version": OCRVersion.PPOCRV6,
                 "Rec.ocr_version": rapid_version,
+                'Det.model_type': ModelType(RAPID_MODEL_SIZE),
+                'Rec.model_type': ModelType(RAPID_MODEL_SIZE if version == 'PP-OCRv6' else 'mobile'),
+                'Global.use_cls': False, 'Global.text_score': 0.0, 'Rec.rec_batch_num': RAPID_REC_BATCH,
+                'EngineConfig.onnxruntime.intra_op_num_threads': RAPID_THREADS,
+                'EngineConfig.onnxruntime.inter_op_num_threads': 1,
             })
         else:
             try:
@@ -570,6 +761,49 @@ def get_ocr_engine(language=None, backend=None):
                 use_textline_orientation=False,
             )
     return _OCR_ENGINE_INSTANCES[cache_key]
+
+
+def rapid_language(language):
+    if language in PP_OCRV6_LANGS:
+        return language
+    if language in {'ar', 'fa', 'ug', 'ur', 'ps', 'sd', 'bal'}:
+        return 'arabic'
+    if language in {'ru', 'be', 'uk', 'sr', 'bg', 'mn', 'ab', 'ady', 'kbd', 'av', 'dar', 'inh',
+                    'ce', 'lki', 'lez', 'tab', 'kk', 'ky', 'tg', 'mk', 'tt', 'cv', 'ba', 'mhr',
+                    'mo', 'udm', 'kv', 'os', 'bua', 'xal', 'tyv', 'sah', 'kaa'}:
+        return 'cyrillic'
+    if language in {'hi', 'mr', 'ne', 'bh', 'mai', 'ang', 'bho', 'mah', 'sck', 'new', 'gom', 'sa', 'bgc', 'pi'}:
+        return 'devanagari'
+    return language
+
+
+def actual_ocr_models(language=None, backend=None):
+    """Record the loaded files rather than a configured marketing-size label."""
+    engine = get_ocr_engine(language, backend)
+    if resolve_ocr_config(language, backend)[2] == 'ndlocr_onnxruntime':
+        return engine.models()
+    if not hasattr(engine, 'cfg'):
+        return {'backend': resolve_ocr_config(language, backend)[2]}
+    result = {'backend': 'rapidocr_onnxruntime', 'package_version': importlib.metadata.version('rapidocr'),
+              'models': {}, 'diagnostics': dict(getattr(engine, 'reader_diagnostics', {}))}
+    for name in ('Det', 'Rec'):
+        config = getattr(engine.cfg, name)
+        component = getattr(engine, 'text_det' if name == 'Det' else 'text_rec', None)
+        session = getattr(getattr(component, 'session', None), 'session', None)
+        model = getattr(session, '_model_path', None)
+        entry = {'version': config.ocr_version.value, 'size': config.model_type.value,
+                 'language': getattr(config.lang_type, 'value', config.lang_type)}
+        if model and Path(model).is_file():
+            path = Path(model)
+            stat = path.stat()
+            identity = (str(path), stat.st_size, stat.st_mtime_ns)
+            if identity not in _MODEL_DIGESTS:
+                _MODEL_DIGESTS[identity] = shared.hash_file(path)[0]
+            entry.update(file=path.name, sha256=_MODEL_DIGESTS[identity], bytes=stat.st_size,
+                         providers=session.get_providers())
+        result['models'][name.lower()] = entry
+    result['models'].update(getattr(engine, 'reader_secondary_models', {}))
+    return result
 
 
 def _page_render_dpi(path: Path, page: int) -> int:
@@ -653,7 +887,7 @@ def render_page(path: Path, page: int, directory: Path,
                 reader_images: bool = True) -> tuple[Path, int, int]:
     prefix = directory / f"page-{page:06d}"
     _stdout, errors = _run([
-        "pdftocairo", "-png", "-singlefile", "-r", str(_page_render_dpi(path, page)),
+        "pdftocairo", "-tiff", "-tiffcompression", "none", "-singlefile", "-r", str(_page_render_dpi(path, page)),
         "-f", str(page), "-l", str(page), str(path), str(prefix),
     ], timeout=COMMAND_TIMEOUT, stderr=True)
     # A PDF with non-embedded CJK CID fonts renders as an almost blank page when
@@ -665,7 +899,8 @@ def render_page(path: Path, page: int, directory: Path,
             "fonts before rendering (refusing an unreliable OCR page): "
             + errors.strip().splitlines()[0][:200])
     png = prefix.with_suffix(".png")
-    if not png.is_file():
+    raster = prefix.with_suffix('.tif')
+    if not raster.is_file():
         raise RuntimeError(f"page {page} render missing")
     from PIL import Image
     previous_limit = Image.MAX_IMAGE_PIXELS
@@ -675,7 +910,7 @@ def render_page(path: Path, page: int, directory: Path,
         # intermediate so the explicit resize below enforces our bound instead
         # of treating Pillow's generic decompression warning as a PDF failure.
         Image.MAX_IMAGE_PIXELS = None
-        with warnings.catch_warnings(), Image.open(png) as image:
+        with warnings.catch_warnings(), Image.open(raster) as image:
             warnings.simplefilter("ignore", Image.DecompressionBombWarning)
             width, height = image.size
             rgb = image.convert("RGB")
@@ -683,7 +918,10 @@ def render_page(path: Path, page: int, directory: Path,
                 scale = (MAX_PAGE_PIXELS / (width * height)) ** 0.5
                 rgb = rgb.resize((max(1, round(width * scale)), max(1, round(height * scale))))
                 width, height = rgb.size
-                rgb.save(png, "PNG")
+            # Cairo's PNG writer uses costly maximum compression. A temporary
+            # uncompressed TIFF has identical Cairo pixels; level 6 preserves
+            # every sample and avoids recompressing the same page twice.
+            rgb.save(png, 'PNG', compress_level=6)
             if not reader_images:
                 rgb.close()
                 return png, width, height
@@ -706,32 +944,47 @@ def render_page(path: Path, page: int, directory: Path,
                     resized = rgb.resize((reader_width, reader_height), Image.Resampling.LANCZOS)
                     rgb.close()
                     rgb = resized
-            webp = prefix.with_suffix(".webp")
-            rgb.save(webp, "WEBP", quality=reader_webp_quality(rgb, reader_pixels is not None), method=6)
-            if reader_jxl and rgb.size != (width, height):
-                rgb.save(prefix.with_name(prefix.name + "-reader").with_suffix(".png"), "PNG")
+            if reader_jxl:
+                rgb.save(prefix.with_name(prefix.name + "-reader").with_suffix(".ppm"))
+            else:
+                webp = prefix.with_suffix(".webp")
+                rgb.save(webp, "WEBP", quality=reader_webp_quality(rgb, reader_pixels is not None), method=6)
             rgb.close()
     finally:
         Image.MAX_IMAGE_PIXELS = previous_limit
+        raster.unlink(missing_ok=True)
     return png, width, height
 
 
 def encode_jxl(png: Path, destination: Path) -> tuple[str, int]:
-    """Encode an optional reader stream from a lossless PNG input."""
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    _run(["cjxl", str(png), str(destination), "-d", str(JXL_DISTANCE), "-e", str(JXL_EFFORT)],
-         timeout=COMMAND_TIMEOUT)
-    if not destination.is_file() or destination.stat().st_size == 0:
-        raise RuntimeError("cjxl produced no output")
-    return shared.hash_file(destination)
+    return reader_page_codec.encode_png(png, destination)
 
 
 def ocr_page(image: Path, width: int, height: int, language=None, backend=None) -> list[dict]:
     started = time.monotonic()
     _, _, backend = resolve_ocr_config(language, backend)
     engine = get_ocr_engine(language, backend)
+    if backend == 'ndlocr_onnxruntime':
+        result = engine.recognize(image)
+        if time.monotonic() - started > OCR_TIMEOUT:
+            raise RuntimeError('NDLOCR page timeout')
+        return result
     if backend == "rapidocr_onnxruntime":
-        result = normalize_rapid_result(engine(str(image), use_det=True, use_cls=False, use_rec=True), width, height)
+        language = resolve_ocr_config(language, backend)[0]
+        mixed = language in {'ch', 'chinese_cht'}
+        recognized = engine(str(image), use_det=True, use_cls=False, use_rec=True,
+                            return_word_box=mixed, return_single_char_box=mixed)
+        result = normalize_rapid_result(recognized, width, height)
+        if mixed and result:
+            try:
+                from . import ocr_mixed_text
+            except ImportError:
+                import ocr_mixed_text
+            model_evidence = actual_ocr_models(language, backend)
+            result = ocr_mixed_text.recognize(recognized, width, height, model_evidence)
+            engine.reader_diagnostics.update(model_evidence.get('diagnostics', {}))
+            engine.reader_secondary_models = {k: v for k, v in model_evidence['models'].items()
+                                             if k not in {'det', 'rec'}}
         if time.monotonic() - started > OCR_TIMEOUT:
             raise RuntimeError("RapidOCR page timeout")
         return result
@@ -781,193 +1034,7 @@ def read_bucket_gzip_json(path: str) -> dict:
 
 
 def build_item(item: dict, source: Path, bundle: Path) -> dict:
-    source_sha, source_bytes = shared.hash_file(source)
-    if item.get("source_sha256") and item["source_sha256"] != source_sha:
-        raise ValueError("PDF source changed after planning")
-    bundle.mkdir(parents=True, exist_ok=True)
-    probe = item.get("probe") or probe_pdf(source)
-    pages = int(probe["page_count"])
-    root = object_root(source_sha, item["key"])
-    public_item = {key: value for key, value in item.items() if not key.startswith("_")}
-    if probe["classification"] == "native-text":
-        # A native PDF already has a browser-readable text layer.  Do not spend
-        # time producing duplicate page images or OCR JSON for it.
-        return {
-            **public_item, "source_sha256": source_sha, "source_bytes": source_bytes,
-            "status": "skipped", "reason": "native-text-pdf", "profile": asset_profile(),
-            "classification": probe["classification"], "page_count": pages, "stream": False,
-        }
-    presentation = item.get("reader_presentation") or reader_presentation(source)
-    if presentation["strategy"] == "preserve-pdf":
-        raise ValueError("preserved PDFs require the independent plan-render/plan-ocr pipeline; reader re-encoding is disabled")
-    previous = item.get("_previous_ocr") if isinstance(item.get("_previous_ocr"), dict) else None
-    previous_manifest = None
-    previous_book = None
-    previous_profile = str(previous.get("profile", "")) if previous else ""
-    reuse_previous = bool(
-        previous and previous.get("source_sha256") == source_sha
-        and ocr_profile_without_jxl(previous_profile) == ocr_profile_without_jxl(asset_profile())
-    )
-    reencode_jxl = reuse_previous and JXL_ENABLED and previous_profile != asset_profile()
-    if reuse_previous:
-        try:
-            previous_manifest = read_bucket_json(previous["ocr_manifest"])
-            old_pages = previous_manifest.get("pages")
-            if (previous_manifest.get("source_sha256") != source_sha
-                    or previous_manifest.get("page_count") != pages
-                    or not isinstance(old_pages, list) or len(old_pages) != pages
-                    or not previous_manifest.get("page_manifest")):
-                raise ValueError("incomplete previous OCR manifest")
-            for number, old in enumerate(old_pages, 1):
-                if old.get("p") != number:
-                    raise ValueError("invalid previous OCR page order")
-                for field, suffix in (("o", ".json.gz"), ("w", ".webp"), ("i", ".png")):
-                    if field == "i" and field not in old:
-                        continue
-                    validate_ocr_object_path(old.get(field))
-                    if not old[field].endswith(f"page-{number:06d}{suffix}"):
-                        raise ValueError("invalid previous OCR page path")
-            previous_book = read_bucket_gzip_json(previous_manifest["book_text"]["path"])
-            if (previous_book.get("kind") != "pdf-ocr-book-text"
-                    or len(previous_book.get("pages", [])) != pages):
-                raise ValueError("incomplete previous OCR book text")
-        except Exception:
-            # A missing or stale old manifest is recoverable: fall back to a full OCR build.
-            reuse_previous = False
-            previous_manifest = previous_book = None
-    previous_pages = previous_manifest.get("pages", []) if reuse_previous else []
-    page_results = []
-    book_pages = []
-    with tempfile.TemporaryDirectory(dir=bundle) as temp_name:
-        temp = Path(temp_name)
-        for page in range(1, pages + 1):
-            old_page = previous_pages[page - 1] if reuse_previous else None
-            if old_page:
-                page_entry = dict(old_page)
-                if probe["classification"] != "native-text":
-                    if not JXL_ENABLED:
-                        for field in ("j", "jbucket", "js", "jb"):
-                            page_entry.pop(field, None)
-                    elif reencode_jxl:
-                        with tempfile.TemporaryDirectory(dir=temp) as page_temp:
-                            rendered, width, height = render_page(source, page, Path(page_temp))
-                            jxl_path = bundle / root / "pages" / f"page-{page:06d}.jxl"
-                            jxl_sha, jxl_bytes = encode_jxl(rendered, jxl_path)
-                            page_entry.update({"j": (root / "pages" / jxl_path.name).as_posix(),
-                                                "jbucket": shared.PDF_OCR_INPUT_BUCKET,
-                                               "js": jxl_sha, "jb": jxl_bytes})
-                page_results.append(page_entry)
-                continue
-            native_chars = int(probe.get("page_chars", [0] * pages)[page - 1])
-            source_kind = "native" if native_chars >= MIN_NATIVE_PAGE_CHARS else "ocr"
-            webp_path = None
-            input_png_path = None
-            if probe["classification"] != "native-text":
-                rendered, width, height = render_page(source, page, temp)
-                if source_kind == "native":
-                    native = native_page(source, page)
-                    blocks = native["blocks"]
-                    page_text = native["text"]
-                    width, height = native["width"] or width, native["height"] or height
-                    source_kind = "native"
-                else:
-                    blocks = ocr_page(rendered, width, height)
-                    page_text = "\n".join(block["t"] for block in blocks).strip()
-                # Empty recognition is a valid page result (blank/image-only pages).
-                if probe["classification"] != "native-text":
-                    webp_path = bundle / root / "pages" / f"page-{page:06d}.webp"
-                    webp_path.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copyfile(temp / f"page-{page:06d}.webp", webp_path)
-                if source_kind == "ocr":
-                    # Keep the high-quality PNG used by PaddleOCR so a later
-                    # OCR-only workflow can consume it without downloading or
-                    # rendering the source PDF again.  WebP remains the
-                    # Reader delivery image; PNG is an internal OCR input.
-                    input_png_path = bundle / root / "ocr-input" / f"page-{page:06d}.png"
-                    input_png_path.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copyfile(rendered, input_png_path)
-            else:
-                native = native_page(source, page)
-                width, height, blocks = native["width"], native["height"], native["blocks"]
-                page_text = native["text"]
-            payload = page_payload(page, width, height, blocks, source_kind)
-            payload["text"] = page_text
-            ocr_path = bundle / root / "ocr" / f"page-{page:06d}.json.gz"
-            ocr_sha, ocr_bytes = write_gzip_json(ocr_path, payload)
-            book_pages.append({"page": page, "text": page_text})
-            page_entry = {
-                "p": page, "o": (root / "ocr" / ocr_path.name).as_posix(),
-                "os": ocr_sha, "ob": ocr_bytes, "source": source_kind,
-                "chars": len(payload["text"]),
-            }
-            if webp_path:
-                webp_sha, webp_bytes = shared.hash_file(webp_path)
-                page_entry.update({"w": (root / "pages" / webp_path.name).as_posix(),
-                                   "ws": webp_sha, "wb": webp_bytes})
-                if JXL_ENABLED:
-                    jxl_path = bundle / root / "pages" / f"page-{page:06d}.jxl"
-                    jxl_sha, jxl_bytes = encode_jxl(rendered, jxl_path)
-                    page_entry.update({"j": (root / "pages" / jxl_path.name).as_posix(),
-                                       "jbucket": shared.PDF_OCR_INPUT_BUCKET,
-                                       "js": jxl_sha, "jb": jxl_bytes})
-            if input_png_path:
-                input_sha, input_bytes = shared.hash_file(input_png_path)
-                page_entry.update({"i": (root / "ocr-input" / input_png_path.name).as_posix(),
-                                   "ibucket": shared.PDF_OCR_INPUT_BUCKET,
-                                   "is": input_sha, "ib": input_bytes})
-            page_results.append(page_entry)
-            for suffix in (".png", ".webp"):
-                (temp / f"page-{page:06d}{suffix}").unlink(missing_ok=True)
-    # Keep the searchable representation compact and derive it from page files.
-    if reuse_previous and previous_book:
-        book_text = previous_book
-        previous_book_meta = previous_manifest["book_text"]
-        book_sha, book_bytes = previous_book_meta["sha256"], previous_book_meta["bytes"]
-        book_path = Path(previous_book_meta["path"])
-    else:
-        book_text = {"version": 1, "kind": "pdf-ocr-book-text", "profile": OCR_PROFILE,
-                     "pages": book_pages}
-        book_path = bundle / root / "ocr" / "book-text.json.gz"
-        book_sha, book_bytes = write_gzip_json(book_path, book_text)
-    page_manifest_meta = previous_manifest["page_manifest"] if reuse_previous else None
-    image_pages = [
-        {"page": entry["p"], "path": entry["w"], "sha256": entry["ws"], "bytes": entry["wb"]}
-        for entry in page_results if entry.get("w")
-    ]
-    if image_pages and not reuse_previous:
-        page_manifest = pdf_assets.compact_page_manifest(
-            source_sha, asset_profile(), image_pages, manifest_dir=root,
-            ocr_pages=[{"page": entry["p"], "o": entry["o"], "os": entry["os"], "ob": entry["ob"]}
-                        for entry in page_results],
-        )
-        page_manifest_path = bundle / root / "page-manifest.json"
-        page_manifest_sha, page_manifest_bytes = write_json(page_manifest_path, page_manifest)
-        page_manifest_meta = {
-            "path": page_manifest_path.relative_to(bundle).as_posix(),
-            "sha256": page_manifest_sha, "bytes": page_manifest_bytes,
-            "version": pdf_assets.PAGE_MANIFEST_VERSION,
-        }
-    manifest = {
-        "version": OCR_MANIFEST_VERSION, "kind": "pdf-ocr",
-        "source_sha256": source_sha, "source_bytes": source_bytes,
-        "source_revision": item.get("source_revision", ""), "profile": asset_profile(),
-        "engine": OCR_ENGINE, "dpi": OCR_DPI, "classification": probe["classification"],
-        "page_count": pages, "complete": True, "pages": page_results,
-        "book_text": {"path": previous_manifest["book_text"]["path"] if reuse_previous else (root / "ocr" / book_path.name).as_posix(),
-                       "sha256": book_sha, "bytes": book_bytes},
-    }
-    if page_manifest_meta:
-        manifest["page_manifest"] = page_manifest_meta
-    manifest_path = bundle / root / OCR_MANIFEST_NAME
-    # The browser manifest is deliberately plain JSON; page text is compressed.
-    manifest_sha, manifest_bytes = write_json(manifest_path, manifest)
-    return {
-        **public_item, "source_sha256": source_sha, "source_bytes": source_bytes,
-        "status": "ready", "profile": asset_profile(), "ocr_manifest": (root / OCR_MANIFEST_NAME).as_posix(),
-        "ocr_manifest_sha256": manifest_sha, "ocr_manifest_bytes": manifest_bytes,
-        "classification": probe["classification"], "page_count": pages,
-        "stream": True, **({"page_manifest": page_manifest_meta} if page_manifest_meta else {}),
-    }
+    raise ValueError("legacy monolithic OCR is retired; use the independent plan-render/plan-ocr pipeline with quality evidence")
 
 
 def empty_manifest() -> dict:

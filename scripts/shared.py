@@ -220,6 +220,13 @@ def merge_pdf_ocr_sidecar_entry(current: dict | None, result: dict) -> dict | No
     """Merge OCR metadata without losing an existing Reader asset mapping."""
     entry = preserve_pdf_sidecar_entry(current, result)
     if result.get("status") == "failed":
+        if result.get("quality_status") in {"failed", "review"}:
+            for field in ("o", "om", "op", "ob"):
+                entry.pop(field, None)
+            entry.update(om="needs-review" if result["quality_status"] == "review" else "failed",
+                         oe=result.get("error", "OCR quality check failed"))
+            if not entry.get("p"):
+                entry["s"] = 4
         return entry or {"s": 4, "om": "failed", "oe": result.get("error", "OCR failed")}
     if result.get("status") == "ready":
         page_manifest = result.get("page_manifest")

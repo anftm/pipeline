@@ -58,7 +58,7 @@ class ReaderAssetContractTests(unittest.TestCase):
             "rtf": ("calibre-rtf-html-v1", "html", "document.html"),
             "chm": ("calibre-chm-epub-v4-source-text", "epub", "document.epub"),
             "ppt": ("libreoffice-pdf-office-v2", "pdf", "document.pdf"),
-            "pptx": ("libreoffice-pdf-office-v2", "pdf", "document.pdf"),
+            "pptx": ("libreoffice-pdf-symbols-v3", "pdf", "document.pdf"),
             "pps": ("libreoffice-pdf-office-v2", "pdf", "document.pdf"),
             "odp": ("libreoffice-pdf-office-v2", "pdf", "document.pdf"),
             "xls": ("libreoffice-pdf-office-v2", "pdf", "document.pdf"),
@@ -1799,7 +1799,7 @@ aW1hZ2U=
             "profile": reader_assets.SPREADSHEET_HTML_PROFILE, "path": spreadsheet_path,
         }}}
         pdf_manifest = {"files": {key: {
-            "status": "ready", "strategy": "sampled-webp",
+            "status": "ready", "strategy": "sampled-jxl",
             "render_profile": build_reader_assets_index.PDF_PROFILE,
             "decision_profile": build_reader_assets_index.PDF_DECISION_PROFILE,
             "path": pdf_path,
@@ -3107,7 +3107,7 @@ class PublicationTests(unittest.TestCase):
             "book": {"status": "ready", "reader_mode": "epub", "path": "objects/aa/book.epub"},
         }}
         pdf_manifest = {"version": 1, "files": {
-            "scan": {"status": "ready", "strategy": "sampled-webp",
+            "scan": {"status": "ready", "strategy": "sampled-jxl",
                      "render_profile": pdf_assets.PDF_PROFILE,
                      "decision_profile": pdf_assets.PDF_DECISION_PROFILE,
                      "path": "", "page_manifest": {
@@ -3144,7 +3144,7 @@ class PublicationTests(unittest.TestCase):
         pdf_manifest = {"version": 1, "files": {
             "legacy": {"status": "ready", "strategy": "sampled-webp",
                        "page_manifest": {"path": "objects/aa/" + "a" * 64 + "/page-manifest.json"}},
-            "current": {"status": "ready", "strategy": "sampled-webp", "source_extension": "caj",
+            "current": {"status": "ready", "strategy": "sampled-jxl", "source_extension": "caj",
                         "render_profile": pdf_assets.PDF_PROFILE,
                         "decision_profile": pdf_assets.PDF_DECISION_PROFILE,
                         "page_manifest": {"path": "objects/bb/" + "b" * 64 + "/page-manifest.json"}},

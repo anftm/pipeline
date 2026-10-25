@@ -12,6 +12,7 @@ def entry(key="VoiceOfML/books\0book.pdf", source="a" * 64, count=97):
     return {"key": key, "repo": key.split("\0")[0], "path": key.split("\0")[1],
             "source_kind": "upstream", "source_revision": "b" * 40, "source_sha256": source,
             "source_bytes": 100, "page_count": count, "status": "ready",
+            "quality_check": {"policy": "ocr-quality-v1", "status": "passed", "checked_pages": count, "issues": []},
             "ocr_manifest": f"objects/{source[:2]}/{source}/{'c' * 16}/ocr-manifest.json",
             "ocr_manifest_sha256": "d" * 64, "ocr_manifest_bytes": 100}
 

@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from scripts import pdf_ocr, pdf_ocr_stages as stages, pdf_reading_v3 as v3
+from scripts import pdf_ocr, pdf_ocr_stages as stages, pdf_reading_v3 as v3, ocr_quality
 from scripts import publish_pdf_ocr_assets as publication
 from tests.test_pdf_text_layer import raw_page
 
@@ -20,10 +20,17 @@ class OcrCompanionPublicationTests(unittest.TestCase):
             for number, kind, content in ((1, "native", "Native"), (2, "ocr", "Recognized")):
                 raw = raw_page(content)
                 raw.update(page=number, source=kind)
+                if kind == "ocr":
+                    raw["recognition"] = {"policy": ocr_quality.POLICY, "source_sha256": source,
+                        "input_sha256": "e" * 64, "profile": pdf_ocr.asset_profile("ch", "rapidocr_onnxruntime"),
+                        "language": "en", "language_evidence": {"scripts": ["Latin"]},
+                        "models": {"models": {"det": {"sha256": "f" * 64}, "rec": {"sha256": "1" * 64}}}}
+                    raw["quality_check"] = ocr_quality.check_page(raw)
                 path = root / "ocr" / f"page-{number:06d}.json.gz"
                 digest, size = pdf_ocr.write_gzip_json(bundle / path, raw)
                 objects[path.as_posix()] = (bundle / path).read_bytes()
-                pages.append({"p": number, "source": kind, "o": path.as_posix(), "os": digest, "ob": size})
+                pages.append({"p": number, "source": kind, "o": path.as_posix(), "os": digest, "ob": size,
+                              **({"is": "e" * 64} if kind == "ocr" else {})})
             book = {"key": "repo\0book.pdf", "source_sha256": source, "source_bytes": 100,
                     "status": "ready", "page_count": 2, "classification": "mixed", "pages": pages,
                     "ocr_language": "ch", "ocr_backend": "rapidocr_onnxruntime",

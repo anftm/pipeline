@@ -15,10 +15,10 @@ class OcrLanguageAnnotationTests(unittest.TestCase):
         publish.annotate_language(result, {"pages": [{"text": "Русский текст " * 60}]})
         self.assertNotIn("language_suspect", result)
 
-    def test_explicit_override_is_trusted(self):
+    def test_explicit_override_still_requires_matching_text_evidence(self):
         result = {"key": "repo\0book.pdf", "ocr_language": "ru", "language_source": "override"}
         publish.annotate_language(result, {"pages": [{"text": "Latin only text " * 60}]})
-        self.assertNotIn("language_suspect", result)
+        self.assertTrue(result["language_suspect"])
 
 
 if __name__ == "__main__":

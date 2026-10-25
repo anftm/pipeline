@@ -14,12 +14,13 @@ from xml.etree import ElementTree as ET
 from pathlib import Path, PurePosixPath
 
 try:
-    from . import pdf_ocr, pdf_text_layer as text, shared, djvu_pages
+    from . import pdf_ocr, pdf_text_layer as text, shared, djvu_pages, reader_page_codec
 except ImportError:
     import pdf_ocr
     import pdf_text_layer as text
     import shared
     import djvu_pages
+    import reader_page_codec
 
 BUCKETS = {shared.READER_ASSETS_BUCKET, shared.PDF_PAGES_BUCKET, shared.PDF_OCR_INPUT_BUCKET}
 PARTITION_SIZE = 128
@@ -57,6 +58,8 @@ def validate_vector_svg(raw):
 def preview_geometry(raw, codec):
     if codec == "svg":
         return validate_vector_svg(raw)
+    if codec == 'jxl':
+        return reader_page_codec.geometry(raw)
     from PIL import Image
     import io
     with Image.open(io.BytesIO(raw)) as image:
@@ -72,7 +75,7 @@ def resource(value):
     path = value.get("path")
     if (not isinstance(path, str) or not (path.startswith(("objects/", "derived/")) or
             re.fullmatch(r"documents/pdf/[a-z0-9_-]+/[0-9a-f]{64}/document\.pdf", path) or
-            re.fullmatch(r"documents/pdf/[a-z0-9_-]+/[0-9a-f]{64}/document-manifest\.json", path))
+            re.fullmatch(r"documents/pdf/[a-z0-9_-]+/[0-9a-f]{64}/(?:document-manifest|symbol-conversion)\.json", path))
             or "\\" in path or any(part in {"", ".", ".."} for part in path.split("/"))
             or any(ord(c) < 32 for c in path) or "?" in path or "#" in path):
         raise ValueError("invalid qualified resource path")
@@ -275,12 +278,14 @@ def build_text_bundle(layers, raw_pages, root, bundle, *, parent=None, include_s
 
 
 def verify_text_bundle(ref, read, source_sha256, page_count, *, verify_evidence=False, page_geometries=None,
-                       read_workers=1):
+                       read_workers=1, verified_layers=None):
     manifest = validate_text_manifest(decode(verified_read(ref, read)))
     if manifest["source_sha256"] != source_sha256 or manifest["page_count"] != page_count:
         raise ValueError("text layer index source mismatch")
     generations = []
-    layers = []
+    layers = [] if verified_layers is None else verified_layers
+    if len(layers):
+        raise ValueError('verified text page storage must be empty')
     page_resources = {}
     for partition in manifest["partitions"]:
         data = decode(verified_read(partition["resource"], read))
@@ -327,27 +332,27 @@ def verify_text_bundle(ref, read, source_sha256, page_count, *, verify_evidence=
         raise ValueError("text index quality claim mismatch")
     if manifest.get("book_text"):
         index = decode(verified_read(manifest["book_text"], read))
-        expected_spans = [[{"start": r["start"], "end": r["end"], "box": r["box"],
-                            "region_id": r["id"], "precision": r["mapping_precision"]}
-                           for r in layer["regions"]] for layer in layers]
         if (index.get("kind") != "pdf-book-text" or index.get("version") != 2
                 or index.get("complete") is not True or index.get("source_sha256") != source_sha256
                 or index.get("generation") != manifest["generation"]
                 or index.get("page_count") != page_count or index.get("revision") != manifest["revision"]
                 or [p.get("page") for p in index.get("pages", [])] != list(range(1, page_count + 1))
                 or any(p["text"] != layer["text"] or p["text_generation"] != layer["generation"]
-                       or p["quality"] != layer["quality"] or p["text_spans"] != spans
-                       for p, layer, spans in zip(index["pages"], layers, expected_spans))):
+                       or p["quality"] != layer["quality"] or p["text_spans"] != [
+                           {"start": r["start"], "end": r["end"], "box": r["box"],
+                            "region_id": r["id"], "precision": r["mapping_precision"]} for r in layer["regions"]]
+                       for p, layer in zip(index["pages"], layers))):
             raise ValueError("search index differs from effective page text")
+        del index
     review = decode(verified_read(manifest["review"], read))
     if (review.get("kind") != "pdf-text-review" or review.get("version") != 1
             or review.get("source_sha256") != source_sha256 or review.get("generation") != manifest["generation"]
             or len(review.get("tasks", [])) != manifest["review_count"]):
         raise ValueError("invalid review manifest")
-    known = {p["page"]: p for p in layers}
     ids = set()
     for task in review["tasks"]:
-        layer = known.get(task.get("page"))
+        number = task.get('page')
+        layer = layers[number - 1] if type(number) is int and 1 <= number <= len(layers) else None
         if (not layer or task.get("base_generation") != layer["generation"]
                 or task.get("raw_sha256") != layer["raw_sha256"]
                 or task.get("page_identity") != layer["page_identity"]
@@ -470,6 +475,41 @@ def page_map(pdf_bytes, source_sha256):
     return {"version": 1, "kind": "pdf-page-map", "source_sha256": source_sha256, "pages": pages}
 
 
+def render_previews(spec, read, mapping):
+    """Adopt checksummed reading images from the account's completed render."""
+    ref = spec.get("render_manifest")
+    if ref is None:
+        return {}
+    source = spec["source_sha256"]
+    descriptor = decode(verified_read(ref, read))
+    count = len(mapping["pages"])
+    if (descriptor.get("kind") != "pdf-render" or descriptor.get("complete") is not True
+            or descriptor.get("source_sha256") != source or descriptor.get("key") != spec["source_key"]
+            or descriptor.get("page_count") != count
+            or [p.get("p") for p in descriptor.get("pages", [])] != list(range(1, count + 1))):
+        raise ValueError("shared render source or page sequence mismatch")
+    if descriptor.get("reader_presentation", {}).get("strategy") == "preserve-pdf":
+        return {}
+    previews = {}
+    for page, geometry in zip(descriptor["pages"], mapping["pages"]):
+        if geometry["classification"] in {"bitonal-image", "unknown", "native-vector"} or not page.get("j"):
+            continue
+        path = page["j"]
+        if (page.get("jbucket", shared.PDF_PAGES_BUCKET) != shared.PDF_PAGES_BUCKET or not re.fullmatch(
+                rf"objects/{source[:2]}/{source}/[0-9a-f]{{16}}/pages/page-{page['p']:06d}\.jxl", path)):
+            raise ValueError("shared render image source identity mismatch")
+        media = resource({"bucket": shared.PDF_PAGES_BUCKET, "path": path,
+                          "sha256": page["js"], "bytes": page["jb"], "role": "runtime"})
+        width, height = preview_geometry(verified_read(media, read), "jxl")
+        if abs((width / height) / (geometry["width"] / geometry["height"]) - 1) > .01:
+            raise ValueError("shared render geometry mismatch")
+        previews[page["p"]] = {"page": page["p"], "page_identity": geometry["identity"], "codec": "jxl",
+            "width": width, "height": height, "resource": media,
+            "recipe": {"policy": "shared-document-render-v1", "render_profile": descriptor["render_profile"],
+                       "render_sha256": ref["sha256"], "role": "preview-not-archival"}}
+    return previews
+
+
 def generate_previews(spec, read, bundle, *, start=1, end=None, dpi=150, max_pixels=50000000):
     """Generate resumable page ranges, choosing lossless PNG for protected pages."""
     import pymupdf
@@ -481,15 +521,17 @@ def generate_previews(spec, read, bundle, *, start=1, end=None, dpi=150, max_pix
     kind = primary_kind(resource(spec["primary"]))
     raw = verified_read(spec["primary"], read)
     mapping = primary_page_map(raw, source, kind)
+    shared_previews = render_previews(spec, read, mapping)
     count = len(mapping["pages"])
     end = count if end is None else end
     if type(start) is not int or type(end) is not int or not 1 <= start <= end <= count:
         raise ValueError("invalid preview generation range")
     if kind == "djvu":
-        return _djvu_previews(spec, raw, mapping, bundle, start, end, dpi, max_pixels)
+        return _djvu_previews(spec, raw, mapping, bundle, start, end, dpi, max_pixels, shared_previews)
     vector = spec.get("vector_previews", False)
     recipe_options = {"source": source, "primary": spec["primary"], "dpi": dpi,
-                      "max_pixels": max_pixels, "webp_quality": 85, "policy": "mixed-preview-v1"}
+                      "max_pixels": max_pixels, "codec_profile": reader_page_codec.PROFILE,
+                      "policy": "mixed-preview-jxl-v1"}
     if vector:
         recipe_options["vector_previews"] = "svg-paths-v1"
     recipe = text.digest(recipe_options)
@@ -497,6 +539,9 @@ def generate_previews(spec, read, bundle, *, start=1, end=None, dpi=150, max_pix
     generated = []
     with pymupdf.open(stream=raw, filetype="pdf") as document:
         for number in range(start, end + 1):
+            if number in shared_previews:
+                generated.append(shared_previews[number])
+                continue
             geometry = mapping["pages"][number - 1]
             if geometry["classification"] == "unknown":
                 raise ValueError("unknown page inspection requires retry before stream generation")
@@ -532,12 +577,16 @@ def generate_previews(spec, read, bundle, *, start=1, end=None, dpi=150, max_pix
                 scale *= .99
             image = Image.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples)
             stream = io.BytesIO()
-            codec = "png" if protected else "webp"
-            image.save(stream, "PNG" if protected else "WEBP", **({} if protected else {"quality": 85, "method": 6}))
+            codec = "png" if protected else "jxl"
             path = bundle / root / "preview" / f"page-{number:06d}.{codec}"
             path.parent.mkdir(parents=True, exist_ok=True)
-            encoded = stream.getvalue()
-            path.write_bytes(encoded)
+            if protected:
+                image.save(stream, 'PNG')
+                encoded = stream.getvalue()
+                path.write_bytes(encoded)
+            else:
+                reader_page_codec.encode_image(image, path)
+                encoded = path.read_bytes()
             ref = {"bucket": shared.PDF_PAGES_BUCKET, "path": path.relative_to(bundle).as_posix(),
                    "sha256": hashlib.sha256(encoded).hexdigest(), "bytes": len(encoded), "role": "runtime"}
             generated.append({"page": number, "page_identity": geometry["identity"], "codec": codec,
@@ -551,7 +600,7 @@ def generate_previews(spec, read, bundle, *, start=1, end=None, dpi=150, max_pix
     return {**spec, "previews": [existing[p] for p in sorted(existing)]}
 
 
-def _djvu_previews(spec, raw, mapping, bundle, start, end, dpi, max_pixels):
+def _djvu_previews(spec, raw, mapping, bundle, start, end, dpi, max_pixels, shared_previews=None):
     """DjVu previews follow the PDF rules: lossless PNG for bitonal pages.
 
     A bitonal page at its native resolution is stored as the exact 1-bit JB2
@@ -562,8 +611,8 @@ def _djvu_previews(spec, raw, mapping, bundle, start, end, dpi, max_pixels):
     from PIL import Image
     source = spec["source_sha256"]
     recipe = text.digest({"source": source, "primary": spec["primary"], "dpi": dpi,
-                          "max_pixels": max_pixels, "webp_quality": 85,
-                          "policy": "djvu-native-preview-v1"})
+                           "max_pixels": max_pixels, "codec_profile": reader_page_codec.PROFILE,
+                           "policy": "djvu-native-preview-jxl-v1"})
     root = Path("objects") / source[:2] / source / recipe[:16]
     infos = djvu_pages.inspect(raw)
     generated = []
@@ -571,6 +620,9 @@ def _djvu_previews(spec, raw, mapping, bundle, start, end, dpi, max_pixels):
         local = Path(directory) / "document.djvu"
         local.write_bytes(raw)
         for number in range(start, end + 1):
+            if number in (shared_previews or {}):
+                generated.append(shared_previews[number])
+                continue
             geometry = mapping["pages"][number - 1]
             protected = geometry["classification"] == "bitonal-image"
             requested_dpi = max(dpi, 300) if protected else dpi
@@ -581,9 +633,10 @@ def _djvu_previews(spec, raw, mapping, bundle, start, end, dpi, max_pixels):
                 codec, encoded = "png", target.read_bytes()
             else:
                 with Image.open(target) as image:
-                    stream = io.BytesIO()
-                    image.convert("RGB").save(stream, "WEBP", quality=85, method=6)
-                codec, encoded = "webp", stream.getvalue()
+                    jxl = target.with_suffix('.jxl')
+                    reader_page_codec.encode_image(image.convert('RGB'), jxl)
+                codec, encoded = 'jxl', jxl.read_bytes()
+                jxl.unlink()
             target.unlink()
             path = bundle / root / "preview" / f"page-{number:06d}.{codec}"
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -668,7 +721,7 @@ def build_reading(spec, read, bundle):
         if ref["bucket"] == shared.PDF_OCR_INPUT_BUCKET or ref["role"] != "runtime":
             raise ValueError("processing inputs are not published previews")
         codec = entry.get("codec")
-        if codec not in {"png", "webp", "jpeg", "svg"}:
+        if codec not in {"png", "webp", "jpeg", "svg", "jxl"}:
             raise ValueError("unsupported preview codec")
         if geometry["classification"] in {"bitonal-image", "unknown"} and codec != "png":
             raise ValueError("protected pages require lossless preview encoding")
@@ -757,7 +810,7 @@ def verify_reading(ref, read, *, read_workers=4):
             media = resource(page["resource"])
             if media["bucket"] == shared.PDF_OCR_INPUT_BUCKET or media["role"] != "runtime":
                 raise ValueError("invalid runtime preview")
-            if page["codec"] not in {"png", "webp", "jpeg", "svg"}:
+            if page["codec"] not in {"png", "webp", "jpeg", "svg", "jxl"}:
                 raise ValueError("unsupported preview codec")
             if geometry["classification"] in {"bitonal-image", "unknown"} and page["codec"] != "png":
                 raise ValueError("protected page has lossy preview")

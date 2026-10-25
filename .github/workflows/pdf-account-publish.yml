@@ -27,7 +27,7 @@ concurrency:
   queue: max
 
 env:
-  PDF_JXL_ENABLED: "false"
+  PDF_JXL_ENABLED: "true"
   PDF_OCR_LANG: auto
   PDF_OCR_BACKEND: rapidocr_onnxruntime
 
@@ -78,6 +78,7 @@ jobs:
           STAGE: ${{ inputs.stage }}
         run: timeout --signal=TERM --kill-after=5m 150m python -u scripts/pdf_ocr_stages.py "publish-$STAGE" --publish-batch-size 4 --results-dir output/pdf-ocr/results
       - name: Publish Reader sidecar to Pages
+        if: always() && !cancelled() && steps.queue.outcome == 'success'
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           PAGES_TOKEN: ${{ secrets.PAGES_TOKEN }}
@@ -106,6 +107,7 @@ jobs:
           path: |
             output/pdf-ocr/pdf-progress.json
             output/pdf-ocr/bundle/publication.json
+            output/pdf-ocr/bundle/quality-report.json
             output/pdf-ocr/dispatch.json
           retention-days: 30
           if-no-files-found: warn

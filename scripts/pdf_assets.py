@@ -24,9 +24,10 @@ except ImportError:
     from reader_bucket import INDEX_FILES, read_bytes as read_bucket_bytes, read_json as read_bucket_json
 
 try:
-    from . import shared
+    from . import shared, reader_page_codec
 except ImportError:
     import shared
+    import reader_page_codec
 
 MANIFEST_NAME = "pdf_manifest.json"
 MANIFEST_VERSION = 1
@@ -46,7 +47,7 @@ VERY_LARGE_BYTES = 500 * MI
 MAX_PDF_OUTLINE_ENTRIES = 2000
 MAX_PDF_OUTLINE_TITLE_CHARS = 500
 MAX_PDF_OUTLINE_DEPTH = 32
-PDF_PROFILE = f"pdf-pages-v3-{WEBP_QUALITY}-{WEBP_MAX_DIMENSION}-no-upscale-toc"
+PDF_PROFILE = f"pdf-pages-v4-{WEBP_MAX_DIMENSION}-no-upscale-toc-{reader_page_codec.PROFILE}"
 PDF_DECISION_PROFILE = f"pdf-large-v2-{LARGE_BYTES}-whole-book-{SAMPLE_PAGES}"
 PDF_RISK_DECISION_PROFILE = f"pdf-range-risk-v1-{RISK_PDF_MIN_BYTES}-{RISK_PDF_MIN_PAGES}-{SAMPLE_PAGES}"
 SOURCE_PROFILES = {
@@ -70,7 +71,7 @@ def download_hf_source(repo: str, path: str, revision: str, token: str | None) -
 
 
 def object_root(source_sha: str, key: str) -> Path:
-    key_sha = hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
+    key_sha = hashlib.sha256((key + '\0' + PDF_PROFILE).encode("utf-8")).hexdigest()[:16]
     return Path("objects") / source_sha[:2] / source_sha / key_sha
 
 
@@ -80,8 +81,9 @@ def compact_page_manifest(source_sha: str, profile: str, pages: list[dict],
     if not pages:
         raise ValueError("PDF page manifest must contain at least one page")
     manifest_dir = manifest_dir or Path(str(pages[0].get("path") or "")).parent.parent
+    codec = 'jxl' if str(pages[0].get('path', '')).endswith('.jxl') else 'webp'
     for number, page in enumerate(pages, 1):
-        expected = (manifest_dir / "pages" / f"page-{number:06d}.webp").as_posix()
+        expected = (manifest_dir / "pages" / f"page-{number:06d}.{codec}").as_posix()
         if page.get("page") != number or page.get("path") != expected:
             raise ValueError("PDF pages do not match derived manifest paths")
     manifest = {
@@ -91,6 +93,9 @@ def compact_page_manifest(source_sha: str, profile: str, pages: list[dict],
         "profile": profile,
         "page_count": len(pages),
     }
+    if codec == 'jxl':
+        manifest['codec'] = codec
+        manifest['images'] = [{'sha256': page['sha256'], 'bytes': page['bytes']} for page in pages]
     if toc:
         manifest["toc"] = toc
     if ocr_pages is not None:
@@ -119,7 +124,7 @@ def is_current_ready(entry: dict, source_revision: str | None = None,
     ready artifacts across revisions pass None.
     """
     return (isinstance(entry, dict) and entry.get("status") == "ready"
-            and entry.get("strategy") == "sampled-webp"
+            and entry.get("strategy") == "sampled-jxl"
             and entry.get("render_profile") == PDF_PROFILE
             and entry.get("decision_profile") == (decision_profile or PDF_DECISION_PROFILE)
             and (source_revision is None or entry.get("source_revision") == source_revision))
@@ -308,21 +313,23 @@ def _image_dimensions(path: Path) -> tuple[int, int]:
 
 
 def _render(pdf: Path, page: int, directory: Path, extension: str = "pdf") -> Path:
+    from PIL import Image
     stem = directory / f"page-{page:06d}"
     if extension == "djvu":
         _run(["ddjvu", "-format=ppm", f"-page={page}", str(pdf), str(stem.with_suffix(".ppm"))])
     else:
-        _run(["pdftocairo", "-png", "-singlefile", "-f", str(page), "-l", str(page), str(pdf), str(stem)])
-    png = stem.with_suffix(".png") if extension != "djvu" else stem.with_suffix(".ppm")
-    webp = stem.with_suffix(".webp")
-    args = ["cwebp", "-quiet", "-q", str(WEBP_QUALITY)]
-    width, height = _image_dimensions(png)
-    if WEBP_MAX_DIMENSION > 0 and max(width, height) > WEBP_MAX_DIMENSION:
-        args += (["-resize", str(WEBP_MAX_DIMENSION), "0"] if width >= height
-                 else ["-resize", "0", str(WEBP_MAX_DIMENSION)])
-    _run([*args, str(png), "-o", str(webp)])
-    png.unlink(missing_ok=True)
-    return webp
+        _run(["pdftocairo", "-tiff", "-singlefile", "-f", str(page), "-l", str(page), str(pdf), str(stem)])
+    pixels = stem.with_suffix(".tif") if extension != "djvu" else stem.with_suffix(".ppm")
+    jxl = stem.with_suffix(".jxl")
+    try:
+        with Image.open(pixels) as image:
+            image.load()
+            if WEBP_MAX_DIMENSION > 0 and max(image.size) > WEBP_MAX_DIMENSION:
+                image.thumbnail((WEBP_MAX_DIMENSION, WEBP_MAX_DIMENSION), Image.Resampling.LANCZOS)
+            reader_page_codec.encode_image(image, jxl)
+    finally:
+        pixels.unlink(missing_ok=True)
+    return jxl
 
 
 def build_item(item: dict, source: Path, bundle: Path) -> dict:
@@ -357,19 +364,21 @@ def build_item(item: dict, source: Path, bundle: Path) -> dict:
             sample_sizes.append(_render(source, page, Path(temp), str(item.get("extension") or "pdf")).stat().st_size)
         range_pages = page_end - page_start + 1
         estimated = int(round(sum(sample_sizes) / len(sample_sizes) * range_pages))
-        metadata.update({"sample_webp_bytes": sample_sizes,
-                    "estimated_webp_bytes": estimated})
+        metadata.update({"codec": "jxl", "sample_jxl_bytes": sample_sizes,
+                         "estimated_jxl_bytes": estimated})
         page_entries = []
         for page in range(page_start, page_end + 1):
-            rendered = _render(source, page, Path(temp), str(item.get("extension") or "pdf"))
+            rendered = Path(temp) / f'page-{page:06d}.jxl'
+            if not rendered.is_file():
+                rendered = _render(source, page, Path(temp), str(item.get("extension") or "pdf"))
             page_sha, page_bytes = digest(rendered)
-            destination = bundle / object_dir / "pages" / f"page-{page:06d}.webp"
+            destination = bundle / object_dir / "pages" / f"page-{page:06d}.jxl"
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(rendered, destination)
             page_entries.append({"page": page, "path": (object_dir / "pages" / destination.name).as_posix(),
                                  "sha256": page_sha, "bytes": page_bytes})
     if ranged:
-        return {**base, "path": "", "status": "ready", "strategy": "sampled-webp", "pdf": metadata,
+        return {**base, "path": "", "status": "ready", "strategy": "sampled-jxl", "pdf": metadata,
                 "render_profile": PDF_PROFILE, "decision_profile": decision_profile,
                 "pages": page_entries, "outline": outline}
     page_manifest = compact_page_manifest(
@@ -378,7 +387,7 @@ def build_item(item: dict, source: Path, bundle: Path) -> dict:
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(json.dumps(page_manifest, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
     manifest_sha, manifest_bytes = digest(manifest_path)
-    return {**base, "path": "", "status": "ready", "strategy": "sampled-webp", "pdf": metadata,
+    return {**base, "path": "", "status": "ready", "strategy": "sampled-jxl", "pdf": metadata,
         "render_profile": PDF_PROFILE, "decision_profile": decision_profile,
             "pages": page_entries, "outline": outline, "page_manifest": {
                 "path": (object_dir / PAGE_MANIFEST_NAME).as_posix(),

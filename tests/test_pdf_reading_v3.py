@@ -5,6 +5,7 @@ import io
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 import pymupdf
@@ -15,6 +16,32 @@ from tests.test_pdf_text_layer import raw_page
 
 
 class ReadingV3Tests(unittest.TestCase):
+    def test_shared_render_reuses_verified_page_bytes_without_render_or_encoding(self):
+        import imagecodecs
+        import numpy as np
+        spec = self.spec()
+        spec.pop("previews")
+        source = spec["source_sha256"]
+        root = f"objects/{source[:2]}/{source}/" + "f" * 16
+        mapping = v3.primary_page_map(self.read(spec["primary"]), source, "pdf")
+        pages = []
+        for geometry in mapping["pages"]:
+            raw = imagecodecs.jpegxl_encode(np.full((int(geometry["height"]), int(geometry["width"]), 3), 255, dtype=np.uint8))
+            media = self.add(root + f"/pages/page-{geometry['page']:06d}.jxl", raw)
+            pages.append({"p": geometry["page"], "j": media["path"], "js": media["sha256"], "jb": media["bytes"]})
+        descriptor = {"kind": "pdf-render", "complete": True, "source_sha256": source,
+                      "key": spec["source_key"], "page_count": 2, "render_profile": "shared", "pages": pages}
+        spec["render_manifest"] = self.add(root + "/render-manifest.json", json.dumps(descriptor).encode(), role="provenance")
+        with patch.object(pymupdf.Page, "get_pixmap", side_effect=AssertionError("must reuse rendered pixels")), \
+                patch.object(v3.reader_page_codec, "encode_image", side_effect=AssertionError("must reuse JXL")):
+            generated = v3.generate_previews(spec, self.read, self.bundle)
+        self.assertEqual([p["resource"]["path"] for p in generated["previews"]], [p["j"] for p in pages])
+        self.assertEqual(list(self.bundle.rglob("*.jxl")), [])
+        key = (shared.PDF_PAGES_BUCKET, pages[0]["j"])
+        self.objects[key] = b"changed"
+        with self.assertRaisesRegex(ValueError, "checksum"):
+            v3.generate_previews(spec, self.read, self.bundle)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

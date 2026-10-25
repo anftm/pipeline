@@ -10,7 +10,7 @@ from unittest.mock import patch
 import yaml
 from PIL import Image
 
-from scripts import force_ocr_book as repair, pdf_ocr, pdf_ocr_stages as stages
+from scripts import force_ocr_book as repair, pdf_ocr, pdf_ocr_stages as stages, ocr_quality
 from scripts import publish_pdf_ocr_assets as publication
 from scripts.reader_gc_fence import producer_path
 
@@ -75,6 +75,10 @@ class ForceOcrBookTests(unittest.TestCase):
                 patch.object(pdf_ocr, "render_page", side_effect=self.render), \
                 patch.object(pdf_ocr, "native_pages", side_effect=AssertionError("must not extract broken native text")), \
                 patch.object(pdf_ocr, "ocr_page", return_value=[{"t": "完整识别正文", "b": [0, 0, 1, 1], "s": "ocr", "c": 1}]), \
+                patch.object(ocr_quality, "probe_image", return_value={"blank": False, "regions": [
+                    {"region": "whole", "script": "Han", "confidence": 8, "rotation": 0}]}), \
+                patch.object(pdf_ocr, "actual_ocr_models", return_value={"models": {
+                    "det": {"sha256": "a" * 64}, "rec": {"sha256": "b" * 64}}}), \
                 patch.object(stages, "upload_objects", side_effect=self.upload), \
                 patch.object(stages, "read_object", side_effect=self.read), \
                 patch.object(publication, "read_bucket_bytes", side_effect=lambda path, *a, **kw: self.objects[path]), \
@@ -146,12 +150,14 @@ class ForceOcrBookTests(unittest.TestCase):
             # This is the production failure: compact entry lacks recognized page paths.
             with self.assertRaisesRegex(ValueError, "does not belong"):
                 publication.reader_lifecycle.processing_handoffs(
-                    [report["entry"]], "generation", lambda p: self.protections[p])
+                    [report["entry"]], "a" * 32, lambda p: self.protections[p])
             owner = repair.handoff_owner(report["entry"])
             released = publication.reader_lifecycle.processing_handoffs(
-                [owner], "generation", lambda p: self.protections[p])
-            self.assertEqual(set(released), set(report["processing_roots"]))
-            self.assertTrue(all(r["status"] == "released" for r in released.values()))
+                [owner], "a" * 32, lambda p: self.protections[p])
+            protections = {p:r for p,r in released.items() if p.startswith('reader-index/processing/')}
+            self.assertEqual(set(protections), set(report["processing_roots"]))
+            self.assertTrue(all(r["status"] == "released" for r in protections.values()))
+            self.assertTrue(any(r.get('kind') == 'reader-retirement-hints' for r in released.values()))
             foreign = "reader-index/processing/foreign.json"
             self.protections[foreign] = publication.reader_lifecycle.processing_record(
                 [{"bucket": stages.shared.PDF_PAGES_BUCKET, "root": "objects/ff/foreign"}], "test", {})

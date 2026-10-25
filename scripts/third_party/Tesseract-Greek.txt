@@ -1,0 +1,11 @@
+Polytonic Greek LSTM traineddata from tesseract-ocr/tessdata_best
+Source: https://github.com/tesseract-ocr/tessdata_best
+Pinned revision: e12c65a915945e4c28e237a9b52bc4a8f39a0cec
+File: grc.traineddata
+SHA-256: dfc9bda286cd9d8755b1832e5731a5425d1cf0803393a5fa6dee078466178cf1
+License: Apache License 2.0
+https://github.com/tesseract-ocr/tessdata_best/blob/e12c65a915945e4c28e237a9b52bc4a8f39a0cec/LICENSE
+
+Workers download the pinned file and verify its byte size and SHA-256 before use.
+The recognition evidence retains Tesseract's version, input checksums, coordinates,
+raw text, word confidences, and both crop/scale hypotheses.

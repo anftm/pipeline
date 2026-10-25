@@ -105,6 +105,9 @@ def primary_spec(key, entry):
             or type(size) is not int or not 1 <= size <= 512 * 1024 * 1024):
         raise ValueError("PDF entry lacks bounded complete source metadata")
     spec = {"source_key": key, "source_sha256": source, "vector_previews": True}
+    if entry.get("render_manifest"):
+        spec["render_manifest"] = publication.v3.resource({"bucket": shared.PDF_PAGES_BUCKET,
+            **entry["render_manifest"], "role": "provenance"})
     djvu = entry.get("source_format") == "djvu"
     if djvu and entry.get("source_kind", "upstream") != "upstream":
         raise ValueError("native DjVu primary must be the pinned original")
@@ -146,6 +149,10 @@ def primary_spec(key, entry):
 def spec_for(key, entry):
     """Admit pinned complete OCR without changing existing task identities."""
     spec, count = primary_spec(key, entry)
+    check = entry.get('quality_check', {})
+    if (check.get('policy') != 'ocr-quality-v1' or check.get('status') != 'passed'
+            or check.get('checked_pages') != count or check.get('issues') != []):
+        raise ValueError('OCR has not passed complete page quality checks')
     source = spec["source_sha256"]
     ocr = {"bucket": shared.PDF_PAGES_BUCKET, "path": entry["ocr_manifest"],
            "sha256": entry["ocr_manifest_sha256"], "bytes": entry["ocr_manifest_bytes"], "role": "provenance"}

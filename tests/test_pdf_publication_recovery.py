@@ -134,7 +134,7 @@ class PdfPublicationRecoveryTests(unittest.TestCase):
             return {**book, "ocr_manifest": root + "/ocr-manifest.json", "page_count": 999}
         def upload(bundle):
             return [f"reader-index/processing/{root.name}.json" for root in sorted((bundle / "objects").glob("*/*/*"))]
-        def publish(api, repo, results):
+        def publish(api, repo, results, **kwargs):
             if committed:
                 raise RuntimeError("interrupted second batch")
             committed.extend(copy.deepcopy(results))

@@ -319,9 +319,10 @@ def render_page(path: Path, page: int, directory: Path, *, info: dict,
         resized = rgb.resize((max(1, int(width * scale)), max(1, int(height * scale))), Image.Resampling.LANCZOS)
         rgb.close()
         rgb = resized
-    rgb.save(prefix.with_suffix(".webp"), "WEBP", quality=pdf_ocr.reader_webp_quality(rgb, True), method=6)
-    if reader_jxl and rgb.size != (width, height):
-        rgb.save(prefix.with_name(prefix.name + "-reader").with_suffix(".png"), "PNG")
+    if reader_jxl:
+        rgb.save(prefix.with_name(prefix.name + "-reader").with_suffix(".ppm"))
+    else:
+        rgb.save(prefix.with_suffix(".webp"), "WEBP", quality=pdf_ocr.reader_webp_quality(rgb, True), method=6)
     rgb.close()
     return png, width, height
 

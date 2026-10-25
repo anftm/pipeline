@@ -127,9 +127,12 @@ def from_page(payload, source_sha256, language="und", raw_resource=None, *, layo
         detected_scripts = scripts(content)
         if bidi in {"rtl", "mixed"}:
             flags.add("bidi-order-needs-review")
-        if payload["source"] == "ocr" and confidence < .90:
+        block_source = block.get('s', payload['source'])
+        if block_source not in {'native', 'ocr'}:
+            block_source = payload['source']
+        if block_source == "ocr" and confidence < .90:
             flags.add("low-recognition-confidence")
-        if payload["source"] == "ocr":
+        if block_source == "ocr":
             supported = ({"Hani", "Latn"} if language in {"ch", "chinese_cht"} else
                          {"Latn"} if language == "en" else
                          {"Hani", "Hira", "Kana", "Latn"} if language == "japan" else None)
@@ -152,7 +155,7 @@ def from_page(payload, source_sha256, language="und", raw_resource=None, *, layo
             flags.add("vertical-recognition-needs-sample-validation")
         regions.append({"id": f"b{span['block']}", "order": len(regions), "start": start, "end": end,
                         "text": content, "box": bounds, "quad": copy.deepcopy(polygon),
-                        "mapping_precision": "block", "source": payload["source"],
+                         "mapping_precision": "block", "source": block_source,
                         "confidence": confidence, "language_hint": language,
                         "scripts": detected_scripts, "direction": bidi,
                         "writing_mode": region_mode, "layout_region": span.get("region", index)})
@@ -172,6 +175,14 @@ def from_page(payload, source_sha256, language="und", raw_resource=None, *, layo
               "provenance": {"source": payload["source"], "language_hint": language}}
     if raw_resource is not None:
         result["provenance"]["raw_resource"] = copy.deepcopy(raw_resource)
+    if layout.get('tables'):
+        # Cells refer to stable positioned regions, so accepted corrections can
+        # change their text/offsets without leaving a stale second text copy.
+        result['tables'] = copy.deepcopy(layout['tables'])
+        for table in result['tables']:
+            for cell in table['cells']:
+                cell['region_ids'] = [f'b{index}' for index in cell.pop('blocks')]
+                cell.pop('text', None)
     result["generation"] = digest(result)
     validate(result)
     return result
@@ -230,6 +241,32 @@ def validate(layer):
             raise ValueError("invalid region recognition provenance")
         previous = end
         ids.add(region["id"])
+    for table in layer.get('tables', []):
+        box(table['box'])
+        sha(table['source_pixels_sha256'])
+        for axis in ('rows', 'columns'):
+            positions = table.get(axis)
+            if (not isinstance(positions, list) or len(positions) < 2
+                    or any(number(p) > 1 for p in positions)
+                    or any(a >= b for a, b in zip(positions, positions[1:]))):
+                raise ValueError('invalid table grid')
+        occupied, members = set(), set()
+        for cell in table['cells']:
+            box(cell['box'])
+            row, column, rowspan, colspan = (cell.get(k) for k in ('row', 'column', 'rowspan', 'colspan'))
+            if (any(type(n) is not int for n in (row, column, rowspan, colspan))
+                    or min(row, column) < 0 or min(rowspan, colspan) < 1
+                    or row+rowspan >= len(table['rows']) or column+colspan >= len(table['columns'])):
+                raise ValueError('invalid table cell span')
+            slots = {(r, c) for r in range(row, row+rowspan) for c in range(column, column+colspan)}
+            refs = cell.get('region_ids')
+            if (occupied & slots or not isinstance(refs, list) or any(i not in ids for i in refs)
+                    or len(set(refs)) != len(refs) or members.intersection(refs)):
+                raise ValueError('invalid table cell region ownership')
+            occupied.update(slots)
+            members.update(refs)
+        if len(occupied) != (len(table['rows'])-1)*(len(table['columns'])-1):
+            raise ValueError('incomplete table cell coverage')
     content = {k: v for k, v in layer.items() if k != "generation"}
     if digest(content) != layer["generation"]:
         raise ValueError("text generation mismatch")

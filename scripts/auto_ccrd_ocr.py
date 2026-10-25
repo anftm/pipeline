@@ -11,7 +11,7 @@ import re
 try:
     from . import ccrd_ocr_release as contract, ccrd_lifecycle as lifecycle
     from . import export_reader_txt as exporter, build_ccrd_ocr_release as builder
-    from . import publish_ccrd_ocr as publisher, publish_reader_v3 as reading, shared
+    from . import publish_ccrd_ocr as publisher, publish_reader_v3 as reading, shared, ocr_quality, reader_text_admission
 except ImportError:
     import ccrd_ocr_release as contract
     import ccrd_lifecycle as lifecycle
@@ -20,6 +20,8 @@ except ImportError:
     import publish_ccrd_ocr as publisher
     import publish_reader_v3 as reading
     import shared
+    import ocr_quality
+    import reader_text_admission
 
 
 REGISTRY = 'reader-index/pdf_ocr_manifest.json'
@@ -123,6 +125,13 @@ def discover(registry, derived, catalog, exports, state, *, retry_failures=False
             deferred.append({'key': key,
                              'reason': 'language check suspects the declared language; text held back'})
             continue
+        quality = entry.get('quality_check', {})
+        if (quality.get('policy') != ocr_quality.POLICY or quality.get('status') != 'passed'
+                or quality.get('issues') != [] or quality.get('checked_pages') != entry.get('page_count')
+                or quality.get('page_count') != entry.get('page_count')
+                or not isinstance(entry.get('profile'), str) or '-quality-v1-layout-' not in entry['profile']):
+            deferred.append({'key': key, 'reason': 'complete current recognition quality evidence required'})
+            continue
         book = contract.digest(key.encode())
         active, old = catalog['files'].get(key), exports.get(book)
         derived_entry = derivations.get(key) if entry.get('source_kind', 'upstream') != 'upstream' else None
@@ -138,6 +147,7 @@ def discover(registry, derived, catalog, exports, state, *, retry_failures=False
             'source_revision': entry.get('source_revision'),
             'page_count': entry.get('page_count'),
             'text_layer': entry.get('text_layer'),
+            'recognition_profile': entry.get('profile'), 'quality_check': quality,
             'derivation': None if not derived_entry else {
                 'source_sha256': derived_entry.get('source_sha256'),
                 'derived_sha256': derived_entry.get('derived_sha256'),
@@ -158,7 +168,7 @@ def discover(registry, derived, catalog, exports, state, *, retry_failures=False
             continue
         if old and old['source_sha256'] == entry.get('source_sha256'):
             retained = old['retained_reader_resources']
-            if ((has_effective and active['resource'] in retained)
+            if old.get('body_admission', {}).get('policy') == reader_text_admission.POLICY and ((has_effective and active['resource'] in retained)
                     or (not has_effective and entry.get('text_layer') in retained)):
                 continue
         jobs.append({**identity, 'book_id': book, 'fingerprint': fingerprint, 'quarantine': quarantine})
@@ -174,7 +184,8 @@ def export_spec(store, job, number):
         raise ValueError('OCR registry original source-key mismatch')
     spec = {'origin_repo': repo, 'origin_rel_path': path, 'origin_revision': entry.get('source_revision'),
             'origin_sha256': entry.get('source_sha256'), 'source_sha256': entry.get('source_sha256'),
-            'page_count': entry.get('page_count'), 'doc_number': number, 'text_manifest': entry.get('text_layer')}
+             'page_count': entry.get('page_count'), 'doc_number': number, 'text_manifest': entry.get('text_layer'),
+             'recognition_profile': entry.get('profile'), 'layout_options': entry.get('layout_options', {})}
     active = job.get('active')
     if active and active.get('components', {}).get('text') == 'ready':
         ref = active['resource']
@@ -353,7 +364,7 @@ def reconcile(store, root, consumer_root, approved, *, limit=8, apply=False, pla
         except Exception as error:
             # Quarantine only this exact input identity. Keep the old complete
             # release active; the next automatic run can advance other books.
-            permanent = isinstance(error, (exporter.PermanentTextRejection, StaleRetainedProvenance,
+            permanent = isinstance(error, (exporter.PermanentTextRejection, reader_text_admission.QualityRejection, StaleRetainedProvenance,
                                              StaleDerivedProvenance))
             failure = {'key': job['key'], 'fingerprint': job['fingerprint'],
                        'quarantine': job['quarantine'], 'error_type': type(error).__name__}
@@ -362,6 +373,8 @@ def reconcile(store, root, consumer_root, approved, *, limit=8, apply=False, pla
                 # characters). Record it as a terminal disposition instead of
                 # failing every later batch for the same unchanged bytes.
                 failure['rejected'] = str(error)[:300]
+                if isinstance(error, reader_text_admission.QualityRejection):
+                    failure['repair_required'] = True
             report['failures'].append(failure)
             state['failures'][job['key']] = failure
             if apply:

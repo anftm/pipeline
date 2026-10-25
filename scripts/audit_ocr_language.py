@@ -130,7 +130,7 @@ def select_flag_updates(entries: dict, report: dict) -> list[dict]:
             continue
         if "script-mismatch" not in row.get("flags", []):
             continue
-        if entry.get("language_source") == "override" or entry.get("language_suspect"):
+        if entry.get("language_suspect"):
             continue
         updates.append({**entry, "language_suspect": True,
                         "language_check": {"observed_script": row.get("observed_script"),

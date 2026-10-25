@@ -54,7 +54,7 @@ class PdfHealthTests(unittest.TestCase):
 
     def test_conversion_ready_records_skip_audit_and_refresh_report(self):
         from scripts import pdf_assets
-        ready = {"status": "ready", "strategy": "sampled-webp", "source_revision": "one",
+        ready = {"status": "ready", "strategy": "sampled-jxl", "source_revision": "one",
                  "render_profile": pdf_assets.PDF_PROFILE,
                  "decision_profile": pdf_assets.PDF_DECISION_PROFILE}
         manifest = {"version": 1, "files": {
@@ -98,7 +98,7 @@ class PdfHealthTests(unittest.TestCase):
         from scripts import pdf_assets
         manifest = {"version": 1, "files": {
             "r\0proven.pdf": {
-                "status": "ready", "strategy": "sampled-webp", "source_revision": "old",
+                "status": "ready", "strategy": "sampled-jxl", "source_revision": "old",
                 "source_sha256": "same", "source_bytes": 100,
                 "render_profile": pdf_assets.PDF_PROFILE,
                 "decision_profile": pdf_assets.PDF_DECISION_PROFILE,

@@ -176,8 +176,12 @@ def handoff_owner(result):
     owner = {**result, "pages": pages}
     # Read-only preflight before publication: a foreign root must never cause a
     # late failure after updating the registry/catalog.
-    publication.reader_lifecycle.processing_handoffs(
-        [owner], "ownership-preflight", lambda path: publication.read_bucket_json(path, os.environ.get("HF_TOKEN")))
+    for path in owner.get('processing_roots', []):
+        if (not isinstance(path, str) or not path.startswith('reader-index/processing/')
+                or any(part in {'', '.', '..'} for part in path.split('/'))):
+            raise ValueError('invalid processing root path')
+        record = publication.read_bucket_json(path, os.environ.get('HF_TOKEN'))
+        publication.reader_lifecycle.validate_processing_handoff(record, owner)
     return owner
 
 

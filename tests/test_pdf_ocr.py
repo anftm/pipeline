@@ -122,7 +122,7 @@ class PdfOcrContractTests(unittest.TestCase):
     def test_language_selects_supported_model_without_changing_render_profile(self):
         root = Path(__file__).resolve().parents[1]
         script = "from scripts import pdf_ocr; print(pdf_ocr.OCR_VERSION); print(pdf_ocr.asset_profile()); print(pdf_ocr.OCR_ENGINE)"
-        for language, version in (("en", "PP-OCRv6"), ("japan", "PP-OCRv6"),
+        for language, version in (("en", "PP-OCRv6"), ("japan", "NDLOCR-Lite-202604"),
                                   ("ar", "PP-OCRv5"), ("fa", "PP-OCRv5"), ("korean", "PP-OCRv5")):
             with self.subTest(language=language):
                 env = {**os.environ, "PDF_OCR_LANG": language}
@@ -143,7 +143,7 @@ class PdfOcrContractTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         automatic_fa = {**os.environ, "PDF_OCR_LANG": "fa", "PDF_OCR_BACKEND": "rapidocr_onnxruntime"}
         output = subprocess.check_output(["python3", "-c", script], cwd=root, env=automatic_fa, text=True)
-        self.assertIn("paddle-onnxruntime", output)
+        self.assertIn("rapidocr-onnxruntime", output)
 
     def test_rapidocr_result_uses_shared_block_contract(self):
         result = type("RapidResult", (), {
@@ -159,9 +159,9 @@ class PdfOcrContractTests(unittest.TestCase):
     def test_auto_language_detection_selects_per_book_backend(self):
         cases = (
             ("repo\0中国历史.pdf", "ch", "rapidocr_onnxruntime"),
-            ("repo\0Iran Persian تاریخ ایران.pdf", "fa", "paddle_onnxruntime"),
-            ("repo\0Arabic كتاب.pdf", "ar", "paddle_onnxruntime"),
-            ("repo\0한국어.pdf", "korean", "paddle_onnxruntime"),
+            ("repo\0Iran Persian تاریخ ایران.pdf", "fa", "rapidocr_onnxruntime"),
+            ("repo\0Arabic كتاب.pdf", "ar", "rapidocr_onnxruntime"),
+            ("repo\0한국어.pdf", "korean", "rapidocr_onnxruntime"),
             ("repo\0English book.pdf", "en", "rapidocr_onnxruntime"),
         )
         for key, language, backend in cases:
@@ -180,6 +180,9 @@ class PdfOcrContractTests(unittest.TestCase):
         key = "VoiceOfML/GPCREducation\0地理/各地区地理/中国地理知识.pdf"
         self.assertEqual(pdf_ocr.detect_language(key), "ch")
         self.assertEqual(pdf_ocr.detect_language("VoiceOfML/English-Books\0Novel.pdf"), "en")
+        self.assertEqual(pdf_ocr.detect_language('repo\0中国历史与俄国档案/English book.pdf'), 'en')
+        self.assertEqual(pdf_ocr.detect_language('repo\0English folder/日本近代歴史の研究.pdf'), 'japan')
+        self.assertEqual(pdf_ocr.detect_text_language('日本近代歴史の研究に関する資料集'), 'japan')
 
     def test_explicit_language_override_outranks_registry_and_filename(self):
         key = "repo\0中文目录/俄文书.pdf"
@@ -237,6 +240,11 @@ class PdfOcrContractTests(unittest.TestCase):
                      "page_count": 1, "ocr_manifest": "objects/cc/" + "c" * 64 + "/" + "d" * 16 + "/ocr-manifest.json"}
             self.assertTrue(pdf_ocr.valid_published_profile(profile))
             self.assertIsNotNone(pdf_ocr.validate_manifest({"version": 1, "files": {"book": entry}}))
+
+    def test_current_japanese_layout_profile_can_be_published(self):
+        from scripts import pdf_ocr_stages
+        profile = pdf_ocr_stages.recognition_identity({'key': 'book', 'ocr_language': 'japan'}, {})
+        self.assertTrue(pdf_ocr.valid_published_profile(profile), profile)
 
 
 if __name__ == "__main__":

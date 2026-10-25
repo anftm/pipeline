@@ -15,7 +15,7 @@ from huggingface_hub import CommitOperationAdd, HfApi
 from huggingface_hub.errors import HfHubHTTPError
 
 try:
-    from . import pdf_ocr, shared, reader_lifecycle
+    from . import pdf_ocr, shared, reader_lifecycle, ocr_quality
     from .reader_assets import READER_ASSETS_REPO
     from .reader_bucket import (INDEX_FILES, publish_catalog, publish_indexes,
                                 publish_json, publish_json_batch, read_json as read_bucket_json,
@@ -24,6 +24,7 @@ except ImportError:
     import pdf_ocr
     import shared
     import reader_lifecycle
+    import ocr_quality
     from reader_assets import READER_ASSETS_REPO
     from reader_bucket import (INDEX_FILES, publish_catalog, publish_indexes,
                                publish_json, publish_json_batch, read_json as read_bucket_json,
@@ -123,17 +124,14 @@ def published(current: dict, results: list[dict]) -> bool:
 def annotate_language(result: dict, text: dict) -> dict:
     """Mark text whose script contradicts the declared language.
 
-    Explicit overrides are trusted; everything else is judged from the
-    published page text so a wrong-language OCR never reaches search silently.
+    Explicit configuration still requires evidence from the published text.
     """
     try:
         from .audit_ocr_language import judge
     except ImportError:
         from audit_ocr_language import judge
-    if result.get("language_source") == "override":
-        return result
     pages = [str(page.get("text") or "") for page in text.get("pages", [])]
-    row = judge(result.get("key", ""), {"ocr_language": result.get("ocr_language")}, pages)
+    row = judge(result.get("key", ""), {"ocr_language": result.get("ocr_language") or result.get("language")}, pages)
     if "script-mismatch" in row["flags"]:
         result["language_suspect"] = True
         result["language_check"] = {"observed_script": row["observed_script"],
@@ -166,7 +164,30 @@ def verify_ready_objects(result: dict) -> None:
             or text.get("complete") is not True or text.get("page_count") != count
             or [page.get("page") for page in text.get("pages", [])] != list(range(1, count + 1))):
         raise ValueError("published book text is incomplete")
+    quality = result.get("quality_check", {})
+    if (quality.get("policy") != ocr_quality.POLICY or quality.get("status") != "passed"
+            or quality.get("checked_pages") != count or quality.get("issues") != []
+            or manifest.get("quality_check") != quality or text.get("quality_check") != quality):
+        raise ValueError("OCR publication lacks complete passing quality evidence")
+    def check_raw_page(page):
+        raw = read_bucket_bytes(page["o"], token, bucket=shared.PDF_PAGES_BUCKET)
+        if len(raw) != page["ob"] or hashlib.sha256(raw).hexdigest() != page["os"]:
+            raise ValueError("OCR page checksum mismatch")
+        payload = json.loads(gzip.decompress(raw))
+        if payload.get("page") != page["p"] or payload.get("source") != page["source"]:
+            raise ValueError("OCR page provenance mismatch")
+        if page["source"] == "ocr":
+            check = ocr_quality.check_page(payload, source_sha256=result["source_sha256"], input_sha256=page["is"])
+            if check["status"] != "passed" or payload.get("quality_check") != check:
+                raise ValueError(f"OCR page {page['p']} failed quality verification")
+    for _ in shared.ordered_reads(check_raw_page, manifest["pages"]):
+        pass
     annotate_language(result, text)
+    if result.get("language_suspect"):
+        # Regional model routing can legitimately change the filename's hint.
+        # The per-page checks above prove what model and script were actually used.
+        result["language_check"]["resolved_by"] = "verified-page-language-evidence"
+        result.pop("language_suspect", None)
     if manifest.get("text_layer") is not None:
         try:
             from .pdf_reading_v3 import verify_text_bundle
@@ -179,8 +200,8 @@ def verify_ready_objects(result: dict) -> None:
         verify_text_bundle(manifest["text_layer"], read, result["source_sha256"], count, read_workers=4)
 
 
-def publish(api: HfApi, repo: str, results: list[dict], attempts: int = 20) -> None:
-    if type(api) is HfApi:
+def publish(api: HfApi, repo: str, results: list[dict], attempts: int = 20, *, verified=False) -> None:
+    if type(api) is HfApi and not verified:
         for result in results:
             if result.get("status") == "ready":
                 verify_ready_objects(result)

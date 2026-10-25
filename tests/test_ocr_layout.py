@@ -26,6 +26,23 @@ class OcrLayoutTests(unittest.TestCase):
         self.assertEqual(result["text"], "甲乙\n\n丙丁")
         self.assertEqual([x["precision"] for x in result["text_spans"]], ["block"] * 4)
 
+    def test_vertical_two_tiers_do_not_interleave_upper_and_lower_columns(self):
+        blocks = [block('上段右列', [.75,.05,.8,.42]), block('上段左列', [.2,.05,.25,.42]),
+                  block('下段右列', [.75,.55,.8,.93]), block('下段左列', [.2,.55,.25,.93])]
+        result = layout.arrange(blocks, 1200, 1800)
+        self.assertEqual([b['t'] for b in result['blocks']], ['上段右列','上段左列','下段右列','下段左列'])
+        for span in result['text_spans']:
+            self.assertEqual(result['text'][span['start']:span['end']], blocks[span['block']]['t'])
+
+    def test_vertical_sidebar_has_its_own_order_before_two_tier_body(self):
+        blocks = [{**block('上段文章', [.7,.05,.73,.45]), 'section': 0},
+                  {**block('下段文章', [.7,.55,.73,.92]), 'section': 0},
+                  {**block('右栏目次', [.90,.52,.92,.72]), 'section': 1},
+                  {**block('左栏目次', [.87,.52,.89,.67]), 'section': 1},
+                  {**block('月報②', [.88,.41,.92,.47]), 'section': 1}]
+        result = layout.arrange(blocks, 1200, 1800)
+        self.assertEqual([b['t'] for b in result['blocks']], ['月報②', '右栏目次', '左栏目次', '上段文章', '下段文章'])
+
     def test_rtl_heading_reorders_glyph_blocks_but_never_reverses_line_string(self):
         glyphs = [block("民", [.1, .1, .15, .15]), block("人", [.2, .1, .25, .15])]
         result = layout.arrange(glyphs, 1000, 1000, {"writing_mode": "horizontal-rtl"})

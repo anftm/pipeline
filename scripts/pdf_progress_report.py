@@ -56,7 +56,8 @@ def summarize(render, ocr, render_progress, ocr_progress, catalog, automation, c
             raise ValueError("invalid registry page count")
         item = books.setdefault(source, {"source_sha256": source, "keys": set(), "page_count": count,
             "render_ready": False, "ocr_ready": False, "v3_promoted": False,
-            "render_partial_pages": 0, "ocr_pages": set(), "errors": set()})
+            "render_partial_pages": 0, "ocr_pages": set(), "errors": set(),
+            "ocr_quality_statuses": set(), "ocr_quality_pages": set(), "ocr_quality_codes": set()})
         if item["page_count"] != count:
             raise ValueError("one source digest has conflicting page counts")
         item["keys"].add(key)
@@ -69,6 +70,14 @@ def summarize(render, ocr, render_progress, ocr_progress, catalog, automation, c
             item[stage + "_ready"] |= entry.get("status") == "ready"
             if entry.get("status") == "failed":
                 item["errors"].add(stage)
+            if stage == "ocr":
+                check = entry.get("quality_check", {})
+                state = entry.get("quality_status", check.get("status", "unverified"))
+                item["ocr_quality_statuses"].add(state)
+                item["ocr_quality_pages"].update(check.get("affected_pages", []))
+                item["ocr_quality_codes"].update(check.get("counts", {}))
+                if state in {"failed", "review"}:
+                    item["errors"].add("ocr-quality")
     for key, entry in render_progress.items():
         item = book(key, entry)
         if item:
@@ -103,6 +112,8 @@ def summarize(render, ocr, render_progress, ocr_progress, catalog, automation, c
     for item in books.values():
         item["ocr_recognized_pages"] = len(item.pop("ocr_pages"))
         item["keys"], item["errors"] = sorted(item["keys"]), sorted(item["errors"])
+        for field in ("ocr_quality_statuses", "ocr_quality_pages", "ocr_quality_codes"):
+            item[field] = sorted(item[field])
         values.append(item)
     values.sort(key=lambda item: item["source_sha256"])
     return {"version": 1, "kind": "pdf-production-progress", "scope": "observed-registries",
@@ -112,6 +123,10 @@ def summarize(render, ocr, render_progress, ocr_progress, catalog, automation, c
         "render_partial_pages": sum(p["render_partial_pages"] for p in values if not p["render_ready"]),
         "ocr_ready_books": sum(p["ocr_ready"] for p in values),
         "ocr_ready_pages": sum(p["page_count"] for p in values if p["ocr_ready"]),
+        "ocr_quality_passed_books": sum(p["ocr_ready"] and p["ocr_quality_statuses"] == ["passed"] for p in values),
+        "ocr_quality_review_books": sum("review" in p["ocr_quality_statuses"] for p in values),
+        "ocr_quality_failed_books": sum("failed" in p["ocr_quality_statuses"] for p in values),
+        "ocr_quality_unverified_books": sum("unverified" in p["ocr_quality_statuses"] for p in values),
         "ocr_recognized_pages": sum(p["ocr_recognized_pages"] for p in values),
         "ocr_recognized_scope": "generation-matched-retained-checkpoints",
         "v3_promoted_books": sum(p["v3_promoted"] for p in values),

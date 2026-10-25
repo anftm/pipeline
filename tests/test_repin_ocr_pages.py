@@ -6,7 +6,7 @@ import unittest
 import unittest.mock
 from pathlib import Path
 
-from scripts import pdf_ocr_stages as stages
+from scripts import pdf_ocr_stages as stages, pdf_ocr
 from scripts import repin_ocr_pages as repin
 
 ROOT = "objects/aa/" + "a" * 64 + "/" + "b" * 16 + "/ocr"
@@ -50,16 +50,20 @@ class RepinRootTests(unittest.TestCase):
         def capture(*args):
             roots.append(args[2])
             return original(*args)
-        book = {"render_manifest": {"sha256": "r" * 64}, "profile": "p", "source_sha256": "a" * 64, "key": "k"}
-        class Empty(list):
-            def close(self):
-                pass
-        with unittest.mock.patch.object(stages, "root_for", side_effect=capture), \
-                unittest.mock.patch.object(stages.shared, "ordered_reads", return_value=Empty()), \
+        book = {"render_manifest": {"sha256": "b" * 64}, "profile": "p", "source_sha256": "a" * 64,
+                "key": "k", "page_count": 1}
+        raw = pdf_ocr.page_payload(1, 10, 20,
+            [{"t": "字", "b": [.1, .1, .9, .8], "s": "native", "c": 1}], "native")
+        encoded = gzip.compress(json.dumps(raw).encode(), mtime=0)
+        page = {"p": 1, "source": "native", "width": 10, "height": 20,
+                "o": ROOT + "/page-000001.json.gz", "os": hashlib.sha256(encoded).hexdigest(), "ob": len(encoded)}
+        with tempfile.TemporaryDirectory() as directory, \
+                unittest.mock.patch.object(stages, "root_for", side_effect=capture), \
+                unittest.mock.patch.object(stages, "read_object", return_value=encoded), \
                 unittest.mock.patch.object(stages.pdf_reading_v3, "build_text_bundle", side_effect=RuntimeError("stop")):
             for extra in ({}, {"repin": "c" * 16}):
-                with self.assertRaises(RuntimeError):
-                    stages.assemble_book({**book, **extra, "status": "ready", "pages": []}, {}, Path(tempfile.gettempdir()))
+                with self.assertRaisesRegex(RuntimeError, "stop"):
+                    stages.assemble_book({**book, **extra, "status": "ready", "pages": [page]}, {}, Path(directory))
         self.assertEqual(len(roots), 2)
         self.assertNotEqual(roots[0], roots[1])
         self.assertTrue(roots[1].endswith("|repin-" + "c" * 16))

@@ -57,7 +57,7 @@ CONVERTIBLE_EXTENSIONS = {
     "rtf": ("calibre-rtf-html-v1", "html", "document.html"),
     "chm": ("calibre-chm-epub-v4-source-text", "epub", "document.epub"),
     "ppt": ("libreoffice-pdf-office-v2", "pdf", "document.pdf"),
-    "pptx": ("libreoffice-pdf-office-v2", "pdf", "document.pdf"),
+    "pptx": ("libreoffice-pdf-symbols-v3", "pdf", "document.pdf"),
     "pps": ("libreoffice-pdf-office-v2", "pdf", "document.pdf"),
     "odp": ("libreoffice-pdf-office-v2", "pdf", "document.pdf"),
     "xls": ("libreoffice-pdf-office-v2", "pdf", "document.pdf"),

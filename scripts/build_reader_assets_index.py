@@ -48,7 +48,7 @@ def build_index(manifest: dict, pdf_manifest: dict | None = None,
             continue
         if entry.get("status") != "ready":
             continue
-        if (entry.get("strategy") != "sampled-webp"
+        if (entry.get("strategy") != "sampled-jxl"
                 or entry.get("render_profile") != PDF_PROFILE
                 or entry.get("decision_profile") != PDF_DECISION_PROFILE):
             continue

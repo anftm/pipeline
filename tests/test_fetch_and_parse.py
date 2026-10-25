@@ -201,8 +201,10 @@ class FetchAndParseTests(unittest.TestCase):
                  patch.object(self.module, "http_get_text", side_effect=get_text), \
                  patch.object(self.module, "http_get_json_page", return_value=(tree, "")), \
                  patch.object(self.module, "batch_get_sizes", return_value={}), \
-                 patch.object(self.module, "OUTPUT_DIR", temporary_path), \
-                 patch.dict(os.environ, {"FORCE_SYNC": "true"}, clear=True):
+                  patch.object(self.module, "OUTPUT_DIR", temporary_path), \
+                  patch.object(self.module, "FOLDER_TREE_FILE", temporary_path / "folder_tree.json"), \
+                  patch.object(self.module, "FOLDER_BROWSER_FILE", temporary_path / "folder_browser.json"), \
+                  patch.dict(os.environ, {"FORCE_SYNC": "true"}, clear=True):
                 self.assertEqual(self.module.main(), 0)
 
             payload = json.loads(output_file.read_text())

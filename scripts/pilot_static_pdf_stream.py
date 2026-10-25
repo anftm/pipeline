@@ -20,10 +20,12 @@ try:
     from .convert_reader_assets import convert_tiff, validate_pdf_content
     from .pilot_office_stream import converted_output, run_libreoffice
     from .reader_assets import decode_search_payload, relative_path, source_url
+    from . import office_symbol_fonts
 except ImportError:
     from convert_reader_assets import convert_tiff, validate_pdf_content
     from pilot_office_stream import converted_output, run_libreoffice
     from reader_assets import decode_search_payload, relative_path, source_url
+    import office_symbol_fonts
 
 
 BUCKET = "vomebook/reader-assets-v2"
@@ -112,6 +114,10 @@ def build(item: dict, work: Path, token: str | None) -> tuple[dict, dict[str, st
     source = work / f"source.{item['extension']}"
     download(source_url(item["repo"], item["revision"], item["path"]), source, token)
     source_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+    conversion = None
+    office_source = source
+    if item['extension'] == 'pptx':
+        office_source, conversion = office_symbol_fonts.prepare(source, work)
     output_dir = work / "pdf"
     output_dir.mkdir()
     if item["extension"] in {"tif", "tiff"}:
@@ -123,28 +129,41 @@ def build(item: dict, work: Path, token: str | None) -> tuple[dict, dict[str, st
                         f"-sOutputFile={output}", str(source)], check=True, timeout=600)
     else:
         run_libreoffice(["libreoffice", "--headless", "--convert-to", "pdf",
-                         "--outdir", str(output_dir), str(source)], work / "libreoffice-profile")
+                         "--outdir", str(output_dir), str(office_source)], work / "libreoffice-profile")
         output = converted_output(output_dir, "pdf")
     validation = work / "validation"
     validation.mkdir()
     validate_pdf_content(output, validation)
     output_bytes = output.read_bytes()
     output_hash = hashlib.sha256(output_bytes).hexdigest()
-    root = f"documents/pdf/{item['extension']}/{source_hash}"
+    # A changed conversion must not replace immutable PDFs under their old URL.
+    category = 'pptx-symbols-v2' if item['extension'] == 'pptx' else item['extension']
+    root = f"documents/pdf/{category}/{source_hash}"
     object_path = f"{root}/document.pdf"
     manifest_path = f"{root}/document-manifest.json"
     manifest = work / "document-manifest.json"
+    extra_uploads = {}
+    evidence = None
+    if conversion:
+        raw = (work/'symbol-conversion.json').read_bytes()
+        evidence = {'bucket': BUCKET, 'path': root+'/symbol-conversion.json', 'sha256': hashlib.sha256(raw).hexdigest(),
+                    'bytes': len(raw), 'role': 'provenance'}
+        extra_uploads[evidence['path']] = str(work/'symbol-conversion.json')
     manifest.write_text(json.dumps({
         "kind": "static-pdf-document-stream", "version": 1,
         "source_extension": item["extension"], "source_sha256": source_hash,
         "path": "document.pdf", "bytes": len(output_bytes), "sha256": output_hash,
+        **({'conversion_profile': office_symbol_fonts.PROFILE} if item['extension'] == 'pptx' else {}),
+        **({'symbol_conversion': evidence} if evidence else {}),
     }, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
     entry = {"key": f"{item['repo']}\0{item['path']}", "repo": item["repo"],
              "path": item["path"], "extension": item["extension"],
              "source_revision": item["revision"], "source_sha256": source_hash,
              "mode": "pdf", "bucket": BUCKET, "object": object_path,
-             "manifest": manifest_path, "bytes": len(output_bytes), "sha256": output_hash}
-    return entry, {object_path: str(output), manifest_path: str(manifest)}
+              "manifest": manifest_path, "bytes": len(output_bytes), "sha256": output_hash}
+    if item['extension'] == 'pptx':
+        entry['conversion_profile'] = office_symbol_fonts.PROFILE
+    return entry, {object_path: str(output), manifest_path: str(manifest), **extra_uploads}
 
 
 def main() -> int:
@@ -169,13 +188,15 @@ def main() -> int:
             if not args.retry_failures:
                 handled += list(old.get("failures", []))
             if any(e.get("key") == key and e.get("source_revision") == item["revision"]
+                    and (item['extension'] != 'pptx' or e.get('conversion_profile') == office_symbol_fonts.PROFILE)
                    for e in handled if isinstance(e, dict)):
                 continue
             try:
                 entry, files = build(item, root / str(number), token)
             except Exception as error:
                 failures[key] = {"key": key, "repo": item["repo"], "path": item["path"],
-                                 "extension": item["extension"], "source_revision": item["revision"],
+                                  "extension": item["extension"], "source_revision": item["revision"],
+                                  **({'conversion_profile': office_symbol_fonts.PROFILE} if item['extension'] == 'pptx' else {}),
                                  "error": f"{type(error).__name__}: {error}"[:1000]}
                 print(f"failed: {item['repo']}/{item['path']}: {type(error).__name__}: {error}")
                 continue

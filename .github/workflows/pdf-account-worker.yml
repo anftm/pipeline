@@ -36,7 +36,7 @@ concurrency:
   queue: max
 
 env:
-  PDF_JXL_ENABLED: "false"
+  PDF_JXL_ENABLED: "true"
   PDF_OCR_LANG: auto
   PDF_OCR_BACKEND: rapidocr_onnxruntime
 
@@ -99,7 +99,7 @@ jobs:
                 "$(jq -r '.shard_count' output/pdf-ocr/queue.json)" == 0 && \
                 "$(jq -r '(.books // []) | length' output/pdf-ocr/queue.json)" == 0 ) ]]; then
             sudo apt-get update
-            sudo apt-get install -y --no-install-recommends poppler-utils poppler-data fonts-noto-cjk fonts-liberation djvulibre-bin
+            sudo apt-get install -y --no-install-recommends poppler-utils poppler-data fonts-noto-cjk fonts-liberation djvulibre-bin libjxl-tools
             FORCE_SYNC=true python scripts/fetch_and_parse.py
             retry_args=()
             if [[ "$RETRY_FAILED_RENDER" == "true" ]]; then retry_args+=(--retry-failed); fi
@@ -144,10 +144,13 @@ jobs:
         run: |
           pip install -r scripts/requirements.txt
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends poppler-utils poppler-data fonts-noto-cjk fonts-liberation djvulibre-bin
+          sudo apt-get install -y --no-install-recommends poppler-utils poppler-data fonts-noto-cjk fonts-liberation djvulibre-bin libjxl-tools
       - name: Install OCR dependencies
         if: needs.plan.outputs.stage == 'ocr'
-        run: pip install -r scripts/requirements.txt -r scripts/requirements-pdf-ocr.txt
+        run: |
+          pip install -r scripts/requirements.txt -r scripts/requirements-pdf-ocr.txt
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-osd tesseract-ocr-eng tesseract-ocr-chi-sim tesseract-ocr-jpn
       - uses: actions/download-artifact@v8
         with:
           name: pdf-account-queue
@@ -163,8 +166,10 @@ jobs:
         if: always()
         with:
           name: pdf-account-results-${{ matrix.shard }}
-          path: output/pdf-ocr/bundle/results-*.json
-          retention-days: 7
+          path: |
+            output/pdf-ocr/bundle/results-*.json
+            output/pdf-ocr/bundle/quality-*.json
+          retention-days: 30
           if-no-files-found: warn
 
   notify:

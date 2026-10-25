@@ -2131,6 +2131,12 @@ def convert_file(item: dict, source: Path, target: Path, work: Path,
         out = work / "office-pdf"
         out.mkdir()
         office_source = source
+        if ext == 'pptx':
+            try:
+                from . import office_symbol_fonts
+            except ImportError:
+                import office_symbol_fonts
+            office_source, _ = office_symbol_fonts.prepare(source, work)
         if ext == "xlsx" and source.read_bytes()[:8] == OLE_SIGNATURE:
             office_source = work / "source.xls"
             shutil.copyfile(source, office_source)
@@ -2290,7 +2296,7 @@ def validate_office_pdf(path: Path, item: dict, work: Path, source: Path | None 
             rasterize_pdf(path, work)
         except RuntimeError as exc:
             if (source is None or item.get("profile") not in {
-                    "libreoffice-pdf-office-v2", "libreoffice-pdf-office-xlsx-v3"
+                    "libreoffice-pdf-office-v2", "libreoffice-pdf-office-xlsx-v3", "libreoffice-pdf-symbols-v3"
                     } or "blank interior page" not in str(exc)):
                 raise
             candidate = normalized_office_pdf(source, work)
@@ -2458,6 +2464,11 @@ def convert_item(item: dict, bundle: Path, reusable: dict | None = None) -> dict
             "reader_mode": item["reader_mode"], "path": object_path, "bytes": target.stat().st_size,
         "sha256": file_sha256(target), "reused": reused,
         }
+        if (work / 'symbol-conversion.json').is_file():
+            evidence = target.parent/'symbol-conversion.json'
+            shutil.copyfile(work/'symbol-conversion.json', evidence)
+            result['symbol_conversion'] = {'path': evidence.relative_to(bundle).as_posix(),
+                'sha256': file_sha256(evidence), 'bytes': evidence.stat().st_size}
         if item["extension"] == "epub" and item["reader_mode"] == "pdf":
             result["fallback_path"] = object_path
         if item.get("output_name") == "page-manifest.json":

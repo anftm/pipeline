@@ -38,7 +38,7 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: '3.11'
-      - run: sudo apt-get update && sudo apt-get install -y poppler-utils poppler-data fonts-noto-cjk fonts-liberation djvulibre-bin
+      - run: sudo apt-get update && sudo apt-get install -y poppler-utils poppler-data fonts-noto-cjk fonts-liberation djvulibre-bin libjxl-tools
       - run: pip install -r scripts/requirements.txt
       - name: Build and stage one immutable candidate
         env:

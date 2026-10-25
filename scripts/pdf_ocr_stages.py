@@ -32,7 +32,7 @@ from huggingface_hub.utils import get_session, hf_raise_for_status
 
 try:
     from . import pdf_ocr, pdf_assets, lin_pdf_text, pdf_render_schedule, pdf_worker_lanes, plan_pdf_ocr, publish_pdf_ocr_assets as publication, shared, ocr_layout, reader_lifecycle, pdf_text_layer, pdf_reading_v3
-    from . import pdf_ocr_progress, djvu_pages
+    from . import pdf_ocr_progress, djvu_pages, ocr_quality, ndl_ocr, native_text_quality, ocr_mixed_text, ocr_script_evidence
     from .run_pdf_ocr import source_path, _bucket_retry_delay
     from .reader_bucket import index_path, publish_bytes, publish_json, publish_json_batch, publish_catalog, read_json as read_bucket_json
 except ImportError:
@@ -41,6 +41,11 @@ except ImportError:
     import pdf_worker_lanes
     import pdf_ocr_progress
     import djvu_pages
+    import ocr_quality
+    import ndl_ocr
+    import native_text_quality
+    import ocr_mixed_text
+    import ocr_script_evidence
     from run_pdf_ocr import source_path, _bucket_retry_delay
     from reader_bucket import index_path, publish_bytes, publish_json, publish_json_batch, publish_catalog, read_json as read_bucket_json
 
@@ -60,7 +65,9 @@ def render_profile() -> str:
     return (f"pdf-render-v2-text-png-dpi-{pdf_ocr.OCR_DPI}-maxpix-{pdf_ocr.MAX_PAGE_PIXELS}"
             f"-webp-{pdf_ocr.WEBP_QUALITY}-{pdf_ocr.WEBP_MAX_DIMENSION}"
             f"-native-{pdf_ocr.MIN_NATIVE_PAGE_CHARS}-jxl-{int(pdf_ocr.JXL_ENABLED)}"
-            f"-{pdf_ocr.JXL_DISTANCE:g}-{pdf_ocr.JXL_EFFORT}-reader-source-pixels-v2-clean-webp-80-native-stream-v1-preserve-bitonal-v1")
+            "-adaptive-reader-source-pixels-v2-clean-webp-80-native-stream-v1-preserve-bitonal-v1-png6"
+            + (f"-{pdf_ocr.reader_page_codec.PROFILE}" if pdf_ocr.JXL_ENABLED else "")
+            + f'-{native_text_quality.PROFILE}-bitmap-text-v1-native-geometry-v1-native-raster-text-v3-rule-evidence')
 
 
 def render_profile_for(item: dict) -> str:
@@ -184,7 +191,7 @@ def upload_objects(bundle: Path) -> list[str]:
         if root.is_dir():
             relative = root.relative_to(bundle).as_posix()
             resources = [{"bucket": shared.PDF_PAGES_BUCKET, "root": relative}]
-            if (root / "ocr-input").is_dir() or any((root / "pages").glob("*.jxl")):
+            if (root / "ocr-input").is_dir():
                 resources.append({"bucket": shared.PDF_OCR_INPUT_BUCKET, "root": relative})
             record = reader_lifecycle.processing_record(resources, "pdf-object-upload", {
                 "repository": os.environ.get("GITHUB_REPOSITORY", "local"),
@@ -207,13 +214,13 @@ def upload_objects(bundle: Path) -> list[str]:
                 continue
             rel = local.relative_to(root)
             if input_bucket:
-                if not (rel.parts[0] == "ocr-input" or (rel.parts[0] == "pages" and rel.suffix == ".jxl")):
+                if rel.parts[0] != "ocr-input":
                     continue
             else:
-                if rel.parts[0] == "ocr-input" or (rel.parts[0] == "pages" and rel.suffix == ".jxl"):
+                if rel.parts[0] == "ocr-input":
                     continue
                 if not (rel.parts[0] in {"ocr", "text"}
-                        or (rel.parts[0] == "pages" and rel.suffix == ".webp")
+                        or (rel.parts[0] == "pages" and rel.suffix in {".webp", ".jxl"})
                         or rel.name in {"text-layer-manifest.json", "text-review-manifest.json",
                                          "ocr-manifest.json", "page-manifest.json", "render-manifest.json"}
                         or rel.name.startswith("render-range-") and rel.suffix == ".json"):
@@ -293,6 +300,12 @@ def page_meta(page: dict, field: str) -> dict:
 
 def set_page_meta(page: dict, field: str, meta: dict) -> None:
     page.update({field: meta["path"], field + "s": meta["sha256"], field + "b": meta["bytes"]})
+    if meta.get('bucket'):
+        page[field + 'bucket'] = meta['bucket']
+
+
+def reading_meta(page):
+    return page_meta(page, 'j' if 'j' in page else 'w')
 
 
 def load_registry(api, repo, name, revision=None):
@@ -672,7 +685,7 @@ def validate_range(book, start, end, descriptor, *, with_toc=False):
         raise ValueError("incomplete render range")
     if (book.get("force_image_render") and not pdf_ocr.preserves_reader_pdf(book)
             and book["probe"]["classification"] == "native-text"
-            and (not payload.get("image_rendered") or any("w" not in page for page in pages))):
+            and (not payload.get("image_rendered") or any(not ({'w', 'j'} & page.keys()) for page in pages))):
         raise ValueError("native render range lacks required page images")
     validate_render({**book, "page_manifest": None}, {**book, "version": 1, "kind": "pdf-render",
                                                     "complete": True, "page_manifest": None,
@@ -839,6 +852,8 @@ def render_book(item: dict, source: Path, bundle: Path, *, force_ocr_native=Fals
     pages = []
     # Browsers cannot draw DjVu: its page images are the only Reader stream.
     force_image_render = (bool(item.get("force_image_render")) or djvu) and not preserve_pdf
+    reader_images = not preserve_pdf and (force_image_render or force_ocr_native
+                                         or probe['classification'] != 'native-text')
     first, last = item.get("start", 1), item.get("end", probe["page_count"])
     # The page stream is the only Reader surface when PDF.js cannot open the
     # primary (oversized, or a non-PDF source), so it carries the outline itself.
@@ -852,32 +867,44 @@ def render_book(item: dict, source: Path, bundle: Path, *, force_ocr_native=Fals
     if not lin_native and not force_ocr_native:
         native_numbers = [number for number in range(first, last + 1)
                           if probe["classification"] == "native-text"
-                          or probe["page_chars"][number - 1] >= pdf_ocr.MIN_NATIVE_PAGE_CHARS]
+                          or probe["page_chars"][number - 1] > 0]
         if djvu:
             texts = djvu_pages.text_pages(source, djvu_infos) if native_numbers else {}
             native_text = {number: texts[number] for number in native_numbers}
         else:
             native_text = pdf_ocr.native_pages(source, native_numbers)
+    language, _ = pdf_ocr.book_ocr_config(item)
+    explicit_language = pdf_ocr.language_source(item) in {'override', 'global', 'registry'}
+    native_checks = {number: native_text_quality.assess(value, language, explicit_language)
+                     for number, value in native_text.items()}
     page_started = time.perf_counter()
     with tempfile.TemporaryDirectory(dir=bundle) as temp, (
             lin_pdf_text.pymupdf.open(source) if lin_native else nullcontext(None)) as document:
         for number in range(item.get("start", 1), item.get("end", probe["page_count"]) + 1):
-            if not force_ocr_native and probe["classification"] == "native-text" and not force_image_render:
+            raster = native_text.get(number, {}).get('raster_evidence')
+            mixed_native = bool(native_checks.get(number, {}).get('usable') and raster and raster['regions'])
+            native = not force_ocr_native and (lin_native or (
+                native_checks.get(number, {}).get('usable', False)
+                and not mixed_native
+                and (probe['page_chars'][number - 1] >= pdf_ocr.MIN_NATIVE_PAGE_CHARS
+                     or raster is not None and not raster['regions']
+                     or native_text[number].get('native_evidence', {}).get('status') == 'decoded')))
+            if native and not reader_images:
                 text = lin_pdf_text.extract(document, number) if lin_native else native_text[number]
                 payload = pdf_ocr.page_payload(number, text["width"], text["height"], text["blocks"], "native")
                 payload.update(ocr_layout.arrange(payload["blocks"], payload["width"], payload["height"], {}))
-                if not lin_native:
-                    payload["text"] = text["text"]
+                payload['extracted_text'] = text.get('extracted_text', text['text'])
+                payload.update({k: text[k] for k in ('native_evidence', 'extracted_blocks') if k in text})
+                payload['native_check'] = native_checks.get(number, native_text_quality.assess(text))
                 out = bundle / root / "ocr" / f"page-{number:06d}.json.gz"
                 pdf_ocr.write_gzip_json(out, payload)
                 page = {"p": number, "source": "native", "width": text["width"], "height": text["height"],
+                         'native_text_only': True,
                         "chars": len(payload["text"]), "text": payload["text"],
                         "text_spans": payload["text_spans"], "layout": payload["layout"]}
                 set_page_meta(page, "o", metadata(out, bundle))
                 pages.append(page)
                 continue
-            native = not force_ocr_native and (probe["classification"] == "native-text"
-                     or probe["page_chars"][number - 1] >= pdf_ocr.MIN_NATIVE_PAGE_CHARS)
             reader_pixels = scan_images.get(number) if not native and probe["page_chars"][number - 1] == 0 else None
             if djvu:
                 png, width, height = djvu_pages.render_page(source, number, Path(temp),
@@ -885,28 +912,38 @@ def render_book(item: dict, source: Path, bundle: Path, *, force_ocr_native=Fals
                                                             reader_jxl=pdf_ocr.JXL_ENABLED)
             else:
                 png, width, height = pdf_ocr.render_page(source, number, Path(temp), reader_pixels,
-                                                         reader_jxl=pdf_ocr.JXL_ENABLED and not preserve_pdf,
-                                                         **({"reader_images": False} if preserve_pdf else {}))
+                                                          reader_jxl=pdf_ocr.JXL_ENABLED and reader_images,
+                                                          **({"reader_images": False} if not reader_images else {}))
             page = {"p": number, "source": "native" if native else "ocr", "width": width, "height": height}
+            if mixed_native:
+                page['native_components'] = {'blocks': native_text[number]['blocks'],
+                    'text': native_text[number]['text'], 'check': native_checks[number], 'raster': raster}
+            elif not native and number in native_text:
+                page['native_rejection'] = {**native_checks[number], 'text': native_text[number]['text'],
+                                             'blocks': native_text[number]['blocks'],
+                    **{key: native_text[number][key] for key in ('native_evidence', 'extracted_text', 'extracted_blocks')
+                       if key in native_text[number]}}
             for field, local, folder in (("i", png, "ocr-input"),
                                           ("w", png.with_suffix(".webp"), "pages")):
-                if field == "w" and preserve_pdf:
+                if field == "w" and (not reader_images or pdf_ocr.JXL_ENABLED):
                     continue
                 destination = bundle / root / folder / local.name
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(local), destination)
                 set_page_meta(page, field, metadata(destination, bundle))
-            if pdf_ocr.JXL_ENABLED and not preserve_pdf:
+            if pdf_ocr.JXL_ENABLED and reader_images:
                 jxl = bundle / root / "pages" / f"page-{number:06d}.jxl"
-                reader_png = Path(temp) / f"page-{number:06d}-reader.png"
+                jxl.parent.mkdir(parents=True, exist_ok=True)
+                reader_png = Path(temp) / f"page-{number:06d}-reader.ppm"
                 pdf_ocr.encode_jxl(reader_png if reader_png.is_file() else bundle / page["i"], jxl)
-                set_page_meta(page, "j", metadata(jxl, bundle))
+                set_page_meta(page, "j", {**metadata(jxl, bundle), 'bucket': shared.PDF_PAGES_BUCKET})
             if native:
                 text = lin_pdf_text.extract(document, number) if lin_native else native_text[number]
                 payload = pdf_ocr.page_payload(number, text["width"], text["height"], text["blocks"], "native")
                 payload.update(ocr_layout.arrange(payload["blocks"], payload["width"], payload["height"], {}))
-                if not lin_native:
-                    payload["text"] = text["text"]
+                payload['extracted_text'] = text.get('extracted_text', text['text'])
+                payload.update({k: text[k] for k in ('native_evidence', 'extracted_blocks') if k in text})
+                payload['native_check'] = native_checks.get(number, native_text_quality.assess(text))
                 out = bundle / root / "ocr" / f"page-{number:06d}.json.gz"
                 pdf_ocr.write_gzip_json(out, payload)
                 set_page_meta(page, "o", metadata(out, bundle))
@@ -914,7 +951,7 @@ def render_book(item: dict, source: Path, bundle: Path, *, force_ocr_native=Fals
                              "text_spans": payload["text_spans"], "layout": payload["layout"]})
             pages.append(page)
             print(f"rendered {number}/{probe['page_count']}: {item['key']}", flush=True)
-    timing = {"page_count": len(pages), "image_rendered": any("w" in page for page in pages),
+    timing = {"page_count": len(pages), "image_rendered": any({'w', 'j'} & page.keys() for page in pages),
               "page_seconds": time.perf_counter() - page_started,
               "setup_seconds": page_started - started}
     if "start" in item:
@@ -923,13 +960,13 @@ def render_book(item: dict, source: Path, bundle: Path, *, force_ocr_native=Fals
             raise ValueError("invalid render page range")
         descriptor = bundle / root / f"render-range-{range_id(start, end)}.json"
         pdf_ocr.write_json(descriptor, {**range_identity(base), "version": 1, "kind": "pdf-render-range",
-                                        "image_rendered": any("w" in page for page in pages),
+                                        "image_rendered": any({'w', 'j'} & page.keys() for page in pages),
                                         "start": start, "end": end, "pages": pages,
                                         **({"toc": toc} if toc else {})})
         return {**range_identity(base), "status": "range", "start": start, "end": end,
                 "timing": timing,
                 "descriptor": metadata(descriptor, bundle)}
-    image_pages = [{"page": p["p"], **page_meta(p, "w")} for p in pages if "w" in p]
+    image_pages = [{"page": p["p"], **reading_meta(p)} for p in pages if {'w', 'j'} & p.keys()]
     page_manifest_meta = None
     if image_pages:
         page_manifest = bundle / root / "page-manifest.json"
@@ -966,15 +1003,30 @@ def validate_render(item, manifest, page_numbers=None):
     for p in pages:
         if p.get("source") not in {"native", "ocr"} or p["width"] <= 0 or p["height"] <= 0:
             raise ValueError("invalid rendered page")
+        if manifest.get('image_rendered') and not {'w', 'j'} & p.keys():
+            raise ValueError('incomplete reader image stream')
         for field, suffix in (("i", ".png"), ("w", ".webp"), ("j", ".jxl"), ("o", ".json.gz")):
+            if p.get('native_text_only'):
+                if p['source'] != 'native' or any(key in p for key in ('i', 'w', 'j')):
+                    raise ValueError('invalid native text-only page')
+                if field != 'o':
+                    continue
+            jxl_only = 'reader-jxl-v' in item['render_profile']
+            if field == 'w' and jxl_only and not preserve_pdf:
+                if 'w' in p:
+                    raise ValueError('JXL reading profile contains a redundant WebP')
+                continue
             if field in {"w", "j"} and preserve_pdf:
                 if field in p:
                     raise ValueError("preserved PDF contains a recompressed reader image")
                 continue
-            if field in {"i", "w"} and manifest["classification"] == "native-text" and not manifest.get("image_rendered"):
-                continue
-            if field == "j" and manifest["classification"] == "native-text" and not manifest.get("image_rendered"):
-                continue
+            if manifest["classification"] == "native-text" and not manifest.get("image_rendered"):
+                if field in {'w', 'j'}:
+                    if field in p:
+                        raise ValueError('unadvertised reader image stream')
+                    continue
+                if field == 'i' and p['source'] == 'native':
+                    continue
             if field == "j" and "-jxl-1-" not in item["render_profile"]:
                 continue
             if field == "o" and p["source"] != "native":
@@ -1021,7 +1073,7 @@ def assemble_render_book(book, descriptors, bundle):
     if len(pages) != book["page_count"]:
         return None
     root = root_for(book["source_sha256"], book["key"], book["render_profile"])
-    image_pages = [{"page": p["p"], **page_meta(p, "w")} for p in pages if "w" in p]
+    image_pages = [{"page": p["p"], **reading_meta(p)} for p in pages if {'w', 'j'} & p.keys()]
     page_manifest_meta = None
     if image_pages:
         page_manifest = bundle / root / "page-manifest.json"
@@ -1043,12 +1095,21 @@ def assemble_render_book(book, descriptors, bundle):
 
 
 def recognition_identity(entry, options):
-    digest = hashlib.sha256(json.dumps(options, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:16]
+    recipe = {"options": normalized_layout(options), "quality": ocr_quality.POLICY,
+               "japanese_models": ndl_ocr.PROFILE,
+               'native_text': native_text_quality.PROFILE,
+               'mixed_scripts': ocr_mixed_text.PROFILE,
+               'script_evidence': ocr_script_evidence.PROFILE,
+               'language_policy': ocr_quality.ROUTING_PROFILE,
+               'mixed_native': 'native-raster-text-v3-rule-evidence',
+               'tables': 'ruled-table-geometry-v2-cell-offsets-diagonal-header-crops-v1',
+              'language_routing': entry.get('language_source') or pdf_ocr.language_source(entry)}
+    digest = hashlib.sha256(json.dumps(recipe, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:16]
     # Recognition language/model belongs to the OCR worker. A language change
     # must reuse the published PNG render instead of forcing PDF rendering.
     language, backend = pdf_ocr.book_ocr_config(entry)
     base = pdf_ocr.asset_profile(language, backend, entry.get("ocr_revision"))
-    return f"{base}-layout-{ocr_layout.VERSION}-{digest}"
+    return f"{base}-quality-v1-layout-{ocr_layout.VERSION}-{digest}"
 
 
 LAYOUT_DEFAULTS = {"rotation": 0, "writing_mode": "auto", "join_soft_lines": True, "regions": []}
@@ -1065,12 +1126,16 @@ def normalized_layout(options):
 
 def same_recognition_profile(old, entry):
     """A ready OCR entry is current when only default-valued layout keys differ."""
-    if old.get("profile") == entry.get("profile"):
-        return True
-    old_base, old_sep, _ = str(old.get("profile") or "").partition("-layout-")
-    new_base, new_sep, _ = str(entry.get("profile") or "").partition("-layout-")
-    return bool(old_sep and new_sep and old_base == new_base and isinstance(old.get("layout_options"), dict)
-                and normalized_layout(old["layout_options"]) == normalized_layout(entry.get("layout_options")))
+    return (old.get('profile') == entry.get('profile')
+            and normalized_layout(old.get('layout_options')) == normalized_layout(entry.get('layout_options')))
+
+
+def reusable_profile(old, new):
+    a, sep_a, layout_a = str(old or "").partition("-layout-")
+    b, sep_b, layout_b = str(new or "").partition("-layout-")
+    return bool(sep_a and sep_b and layout_a == layout_b and "-quality-v1" in a and "-quality-v1" in b
+                and re.sub(r'-jxl-[01]-(?:adaptive|[0-9.]+-[0-9]+)', '', a)
+                == re.sub(r'-jxl-[01]-(?:adaptive|[0-9.]+-[0-9]+)', '', b))
 
 
 def generation_for(book):
@@ -1090,11 +1155,7 @@ def layout_options(overrides, key):
 
 def reuse_recognized_pages(old, entry, pages):
     """Reuse verified OCR when only Reader image objects changed."""
-    old_profile, old_separator, old_layout = str(old.get("profile") or "").partition("-layout-")
-    new_profile, new_separator, new_layout = str(entry.get("profile") or "").partition("-layout-")
-    same_recognition = (bool(old_separator and new_separator) and old_layout == new_layout
-                        and pdf_ocr.ocr_profile_without_jxl(old_profile) ==
-                        pdf_ocr.ocr_profile_without_jxl(new_profile))
+    same_recognition = reusable_profile(old.get("profile"), entry.get("profile"))
     if (old.get("status") != "ready" or not same_source(old, entry)
             or old.get("source_sha256") != entry.get("source_sha256")
             or not same_recognition):
@@ -1121,7 +1182,7 @@ def reuse_recognized_pages(old, entry, pages):
                     or page_meta(prior, "i")["bytes"] != page_meta(page, "i")["bytes"]):
                 return {}
             output = {**page, **{field: prior[field] for field in
-                                 ("o", "os", "ob", "text", "text_spans", "layout", "chars")}}
+                                 ("o", "os", "ob", "text", "text_spans", "layout", "chars", "recognition", "quality_check")}}
             pdf_ocr.validate_ocr_object_path(output["o"], f"page-{page['p']:06d}.json.gz")
             saved[str(page["p"])] = output
         return saved
@@ -1130,13 +1191,10 @@ def reuse_recognized_pages(old, entry, pages):
 
 
 def reuse_progress_pages(previous, entry, pages):
-    """Reuse already-recognised pages after a profile bump.
-
-    A profile change gives the book a new generation, but recognition output
-    for an unchanged page image is still valid. Without this, every profile
-    bump silently discards complete OCR and the book is reported as
-    "pages incomplete" even though nothing failed.
-    """
+    """Reuse unchanged inputs only when recognition, layout and policy also match."""
+    if (previous.get("source_sha256") != entry.get("source_sha256")
+            or not reusable_profile(previous.get("profile"), entry.get("profile"))):
+        return {}
     saved_pages = previous.get("pages") if isinstance(previous, dict) else None
     if not isinstance(saved_pages, dict) or not saved_pages:
         return {}
@@ -1153,7 +1211,7 @@ def reuse_progress_pages(previous, entry, pages):
                 or page_meta(prior, "i").get("bytes") != page_meta(page, "i").get("bytes")):
             continue
         output = {**page, **{field: prior[field] for field in
-                             ("o", "os", "ob", "text", "text_spans", "layout", "chars")
+                             ("o", "os", "ob", "text", "text_spans", "layout", "chars", "recognition", "quality_check")
                              if field in prior}}
         try:
             pdf_ocr.validate_ocr_object_path(output["o"], f"page-{page['p']:06d}.json.gz")
@@ -1184,27 +1242,37 @@ def plan_images(rendered, current, progress, limit=20, target=500, overrides=Non
         if entry["status"] != "skipped":
             manifest = validate_render(entry, json.loads(read_object(entry["render_manifest"], "/render-manifest.json")))
         native_text = "\n".join(str(page.get("text") or "") for page in (manifest or {}).get("pages", []))
-        if pdf_ocr.OCR_LANG != "auto":
-            language, _, backend = pdf_ocr.resolve_ocr_config(pdf_ocr.OCR_LANG, pdf_ocr.OCR_BACKEND)
-            language_source = "global"
-        elif pdf_ocr.language_override(key):
+        if pdf_ocr.language_override(key):
             language, backend = pdf_ocr.book_ocr_config(entry)
             language_source = "override"
+        elif pdf_ocr.OCR_LANG != "auto":
+            language, _, backend = pdf_ocr.resolve_ocr_config(pdf_ocr.OCR_LANG, pdf_ocr.OCR_BACKEND)
+            language_source = "global"
         elif native_text.strip():
-            language = pdf_ocr.detect_language(native_text)
-            backend = (pdf_ocr.OCR_BACKEND if pdf_ocr.OCR_BACKEND != "rapidocr_onnxruntime"
-                       else ("rapidocr_onnxruntime" if language in {"ch", "en"} else "paddle_onnxruntime"))
+            language = pdf_ocr.detect_text_language(native_text)
+            backend = pdf_ocr.OCR_BACKEND
             language_source = "native-text"
         else:
             language, backend = pdf_ocr.book_ocr_config(entry)
             language_source = pdf_ocr.language_source(entry)
         override = pdf_ocr.language_override(key) or {}
         entry = {**entry, "ocr_language": language, "ocr_backend": backend,
-                 "language_source": language_source,
-                 **({"ocr_revision": override["revision"]} if override.get("revision") else {}),
-                 "profile": recognition_identity({**entry, "ocr_language": language, "ocr_backend": backend}, options),
-                 "layout_options": options}
+                  "language_source": language_source,
+                  **({"ocr_revision": override["revision"]} if override.get("revision") else {}),
+                  "layout_options": options}
+        entry['profile'] = recognition_identity(entry, options)
         old = current.get(key, {})
+        if (not retry_failed_only and old.get("quality_status") in {"failed", "review"}
+                and old.get("quality_check", {}).get("checked_pages") == entry.get("page_count")
+                and old.get("source_sha256") == entry.get("source_sha256")
+                and same_recognition_profile(old, entry)):
+            # A complete rejected result needs a new model/policy or an explicit
+            # retry; an automatic continuation must not cycle on the same book.
+            continue
+        if retry_failed_only and old.get("quality_status") in {"failed", "review"} and old.get("quality_check"):
+            attempt = re.sub(r"[^a-z0-9._-]", "-", os.environ.get("GITHUB_RUN_ID", str(time.time_ns())).lower())
+            entry["ocr_revision"] = str(entry.get("ocr_revision", "quality")) + "-retry-" + attempt
+            entry["profile"] = recognition_identity(entry, options)
         if (old.get("status") in {"ready", "skipped"} and same_source(old, entry)
                 and same_recognition_profile(old, entry)
                 and old.get("source_sha256") == entry.get("source_sha256")
@@ -1231,7 +1299,9 @@ def plan_images(rendered, current, progress, limit=20, target=500, overrides=Non
         task_target = min(target, 1200) if entry["ocr_backend"] == "paddle_onnxruntime" else target
         for start in range(0, len(pending), task_target):
             tasks.append({"key": key, "generation": generation, "profile": entry["profile"],
-                          "ocr_language": entry["ocr_language"], "ocr_backend": entry["ocr_backend"],
+                           "ocr_language": entry["ocr_language"], "ocr_backend": entry["ocr_backend"],
+                           "language_source": language_source,
+                           "routing_backend": backend if language_source in {"override", "global"} else pdf_ocr.OCR_BACKEND,
                           "source_sha256": entry["source_sha256"], "layout_options": options,
                           "pages": pending[start:start + task_target]})
     # Pack small books together, while large books can span several workers.
@@ -1244,7 +1314,7 @@ def plan_images(rendered, current, progress, limit=20, target=500, overrides=Non
             "shard_count": len(shards), "shard_ids": list(range(len(shards))), "shards": shards}
 
 
-def adopt_recognized_page(page, path, raw):
+def adopt_recognized_page(page, path, raw, task=None):
     """Validate an existing page object at this generation's deterministic path."""
     payload = json.loads(gzip.decompress(raw))
     if (payload.get("kind") != "pdf-ocr-page" or payload.get("page") != page["p"] or payload.get("source") != "ocr"
@@ -1252,6 +1322,11 @@ def adopt_recognized_page(page, path, raw):
             or not isinstance(payload.get("text"), str)
             or not isinstance(payload.get("text_spans", []), list)):
         raise ValueError(f"existing OCR object is not this page's result: {path}")
+    if task is not None:
+        check = ocr_quality.check_page(payload, source_sha256=task["source_sha256"],
+                                       input_sha256=page["is"], profile=task["profile"])
+        if payload.get("quality_check") != check:
+            raise ValueError("existing OCR object lacks current quality evidence")
     return payload
 
 
@@ -1271,12 +1346,13 @@ def recognize_task(task, bundle, adopt_existing=False):
                 remote = (root / "ocr" / f"page-{page['p']:06d}.json.gz").as_posix()
                 if remote in existing:
                     raw = read_existing_object(remote)
-                    payload = adopt_recognized_page(page, remote, raw)
+                    payload = adopt_recognized_page(page, remote, raw, task)
                     out = bundle / remote
                     out.parent.mkdir(parents=True, exist_ok=True)
                     out.write_bytes(raw)
                     result = {**page, "chars": len(payload["text"]), "text": payload["text"],
-                              "text_spans": payload.get("text_spans", []), "layout": payload.get("layout", {})}
+                              "text_spans": payload.get("text_spans", []), "layout": payload.get("layout", {}),
+                              "recognition": payload["recognition"], "quality_check": payload["quality_check"]}
                     set_page_meta(result, "o", metadata(out, bundle))
                     done.append(result)
                     print(f"OCR page {page['p']}: adopted existing object ({task['key']})", flush=True)
@@ -1297,6 +1373,11 @@ def recognize_task(task, bundle, adopt_existing=False):
                         rotated.save(png)
                         rotated.close()
                 degenerate = min(width, height) < MIN_OCR_IMAGE_SIDE_PIXELS
+                evidence = ocr_quality.select_language(task["ocr_language"], task.get("language_source", "filename"),
+                                                       ocr_quality.probe_image(png))
+                language = evidence["language"]
+                backend = task.get("routing_backend", task["ocr_backend"])
+                models = {}
                 if degenerate:
                     # A thin scan strip such as 2200x3 pixels cannot contain
                     # recoverable text at the rendered resolution. Preserve it
@@ -1306,27 +1387,69 @@ def recognize_task(task, bundle, adopt_existing=False):
                     print(f"OCR page {page['p']}: skipped degenerate image {width}x{height} "
                           f"({task['key']})", flush=True)
                 else:
-                    if pdf_ocr.resolve_ocr_config(task["ocr_language"], task["ocr_backend"]) == pdf_ocr.resolve_ocr_config():
-                        blocks = pdf_ocr.ocr_page(png, width, height)
-                    else:
-                        blocks = pdf_ocr.ocr_page(png, width, height, task["ocr_language"], task["ocr_backend"])
+                    def recognize(selected):
+                        if page.get('native_components'):
+                            if rotation:
+                                raise ValueError('mixed native/raster recognition requires original page orientation')
+                            try:
+                                from . import pdf_mixed_text
+                            except ImportError:
+                                import pdf_mixed_text
+                            return pdf_mixed_text.recognize(png, page['native_components'], selected, backend, pdf_ocr)
+                        if pdf_ocr.resolve_ocr_config(selected, backend) == pdf_ocr.resolve_ocr_config():
+                            values = pdf_ocr.ocr_page(png, width, height)
+                        else:
+                            values = pdf_ocr.ocr_page(png, width, height, selected, backend)
+                        return values, pdf_ocr.actual_ocr_models(selected, backend)
+                    blocks, models = recognize(language)
+                    evidence, blocks, models = ocr_script_evidence.recover_chinese_route(
+                        png, evidence, blocks, models, recognize)
+                    language = evidence['language']
+                    evidence = ocr_script_evidence.corroborate(png, evidence, blocks)
+                table = None
+                if language in {'ch', 'chinese_cht'} and not degenerate and not rotation and not page.get('native_components'):
+                    try:
+                        from . import ocr_table_geometry, ocr_diagonal_header
+                    except ImportError:
+                        import ocr_table_geometry, ocr_diagonal_header
+                    with Image.open(png) as image:
+                        table = ocr_table_geometry.detect(image, blocks)
+                        if table:
+                            blocks, table, table_evidence = ocr_diagonal_header.recognize(image, table, blocks, pdf_ocr, language, backend)
+                            if table_evidence:
+                                models.setdefault('diagnostics', {})['table_headers'] = table_evidence
                 payload = pdf_ocr.page_payload(page["p"], page["width"], page["height"], blocks, "ocr")
+                if page.get('native_rejection'):
+                    payload['native_rejection'] = page['native_rejection']
+                if page.get('native_components'):
+                    payload['native_components'] = page['native_components']
                 if degenerate:
                     payload["ocr_warning"] = "degenerate-image-below-minimum-side"
-                arranged = ocr_layout.arrange(blocks, width, height, options)
+                arranged = (ocr_table_geometry.arrange(blocks, width, height, table, options, include_writing_modes=True)
+                            if table else ocr_layout.arrange(blocks, width, height, options))
                 payload.update(ocr_layout.restore_coordinates(arranged, rotation))
+                payload["recognition"] = {"policy": ocr_quality.POLICY, "profile": task["profile"],
+                    "source_sha256": task["source_sha256"], "input_sha256": page["is"],
+                    "language": language, "backend": models.get("backend", task["ocr_backend"]), "language_evidence": evidence,
+                    "models": models, "degenerate": degenerate}
+                payload["quality_check"] = ocr_quality.check_page(payload, source_sha256=task["source_sha256"],
+                    input_sha256=page["is"], profile=task["profile"])
                 out = bundle / root / "ocr" / f"page-{page['p']:06d}.json.gz"
                 pdf_ocr.write_gzip_json(out, payload)
                 result = {**page, "chars": len(payload["text"]), "text": payload["text"],
-                          "text_spans": payload["text_spans"], "layout": payload["layout"]}
+                          "text_spans": payload["text_spans"], "layout": payload["layout"],
+                          "recognition": payload["recognition"], "quality_check": payload["quality_check"]}
                 set_page_meta(result, "o", metadata(out, bundle))
                 done.append(result)
                 print(f"OCR page {page['p']}: {task['key']}", flush=True)
             except Exception as exc:
-                errors.append({"page": page["p"], "error": f"{type(exc).__name__}: {exc}"[:1000]})
+                errors.append({"page": page["p"], "code": "ocr-page-execution-failed", "stage": "recognition",
+                               "input_sha256": page.get("is"), "error": f"{type(exc).__name__}: {exc}"[:1000]})
             finally:
                 png.unlink(missing_ok=True)
-    return {"key": task["key"], "generation": task["generation"], "pages": done, "errors": errors}
+    return {"key": task["key"], "generation": task["generation"], "pages": done, "errors": errors,
+            "quality_status": "failed" if errors else ocr_quality.status(
+                [i for p in done for i in p["quality_check"]["issues"]])}
 
 
 def load_ocr_progress(api, repo, revision=None):
@@ -1354,7 +1477,14 @@ def save_ocr_progress(api, repo, updates):
 def merge_progress(old, new):
     pages = dict((old or {}).get("pages", {})) if (old or {}).get("generation") == new["generation"] else {}
     pages.update(new["pages"])
-    return {"generation": new["generation"], "pages": pages}
+    same = (old or {}).get("generation") == new["generation"]
+    errors = {str(e.get("page", "task")): e for e in (old or {}).get("errors", [])} if same else {}
+    errors.update({str(e.get("page", "task")): e for e in new.get("errors", [])})
+    for number in new["pages"]:
+        errors.pop(number, None)
+    identity = {k: v for k, v in (old or {}).items() if same and k in ("source_sha256", "profile")}
+    return {**identity, **{k: new[k] for k in ("source_sha256", "profile") if k in new},
+            "generation": new["generation"], "pages": pages, "errors": list(errors.values())}
 
 
 def collect_progress(queue, results):
@@ -1365,7 +1495,9 @@ def collect_progress(queue, results):
         if not book or result["generation"] != generation_for(book):
             raise ValueError("OCR result generation mismatch")
         source_pages = {p["p"]: p for p in book["pages"]}
-        value = updates.setdefault(book["key"], {"generation": result["generation"], "pages": dict(book["saved"])})
+        value = updates.setdefault(book["key"], {"generation": result["generation"], "pages": dict(book["saved"]),
+            "source_sha256": book["source_sha256"], "profile": book["profile"], "errors": []})
+        value["errors"].extend(result.get("errors", []))
         for page in result["pages"]:
             original = source_pages.get(page["p"], {})
             if original.get("source") != "ocr" or page.get("is") != original.get("is"):
@@ -1379,21 +1511,36 @@ def collect_progress(queue, results):
 
 
 def assemble_book(book, saved, bundle):
-    base = {k: v for k, v in book.items() if k not in {"pages", "saved"}}
+    base = {k: v for k, v in book.items() if k not in {"pages", "saved", "errors"}}
     if book["status"] == "skipped":
         return base
     pages = [p if p["source"] == "native" else saved.get(str(p["p"])) for p in book["pages"]]
     if any(p is None for p in pages):
-        return {**base, "status": "failed", "error": "OCR pages incomplete; uploaded pages retained for retry"}
-    texts, layers = [], []
+        missing = [p["p"] for p, result in zip(book["pages"], pages) if result is None]
+        return {**base, "status": "failed", "error": "OCR pages incomplete; uploaded pages retained for retry",
+                "quality_status": "failed", "missing_pages": missing, "errors": book.get("errors", [])}
+    texts, layers, checks = [], [], []
     language, backend = pdf_ocr.book_ocr_config(book)
     raw_pages = shared.ordered_reads(lambda page: read_object(page_meta(page, "o"), ".json.gz"), pages)
     with closing(raw_pages):
         for page, raw in zip(pages, raw_pages):
             payload = json.loads(gzip.decompress(raw))
             layer, page_text = assembled_page(book, page, payload, language)
+            recognition = payload.get("recognition", {})
+            compatible = (recognition.get("profile") == book["profile"]
+                          or reusable_profile(recognition.get("profile"), book["profile"]))
+            check = ocr_quality.check_page(payload, source_sha256=book["source_sha256"],
+                input_sha256=page.get("is"), profile=recognition.get("profile") if compatible else book["profile"])
+            checks.append(check)
+            page_text["quality_check"] = check
             layers.append(layer)
             texts.append(page_text)
+    quality = ocr_quality.book_report(checks, book["page_count"])
+    pdf_ocr.write_json(bundle / "quality-report.json", quality)
+    if quality["status"] != "passed":
+        return {**base, "status": "failed", "quality_status": quality["status"], "quality_check": quality,
+                "error": "OCR quality gate: " + ", ".join(sorted(quality["counts"])),
+                "errors": book.get("errors", [])}
     # An explicit re-pin (repin_ocr_pages.py) assembles adopted page bytes into
     # a distinct root; it must never collide with the stale manifest's root.
     root = root_for(book["source_sha256"], book["key"],
@@ -1406,7 +1553,7 @@ def assemble_book(book, saved, bundle):
                                       "offset_unit": "unicode-codepoint", "profile": book["profile"],
                                       "revision": "raw", "quality": "unreviewed", "text_layer": text_layer_ref,
                                       "language": language, "ocr_version": pdf_ocr.resolve_ocr_config(language, backend)[1],
-                                      "pages": texts})
+                                      "quality_check": quality, "pages": texts})
     manifest_path = bundle / root / "ocr-manifest.json"
     pdf_ocr.write_json(manifest_path, {
         "version": 1, "kind": "pdf-ocr", "complete": True, "profile": book["profile"],
@@ -1418,13 +1565,15 @@ def assemble_book(book, saved, bundle):
         "dpi": pdf_ocr.OCR_DPI, "pages": pages, "book_text": metadata(text_path, bundle),
         "text_layer": text_layer_ref, "text_revision": "raw", "text_quality": "unreviewed",
         "layout_options": book.get("layout_options", {}),
+        "quality_check": quality,
         **({"page_manifest": book["page_manifest"]} if book.get("page_manifest") else {}),
     })
     meta = metadata(manifest_path, bundle)
     return {**base, "status": "ready", "language": language, "ocr_version": pdf_ocr.resolve_ocr_config(language, backend)[1],
             "backend": backend, "stream": bool(book.get("page_manifest")), "ocr_manifest": meta["path"],
             "ocr_manifest_sha256": meta["sha256"], "ocr_manifest_bytes": meta["bytes"],
-            "text_layer": text_layer_ref, "text_revision": "raw", "text_quality": "unreviewed"}
+            "text_layer": text_layer_ref, "text_revision": "raw", "text_quality": "unreviewed",
+            "quality_status": "passed", "quality_check": quality}
 
 
 def assembled_page(book, page, payload, language):
@@ -1437,7 +1586,7 @@ def assembled_page(book, page, payload, language):
         # Native extraction is already in original page coordinates.
         options.pop("rotation", None)
         if payload["blocks"]:
-            payload.update(ocr_layout.arrange(payload["blocks"], payload["width"], payload["height"], options,
+            payload.update(ocr_layout.arrange(payload.get("raw_blocks", payload["blocks"]), payload["width"], payload["height"], options,
                                               include_writing_modes=True))
         else:
             payload["text_spans"] = []
@@ -1445,6 +1594,7 @@ def assembled_page(book, page, payload, language):
                                   "review": ["native-text-without-positioned-blocks"] if payload["text"] else [],
                                   "mapping_precision": "block", "offset_unit": "unicode-codepoint"}
     raw_ref = {"bucket": shared.PDF_PAGES_BUCKET, **page_meta(page, "o"), "role": "provenance"}
+    language = payload.get("recognition", {}).get("language", language)
     layer = pdf_text_layer.from_page(payload, book["source_sha256"], language, raw_ref, layout_options=options)
     return layer, {"page": page["p"], "text": payload["text"], "layout": payload["layout"],
                    "text_spans": payload["text_spans"], "text_generation": layer["generation"],
@@ -1456,7 +1606,7 @@ def publish_ocr_batches(books, updates, api, repo, output, batch_size=4):
     if type(batch_size) is not int or not 1 <= batch_size <= 20:
         raise ValueError("publication batch size must be between 1 and 20")
     report = {"version": 1, "kind": "pdf-ocr-publication-progress", "selected_books": len(books),
-              "batch_size": batch_size, "batches": [], "complete": False}
+              "batch_size": batch_size, "batches": [], "books": [], "complete": False, "status": "running"}
     checkpoint = output / "publication.json"
     def save_report():
         pending = checkpoint.with_suffix(".pending.json")
@@ -1472,6 +1622,7 @@ def publish_ocr_batches(books, updates, api, repo, output, batch_size=4):
             for book in selected:
                 try:
                     saved = updates.get(book["key"], {}).get("pages", book.get("saved", {}))
+                    book = {**book, "errors": updates.get(book["key"], {}).get("errors", [])}
                     # A failed assembly must not leave an unowned prefix in the batch.
                     with tempfile.TemporaryDirectory(dir=output) as temporary:
                         result = assemble_book(book, saved, Path(temporary))
@@ -1492,7 +1643,20 @@ def publish_ocr_batches(books, updates, api, repo, output, batch_size=4):
                     result["processing_roots"] = [protected[str(Path(result["ocr_manifest"]).parent)]]
             # The publisher checks every uploaded manifest, page and search
             # partition before registry/catalog promotion. Do not duplicate reads.
-            publication.publish(api, repo, completed)
+            if type(api) is HfApi:
+                for index, result in enumerate(completed):
+                    if result.get("status") != "ready":
+                        continue
+                    try:
+                        publication.verify_ready_objects(result)
+                    except Exception as exc:
+                        completed[index] = {**{k: v for k, v in result.items() if k not in {
+                            "ocr_manifest", "ocr_manifest_sha256", "ocr_manifest_bytes", "text_layer"}},
+                            "status": "failed", "quality_status": "failed",
+                            "error": f"publication verification: {type(exc).__name__}: {exc}"[:1000]}
+            publication.publish(api, repo, completed, verified=type(api) is HfApi)
+        report["books"].extend({k: r[k] for k in ("key", "status", "quality_status", "quality_check", "error",
+                                                 "errors", "missing_pages") if k in r} for r in completed)
         batch = {"offset": offset, "books": len(selected),
                  "ready": sum(r.get("status") == "ready" for r in completed),
                  "failed": sum(r.get("status") == "failed" for r in completed),
@@ -1502,8 +1666,38 @@ def publish_ocr_batches(books, updates, api, repo, output, batch_size=4):
         save_report()
         print("pdf_publication " + json.dumps(batch, sort_keys=True), flush=True)
     report["complete"] = True
+    report["status"] = "failed" if any(r["status"] == "failed" for r in report["books"]) else "passed"
     save_report()
+    write_execution_report(report, output / "quality-report.json")
     return report
+
+
+def write_execution_report(report, path):
+    """Durable JSON plus Actions summary/annotation; checkpoints survive a red job."""
+    pdf_ocr.write_json(path, report)
+    rows = report.get("books", report.get("results", []))
+    problems = [r for r in rows if r.get("status") == "failed" or r.get("errors")
+                or r.get("quality_status") in {"review", "failed"}]
+    if not problems:
+        return
+    def escape(value):
+        return str(value).replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+    print("::error title=OCR quality gate::" + escape(
+        f"{len(problems)} book/task results failed or require review. See {path.name}; retained pages remain resumable."), flush=True)
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary:
+        with open(summary, "a", encoding="utf-8") as stream:
+            stream.write(f"\nOCR quality check: **{len(problems)} failed or require review**. Full report: `{path.name}`.\n\n")
+            for row in problems[:100]:
+                key = str(row.get("key", "")).replace("\0", "/").replace("\n", " ")
+                check = row.get("quality_check", {})
+                pages = check.get("affected_pages", row.get("missing_pages", []))
+                codes = sorted(check.get("counts", {}))
+                if not codes:
+                    codes = sorted({i["code"] for p in row.get("pages", []) for i in p.get("quality_check", {}).get("issues", [])})
+                    pages = [p["p"] for p in row.get("pages", []) if p.get("quality_check", {}).get("status") != "passed"]
+                pages = sorted(set(pages + [e["page"] for e in row.get("errors", []) if type(e.get("page")) is int]))
+                stream.write(f"- {key}: {row.get('error') or ', '.join(codes) or 'execution failed'}; pages {pages}\n")
 
 
 def read_results(paths):
@@ -1756,10 +1950,10 @@ def main():
                 return 0
         updates = collect_progress(queue, results)
         save_ocr_progress(api, repo, updates)
-        publish_ocr_batches(queue["books"], updates, api, repo, args.output, args.publish_batch_size)
+        report = publish_ocr_batches(queue["books"], updates, api, repo, args.output, args.publish_batch_size)
         handoff_worker_results(api, repo, results)
         print(f"published {len(queue['books'])} book states; incomplete books retain page progress", flush=True)
-        return 0
+        return 1 if report["status"] == "failed" else 0
     if not 0 <= args.shard < len(queue["shards"]):
         raise ValueError("invalid shard")
     tasks = queue["shards"][args.shard]
@@ -1794,6 +1988,9 @@ def main():
     # failing the shard would discard every other book rendered by this job.
     print(f"{args.stage}: {len(results)} results, "
           f"{sum(1 for r in results if r.get('status') == 'failed' or r.get('errors'))} failed", flush=True)
+    if args.stage == "ocr":
+        write_execution_report({"version": 1, "results": results}, args.output / f"quality-{args.shard}.json")
+        return int(any(r.get("errors") or r.get("quality_status") in {"review", "failed"} for r in results))
     return 0
 
 

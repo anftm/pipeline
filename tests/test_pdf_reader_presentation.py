@@ -75,7 +75,11 @@ class PdfReaderPresentationTests(unittest.TestCase):
             self.assertEqual(queue["total_ocr_pages"], 2)
             output = self.root / "ocr"
             with patch.object(pdf_ocr, "ocr_page", return_value=[
-                    {"t": "recognized binary text", "b": [0, 0, 1, 1], "c": .9, "s": "ocr"}]):
+                    {"t": "recognized binary text", "b": [0, 0, 1, 1], "c": .9, "s": "ocr"}]), \
+                    patch.object(stages.ocr_quality, "probe_image", return_value={"blank": False,
+                        "regions": [{"region": "whole", "script": "Latin", "confidence": 8}]}), \
+                    patch.object(pdf_ocr, "actual_ocr_models", return_value={"models": {
+                        "det": {"sha256": "a" * 64}, "rec": {"sha256": "b" * 64}}}):
                 recognized = stages.recognize_task(queue["shards"][0][0], output)
             self.store(output)
             progress = stages.collect_progress(queue, [recognized])

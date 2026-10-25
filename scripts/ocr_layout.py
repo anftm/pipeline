@@ -11,7 +11,7 @@ import copy
 import re
 import statistics
 
-VERSION = "layout-v1"
+VERSION = "layout-v3"
 MODES = {"auto", "horizontal-ltr", "horizontal-rtl", "vertical-rl", "vertical-lr"}
 
 
@@ -117,6 +117,20 @@ def groups(blocks, mode, width, height, depth=0):
         return []
     vertical = mode.startswith("vertical")
     if vertical:
+        # Books with two horizontal tiers of vertical columns read the whole
+        # upper tier before the lower. Grouping by x first interleaves them.
+        column_width = statistics.median(max(1e-6, b['b'][2] - b['b'][0]) for b in blocks)
+        # Keep a separately printed page number at the end instead of joining
+        # it to the rightmost body column. It is retained with its own offsets.
+        footers = [b for b in blocks if b.get('detector_class') == 9 or
+                   b['t'].strip().isdigit() and b['b'][1] >= .94]
+        body = [b for b in blocks if b not in footers]
+        if footers and body and max(b['b'][3] for b in body) < min(b['b'][1] for b in footers):
+            return groups(body, mode, width, height, depth + 1) + [[b] for b in sorted(footers, key=lambda b: b['b'][0])]
+        cut = gap_split(blocks, 1, max(.012, .6 * column_width * width / height)) if depth < 12 else None
+        separated_heading = cut and min(b['b'][1] for b in cut[1]) - max(b['b'][3] for b in cut[0]) >= 2 * column_width * width / height
+        if cut and (all(len(part) >= 2 for part in cut) or separated_heading):
+            return [group for part in cut for group in groups(part, mode, width, height, depth + 1)]
         # Group tall/single-character fragments sharing a column; do not read
         # a row across adjacent vertical columns.
         columns = []
@@ -180,7 +194,7 @@ def groups(blocks, mode, width, height, depth=0):
 
 
 def cjk(char):
-    return bool(char and re.fullmatch(r"[\u3400-\u9fff\uf900-\ufaff]", char))
+    return bool(char and re.fullmatch(r"[\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff]", char))
 
 
 def soft_boundary(previous, current, group, mode):
@@ -243,6 +257,8 @@ def arrange(blocks, width, height, options=None, *, include_writing_modes=False)
         review.append("within-block-character-order-unverified")
     partitions = []
     remaining = list(working)
+    folios = [b for b in remaining if b.get('detector_class') == 9]
+    remaining = [b for b in remaining if b not in folios]
     for region in options.get("regions", []):
         x0, y0, x1, y1 = region["box"]
         selected = [b for b in remaining if x0 <= (b["b"][0] + b["b"][2]) / 2 <= x1
@@ -253,9 +269,15 @@ def arrange(blocks, width, height, options=None, *, include_writing_modes=False)
             region_mode = infer_mode(selected, width, height)[0]
         partitions.append((selected, region_mode))
     if remaining:
-        partitions.append((remaining, mode))
+        if not options.get('regions') and all(type(b.get('section')) is int for b in remaining):
+            for section in sorted({b['section'] for b in remaining}, reverse=mode in {'vertical-rl', 'horizontal-rtl'}):
+                partitions.append(([b for b in remaining if b['section'] == section], mode))
+        else:
+            partitions.append((remaining, mode))
         if options.get("regions"):
             review.append("blocks-outside-explicit-regions")
+    if folios:
+        partitions.append((folios, 'horizontal-ltr'))
     text, spans, ordered, boundaries = "", [], [], []
     group_index = 0
     for partition, partition_mode in partitions:

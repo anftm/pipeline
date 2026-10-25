@@ -44,8 +44,9 @@ class PublicationReviewRequired(ValueError):
 PUBLIC_OBJECT = re.compile(
     r"objects/[0-9a-f]{2}/[0-9a-f]{64}/[0-9a-f]{16}/(?:document\.pdf|document\.djvu|"
     r"reading-manifest\.json|page-map\.json\.gz|text-layer-manifest\.json|"
+    r"pages/page-[0-9]{6}\.jxl|"
     r"text/(?:page-[0-9]{6}\.json\.gz|book-text\.json\.gz|search-[0-9]{6}-[0-9]{6}\.json\.gz|partition-[0-9]{6}-[0-9]{6}-manifest\.json)|"
-    r"preview/(?:page-[0-9]{6}\.(?:png|webp|jpeg|svg)|partition-[0-9]{6}-[0-9]{6}-manifest\.json))")
+    r"preview/(?:page-[0-9]{6}\.(?:png|webp|jpeg|svg|jxl)|partition-[0-9]{6}-[0-9]{6}-manifest\.json))")
 
 
 def encode(value):
@@ -501,6 +502,8 @@ def build_stage(store, spec, workspace, *, apply=False):
     if spec.get("preview_only"):
         reading_spec = {"source_key": key, "source_sha256": source, "primary": spec["primary"],
                         "require_complete_preview": True, "vector_previews": spec.get("vector_previews", False)}
+        if spec.get("render_manifest"):
+            reading_spec["render_manifest"] = spec["render_manifest"]
         preview_started = time.monotonic()
         if previews is None:
             reading_spec = v3.generate_previews(reading_spec, reader, workspace,
@@ -513,6 +516,8 @@ def build_stage(store, spec, workspace, *, apply=False):
         result = stage(store, ref, workspace, apply=apply)
         result.update(reading=ref, components=manifest["components"])
         result["build"] = {"preview_only": True, "reused_preview_pages": len(previews or []),
+                           "shared_render_pages": sum(p.get("recipe", {}).get("policy") == "shared-document-render-v1"
+                                                      for p in reading_spec.get("previews", [])),
                            "preview_seconds": round(preview_seconds, 3),
                            "total_seconds": round(time.monotonic() - started, 3)}
         return result
@@ -549,6 +554,8 @@ def build_stage(store, spec, workspace, *, apply=False):
     reading_spec = {"source_key": key, "source_sha256": source, "primary": spec["primary"],
                     "text_layer": text_ref, "require_complete_preview": True,
                     "vector_previews": spec.get("vector_previews", False)}
+    if spec.get("render_manifest"):
+        reading_spec["render_manifest"] = spec["render_manifest"]
     preview_started = time.monotonic()
     if previews is None:
         reading_spec = v3.generate_previews(reading_spec, reader, workspace,
@@ -562,6 +569,8 @@ def build_stage(store, spec, workspace, *, apply=False):
     result["reading"] = ref
     result["components"] = manifest["components"]
     result["build"] = {"preview_only": False, "reused_preview_pages": len(previews or []),
+                       "shared_render_pages": sum(p.get("recipe", {}).get("policy") == "shared-document-render-v1"
+                                                  for p in reading_spec.get("previews", [])),
                        "preview_seconds": round(preview_seconds, 3),
                        "total_seconds": round(time.monotonic() - started, 3)}
     return result

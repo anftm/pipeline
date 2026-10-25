@@ -728,17 +728,27 @@ class ReaderGcGraphTests(unittest.TestCase):
 
 class CanonicalOcrPublicationTests(unittest.TestCase):
     def test_ready_publication_verifies_manifest_text_checksums_and_page_order(self):
+        from scripts import ocr_quality
         root = "objects/aa/" + "a" * 64 + "/" + "b" * 16
+        check = ocr_quality.book_report([{"page": n, "issues": []} for n in (1, 2)], 2)
+        pages = []
+        raw_pages = []
+        for n in (1, 2):
+            raw = gzip.compress(json.dumps({"kind": "pdf-ocr-page", "page": n, "source": "native"}).encode())
+            raw_pages.append(raw)
+            pages.append({"p": n, "source": "native", "o": root + f"/ocr/page-{n:06d}.json.gz",
+                          "os": hashlib.sha256(raw).hexdigest(), "ob": len(raw)})
         text_path = root + "/ocr/book-text.json.gz"
         text = gzip.compress(json.dumps({"kind": "pdf-book-text", "version": 2,
-            "complete": True, "page_count": 2, "pages": [{"page": 1}, {"page": 2}]}).encode())
+            "complete": True, "page_count": 2, "quality_check": check, "pages": [{"page": 1}, {"page": 2}]}).encode())
         manifest = json.dumps({"kind": "pdf-ocr", "complete": True, "page_count": 2,
-            "source_sha256": "a" * 64, "pages": [{"p": 1}, {"p": 2}], "book_text": {
+            "source_sha256": "a" * 64, "quality_check": check, "pages": pages, "book_text": {
                 "path": text_path, "bytes": len(text), "sha256": hashlib.sha256(text).hexdigest()}}).encode()
         result = {"ocr_manifest": root + "/ocr-manifest.json", "page_count": 2,
-            "source_sha256": "a" * 64, "ocr_manifest_bytes": len(manifest),
+            "source_sha256": "a" * 64, "quality_check": check, "ocr_manifest_bytes": len(manifest),
             "ocr_manifest_sha256": hashlib.sha256(manifest).hexdigest()}
-        with patch.object(publication, "read_bucket_bytes", side_effect=[manifest, text]) as read:
+        objects = {result["ocr_manifest"]: manifest, text_path: text, **dict(zip([p["o"] for p in pages], raw_pages))}
+        with patch.object(publication, "read_bucket_bytes", side_effect=lambda path, token, bucket: objects[path]) as read:
             publication.verify_ready_objects(result)
         self.assertTrue(all(call.kwargs["bucket"] == PDF for call in read.call_args_list))
         malformed = json.loads(manifest)

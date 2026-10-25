@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       spec_json:
-        description: Exact original repo/path/revision, OCR text-manifest resource, page count and stable doc_number
+        description: One spec or array of 1..32 complete books with pinned sources, text manifests and stable doc_numbers
         type: string
         required: true
       consumer_revision:
@@ -22,7 +22,7 @@ permissions:
 jobs:
   stage:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -40,7 +40,7 @@ jobs:
           BUILDER_SHA256: ${{ inputs.builder_sha256 }}
         run: |
           python - <<'PY'
-          import json, os, re, shutil
+          import json, os, re
           from pathlib import Path
           from huggingface_hub import hf_hub_download
           revision = os.environ['CONSUMER_REVISION']
@@ -53,10 +53,9 @@ jobs:
           spec = json.loads(raw)
           Path('output').mkdir(exist_ok=True)
           Path('output/ocr-export-spec.json').write_text(json.dumps(spec, ensure_ascii=False), encoding='utf-8')
-          for name in ('build_fulltext_db.py', 'data/search_data.json.gz'):
+          for name in ('build_fulltext_db.py', 'ocr_release.py', 'data/search_data.json.gz'):
               hf_hub_download('vomebook/Search', name, repo_type='space', revision=revision,
                               local_dir='output/ccrd-consumer', token=os.environ['HF_TOKEN'])
-          shutil.copyfile('scripts/ccrd_ocr_release.py', 'output/ccrd-consumer/ocr_release.py')
           PY
       - name: Export verified effective text without geometry
         env:

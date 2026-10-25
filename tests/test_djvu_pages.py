@@ -244,7 +244,7 @@ class RealDjvuTests(unittest.TestCase):
         for path in bundle.rglob("*"):
             if path.is_file():
                 self.objects[(shared.PDF_PAGES_BUCKET, path.relative_to(bundle).as_posix())] = path.read_bytes()
-        self.assertEqual([p["codec"] for p in spec["previews"]], ["png", "webp"])
+        self.assertEqual([p["codec"] for p in spec["previews"]], ["png", "jxl"])
         bitonal = self.objects[(shared.PDF_PAGES_BUCKET, spec["previews"][0]["resource"]["path"])]
         with Image.open(__import__("io").BytesIO(bitonal)) as image, Image.open(self.root / "p1.pbm") as original:
             self.assertEqual(image.mode, "1")

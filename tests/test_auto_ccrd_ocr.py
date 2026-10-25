@@ -14,6 +14,8 @@ from scripts import publish_ccrd_ocr as publisher
 from scripts import verify_ccrd_ocr_live as live
 from tests.test_pdf_text_layer import raw_page
 from tests.test_publish_ccrd_ocr import Store
+from tests.test_reader_text_admission import recognized_layers, PROFILE
+from scripts import ocr_quality
 
 
 APPROVED = {'version': 1, 'consumer_revision': 'a' * 40,
@@ -30,11 +32,11 @@ class AutoCcrdOcrTests(unittest.TestCase):
         self.derived = {'version': 1, 'kind': 'pdf-derived-source-index', 'files': []}
         self.empty_catalog = (None, {'files': {}})
 
-    def book(self, name, *, source='a', accepted=False):
+    def book(self, name, *, source='a', accepted=False, contents=None, profile=PROFILE):
         path = '目录/' + name + '.pdf'
         key = 'VoiceOfML/Books\0' + path
-        layers = [text.from_page({**raw_page(body), 'page': number}, source * 64)
-                  for number, body in enumerate(('手机原始全文', '', '手。机末页 ABC'), 1)]
+        layers = recognized_layers(contents or ('手机原始全文', '', '手。机末页 ABC'), source * 64, self.store.objects,
+                                   profile=profile)
         if accepted:
             first = layers[0]
             layers[0] = text.accept_proposal(first, {'version': 1, 'kind': 'pdf-text-correction',
@@ -50,7 +52,9 @@ class AutoCcrdOcrTests(unittest.TestCase):
                 self.store.objects[shared.PDF_PAGES_BUCKET, target.relative_to(bundle).as_posix()] = target.read_bytes()
         entry = {'repo': 'VoiceOfML/Books', 'path': path, 'key': key, 'status': 'ready',
                  'source_kind': 'upstream', 'source_revision': 'e' * 40,
-                 'source_sha256': source * 64, 'source_bytes': 100, 'page_count': 3, 'text_layer': ref}
+                 'source_sha256': source * 64, 'source_bytes': 100, 'page_count': 3, 'text_layer': ref,
+                 'profile': profile, 'quality_check': ocr_quality.book_report([
+                     {'page': n, 'issues': []} for n in range(1, 4)], 3)}
         self.registry['files'][key] = entry
         return key, entry
 
@@ -173,6 +177,14 @@ class AutoCcrdOcrTests(unittest.TestCase):
         self.assertEqual(result['eligible'], 0)
         self.assertEqual(result['deferred'][0]['key'], key)
         self.assertIn('language', result['deferred'][0]['reason'])
+
+    def test_ready_status_alone_cannot_admit_old_or_failed_body(self):
+        key, entry = self.book('old-ready')
+        entry['quality_check']['status'] = 'review'
+        result = self.run_auto('quality-plan', plan_only=True)
+        self.assertEqual(result['selected'], [])
+        self.assertEqual(result['deferred'][0]['key'], key)
+        self.assertIn('quality', result['deferred'][0]['reason'])
 
     def test_derived_original_is_not_confused_with_reader_primary(self):
         key, entry = self.book('derived')
@@ -336,8 +348,26 @@ class AutoCcrdOcrTests(unittest.TestCase):
             publisher.verify_text_upgrade(self.store, original, {**updated, 'doc_id': 'OCR:9'})
         disconnected = copy.deepcopy(updated)
         disconnected['retained_reader_resources'] = original['retained_reader_resources']
-        with self.assertRaisesRegex(ValueError, 'descendant'):
+        with self.assertRaisesRegex(ValueError, 'text manifest is missing'):
             publisher.verify_text_upgrade(self.store, original, disconnected)
+
+    def test_new_recognition_upgrades_stable_id_and_cannot_replace_accepted_page(self):
+        key, entry = self.book('recognition-upgrade')
+        read = lambda ref: self.store.read_bytes(ref['bucket'], ref['path'])
+        spec = auto.export_spec(self.store, {'entry': entry, 'key': key, 'active': None}, 781)
+        original = exporter.build_export(spec, read, allow_unreviewed=True)['manifest']
+        key, entry = self.book('recognition-upgrade', contents=('识别修复后的完整正文', '', '正确的末页 ABC'),
+                               profile=PROFILE + '-new')
+        new_spec = auto.export_spec(self.store, {'entry': entry, 'key': key, 'active': None}, 781)
+        replacement = exporter.build_export(new_spec, read, allow_unreviewed=True)['manifest']
+        publisher.verify_text_upgrade(self.store, original, replacement)
+        self.assertEqual(replacement['doc_id'], 'OCR:781')
+        self.assertEqual(replacement['quality'], 'unreviewed')
+        protected = copy.deepcopy(original)
+        protected['accepted_pages'] = 1
+        protected['pages'][0]['quality'] = 'partially-reviewed'
+        with self.assertRaisesRegex(ValueError, 'downgrade'):
+            publisher.verify_text_upgrade(self.store, protected, replacement)
 
     def test_actual_workflow_automates_only_trusted_completion_and_keeps_writer(self):
         workflow = (Path(__file__).parents[1] / '.github/workflows/publish-ccrd-ocr.yml').read_text()

@@ -46,6 +46,7 @@ class PublishCcrdOcrTests(unittest.TestCase):
 
     def publish(self, **kwargs):
         with patch.object(publisher, 'plan', return_value=(self.candidate, self.files)), \
+                patch.object(publisher.reader_text_admission, 'verify_export'), \
                 patch.object(publisher, 'assert_writer'):
             return publisher.publish(self.store, Path('.'), self.path, contract.digest(self.raw), 'c' * 64,
                                      kwargs.pop('expected_parent', None), **kwargs)
