@@ -10,6 +10,19 @@ from scripts.reader_bucket_store import HubBucketStore, S3BucketStore
 
 
 class ReaderBucketStoreTests(unittest.TestCase):
+    def test_delete_retries_only_the_current_bounded_hub_batch(self):
+        paths = [f'objects/retired/{i}.bin' for i in range(1201)]
+        calls = []
+        def remove(bucket, *, delete, token):
+            calls.append(list(delete))
+            if len(calls) == 2:
+                raise ConnectionError('429 Too Many Requests')
+        with patch('huggingface_hub.HfApi'), \
+                patch('huggingface_hub.batch_bucket_files', side_effect=remove), \
+                patch('scripts.shared.time.sleep'):
+            HubBucketStore().delete('vomebook/reader-assets-v2', paths)
+        self.assertEqual(calls, [paths[:500], paths[500:1000], paths[500:1000], paths[1000:]])
+
     def test_hub_put_bytes_retries_connection_style_xet_throttling(self):
         error = ConnectionError(
             "Network error: Request error: HTTP status client error "
@@ -239,6 +252,41 @@ class ReaderBucketStoreTests(unittest.TestCase):
         self.assertEqual(store.root_etags['vomebook/reader-assets-v2'][last], '"2999"')
         self.assertEqual(store.object_sizes['vomebook/reader-assets-v2', last], 123)
 
+    def test_deep_and_wide_inventories_fall_back_without_dropping_objects(self):
+        for count, prefix in [(3000, 'chapters/ebook/'), (250, 'objects/aa/')]:
+            with self.subTest(prefix=prefix):
+                entries = {prefix + f'{i:064x}/page.png': {'Key': prefix + f'{i:064x}/page.png',
+                            'Size': i + 1, 'ETag': f'"{i}"'} for i in range(count)}
+                entries['root.json'] = {'Key': 'root.json', 'Size': 10}
+                calls = []
+                def paginate(Bucket, Prefix, Delimiter=None):
+                    calls.append((Prefix, Delimiter))
+                    matched = {key: value for key, value in entries.items() if key.startswith(Prefix)}
+                    if not Delimiter:
+                        for start in range(0, len(matched), 1000):
+                            yield {'Contents': list(matched.values())[start:start + 1000]}
+                        return
+                    children = sorted({Prefix + key[len(Prefix):].split('/')[0] + '/'
+                                       for key in matched if '/' in key[len(Prefix):]})
+                    yield {'CommonPrefixes': [{'Prefix': child} for child in children[:1000]],
+                           'Contents': [v for key, v in matched.items() if '/' not in key[len(Prefix):]]}
+                    if len(children) > 1000:
+                        yield {'CommonPrefixes': [{'Prefix': child} for child in children[1000:]]}
+                client = Mock()
+                client.get_paginator.return_value.paginate.side_effect = paginate
+                store = self.store(client)
+                self.assertEqual(store.list_files('bucket', ('',)), set(entries))
+                self.assertLessEqual(len(calls), 4)
+                self.assertEqual(store.object_sizes['bucket', prefix + f'{count - 1:064x}/page.png'], count)
+
+    def test_wide_prefix_discovery_stops_before_listing_thousands_of_directories(self):
+        client = Mock()
+        def paginate(**kwargs):
+            yield {'CommonPrefixes': [{'Prefix': f'objects/{i}/'} for i in range(1000)]}
+            raise AssertionError('wide delimiter discovery should stop after the first page')
+        client.get_paginator.return_value.paginate.side_effect = paginate
+        self.assertEqual(self.store(client)._shards(client, 'bucket', 'objects/'), ({}, ['objects/']))
+
     def test_s3_root_listing_reads_index_dirs_without_full_inventory(self):
         calls = []
         def paginate(Bucket, Prefix, Delimiter=None):
@@ -267,6 +315,18 @@ class ReaderBucketStoreTests(unittest.TestCase):
         client.delete_objects.return_value = {"Errors": [{"Key": "a", "Code": "AccessDenied"}]}
         with self.assertRaises(RuntimeError):
             self.store(client).delete("bucket", ["a"])
+
+    def test_s3_delete_retries_partial_transient_errors_without_replaying_other_batches(self):
+        from botocore.exceptions import ClientError
+        client = Mock()
+        client.delete_objects.side_effect = [{}, {'Errors': [{'Key': '1001', 'Code': 'SlowDown'}]},
+                                             ClientError({'Error': {'Code': '503'}}, 'DeleteObjects'), {}]
+        paths = [str(i) for i in range(1003)]
+        with patch('scripts.reader_bucket_store.time.sleep'):
+            self.store(client).delete('bucket', paths)
+        batches = [[row['Key'] for row in call.kwargs['Delete']['Objects']]
+                   for call in client.delete_objects.call_args_list]
+        self.assertEqual(batches, [paths[:1000]] + [paths[1000:]] * 3)
 
     def test_integrity_scan_preserves_page_and_chapter_contracts(self):
         store = self.store(Mock())

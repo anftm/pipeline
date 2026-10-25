@@ -24,13 +24,13 @@ from datetime import datetime, timezone
 try:
     from . import reader_document_reset as reset, ccrd_lifecycle
     from . import publish_reader_v3 as publication
-    from .reader_bucket_store import S3BucketStore, HubBucketStore, retry_s3
+    from .reader_bucket_store import S3BucketStore, HubBucketStore
     from .reader_gc_fence import assert_collector_context
 except ImportError:
     import reader_document_reset as reset
     import ccrd_lifecycle
     import publish_reader_v3 as publication
-    from reader_bucket_store import S3BucketStore, HubBucketStore, retry_s3
+    from reader_bucket_store import S3BucketStore, HubBucketStore
     from reader_gc_fence import assert_collector_context
 
 
@@ -59,7 +59,21 @@ class Store(S3BucketStore):
             raise ValueError('invalid collection key')
         # S3 reports per-key failures even with HTTP 200. The base implementation
         # checks Errors; retry remains idempotent for these exact retired keys.
-        retry_s3(lambda: super(Store, self).delete(bucket, paths))
+        super().delete(bucket, paths)
+
+
+def withdrawn_sidecar(sidecar, derived):
+    """Independent formats may publish while the document namespaces stay empty."""
+    if sidecar.get('v') != 1 or not isinstance(sidecar.get('f'), dict):
+        raise ValueError('invalid withdrawn sidecar')
+    if any(not isinstance(entry, dict) for entry in sidecar['f'].values()):
+        raise ValueError('invalid withdrawn sidecar entry')
+    retained = {entry[field] for entry in derived['files'] if not reset.is_djvu(entry)
+                for field in ('new_path', 'manifest_path') if entry.get(field)}
+    for ref in publication.reader_lifecycle.sidecar_references(sidecar):
+        if (ref['bucket'] == reset.INPUTS
+                or ref['bucket'] == reset.PAGES and ref['path'] not in retained):
+            raise ValueError('withdrawn document resource was republished: ' + ref['path'])
 
 
 def preflight(store, reset_id, client):
@@ -79,15 +93,14 @@ def preflight(store, reset_id, client):
         raise ValueError('OCR library is still published')
     pinned = {(reset.ASSETS, reset.RECEIPT): receipt_raw, (CCRD, ccrd_path): ccrd_raw}
     raw = store.read_bytes(reset.ASSETS, reset.SIDECAR)
-    if reset.digest(raw) != receipt['sidecar_sha256']:
-        raise ValueError('canonical sidecar changed after withdrawal')
     pinned[reset.ASSETS, reset.SIDECAR] = raw
     sidecar = reset.decode(raw)
     pointer, catalog = publication.current(store)
     if (not pointer or pointer['generation'] != receipt['generation'] or catalog['files']
             or catalog.get('document_reset') != reset_id
-            or publication.pinned_base(store, catalog, {}) != sidecar):
+            or catalog.get('base_sidecar') != receipt['base_snapshot']):
         raise ValueError('v3 document withdrawal changed')
+    baseline = publication.pinned_base(store, catalog, {})
     pinned[reset.ASSETS, publication.POINTER] = store.read_bytes(reset.ASSETS, publication.POINTER)
     for name in reset.REGISTRIES:
         path = 'reader-index/' + name
@@ -99,11 +112,15 @@ def preflight(store, reset_id, client):
     if any(reset.is_djvu(entry) for entry in reset.decode(derived)['files']):
         raise ValueError('DJVU derived registry was repopulated')
     pinned[reset.PAGES, reset.DERIVED] = derived
+    for projection in (baseline, sidecar):
+        withdrawn_sidecar(projection, reset.decode(derived))
     for surface, url in [('hf', 'https://voiceofml-search.hf.space/api/reader-assets'),
                          ('pages', 'https://vomebook.github.io/search/data/reader_assets.json.gz')]:
         response = client.get(url, headers={'Cache-Control': 'no-cache'})
         response.raise_for_status()
-        if reset.decode(response.content).get('f') != sidecar['f']:
+        deployed = reset.decode(response.content)
+        withdrawn_sidecar(deployed, reset.decode(derived))
+        if deployed['f'] not in (sidecar['f'], baseline['f']):
             raise ValueError(surface + ' has not withdrawn the document routes')
     response = client.get('https://vomebook-search.hf.space/api/index-status',
                           headers={'Cache-Control': 'no-cache'})

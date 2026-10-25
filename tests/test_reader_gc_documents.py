@@ -1,5 +1,7 @@
 import copy
+import gzip
 import unittest
+from unittest.mock import Mock
 
 from scripts import reader_gc_documents as gc, reader_document_reset as reset
 
@@ -19,6 +21,57 @@ class Store:
 
 
 class DocumentCollectionTests(unittest.TestCase):
+    def test_preflight_accepts_independent_updates_with_withdrawn_pinned_consumers(self):
+        from tests.test_reader_document_reset import DocumentResetTests
+        store, _ = DocumentResetTests().fixture()
+        receipt = reset.withdraw(store, {'reset_id': 'documents-20261025'}, apply=True)
+        baseline = reset.decode(store.read_bytes(reset.ASSETS, reset.SIDECAR))
+        updated = copy.deepcopy(baseline)
+        updated['f']['repo\0book.epub']['p'] = 'chapters/ebook/epub/new/chapter-manifest.json'
+        updated['f'].pop('repo\0failed.pdf')
+        store.put_bytes(reset.ASSETS, reset.SIDECAR, gzip.compress(reset.encode(updated), mtime=0))
+        store.put_bytes(gc.CCRD, 'reports/ccrd-ocr-reset/documents-20261025/withdrawal.json',
+                        reset.encode({'status': 'withdrawn'}))
+        store.list_files = lambda bucket, prefixes: {p for b, p in store.objects if b == bucket and p.startswith(prefixes)}
+        store.put_bytes(gc.CCRD, 'current.json', reset.encode({'version': 1, 'kind': 'ccrd-ocr-retention', 'resources': []}))
+        # A known legacy pointer is required; its references are outside the reset.
+        from tests.test_reader_gc_ccrd import build_store
+        ccrd, _ = build_store()
+        pointer = reset.decode(ccrd.objects['current.json'])
+        for value in pointer['databases'].values():
+            value['path'] = value['path'].replace('legacy-a', 'ccrd-active')
+        store.put_bytes(gc.CCRD, 'current.json', reset.encode(pointer))
+        client = Mock()
+        def get(url, **kwargs):
+            response = Mock()
+            if url.endswith('/api/index-status'):
+                response.json.return_value = {'ready': True, 'ocr_release': None,
+                                               'loaded_sources': ['CCRD', 'CW', 'PLA', 'RMRB']}
+            else:
+                response.content = reset.encode(baseline)
+            return response
+        client.get.side_effect = get
+        result, pins, _, _ = gc.preflight(store, receipt['reset_id'], client)
+        self.assertEqual(result, receipt)
+        self.assertEqual(reset.decode(pins[reset.ASSETS, reset.SIDECAR]), updated)
+        updated['f']['repo\0scan.pdf'] = {'b': reset.PAGES, 'p': 'objects/old/page-manifest.json'}
+        store.put_bytes(reset.ASSETS, reset.SIDECAR, reset.encode(updated))
+        with self.assertRaisesRegex(ValueError, 'republished'):
+            gc.preflight(store, receipt['reset_id'], client)
+
+    def test_withdrawn_sidecar_allows_independent_formats_but_rejects_document_references(self):
+        derived = {'files': [{'source_extension': 'caj', 'new_path': 'derived/caj/keep/document.pdf'}]}
+        sidecar = {'v': 1, 'f': {'book.epub': {'p': 'chapters/ebook/epub/new/chapter-manifest.json'},
+                                'image.tif': {'p': 'pages/image/tif/new/page-manifest.json'},
+                                'book.caj': {'b': reset.PAGES, 'p': 'derived/caj/keep/document.pdf'}}}
+        gc.withdrawn_sidecar(sidecar, derived)
+        for field, bucket, path in [('p', reset.PAGES, 'objects/old/page-manifest.json'),
+                                    ('o', reset.PAGES, 'objects/old/ocr-manifest.json'),
+                                    ('pd', reset.PAGES, 'derived/djvu/old/document.pdf'),
+                                    ('f', reset.INPUTS, 'objects/old/ocr-input/page-000001.png')]:
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, 'republished'):
+                gc.withdrawn_sidecar({'v': 1, 'f': {'book': {'b': bucket, field: path}}}, derived)
+
     def test_exact_scope_does_not_select_image_sources_or_original_pdf(self):
         root = 'objects/aa/' + 'a' * 64 + '/' + 'b' * 16
         self.assertTrue(gc.classify('ocr-inputs', reset.INPUTS, root + '/ocr-input/page-000001.png', {}))

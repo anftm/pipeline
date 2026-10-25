@@ -186,18 +186,18 @@ class HubBucketStore:
         return retry_read(head)
 
     def delete(self, bucket: str, paths: list[str]) -> None:
-        from huggingface_hub import batch_bucket_files
         if bucket not in {"vomebook/reader-assets-v2", "vomebook/pdf-pages-v2", "melsm/pdf-archive-v2",
                           "vomebook/ccrd-index"}:
             raise ValueError("GC deletion must target a current Reader bucket")
         if any(not path or path.startswith("/") or "\\" in path or "\0" in path
                or any(part in {"", ".", ".."} for part in path.split("/")) for path in paths):
             raise ValueError("invalid GC deletion path")
-        if paths:
-            batch_bucket_files(bucket, delete=paths, token=self.token(bucket))
+        # All format collectors use the same idempotent, bounded retry path.
+        for start in range(0, len(paths), 500):
+            batch_bucket_files_with_retry(bucket, [], self.token(bucket), deletions=paths[start:start + 500])
 
 
-S3_RETRY_CODES = {"500", "502", "503", "504", "InternalError", "ServiceUnavailable", "SlowDown",
+S3_RETRY_CODES = {"408", "429", "500", "502", "503", "504", "InternalError", "ServiceUnavailable", "SlowDown",
                   "RequestTimeout", "RequestTimeTooSkewed", "Throttling", "ThrottlingException"}
 
 
@@ -209,9 +209,10 @@ def s3_error_code(error: BaseException):
             response.get("ResponseMetadata", {}).get("HTTPStatusCode"))
 
 
-def retry_s3(operation, attempts: int = 8, sleep=time.sleep):
+def retry_s3(operation, attempts: int = 8, sleep=None):
     """Retry transient S3 transport/streaming failures; missing objects stay missing."""
     from botocore.exceptions import BotoCoreError, ClientError
+    sleep = sleep or time.sleep
     for attempt in range(attempts):
         try:
             return operation()
@@ -219,14 +220,14 @@ def retry_s3(operation, attempts: int = 8, sleep=time.sleep):
             code, status = s3_error_code(error)
             if code in {"404", "NoSuchKey", "NotFound"} or status == 404:
                 raise S3NotFound(str(error)) from error
-            if (str(code) not in S3_RETRY_CODES and status not in {500, 502, 503, 504}) \
+            if (str(code) not in S3_RETRY_CODES and status not in {408, 429, 500, 502, 503, 504}) \
                     or attempt == attempts - 1:
                 raise
         except (BotoCoreError, OSError) as error:
             if isinstance(error, FileNotFoundError) or attempt == attempts - 1:
                 raise
         delay = min(30, 2 ** attempt) + random.uniform(0, 1)
-        print(f"transient Reader S3 read error; retrying in {delay:.1f}s "
+        print(f"transient Reader S3 request error; retrying in {delay:.1f}s "
               f"(attempt {attempt + 1}/{attempts})", flush=True)
         sleep(delay)
 
@@ -300,13 +301,17 @@ class S3BucketStore:
 
     def _shards(self, client, name: str, prefix: str, depth: int = 0):
         """Split a prefix by delimiter so large buckets list in parallel."""
+        if depth >= 2:
+            return {}, [prefix]
         files, children = {}, []
         for page in client.get_paginator("list_objects_v2").paginate(Bucket=name, Prefix=prefix, Delimiter="/"):
             files.update((item["Key"], item) for item in page.get("Contents", []))
             children.extend(item["Prefix"] for item in page.get("CommonPrefixes", []))
+            if len(children) > 256:
+                return files, [prefix]
         if not children:
             return files, []
-        if depth >= 2 or len(children) >= 16:
+        if len(children) >= 16:
             return files, children
         shards = []
         for child in sorted(children):
@@ -480,18 +485,20 @@ class S3BucketStore:
 
     def put_json(self, bucket: str, path: str, payload: dict) -> None:
         namespace, name = self._location(bucket)
-        self._client(namespace).put_object(
+        raw = (json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode()
+        retry_s3(lambda: self._client(namespace).put_object(
             Bucket=name, Key=path,
-            Body=(json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode(),
-            ContentType="application/json")
+            Body=raw, ContentType="application/json"))
 
     def existing_files(self, bucket: str, paths: set[str]) -> set[str]:
         namespace, name = self._location(bucket)
         client = self._client(namespace)
         def exists(path):
             try:
-                client.head_object(Bucket=name, Key=path)
+                retry_s3(lambda: client.head_object(Bucket=name, Key=path))
                 return path
+            except FileNotFoundError:
+                return None
             except Exception as error:
                 response = getattr(error, "response", {})
                 code = response.get("Error", {}).get("Code")
@@ -529,7 +536,14 @@ class S3BucketStore:
         namespace, name = self._location(bucket)
         client = self._client(namespace)
         for start in range(0, len(paths), 1000):
-            response = client.delete_objects(Bucket=name, Delete={
-                "Objects": [{"Key": path} for path in paths[start:start + 1000]], "Quiet": True})
-            if response.get("Errors"):
-                raise RuntimeError(f"S3 delete failed for {len(response['Errors'])} object(s)")
+            batch = paths[start:start + 1000]
+            def remove():
+                response = client.delete_objects(Bucket=name, Delete={
+                    "Objects": [{"Key": path} for path in batch], "Quiet": True})
+                errors = response.get('Errors', [])
+                if errors and all(error.get('Code') in S3_RETRY_CODES for error in errors):
+                    from botocore.exceptions import ClientError
+                    raise ClientError({'Error': errors[0]}, 'DeleteObjects')
+                if errors:
+                    raise RuntimeError(f"S3 delete failed for {len(errors)} object(s)")
+            retry_s3(remove)

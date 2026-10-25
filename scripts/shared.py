@@ -124,7 +124,8 @@ def bucket_upload_retry_delay(error: BaseException, attempt: int) -> float:
 
 
 def batch_bucket_files_with_retry(bucket: str, additions: list[tuple[str | Path | bytes, str]], token: str | None,
-                                  *, max_attempts: int = 12, reset_xet_on_retry: bool = False) -> None:
+                                  *, max_attempts: int = 12, reset_xet_on_retry: bool = False,
+                                  deletions: list[str] | None = None) -> None:
     """Upload the same bucket batch with bounded retry for HF/Xet throttling.
 
     Session reset is opt-in for dedicated serial publishers only: aborting the
@@ -134,9 +135,12 @@ def batch_bucket_files_with_retry(bucket: str, additions: list[tuple[str | Path 
 
     if type(max_attempts) is not int or max_attempts < 1:
         raise ValueError("max_attempts must be a positive integer")
+    mutation = {'add': additions} if deletions is None else {'delete': list(deletions)}
+    if deletions is not None and additions:
+        raise ValueError('a retried bucket batch must upload or delete, not both')
     for attempt in range(max_attempts):
         try:
-            batch_bucket_files(bucket, add=additions, token=token)
+            batch_bucket_files(bucket, **mutation, token=token)
             return
         except Exception as error:
             response = getattr(error, "response", None)
@@ -161,7 +165,7 @@ def batch_bucket_files_with_retry(bucket: str, additions: list[tuple[str | Path 
                 abort_xet_session()
             delay = bucket_upload_retry_delay(error, attempt)
             delay = min(300, delay + random.uniform(0, 3))
-            print(f"transient HF bucket upload error ({status or type(error).__name__}); "
+            print(f"transient HF bucket {'delete' if deletions is not None else 'upload'} error ({status or type(error).__name__}); "
                   f"retrying in {delay:.1f}s (attempt {attempt + 1}/{max_attempts})", flush=True)
             time.sleep(delay)
 
