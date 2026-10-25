@@ -180,7 +180,10 @@ class ReferenceGraph:
         export's text and document identity are verified independently, so a
         rewritten manifest must not mark the whole graph incomplete.
         """
-        if expected.get("role") == "provenance":
+        # Only Reader-sidecar provenance is advisory. Anything inside the CCRD
+        # bucket is an authoritative lifecycle document: a checksum mismatch
+        # there can hide a corrupted release and must fail closed.
+        if expected.get("role") == "provenance" and ref[0] != ccrd_lifecycle.BUCKET:
             with self.lock:
                 self.resource_warnings.append(f"provenance checksum drifted: {ref[0]}:{ref[1]}")
             return False

@@ -348,7 +348,7 @@ class AutoCcrdOcrTests(unittest.TestCase):
         self.assertNotIn('OCR_CORRECTION_API', workflow)
         self.assertNotIn('download-artifact', workflow.rsplit('\n  automatic:\n', 1)[1])
         automatic = workflow.rsplit('\n  automatic:\n', 1)[1].split('\n  newspapers:\n', 1)[0]
-        self.assertIn('Coalesce queued automatic OCR runs', automatic)
+        self.assertIn('Coalesce automatic OCR runs to a single flight', automatic)
         self.assertIn("steps.coalesce.outputs.skip != 'true'", automatic)
         self.assertIn('if: github.event_name != \'workflow_dispatch\'', automatic)
 

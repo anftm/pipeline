@@ -420,7 +420,9 @@ class FormatProducerRegressionTests(unittest.TestCase):
                 self.assertIn("--retry-failures", commands)
                 self.assertIn('== "schedule" ||', commands)
                 self.assertIn(f"needs.{job}.result == 'success'", workflow["jobs"]["finalize"]["if"])
-                self.assertIn(f"needs.{job}.result == 'skipped'", workflow["jobs"]["finalize"]["if"])
+                # An empty plan must not rebuild the sidecar or dispatch unify:
+                # `skipped` is deliberately not accepted any more.
+                self.assertNotIn(f"needs.{job}.result == 'skipped'", workflow["jobs"]["finalize"]["if"])
                 self.assertNotIn("!= 'cancelled'", workflow["jobs"]["finalize"]["if"])
                 self.assertEqual(workflow["jobs"]["finalize"]["concurrency"]["group"], "reader-sidecar")
 

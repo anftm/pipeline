@@ -8,8 +8,11 @@ class ChmRepairWorkflowTests(unittest.TestCase):
     def test_chm_rebuild_uses_canonical_index_and_serializes_unification(self):
         root = Path(__file__).resolve().parents[1]
         workflow = yaml.safe_load((root / ".github/workflows/reader-chm-repair.yml").read_text())
-        self.assertEqual(workflow["concurrency"]["group"], "reader-sidecar")
-        self.assertFalse(workflow["concurrency"]["cancel-in-progress"])
+        # The planner must not take the writer lock: an empty daily run would
+        # otherwise block every producer. Only the rebuild job serializes.
+        self.assertNotIn("concurrency", workflow)
+        self.assertEqual(workflow["jobs"]["rebuild"]["concurrency"]["group"], "reader-sidecar")
+        self.assertFalse(workflow["jobs"]["rebuild"]["concurrency"]["cancel-in-progress"])
         self.assertEqual(workflow[True]["schedule"][0]["cron"], "17 5 * * *")
         self.assertIn("github.event_name == 'schedule'", workflow["jobs"]["rebuild"]["if"])
         inputs = workflow[True]["workflow_dispatch"]["inputs"]

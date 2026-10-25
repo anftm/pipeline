@@ -1145,7 +1145,9 @@ def reuse_progress_pages(previous, entry, pages):
         if page.get("source") != "ocr":
             continue
         prior = saved_pages.get(str(page["p"]))
-        if not isinstance(prior, dict):
+        if not isinstance(prior, dict) or not all(field in prior for field in ("i", "is", "ib")):
+            # Old or partial progress entries are not evidence of a recognised
+            # page; never trust them just because the book generation changed.
             continue
         if (page_meta(prior, "i").get("sha256") != page_meta(page, "i").get("sha256")
                 or page_meta(prior, "i").get("bytes") != page_meta(page, "i").get("bytes")):
