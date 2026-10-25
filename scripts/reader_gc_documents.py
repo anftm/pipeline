@@ -349,4 +349,17 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except Exception as error:
+        import sys
+        if '--output' in sys.argv:
+            target = Path(sys.argv[sys.argv.index('--output') + 1])
+            target.parent.mkdir(parents=True, exist_ok=True)
+            report = json.loads(target.read_text()) if target.exists() else {
+                'version': 1, 'kind': 'reader-document-reset-collection',
+                'complete': False, 'accepted_objects': 0}
+            report.update(error=f'{type(error).__name__}: {error}', complete=False,
+                          failed_at=datetime.now(timezone.utc).isoformat())
+            target.write_bytes(reset.encode(report))
+        raise

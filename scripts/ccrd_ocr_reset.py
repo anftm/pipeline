@@ -84,13 +84,15 @@ def withdraw(options, *, apply=False):
     # Control roots are retired before their data. Audit keeps the previous
     # activation and byte identities; old page/text content is not duplicated.
     paths = store.list_files(lifecycle.BUCKET, ('control/intents/', 'control/retained/'))
-    audit = []
+    audit = {entry['path']: entry for entry in report.get('retired_control', [])}
     for path in sorted(paths):
         raw = store.read_bytes(lifecycle.BUCKET, path)
         value = json.loads(raw)
         lifecycle.references(value, path)
-        audit.append({'path': path, 'sha256': digest(raw), 'bytes': len(raw),
-                      'generation': value.get('generation'), 'status': value.get('status')})
+        audit.setdefault(path, {'path': path, 'sha256': digest(raw), 'bytes': len(raw),
+                               'generation': value.get('generation'), 'status': value.get('status')})
+        if value.get('status') == 'retired' and not value.get('resources'):
+            continue
         retired = {k: value[k] for k in ('version', 'kind', 'generation', 'expected_parent') if k in value}
         retired.update(status='retired', resources=[], retirement_reason='explicit-document-reset', reset_id=reset_id)
         store.put_bytes(lifecycle.BUCKET, path, encode(retired))
@@ -102,7 +104,7 @@ def withdraw(options, *, apply=False):
         report['previous_pointer'] = json.loads(old)
         store.put_bytes(lifecycle.BUCKET, report_path, encode(report))
         store.delete(lifecycle.BUCKET, [publisher.CURRENT])
-    for path in ('control/ocr-consumer.json',):
+    for path in ('control/ocr-consumer.json', 'control/ocr-ids.json'):
         try:
             value = json.loads(store.read_bytes(lifecycle.BUCKET, path))
         except FileNotFoundError:
@@ -110,6 +112,6 @@ def withdraw(options, *, apply=False):
         lifecycle.references(value, path)
         value.update(resources=[], status='withdrawn', reset_id=reset_id)
         store.put_bytes(lifecycle.BUCKET, path, encode(value))
-    report.update(status='withdrawn', retired_control=audit, applied=True)
+    report.update(status='withdrawn', retired_control=list(audit.values()), applied=True)
     store.put_bytes(lifecycle.BUCKET, report_path, encode(report))
     return report
