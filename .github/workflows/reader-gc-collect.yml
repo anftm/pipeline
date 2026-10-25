@@ -43,7 +43,7 @@ on:
         type: string
         default: "0"
       storage:
-        description: Read backend; Hub remains the only writer
+        description: Inventory and deletion backend; control documents publish through Hub
         type: choice
         options: [s3, hub]
         default: s3

@@ -224,12 +224,15 @@ def retired_snapshots(catalog):
 
 def collect_retired_snapshots(store, fence, catalog, *, apply=False, checkpoint=None):
     """Retire catalog-owned snapshots; this never authorizes content-bundle deletion."""
-    if apply:
-        reject_unaccepted_ccrd_collection(store)
     expected_catalog = store.read_bytes(ASSETS, CATALOG)
     if apply and graph.decode(expected_catalog) != catalog:
         raise RuntimeError("catalog changed before snapshot collection")
     targets = retired_snapshots(catalog)
+    reference_graph = graph.ReferenceGraph(store)
+    scanned = reference_graph.build()
+    if not scanned['graph_complete']:
+        raise RuntimeError('reference graph is incomplete; snapshot deletion is blocked')
+    targets = {path for path in targets if (ASSETS, path) not in reference_graph.references}
     current_id = catalog["current"]["generation"]
     current_snapshot = catalog["generations"][current_id].get("snapshot")
     if not current_snapshot or current_snapshot["path"] in targets:
@@ -252,11 +255,13 @@ def collect_retired_snapshots(store, fence, catalog, *, apply=False, checkpoint=
             or hashlib.sha256(current_raw).hexdigest() != current_snapshot["sha256"]):
         raise ValueError("current snapshot checksum mismatch")
     result = {"scope": "retired-catalog-snapshots", "planned_objects": len(present),
-              "confirmed_deleted_objects": 0, "confirmed_deleted_bytes": 0,
-              "deleted_bytes_complete": True, "applied": apply, "batches": []}
+               "confirmed_deleted_objects": 0, "confirmed_deleted_bytes": 0,
+              "deleted_bytes_complete": True, "applied": apply, "batches": [], 'complete': False}
     if not apply or not present:
+        result['complete'] = bool(apply)
         return result
     fence.check()
+    verify_roots(store, reference_graph)
     if store.read_bytes(ASSETS, CATALOG) != expected_catalog:
         raise RuntimeError("catalog changed before snapshot deletion")
     batch = {"bucket": ASSETS, "paths": present, "status": "submitted"}
@@ -268,6 +273,7 @@ def collect_retired_snapshots(store, fence, catalog, *, apply=False, checkpoint=
     if checkpoint:
         checkpoint(result)
     fence.check()
+    verify_roots(store, reference_graph)
     for path in present:
         try:
             store.read_bytes(ASSETS, path)
@@ -279,7 +285,7 @@ def collect_retired_snapshots(store, fence, catalog, *, apply=False, checkpoint=
     if store.read_bytes(ASSETS, CATALOG) != expected_catalog:
         raise RuntimeError("catalog changed during snapshot retirement")
     batch["status"] = "verified-deleted"
-    result.update(confirmed_deleted_objects=len(present), confirmed_deleted_bytes=sum(sizes.values()))
+    result.update(confirmed_deleted_objects=len(present), confirmed_deleted_bytes=sum(sizes.values()), complete=True)
     if checkpoint:
         checkpoint(result)
     return result
@@ -494,8 +500,8 @@ def main():
     last_checkpoint = [0.0]
     def checkpoint(result, force=False):
         report["collection"] = result
-        save()
         if force or result.get('complete') or time.monotonic() - last_checkpoint[0] >= 30:
+            save()
             store.put_bytes(ASSETS, f"reader-index/gc/{run}/collection.json", encode(result))
             if args.auto_resume:
                 retirement.save_cursor(store, run, scope, result, result.get('complete', False))

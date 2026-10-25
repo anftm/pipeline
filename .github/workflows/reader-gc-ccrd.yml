@@ -1,8 +1,9 @@
-name: CCRD · GC Collect Retired OCR Generations
+name: CCRD · GC Collect Retired Index and OCR Generations
 
 on:
   schedule:
     - cron: '23 9 * * *'
+    - cron: '23 10 * * *'
   workflow_dispatch:
     inputs:
       scope:
@@ -15,7 +16,7 @@ on:
         type: boolean
         default: false
       keep_generations:
-        description: Keep the current release plus this many ancestors
+        description: Total generations to retain, including the current release
         type: string
         default: "2"
       limit:
@@ -42,20 +43,31 @@ jobs:
     if: github.repository == 'anftm/pipeline'
     runs-on: ubuntu-24.04
     timeout-minutes: 120
+    env:
+      READER_GC_CACHE: .cache/reader-gc/reads.sqlite3
+      READER_GC_S3_RATE: '6'
+      READER_S3_LIST_WORKERS: '4'
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
       - run: pip install -r scripts/requirements.txt
-      - name: Plan or collect retired OCR generations
+      - uses: actions/cache/restore@v4
+        with:
+          path: .cache/reader-gc
+          key: reader-gc-ccrd-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: reader-gc-ccrd-v1-
+      - name: Plan or collect retired index and OCR generations
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          SCOPE: ${{ inputs.scope || 'ocr' }}
+          HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+          SCOPE: ${{ github.event.schedule == '23 10 * * *' && 'legacy-generations' || inputs.scope || 'ocr' }}
           APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
           KEEP_GENERATIONS: ${{ inputs.keep_generations || '2' }}
           LIMIT: ${{ inputs.limit || '0' }}
-          INCLUDE_STAGING: ${{ inputs.include_staging || 'false' }}
+          INCLUDE_STAGING: ${{ github.event_name == 'schedule' && github.event.schedule == '23 9 * * *' || inputs.include_staging || 'false' }}
         run: |
           [[ "$KEEP_GENERATIONS" =~ ^[1-9][0-9]*$ ]] || exit 1
           [[ "$LIMIT" =~ ^[0-9]+$ ]] || exit 1
@@ -64,11 +76,16 @@ jobs:
           else
             (( KEEP_GENERATIONS >= 1 )) || exit 1
           fi
-          args=(--scope "$SCOPE" --keep-generations "$KEEP_GENERATIONS" --limit "$LIMIT"
+          args=(--scope "$SCOPE" --storage s3 --keep-generations "$KEEP_GENERATIONS" --limit "$LIMIT"
                 --output output/gc/ccrd-ocr-gc.json)
           if [[ "$APPLY" == true ]]; then args+=(--apply); fi
           if [[ "$INCLUDE_STAGING" == true ]]; then args+=(--include-staging); fi
           python -u scripts/reader_gc_ccrd.py "${args[@]}"
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: .cache/reader-gc
+          key: reader-gc-ccrd-v1-${{ github.run_id }}-${{ github.run_attempt }}
       - uses: actions/upload-artifact@v7
         if: always()
         with:

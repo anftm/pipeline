@@ -140,6 +140,7 @@ def plan(store, *, limit=0):
             continue
         sizes = getattr(store, "object_sizes", {})
         report["roots"].append({"root": root, "pages": pages, 'retirement': item,
+                                'retained': sorted(files - set(pages)),
                                 "bytes": sum(sizes.get((INPUT, path), 0) for path in pages)})
         if limit and len(report["roots"]) >= limit:
             break
@@ -150,20 +151,34 @@ def plan(store, *, limit=0):
 
 def collect(store, report, *, checkpoint=None, fence=None):
     deleted = {"roots": 0, "objects": 0, "bytes": 0}
+    report.update(complete=False, deleted=deleted)
     for item in report["roots"]:
         pages = item["pages"]
+        item['batches'] = []
         for start in range(0, len(pages), 1000):
             if fence:
                 fence.check()
             eligible_identity(store, item['root'], item['retirement'])
             batch = pages[start:start + 1000]
             item['status'] = 'submitted'
+            receipt = {'paths': batch, 'status': 'submitted'}
+            item['batches'].append(receipt)
             if checkpoint:
                 checkpoint(report)
             store.delete(INPUT, batch)
-        remaining = set(pages) & store.list_files(INPUT, (item["root"] + "/",))
-        if remaining:
-            raise RuntimeError(f"{len(remaining)} OCR inputs remain after deletion under {item['root']}")
+            receipt['status'] = 'accepted'
+            if checkpoint:
+                checkpoint(report)
+        if fence:
+            fence.check()
+        eligible_identity(store, item['root'], item['retirement'])
+        remaining = store.list_files(INPUT, (item["root"] + "/",))
+        if set(pages) & remaining:
+            raise RuntimeError(f"{len(set(pages) & remaining)} OCR inputs remain after deletion under {item['root']}")
+        if not set(item.get('retained', [])) <= remaining:
+            raise RuntimeError('retained OCR input sibling disappeared during collection')
+        for receipt in item['batches']:
+            receipt['status'] = 'verified-deleted'
         item["status"] = "verified-deleted"
         deleted["roots"] += 1
         deleted["objects"] += len(pages)
@@ -172,6 +187,7 @@ def collect(store, report, *, checkpoint=None, fence=None):
         if checkpoint:
             checkpoint(report)
     report["deleted"] = deleted
+    report['complete'] = True
     return report
 
 
@@ -207,8 +223,13 @@ def main():
     save(report)
     print(json.dumps({k: v for k, v in report.items() if k != "roots"}, sort_keys=True), flush=True)
     if args.apply:
-        collect(store, report, checkpoint=save, fence=GitHubProducerFence())
-        save(report)
+        try:
+            collect(store, report, checkpoint=save, fence=GitHubProducerFence())
+        except Exception as error:
+            report['error'] = f'{type(error).__name__}: {error}'
+            raise
+        finally:
+            save(report)
         print(json.dumps(report["deleted"], sort_keys=True), flush=True)
 
 

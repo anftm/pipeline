@@ -10,6 +10,20 @@ from scripts.reader_bucket_store import HubBucketStore, S3BucketStore
 
 
 class ReaderBucketStoreTests(unittest.TestCase):
+    def test_s3_collection_enforces_bucket_and_key_boundaries_before_deleting(self):
+        from scripts.reader_gc_store import CollectionStore, CcrdCollectionStore
+        for cls, allowed, forbidden in [(CollectionStore, 'vomebook/reader-assets-v2', 'vomebook/ccrd-index'),
+                                        (CcrdCollectionStore, 'vomebook/ccrd-index', 'vomebook/reader-assets-v2')]:
+            store = cls.__new__(cls)
+            with patch.object(S3BucketStore, 'delete') as delete:
+                for bucket, paths in [(forbidden, ['objects/old']), (allowed, ['../source']),
+                                      (allowed, ['objects//bad']), ('upstream/source', ['old'])]:
+                    with self.assertRaises(ValueError):
+                        store.delete(bucket, paths)
+                delete.assert_not_called()
+                store.delete(allowed, ['objects/old'])
+                delete.assert_called_once_with(allowed, ['objects/old'])
+
     def test_delete_retries_only_the_current_bounded_hub_batch(self):
         paths = [f'objects/retired/{i}.bin' for i in range(1201)]
         calls = []

@@ -649,7 +649,8 @@ class ReferenceGraph:
 
     def list_roots(self, bucket):
         if bucket == ccrd_lifecycle.BUCKET:
-            return {path for path in self.store.list_files(bucket, ("",)) if is_root(path, bucket)}
+            return {path for path in self.store.list_files(bucket, ('control/', 'current.json'))
+                    if is_root(path, bucket)}
         if hasattr(self.store, "list_roots"):
             parents = {posixpath.dirname(path) + "/" for path in self.root_names.get(bucket, set())
                        if not path.startswith("reader-index/") and "/" in path}

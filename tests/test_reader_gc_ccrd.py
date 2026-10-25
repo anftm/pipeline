@@ -400,6 +400,124 @@ def build_legacy(*, cross_ref=False, orphan=False):
 
 
 class LegacyGcTests(unittest.TestCase):
+    def four_source(self):
+        from tests.test_ccrd_lifecycle import CcrdLifecycleTests
+        fixture = CcrdLifecycleTests()
+        fixture.setUp()
+        pointer = fixture.four_source_pointer()
+        store, directories, counts = build_legacy()
+        old_prefix = 'generations/' + pointer['generation']
+        generation = 'ccrd-four-' + 'f' * 64
+        new_prefix = 'generations/' + generation
+        for path, raw in fixture.store.objects[BUCKET].items():
+            if path != 'current.json':
+                store.put(path.replace(old_prefix, new_prefix), raw)
+        pointer = json.loads(json.dumps(pointer).replace(old_prefix, new_prefix))
+        pointer['generation'] = generation
+        pointer['previous_index_manifest_sha256'] = gc.digest(store.objects['generations/gen-current/manifest.json'])
+        previous = json.loads(store.objects['current.json'])
+        for name in ['CCRD', 'CW']:
+            pointer['databases'][name] = previous['databases'][name]
+        # The four-source contract permits only canonical ccrd-* database paths.
+        for name in ['CCRD', 'CW']:
+            original = pointer['databases'][name]['path']
+            canonical = original.replace('gen-current', 'ccrd-current')
+            store.put(canonical, store.objects[original])
+            pointer['databases'][name]['path'] = canonical
+        store.put('current.json', pointer)
+        store.put(new_prefix + '/manifest.json', pointer)
+        counts = {name: item['documents'] for name, item in pointer['databases'].items()}
+        class FourLive(LegacyLive):
+            def get(self, url, **kwargs):
+                if url.endswith('/api/sources'):
+                    response = LegacySources(counts)
+                    response.json = lambda: [{'slug': name, 'count': count} for name, count in counts.items()]
+                    return response
+                response = LegacyStatus([])
+                response.json = lambda: {'ready': True, 'loaded_sources': list(counts), 'bucket': {
+                    'state': 'ready', 'source': 'space-activation', 'sources': list(counts),
+                    'generation': generation, 'base_metadata_sha256': pointer['base_metadata_sha256']}}
+                return response
+        return store, pointer, FourLive([], counts)
+
+    def test_four_source_index_keeps_exact_parent_shared_databases_and_archives(self):
+        store, pointer, live = self.four_source()
+        store.put('indexes/newspapers/PLA/obsolete.sqlite3', b'old newspaper')
+        report = gc.legacy_plan(store, keep_generations=2, client=live)
+        self.assertEqual(report['kept'], ['gen-current'])
+        protected = {ref['path'] for ref in lifecycle.references(pointer, 'current.json')}
+        self.assertFalse(protected & set(report['candidates']))
+        self.assertIn('indexes/newspapers/PLA/obsolete.sqlite3', report['candidates'])
+        gc.legacy_apply(store, report, client=live)
+        self.assertTrue(report['complete'])
+        self.assertTrue(protected <= store.objects.keys())
+        self.assertNotIn('generations/gen-old/manifest.json', store.objects)
+
+    def test_new_rollout_pin_between_batches_stops_index_deletion(self):
+        store, pointer, live = self.four_source()
+        report = gc.legacy_plan(store, client=live)
+        delete = store.delete
+        def race(bucket, paths):
+            delete(bucket, paths)
+            store.put('control/retention-new.json', {'version': 1, 'kind': 'ccrd-ocr-retention',
+                      'resources': [store.ref('generations/gen-old/CCRD.sqlite3')]})
+        with patch.object(store, 'delete', side_effect=race), self.assertRaisesRegex(gc.Blocker, 'control references changed'):
+            gc.legacy_apply(store, report, client=live)
+        self.assertIn('generations/gen-old/CCRD.sqlite3', store.objects)
+        self.assertEqual(report['deleted']['objects'], 0)
+
+    def test_existing_control_pin_keeps_the_entire_index_generation(self):
+        store, pointer, live = self.four_source()
+        manifest = 'generations/gen-old/manifest.json'
+        store.put('control/retention-other.json', {'version': 1, 'kind': 'ccrd-ocr-retention',
+                  'resources': [store.ref(manifest)]})
+        report = gc.legacy_plan(store, client=live)
+        self.assertFalse(any(path.startswith('generations/gen-old/') for path in report['candidates']))
+
+    def test_interrupted_manifest_batch_resumes_and_only_counts_verified_deletions(self):
+        store, directories, counts = build_legacy(orphan=True)
+        live = LegacyLive(directories, counts)
+        report = gc.legacy_plan(store, client=live)
+        remove = store.delete
+        def partial(bucket, paths):
+            remove(bucket, paths[:1])
+            raise OSError('response lost')
+        with patch.object(store, 'delete', side_effect=partial), self.assertRaises(OSError):
+            gc.legacy_apply(store, report, client=live)
+        self.assertFalse(report['complete'])
+        self.assertEqual(report['deleted']['objects'], 0)
+        retry = gc.legacy_plan(store, client=live)
+        gc.legacy_apply(store, retry, client=live)
+        self.assertTrue(retry['complete'])
+        self.assertTrue(all(batch['status'] == 'verified-deleted' for batch in retry['batches']))
+        self.assertFalse(any(path.startswith(('generations/gen-old/', 'generations/gen-orphan/'))
+                             for path in store.objects))
+        self.assertIn('generations/gen-prev/manifest.json', store.objects)
+
+    def test_changed_same_name_manifest_with_new_reference_blocks_deletion(self):
+        store, directories, counts = build_legacy()
+        live = LegacyLive(directories, counts)
+        report = gc.legacy_plan(store, client=live)
+        path = 'generations/gen-prev/manifest.json'
+        value = json.loads(store.objects[path])
+        value['databases']['CCRD']['path'] = 'generations/gen-evil/CCRD.sqlite3'
+        store.put(path, value)
+        with self.assertRaisesRegex(gc.Blocker, 'manifest changed'):
+            gc.legacy_apply(store, report, client=live)
+        self.assertEqual(store.deleted, [])
+
+    def test_silent_partial_delete_is_not_reported_as_verified(self):
+        store, directories, counts = build_legacy()
+        live = LegacyLive(directories, counts)
+        report = gc.legacy_plan(store, client=live)
+        remove = store.delete
+        def partial(bucket, paths):
+            remove(bucket, paths[:1])
+        with patch.object(store, 'delete', side_effect=partial), self.assertRaisesRegex(RuntimeError, 'readback'):
+            gc.legacy_apply(store, report, client=live)
+        self.assertFalse(report['complete'])
+        self.assertEqual(report['deleted']['objects'], 0)
+
     def test_plan_keeps_current_and_previous_and_reclaims_older(self):
         store, directories, counts = build_legacy()
         report = gc.legacy_plan(store, keep_generations=2,

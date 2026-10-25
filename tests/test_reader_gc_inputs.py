@@ -117,11 +117,33 @@ class RetiredInputTests(unittest.TestCase):
         with patch.object(self.store, 'delete', side_effect=partial), self.assertRaises(OSError):
             inputs.collect(self.store, report, checkpoint=lambda r: checkpoints.append(json.loads(json.dumps(r))))
         self.assertEqual(checkpoints[-1]['roots'][0]['status'], 'submitted')
-        self.assertNotIn('deleted', checkpoints[-1])
+        self.assertEqual(checkpoints[-1]['deleted']['objects'], 0)
+        self.assertFalse(checkpoints[-1]['complete'])
         retry = inputs.plan(self.store)
         self.assertEqual(retry['planned_objects'], 1)
         inputs.collect(self.store, retry)
         self.assertEqual(retry['deleted']['objects'], 1)
+
+    def test_successful_delete_receipt_cannot_hide_retained_sibling_loss(self):
+        report = inputs.plan(self.store)
+        delete = self.store.delete
+        def remove(bucket, paths):
+            delete(bucket, [*paths, ROOT + '/notes.json'])
+        with patch.object(self.store, 'delete', side_effect=remove), self.assertRaisesRegex(RuntimeError, 'sibling'):
+            inputs.collect(self.store, report)
+        self.assertEqual(report['deleted']['objects'], 0)
+        self.assertEqual(report['roots'][0]['batches'][0]['status'], 'accepted')
+
+    def test_pin_added_during_delete_prevents_verified_success(self):
+        report = inputs.plan(self.store)
+        delete = self.store.delete
+        def race(bucket, paths):
+            delete(bucket, paths)
+            self.pin_input()
+        with patch.object(self.store, 'delete', side_effect=race), self.assertRaisesRegex(RuntimeError, 'CCRD retained'):
+            inputs.collect(self.store, report)
+        self.assertFalse(report['complete'])
+        self.assertEqual(report['deleted']['objects'], 0)
 
 
 if __name__ == "__main__":

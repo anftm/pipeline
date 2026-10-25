@@ -14,7 +14,7 @@ def cacheable(path):
     name = path.rsplit('/', 1)[-1]
     return (path.endswith(('.json', '.json.gz')) and (not path.startswith('reader-index/gc/')
             or path.startswith('reader-index/gc/retirements/'))
-            and (path.startswith(('reader-index/', 'control/', 'releases/', 'text/exports/'))
+            and (path.startswith(('reader-index/', 'control/', 'releases/', 'text/exports/', 'generations/'))
                  or name.endswith('-manifest.json') or name.startswith(('index', 'render-range-'))))
 
 

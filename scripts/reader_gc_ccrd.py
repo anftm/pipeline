@@ -57,9 +57,10 @@ def digest(raw):
     return hashlib.sha256(raw).hexdigest()
 
 
-def read_json(store, path, *, required=True):
+def read_json(store, path, *, required=True, cached=False):
     try:
-        raw = store.read_bytes(BUCKET, path)
+        reader = getattr(store, 'read_cached_bytes', store.read_bytes) if cached else store.read_bytes
+        raw = reader(BUCKET, path)
     except FileNotFoundError:
         if required:
             raise Blocker(f"missing required control document: {path}")
@@ -195,7 +196,7 @@ def release_identity(store, generation, sizes):
     every plan multiplied the request count by the whole library.
     """
     path = f"releases/ocr-{generation}/manifest.json"
-    release, raw = read_json(store, path)
+    release, raw = read_json(store, path, cached=True)
     if release.get("generation") != generation:
         raise Blocker(f"{path}: release generation differs from its path")
     refs = schema(release, path)
@@ -304,7 +305,7 @@ def plan(store, *, keep_generations=2, limit=0, include_staging=False,
     control_hashes = {CURRENT: digest(pointer_raw),
                       'control/newspaper-rollout.json': digest(rollout_raw) if rollout_raw is not None else None}
     for path in sorted(store.list_files(BUCKET, ("control/intents/",))):
-        intent, raw = read_json(store, path)
+        intent, raw = read_json(store, path, cached=True)
         gen = generation_of(path, "control/intents/")
         if intent.get("kind") != "ccrd-ocr-intent" or intent.get("version") != 1:
             raise Blocker(f"{path}: unknown intent schema")
@@ -319,7 +320,7 @@ def plan(store, *, keep_generations=2, limit=0, include_staging=False,
         control_snapshot.add(path)
         control_hashes[path] = digest(raw)
     for path in sorted(store.list_files(BUCKET, ("control/retained/",))):
-        history, raw = read_json(store, path)
+        history, raw = read_json(store, path, cached=True)
         gen = generation_of(path, "control/retained/")
         if history.get("kind") != "ccrd-ocr-retention" or history.get("version") != 1:
             raise Blocker(f"{path}: unknown retention schema")
@@ -569,7 +570,8 @@ def apply(store, report, *, client=None, checkpoint=None, batch_size=500):
         if controls != set(report['control_snapshot']):
             raise Blocker('OCR control history changed during deletion')
         for path, expected in expected_controls.items():
-            _, raw = read_json(store, path, required=expected is not None)
+            _, raw = read_json(store, path, required=expected is not None,
+                               cached=path.startswith(('control/intents/', 'control/retained/')))
             if (digest(raw) if raw is not None else None) != expected:
                 raise Blocker('OCR control content changed before deletion: ' + path)
     barrier()
@@ -641,12 +643,15 @@ def apply(store, report, *, client=None, checkpoint=None, batch_size=500):
             if checkpoint:
                 checkpoint(report)
         if candidates:
-            remaining = set(store.list_files(BUCKET, lifecycle.MANAGED_PREFIXES))
+            remaining = inventory(store, True)
             if any(path in remaining for path in candidates):
                 raise RuntimeError("data deletion readback failed")
-            if not set(report['protected_sizes']) <= remaining:
-                raise RuntimeError('retained CCRD object disappeared during collection')
+            if any(remaining.get(path) != size for path, size in report['protected_sizes'].items()):
+                raise RuntimeError('retained CCRD object disappeared or changed during collection')
         barrier()
+        if client is not None:
+            accept_live(client, report['current'])
+            report['live_after'] = {'checked': True, 'generation': report['current'], 'ready': True}
         for batch in report['batches']:
             batch['status'] = 'verified-deleted'
         report['complete'] = True
@@ -658,13 +663,6 @@ def apply(store, report, *, client=None, checkpoint=None, batch_size=500):
         report["finished_at"] = now()
     report["deletion_enabled"] = True
     report["applied"] = True
-    pointer_after, _ = read_json(store, CURRENT)
-    if pointer_after.get("generation") != report["current"]:
-        raise Blocker("OCR pointer changed during deletion")
-    if client is not None:
-        report["live_after"] = {"checked": True, "generation": report["current"],
-                                "ready": True}
-        accept_live(client, report["current"])
     return report
 
 
@@ -680,12 +678,19 @@ def write_journal(store, report):
 
 LEGACY_CURRENT = "current.json"
 LEGACY_PREFIX = "generations/"
+INDEX_PREFIXES = (LEGACY_PREFIX, 'indexes/newspapers/')
 LEGACY_JOURNAL_PREFIX = "reports/ccrd-legacy-gc/"
 SOURCES_URL = "https://vomebook-search.hf.space/api/sources"
 
 
 def legacy_pointer(store):
     payload, raw = read_json(store, LEGACY_CURRENT)
+    if payload.get('format') == 2:
+        refs = schema(payload, LEGACY_CURRENT)
+        generation = payload['generation']
+        if not re.fullmatch(r'ccrd-four-[0-9a-f]{64}', generation):
+            raise Blocker('four-source pointer has an invalid generation')
+        return payload, raw, {ref['path']: ref for ref in refs}, {generation}
     if payload.get("format") != 1 or payload.get("tokenizer_version") != lifecycle.TOKENIZER:
         raise Blocker("legacy CCRD pointer has an unknown format or tokenizer")
     databases = payload.get("databases")
@@ -714,7 +719,25 @@ def legacy_manifest(store, directory, sizes):
     path = f"generations/{directory}/manifest.json"
     if path not in sizes:
         raise Blocker(f"missing legacy generation manifest: {path}")
-    payload, raw = read_json(store, path)
+    payload, raw = read_json(store, path, cached=True)
+    if payload.get('format') == 2:
+        refs = schema(payload, path)
+        members = {path, *(ref['path'] for ref in refs)}
+        missing = members - sizes.keys()
+        for ref in refs:
+            if ref['path'] in sizes:
+                require_member(sizes, ref, path)
+        previous = payload.get('previous_index_manifest_sha256')
+        if not re.fullmatch(r'[0-9a-f]{64}', str(previous)):
+            raise Blocker(path + ': missing exact previous index manifest')
+        # Four-source manifests use content identity and parent hashes. S3's
+        # immutable object timestamp orders branches without changing the schema.
+        created = getattr(store, 'object_modified', {}).get((BUCKET, path))
+        if created is None:
+            created = datetime.min.replace(tzinfo=timezone.utc)
+        return {'dir': directory, 'path': path, 'created': created, 'refs': members,
+                'missing': missing, 'databases': payload['databases'], 'raw_bytes': len(raw),
+                'sha256': digest(raw), 'previous_sha256': previous}
     if payload.get("format") != 1 or payload.get("tokenizer_version") != lifecycle.TOKENIZER:
         raise Blocker(f"{path}: unknown legacy generation schema")
     if payload.get("created_at") is None:
@@ -723,6 +746,8 @@ def legacy_manifest(store, directory, sizes):
         created = datetime.fromisoformat(str(payload["created_at"]).replace("Z", "+00:00"))
     except ValueError:
         raise Blocker(f"{path}: invalid created_at")
+    if created.tzinfo is None:
+        raise Blocker(f'{path}: created_at must include a timezone')
     databases = payload.get("databases")
     if not isinstance(databases, dict) or set(databases) != {"CCRD", "CW"}:
         raise Blocker(f"{path}: generation must name CCRD and CW")
@@ -744,13 +769,13 @@ def legacy_manifest(store, directory, sizes):
         elif sizes[db_path] != ref["bytes"]:
             raise Blocker(f"{path}: {name} size differs from its manifest")
     return {"dir": directory, "path": path, "created": created, "refs": refs,
-            "missing": missing, "databases": databases, "raw_bytes": len(raw)}
+            "missing": missing, "databases": databases, "raw_bytes": len(raw), 'sha256': digest(raw)}
 
 
 def legacy_tree(store):
     sizes = {}
     try:
-        files = store.list_files(BUCKET, (LEGACY_PREFIX,))
+        files = store.list_files(BUCKET, INDEX_PREFIXES)
     except Exception as error:
         raise Blocker(f"cannot inventory {LEGACY_PREFIX}: {error}")
     for path in files:
@@ -777,21 +802,39 @@ def legacy_live(client, pointer):
     response.raise_for_status()
     status = response.json()
     bucket = status.get("bucket") or {}
+    expected_sources = set(pointer['databases'])
+    four_source = pointer.get('format') == 2
     if (status.get("ready") is not True or bucket.get("state") != "ready"
-            or bucket.get("source") != "bucket-pointer"
-            or set(bucket.get("sources") or []) != {"CCRD", "CW"}
-            or not {"CCRD", "CW"} <= set(status.get("loaded_sources") or [])):
+            or bucket.get("source") not in ({'space-activation', 'bucket-pointer'} if four_source else {'bucket-pointer'})
+            or set(bucket.get("sources") or []) != expected_sources
+            or not expected_sources <= set(status.get("loaded_sources") or [])):
         raise Blocker("live CCRD is not serving the bucket legacy pointer")
+    if four_source and (bucket.get('generation') != pointer['generation']
+                        or bucket.get('base_metadata_sha256') != pointer['base_metadata_sha256']):
+        raise Blocker('live CCRD has not loaded the exact four-source index generation')
     sources = client.get(SOURCES_URL, headers={"Cache-Control": "no-cache"}, timeout=60)
     sources.raise_for_status()
     rows = sources.json()
     if isinstance(rows, dict):
         rows = rows.get("sources", [])
     counts = {row.get("slug"): row.get("count") for row in rows if isinstance(row, dict)}
-    expected = {name: pointer["databases"][name]["documents"] for name in ("CCRD", "CW")}
+    expected = {name: item['documents'] for name, item in pointer['databases'].items()}
     if any(counts.get(name) != expected[name] for name in expected):
         raise Blocker("live CCRD source counts differ from the bucket legacy pointer")
     return {"bucket": bucket, "counts": counts, "checked_at": now()}
+
+
+def index_control_pins(store):
+    """Rollouts and OCR control roots may pin an older base index or archive."""
+    paths = store.list_files(BUCKET, ('control/',))
+    hashes, refs = {}, {}
+    for path in sorted(paths):
+        payload, raw = read_json(store, path, cached=True)
+        hashes[path] = digest(raw)
+        for ref in schema(payload, path):
+            if ref['bucket'] == BUCKET and ref['path'].startswith(INDEX_PREFIXES):
+                refs[ref['path']] = ref
+    return hashes, refs
 
 
 def legacy_plan(store, *, keep_generations=2, limit=0, client=None, verify_live=True):
@@ -810,7 +853,11 @@ def legacy_plan(store, *, keep_generations=2, limit=0, client=None, verify_live=
     for directory, files in dirs.items():
         if f"generations/{directory}/manifest.json" in files:
             manifests[directory] = legacy_manifest(store, directory, sizes)
+    control_hashes, control_refs = index_control_pins(store)
+    for ref in control_refs.values():
+        require_member(sizes, ref, 'index control pin')
     protected = set(active_refs)
+    protected.update(control_refs)
     for directory in active_dirs:
         protected.update(dirs[directory])
         manifest = manifests.get(directory)
@@ -818,13 +865,28 @@ def legacy_plan(store, *, keep_generations=2, limit=0, client=None, verify_live=
             raise Blocker(f"active legacy generation lacks a manifest: {directory}")
         if manifest["missing"]:
             raise Blocker(f"active legacy generation is incomplete: {directory}")
+        if pointer.get('format') == 2 and manifest['sha256'] != digest(pointer_raw):
+            raise Blocker('current four-source manifest differs from its pointer')
         protected.update(manifest["refs"])
 
     candidates = [d for d in manifests if d not in active_dirs]
     ordered = sorted(candidates, key=lambda d: (manifests[d]["created"], d), reverse=True)
     keep_old = max(0, keep_generations - len(active_dirs))
-    kept_old = ordered[:keep_old]
-    remaining = ordered[keep_old:]
+    kept_old = []
+    by_hash = {item['sha256']: directory for directory, item in manifests.items()}
+    parent_hash = pointer.get('previous_index_manifest_sha256')
+    while parent_hash and len(kept_old) < keep_old:
+        parent = by_hash.get(parent_hash)
+        if parent is None or parent in active_dirs or parent in kept_old:
+            raise Blocker('exact index rollback ancestor is missing or cyclic')
+        kept_old.append(parent)
+        parent_hash = manifests[parent].get('previous_sha256')
+    for directory in ordered:
+        if len(kept_old) >= keep_old:
+            break
+        if directory not in kept_old:
+            kept_old.append(directory)
+    remaining = [d for d in ordered if d not in kept_old]
     oldest = sorted(remaining, key=lambda d: (manifests[d]["created"], d))
     expiring = oldest[:limit] if limit else oldest
     deferred = oldest[len(expiring):]
@@ -837,8 +899,24 @@ def legacy_plan(store, *, keep_generations=2, limit=0, client=None, verify_live=
     for directory in [*kept_old, *deferred]:
         protected.add(manifests[directory]["path"])
 
+    # A retained manifest can reference databases outside its own generation.
+    # Expand any manifest pinned by a rollout before choosing deletion targets.
+    pending = [item for item in manifests.values() if item['path'] in protected]
+    visited = set()
+    while pending:
+        item = pending.pop()
+        if item['path'] in visited:
+            continue
+        visited.add(item['path'])
+        if item['missing']:
+            raise Blocker('retained index manifest is incomplete: ' + item['path'])
+        protected.update(item['refs'])
+        protected.update(dirs[item['dir']])
+        pending.extend(other for other in manifests.values()
+                       if other['path'] in protected and other['path'] not in visited)
+
     generation_candidates = sorted(path for path in sizes
-                                   if path.startswith(LEGACY_PREFIX) and path not in protected)
+                                   if path.startswith(INDEX_PREFIXES) and path not in protected)
     if any(path.startswith("control/") for path in generation_candidates):
         raise Blocker("legacy candidate list unexpectedly contains control documents")
     live = legacy_live(client, pointer) if verify_live else None
@@ -861,7 +939,7 @@ def legacy_plan(store, *, keep_generations=2, limit=0, client=None, verify_live=
         "version": 1, "kind": "ccrd-legacy-gc-plan", "scope": "legacy-generations",
         "observed_at": now(), "bucket": BUCKET, "current_dirs": sorted(active_dirs),
         "pointer_sha256": digest(pointer_raw),
-        "documents": {name: pointer["databases"][name]["documents"] for name in ("CCRD", "CW")},
+        "documents": {name: item['documents'] for name, item in pointer['databases'].items()},
         "live": live, "keep_generations": keep_generations,
         "kept": kept_old, "expiring": expiring, "deferred": deferred,
         "generations": rows,
@@ -874,13 +952,17 @@ def legacy_plan(store, *, keep_generations=2, limit=0, client=None, verify_live=
         "candidate_sizes": {path: sizes[path] for path in generation_candidates},
         "inventory_snapshot": sorted(sizes),
         "protected_sizes": {path: sizes[path] for path in protected if path in sizes},
+        'manifest_hashes': {item['path']: item['sha256'] for item in manifests.values()},
+        'control_hashes': control_hashes,
         "deletion_enabled": False,
     }
 
 
-def legacy_apply(store, report, *, client=None):
+def legacy_apply(store, report, *, client=None, checkpoint=None, batch_size=500):
     if report.get("kind") != "ccrd-legacy-gc-plan" or report.get("bucket") != BUCKET:
         raise ValueError("not a legacy CCRD GC plan")
+    if not 1 <= batch_size <= 1000:
+        raise ValueError('invalid legacy deletion batch size')
     pointer, pointer_raw, _, _ = legacy_pointer(store)
     if digest(pointer_raw) != report["pointer_sha256"]:
         raise Blocker("legacy CCRD pointer changed before deletion")
@@ -894,37 +976,62 @@ def legacy_apply(store, report, *, client=None):
             raise Blocker(f"kept legacy object changed before deletion: {path}")
 
     candidates = list(report.get("candidates", []))
-    if any(not path.startswith(LEGACY_PREFIX) for path in candidates):
-        raise Blocker("refusing to delete outside generations/")
+    if any(not path.startswith(INDEX_PREFIXES) for path in candidates):
+        raise Blocker("refusing to delete outside managed index prefixes")
     deleted_paths = set()
     deleted_bytes = 0
+    report.update(complete=False, batches=[])
+    def barrier():
+        if digest(store.read_bytes(BUCKET, LEGACY_CURRENT)) != report['pointer_sha256']:
+            raise Blocker('legacy CCRD pointer changed during deletion')
+        listed = store.list_files(BUCKET, INDEX_PREFIXES)
+        known_manifests = set(report['manifest_hashes']) - deleted_paths
+        actual_manifests = {path for path in listed if re.fullmatch(r'generations/[^/]+/manifest\.json', path)}
+        if actual_manifests != known_manifests:
+            raise Blocker('index manifest inventory changed during deletion')
+        for path, expected in report['manifest_hashes'].items():
+            if path not in deleted_paths and digest(read_json(store, path, cached=True)[1]) != expected:
+                raise Blocker('legacy generation manifest changed during deletion: ' + path)
+        if index_control_pins(store)[0] != report['control_hashes']:
+            raise Blocker('index control references changed during deletion')
+    def remove(paths):
+        nonlocal deleted_bytes
+        for start in range(0, len(paths), batch_size):
+            barrier()
+            batch = paths[start:start + batch_size]
+            receipt = {'paths': batch, 'status': 'submitted'}
+            report['batches'].append(receipt)
+            if checkpoint:
+                checkpoint(report)
+            store.delete(BUCKET, batch)
+            deleted_paths.update(batch)
+            deleted_bytes += sum(report['candidate_sizes'].get(path, 0) for path in batch)
+            receipt['status'] = 'accepted'
+            report['accepted'] = {'objects': len(deleted_paths), 'bytes': deleted_bytes}
+            if checkpoint:
+                checkpoint(report)
     try:
         # Remove the manifest first: a retry then treats the directory as an
         # orphan and can finish deleting its remaining files without guessing
         # a retention timestamp.
-        for directory in report["expiring"]:
-            manifest = f"generations/{directory}/manifest.json"
-            if manifest in candidates and manifest not in deleted_paths:
-                store.delete(BUCKET, [manifest])
-                deleted_paths.add(manifest)
-                deleted_bytes += report["candidate_sizes"].get(manifest, 0)
-        for path in candidates:
-            if path in deleted_paths:
-                continue
-            store.delete(BUCKET, [path])
-            deleted_paths.add(path)
-            deleted_bytes += report["candidate_sizes"].get(path, 0)
-        remaining = set(store.list_files(BUCKET, (LEGACY_PREFIX,)))
-        if any(path in remaining for path in candidates):
+        manifests = [f'generations/{directory}/manifest.json' for directory in report['expiring']]
+        remove([path for path in manifests if path in candidates])
+        remove([path for path in candidates if path not in deleted_paths])
+        remaining, _ = legacy_tree(store)
+        if set(candidates) & remaining.keys():
             raise RuntimeError("legacy deletion readback failed")
+        if any(remaining.get(path) != size for path, size in report['protected_sizes'].items()):
+            raise RuntimeError('retained legacy object disappeared or changed during collection')
+        barrier()
+        if client is not None:
+            report['live_after'] = legacy_live(client, pointer)
+        for batch in report['batches']:
+            batch['status'] = 'verified-deleted'
+        report['complete'] = True
     finally:
-        report["deleted"] = {"objects": len(deleted_paths), "bytes": deleted_bytes}
+        report["deleted"] = {"objects": len(deleted_paths) if report['complete'] else 0,
+                             "bytes": deleted_bytes if report['complete'] else 0}
         report["finished_at"] = now()
-    pointer_after, _ = read_json(store, LEGACY_CURRENT)
-    if pointer_after != pointer:
-        raise Blocker("legacy CCRD pointer changed during deletion")
-    if client is not None:
-        report["live_after"] = legacy_live(client, pointer)
     report["deletion_enabled"] = True
     report["applied"] = True
     return report
@@ -953,7 +1060,7 @@ def main(argv=None):
     parser.add_argument("--apply", action="store_true",
                         help="delete after planning; default is plan only")
     parser.add_argument("--keep-generations", type=int, default=2,
-                        help="current plus this many ancestors; OCR minimum 2, legacy minimum 1")
+                        help="total retained generations including current; OCR minimum 2, legacy minimum 1")
     parser.add_argument("--limit", type=int, default=0,
                         help="maximum generations to expire in this run; zero means all")
     parser.add_argument("--include-staging", action="store_true",
@@ -962,6 +1069,7 @@ def main(argv=None):
                         help="also re-read kept TXT bodies (OCR scope; slow)")
     parser.add_argument("--skip-live", action="store_true",
                         help="skip live CCRD acceptance; only valid outside Actions")
+    parser.add_argument('--storage', choices=('hub', 's3'), default='hub')
     parser.add_argument("--output", type=Path, default=Path("output/gc/ccrd-ocr-gc.json"))
     args = parser.parse_args(argv)
     if args.limit < 0:
@@ -978,7 +1086,14 @@ def main(argv=None):
         assert_workflow_context(".github/workflows/reader-gc-ccrd.yml")
 
     plan_kind = "ccrd-legacy-gc-plan" if args.scope == "legacy-generations" else "ccrd-ocr-gc-plan"
-    store = HubBucketStore()
+    if args.storage == 's3':
+        try:
+            from .reader_gc_store import CcrdCollectionStore
+        except ImportError:
+            from reader_gc_store import CcrdCollectionStore
+        store = CcrdCollectionStore()
+    else:
+        store = HubBucketStore()
     with httpx.Client() as client:
         try:
             if args.scope == "legacy-generations":
@@ -1003,15 +1118,15 @@ def main(argv=None):
             try:
                 report["phase"] = "planned"
                 journal(store, report)
-                if args.scope == "legacy-generations":
-                    legacy_apply(store, report, client=client)
-                else:
-                    last_save = [0.0]
-                    def checkpoint(value):
+                last_save = [0.0]
+                def checkpoint(value):
+                    if value.get('complete') or time.monotonic() - last_save[0] > 30:
                         write_output(args.output, value)
-                        if time.monotonic() - last_save[0] > 30:
-                            journal(store, value)
-                            last_save[0] = time.monotonic()
+                        journal(store, value)
+                        last_save[0] = time.monotonic()
+                if args.scope == "legacy-generations":
+                    legacy_apply(store, report, client=client, checkpoint=checkpoint)
+                else:
                     apply(store, report, client=client, checkpoint=checkpoint)
                 report["phase"] = "applied"
                 journal(store, report)

@@ -221,6 +221,24 @@ class ReaderGcCollectTests(unittest.TestCase):
         self.assertIn(live_ref['path'], store.objects[ASSETS])
         self.assertNotIn(old_ref['path'], store.objects[ASSETS])
 
+    def test_snapshot_tier_respects_another_live_root(self):
+        store = Store()
+        old, current = 'a' * 32, 'b' * 32
+        def snapshot(generation):
+            path = f'reader-index/generations/{generation}/reader_assets.json.gz'
+            raw = gzip.compress(b'{"v":1,"f":{}}')
+            store.objects[ASSETS][path] = raw
+            return {'bucket': ASSETS, 'path': path, 'bytes': len(raw), 'sha256': hashlib.sha256(raw).hexdigest()}
+        old_ref, current_ref = snapshot(old), snapshot(current)
+        catalog = {'version': 1, 'kind': 'reader-catalog', 'current': {'generation': current},
+                   'generations': {current: {'snapshot': current_ref}}, 'retired_generations': {
+                       old: {'snapshot': old_ref, 'replacement_acks': {'hf': True, 'pages': True}}}}
+        store.put(ASSETS, collector.CATALOG, catalog)
+        store.put(ASSETS, 'reader-index/retained-review.json', {'resources': [old_ref]})
+        result = collector.collect_retired_snapshots(store, Mock(), catalog, apply=True)
+        self.assertEqual(result['confirmed_deleted_objects'], 0)
+        self.assertIn(old_ref['path'], store.objects[ASSETS])
+
     def test_planned_primary_is_not_an_uploaded_dependency_but_real_candidate_is(self):
         store = Store()
         store.put(ASSETS, 'reader-index/v3/automation.json', {'version': 1,
