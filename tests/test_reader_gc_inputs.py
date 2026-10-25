@@ -60,6 +60,24 @@ class RetiredInputTests(unittest.TestCase):
         self.assertEqual(report["planned_objects"], 0)
         self.assertEqual(report["skipped"], {"ocr-registry-changed": 1})
 
+    def test_recently_released_root_is_kept_for_the_grace_period(self):
+        journal = self.store.objects[(inputs.ASSETS, inputs.JOURNAL)]
+        payload = json.loads(journal)
+        payload["retired_input_roots"][ROOT]["released_at"] = (
+            __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat())
+        self.store.put(inputs.ASSETS, inputs.JOURNAL, payload)
+        report = inputs.plan(self.store)
+        self.assertEqual(report["planned_objects"], 0)
+        self.assertEqual(report["skipped"], {"recently-released": 1})
+
+    def test_old_release_is_collected(self):
+        journal = self.store.objects[(inputs.ASSETS, inputs.JOURNAL)]
+        payload = json.loads(journal)
+        payload["retired_input_roots"][ROOT]["released_at"] = "2020-01-01T00:00:00+00:00"
+        self.store.put(inputs.ASSETS, inputs.JOURNAL, payload)
+        report = inputs.plan(self.store)
+        self.assertEqual(report["planned_objects"], 2)
+
     def test_ccrd_retained_input_is_kept(self):
         self.store.put(inputs.CCRD, "control/ocr-current.json", {"release": {"path": "releases/r/manifest.json"}})
         self.store.put(inputs.CCRD, "releases/r/manifest.json", {"exports": [{"path": "text/exports/e.json"}]})

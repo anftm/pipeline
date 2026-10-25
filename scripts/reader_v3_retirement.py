@@ -138,6 +138,8 @@ def _releasable_roots(store, active, ocr, generation):
             return "input-root-identity"
         item = roots.setdefault(root, {"bucket": publication.v3.shared.PDF_OCR_INPUT_BUCKET, "root": root,
                                        "source_sha256": source, "ocr_manifest_sha256": ocr["ocr_manifest_sha256"],
-                                       "released_after_generation": generation, "pages": 0})
+                                       "released_after_generation": generation, "pages": 0,
+                                       "released_at": datetime.now(timezone.utc)
+                                                       .replace(microsecond=0).isoformat()})
         item["pages"] += 1
     return roots or "no-ocr-inputs"

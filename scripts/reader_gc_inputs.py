@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import re
 
@@ -37,6 +38,12 @@ JOURNAL = "reader-index/v3/retirement.json"
 REGISTRY = "reader-index/pdf_ocr_manifest.json"
 ROOT = re.compile(r"objects/[0-9a-f]{2}/([0-9a-f]{64})/[0-9a-f]{16}/ocr-input")
 PAGE = re.compile(r"page-[0-9]{6}\.png")
+# Inputs are kept for a grace period after release. A later render-profile or
+# recognition change cannot reuse an OCR result whose page images are gone, so
+# deleting immediately forces a full re-render for any book we still need to
+# touch. The journal records released_at; older entries without it are treated
+# as long released.
+KEEP_DAYS = 30
 
 
 def ccrd_pinned_roots(store):
@@ -66,6 +73,7 @@ def plan(store, *, limit=0):
              for entry in registry.values() if entry.get("status") == "ready"}
     pinned = ccrd_pinned_roots(store)
     report = {"journal_roots": len(roots), "ccrd_pinned_roots": len(pinned), "skipped": {}, "roots": []}
+    cutoff = datetime.now(timezone.utc) - timedelta(days=KEEP_DAYS)
 
     def skip(reason):
         report["skipped"][reason] = report["skipped"].get(reason, 0) + 1
@@ -83,6 +91,15 @@ def plan(store, *, limit=0):
         if (item["source_sha256"], item.get("ocr_manifest_sha256")) not in ready:
             skip("ocr-registry-changed")
             continue
+        released_at = item.get("released_at")
+        if released_at:
+            try:
+                released = datetime.fromisoformat(str(released_at).replace("Z", "+00:00"))
+            except ValueError:
+                released = None
+            if released is not None and released > cutoff:
+                skip("recently-released")
+                continue
         files = store.list_files(INPUT, (root + "/",))
         pages = sorted(path for path in files if path.rsplit("/", 1)[0] == root and PAGE.fullmatch(path.rsplit("/", 1)[1]))
         if not pages:
