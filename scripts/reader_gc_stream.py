@@ -180,6 +180,10 @@ def compact_catalog_stream(chunks, compressed=False, *, current, acknowledged,
                     raise ValueError("invalid Reader catalog generation")
                 continue
             if section == "retired_generations":
+                if (acknowledged and item.get('withdrawal_reset_id')
+                        and item.get('replacement_acks') != {'hf': True, 'pages': True}):
+                    item = {**item, 'replacement_generation': current,
+                            'replacement_acks': {'hf': True, 'pages': True}, 'retired_at': stamp}
                 retired[name] = item
                 continue
             item.setdefault("generation", name)

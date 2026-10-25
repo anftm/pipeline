@@ -156,7 +156,7 @@ def clean_sidecar(sidecar, derived, static_indexes=()):
 
 
 def current_base_catalog(store):
-    """Read only the current entry of the potentially multi-GB catalog."""
+    """Keep release history without materializing historical reference arrays."""
     import ijson
     try:
         from .reader_gc_stream import HashingReader
@@ -168,27 +168,54 @@ def current_base_catalog(store):
         source = HashingReader(chunks)
         stream = io.BufferedReader(source)
         decoded = gzip.GzipFile(fileobj=stream) if compressed else stream
-        cursor, selected = None, None
-        # The generator sorts keys, so current precedes generations. Refuse an
-        # unexpected order rather than materializing every historical generation.
+        cursor, builder = None, ijson.ObjectBuilder()
+        skipped = None
         for prefix, event, value in ijson.parse(decoded, use_float=True):
+            if skipped is not None:
+                if prefix == skipped or prefix.startswith(skipped + '.'):
+                    continue
+                skipped = None
             if prefix == 'current.generation' and event == 'string':
                 cursor = value
             if prefix == 'generations' and event == 'map_key' and cursor is None:
                 raise ValueError('catalog cursor must precede its generations')
-            if cursor and (prefix == 'generations.' + cursor or prefix.startswith('generations.' + cursor + '.')):
-                if selected is None:
-                    selected = ijson.ObjectBuilder()
-                selected.event(event, value)
-        if cursor is None or selected is None:
+            if (prefix.startswith('generations.') and prefix.count('.') == 1
+                    and prefix != 'generations.' + str(cursor)
+                    and event == 'map_key' and value == 'references'):
+                skipped = prefix + '.references'
+                continue
+            builder.event(event, value)
+        while stream.read(65536):
+            pass
+        catalog = builder.value
+        if (not isinstance(catalog, dict) or catalog.get('version') != 1
+                or catalog.get('kind') != 'reader-catalog'
+                or cursor is None or cursor not in catalog.get('generations', {})):
             raise ValueError('catalog current generation is missing')
-        return {'version': 1, 'kind': 'reader-catalog', 'current': {'generation': cursor},
-                'generations': {cursor: selected.value}}, source.hash.hexdigest()
+        return catalog, source.hash.hexdigest()
 
     if hasattr(store, 'read_graph_json'):
         return store.read_graph_json(ASSETS, 'reader-index/reader_catalog.json', parser=parse)
     raw = store.read_bytes(ASSETS, 'reader-index/reader_catalog.json')
     return parse([raw], raw.startswith(b'\x1f\x8b'))
+
+
+def retain_withdrawal_history(legacy, before, generation, reset_id):
+    """Preserve original release identities until real consumers accept replacement."""
+    history = dict(legacy.get('retired_generations', {}))
+    for previous_generation, entry in before['generations'].items():
+        if previous_generation == generation:
+            continue
+        history.setdefault(previous_generation, {
+            **{key: value for key, value in entry.items() if key != 'references'},
+            'replacement_generation': generation,
+            'replacement_acks': {'hf': False, 'pages': False},
+            'withdrawal_reset_id': reset_id,
+            'withdrawn_at': legacy['current'].get('published_at'),
+        })
+    legacy['generations'] = {generation: legacy['generations'][generation]}
+    if history:
+        legacy['retired_generations'] = history
 
 
 def withdraw(store, options, *, apply=False):
@@ -234,12 +261,18 @@ def withdraw(store, options, *, apply=False):
     legacy, generation = lifecycle.catalog_generation(cleaned, before)
     # This reset explicitly retires all prior document routes. The current
     # non-document sidecar owns everything retained after withdrawal.
-    legacy['generations'] = {generation: legacy['generations'][generation]}
-    legacy.pop('retired_generations', None)
+    retain_withdrawal_history(legacy, before, generation, reset_id)
     snapshot_path = f'reader-index/generations/{generation}/reader_assets.json.gz'
     legacy['generations'][generation]['snapshot'] = publication.metadata(ASSETS, snapshot_path, packed)
     snapshot = publication.metadata(ASSETS, f'reader-index/snapshots/{digest(packed)}/reader_assets.json.gz', packed)
     archives = {SIDECAR: raw, DERIVED: derived_raw}
+    archives['reader-index/catalog-release-history.json'] = encode({
+        'version': 1, 'kind': 'reader-catalog-release-history',
+        'original_catalog_sha256': catalog_sha,
+        'current': before['current'], 'retired_generations': before.get('retired_generations', {}),
+        'generations': {key: {field: value for field, value in entry.items() if field != 'references'}
+                        for key, entry in before['generations'].items()},
+    })
     if pointer:
         archives['reader-index/v3/previous-pointer.json'] = encode(pointer)
         archives['reader-index/v3/previous-catalog.json'] = encode(catalog)
@@ -370,7 +403,7 @@ def normalize_withdrawn(store, receipt, *, apply=False):
     packed = gzip.compress(encode(sidecar), mtime=0)
     before, _ = current_base_catalog(store)
     legacy, generation = lifecycle.catalog_generation(sidecar, before)
-    legacy['generations'] = {generation: legacy['generations'][generation]}
+    retain_withdrawal_history(legacy, before, generation, receipt['reset_id'])
     path = f'reader-index/generations/{generation}/reader_assets.json.gz'
     legacy['generations'][generation]['snapshot'] = publication.metadata(ASSETS, path, packed)
     snapshot = publication.metadata(ASSETS, f'reader-index/snapshots/{digest(packed)}/reader_assets.json.gz', packed)

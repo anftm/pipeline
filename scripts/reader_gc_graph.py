@@ -95,7 +95,7 @@ def decode(raw: bytes) -> dict:
 class ReferenceGraph:
     def __init__(self, store, include_input: bool = True, generation_grace_days: int = 0,
                  progress=None, workers: int = 8, max_rounds: int = 20, full_passes: int = 3,
-                 deadline: float | None = None):
+                 deadline: float | None = None, processing_supersessions=None):
         self.store = store
         self.include_input = include_input
         self.files = {}
@@ -140,6 +140,7 @@ class ReferenceGraph:
         self.externally_traversed = set()
         self.active_external_pin = False
         self.released_processing = {}
+        self.processing_supersessions = processing_supersessions or {}
 
     def read_catalog(self, ref):
         parser = functools.partial(catalog_json, grace_days=self.generation_grace_days)
@@ -381,15 +382,30 @@ class ReferenceGraph:
                     if isinstance(generation, dict) and reader_lifecycle.generation_live(
                             generation, current, grace_days=self.generation_grace_days):
                         self.walk(generation, bucket, origin, explicit, "generation")
+                for entry in (value.get('retired_generations') or {}).values():
+                    if (isinstance(entry, dict) and entry.get('withdrawal_reset_id')
+                            and entry.get('replacement_acks') != ACKED and entry.get('snapshot')):
+                        self.walk(entry['snapshot'], bucket, origin, explicit, 'snapshot')
                 return
             if origin.startswith("reader-index/processing/") and value.get("status") == "released":
                 generation = value.get("generation")
-                if self.handoff_resolved(generation):
+                supersession = self.processing_supersessions.get((bucket, origin))
+                if supersession:
+                    current = self.catalog.get('current', {}).get('generation')
+                    accepted = self.catalog.get('generations', {}).get(current, {})
+                    if (supersession.get('record_sha256') != self.loaded_digests.get((bucket, origin))
+                            or supersession.get('original_generation') != generation
+                            or supersession.get('replacement_generation') != current
+                            or supersession.get('sidecar_sha256') != accepted.get('sidecar_sha256')):
+                        self.blockers.add(f"processing supersession identity changed: {bucket}:{origin}")
+                        supersession = None
+                if self.handoff_resolved(generation) or supersession:
                     if value.get('kind') == 'reader-processing-roots':
                         self.released_processing[self.origin or (bucket, origin)] = {
                             'generation': generation, 'sha256': self.loaded_digests.get((bucket, origin)),
                             'operation': value.get('operation'), 'run': value.get('run'),
-                            'released_at': value.get('released_at')}
+                            'released_at': value.get('released_at'),
+                            **({'supersession': supersession} if supersession else {})}
                     return
                 # Resolve against every catalog version read during the scan;
                 # until then the root's resources stay protected.

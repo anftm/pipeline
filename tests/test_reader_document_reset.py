@@ -1,9 +1,11 @@
 import gzip
+import hashlib
 import json
 import unittest
 
 from scripts import reader_document_reset as reset, reader_lifecycle as lifecycle
 from scripts import publish_reader_v3 as publication
+from scripts import reader_gc_stream, reader_gc_collect
 from tests.test_publish_reader_v3 import Store
 
 
@@ -59,6 +61,49 @@ class DocumentResetTests(unittest.TestCase):
         report = reset.withdraw(store, {'reset_id': 'documents-20261025'}, apply=True)
         self.assertEqual(report['status'], 'withdrawn')
         self.assertEqual(publication.current(store)[1]['files'], {})
+
+    def test_withdrawal_preserves_history_without_claiming_consumer_acceptance(self):
+        store, before = self.fixture()
+        path = 'reader-index/reader_catalog.json'
+        catalog = reset.decode(store.read_bytes(reset.ASSETS, path))
+        current = catalog['current']['generation']
+        old, retired = 'c' * 32, 'd' * 32
+        catalog['generations'][old] = {
+            'generation': old, 'status': 'superseded', 'published_at': '2026-10-01T00:00:00+00:00',
+            'superseded_at': '2026-10-02T00:00:00+00:00',
+            'sidecar_sha256': 'e' * 64, 'replacement_acks': {'hf': False, 'pages': False},
+            'references': [{'bucket': reset.PAGES, 'path': 'objects/old/page.webp'}],
+        }
+        tombstone = {'replacement_generation': old, 'replacement_acks': {'hf': True, 'pages': True},
+                     'sidecar_sha256': 'f' * 64, 'retired_at': '2026-10-01T00:00:00+00:00'}
+        catalog['retired_generations'] = {retired: tombstone}
+        raw = reset.encode(catalog)
+        store.objects[reset.ASSETS, path] = raw
+        reduced, digest = reset.current_base_catalog(store)
+        self.assertEqual(digest, hashlib.sha256(raw).hexdigest())
+        self.assertEqual(reduced['generations'][current], catalog['generations'][current])
+        self.assertNotIn('references', reduced['generations'][old])
+        reset.withdraw(store, {'reset_id': 'documents-history-20261025'}, apply=True)
+        after = reset.decode(store.read_bytes(reset.ASSETS, path))
+        self.assertEqual(after['retired_generations'][retired], tombstone)
+        for identity in [old, current]:
+            entry = after['retired_generations'][identity]
+            self.assertEqual(entry['sidecar_sha256'], catalog['generations'][identity]['sidecar_sha256'])
+            self.assertNotIn('references', entry)
+            self.assertEqual(entry['replacement_acks'], {'hf': False, 'pages': False})
+        archive = 'reader-index/gc/document-reset/documents-history-20261025/metadata/reader-index--catalog-release-history.json.gz'
+        history = reset.decode(store.read_bytes(reset.ASSETS, archive))
+        self.assertEqual(history['original_catalog_sha256'], digest)
+        self.assertEqual(set(history['generations']), {old, current})
+        packed = reset.encode(after)
+        compacted, _, _ = reader_gc_stream.compact_catalog_stream([packed], current=after['current']['generation'],
+                                                                 acknowledged=False)
+        self.assertNotIn(f'reader-index/generations/{current}/reader_assets.json.gz',
+                         reader_gc_collect.retired_snapshots(reset.decode(compacted)))
+        compacted, _, _ = reader_gc_stream.compact_catalog_stream([packed], current=after['current']['generation'],
+                                                                 acknowledged=True)
+        confirmed = reset.decode(compacted)
+        self.assertEqual(confirmed['retired_generations'][old]['replacement_acks'], {'hf': True, 'pages': True})
 
     def test_delete_classification_excludes_originals_and_independent_images(self):
         root = 'objects/aa/' + 'a' * 64 + '/' + 'b' * 16

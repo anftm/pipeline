@@ -210,6 +210,8 @@ def retire_catalog(store, identity, consumers, grace_days, *, apply):
 def retired_snapshots(catalog):
     result = set()
     for generation, entry in catalog.get("retired_generations", {}).items():
+        if entry.get('withdrawal_reset_id') and entry.get('replacement_acks') != {'hf': True, 'pages': True}:
+            continue
         snapshot = entry.get("snapshot")
         if not snapshot:
             continue
@@ -538,7 +540,26 @@ def main():
             report["complete"] = True
             print(json.dumps({k: v for k, v in report["collection"].items() if k != "batches"}), flush=True)
             return
-        reference_graph = graph.ReferenceGraph(store, generation_grace_days=args.grace_days, progress=progress)
+        try:
+            from . import reader_processing_history
+        except ImportError:
+            import reader_processing_history
+        fence.check()
+        supersessions = reader_processing_history.reconcile(store, catalog, consumers)
+        report['processing_supersessions'] = [{'bucket': bucket, 'path': path, **value}
+            for (bucket, path), value in sorted(supersessions.items())]
+        save()
+        if args.apply and supersessions:
+            # Save original generation, exact record bytes and current consumer
+            # proof before collecting any historical upload record or content.
+            audit = encode({'version': 1, 'kind': 'reader-processing-supersessions',
+                            'records': report['processing_supersessions']})
+            audit_path = f'reader-index/gc/{run}/processing-supersessions-{hashlib.sha256(audit).hexdigest()}.json'
+            store.put_bytes(ASSETS, audit_path, audit)
+            if store.read_bytes(ASSETS, audit_path) != audit:
+                raise RuntimeError('processing supersession audit readback mismatch')
+        reference_graph = graph.ReferenceGraph(store, generation_grace_days=args.grace_days, progress=progress,
+                                              processing_supersessions=supersessions)
         scanned = reference_graph.build()
         report["graph"] = scanned
         save()
