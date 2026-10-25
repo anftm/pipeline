@@ -325,6 +325,13 @@ class S3BucketStore:
             return result
         items, shards = {}, []
         for prefix in prefixes:
+            # Control trees contain thousands of one-file directories. Listing
+            # each directory separately multiplies API calls and can leave a
+            # collector throttled in its pre-delete barrier for hours. A flat
+            # paginated listing still returns every key, size and current ETag.
+            if prefix.startswith(('reader-index/', 'control/')):
+                shards.append(prefix)
+                continue
             direct, found = retry_s3(lambda prefix=prefix: self._shards(client, name, prefix))
             items.update(direct)
             shards.extend(found)

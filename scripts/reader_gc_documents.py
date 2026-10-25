@@ -350,6 +350,7 @@ def collect(store, bucket, prefixes, files, targets, *, workers, journal, barrie
             journal['accepted_objects'] = sum(batch_sizes[key] for key in accepted)
             checkpoint(journal)
     barrier()
+    last_barrier[0] = time.monotonic()
     with ThreadPoolExecutor(max_workers=workers) as pool:
         for future in as_completed([pool.submit(execute, i) for i in range(len(chunks))]):
             future.result()
@@ -444,6 +445,7 @@ def main():
     if audit:
         store.put_bytes(reset.ASSETS, prefix + '/processing-retirement.jsonl.gz', audit.read_bytes())
     def barrier():
+        print(json.dumps({'phase': 'verify-before-delete', 'scope': args.scope}), flush=True)
         fence.check()
         def check(item):
             (b, p), expected = item
@@ -459,6 +461,7 @@ def main():
             for path, expected in plan.get('control_etags', {}).items():
                 if path in latest and (not expected or store.object_etags[bucket].get(path) != expected):
                     raise RuntimeError('selected control changed before deletion: ' + path)
+        print(json.dumps({'phase': 'verified-before-delete', 'scope': args.scope}), flush=True)
     collect(store, bucket, prefixes, files, targets, workers=args.workers, journal=report,
             barrier=barrier, checkpoint=checkpoint)
 

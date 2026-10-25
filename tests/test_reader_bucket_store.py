@@ -220,6 +220,25 @@ class ReaderBucketStoreTests(unittest.TestCase):
         self.assertEqual(len(files), 17)
         self.assertEqual(store.root_etags["vomebook/reader-assets-v2"]["objects/0a/index.json"], '"objects/0a/"')
 
+    def test_control_inventory_batches_tiny_directories_and_retains_current_etags(self):
+        client = Mock()
+        calls = []
+        def paginate(Bucket, Prefix, **options):
+            calls.append((Prefix, options))
+            self.assertNotIn('Delimiter', options)
+            for start in (0, 1000, 2000):
+                yield {'Contents': [{'Key': f'{Prefix}generations/{i:032x}/catalog.json',
+                                     'ETag': f'"{i}"', 'Size': 123} for i in range(start, start + 1000)]}
+        client.get_paginator.return_value.paginate.side_effect = paginate
+        store = self.store(client)
+        store.root_predicate = lambda path: True
+        files = store.list_files('vomebook/reader-assets-v2', ('reader-index/',))
+        self.assertEqual(len(files), 3000)
+        self.assertEqual(calls, [('reader-index/', {})])
+        last = 'reader-index/generations/' + f'{2999:032x}' + '/catalog.json'
+        self.assertEqual(store.root_etags['vomebook/reader-assets-v2'][last], '"2999"')
+        self.assertEqual(store.object_sizes['vomebook/reader-assets-v2', last], 123)
+
     def test_s3_root_listing_reads_index_dirs_without_full_inventory(self):
         calls = []
         def paginate(Bucket, Prefix, Delimiter=None):
