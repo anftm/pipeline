@@ -103,7 +103,7 @@ class ForceOcrBookTests(unittest.TestCase):
         self.assertTrue(report["complete"])
         entry = report["entry"]
         self.assertEqual(entry["ocr_pages"], 2)
-        self.assertEqual(entry["reader_presentation"], self.presentation)
+        self.assertEqual(entry['reader_presentation'], {**self.presentation, 'policy': 'djvu-only-page-stream-v1'})
         self.assertFalse(entry["image_rendered"])
         self.assertIsNone(entry["page_manifest"])
         self.assertTrue(entry["force_ocr_native"])

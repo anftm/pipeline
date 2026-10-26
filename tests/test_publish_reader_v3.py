@@ -395,7 +395,7 @@ class V3PublicationTests(unittest.TestCase):
                 "primary": primary, "ocr_manifest": ocr_ref, "dpi": 150}
         with tempfile.TemporaryDirectory() as directory:
             report = publish.build_stage(self.store, spec, Path(directory), apply=True)
-        self.assertEqual(report["components"]["preview"], "ready")
+        self.assertEqual(report["components"]["preview"], "skipped")
         self.assertEqual(report["components"]["text"], "ready")
         self.assertNotIn((publish.ASSETS, publish.POINTER), self.store.objects)
         publish.promote(self.store, report["candidate"], None, apply=True)
@@ -417,7 +417,7 @@ class V3PublicationTests(unittest.TestCase):
         before = v3.verify_reading(preview, lambda ref: self.store.read_bytes(ref["bucket"], ref["path"]))
         self.assertIsNone(before["text_layer"])
         self.assertEqual(before["components"]["text"], "pending")
-        self.assertEqual(before["components"]["preview"], "ready")
+        self.assertEqual(before["components"]["preview"], "skipped")
         # The independently built text bundle uses exactly the existing page
         # resources. No image/SVG generation is needed for this later upgrade.
         full = self.candidate()
@@ -453,7 +453,7 @@ class V3PublicationTests(unittest.TestCase):
         with patch.object(v3, "backfill_text", side_effect=AssertionError("must not require OCR")), \
                 patch.object(publish, "native_ocr", side_effect=AssertionError("must not extract text")):
             result = publish.build_stage(self.store, spec, self.bundle / "preview-only", apply=True)
-        self.assertEqual(result["components"]["preview"], "ready")
+        self.assertEqual(result["components"]["preview"], "skipped")
         self.assertEqual(result["components"]["text"], "pending")
 
 
@@ -521,7 +521,7 @@ class V3PublicationTests(unittest.TestCase):
         ref2 = self.candidate("b" * 64, "repo\0second.pdf")
         def corrupt(bucket, additions):
             for local, path in additions:
-                raw = b"bad" if path.endswith(".png") else Path(local).read_bytes()
+                raw = b"bad" if path.endswith("document.pdf") else Path(local).read_bytes()
                 self.store.put_bytes(bucket, path, raw)
         self.store.put_files = corrupt
         with self.assertRaises(ValueError):

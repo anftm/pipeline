@@ -74,6 +74,8 @@ def add_pdf_streams(files: dict, payload: dict, bucket: str) -> None:
     for key, entry in payload.get("files", {}).items():
         if not isinstance(entry, dict) or entry.get("status") not in {"ready", "rendered"}:
             continue
+        if entry.get('source_format') != 'djvu':
+            continue
         page_manifest = entry.get("page_manifest")
         path = page_manifest.get("path") if isinstance(page_manifest, dict) else ""
         if isinstance(path, str) and path.endswith("/page-manifest.json"):

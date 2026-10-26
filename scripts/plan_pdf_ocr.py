@@ -118,13 +118,12 @@ def plan(records: list[dict], workers: int = 4, current: dict | None = None,
                     inspected["_render_cost"] = render_estimator(inspected, source)
                 return inspected
             probe = lin_pdf_text.probe(source) if lin_pdf_text.applies(item) else pdf_ocr.probe_pdf(source)
-            presentation = pdf_ocr.reader_presentation(source)
+            presentation = {**pdf_ocr.reader_presentation(source), "strategy": "preserve-pdf",
+                            "policy": "djvu-only-page-stream-v1"}
+            item.pop("force_image_render", None)
             inspected = {**item, "source_sha256": digest, "source_bytes": size, "probe": probe,
                       "reader_presentation": presentation,
-                      "page_count": probe["page_count"], "status": "planned", "profile": pdf_ocr.asset_profile(),
-                      **({"force_image_render": True} if native_text_stream
-                         and probe["classification"] == "native-text"
-                         and presentation["strategy"] != "preserve-pdf" else {})}
+                       "page_count": probe["page_count"], "status": "planned", "profile": pdf_ocr.asset_profile()}
             if render_estimator is not None:
                 inspected["_render_cost"] = render_estimator(inspected, source)
             return inspected

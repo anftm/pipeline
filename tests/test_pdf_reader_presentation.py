@@ -102,7 +102,7 @@ class PdfReaderPresentationTests(unittest.TestCase):
     def test_small_rgb_is_not_assumed_binary_and_mixed_bitonal_book_is_preserved(self):
         color = self.source(("RGB",))
         self.assertLess(color.stat().st_size, 10 * 1024**2)
-        self.assertEqual(pdf_ocr.reader_presentation(color)["strategy"], "page-stream")
+        self.assertEqual(pdf_ocr.reader_presentation(color)["strategy"], "preserve-pdf")
         mixed = pdf_ocr.reader_presentation(self.source(("RGB", "1")))
         self.assertEqual(mixed["strategy"], "preserve-pdf")
         self.assertEqual(mixed["inspected_pages"], 2)

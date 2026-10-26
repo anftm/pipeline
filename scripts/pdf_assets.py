@@ -313,13 +313,15 @@ def _image_dimensions(path: Path) -> tuple[int, int]:
 
 
 def _render(pdf: Path, page: int, directory: Path, extension: str = "pdf") -> Path:
+    if extension.lower() != 'djvu':
+        raise ValueError('only DjVu documents may generate Reader page images')
+    with pdf.open('rb') as source:
+        if source.read(8) != b'AT&TFORM':
+            raise ValueError('DjVu page images require original DjVu bytes')
     from PIL import Image
     stem = directory / f"page-{page:06d}"
-    if extension == "djvu":
-        _run(["ddjvu", "-format=ppm", f"-page={page}", str(pdf), str(stem.with_suffix(".ppm"))])
-    else:
-        _run(["pdftocairo", "-tiff", "-singlefile", "-f", str(page), "-l", str(page), str(pdf), str(stem)])
-    pixels = stem.with_suffix(".tif") if extension != "djvu" else stem.with_suffix(".ppm")
+    _run(["ddjvu", "-format=ppm", f"-page={page}", str(pdf), str(stem.with_suffix(".ppm"))])
+    pixels = stem.with_suffix('.ppm')
     jxl = stem.with_suffix(".jxl")
     try:
         with Image.open(pixels) as image:
@@ -335,6 +337,10 @@ def _render(pdf: Path, page: int, directory: Path, extension: str = "pdf") -> Pa
 def build_item(item: dict, source: Path, bundle: Path) -> dict:
     source_sha, actual_bytes = digest(source)
     base = {**item, "source_sha256": source_sha, "source_bytes": actual_bytes}
+    if str(item.get('extension') or '').lower() != 'djvu':
+        return {**base, 'status': 'skipped', 'strategy': 'preserve-pdf',
+                'reason': 'document-page-streams-djvu-only', 'decision_profile': 'pdf-primary-only-v1'}
+    base['source_format'] = 'djvu'
     risk_candidate = bool(item.get("range_risk_candidate"))
     if actual_bytes < LARGE_BYTES and not risk_candidate:
         return {**base, "status": "skipped", "reason": "below-minimum-100-mib", "strategy": "none",
@@ -457,6 +463,8 @@ def remote_sidecar(api: HfApi, repo: str) -> dict:
 def update_sidecar(sidecar: dict, results: list[dict]) -> bytes:
     updated = {"v": 1, "f": dict(sidecar.get("f", {}))}
     for result in results:
+        if result.get('source_format') != 'djvu' and str(result.get('extension') or '').lower() != 'djvu':
+            continue
         updated["f"].pop(result.get("key"), None)
         if result.get("status") != "ready":
             continue

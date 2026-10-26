@@ -109,6 +109,8 @@ def primary_spec(key, entry):
         spec["render_manifest"] = publication.v3.resource({"bucket": shared.PDF_PAGES_BUCKET,
             **entry["render_manifest"], "role": "provenance"})
     djvu = entry.get("source_format") == "djvu"
+    if not djvu:
+        spec.update(vector_previews=False, reading_policy='pdf-primary-only-v1')
     if djvu and entry.get("source_kind", "upstream") != "upstream":
         raise ValueError("native DjVu primary must be the pinned original")
     suffix = ".djvu" if djvu else ".pdf"

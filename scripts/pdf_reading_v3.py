@@ -477,6 +477,8 @@ def page_map(pdf_bytes, source_sha256):
 
 def render_previews(spec, read, mapping):
     """Adopt checksummed reading images from the account's completed render."""
+    if primary_kind(resource(spec['primary'])) != 'djvu':
+        return {}
     ref = spec.get("render_manifest")
     if ref is None:
         return {}
@@ -511,14 +513,17 @@ def render_previews(spec, read, mapping):
 
 
 def generate_previews(spec, read, bundle, *, start=1, end=None, dpi=150, max_pixels=50000000):
-    """Generate resumable page ranges, choosing lossless PNG for protected pages."""
-    import pymupdf
-    import io
-    from PIL import Image
+    """Only DjVu needs a document page stream; PDFs use their original bytes.
+
+    Legacy PDF previews may still be verified as history, but neither a stale
+    spec nor a shared render may create/adopt new PDF reading images.
+    """
     if type(dpi) is not int or not 72 <= dpi <= 600 or type(max_pixels) is not int or max_pixels < 4096:
         raise ValueError("invalid preview render budget")
     source = text.sha(spec["source_sha256"])
     kind = primary_kind(resource(spec["primary"]))
+    if kind == 'pdf':
+        return {**spec, 'previews': [], 'require_complete_preview': False}
     raw = verified_read(spec["primary"], read)
     mapping = primary_page_map(raw, source, kind)
     shared_previews = render_previews(spec, read, mapping)
@@ -526,87 +531,15 @@ def generate_previews(spec, read, bundle, *, start=1, end=None, dpi=150, max_pix
     end = count if end is None else end
     if type(start) is not int or type(end) is not int or not 1 <= start <= end <= count:
         raise ValueError("invalid preview generation range")
-    if kind == "djvu":
-        return _djvu_previews(spec, raw, mapping, bundle, start, end, dpi, max_pixels, shared_previews)
-    vector = spec.get("vector_previews", False)
-    recipe_options = {"source": source, "primary": spec["primary"], "dpi": dpi,
-                      "max_pixels": max_pixels, "codec_profile": reader_page_codec.PROFILE,
-                      "policy": "mixed-preview-jxl-v1"}
-    if vector:
-        recipe_options["vector_previews"] = "svg-paths-v1"
-    recipe = text.digest(recipe_options)
-    root = Path("objects") / source[:2] / source / recipe[:16]
-    generated = []
-    with pymupdf.open(stream=raw, filetype="pdf") as document:
-        for number in range(start, end + 1):
-            if number in shared_previews:
-                generated.append(shared_previews[number])
-                continue
-            geometry = mapping["pages"][number - 1]
-            if geometry["classification"] == "unknown":
-                raise ValueError("unknown page inspection requires retry before stream generation")
-            page = document[number - 1]
-            if vector and geometry["classification"] == "native-vector" and not page.get_image_info():
-                try:
-                    root_element = ET.fromstring(page.get_svg_image(text_as_path=True))
-                    root_element.insert(0, ET.Element("{http://www.w3.org/2000/svg}rect",
-                        {"width": "100%", "height": "100%", "fill": "white"}))
-                    encoded = ET.tostring(root_element, encoding="utf-8")
-                    width, height = validate_vector_svg(encoded)
-                except (ValueError, ET.ParseError):
-                    encoded = None
-                if encoded:
-                    path = bundle / root / "preview" / f"page-{number:06d}.svg"
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_bytes(encoded)
-                    ref = {"bucket": shared.PDF_PAGES_BUCKET, "path": path.relative_to(bundle).as_posix(),
-                           "sha256": hashlib.sha256(encoded).hexdigest(), "bytes": len(encoded), "role": "runtime"}
-                    generated.append({"page": number, "page_identity": geometry["identity"], "codec": "svg",
-                        "width": math.ceil(width), "height": math.ceil(height), "resource": ref,
-                        "recipe": {"policy": "svg-paths-v1", "role": "preview-not-archival"}})
-                    continue
-            protected = geometry["classification"] == "bitonal-image"
-            requested_dpi = max(dpi, 300) if protected else dpi
-            scale = min(requested_dpi / 72, math.sqrt(max_pixels / (geometry["width"] * geometry["height"])))
-            # Pixmap dimensions are rounded upwards by the PDF engine.
-            while True:
-                pixmap = document[number - 1].get_pixmap(matrix=pymupdf.Matrix(scale, scale),
-                                                       colorspace=pymupdf.csRGB, alpha=False)
-                if pixmap.width * pixmap.height <= max_pixels:
-                    break
-                scale *= .99
-            image = Image.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples)
-            stream = io.BytesIO()
-            codec = "png" if protected else "jxl"
-            path = bundle / root / "preview" / f"page-{number:06d}.{codec}"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            if protected:
-                image.save(stream, 'PNG')
-                encoded = stream.getvalue()
-                path.write_bytes(encoded)
-            else:
-                reader_page_codec.encode_image(image, path)
-                encoded = path.read_bytes()
-            ref = {"bucket": shared.PDF_PAGES_BUCKET, "path": path.relative_to(bundle).as_posix(),
-                   "sha256": hashlib.sha256(encoded).hexdigest(), "bytes": len(encoded), "role": "runtime"}
-            generated.append({"page": number, "page_identity": geometry["identity"], "codec": codec,
-                              "width": image.width, "height": image.height, "resource": ref,
-                              "recipe": {"requested_dpi": requested_dpi, "actual_scale": scale,
-                                         "max_pixels": max_pixels, "role": "preview-not-archival"}})
-            image.close()
-    existing = {entry["page"]: entry for entry in spec.get("previews", [])}
-    for entry in generated:
-        existing[entry["page"]] = entry
-    return {**spec, "previews": [existing[p] for p in sorted(existing)]}
+    return _djvu_previews(spec, raw, mapping, bundle, start, end, dpi, max_pixels, shared_previews)
 
 
 def _djvu_previews(spec, raw, mapping, bundle, start, end, dpi, max_pixels, shared_previews=None):
-    """DjVu previews follow the PDF rules: lossless PNG for bitonal pages.
+    """The sole document page stream: lossless PNG for bitonal DjVu pages.
 
     A bitonal page at its native resolution is stored as the exact 1-bit JB2
     bitmap. Pages are never upsampled past their native DjVu resolution.
     """
-    import io
     import tempfile
     from PIL import Image
     source = spec["source_sha256"]
@@ -690,7 +623,13 @@ def validate_reading_manifest(manifest):
         raise ValueError("incomplete advertised preview")
     if manifest.get("text_layer"):
         resource(manifest["text_layer"])
-    expected = {"document": "ready", "preview": "ready" if preview["complete"] else "pending",
+    skipped = preview.get('status') == 'skipped'
+    if 'status' in preview and not skipped:
+        raise ValueError('invalid preview policy')
+    if skipped and (manifest['primary']['kind'] != 'pdf' or preview['complete']
+                    or preview['ready_pages'] or preview['partitions']):
+        raise ValueError('only a primary PDF can skip document previews')
+    expected = {"document": "ready", "preview": "skipped" if skipped else "ready" if preview["complete"] else "pending",
                 "text": "ready" if manifest.get("text_layer") else "pending", "searchable_pdf": "skipped"}
     if any(manifest["components"].get(k) != v for k, v in expected.items()):
         raise ValueError("invalid reading component state")
@@ -698,7 +637,7 @@ def validate_reading_manifest(manifest):
 
 
 def build_reading(spec, read, bundle):
-    """Build a candidate with a full PDF and explicitly complete/partial previews."""
+    """Build primary-PDF reading, or native DjVu with required page previews."""
     source = text.sha(spec["source_sha256"])
     primary = resource(spec["primary"])
     try:
@@ -707,7 +646,7 @@ def build_reading(spec, read, bundle):
         raise ValueError("primary must be a reading-bucket PDF or native DjVu") from None
     mapping = primary_page_map(verified_read(primary, read), source, kind)
     count = len(mapping["pages"])
-    previews = spec.get("previews", [])
+    previews = spec.get("previews", []) if kind == 'djvu' else []
     seen = set()
     for entry in previews:
         number = entry.get("page")
@@ -731,12 +670,15 @@ def build_reading(spec, read, bundle):
         if abs((width / height) / (geometry["width"] / geometry["height"]) - 1) > .01:
             raise ValueError("preview aspect ratio mismatch")
     complete = seen == set(range(1, count + 1))
-    if spec.get("require_complete_preview", False) and not complete:
+    if kind == 'djvu' and spec.get("require_complete_preview", False) and not complete:
         raise ValueError("incomplete whole-book preview")
     text_ref = spec.get("text_layer")
     if text_ref:
         verify_text_bundle(text_ref, read, source, count, page_geometries=mapping["pages"])
-    recipe = text.digest({"version": 3, "spec": spec, "page_map": mapping})
+    identity = {"version": 3, "spec": spec, "page_map": mapping}
+    if kind == 'pdf':
+        identity['reading_policy'] = 'pdf-primary-only-v1'
+    recipe = text.digest(identity)
     root = Path("objects") / source[:2] / source / recipe[:16]
     map_ref = stored(bundle / root / "page-map.json.gz", bundle, mapping, compressed=True)
     partitions = []
@@ -763,6 +705,9 @@ def build_reading(spec, read, bundle):
                                "text": "ready" if text_ref else "pending", "correction": "pending",
                                "searchable_pdf": "skipped"},
                 "provenance": {"builder": "pdf-reading-v3-v1", "recipe_sha256": recipe}}
+    if kind == 'pdf':
+        manifest['preview']['status'] = 'skipped'
+        manifest['components']['preview'] = 'skipped'
     validate_reading_manifest(manifest)
     ref = stored(bundle / root / "reading-manifest.json", bundle, manifest)
     return ref, manifest
@@ -785,8 +730,6 @@ def verify_reading(ref, read, *, read_workers=4):
     if type(preview.get("complete")) is not bool or preview.get("page_count") != count:
         raise ValueError("invalid preview completeness")
     seen, previous = set(), 0
-    from PIL import Image
-    import io
     for partition in preview["partitions"]:
         start, end = partition["start"], partition["end"]
         if (type(start) is not int or type(end) is not int or not previous < start <= end <= count
@@ -829,11 +772,18 @@ def verify_reading(ref, read, *, read_workers=4):
                            read_workers=read_workers)
     components = manifest["components"]
     if (components.get("document") != "ready"
-            or components.get("preview") != ("ready" if preview["complete"] else "pending")
+            or components.get("preview") != ('skipped' if preview.get('status') == 'skipped'
+                                              else "ready" if preview["complete"] else "pending")
             or components.get("text") != ("ready" if manifest.get("text_layer") else "pending")
             or components.get("searchable_pdf") != "skipped"):
         raise ValueError("reading component state mismatch")
     return manifest
+
+
+def reading_surface_ready(manifest):
+    """Publication readiness is primary-PDF, or a complete DjVu page stream."""
+    return (manifest['primary']['kind'] == 'pdf' and manifest['preview'].get('status') == 'skipped'
+            or manifest['primary']['kind'] == 'djvu' and manifest['preview']['complete'])
 
 
 def local_reader(directory):

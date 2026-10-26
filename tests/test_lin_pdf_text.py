@@ -69,10 +69,17 @@ class LinPdfTextTests(unittest.TestCase):
             self.assertEqual(page["text_spans"][0]["end"], len(page["blocks"][0]["t"]))
 
             old = {**rendered, "ocr_pages": 2, "classification": "scan"}
+            # Simulate a legacy OCR-input manifest, not new native-only pages.
+            png = root / 'legacy-input.png'
+            Image.new('L', (200, 300), 255).save(png)
+            import hashlib
+            input_raw = png.read_bytes()
             old_manifest = {**manifest, "classification": "scan",
                             "pages": [{k: v for k, v in page.items() if k not in
-                                      {"o", "os", "ob", "text", "text_spans", "layout", "chars"}}
-                                      | {"source": "ocr"} for page in manifest["pages"]]}
+                                      {"o", "os", "ob", "text", "text_spans", "layout", "chars", 'native_text_only'}}
+                                      | {"source": "ocr", 'i': page['o'].replace('/ocr/', '/ocr-input/').replace('.json.gz', '.png'),
+                                         'is': hashlib.sha256(input_raw).hexdigest(), 'ib': len(input_raw)}
+                                      for page in manifest["pages"]]}
             stages.validate_render(old, old_manifest)
             with patch.object(stages, "read_object", side_effect=AssertionError("no OCR planner download")):
                 self.assertEqual(stages.plan_images({old["key"]: old}, {}, {})["books"], [])

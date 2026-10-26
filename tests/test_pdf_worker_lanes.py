@@ -78,7 +78,7 @@ class PdfWorkerLaneTests(unittest.TestCase):
         self.assertEqual((entry["pd"], entry["pdb"]), (path, shared.PDF_PAGES_BUCKET))
         files = {}
         add_pdf_streams(files, {"files": {"key": result}}, shared.PDF_PAGES_BUCKET)
-        self.assertEqual(files["key"], entry)
+        self.assertNotIn('key', files, 'converted PDFs no longer publish page-stream routes')
         original = {"s": 2, "m": "p", "p": path, "b": shared.PDF_PAGES_BUCKET}
         rebuilt = shared.pdf_pages_sidecar_entry(stream, {}, original)
         self.assertEqual((rebuilt["pd"], rebuilt["pdb"]), (path, shared.PDF_PAGES_BUCKET))

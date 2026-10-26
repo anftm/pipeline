@@ -3117,10 +3117,7 @@ class PublicationTests(unittest.TestCase):
         }}
         files = build_reader_assets_index.build_index(manifest, pdf_manifest)["f"]
         self.assertEqual(files["book"]["m"], "e")
-        self.assertEqual(files["scan"], {
-            "s": 2, "m": "p", "p": "objects/bb/" + "b" * 64 + "/page-manifest.json",
-             "b": "vomebook/pdf-pages-v2",
-        })
+        self.assertNotIn('scan', files)
         self.assertNotIn("text", files)
 
     def test_sidecar_preserves_pdf_ocr_when_reader_assets_change(self):
@@ -3153,7 +3150,7 @@ class PublicationTests(unittest.TestCase):
         }}
         files = build_reader_assets_index.build_index(manifest, pdf_manifest)["f"]
         self.assertNotIn("legacy", files)
-        self.assertIn("current", files)
+        self.assertNotIn("current", files)
         self.assertNotIn("linear", files)
 
     def test_media_workflow_has_explicit_empty_matrix_guard(self):

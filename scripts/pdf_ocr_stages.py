@@ -78,12 +78,14 @@ def render_profile() -> str:
             f"-native-{pdf_ocr.MIN_NATIVE_PAGE_CHARS}-jxl-{int(pdf_ocr.JXL_ENABLED)}"
             "-adaptive-reader-source-pixels-v2-clean-webp-80-native-stream-v1-preserve-bitonal-v1-png6"
             + (f"-{pdf_ocr.reader_page_codec.PROFILE}" if pdf_ocr.JXL_ENABLED else "")
-            + f'-{native_text_quality.PROFILE}-bitmap-text-v1-native-geometry-v1-native-raster-text-v3-rule-evidence')
+            + f'-{native_text_quality.PROFILE}-bitmap-text-v1-native-geometry-v1-native-raster-text-v3-rule-evidence'
+            + '-pdf-primary-only-v1')
 
 
 def render_profile_for(item: dict) -> str:
     """PDF and native DjVu renders never share a profile namespace."""
-    return djvu_pages.render_profile(render_profile()) if djvu_pages.is_native_item(item) else render_profile()
+    return (djvu_pages.render_profile(render_profile().removesuffix('-pdf-primary-only-v1'))
+            if djvu_pages.is_native_item(item) else render_profile())
 
 
 def djvu_fallback_current(previous, item):
@@ -401,7 +403,7 @@ def save_registry(api, repo, name, updates, merge=None, publish_streams=False):
                                                 "render_manifest": value["render_manifest"],
                                                 "range_status": "failed", "classification": "native-text"}
                 entry = shared.preserve_pdf_sidecar_entry(sidecar["f"].get(key), value)
-                if value.get("page_manifest"):
+                if value.get("source_format") == 'djvu' and value.get("page_manifest"):
                     shared.apply_pdf_pages_sidecar_entry(entry, value["page_manifest"]["path"], value)
                 if entry:
                     sidecar["f"][key] = entry
@@ -453,7 +455,7 @@ def save_registry(api, repo, name, updates, merge=None, publish_streams=False):
                                                    "render_manifest": value["render_manifest"],
                                                    "range_status": "failed", "classification": "native-text"}
                     entry = shared.preserve_pdf_sidecar_entry(sidecar["f"].get(key), value)
-                    if value.get("page_manifest"):
+                    if value.get("source_format") == 'djvu' and value.get("page_manifest"):
                         shared.apply_pdf_pages_sidecar_entry(entry, value["page_manifest"]["path"], value)
                     if entry:
                         sidecar["f"][key] = entry
@@ -608,7 +610,8 @@ def pending_render(records, rendered, ocr, retry_failed=False, partition="all"):
             continue
         if same_source(previous, item) and previous.get("render_profile") == render_profile_for(item):
             if previous.get("status") in {"ready", "skipped"}:
-                if not item.get("force_image_render") or previous.get("image_rendered"):
+                if (not djvu_pages.is_native_item(item) or not item.get("force_image_render")
+                        or previous.get("image_rendered")):
                     continue
             if previous.get("status") == "failed" and not retry_failed:
                 continue
@@ -694,7 +697,7 @@ def validate_range(book, start, end, descriptor, *, with_toc=False):
     pages = payload.get("pages")
     if not isinstance(pages, list) or [p.get("p") for p in pages] != list(range(start, end + 1)):
         raise ValueError("incomplete render range")
-    if (book.get("force_image_render") and not pdf_ocr.preserves_reader_pdf(book)
+    if (djvu_pages.is_native_item(book) and book.get("force_image_render")
             and book["probe"]["classification"] == "native-text"
             and (not payload.get("image_rendered") or any(not ({'w', 'j'} & page.keys()) for page in pages))):
         raise ValueError("native render range lacks required page images")
@@ -711,8 +714,7 @@ def validate_range(book, start, end, descriptor, *, with_toc=False):
 def estimate_render_cost(item, source, progress):
     book = {**item, "render_profile": render_profile_for(item)}
     previous = progress.get(book["key"], {})
-    image_rendered = (not pdf_ocr.preserves_reader_pdf(book)
-                      and bool(book.get("force_image_render") or book.get("probe", {}).get("classification") != "native-text"))
+    image_rendered = djvu_pages.is_native_item(book)
     cost = pdf_render_schedule.history_cost(range_identity(book), previous, image_rendered)
     if cost is not None:
         return cost
@@ -836,8 +838,9 @@ def render_book(item: dict, source: Path, bundle: Path, *, force_ocr_native=Fals
     lin_native = not djvu and lin_pdf_text.applies(item)
     probe = item.get("probe") or (djvu_pages.probe(source) if djvu else
                                   lin_pdf_text.probe(source) if lin_native else pdf_ocr.probe_pdf(source))
-    presentation = item.get("reader_presentation") or (
-        djvu_pages.reader_presentation(source) if djvu else pdf_ocr.reader_presentation(source))
+    presentation = (item.get("reader_presentation") or djvu_pages.reader_presentation(source)) if djvu else {
+        **(item.get("reader_presentation") or pdf_ocr.reader_presentation(source)),
+        "strategy": "preserve-pdf", "policy": "djvu-only-page-stream-v1"}
     preserve_pdf = pdf_ocr.preserves_reader_pdf({"reader_presentation": presentation})
     if djvu and preserve_pdf:
         raise ValueError("a DjVu source cannot be preserved as a Reader PDF")
@@ -862,18 +865,14 @@ def render_book(item: dict, source: Path, bundle: Path, *, force_ocr_native=Fals
     bundle.mkdir(parents=True, exist_ok=True)
     pages = []
     # Browsers cannot draw DjVu: its page images are the only Reader stream.
-    force_image_render = (bool(item.get("force_image_render")) or djvu) and not preserve_pdf
-    reader_images = not preserve_pdf and (force_image_render or force_ocr_native
-                                         or probe['classification'] != 'native-text')
+    # Stale plans and force_image_render must not re-enable PDF page images.
+    # OCR still renders only the required pages to independent lossless PNGs.
+    reader_images = djvu
     first, last = item.get("start", 1), item.get("end", probe["page_count"])
-    # The page stream is the only Reader surface when PDF.js cannot open the
-    # primary (oversized, or a non-PDF source), so it carries the outline itself.
-    toc = (pdf_assets.extract_pdf_outline(source, probe["page_count"])
-           if first == 1 and not djvu and not preserve_pdf else [])
-    scan_images = (pdf_ocr.scan_reader_images(source, first, last)
-                   if not djvu and not force_ocr_native and not preserve_pdf
-                   and any(chars == 0 for chars in probe["page_chars"][first - 1:last])
-                   else {})
+    # PDF outlines stay in the directly read primary. DjVu never passes through
+    # PDF outline/image inspection, and OCR inputs keep their full render pixels.
+    toc = []
+    scan_images = {}
     native_text = {}
     if not lin_native and not force_ocr_native:
         native_numbers = [number for number in range(first, last + 1)
@@ -1004,7 +1003,8 @@ def validate_render(item, manifest, page_numbers=None):
     expected = list(page_numbers) if page_numbers is not None else list(range(1, item["page_count"] + 1))
     if len(pages) != len(expected) or [p["p"] for p in pages] != expected:
         raise ValueError("incomplete render page sequence")
-    preserve_pdf = pdf_ocr.preserves_reader_pdf(item)
+    preserve_pdf = (pdf_ocr.preserves_reader_pdf(item) or not djvu_pages.is_native_item(item)
+                    and item.get('render_profile', '').endswith('-pdf-primary-only-v1'))
     if preserve_pdf and (manifest.get("image_rendered") or manifest.get("page_manifest")):
         raise ValueError("preserved PDF must not publish a reader image stream")
     if (item.get("force_image_render") and not preserve_pdf and manifest.get("classification") == "native-text"

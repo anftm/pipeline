@@ -32,8 +32,7 @@ class RealPdfRenderingTests(unittest.TestCase):
                 self.assertEqual(payload['text'][span['start']:span['end']], payload['raw_blocks'][span['block']]['t'])
             self.assertIn('First native line', payload['extracted_text'])
 
-    def test_legacy_document_entrypoint_emits_real_jxl_with_manifest_integrity(self):
-        import imagecodecs
+    def test_legacy_document_entrypoint_cannot_recreate_pdf_images_even_for_large_files(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             source, bundle = root / 'scan.pdf', root / 'bundle'
@@ -43,12 +42,10 @@ class RealPdfRenderingTests(unittest.TestCase):
                 image.save(source, 'PDF', resolution=150)
             with patch.object(pdf_assets, 'LARGE_BYTES', 0):
                 result = pdf_assets.build_item({'key': 'test\0scan.pdf', 'extension': 'pdf'}, source, bundle)
-            manifest = json.loads((bundle / result['page_manifest']['path']).read_text())
-            self.assertEqual(manifest['codec'], 'jxl')
-            self.assertEqual(result['strategy'], 'sampled-jxl')
-            raw = (bundle / result['pages'][0]['path']).read_bytes()
-            self.assertEqual(imagecodecs.jpegxl_decode(raw).shape[:2], (400, 300))
-            self.assertEqual(manifest['images'][0]['bytes'], len(raw))
+            self.assertEqual(result['status'], 'skipped')
+            self.assertEqual(result['strategy'], 'preserve-pdf')
+            self.assertNotIn('page_manifest', result)
+            self.assertEqual(list(bundle.rglob('*')), [])
 
     def test_time_estimator_samples_real_pages_locally_and_builds_a_compact_queue(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -88,8 +85,8 @@ class RealPdfRenderingTests(unittest.TestCase):
                 self.assertEqual(png.format, "PNG")
                 self.assertEqual(png.size, (600, 800))
             self.assertNotIn('w', page)
-            self.assertEqual(pdf_ocr.reader_page_codec.geometry((bundle / page['j']).read_bytes()), [300, 400])
-            self.assertEqual(page['jbucket'], stages.shared.PDF_PAGES_BUCKET)
+            self.assertNotIn('j', page)
+            self.assertIsNone(result['page_manifest'])
             self.assertNotIn("o", page)
 
     def test_low_resolution_full_page_scan_preserves_ocr_pixels_but_not_reader_upscale(self):
@@ -113,7 +110,7 @@ class RealPdfRenderingTests(unittest.TestCase):
                 self.assertGreater(png.width, 300)
                 self.assertGreater(png.height, 400)
             self.assertNotIn('w', page)
-            self.assertEqual((bundle / page["j"]).read_bytes(), b"jxl")
+            self.assertNotIn('j', page)
 
     def test_small_embedded_image_is_not_treated_as_full_page_scan(self):
         listing = ("page num type width height color comp bpc enc interp object ID x-ppi y-ppi size ratio\n"
@@ -123,7 +120,7 @@ class RealPdfRenderingTests(unittest.TestCase):
         with patch.object(pdf_ocr, "_run", side_effect=inspect):
             self.assertEqual(pdf_ocr.scan_reader_images(Path("sample.pdf"), 1, 1), {})
 
-    def test_reader_jxl_respects_reading_cap_without_webp_or_changing_ocr_png(self):
+    def test_obsolete_pdf_reader_flags_only_render_lossless_ocr_png(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             source = root / "large-page.pdf"
@@ -131,10 +128,10 @@ class RealPdfRenderingTests(unittest.TestCase):
                 image.save(source, "PDF", resolution=150)
             png, width, height = pdf_ocr.render_page(source, 1, root, reader_jxl=True)
             reader_png = png.with_name(png.stem + "-reader.ppm")
-            with Image.open(png) as full, Image.open(reader_png) as reader:
+            with Image.open(png) as full:
                 self.assertEqual(full.size, (width, height))
                 self.assertGreater(full.height, 1800)
-                self.assertEqual(reader.height, 1800)
+            self.assertFalse(reader_png.exists())
             self.assertFalse(png.with_suffix('.webp').exists())
 
     def test_unresolved_font_warning_refuses_an_unreliable_ocr_page(self):
@@ -170,10 +167,7 @@ class RealPdfRenderingTests(unittest.TestCase):
                     with self.subTest(jxl=jxl), patch.object(pdf_ocr, "reader_webp_quality",
                                                            wraps=pdf_ocr.reader_webp_quality) as select:
                         pdf_ocr.render_page(source, 1, root, (128, 128), reader_jxl=jxl)
-                        if jxl:
-                            select.assert_not_called()
-                        else:
-                            self.assertEqual(select.call_args.args[1], True)
+                        select.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -103,7 +103,7 @@ jobs:
             FORCE_SYNC=true python scripts/fetch_and_parse.py
             retry_args=()
             if [[ "$RETRY_FAILED_RENDER" == "true" ]]; then retry_args+=(--retry-failed); fi
-            python scripts/pdf_ocr_stages.py plan-render --native-text-stream --target-render-seconds 6000 "${retry_args[@]}" "${args[@]}"
+            python scripts/pdf_ocr_stages.py plan-render --target-render-seconds 6000 "${retry_args[@]}" "${args[@]}"
             resolved=render
           fi
           echo "stage=$resolved" >> "$GITHUB_OUTPUT"

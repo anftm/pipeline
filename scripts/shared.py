@@ -201,12 +201,15 @@ def apply_pdf_pages_sidecar_entry(entry: dict, path: str, result: dict) -> dict:
 def preserve_pdf_sidecar_entry(current: dict | None, result: dict) -> dict:
     entry = dict(current or {})
     if (result.get("status") != "ready"
-            or result.get("reader_presentation", {}).get("strategy") != "preserve-pdf"
-            or not str(entry.get("p", "")).endswith("/page-manifest.json")):
+            or result.get('source_format') == 'djvu'
+            or not str(entry.get("p", "")).endswith(("/page-manifest.json", "/reading-manifest.json"))):
         return entry
-    if result.get("source_kind") == "generated" and result.get("reader_assets_path"):
-        entry.update({"s": 2, "m": "p", "p": result["reader_assets_path"],
-                      "b": result.get("reader_assets_bucket") or PDF_PAGES_BUCKET})
+    document = result.get('reader_assets_path') or entry.get('pd')
+    bucket = result.get('reader_assets_bucket') or entry.get('pdb') or PDF_PAGES_BUCKET
+    if document and str(document).endswith('/document.pdf'):
+        entry.update({"s": 2, "m": "p", "p": document, "b": bucket})
+        entry.pop('pd', None)
+        entry.pop('pdb', None)
         if entry.get("o"):
             entry["ob"] = PDF_PAGES_BUCKET
         return entry
@@ -230,8 +233,8 @@ def merge_pdf_ocr_sidecar_entry(current: dict | None, result: dict) -> dict | No
         return entry or {"s": 4, "om": "failed", "oe": result.get("error", "OCR failed")}
     if result.get("status") == "ready":
         page_manifest = result.get("page_manifest")
-        if result.get("reader_presentation", {}).get("strategy") == "preserve-pdf" and page_manifest:
-            raise ValueError("preserved PDF must not advertise a reader page stream")
+        if result.get('source_format') != 'djvu':
+            page_manifest = None
         # A completed page stream must take precedence over an older optimized
         # PDF route.  OCR recognition can publish after rendering, so keeping
         # the PDF in `p` would make Reader ignore the already available pages.

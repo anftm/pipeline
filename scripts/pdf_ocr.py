@@ -474,8 +474,8 @@ def reader_presentation(path: Path) -> dict:
                 inspected += 1
         if not inspected:
             raise ValueError("empty PDF")
-        return {"strategy": "preserve-pdf" if binary_images else "page-stream",
-                "reason": "bitonal-raster" if binary_images else "no-bitonal-raster",
+        return {"strategy": "preserve-pdf", "policy": "djvu-only-page-stream-v1",
+                "reason": "bitonal-raster" if binary_images else "primary-pdf-reader",
                 "complete": True, "inspected_pages": inspected,
                 "bitonal_images": binary_images, "filters": sorted(filters)}
     except Exception as error:
@@ -885,7 +885,9 @@ def reader_webp_quality(image, full_page_scan: bool) -> int:
 
 def render_page(path: Path, page: int, directory: Path,
                 reader_pixels: tuple[int, int] | None = None, reader_jxl: bool = False,
-                reader_images: bool = True) -> tuple[Path, int, int]:
+                reader_images: bool = False) -> tuple[Path, int, int]:
+    # PDF rendering exists only for OCR/correction evidence. Keep obsolete call
+    # arguments accepted, but never let them recreate reading WebP/JXL/PPM files.
     prefix = directory / f"page-{page:06d}"
     _stdout, errors = _run([
         "pdftocairo", "-tiff", "-tiffcompression", "none", "-singlefile", "-r", str(_page_render_dpi(path, page)),
@@ -923,33 +925,6 @@ def render_page(path: Path, page: int, directory: Path,
             # uncompressed TIFF has identical Cairo pixels; level 6 preserves
             # every sample and avoids recompressing the same page twice.
             rgb.save(png, 'PNG', compress_level=6)
-            if not reader_images:
-                rgb.close()
-                return png, width, height
-            if reader_pixels is None and not reader_jxl:
-                # Preserve the older single-stage profile's delivery bytes.
-                if WEBP_MAX_DIMENSION and max(width, height) > WEBP_MAX_DIMENSION:
-                    scale = WEBP_MAX_DIMENSION / max(width, height)
-                    resized = rgb.resize((max(1, round(width * scale)), max(1, round(height * scale))))
-                    rgb.close()
-                    rgb = resized
-            else:
-                scale = min(1.0, WEBP_MAX_DIMENSION / max(width, height)) if WEBP_MAX_DIMENSION else 1.0
-                if reader_pixels:
-                    scale = min(scale, reader_pixels[0] / width, reader_pixels[1] / height)
-                if scale < 1:
-                    reader_width, reader_height = max(1, int(width * scale)), max(1, int(height * scale))
-                    if reader_pixels:
-                        reader_width = min(reader_width, reader_pixels[0])
-                        reader_height = min(reader_height, reader_pixels[1])
-                    resized = rgb.resize((reader_width, reader_height), Image.Resampling.LANCZOS)
-                    rgb.close()
-                    rgb = resized
-            if reader_jxl:
-                rgb.save(prefix.with_name(prefix.name + "-reader").with_suffix(".ppm"))
-            else:
-                webp = prefix.with_suffix(".webp")
-                rgb.save(webp, "WEBP", quality=reader_webp_quality(rgb, reader_pixels is not None), method=6)
             rgb.close()
     finally:
         Image.MAX_IMAGE_PIXELS = previous_limit

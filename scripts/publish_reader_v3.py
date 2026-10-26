@@ -340,8 +340,8 @@ def stage(store, ref, bundle=None, *, apply=False):
     validate_reading_ref(ref)
     reader = CandidateReader(store, bundle)
     manifest = v3.verify_reading(ref, reader)
-    if not manifest["preview"]["complete"]:
-        raise ValueError("promotion candidate requires complete previews")
+    if not v3.reading_surface_ready(manifest):
+        raise ValueError("promotion requires a primary PDF or complete DjVu previews")
     reader.closure()
     body = {"version": 1, "kind": "reader-reading-candidate", "source_key": manifest["source_key"],
             "source_sha256": manifest["source_sha256"], "reading_generation": manifest["generation"],
@@ -495,7 +495,8 @@ def build_stage(store, spec, workspace, *, apply=False):
     if reuse:
         previous = v3.verify_reading(validate_reading_ref(reuse), reader)
         if (previous["source_key"] != key or previous["source_sha256"] != source
-                or previous["primary"]["resource"] != spec["primary"] or not previous["preview"]["complete"]):
+                or previous["primary"]["resource"] != spec["primary"]
+                or previous['primary']['kind'] == 'djvu' and not previous["preview"]["complete"]):
             raise ValueError("preview reuse source mismatch")
         previews = [entry for part in previous["preview"]["partitions"]
                     for entry in v3.decode(v3.verified_read(part["resource"], reader))["pages"]]
@@ -588,7 +589,7 @@ def promote(store, candidate_ref, expected_parent, *, apply=False, replace_sourc
     verified = CandidateReader(store)
     manifest = v3.verify_reading(candidate["reading"], verified)
     verified.closure()
-    if (not manifest["preview"]["complete"]
+    if (not v3.reading_surface_ready(manifest)
             or candidate["source_key"] != manifest["source_key"]
             or candidate["reading_generation"] != manifest["generation"]
             or candidate["source_sha256"] != manifest["source_sha256"]):
@@ -631,7 +632,7 @@ def promote(store, candidate_ref, expected_parent, *, apply=False, replace_sourc
         if (previous["source_sha256"] != manifest["source_sha256"]
                 or previous["primary"] != manifest["primary"]
                 or not same_map
-                or previews(previous) != previews(manifest)):
+                or (manifest['primary']['kind'] == 'djvu' and previews(previous) != previews(manifest))):
             raise ValueError("text upgrade must preserve the complete existing preview")
     verified.close()
     files = {**old["files"], key: entry}

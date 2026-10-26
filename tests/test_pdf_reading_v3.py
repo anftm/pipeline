@@ -33,7 +33,7 @@ class ReadingV3Tests(unittest.TestCase):
         for literal in ['辻の妹恒','野枝の従妹坂口キミ','辻の母美津','野枝の叔母渡辺マツ','↓']:
             self.assertIn(literal,search)
 
-    def test_shared_render_reuses_verified_page_bytes_without_render_or_encoding(self):
+    def test_pdf_shared_render_is_not_adopted_or_read_as_a_new_page_stream(self):
         import imagecodecs
         import numpy as np
         spec = self.spec()
@@ -52,12 +52,11 @@ class ReadingV3Tests(unittest.TestCase):
         with patch.object(pymupdf.Page, "get_pixmap", side_effect=AssertionError("must reuse rendered pixels")), \
                 patch.object(v3.reader_page_codec, "encode_image", side_effect=AssertionError("must reuse JXL")):
             generated = v3.generate_previews(spec, self.read, self.bundle)
-        self.assertEqual([p["resource"]["path"] for p in generated["previews"]], [p["j"] for p in pages])
+        self.assertEqual(generated['previews'], [])
         self.assertEqual(list(self.bundle.rglob("*.jxl")), [])
         key = (shared.PDF_PAGES_BUCKET, pages[0]["j"])
         self.objects[key] = b"changed"
-        with self.assertRaisesRegex(ValueError, "checksum"):
-            v3.generate_previews(spec, self.read, self.bundle)
+        self.assertEqual(v3.generate_previews(spec, self.read, self.bundle)['previews'], [])
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -172,13 +171,15 @@ class ReadingV3Tests(unittest.TestCase):
         self.generated()
         mapping = json.loads(gzip.decompress(self.read(manifest["page_map"])))
         self.assertEqual(mapping["pages"][1]["rotation"], 90)
-        self.assertTrue(manifest["preview"]["complete"])
+        self.assertFalse(manifest['preview']['complete'])
+        self.assertEqual(manifest['preview']['status'], 'skipped')
+        self.assertEqual(manifest['preview']['partitions'], [])
         self.assertEqual(manifest["components"]["searchable_pdf"], "skipped")
         self.assertEqual(v3.decode(self.read(ref)), manifest)
         self.assertEqual(v3.verify_reading(ref, self.read), manifest)
         self.assertEqual(v3.build_reading(spec, self.read, self.bundle)[0], ref)
 
-    def test_real_engine_vector_preview_preserves_geometry_and_verifies(self):
+    def test_vector_pdf_is_read_directly_without_svg_or_raster_preview(self):
         with pymupdf.open() as doc:
             page = doc.new_page(width=200, height=300)
             page.insert_text((30, 70), "Vector page", fontsize=18)
@@ -187,38 +188,36 @@ class ReadingV3Tests(unittest.TestCase):
         spec = v3.generate_previews({"source_sha256": "a" * 64, "source_key": "repo\0book.pdf",
                                     "primary": primary, "vector_previews": True}, self.read, self.bundle)
         self.generated()
-        self.assertEqual(spec["previews"][0]["codec"], "svg")
+        self.assertEqual(spec['previews'], [])
+        self.assertEqual(list(self.bundle.rglob('*.svg')), [])
         ref, _ = v3.build_reading(spec, self.read, self.bundle)
         self.generated()
-        self.assertTrue(v3.verify_reading(ref, self.read)["preview"]["complete"])
+        self.assertEqual(v3.verify_reading(ref, self.read)['components']['preview'], 'skipped')
         with self.assertRaises(ValueError):
             v3.validate_vector_svg(b'<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><script/></svg>')
 
-    def test_missing_preview_is_pending_and_never_claimed_complete(self):
+    def test_pdf_missing_preview_is_explicitly_skipped_not_pending_or_complete(self):
         spec = self.spec()
         spec["previews"].pop()
-        with self.assertRaises(ValueError):
-            v3.build_reading(spec, self.read, self.bundle)
+        _, direct = v3.build_reading(spec, self.read, self.bundle)
+        self.assertEqual(direct['components']['preview'], 'skipped')
         spec["require_complete_preview"] = False
         _, manifest = v3.build_reading(spec, self.read, self.bundle)
         self.assertFalse(manifest["preview"]["complete"])
         self.assertEqual(manifest["components"]["document"], "ready")
 
-    def test_duplicate_wrong_identity_codec_and_processing_preview_rejected(self):
+    def test_pdf_builder_discards_obsolete_preview_metadata_without_reading_its_media(self):
         spec = self.spec()
         duplicate = copy.deepcopy(spec)
         duplicate["previews"].append(duplicate["previews"][0])
-        with self.assertRaises(ValueError):
-            v3.build_reading(duplicate, self.read, self.bundle)
+        self.assertEqual(v3.build_reading(duplicate, self.read, self.bundle)[1]['preview']['partitions'], [])
         for change in ({"page_identity": "b" * 64}, {"codec": "webp"}, {"width": 200}):
             altered = copy.deepcopy(spec)
             altered["previews"][0].update(change)
-            with self.assertRaises(ValueError):
-                v3.build_reading(altered, self.read, self.bundle)
+            self.assertEqual(v3.build_reading(altered, self.read, self.bundle)[1]['preview']['partitions'], [])
         altered = copy.deepcopy(spec)
         altered["previews"][0]["resource"]["bucket"] = shared.PDF_OCR_INPUT_BUCKET
-        with self.assertRaises(ValueError):
-            v3.build_reading(altered, self.read, self.bundle)
+        self.assertEqual(v3.build_reading(altered, self.read, self.bundle)[1]['components']['preview'], 'skipped')
 
     def test_resource_path_traversal_unsupported_bucket_and_digest_rejected(self):
         valid = self.add("objects/aa/book/document.pdf", b"pdf")
@@ -244,20 +243,19 @@ class ReadingV3Tests(unittest.TestCase):
         with self.assertRaises(ValueError):
             v3.backfill_text(manifest, self.read, self.bundle, {"rotation": 90})
 
-    def test_stream_generation_is_resumable_and_validates_real_pixels(self):
+    def test_pdf_preview_range_requests_are_noops_without_reading_or_rendering(self):
         spec = self.spec()
         spec["previews"] = []
         one = v3.generate_previews(spec, self.read, self.bundle, start=2, end=2, max_pixels=10000)
-        self.assertEqual([p["page"] for p in one["previews"]], [2])
-        self.assertLessEqual(one["previews"][0]["width"] * one["previews"][0]["height"], 10000)
+        self.assertEqual(one['previews'], [])
         resumed = v3.generate_previews(one, self.read, self.bundle, start=1, end=1, max_pixels=10000)
         self.generated()
         ref, manifest = v3.build_reading(resumed, self.read, self.bundle)
         self.generated()
-        self.assertTrue(v3.verify_reading(ref, self.read)["preview"]["complete"])
-        self.assertEqual([p["page"] for p in resumed["previews"]], [1, 2])
+        self.assertEqual(v3.verify_reading(ref, self.read)['components']['preview'], 'skipped')
+        self.assertEqual(resumed['previews'], [])
 
-    def test_bitonal_page_gets_png_without_modifying_pdf(self):
+    def test_bitonal_pdf_keeps_original_without_generating_even_a_lossless_preview(self):
         image = Image.new("1", (100, 200), 1)
         stream = io.BytesIO()
         image.save(stream, "TIFF", compression="group4")
@@ -269,27 +267,28 @@ class ReadingV3Tests(unittest.TestCase):
         spec = {"source_sha256": "a" * 64, "source_key": "book", "primary": primary,
                 "require_complete_preview": True}
         generated = v3.generate_previews(spec, self.read, self.bundle, max_pixels=10000)
-        self.assertEqual(generated["previews"][0]["codec"], "png")
+        self.assertEqual(generated['previews'], [])
+        self.assertEqual(list(self.bundle.rglob('*.png')), [])
         self.assertEqual(self.read(primary), raw)
         self.generated()
         ref, _ = v3.build_reading(generated, self.read, self.bundle)
         self.generated()
         v3.verify_reading(ref, self.read)
-        generated["previews"][0]["codec"] = "webp"
-        with self.assertRaises(ValueError):
-            v3.build_reading(generated, self.read, self.bundle)
+        self.assertEqual(v3.verify_reading(ref, self.read)['components']['preview'], 'skipped')
 
-    def test_false_completeness_and_corrupt_preview_partition_rejected(self):
+    def test_skipped_preview_cannot_claim_complete_or_hide_runtime_partitions(self):
         ref, manifest = v3.build_reading(self.spec(), self.read, self.bundle)
         self.generated()
         incomplete = copy.deepcopy(manifest)
-        incomplete["preview"]["partitions"] = []
+        incomplete['preview']['complete'] = True
         with self.assertRaises(ValueError):
             v3.validate_reading_manifest(incomplete)
-        partition = manifest["preview"]["partitions"][0]["resource"]
-        self.objects[(partition["bucket"], partition["path"])] = b"corrupt"
-        with self.assertRaises(ValueError):
-            v3.verify_reading(ref, self.read)
+        extra = copy.deepcopy(manifest)
+        extra['preview']['ready_pages'] = 1
+        with self.assertRaises(ValueError):v3.validate_reading_manifest(extra)
+        broken = copy.deepcopy(manifest)
+        broken['components']['preview'] = 'ready'
+        with self.assertRaises(ValueError):v3.validate_reading_manifest(broken)
 
     def test_text_geometry_must_match_pdf_before_reading_publication(self):
         spec = self.spec()

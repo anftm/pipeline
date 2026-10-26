@@ -91,7 +91,8 @@ class AutomationTests(unittest.TestCase):
         book = entry()
         ready_spec, _ = auto.spec_for(book["key"], book)
         self.assertEqual(ready_spec, {
-            "source_key": book["key"], "source_sha256": book["source_sha256"], "vector_previews": True,
+            "source_key": book["key"], "source_sha256": book["source_sha256"], "vector_previews": False,
+            "reading_policy": "pdf-primary-only-v1",
             "ocr_manifest": {"bucket": "vomebook/pdf-pages-v2", "path": book["ocr_manifest"],
                              "sha256": book["ocr_manifest_sha256"], "bytes": book["ocr_manifest_bytes"], "role": "provenance"},
             "primary_source": {"repo": book["repo"], "path": book["path"], "revision": book["source_revision"]},

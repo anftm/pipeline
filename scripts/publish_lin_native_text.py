@@ -25,7 +25,7 @@ except ImportError:
 
 
 def build(entry: dict, manifest: dict, source: Path, bundle: Path) -> dict:
-    if (not lin_pdf_text.applies(entry) or entry.get("status") != "ready" or not entry.get("page_manifest")
+    if (not lin_pdf_text.applies(entry) or entry.get("status") != "ready"
             or entry.get("source_kind") != "generated"
             or not str(entry.get("reader_assets_path") or "").endswith(
                 f"/{reader_assets.GBK_PDF_CONTRACT[0]}/document.pdf")):
@@ -74,11 +74,13 @@ def build(entry: dict, manifest: dict, source: Path, bundle: Path) -> dict:
                                        "source_revision": entry.get("source_revision", ""),
                                        "classification": "native-text", "page_count": entry["page_count"],
                                        "pages": pages, "book_text": stages.metadata(book_path, bundle),
-                                       "page_manifest": entry["page_manifest"]})
+                                        "page_manifest": None})
     meta = stages.metadata(manifest_path, bundle)
     return {**stages.public_item(entry), "status": "ready", "profile": profile,
             "language": language, "ocr_version": "native-mupdf-1.28.2", "backend": "native",
-            "stream": True, "ocr_manifest": meta["path"], "ocr_manifest_sha256": meta["sha256"],
+            "stream": False, "page_manifest": None,
+            "reader_presentation": {"strategy": "preserve-pdf", "policy": "djvu-only-page-stream-v1"},
+            "ocr_manifest": meta["path"], "ocr_manifest_sha256": meta["sha256"],
             "ocr_manifest_bytes": meta["bytes"]}
 
 
