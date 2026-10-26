@@ -33,6 +33,29 @@ def recognized_layers(contents, source, objects, *, profile=PROFILE, mutate=None
 
 
 class ReaderTextAdmissionTests(unittest.TestCase):
+    def test_printed_errata_metadata_cannot_turn_original_model_failure_into_approved_body(self):
+        literal='辻の妹恒↓野枝の従妹坂口キミ'
+        def damage(payload):
+            if payload['page']==1:
+                payload['recognition']['models']['models']['rec']['sha256']='unknown'
+        layers=recognized_layers([literal,'末页'],'a'*64,self.objects,mutate=damage)
+        original=layers[0]
+        def anchor(value):
+            start=literal.index(value)
+            return {'region_id':'b0','start':start,'end':start+len(value),'text':value}
+        proposal={'kind':'pdf-text-correction','version':1,'page':1,'base_generation':original['generation'],
+            'raw_sha256':original['raw_sha256'],'page_identity':original['page_identity'],'replacements':[],
+            'visual_review':{'kind':'source-image-review','source_sha256':'a'*64,'page':1,
+                'input_png_sha256':'d'*64,'basis':'User original wrong-arrow-correct column'},
+            'errata_relations':[{'id':'e'+'1'*16,'kind':'printed-erratum','axis':'vertical','direction':'down',
+                'wrong':anchor('辻の妹恒'),'operator':anchor('↓'),'correct':anchor('野枝の従妹坂口キミ'),
+                'box':[.1,.1,.8,.2],'quad':[[.1,.1],[.8,.1],[.8,.2],[.1,.2]],
+                'evidence':{'crop_sha256':'f'*64,'reason':'Preserve both source entries, not a model repair'}}]}
+        layers[0]=text.accept_proposal(original,proposal,actor='explicit-source-review')
+        self.assertEqual(layers[0]['text'],original['text'])
+        with self.assertRaisesRegex(admission.QualityRejection,'model-identity'):
+            admission.check(self.spec,layers,self.read)
+
     def setUp(self):
         self.objects = {}
         self.spec = {'source_sha256': 'a' * 64, 'recognition_profile': PROFILE, 'page_count': 2}

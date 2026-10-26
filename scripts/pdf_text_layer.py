@@ -127,6 +127,52 @@ def validate_formula_continuations(continuations, regions, content):
         sha(proof.get('crop_sha256'));identities.add(identity);pairs.add(pair)
 
 
+def validate_errata_relations(relations, regions):
+    """Link printed wrong text, its arrow and correction without replacing either.
+
+    Anchors are exact codepoint spans in original positioned regions. The
+    relation never supplies a second transcription or invented character boxes.
+    """
+    if not isinstance(relations,list) or len(relations)>1000:
+        raise ValueError('invalid printed errata relations')
+    known={r['id']:r for r in regions};identities=set();operators=set()
+    def anchor(item):
+        if (not isinstance(item,dict) or not isinstance(item.get('region_id'),str)
+                or item['region_id'] not in known):
+            raise ValueError('unknown printed erratum anchor')
+        region=known[item['region_id']];start,end=item.get('start'),item.get('end')
+        if (type(start) is not int or type(end) is not int or not 0<=start<end<=len(region['text'])
+                or region['text'][start:end]!=item.get('text')):
+            raise ValueError('stale printed erratum anchor')
+        return region['start']+start,region['start']+end
+    arrows={'↓':('vertical','down'),'↑':('vertical','up'),
+            '→':('horizontal','right'),'←':('horizontal','left')}
+    for relation in relations:
+        if not isinstance(relation,dict):raise ValueError('invalid printed erratum')
+        identity=relation.get('id')
+        if (not isinstance(identity,str) or not re.fullmatch(r'e[0-9a-f]{16}',identity)
+                or identity in identities or relation.get('kind')!='printed-erratum'):
+            raise ValueError('invalid printed erratum identity')
+        wrong=anchor(relation.get('wrong'));operator=anchor(relation.get('operator'))
+        correct=anchor(relation.get('correct'))
+        mark=relation['operator']['text']
+        if mark not in arrows or (relation.get('axis'),relation.get('direction'))!=arrows[mark]:
+            raise ValueError('printed erratum arrow direction differs from source')
+        if (not wrong[1]<=operator[0]<operator[1]<=correct[0]
+                or relation['wrong']['text']==relation['correct']['text']
+                or not relation['wrong']['text'].strip() or not relation['correct']['text'].strip()
+                or operator in operators):
+            raise ValueError('printed erratum must preserve distinct wrong-arrow-correct spans')
+        bounds=box(relation.get('box'));polygon=quad(relation.get('quad'))
+        if any(not bounds[0]-1e-8<=x<=bounds[2]+1e-8 or not bounds[1]-1e-8<=y<=bounds[3]+1e-8
+               for x,y in polygon):
+            raise ValueError('printed erratum quadrilateral is outside source box')
+        proof=relation.get('evidence',{})
+        if not isinstance(proof,dict) or not isinstance(proof.get('reason'),str) or not proof['reason'].strip():
+            raise ValueError('printed erratum lacks original-source evidence')
+        sha(proof.get('crop_sha256'));identities.add(identity);operators.add(operator)
+
+
 def validate_flow_diagrams(diagrams,regions):
     """Check stable source memberships and directed routes, without copying text."""
     if not isinstance(diagrams,list) or len(diagrams)>100:raise ValueError('invalid flow diagrams')
@@ -411,6 +457,7 @@ def validate(layer):
             raise ValueError('incomplete table cell coverage')
     validate_formula_relations(layer.get('formula_relations',[]),layer['regions'])
     validate_formula_continuations(layer.get('formula_continuations',[]),layer['regions'],layer['text'])
+    validate_errata_relations(layer.get('errata_relations',[]),layer['regions'])
     validate_flow_diagrams(layer.get('flow_diagrams',[]),layer['regions'])
     for fraction in layer.get('fractions',[]):
         box(fraction.get('box'));box(fraction.get('bar_box'))
@@ -481,14 +528,16 @@ def accept_proposal(layer, proposal, *, actor):
     separators = proposal.get('separators', [])
     relations = proposal.get('formula_relations', [])
     continuations = proposal.get('formula_continuations', [])
+    errata = proposal.get('errata_relations', [])
     if not isinstance(relations,list):raise ValueError('invalid formula relations')
     if not isinstance(continuations,list):raise ValueError('invalid formula continuations')
+    if not isinstance(errata,list):raise ValueError('invalid printed errata relations')
     if (not isinstance(additions,list) or not isinstance(exclusions,list) or not isinstance(annotations,list)
             or not isinstance(separators,list)
             or not isinstance(annotation_additions,list)
             or any(not isinstance(row,dict) for row in additions+exclusions+annotations+separators+annotation_additions)):
         raise ValueError('invalid positioned correction scope')
-    positioned = bool(additions or exclusions or annotations or annotation_additions or separators or relations or continuations or any('geometry' in row for row in replacements or []))
+    positioned = bool(additions or exclusions or annotations or annotation_additions or separators or relations or continuations or errata or any('geometry' in row for row in replacements or []))
     visual_review = proposal.get('visual_review', {})
     if positioned:
         if (not isinstance(visual_review, dict) or visual_review.get('kind') != 'source-image-review'
@@ -578,7 +627,7 @@ def accept_proposal(layer, proposal, *, actor):
             or (added or removed) and not requested_order):
         raise ValueError("correction order must name every region exactly once")
     reorder = bool(requested_order and requested_order != original_order)
-    if not isinstance(replacements, list) or not replacements and not reorder and not relations and not continuations and not separators and not new_annotations:
+    if not isinstance(replacements, list) or not replacements and not reorder and not relations and not continuations and not errata and not separators and not new_annotations:
         raise ValueError("empty correction proposal")
     # Source-reviewed line/space corrections are independent from glyph text.
     # Require the exact original adjacent pair and gap so no hidden text can
@@ -674,6 +723,10 @@ def accept_proposal(layer, proposal, *, actor):
         combined=[*result.get('formula_continuations',[]),*copy.deepcopy(continuations)]
         validate_formula_continuations(combined,result['regions'],result['text'])
         result['formula_continuations']=combined
+    if errata:
+        combined=[*result.get('errata_relations',[]),*copy.deepcopy(errata)]
+        validate_errata_relations(combined,result['regions'])
+        result['errata_relations']=combined
     result.update(revision="accepted", quality="partially-reviewed", parent_generation=layer["generation"])
     result.setdefault("acceptances", []).append({"proposal_sha256": digest(proposal), "actor": actor,
                                                  "region_ids": sorted(changes),
@@ -688,6 +741,7 @@ def accept_proposal(layer, proposal, *, actor):
                                                           for identity in sorted(geometry)],
                                                        'formula_relation_ids':[r['id'] for r in relations],
                                                        **({'formula_continuation_ids':[r['id'] for r in continuations]} if continuations else {}),
+                                                       **({'errata_relation_ids':[r['id'] for r in errata]} if errata else {}),
                                                        **({'separator_changes':copy.deepcopy(list(separator_changes.values()))} if separator_changes else {}),
                                                      'visual_review':copy.deepcopy(visual_review)} if positioned else {}),
                                                 **({"region_order": requested_order} if reorder else {})})

@@ -110,6 +110,77 @@ class TextLayerTests(unittest.TestCase):
                 'visual_review':{'kind':'source-image-review','source_sha256':original['source_sha256'],
                      'page':original['page'],'input_png_sha256':'c'*64,'basis':'Complete source map and enlarged glyphs'}}
 
+    def errata_fixture(self):
+        blocks=[{'t':'辻の妹恒','b':[.6,.1,.7,.2],'c':.99,'s':'ocr'},
+                {'t':'↓野枝の従妹坂口キミ','b':[.6,.3,.7,.6],'c':.98,'s':'ocr'},
+                {'t':'辻の母美津↓野枝の叔母渡辺マツ','b':[.3,.1,.4,.6],'c':.97,'s':'ocr'}]
+        payload={**raw_page(),**ocr_layout.arrange(blocks,100,200,{'writing_mode':'vertical-rl'},
+                                                 include_writing_modes=True)}
+        original=layer.from_page(payload,'a'*64,'japan')
+        def anchor(identity,literal):
+            region=next(r for r in original['regions'] if r['id']==identity)
+            start=region['text'].index(literal)
+            return {'region_id':identity,'start':start,'end':start+len(literal),'text':literal}
+        relations=[]
+        for index,wrong,operator,correct in [(1,('b0','辻の妹恒'),('b1','↓'),('b1','野枝の従妹坂口キミ')),
+                                            (2,('b2','辻の母美津'),('b2','↓'),('b2','野枝の叔母渡辺マツ'))]:
+            relations.append({'id':'e'+str(index)*16,'kind':'printed-erratum','axis':'vertical','direction':'down',
+                'wrong':anchor(*wrong),'operator':anchor(*operator),'correct':anchor(*correct),
+                'box':[.3,.1,.7,.6],'quad':[[.3,.1],[.7,.1],[.7,.6],[.3,.6]],
+                'evidence':{'crop_sha256':'d'*64,'reason':'User original vertical wrong-arrow-correct entries'}})
+        return original,relations
+
+    def test_printed_errata_keep_both_original_sides_and_separate_source_arrows(self):
+        original,relations=self.errata_fixture();before=copy.deepcopy(original)
+        proposal=self.visual_proposal(original);proposal['errata_relations']=relations
+        accepted=layer.accept_proposal(original,proposal,actor='user-source-errata-review')
+        self.assertEqual(original,before)
+        for key in ('text','regions','raw_sha256','provenance','review_flags'):
+            self.assertEqual(accepted[key],original[key])
+        self.assertEqual(accepted['errata_relations'],relations)
+        self.assertEqual(accepted['acceptances'][-1]['errata_relation_ids'],['e'+'1'*16,'e'+'2'*16])
+        self.assertEqual(accepted['quality'],'partially-reviewed')
+        self.assertIn('辻の妹恒',accepted['text']);self.assertIn('野枝の従妹坂口キミ',accepted['text'])
+        self.assertIn('辻の母美津↓野枝の叔母渡辺マツ',accepted['text'])
+
+    def test_printed_errata_reject_guessed_text_reversed_arrows_aliases_and_missing_source(self):
+        original,relations=self.errata_fixture();proposal=self.visual_proposal(original)
+        proposal['errata_relations']=relations
+        for change in [{'direction':'up'},{'axis':'horizontal'},
+                       {'wrong':relations[0]['correct']},{'correct':relations[0]['wrong']},
+                       {'operator':{**relations[0]['operator'],'text':'→'}},
+                       {'correct':{**relations[0]['correct'],'text':'野枝の従妹坂口きみ'}},
+                       {'wrong':{**relations[0]['wrong'],'start':False}},
+                       {'wrong':{**relations[0]['wrong'],'region_id':[]}},
+                       {'evidence':{}},{'quad':[[.1,.1],[.9,.1],[.9,.9],[.1,.9]]}]:
+            bad=copy.deepcopy(proposal);bad['errata_relations'][0].update(change)
+            with self.subTest(change=change),self.assertRaises(ValueError):
+                layer.accept_proposal(original,bad,actor='reviewer')
+        for field,value in [('visual_review',{}),('errata_relations',relations+[relations[0]]),
+                            ('errata_relations',relations+[{**relations[0],'id':'e'+'3'*16}]),
+                            ('errata_relations',{})]:
+            with self.subTest(field=field,value=value),self.assertRaises(ValueError):
+                layer.accept_proposal(original,{**proposal,field:value},actor='reviewer')
+
+    def test_later_correction_cannot_overwrite_printed_wrong_text_or_erase_the_arrow(self):
+        original,relations=self.errata_fixture();proposal=self.visual_proposal(original)
+        proposal['errata_relations']=relations
+        accepted=layer.accept_proposal(original,proposal,actor='user-source-review')
+        for region_id,after in [('b0','野枝の従妹坂口キミ'),('b1','野枝の従妹坂口キミ'),
+                                ('b2','野枝の叔母渡辺マツ')]:
+            region=next(r for r in accepted['regions'] if r['id']==region_id)
+            changed=self.visual_proposal(accepted)
+            changed['replacements']=[{'region_id':region_id,'before':region['text'],'after':after}]
+            with self.subTest(region=region_id),self.assertRaisesRegex(ValueError,'erratum anchor'):
+                layer.accept_proposal(accepted,changed,actor='reviewer')
+
+        changed=self.visual_proposal(accepted)
+        changed.update(exclusions=[{'region_id':'b0','before':'辻の妹恒','classification':'scan-artifact',
+            'evidence':{'crop_sha256':'f'*64,'reason':'Cannot erase printed wrong entry as noise'}}],
+            region_order=[r['id'] for r in accepted['regions'] if r['id']!='b0'])
+        with self.assertRaisesRegex(ValueError,'erratum anchor'):
+            layer.accept_proposal(accepted,changed,actor='reviewer')
+
     def test_wrapped_ionic_formula_preserves_equal_sign_and_exact_continuation_without_branch(self):
         first='2Ag⁺¹ + 2NO₃⁻¹ + Ca⁺² + 2Cl⁻¹ = 2AgCl↓ +'
         last='Ca⁺² + 2NO₃⁻¹'

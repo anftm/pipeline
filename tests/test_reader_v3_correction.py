@@ -31,7 +31,7 @@ class CorrectionTests(unittest.TestCase):
         self.assertEqual(self.layer["text"], "wrong")
 
     def test_model_answer_cannot_add_or_exclude_source_regions(self):
-        for field in ('additions','exclusions','visual_review','formula_relations','formula_continuations','annotations','annotation_additions','separators'):
+        for field in ('additions','exclusions','visual_review','formula_relations','formula_continuations','errata_relations','annotations','annotation_additions','separators'):
             with self.subTest(field=field),self.assertRaises(ValueError):
                 correction.validate_answer(self.layer,{**self.answer,field:[]})
 

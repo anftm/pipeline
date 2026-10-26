@@ -16,6 +16,23 @@ from tests.test_pdf_text_layer import raw_page
 
 
 class ReadingV3Tests(unittest.TestCase):
+    def test_printed_errata_survive_complete_packaging_without_overwriting_text_or_search(self):
+        from tests.test_pdf_text_layer import TextLayerTests
+        original,relations=TextLayerTests().errata_fixture()
+        proposal=TextLayerTests().visual_proposal(original);proposal['errata_relations']=relations
+        accepted=text.accept_proposal(original,proposal,actor='user-source-errata-review')
+        layers,pages=self.layers(1);layers[0]=accepted
+        ref=v3.build_text_bundle(layers,pages,Path('objects/aa/'+'a'*64+'/'+'b'*16),self.bundle)
+        self.generated();verified=[]
+        manifest=v3.verify_text_bundle(ref,self.read,'a'*64,1,verified_layers=verified)
+        self.assertEqual(verified[0]['errata_relations'],relations)
+        self.assertEqual(verified[0]['regions'],original['regions'])
+        self.assertEqual(verified[0]['text'],original['text'])
+        search=v3.decode(self.read(manifest['search_partitions'][0]['resource']))['pages'][0]['text']
+        self.assertEqual(search,original['text'])
+        for literal in ['辻の妹恒','野枝の従妹坂口キミ','辻の母美津','野枝の叔母渡辺マツ','↓']:
+            self.assertIn(literal,search)
+
     def test_shared_render_reuses_verified_page_bytes_without_render_or_encoding(self):
         import imagecodecs
         import numpy as np
