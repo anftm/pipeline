@@ -11,7 +11,7 @@ try:
 except ImportError:
     import ocr_layout
 
-PROFILE='region-recognition-v2-restored-failure-evidence'
+PROFILE='region-recognition-v3-source-symbolic-tables'
 
 
 def recognize(path,regions,language,backend,ocr):
@@ -33,6 +33,14 @@ def recognize(path,regions,language,backend,ocr):
             try:
                 recognized=ocr.ocr_page(target,crop.width,crop.height,language,backend)
                 models=copy.deepcopy(ocr.actual_ocr_models(language,backend))
+                local_tables=[]
+                if language=='en':
+                    try:
+                        from . import ocr_symbolic_table
+                    except ImportError:
+                        import ocr_symbolic_table
+                    table=ocr_symbolic_table.detect(crop,recognized)
+                    if table:local_tables.append(table)
             finally:crop.close()
             def point(a,b):
                 a,b=ocr_layout.map_point_back(a,b,rotation)
@@ -62,7 +70,8 @@ def recognize(path,regions,language,backend,ocr):
             reports.append({'region':index,'original_box':region['box'],'crop_pixels':bounds,
                 'rotation_clockwise':rotation,'recognition_size':[u-x,v-y] if rotation in (0,180) else [v-y,u-x],
                 'input_png_sha256':hashlib.sha256(target.read_bytes()).hexdigest(),
-                'original_recognition_blocks':copy.deepcopy(recognized),'restored_blocks':output,'models':models})
+                'original_recognition_blocks':copy.deepcopy(recognized),'restored_blocks':output,'models':models,
+                'local_tables':local_tables})
             blocks.extend(output)
     # Every original pixel belongs to a crop. Failure or an empty detection is
     # retained with its own region identity, never replaced by a blank page.
@@ -77,10 +86,10 @@ def recognize(path,regions,language,backend,ocr):
     return blocks,actual
 
 
-def arrange(blocks,width,height,options):
+def arrange(blocks,width,height,options,regional_recognition=None):
     """Order each crop upright, then emit only original-page geometry/offsets."""
     options=ocr_layout.validate_options(options)
-    text='';spans=[];ordered=[];boundaries=[];used=set();review=[]
+    text='';spans=[];ordered=[];boundaries=[];used=set();review=[];tables=[]
     for number,region in enumerate(options['regions']):
         x,y,u,v=[round(a*(width if i%2==0 else height)) for i,a in enumerate(region['box'])]
         rotation=region.get('rotation',0)
@@ -94,8 +103,30 @@ def arrange(blocks,width,height,options):
             local.append(block)
         rw,rh=(v-y,u-x) if rotation in (90,270) else (u-x,v-y)
         writing=region.get('writing_mode','auto')
-        result=ocr_layout.arrange(local,rw,rh,{'writing_mode':writing,
-            'join_soft_lines':options.get('join_soft_lines',True)},include_writing_modes=True)
+        report=next((r for r in (regional_recognition or {}).get('regions',[]) if r['region']==number),{})
+        grids=report.get('local_tables',[])
+        local_options={'writing_mode':writing,'join_soft_lines':options.get('join_soft_lines',True)}
+        if grids:
+            try:
+                from . import ocr_aligned_table
+            except ImportError:
+                import ocr_aligned_table
+            result=ocr_aligned_table.arrange(local,rw,rh,grids,local_options)
+            def original_box(bounds):
+                mapped=ocr_layout.map_box_back(bounds,rotation)
+                return [(x+mapped[0]*(u-x))/width,(y+mapped[1]*(v-y))/height,
+                        (x+mapped[2]*(u-x))/width,(y+mapped[3]*(v-y))/height]
+            for grid in result['layout'].get('tables',[]):
+                actual=copy.deepcopy(grid)
+                actual['grid_box']=grid['box'];actual['grid_rotation_clockwise']=rotation
+                actual['grid_region_box']=copy.deepcopy(region['box'])
+                actual['box']=original_box(grid['box'])
+                for cell in actual['cells']:
+                    cell['blocks']=[indices[i] for i in cell['blocks']]
+                    cell['box']=original_box(cell['box'])
+                tables.append(actual)
+        else:
+            result=ocr_layout.arrange(local,rw,rh,local_options,include_writing_modes=True)
         review.extend(flag for flag in result['layout']['review'] if flag not in review)
         offset=len(text)
         if text and result['text']:
@@ -114,4 +145,5 @@ def arrange(blocks,width,height,options):
             'layout':{'version':ocr_layout.VERSION,'writing_mode':'horizontal-ltr','evidence':PROFILE,
                 'review':review,'regions':len(options['regions']),'boundaries':boundaries,
                 'offset_unit':'unicode-codepoint','mapping_precision':'block',
-                'recognition_regions':copy.deepcopy(options['regions'])}}
+                'recognition_regions':copy.deepcopy(options['regions']),
+                **({'tables':tables} if tables else {})}}

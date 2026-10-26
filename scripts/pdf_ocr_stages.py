@@ -32,7 +32,7 @@ from huggingface_hub.utils import get_session, hf_raise_for_status
 
 try:
     from . import pdf_ocr, pdf_assets, lin_pdf_text, pdf_render_schedule, pdf_worker_lanes, plan_pdf_ocr, publish_pdf_ocr_assets as publication, shared, ocr_layout, reader_lifecycle, pdf_text_layer, pdf_reading_v3
-    from . import pdf_ocr_progress, djvu_pages, ocr_quality, ndl_ocr, native_text_quality, ocr_mixed_text, ocr_script_evidence, ocr_latin_spacing, ocr_source_review, ocr_aligned_table, ocr_regions
+    from . import pdf_ocr_progress, djvu_pages, ocr_quality, ndl_ocr, native_text_quality, ocr_mixed_text, ocr_script_evidence, ocr_latin_spacing, ocr_source_review, ocr_aligned_table, ocr_regions, ocr_symbolic_table
     from .run_pdf_ocr import source_path, _bucket_retry_delay
     from .reader_bucket import index_path, publish_bytes, publish_json, publish_json_batch, publish_catalog, read_json as read_bucket_json
 except ImportError:
@@ -50,6 +50,7 @@ except ImportError:
     import ocr_source_review
     import ocr_aligned_table
     import ocr_regions
+    import ocr_symbolic_table
     from run_pdf_ocr import source_path, _bucket_retry_delay
     from reader_bucket import index_path, publish_bytes, publish_json, publish_json_batch, publish_catalog, read_json as read_bucket_json
 
@@ -1106,6 +1107,7 @@ def recognition_identity(entry, options):
                 'source_review_profile': ocr_source_review.PROFILE,
                 'aligned_tables': ocr_aligned_table.PROFILE,
                 'region_recognition':ocr_regions.PROFILE,
+                'symbolic_tables':ocr_symbolic_table.PROFILE,
                "japanese_models": ndl_ocr.PROFILE,
                'native_text': native_text_quality.PROFILE,
                'mixed_scripts': ocr_mixed_text.PROFILE,
@@ -1463,7 +1465,9 @@ def recognize_task(task, bundle, adopt_existing=False):
                     payload['native_components'] = page['native_components']
                 if degenerate:
                     payload["ocr_warning"] = "degenerate-image-below-minimum-side"
-                arranged = (ocr_regions.arrange(blocks,width,height,options) if any(r.get('rotation') for r in options.get('regions',[])) else
+                arranged = (ocr_regions.arrange(blocks,width,height,options,
+                                models.get('diagnostics',{}).get('regional_recognition'))
+                            if any(r.get('rotation') for r in options.get('regions',[])) else
                             ocr_aligned_table.arrange(blocks,width,height,aligned_tables,options) if aligned_tables else
                             ocr_table_geometry.arrange(blocks, width, height, table, options, include_writing_modes=True)
                             if table else ocr_layout.arrange(blocks, width, height, options))

@@ -69,3 +69,28 @@ class RegionRecognitionTests(unittest.TestCase):
                 self.assertAlmostEqual(actual,expected)
             self.assertEqual(models['diagnostics']['mixed_script']['issues'],[issue,issue])
             self.assertEqual(models['diagnostics']['regional_recognition']['regions'][0]['models']['diagnostics']['unresolved_regions'][0]['box'],[.1,.2,.8,.4])
+
+    def test_symbolic_matrix_keeps_original_page_cell_coordinates_and_no_repeated_text(self):
+        from tests.test_ocr_symbolic_table import SymbolicTableTests
+        from scripts import ocr_symbolic_table
+        image,local=SymbolicTableTests().fixture();grid=ocr_symbolic_table.detect(image,local)
+        self.assertIsNotNone(grid)
+        source=[{'t':'Left printed prose','b':[.05,.1,.4,.2],'s':'ocr','c':1,'recognition_region':0}]
+        for block in local:
+            mapped=ocr_layout.map_box_back(block['b'],90)
+            source.append({**block,'b':[.5+mapped[0]*.5,mapped[1],.5+mapped[2]*.5,mapped[3]],
+                           'recognition_region':1})
+        options={'regions':[{'box':[0,0,.5,1],'writing_mode':'horizontal-ltr'},
+                            {'box':[.5,0,1,1],'rotation':90,'writing_mode':'horizontal-ltr'}]}
+        models={'regions':[{'region':1,'local_tables':[grid]}]}
+        result=regions.arrange(source,2400,1000,options,models)
+        self.assertEqual(sorted(s['block'] for s in result['text_spans']),list(range(len(source))))
+        self.assertEqual(result['text'].count('Note: 0 means no flow.'),1)
+        layer=pdf_text_layer.from_page({'kind':'pdf-ocr-page','page':84,'source':'ocr',
+            'width':2400,'height':1000,**result},'a'*64,'en')
+        pdf_text_layer.validate(layer)
+        table=layer['tables'][0]
+        self.assertEqual(table['grid_rotation_clockwise'],90)
+        self.assertEqual(table['grid_region_box'],[.5,0,1,1])
+        self.assertTrue(all(cell['box'][0]>=.5 for cell in table['cells']))
+        self.assertTrue(all('b0' not in cell['region_ids'] for cell in table['cells']))
