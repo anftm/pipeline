@@ -182,6 +182,7 @@ def check_page(payload, recognition=None, *, source_sha256=None, input_sha256=No
         issues.extend(secondary.get("issues", []))
         issues.extend(diagnostics.get('mixed_script', {}).get('issues', []))
         issues.extend(diagnostics.get('formula_scripts',{}).get('issues',[]))
+        issues.extend(diagnostics.get('formula_sums',{}).get('issues',[]))
         if diagnostics.get("empty_regions"):
             issues.append(issue("detected-regions-without-text", "review", regions=diagnostics["empty_regions"]))
         if diagnostics.get('unresolved_regions'):

@@ -32,7 +32,7 @@ from huggingface_hub.utils import get_session, hf_raise_for_status
 
 try:
     from . import pdf_ocr, pdf_assets, lin_pdf_text, pdf_render_schedule, pdf_worker_lanes, plan_pdf_ocr, publish_pdf_ocr_assets as publication, shared, ocr_layout, reader_lifecycle, pdf_text_layer, pdf_reading_v3
-    from . import pdf_ocr_progress, djvu_pages, ocr_quality, ndl_ocr, native_text_quality, ocr_mixed_text, ocr_script_evidence, ocr_latin_spacing, ocr_source_review, ocr_aligned_table, ocr_regions, ocr_symbolic_table, ocr_formula_scripts, ocr_fraction_layout, ocr_grouped_table, ocr_flow_diagram, ocr_chronology_table
+    from . import pdf_ocr_progress, djvu_pages, ocr_quality, ndl_ocr, native_text_quality, ocr_mixed_text, ocr_script_evidence, ocr_latin_spacing, ocr_source_review, ocr_aligned_table, ocr_regions, ocr_symbolic_table, ocr_formula_scripts, ocr_fraction_layout, ocr_grouped_table, ocr_flow_diagram, ocr_chronology_table, ocr_formula_sums
     from .run_pdf_ocr import source_path, _bucket_retry_delay
     from .reader_bucket import index_path, publish_bytes, publish_json, publish_json_batch, publish_catalog, read_json as read_bucket_json
 except ImportError:
@@ -56,6 +56,7 @@ except ImportError:
     import ocr_grouped_table
     import ocr_flow_diagram
     import ocr_chronology_table
+    import ocr_formula_sums
     from run_pdf_ocr import source_path, _bucket_retry_delay
     from reader_bucket import index_path, publish_bytes, publish_json, publish_json_batch, publish_catalog, read_json as read_bucket_json
 
@@ -1115,6 +1116,7 @@ def recognition_identity(entry, options):
                 'symbolic_tables':ocr_symbolic_table.PROFILE,
                 'formula_tokens':ocr_formula_scripts.PROFILE,
                 'formula_confirmation_rec':ocr_formula_scripts.CONFIRMATION_REC_SHA256,
+                'binary_formula_sums':ocr_formula_sums.PROFILE,
                 'numeric_fractions':ocr_fraction_layout.PROFILE,
                 'grouped_tables':ocr_grouped_table.PROFILE,
                 'flow_diagrams':ocr_flow_diagram.PROFILE,
@@ -1502,7 +1504,11 @@ def recognize_task(task, bundle, adopt_existing=False):
                             with Image.open(png) as image:
                                 secondary_read=read_secondary_formula if language=='ch' and pdf_ocr.RAPID_MODEL_SIZE=='medium' else None
                                 blocks,formula=ocr_formula_scripts.refine_tokens(image,blocks,read_formula,read_secondary=secondary_read)
+                                if not rotation:
+                                    blocks,formula_sums=ocr_formula_sums.refine(image,blocks,read_formula,read_secondary=secondary_read)
+                                else:formula_sums=None
                             if formula:models.setdefault('diagnostics',{})['formula_scripts']=formula
+                            if formula_sums:models.setdefault('diagnostics',{})['formula_sums']=formula_sums
                     if table is None and not any(region.get('rotation') for region in options.get('regions',[])):
                         with Image.open(png) as image:
                             fractions=ocr_fraction_layout.detect(image,blocks)

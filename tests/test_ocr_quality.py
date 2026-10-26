@@ -118,12 +118,17 @@ class QualityTests(unittest.TestCase):
             self.assertFalse(stages.reusable_profile(current,stages.recognition_identity(entry,{})))
         with patch.object(stages.ocr_formula_scripts,'CONFIRMATION_REC_SHA256','different-secondary-model'):
             self.assertFalse(stages.reusable_profile(current,stages.recognition_identity(entry,{})))
+        with patch.object(stages.ocr_formula_sums,'PROFILE','different-binary-sums'):
+            self.assertFalse(stages.reusable_profile(current,stages.recognition_identity(entry,{})))
 
     def test_high_line_confidence_cannot_hide_unresolved_formula_script(self):
         payload=page([block('H2', [.1,.1,.3,.2])])
         payload['recognition']['models']['diagnostics']={'formula_scripts':{'issues':[
             quality.issue('formula-script-token-unresolved','review',region=0)]}}
         self.assertIn('formula-script-token-unresolved',codes(quality.check_page(payload)))
+        payload['recognition']['models']['diagnostics']={'formula_sums':{'issues':[
+            quality.issue('binary-formula-sum-unresolved','review',region=0)]}}
+        self.assertIn('binary-formula-sum-unresolved',codes(quality.check_page(payload)))
 
     def test_reviewed_scientific_symbol_page_still_needs_exact_source_loaded_model_and_formula_pixels(self):
         content='Pb(NO3)2+Na2S=2NaNO3+PbS↓ Cu+2+2OH-1=Cu(OH)2↓ '*3
