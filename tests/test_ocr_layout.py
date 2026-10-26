@@ -43,6 +43,24 @@ class OcrLayoutTests(unittest.TestCase):
         result = layout.arrange(blocks, 1200, 1800)
         self.assertEqual([b['t'] for b in result['blocks']], ['月報②', '右栏目次', '左栏目次', '上段文章', '下段文章'])
 
+    def test_short_vertical_paragraph_endings_do_not_disappear_or_break_tier_join(self):
+        upper=[(.56,'私達は上野高女'),(.42,'全校生が皆お友達'),(.35,'れば皆仲良く遊ぶ。'),(.08,'迫力に充')]
+        lower=[(.75,'ちた修身の時間は'),(.61,'誇りと信じております。'),(.46,'ャが竹下さん'),(.08,'に思われます。')]
+        blocks=[]
+        for values,top,bottom in [(upper,.05,.46),(lower,.51,.93)]:
+            for x,value in values:
+                short=value in {'れば皆仲良く遊ぶ。','誇りと信じております。'}
+                end=top+(bottom-top)*.6 if short else bottom
+                blocks.append({**block(value,[x,top,x+.025,end]),'section':0,'detector_class':1})
+        blocks.extend([{**block('月報②',[.88,.41,.92,.47]),'section':1},
+                       {**block('二〇〇〇年五月',[.90,.84,.92,.93]),'section':1}])
+        result=layout.arrange(blocks,1241,1870,include_writing_modes=True)
+        order=[b['t'] for b in result['blocks']]
+        self.assertEqual(order[:2],['月報②','二〇〇〇年五月'])
+        self.assertEqual(order[2:],[v for x,v in upper+lower])
+        self.assertEqual(order.index('ちた修身の時間は'),order.index('迫力に充')+1)
+        self.assertEqual(sorted(s['block'] for s in result['text_spans']),list(range(len(blocks))))
+
     def test_rtl_heading_reorders_glyph_blocks_but_never_reverses_line_string(self):
         glyphs = [block("民", [.1, .1, .15, .15]), block("人", [.2, .1, .25, .15])]
         result = layout.arrange(glyphs, 1000, 1000, {"writing_mode": "horizontal-rtl"})
