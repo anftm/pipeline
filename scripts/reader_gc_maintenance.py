@@ -41,7 +41,14 @@ class MaintenanceAPIError(RuntimeError):
     def __init__(self, repo, path, method, status):
         self.status = status
         super().__init__(f'maintenance API {method} failed: {repo}:{path} '
-                         f'(HTTP {status or "unknown"})')
+                          f'(HTTP {status or "unknown"})')
+
+
+class MaintenanceReadbackError(RuntimeError):
+    """A policy/workflow mutation was not yet confirmed; never an isolation proof."""
+    def __init__(self, repo, path, operation):
+        self.repo, self.path, self.operation = repo, path, operation
+        super().__init__(f'{operation} readback mismatch: {repo}:{path}')
 
 
 def api(repo, path, *, method="GET", body=None):
@@ -100,7 +107,7 @@ def set_state(repo, path, body, expected):
             time.sleep(2 ** attempt)
             continue
         if not state_matches(repo, path, expected):
-            raise RuntimeError(f"maintenance state mutation readback mismatch: {repo}:{path}")
+            raise MaintenanceReadbackError(repo, path, 'maintenance state mutation')
         return
 
 
@@ -152,7 +159,7 @@ def workflow_state(repo, workflow, enabled):
             time.sleep(2 ** attempt)
             continue
         if not state_matches(repo, path, lambda value: value['state'] == desired):
-            raise RuntimeError(f"workflow state readback mismatch: {repo}:{path}")
+            raise MaintenanceReadbackError(repo, path, 'workflow state')
         return
 
 
@@ -269,29 +276,49 @@ def restore(path):
             raise RuntimeError("collector still active; do not restore producers")
     errors = []
     for repo, record in state["repositories"].items():
-        try:
-            if record.get("permission_changed"):
-                permissions(repo, record["permission"])
-            for workflow in record["workflows"]:
-                if workflow["state"] == "active":
-                    workflow_state(repo, workflow, True)
-            for run in record["cancelled"]:
-                if run.get("restored"):
-                    continue
-                current = api(repo, f"actions/runs/{run['id']}")
-                if current["status"] == "completed" and current.get("conclusion") == "cancelled":
-                    # Never re-run a cancellation performed by this window.
-                    # GitHub can leave a re-run of a queued/cancelled attempt in
-                    # a permanent "waiting for pending jobs" state, and a
-                    # partially executed build must not be replayed behind the
-                    # next publication. Record it for explicit re-dispatch.
-                    run["rerun_skipped"] = True
-                run["restored"] = True
+        for attempt in range(3):
+            stage = 'permissions'
+            try:
+                if record.get("permission_changed"):
+                    permissions(repo, record["permission"])
+                for workflow in record["workflows"]:
+                    if workflow["state"] == "active":
+                        stage = 'workflow:' + str(workflow['id'])
+                        workflow_state(repo, workflow, True)
+                for run in record["cancelled"]:
+                    if run.get("restored"):
+                        continue
+                    stage = 'cancelled-run:' + str(run['id'])
+                    current = api(repo, f"actions/runs/{run['id']}")
+                    if current["status"] == "completed" and current.get("conclusion") == "cancelled":
+                        # Recovery never repeats cancellation/dispatch/rerun.
+                        # Only GET and idempotent policy/workflow PUTs can be
+                        # repeated; the independent collector is already done.
+                        run["rerun_skipped"] = True
+                    run["restored"] = True
+                    journal(path, state)
+                record["restored"] = True
+                stage = 'journal'
                 journal(path, state)
-            record["restored"] = True
-            journal(path, state)
-        except Exception as error:
-            errors.append({"repository": repo, "error": type(error).__name__})
+                break
+            except Exception as error:
+                retryable = (isinstance(error, MaintenanceReadbackError) or
+                    isinstance(error, MaintenanceAPIError) and error.status in {None, 408, 429, 500, 502, 503, 504})
+                failure = {"repository": repo, "error": type(error).__name__,
+                    'stage': stage, 'attempt': attempt + 1,
+                    'at': datetime.now(timezone.utc).isoformat(), 'retryable': retryable}
+                if isinstance(error, MaintenanceAPIError):failure['status'] = error.status
+                # Final recovery success must not erase the original failure.
+                # Keep sanitized, persistent per-attempt evidence without token
+                # material or arbitrary upstream response bodies.
+                state.setdefault('restore_attempt_errors', []).append(failure)
+                record['restored'] = False
+                journal(path, state)
+                if retryable and attempt < 2:
+                    time.sleep(2 ** (attempt + 1))
+                    continue
+                errors.append(failure)
+                break
     state["restore_errors"] = errors
     state["restored"] = not errors
     journal(path, state)

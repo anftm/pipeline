@@ -192,6 +192,64 @@ class MaintenanceTests(unittest.TestCase):
         self.assertNotIn('dispatch_requested',state)
         self.assertEqual(writes,[{'enabled':False}])
 
+    def test_restore_retries_unconfirmed_idempotent_policy_and_preserves_original_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'journal.json'
+            maintenance.journal(path,{'repositories':{'owner/repo':{
+                'permission_changed':True,'permission':{'enabled':True},'workflows':[],'cancelled':[]}}})
+            error=maintenance.MaintenanceReadbackError('owner/repo','actions/permissions','maintenance state mutation')
+            with patch.object(maintenance,'permissions',side_effect=[error,None]) as permissions, \
+                    patch.object(maintenance,'kick_restored') as kick,patch.object(maintenance.time,'sleep'):
+                maintenance.restore(path)
+            state=json.loads(path.read_text())
+            self.assertEqual(permissions.call_count,2)
+            self.assertTrue(state['restored'])
+            self.assertEqual(state['restore_errors'],[])
+            self.assertEqual(len(state['restore_attempt_errors']),1)
+            self.assertEqual(state['restore_attempt_errors'][0]['stage'],'permissions')
+            self.assertEqual(state['restore_attempt_errors'][0]['error'],'MaintenanceReadbackError')
+            self.assertTrue(state['restore_attempt_errors'][0]['retryable'])
+            kick.assert_called_once()
+
+    def test_restore_failed_all_attempts_keeps_history_after_explicit_recovery(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'journal.json'
+            maintenance.journal(path,{'repositories':{'owner/repo':{
+                'permission_changed':True,'permission':{'enabled':True},'workflows':[],'cancelled':[]}}})
+            error=maintenance.MaintenanceAPIError('owner/repo','actions/permissions','GET',503)
+            with patch.object(maintenance,'permissions',side_effect=error) as permissions, \
+                    patch.object(maintenance,'kick_restored') as kick,patch.object(maintenance.time,'sleep'):
+                with self.assertRaisesRegex(RuntimeError,'restoration requires recovery'):
+                    maintenance.restore(path)
+            failed=json.loads(path.read_text())
+            self.assertEqual(permissions.call_count,3)
+            self.assertFalse(failed['restored'])
+            self.assertEqual(len(failed['restore_attempt_errors']),3)
+            self.assertEqual(failed['restore_errors'][0]['status'],503)
+            kick.assert_not_called()
+            with patch.object(maintenance,'permissions'),patch.object(maintenance,'kick_restored'):
+                maintenance.restore(path)
+            recovered=json.loads(path.read_text())
+            self.assertTrue(recovered['restored'])
+            self.assertEqual(recovered['restore_errors'],[])
+            self.assertEqual(recovered['restore_attempt_errors'],failed['restore_attempt_errors'])
+
+    def test_restore_permission_denial_is_not_retried_or_exposed_as_credential_text(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'journal.json'
+            maintenance.journal(path,{'repositories':{'owner/repo':{
+                'permission_changed':True,'permission':{'enabled':True},'workflows':[],'cancelled':[]}}})
+            error=maintenance.MaintenanceAPIError('owner/repo','actions/permissions','PUT',403)
+            with patch.object(maintenance,'permissions',side_effect=error) as permissions, \
+                    patch.object(maintenance,'kick_restored') as kick,patch.object(maintenance.time,'sleep'):
+                with self.assertRaisesRegex(RuntimeError,'restoration requires recovery'):
+                    maintenance.restore(path)
+            value=json.loads(path.read_text())
+            self.assertEqual(permissions.call_count,1)
+            self.assertFalse(value['restore_attempt_errors'][0]['retryable'])
+            self.assertEqual(value['restore_errors'][0]['status'],403)
+            kick.assert_not_called()
+
     def test_repository_permission_denial_is_best_effort(self):
         record = {"permission": {"enabled": True, "allowed_actions": "all"}}
         denied = maintenance.MaintenanceAPIError(
