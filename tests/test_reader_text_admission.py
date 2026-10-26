@@ -86,3 +86,19 @@ class ReaderTextAdmissionTests(unittest.TestCase):
         report=admission.check(self.spec,layers,self.read)
         self.assertEqual(report['quality_check']['status'],'passed')
         self.assertEqual(report['pages'][0]['text_generation'],layers[0]['generation'])
+
+    def test_separating_unresolved_margin_mark_does_not_make_book_approved_body(self):
+        import copy
+        layers=recognized_layers(['Printed','Last page'],'a'*64,self.objects)
+        original=layers[0];accepted=copy.deepcopy(original)
+        mark={'id':'b99','text':'9','box':[.01,.3,.04,.35],'quad':[[.01,.3],[.04,.3],[.04,.35],[.01,.35]],
+              'confidence':.4,'source':'ocr'}
+        accepted.update(revision='accepted',quality='partially-reviewed',parent_generation=original['generation'],
+            acceptances=[{'proposal_sha256':'c'*64,'actor':'user-source-review'}],
+            annotations=[{'id':'b99','classification':'marginal-mark','status':'unresolved','literal_text':None,
+                'box':mark['box'],'quad':mark['quad'],'original_region':mark,
+                'evidence':{'crop_sha256':'f'*64,'reason':'User original handwritten margin mark'}}])
+        accepted['generation']=text.digest({k:v for k,v in accepted.items() if k!='generation'})
+        text.validate(accepted);layers[0]=accepted
+        with self.assertRaisesRegex(admission.QualityRejection,'unresolved source annotations'):
+            admission.check(self.spec,layers,self.read)

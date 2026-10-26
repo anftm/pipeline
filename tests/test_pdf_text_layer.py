@@ -114,6 +114,35 @@ class TextLayerTests(unittest.TestCase):
         self.assertEqual(accepted['acceptances'][-1]['excluded_regions'][0]['region']['text'],'umms')
         self.assertEqual(original['text'],'Title\n\numms')
 
+    def test_reviewed_handwritten_mark_is_kept_outside_body_not_erased_or_transcribed_as_nine(self):
+        blocks=[{'t':'Printed paragraph.','b':[.1,.1,.8,.2],'s':'ocr','c':1},
+                {'t':'9','b':[.02,.3,.06,.35],'s':'ocr','c':.4},
+                {'t':'Second printed paragraph.','b':[.1,.4,.8,.5],'s':'ocr','c':1}]
+        raw={**raw_page(),**ocr_layout.arrange(blocks,100,200,{'writing_mode':'horizontal-ltr'})}
+        original=layer.from_page(raw,'a'*64,'en');proposal=self.visual_proposal(original)
+        proposal.update(annotations=[{'region_id':'b1','before':'9','classification':'marginal-mark',
+            'status':'unresolved','literal_text':None,'evidence':{'crop_sha256':'d'*64,
+            'reason':'User original complete page shows pencil margin mark, not body digit'}}],region_order=['b0','b2'])
+        accepted=layer.accept_proposal(original,proposal,actor='explicit-source-review')
+        self.assertEqual(accepted['text'],'Printed paragraph.\nSecond printed paragraph.')
+        self.assertEqual(original['regions'][1]['text'],'9')
+        self.assertEqual(accepted['annotations'][0]['original_region'],original['regions'][1])
+        self.assertIsNone(accepted['annotations'][0]['literal_text'])
+        self.assertEqual(accepted['annotations'][0]['status'],'unresolved')
+        self.assertEqual(accepted['raw_sha256'],original['raw_sha256'])
+        self.assertIn('unresolved-source-annotation',accepted['review_flags'])
+        changed=copy.deepcopy(proposal);changed['annotations'][0]['literal_text']='?'
+        with self.assertRaises(ValueError):layer.accept_proposal(original,changed,actor='reviewer')
+        for mutation in [
+            {'annotations':proposal['annotations']*2},
+            {'annotations':[{**proposal['annotations'][0],'before':'unmatched'}]},
+            {'annotations':[{**proposal['annotations'][0],'evidence':{}}]},
+            {'annotations':[{**proposal['annotations'][0],'classification':'scan-artifact'}]},
+            {'visual_review':{}},
+            {'region_order':['b0','b1','b2']}]:
+            with self.subTest(mutation=mutation),self.assertRaises(ValueError):
+                layer.accept_proposal(original,{**proposal,**mutation},actor='reviewer')
+
     def test_positioned_map_additions_preserve_unchanged_body_separators(self):
         blocks=[{'t':'map','b':[.1,.1,.3,.2],'c':.99,'s':'ocr'},
                 {'t':'Right paragraph one.','b':[.6,.1,.9,.2],'c':.99,'s':'ocr'},

@@ -358,6 +358,27 @@ class ReadingV3Tests(unittest.TestCase):
         self.assertEqual(search['pages'][0]['text'],layer['text'])
         self.assertIn('⋮',search['pages'][0]['text'])
 
+    def test_unresolved_margin_evidence_survives_search_bundle_without_publishing_false_digit(self):
+        from scripts import ocr_layout
+        blocks=[{'t':'Printed text','b':[.1,.1,.8,.2],'s':'ocr','c':1},
+                {'t':'9','b':[.01,.3,.04,.35],'s':'ocr','c':.4}]
+        payload={**raw_page(),**ocr_layout.arrange(blocks,100,200,{'writing_mode':'horizontal-ltr'})}
+        original=text.from_page(payload,'a'*64,'en')
+        proposal={'kind':'pdf-text-correction','version':1,'base_generation':original['generation'],
+            'raw_sha256':original['raw_sha256'],'page_identity':original['page_identity'],'replacements':[],
+            'annotations':[{'region_id':'b1','before':'9','classification':'marginal-mark','status':'unresolved',
+                'literal_text':None,'evidence':{'crop_sha256':'d'*64,'reason':'Complete original pencil mark'}}],
+            'visual_review':{'kind':'source-image-review','source_sha256':'a'*64,'page':1,
+                'input_png_sha256':'c'*64,'basis':'Complete original user page'},'region_order':['b0']}
+        accepted=text.accept_proposal(original,proposal,actor='explicit-user-source-review')
+        layers,pages=self.layers(1);layers[0]=accepted
+        ref=v3.build_text_bundle(layers,pages,Path('objects/aa/'+'a'*64+'/'+'b'*16),self.bundle)
+        self.generated();verified=[]
+        manifest=v3.verify_text_bundle(ref,self.read,'a'*64,1,verified_layers=verified)
+        self.assertEqual(verified[0]['annotations'],accepted['annotations'])
+        search=v3.decode(self.read(manifest['search_partitions'][0]['resource']))
+        self.assertEqual(search['pages'][0]['text'],'Printed text')
+
 
 if __name__ == "__main__":
     unittest.main()

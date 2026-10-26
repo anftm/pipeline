@@ -32,6 +32,8 @@ def check(spec, layers, read):
         raise QualityRejection('body publication requires every physical page')
     reports, pages = [], []
     for layer in layers:
+        if any(a.get('status')=='unresolved' for a in layer.get('annotations',[])):
+            raise QualityRejection(f"page {layer['page']} retains unresolved source annotations")
         ref = layer['provenance'].get('raw_resource')
         if not ref:
             raise QualityRejection(f"page {layer['page']} lacks original recognition evidence")
