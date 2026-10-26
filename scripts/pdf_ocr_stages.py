@@ -32,7 +32,7 @@ from huggingface_hub.utils import get_session, hf_raise_for_status
 
 try:
     from . import pdf_ocr, pdf_assets, lin_pdf_text, pdf_render_schedule, pdf_worker_lanes, plan_pdf_ocr, publish_pdf_ocr_assets as publication, shared, ocr_layout, reader_lifecycle, pdf_text_layer, pdf_reading_v3
-    from . import pdf_ocr_progress, djvu_pages, ocr_quality, ndl_ocr, native_text_quality, ocr_mixed_text, ocr_script_evidence, ocr_latin_spacing, ocr_source_review, ocr_aligned_table, ocr_regions, ocr_symbolic_table, ocr_formula_scripts, ocr_fraction_layout, ocr_grouped_table
+    from . import pdf_ocr_progress, djvu_pages, ocr_quality, ndl_ocr, native_text_quality, ocr_mixed_text, ocr_script_evidence, ocr_latin_spacing, ocr_source_review, ocr_aligned_table, ocr_regions, ocr_symbolic_table, ocr_formula_scripts, ocr_fraction_layout, ocr_grouped_table, ocr_flow_diagram
     from .run_pdf_ocr import source_path, _bucket_retry_delay
     from .reader_bucket import index_path, publish_bytes, publish_json, publish_json_batch, publish_catalog, read_json as read_bucket_json
 except ImportError:
@@ -54,6 +54,7 @@ except ImportError:
     import ocr_formula_scripts
     import ocr_fraction_layout
     import ocr_grouped_table
+    import ocr_flow_diagram
     from run_pdf_ocr import source_path, _bucket_retry_delay
     from reader_bucket import index_path, publish_bytes, publish_json, publish_json_batch, publish_catalog, read_json as read_bucket_json
 
@@ -1114,6 +1115,7 @@ def recognition_identity(entry, options):
                 'formula_tokens':ocr_formula_scripts.PROFILE,
                 'numeric_fractions':ocr_fraction_layout.PROFILE,
                 'grouped_tables':ocr_grouped_table.PROFILE,
+                'flow_diagrams':ocr_flow_diagram.PROFILE,
                "japanese_models": ndl_ocr.PROFILE,
                'native_text': native_text_quality.PROFILE,
                'mixed_scripts': ocr_mixed_text.PROFILE,
@@ -1444,6 +1446,7 @@ def recognize_task(task, bundle, adopt_existing=False):
                 table = None
                 aligned_tables=[]
                 fractions=[]
+                flow=None
                 if language=='en' and not degenerate and not page.get('native_components') and not any(
                         region.get('rotation') for region in options.get('regions',[])):
                     with Image.open(png) as image:
@@ -1453,6 +1456,9 @@ def recognize_task(task, bundle, adopt_existing=False):
                             aligned_tables=ocr_aligned_table.separate_category_rows(blocks,aligned_tables)
                             aligned_tables=ocr_aligned_table.align_wrapped_labels(blocks,aligned_tables)
                             if dashes:models.setdefault('diagnostics',{})['table_dashes']=dashes
+                        elif not rotation:
+                            flow=ocr_flow_diagram.detect(image,blocks)
+                            if flow:blocks,models,flow=ocr_flow_diagram.filter_detections(image,blocks,models,flow)
                 if language in {'ch', 'chinese_cht'} and not degenerate and not page.get('native_components'):
                     try:
                         from . import ocr_table_geometry, ocr_diagonal_header, ocr_sparse_cells
@@ -1492,6 +1498,7 @@ def recognize_task(task, bundle, adopt_existing=False):
                                 models.get('diagnostics',{}).get('regional_recognition'))
                             if any(r.get('rotation') for r in options.get('regions',[])) else
                             ocr_aligned_table.arrange(blocks,width,height,aligned_tables,options) if aligned_tables else
+                            ocr_flow_diagram.arrange(blocks,width,height,flow,options) if flow else
                             ocr_fraction_layout.arrange(blocks,width,height,fractions,options) if fractions else
                             ocr_table_geometry.arrange(blocks, width, height, table, options, include_writing_modes=True)
                             if table else ocr_layout.arrange(blocks, width, height, options))

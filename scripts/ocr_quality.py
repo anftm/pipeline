@@ -304,6 +304,9 @@ def check_page(payload, recognition=None, *, source_sha256=None, input_sha256=No
     for table in layout.get('tables', []):
         for flag in table.get('review', []):
             issues.append(issue(flag['code'], 'review', **{k:v for k,v in flag.items() if k!='code'}))
+    for diagram in layout.get('flow_diagrams',[]):
+        for flag in diagram.get('review',[]):
+            issues.append(issue(flag['code'],'review',**{k:v for k,v in flag.items() if k!='code'}))
     return {"policy": POLICY, "page": payload.get("page"), "status": status(issues), "issues": issues,
             "scope": "automated-consistency-checks", "character_accuracy": "unreviewed"}
 

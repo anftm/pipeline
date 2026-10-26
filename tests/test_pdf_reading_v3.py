@@ -341,6 +341,23 @@ class ReadingV3Tests(unittest.TestCase):
         self.assertEqual(effective['regions'][1]['confidence'],0)
         self.assertEqual(effective['quality'],'partially-reviewed')
 
+    def test_source_flow_graph_survives_complete_text_and_search_packaging(self):
+        from tests.test_ocr_flow_diagram import fixture
+        from scripts import ocr_flow_diagram as flow
+        image,blocks=fixture();graph=flow.detect(image,blocks)
+        output,models,graph=flow.filter_detections(image,blocks,{},graph)
+        arranged=flow.arrange(output,*image.size,graph)
+        layer=text.from_page({'kind':'pdf-ocr-page','page':1,'source':'ocr',
+            'width':image.width,'height':image.height,**arranged},'a'*64,'en')
+        layers,pages=self.layers(1);layers[0]=layer
+        ref=v3.build_text_bundle(layers,pages,Path('objects/aa/'+'a'*64+'/'+'b'*16),self.bundle)
+        self.generated();verified=[]
+        manifest=v3.verify_text_bundle(ref,self.read,'a'*64,1,verified_layers=verified)
+        self.assertEqual(verified[0]['flow_diagrams'],layer['flow_diagrams'])
+        search=v3.decode(self.read(manifest['search_partitions'][0]['resource']))
+        self.assertEqual(search['pages'][0]['text'],layer['text'])
+        self.assertIn('⋮',search['pages'][0]['text'])
+
 
 if __name__ == "__main__":
     unittest.main()

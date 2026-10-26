@@ -85,6 +85,59 @@ def validate_formula_relations(relations, regions):
         identities.add(identity)
 
 
+def validate_flow_diagrams(diagrams,regions):
+    """Check stable source memberships and directed routes, without copying text."""
+    if not isinstance(diagrams,list) or len(diagrams)>100:raise ValueError('invalid flow diagrams')
+    by_id={r['id']:r for r in regions};known=set(by_id);owned=set()
+    for diagram in diagrams:
+        if not isinstance(diagram,dict):raise ValueError('invalid flow diagram')
+        box(diagram.get('box'));sha(diagram.get('source_pixels_sha256'))
+        nodes=diagram.get('nodes');edges=diagram.get('edges')
+        if not isinstance(nodes,list) or not nodes or not isinstance(edges,list):raise ValueError('invalid flow diagram structure')
+        identities=set();node_boxes={}
+        for node in nodes:
+            if not isinstance(node,dict):raise ValueError('invalid flow node')
+            identity=node.get('id');refs=node.get('region_ids')
+            box(node.get('box'))
+            if (not isinstance(identity,str) or identity in identities or not isinstance(refs,list)
+                    or not refs or any(r not in known for r in refs) or len(set(refs))!=len(refs)
+                    or owned.intersection(refs) or node.get('label_region_id') not in refs):
+                raise ValueError('invalid flow node region ownership')
+            identities.add(identity);owned.update(refs)
+            node_boxes[identity]=node['box']
+            for mark in node.get('marks',[]):
+                if mark.get('kind')!='vertical-dots' or len(mark.get('boxes',[]))!=3:
+                    raise ValueError('invalid source diagram marks')
+                for bounds in mark['boxes']:box(bounds)
+                sha(mark.get('source_pixels_sha256'))
+                if mark.get('operator_region_id') is not None and (
+                        mark['operator_region_id'] not in refs or by_id[mark['operator_region_id']]['text']!='⋮'):
+                    raise ValueError('flow dots token differs from its source mark')
+        routes=set()
+        for edge in edges:
+            if not isinstance(edge,dict):raise ValueError('invalid flow edge')
+            first,last=edge.get('from'),edge.get('to');points=edge.get('path')
+            if first not in identities or last not in identities or first==last or (first,last) in routes:
+                raise ValueError('invalid directed flow connection')
+            if (not isinstance(points,list) or not 2<=len(points)<=100 or any(
+                    not isinstance(point,list) or len(point)!=2 or any(number(v)>1 for v in point) for point in points)):
+                raise ValueError('invalid positioned flow path')
+            for (x,y),(u,v) in zip(points,points[1:]):
+                if (x==u and y==v) or min(abs(u-x),abs(v-y))>1e-8:
+                    raise ValueError('flow path is not orthogonal')
+            for point,node_id in ((points[0],first),(points[-1],last)):
+                x,y=point;a,b,c,d=node_boxes[node_id]
+                if (not a-1e-8<=x<=c+1e-8 or not b-1e-8<=y<=d+1e-8
+                        or min(abs(x-a),abs(x-c),abs(y-b),abs(y-d))>1e-8):
+                    raise ValueError('flow connection misses its original source node')
+            (x,y),(u,v)=points[-2:]
+            direction=('right' if u>x else 'left') if abs(v-y)<1e-8 else ('down' if v>y else 'up')
+            evidence=edge.get('evidence',{})
+            if edge.get('arrow_direction')!=direction or evidence.get('arrowhead',{}).get('direction')!=direction:
+                raise ValueError('flow arrow direction differs from source route')
+            sha(evidence.get('source_path_sha256'));routes.add((first,last))
+
+
 def direction(text):
     strong = {unicodedata.bidirectional(c) for c in text} & {"L", "R", "AL"}
     if "L" in strong and strong & {"R", "AL"}:
@@ -222,6 +275,14 @@ def from_page(payload, source_sha256, language="und", raw_resource=None, *, layo
         for fraction in result['fractions']:
             for role in ('numerator','denominator','operator'):
                 fraction[role+'_region_id']='b'+str(fraction.pop(role+'_block'))
+    if layout.get('flow_diagrams'):
+        result['flow_diagrams']=copy.deepcopy(layout['flow_diagrams'])
+        for diagram in result['flow_diagrams']:
+            for node in diagram['nodes']:
+                node['region_ids']=['b'+str(i) for i in node.pop('blocks')]
+                node['label_region_id']='b'+str(node.pop('label_block'))
+                for mark in node.get('marks',[]):
+                    if 'operator_block' in mark:mark['operator_region_id']='b'+str(mark.pop('operator_block'))
     result["generation"] = digest(result)
     validate(result)
     return result
@@ -307,6 +368,7 @@ def validate(layer):
         if len(occupied) != (len(table['rows'])-1)*(len(table['columns'])-1):
             raise ValueError('incomplete table cell coverage')
     validate_formula_relations(layer.get('formula_relations',[]),layer['regions'])
+    validate_flow_diagrams(layer.get('flow_diagrams',[]),layer['regions'])
     for fraction in layer.get('fractions',[]):
         box(fraction.get('box'));box(fraction.get('bar_box'))
         sha(fraction.get('bar_pixels_sha256'))
