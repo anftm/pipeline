@@ -1,5 +1,7 @@
 import unittest
 import numpy as np
+from PIL import Image
+from unittest.mock import patch
 from scripts import ocr_formula_scripts as scripts
 
 
@@ -83,3 +85,38 @@ class FormulaScriptTests(unittest.TestCase):
         pixels[19:22,25:31]=0;pixels[25:30,25:31]=0
         evidence=scripts.lowered_ink(pixels[:,:,0])
         self.assertEqual(evidence['script_box'],[25,19,31,30])
+
+    def test_large_printed_subscript_uses_baseline_offset_not_only_small_height(self):
+        pixels=np.full((40,65,3),255,np.uint8)
+        pixels[5:25,5:20]=0;pixels[10:28,30:42]=0
+        proof=scripts.lowered_ink(pixels[:,:,0])
+        self.assertIsNotNone(proof)
+        self.assertEqual(proof['script_box'],[30,10,42,28])
+        reads=iter([('H2',.999)]*4+[('2',.999)]*4)
+        value,_=scripts.recognize_subscript(pixels,lambda image:next(reads))
+        self.assertEqual(value,'H₂')
+        pixels[10:28,30:42]=255;pixels[5:25,30:42]=0
+        self.assertIsNone(scripts.lowered_ink(pixels[:,:,0]))
+
+    def test_refined_token_keeps_primary_confidence_and_geometry_without_chemical_replacement(self):
+        image=Image.new('RGB',(200,100),'white')
+        blocks=[{'t':'H2','b':[.1,.1,.4,.4],'q':[[.1,.1],[.4,.1],[.4,.4],[.1,.4]],'c':.83,'s':'ocr'}]
+        proof={'geometry':{'script_box':[10,20,15,28]},'accepted':True}
+        with patch.object(scripts,'recognize_subscript',return_value=('H₂',proof)):
+            output,report=scripts.refine_tokens(image,blocks,lambda image:None)
+        self.assertEqual(output[0]['t'],'H₂')
+        self.assertEqual(blocks[0]['t'],'H2')
+        for key in ['b','q','c','s']:self.assertEqual(output[0][key],blocks[0][key])
+        self.assertTrue(report['tokens'][0]['accepted'])
+        with patch.object(scripts,'recognize_subscript',return_value=('N₂',proof)):
+            output,report=scripts.refine_tokens(image,blocks,lambda image:None)
+        self.assertEqual(output,blocks)
+        self.assertEqual(report['issues'][0]['code'],'formula-script-token-unresolved')
+
+    def test_full_reactions_prose_and_neighbouring_text_are_not_token_crop_shortcuts(self):
+        image=Image.new('RGB',(200,100),'white')
+        blocks=[{'t':'Cu+2+2H2O','b':[.1,.1,.9,.3],'c':1,'s':'ocr'},
+                {'t':'中文H2','b':[.1,.4,.9,.6],'c':1,'s':'ocr'}]
+        with patch.object(scripts,'recognize_subscript') as recognize:
+            self.assertEqual(scripts.refine_tokens(image,blocks,lambda image:None),(blocks,None))
+            recognize.assert_not_called()

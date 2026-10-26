@@ -32,7 +32,7 @@ from huggingface_hub.utils import get_session, hf_raise_for_status
 
 try:
     from . import pdf_ocr, pdf_assets, lin_pdf_text, pdf_render_schedule, pdf_worker_lanes, plan_pdf_ocr, publish_pdf_ocr_assets as publication, shared, ocr_layout, reader_lifecycle, pdf_text_layer, pdf_reading_v3
-    from . import pdf_ocr_progress, djvu_pages, ocr_quality, ndl_ocr, native_text_quality, ocr_mixed_text, ocr_script_evidence, ocr_latin_spacing, ocr_source_review, ocr_aligned_table, ocr_regions, ocr_symbolic_table
+    from . import pdf_ocr_progress, djvu_pages, ocr_quality, ndl_ocr, native_text_quality, ocr_mixed_text, ocr_script_evidence, ocr_latin_spacing, ocr_source_review, ocr_aligned_table, ocr_regions, ocr_symbolic_table, ocr_formula_scripts
     from .run_pdf_ocr import source_path, _bucket_retry_delay
     from .reader_bucket import index_path, publish_bytes, publish_json, publish_json_batch, publish_catalog, read_json as read_bucket_json
 except ImportError:
@@ -51,6 +51,7 @@ except ImportError:
     import ocr_aligned_table
     import ocr_regions
     import ocr_symbolic_table
+    import ocr_formula_scripts
     from run_pdf_ocr import source_path, _bucket_retry_delay
     from reader_bucket import index_path, publish_bytes, publish_json, publish_json_batch, publish_catalog, read_json as read_bucket_json
 
@@ -1108,6 +1109,7 @@ def recognition_identity(entry, options):
                 'aligned_tables': ocr_aligned_table.PROFILE,
                 'region_recognition':ocr_regions.PROFILE,
                 'symbolic_tables':ocr_symbolic_table.PROFILE,
+                'formula_tokens':ocr_formula_scripts.PROFILE,
                "japanese_models": ndl_ocr.PROFILE,
                'native_text': native_text_quality.PROFILE,
                'mixed_scripts': ocr_mixed_text.PROFILE,
@@ -1458,6 +1460,16 @@ def recognize_task(task, bundle, adopt_existing=False):
                                 blocks,table,cell_evidence=ocr_sparse_cells.recognize(image,table,blocks,pdf_ocr,language,backend)
                                 if cell_evidence:
                                     models.setdefault('diagnostics',{})['table_cells']=cell_evidence
+                    if table is None and backend=='rapidocr_onnxruntime' and not any(
+                            region.get('rotation') for region in options.get('regions',[])):
+                        engine=pdf_ocr.get_ocr_engine(language,backend)
+                        if hasattr(engine,'recognize_txt'):
+                            def read_formula(pixels):
+                                recognized=engine.recognize_txt([pixels[:,:,::-1]])
+                                return recognized.txts[0],float(recognized.scores[0])
+                            with Image.open(png) as image:
+                                blocks,formula=ocr_formula_scripts.refine_tokens(image,blocks,read_formula)
+                            if formula:models.setdefault('diagnostics',{})['formula_scripts']=formula
                 payload = pdf_ocr.page_payload(page["p"], page["width"], page["height"], blocks, "ocr")
                 if page.get('native_rejection'):
                     payload['native_rejection'] = page['native_rejection']

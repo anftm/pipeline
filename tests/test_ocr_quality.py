@@ -108,6 +108,14 @@ class QualityTests(unittest.TestCase):
             self.assertFalse(stages.reusable_profile(current, stages.recognition_identity(entry, {})))
         with patch.object(quality, 'ROUTING_PROFILE', 'different-routing'):
             self.assertFalse(stages.reusable_profile(current, stages.recognition_identity(entry, {})))
+        with patch.object(stages.ocr_formula_scripts,'PROFILE','different-formula-scripts'):
+            self.assertFalse(stages.reusable_profile(current,stages.recognition_identity(entry,{})))
+
+    def test_high_line_confidence_cannot_hide_unresolved_formula_script(self):
+        payload=page([block('H2', [.1,.1,.3,.2])])
+        payload['recognition']['models']['diagnostics']={'formula_scripts':{'issues':[
+            quality.issue('formula-script-token-unresolved','review',region=0)]}}
+        self.assertIn('formula-script-token-unresolved',codes(quality.check_page(payload)))
 
     def test_three_consistent_low_confidence_votes_are_recorded(self):
         probe = {"regions": [{"script": "Han", "confidence": n} for n in (.81, .98, 1.03)]}

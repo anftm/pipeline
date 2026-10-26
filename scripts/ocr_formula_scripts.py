@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 import hashlib
+import copy
 import re
 import statistics
 
-PROFILE='formula-scripts-pixels-v2-complete-terms'
+PROFILE='formula-scripts-pixels-v3-baseline-relative-digits'
 SUPERSCRIPT=str.maketrans('+-0123456789','⁺⁻⁰¹²³⁴⁵⁶⁷⁸⁹')
 SUBSCRIPT=str.maketrans('0123456789','₀₁₂₃₄₅₆₇₈₉')
 
@@ -187,12 +188,24 @@ def lowered_ink(gray):
         count,labels,stats,_=cv2.connectedComponentsWithStats((gray<threshold).astype(np.uint8))
         components=[list(map(int,s)) for s in stats[1:] if s[4]>=3]
         maximum=max((c[3] for c in components),default=0)
-        bodies=[c for c in components if c[3]>=maximum*.7]
+        substantial=[c for c in components if c[3]>=maximum*.7]
+        first_top=min((c[1] for c in substantial),default=0)
+        bodies=[c for c in substantial if c[1]<=first_top+maximum*.15]
         if maximum<8 or not bodies:return None
         baseline=float(statistics.median(c[1]+c[3] for c in bodies))
         left=min(c[0] for c in bodies)
-        candidates=[c for c in components if c[0]>=left and c[3]<=maximum*.65 and c[3]>=2
-                    and c[1]>=baseline-maximum*.4 and c[1]+c[3]>=baseline+maximum*.1]
+        candidates=[c for c in components if c[0]>=left and c[3]<=maximum*.95 and c[3]>=2
+                    and c[1]>=first_top+maximum*.2 and c[1]<baseline
+                    and c[1]+c[3]>=baseline+maximum*.08]
+        if not candidates:
+            # A disconnected lower tail is admissible only with a matching
+            # upper component in the same digit band; isolated diagram lines
+            # below the formula cannot become subscripts.
+            candidates=[c for c in components if c[3]>=2 and c[3]<=maximum*.65 and c[1]>=baseline
+                        and c[1]<=baseline+maximum*.15 and any(
+                            p[1]>=first_top+maximum*.2 and p[1]<baseline and p[1]+p[3]<c[1]
+                            and abs((p[0]+p[2]/2)-(c[0]+c[2]/2))<=maximum*.15
+                            for p in components if p is not c)]
         if not candidates:return None
         xs=sorted(candidates,key=lambda c:c[0])
         if any(b[0]>a[0]+a[2]+maximum*.35 for a,b in zip(xs,xs[1:])):return None
@@ -201,7 +214,7 @@ def lowered_ink(gray):
         # Recover the whole original digit in that same horizontal band, not
         # merely its bottom component (which can resemble punctuation).
         xs=[c for c in components if c[0]>=lo-1 and c[0]+c[2]<=hi+1
-            and c[1]>=baseline-maximum*.45 and c[1]+c[3]<=max(q[1]+q[3] for q in candidates)+1]
+            and c[1]>=first_top+maximum*.2 and c[1]+c[3]<=max(q[1]+q[3] for q in candidates)+1]
         bounds=[min(c[0] for c in xs),min(c[1] for c in xs),
                 max(c[0]+c[2] for c in xs),max(c[1]+c[3] for c in xs)]
         masks.append({'threshold':threshold,'components':xs,'body_components':bodies,
@@ -265,3 +278,54 @@ def recognize_subscript(crop,read):
     selected=original[:match.start()]+value.translate(SUBSCRIPT)+original[match.end():]
     proof.update(original=original,text=selected,accepted=True)
     return selected,proof
+
+
+def refine_tokens(image,blocks,read):
+    """Refine positioned complete Latin tokens; preserve every primary block.
+
+    Whole reactions, prose, operators, mixed Han and already positioned Unicode
+    scripts are out of scope. A rejected positive geometry stays reviewable.
+    No caller-provided expected text or chemical dictionary is consulted.
+    """
+    import numpy as np
+    pixels=np.asarray(image.convert('RGB'))
+    width,height=image.size
+    output=copy.deepcopy(blocks);reports=[];issues=[]
+    for index,block in enumerate(output):
+        primary=block['t']
+        if not (2<=len(primary)<=24 and re.fullmatch(r'[0-9]*[A-Za-z][A-Za-z0-9()]*(?:[+\-][0-9]{1,2})?',primary)):
+            continue
+        if not any(c.isdigit() for c in primary):continue
+        bounds=[round(a*(width if axis%2==0 else height)) for axis,a in enumerate(block['b'])]
+        x,y,u,v=bounds
+        if min(u-x,v-y)<4:continue
+        pad=min(5,max(2,round((v-y)*.15)))
+        x0,y0,x1,y1=max(0,x-pad),max(0,y-pad),min(width,u+pad),min(height,v+pad)
+        # Neighbour text cannot be clipped or swallowed to make a token agree.
+        if any(i!=index and max(x0,b['b'][0]*width)<min(x1,b['b'][2]*width)
+               and max(y0,b['b'][1]*height)<min(y1,b['b'][3]*height) for i,b in enumerate(blocks)):
+            continue
+        crop=pixels[y0:y1,x0:x1].copy()
+        charged=bool(re.search(r'[+\-][0-9]{1,2}$',primary))
+        selected,proof=(recognize(crop,read) if charged else recognize_subscript(crop,read))
+        if proof is None:continue
+        row={'region':index,'primary':copy.deepcopy(blocks[index]),'source_crop_box':[x0,y0,x1,y1],
+             'source_pixels_sha256':hashlib.sha256(crop.tobytes()).hexdigest(),'recognition':proof,
+             'accepted':False}
+        if selected is not None:
+            # Match precisely, including case and the sign/number order. Only
+            # script position may change, never an OCR spelling or a letter.
+            reverse=str.maketrans('⁺⁻⁰¹²³⁴⁵⁶⁷⁸⁹₀₁₂₃₄₅₆₇₈₉','+-01234567890123456789')
+            if selected.translate(reverse)==primary:
+                block['t']=selected
+                block['primary_text']=primary
+                sx,sy,su,sv=proof['geometry']['script_box']
+                row.update(accepted=True,text=selected,script_source_box=[
+                    (x0+sx)/width,(y0+sy)/height,(x0+su)/width,(y0+sv)/height])
+                block['formula_script_evidence']=copy.deepcopy(row)
+        reports.append(row)
+        if not row['accepted']:
+            issues.append({'code':'formula-script-token-unresolved','severity':'review',
+                           'evidence':{'region':index,'box':block['b'],'primary':primary,
+                                       'source_pixels_sha256':row['source_pixels_sha256']}})
+    return output,({'profile':PROFILE,'tokens':reports,'issues':issues} if reports else None)
