@@ -439,6 +439,43 @@ class ReadingV3Tests(unittest.TestCase):
         self.assertEqual(search['pages'][0]['text'],original['text'])
         self.assertEqual(verified[0]['annotations'][0]['confidence'],0)
 
+    def test_margin_bracket_packaging_preserves_empty_table_cell_footnote_and_truncated_print(self):
+        from scripts import ocr_layout
+        blocks=[{'t':'Country','b':[.5,.1,.65,.2],'s':'ocr','c':1},
+                {'t':'1949–','b':[.7,.3,.85,.4],'s':'ocr','c':1},
+                {'t':'velop under all socialist systems,','b':[.1,.55,.45,.65],'s':'ocr','c':1},
+                {'t':'¹⁰Summary surveys','b':[.1,.8,.45,.9],'s':'ocr','c':1},
+                {'t':'tinn -f 11-','b':[.5,.96,.6,.98],'s':'ocr','c':.52}]
+        payload={**raw_page(),**ocr_layout.arrange(blocks,100,200,{'writing_mode':'horizontal-ltr'})}
+        original=text.from_page(payload,'a'*64,'en')
+        original['tables']=[{'box':[.5,.1,.9,.5],'source_pixels_sha256':'e'*64,
+            'rows':[.1,.25,.5],'columns':[.5,.68,.9],'cells':[
+                {'row':0,'column':0,'rowspan':1,'colspan':1,'box':[.5,.1,.68,.25],'region_ids':['b0']},
+                {'row':0,'column':1,'rowspan':1,'colspan':1,'box':[.68,.1,.9,.25],'region_ids':[]},
+                {'row':1,'column':0,'rowspan':1,'colspan':1,'box':[.5,.25,.68,.5],'region_ids':[]},
+                {'row':1,'column':1,'rowspan':1,'colspan':1,'box':[.68,.25,.9,.5],'region_ids':['b1']}]}]
+        original['generation']=text.digest({key:value for key,value in original.items() if key!='generation'})
+        text.validate(original)
+        proposal={'kind':'pdf-text-correction','version':1,'page':1,'base_generation':original['generation'],
+            'raw_sha256':original['raw_sha256'],'page_identity':original['page_identity'],'replacements':[],
+            'visual_review':{'kind':'source-image-review','source_sha256':'a'*64,'page':1,
+                'input_png_sha256':'c'*64,'basis':'User complete spread and isolated bracket crop'},
+            'annotation_additions':[{'id':'a'+'2'*16,'classification':'marginal-mark','status':'unresolved',
+                'literal_text':None,'box':[.05,.52,.095,.7],'quad':[[.05,.52],[.095,.52],[.095,.7],[.05,.7]],
+                'evidence':{'crop_sha256':'d'*64,'reason':'Independent bracket, not a body glyph or scan artifact'}}]}
+        accepted=text.accept_proposal(original,proposal,actor='user-source-bracket-review')
+        layers,pages=self.layers(1);layers[0]=accepted
+        ref=v3.build_text_bundle(layers,pages,Path('objects/aa/'+'a'*64+'/'+'b'*16),self.bundle)
+        self.generated();verified=[]
+        manifest=v3.verify_text_bundle(ref,self.read,'a'*64,1,verified_layers=verified)
+        self.assertEqual(verified[0]['tables'],original['tables'])
+        self.assertEqual(verified[0]['regions'],original['regions'])
+        self.assertEqual(verified[0]['annotations'],accepted['annotations'])
+        search=v3.decode(self.read(manifest['search_partitions'][0]['resource']))['pages'][0]['text']
+        self.assertEqual(search,original['text'])
+        self.assertIn('tinn -f 11-',search);self.assertIn('¹⁰Summary surveys',search)
+        self.assertEqual(verified[0]['tables'][0]['cells'][2]['region_ids'],[])
+
     def test_wrapped_formula_link_survives_text_and_search_without_joining_physical_lines(self):
         from scripts import ocr_layout
         first='2Ag⁺¹ + 2NO₃⁻¹ + Ca⁺² + 2Cl⁻¹ = 2AgCl↓ +';last='Ca⁺² + 2NO₃⁻¹'

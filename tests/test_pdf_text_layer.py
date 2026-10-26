@@ -339,6 +339,33 @@ class TextLayerTests(unittest.TestCase):
         repeated=self.visual_proposal(accepted);repeated['annotation_additions']=[item]
         with self.assertRaises(ValueError):layer.accept_proposal(accepted,repeated,actor='reviewer')
 
+    def test_independent_margin_bracket_does_not_delete_adjacent_print_or_complete_truncated_text(self):
+        blocks=[{'t':'lution begins.','b':[.1,.1,.8,.2],'s':'ocr','c':.99},
+                {'t':'velop under all socialist systems,','b':[.1,.25,.8,.35],'s':'ocr','c':.99},
+                {'t':'resemble the serious diseases','b':[.1,.4,.8,.5],'s':'ocr','c':.99},
+                {'t':'to develop, lying dormant,','b':[.1,.55,.8,.65],'s':'ocr','c':.99},
+                {'t':'¹⁰Summary surveys','b':[.1,.7,.8,.8],'s':'ocr','c':.99},
+                {'t':'tinn -f 11-','b':[.5,.96,.6,.98],'s':'ocr','c':.52}]
+        payload={**raw_page(),**ocr_layout.arrange(blocks,100,200,{'writing_mode':'horizontal-ltr'})}
+        original=layer.from_page(payload,'a'*64,'en');baseline=copy.deepcopy(original)
+        proposal=self.visual_proposal(original)
+        proposal['annotation_additions']=[{'id':'a'+'2'*16,'classification':'marginal-mark',
+            'status':'unresolved','literal_text':None,'box':[.05,.22,.095,.68],
+            'quad':[[.05,.22],[.095,.22],[.095,.68],[.05,.68]],
+            'evidence':{'crop_sha256':'d'*64,'reason':'User original bracket is separate from printed letters',
+                'mark_kind':'hand-drawn-bracket','association_precision':'adjacent extent only; intention unresolved'}}]
+        accepted=layer.accept_proposal(original,proposal,actor='user-source-bracket-review')
+        self.assertEqual(original,baseline)
+        for key in ('text','regions','raw_sha256','provenance'):
+            self.assertEqual(accepted[key],original[key])
+        self.assertEqual(accepted['annotations'][0]['classification'],'marginal-mark')
+        self.assertIsNone(accepted['annotations'][0]['literal_text'])
+        self.assertEqual(accepted['annotations'][0]['confidence'],0.)
+        self.assertNotIn('original_region',accepted['annotations'][0])
+        self.assertIn('tinn -f 11-',accepted['text'])
+        self.assertNotIn('[',accepted['text']);self.assertNotIn(']',accepted['text'])
+        self.assertIn('unresolved-source-annotation',accepted['review_flags'])
+
     def test_source_review_can_restore_line_boundary_without_changing_regions_or_old_acceptance(self):
         blocks=[{'t':'能进行水','b':[.1,.1,.8,.2],'c':.9,'s':'ocr'},
                 {'t':'解，其溶液呈酸性反应。','b':[.1,.3,.8,.4],'c':.9,'s':'ocr'}]
