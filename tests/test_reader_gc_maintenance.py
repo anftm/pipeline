@@ -126,6 +126,72 @@ class MaintenanceTests(unittest.TestCase):
         self.assertEqual(writes, [{"enabled": False}])
         self.assertFalse(state["enabled"])
 
+    def test_successful_policy_put_waits_for_stale_reads_without_repeating_mutation(self):
+        reads=iter([{'enabled':True},{'enabled':True},{'enabled':True},{'enabled':False}])
+        writes=[]
+        def api(repo,path,*,method='GET',body=None):
+            if method=='GET':return next(reads)
+            writes.append(body);return {}
+        with patch.object(maintenance,'api',side_effect=api),patch.object(maintenance.time,'sleep') as sleep:
+            maintenance.permissions('owner/repo',{'enabled':False,'allowed_actions':'all'})
+        self.assertEqual(writes,[{'enabled':False}])
+        self.assertEqual([c.args[0] for c in sleep.call_args_list],[1,2])
+
+    def test_successful_policy_put_that_never_converges_cannot_establish_isolation(self):
+        writes=[]
+        def api(repo,path,*,method='GET',body=None):
+            if method=='PUT':writes.append(body)
+            return {'enabled':True}
+        with patch.object(maintenance,'api',side_effect=api),patch.object(maintenance.time,'sleep'):
+            with self.assertRaisesRegex(RuntimeError,'owner/repo:actions/permissions'):
+                maintenance.permissions('owner/repo',{'enabled':False})
+        self.assertEqual(writes,[{'enabled':False}])
+
+    def test_ambiguous_put_converges_by_reads_before_any_retry(self):
+        reads=iter([{'enabled':True},{'enabled':True},{'enabled':False}]);writes=[]
+        def api(repo,path,*,method='GET',body=None):
+            if method=='GET':return next(reads)
+            writes.append(body)
+            raise maintenance.MaintenanceAPIError(repo,path,method,504)
+        with patch.object(maintenance,'api',side_effect=api),patch.object(maintenance.time,'sleep'):
+            maintenance.permissions('owner/repo',{'enabled':False})
+        self.assertEqual(writes,[{'enabled':False}])
+
+    def test_workflow_disable_and_restore_wait_for_readback_without_duplicate_put(self):
+        for enabled,before,after in [(False,'active','disabled_manually'),(True,'disabled_manually','active')]:
+            reads=iter([{'state':before},{'state':before},{'state':after}]);writes=[]
+            def api(repo,path,*,method='GET',body=None):
+                if method=='GET':return next(reads)
+                writes.append(path);return {}
+            with self.subTest(enabled=enabled),patch.object(maintenance,'api',side_effect=api), \
+                    patch.object(maintenance.time,'sleep'):
+                maintenance.workflow_state('owner/repo',{'id':1},enabled)
+            self.assertEqual(writes,['actions/workflows/1/'+('enable' if enabled else 'disable')])
+
+    def test_unconfirmed_policy_readback_restores_journal_without_dispatching_collector(self):
+        writes=[]
+        def api(repo,path,*,method='GET',body=None):
+            if path=='actions/permissions':
+                if method=='PUT':writes.append(body)
+                return {'enabled':True,'allowed_actions':'all'}
+            raise AssertionError('Unconfirmed isolation must never dispatch: '+path)
+        inventory={'owner/repo':{'permission':{'enabled':True,'allowed_actions':'all'},
+            'workflows':[],'cancelled':[]}}
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(maintenance,'preflight',return_value=inventory), \
+                patch.object(maintenance,'pages',return_value=[]), \
+                patch.object(maintenance,'load_config',return_value={'publisher_repository':'central/repo'}), \
+                patch.object(maintenance,'api',side_effect=api), \
+                patch.object(maintenance,'kick_restored'),patch.object(maintenance.time,'sleep'):
+            path=Path(directory)/'journal.json'
+            with self.assertRaisesRegex(RuntimeError,'readback mismatch'):
+                maintenance.run(path,apply=False)
+            state=json.loads(path.read_text())
+        self.assertTrue(state['restored'])
+        self.assertEqual(state['restore_errors'],[])
+        self.assertNotIn('dispatch_requested',state)
+        self.assertEqual(writes,[{'enabled':False}])
+
     def test_repository_permission_denial_is_best_effort(self):
         record = {"permission": {"enabled": True, "allowed_actions": "all"}}
         denied = maintenance.MaintenanceAPIError(

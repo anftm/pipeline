@@ -71,6 +71,20 @@ def api(repo, path, *, method="GET", body=None):
         time.sleep(2 ** attempt)
 
 
+def state_matches(repo, path, expected):
+    """Bounded GET-only convergence after a mutation, never assume a PUT stuck.
+
+    GitHub can acknowledge a workflow/policy update before the next read sees
+    it. A stale read must not trigger another mutation or count as isolation.
+    """
+    for attempt in range(4):
+        if expected(api(repo, path)):
+            return True
+        if attempt < 3:
+            time.sleep(2 ** attempt)
+    return False
+
+
 def set_state(repo, path, body, expected):
     """Idempotent PUT: read back an ambiguous outcome before any bounded retry."""
     for attempt in range(3):
@@ -79,14 +93,14 @@ def set_state(repo, path, body, expected):
         try:
             api(repo, path, method="PUT", body=body)
         except MaintenanceAPIError as error:
-            if expected(api(repo, path)):
+            if state_matches(repo, path, expected):
                 return
             if error.status not in {None, 408, 429, 500, 502, 503, 504} or attempt == 2:
                 raise
             time.sleep(2 ** attempt)
             continue
-        if not expected(api(repo, path)):
-            raise RuntimeError("maintenance state mutation readback mismatch")
+        if not state_matches(repo, path, expected):
+            raise RuntimeError(f"maintenance state mutation readback mismatch: {repo}:{path}")
         return
 
 
@@ -131,14 +145,14 @@ def workflow_state(repo, workflow, enabled):
         try:
             api(repo, path + ("/enable" if enabled else "/disable"), method="PUT")
         except MaintenanceAPIError as error:
-            if api(repo, path)["state"] == desired:
+            if state_matches(repo, path, lambda value: value['state'] == desired):
                 return
             if error.status not in {None, 408, 429, 500, 502, 503, 504} or attempt == 2:
                 raise
             time.sleep(2 ** attempt)
             continue
-        if api(repo, path)["state"] != desired:
-            raise RuntimeError("workflow state readback mismatch")
+        if not state_matches(repo, path, lambda value: value['state'] == desired):
+            raise RuntimeError(f"workflow state readback mismatch: {repo}:{path}")
         return
 
 
