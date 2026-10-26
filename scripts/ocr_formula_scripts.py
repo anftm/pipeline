@@ -6,10 +6,26 @@ import copy
 import re
 import statistics
 
-PROFILE='formula-scripts-pixels-v4-independent-charge-confirmation'
+PROFILE='formula-scripts-pixels-v5-geometry-pinned-charge-encodings'
 CONFIRMATION_REC_SHA256='6f327246b50388f3c176ae304bd95767ea6dc0c9ae92153ef8cbe210b3c14884'
 SUPERSCRIPT=str.maketrans('+-0123456789','⁺⁻⁰¹²³⁴⁵⁶⁷⁸⁹')
 SUBSCRIPT=str.maketrans('0123456789','₀₁₂₃₄₅₆₇₈₉')
+PLAIN_CHARGE=str.maketrans('⁺⁻−⁰¹²³⁴⁵⁶⁷⁸⁹','+--0123456789')
+
+
+def charge_parts(value):
+    """Compare only charge-position encodings, never base glyphs or charge order.
+
+    A recognizer can mix OH-1 and OH⁻1 for the very same raised source ink.
+    Equivalence is restricted to that suffix *after* raised geometry is proven.
+    No whitespace, bracket, letter/digit spelling or sign order is repaired.
+    """
+    match=re.fullmatch(r'([A-Za-z0-9()]+)([+\-⁺⁻−][0-9⁰¹²³⁴⁵⁶⁷⁸⁹]{1,2})',value)
+    return (match[1],match[2].translate(PLAIN_CHARGE)) if match else None
+
+
+def charge_suffix(value):
+    return value.translate(PLAIN_CHARGE) if re.fullmatch(r'[+\-⁺⁻−][0-9⁰¹²³⁴⁵⁶⁷⁸⁹]{1,2}',value) else None
 
 
 def raised_ink(gray):
@@ -113,12 +129,14 @@ def recognize(crop,read,*,read_secondary=None):
                 'text':value,'confidence':float(confidence),'pixels_sha256':hashlib.sha256(selected.tobytes()).hexdigest()})
     proof={'profile':PROFILE,'geometry':geometry,'attempts':attempts,'script_attempts':[],
            'body_attempts':[],'accepted':False}
-    values={a['text'] for a in attempts}
-    if len(values)!=1:return None,proof
-    original=next(iter(values))
-    match=re.fullmatch(r'([A-Za-z0-9()]+)([+\-][0-9]{1,2})',original)
-    if match is None:return None,proof
+    values={charge_parts(a['text']) for a in attempts}
+    if len(values)!=1 or None in values:return None,proof
+    base,suffix=next(iter(values));original=attempts[0]['text']
+    match=re.fullmatch(r'([A-Za-z0-9()]+)([+\-][0-9]{1,2})',base+suffix)
     proof['original']=original
+    if len({a['text'] for a in attempts})>1:
+        proof['equivalent_charge_encodings']={'base_unchanged':base,'charge_order_unchanged':suffix,
+            'basis':'same raised source geometry; only ASCII/superscript charge suffix encoding differs'}
     complete_confident=all(a['confidence']>=.9 for a in attempts)
     if not complete_confident:
         # The mean line score can be depressed by tiny raised ink. Do not
@@ -143,7 +161,7 @@ def recognize(crop,read,*,read_secondary=None):
             value,confidence=read(np.asarray(selected))
             proof['script_attempts'].append({'padding':padding,'scale':scale,'text':value,
                 'confidence':float(confidence),'pixels_sha256':hashlib.sha256(selected.tobytes()).hexdigest()})
-    eligible=[a for a in proof['script_attempts'] if a['text']==match[2] and a['confidence']>=.9]
+    eligible=[a for a in proof['script_attempts'] if charge_suffix(a['text'])==match[2] and a['confidence']>=.9]
     # Both scales of a bounded complete crop must agree. A rejected, tighter
     # crop stays in evidence and cannot be disguised as a successful reading.
     accepted=any(all(any(a['padding']==pad and a['scale']==scale for a in eligible)
@@ -186,7 +204,7 @@ def recognize(crop,read,*,read_secondary=None):
                 value,confidence=read_secondary(np.asarray(selected))
                 secondary_whole.append({'padding':padding,'scale':scale,'text':value,'confidence':float(confidence),
                     'pixels_sha256':hashlib.sha256(selected.tobytes()).hexdigest()})
-        if all(a['text']==original and a['confidence']>=.9 for a in secondary_whole):
+        if all(charge_parts(a['text'])==(base,suffix) and a['confidence']>=.9 for a in secondary_whole):
             for padding in (3,6):
                 padded=ImageOps.expand(script,padding,fill='white')
                 for scale in (3,4):
@@ -197,7 +215,7 @@ def recognize(crop,read,*,read_secondary=None):
         proof['secondary_complete_attempts']=secondary_whole
         proof['secondary_script_attempts']=secondary_script
         accepted=bool(proof.get('isolated_sign_geometry')) and any(all(any(
-            a['padding']==pad and a['scale']==scale and a['text']==match[2] and a['confidence']>=.95
+            a['padding']==pad and a['scale']==scale and charge_suffix(a['text'])==match[2] and a['confidence']>=.95
             for a in secondary_script) for scale in (3,4)) for pad in (3,6))
         proof['secondary_confirmation_accepted']=accepted
     proof['accepted']=accepted

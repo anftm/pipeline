@@ -38,6 +38,24 @@ class FormulaScriptTests(unittest.TestCase):
         self.assertIsNotNone(scripts.cross_sign(np.array([[255,0,255],[0,0,0],[255,0,255]],np.uint8)))
         self.assertIsNone(scripts.cross_sign(np.array([[255,255,255],[0,0,0],[255,255,255]],np.uint8)))
 
+    def test_hybrid_charge_encoding_is_equivalent_only_after_raised_source_ink(self):
+        values=['OH-1','OH⁻1','OH-¹','OH⁻¹']
+        reads=iter([(value,.99) for value in values]+[(value,.99) for value in ['-1','⁻1','-¹','⁻¹']])
+        value,proof=scripts.recognize(self.crop(),lambda image:next(reads))
+        self.assertEqual(value,'OH⁻¹')
+        self.assertEqual([a['text'] for a in proof['attempts']],values)
+        self.assertEqual(proof['equivalent_charge_encodings']['base_unchanged'],'OH')
+        self.assertIsNone(scripts.charge_parts('OH1-'))
+        self.assertNotEqual(scripts.charge_parts('C1-1'),scripts.charge_parts('Cl⁻¹'))
+        for bad in ['OH -1','OH- 1','OH-1}','OH₋₁']:
+            self.assertIsNone(scripts.charge_parts(bad))
+
+    def test_charge_encoding_equivalence_never_fixes_base_letter_or_missing_sign(self):
+        for changed in ['0H-1','OH1','OH1-','OH-2']:
+            reads=iter([('OH-1',.99),(changed,.99),('OH⁻¹',.99),('OH-1',.99)])
+            value,proof=scripts.recognize(self.crop(),lambda image:next(reads))
+            self.assertIsNone(value);self.assertFalse(proof['accepted'])
+
     def test_low_line_score_needs_independent_base_and_charge_readings(self):
         results=iter([('2H+1',.84)]*4+[('2H',.999)]*4+[('+1',.999)]*4)
         value,proof=scripts.recognize(self.crop(),lambda image:next(results))
