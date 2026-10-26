@@ -11,7 +11,7 @@ try:
 except ImportError:
     import ocr_layout
 
-PROFILE='region-recognition-v3-source-symbolic-tables'
+PROFILE='region-recognition-v4-source-grouped-numeric-tables'
 
 
 def recognize(path,regions,language,backend,ocr):
@@ -36,11 +36,15 @@ def recognize(path,regions,language,backend,ocr):
                 local_tables=[]
                 if language=='en':
                     try:
-                        from . import ocr_symbolic_table
+                        from . import ocr_symbolic_table,ocr_aligned_table
                     except ImportError:
-                        import ocr_symbolic_table
+                        import ocr_symbolic_table,ocr_aligned_table
                     table=ocr_symbolic_table.detect(crop,recognized)
                     if table:local_tables.append(table)
+                    else:
+                        local_tables=ocr_aligned_table.prepare(crop,recognized)
+                        local_tables=ocr_aligned_table.separate_category_rows(recognized,local_tables)
+                        local_tables=ocr_aligned_table.align_wrapped_labels(recognized,local_tables)
             finally:crop.close()
             def point(a,b):
                 a,b=ocr_layout.map_point_back(a,b,rotation)
@@ -54,7 +58,7 @@ def recognize(path,regions,language,backend,ocr):
                 restored['recognition_region']=index
                 restored['recognition_rotation_clockwise']=rotation
                 return restored
-            output=[restore(block) for block in recognized]
+            output=[{**restore(block),'recognition_local_block':i} for i,block in enumerate(recognized)]
             diagnostics=models.get('diagnostics',{})
             empty.extend(f'{index}:{number}' for number in diagnostics.get('empty_regions',[]))
             for row in diagnostics.get('detection_regions',[]):
@@ -104,13 +108,23 @@ def arrange(blocks,width,height,options,regional_recognition=None):
         rw,rh=(v-y,u-x) if rotation in (90,270) else (u-x,v-y)
         writing=region.get('writing_mode','auto')
         report=next((r for r in (regional_recognition or {}).get('regions',[]) if r['region']==number),{})
-        grids=report.get('local_tables',[])
+        grids=copy.deepcopy(report.get('local_tables',[]))
         local_options={'writing_mode':writing,'join_soft_lines':options.get('join_soft_lines',True)}
         if grids:
             try:
                 from . import ocr_aligned_table
             except ImportError:
                 import ocr_aligned_table
+            # Source reviews may remove a preceding non-table block. Restore
+            # the saved table ownership by stable crop-local identity instead
+            # of silently shifting every later cell's member index.
+            local_ids={block.get('recognition_local_block',i):i for i,block in enumerate(local)}
+            if len(local_ids)!=len(local):raise ValueError('duplicate regional block identity')
+            for grid in grids:
+                for cell in grid['cells']:
+                    if any(index not in local_ids for index in cell['blocks']):
+                        raise ValueError('regional table lost a source member after review')
+                    cell['blocks']=[local_ids[index] for index in cell['blocks']]
             result=ocr_aligned_table.arrange(local,rw,rh,grids,local_options)
             def original_box(bounds):
                 mapped=ocr_layout.map_box_back(bounds,rotation)

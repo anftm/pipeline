@@ -110,6 +110,8 @@ class QualityTests(unittest.TestCase):
             self.assertFalse(stages.reusable_profile(current, stages.recognition_identity(entry, {})))
         with patch.object(stages.ocr_formula_scripts,'PROFILE','different-formula-scripts'):
             self.assertFalse(stages.reusable_profile(current,stages.recognition_identity(entry,{})))
+        with patch.object(stages.ocr_grouped_table,'PROFILE','different-grouped-tables'):
+            self.assertFalse(stages.reusable_profile(current,stages.recognition_identity(entry,{})))
 
     def test_high_line_confidence_cannot_hide_unresolved_formula_script(self):
         payload=page([block('H2', [.1,.1,.3,.2])])

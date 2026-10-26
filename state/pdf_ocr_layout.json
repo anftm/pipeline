@@ -13,7 +13,11 @@
     {"box":[0.5,0,1,1],"rotation":90,"writing_mode":"horizontal-ltr"}
    ]},
    "168": {"rotation":90,"writing_mode":"horizontal-ltr"},
-   "182": {"rotation":90,"writing_mode":"horizontal-ltr"}
+   "182": {"rotation":90,"writing_mode":"horizontal-ltr"},
+   "183": {"regions":[
+    {"box":[0,0,0.5,1],"rotation":90,"writing_mode":"horizontal-ltr"},
+    {"box":[0.5,0,1,1],"writing_mode":"horizontal-ltr"}
+   ]}
   }
  }
 }

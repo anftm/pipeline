@@ -220,6 +220,15 @@ def detect(image,blocks):
     return tables
 
 
+def prepare(image,blocks):
+    """Refine independently detected grids without replacing any OCR text."""
+    try:
+        from . import ocr_grouped_table
+    except ImportError:
+        import ocr_grouped_table
+    return [ocr_grouped_table.detect(image,blocks,grid) or grid for grid in detect(image,blocks)]
+
+
 def arrange(blocks,width,height,tables,options=None):
     try:
         from . import ocr_layout,ocr_table_geometry
@@ -278,7 +287,11 @@ def recover_dashes(image,blocks,tables):
             if cell['row']<table['body_rows'][0] or cell['column']<1:continue
             original=[blocks[i] for i in cell['blocks']]
             if original and (len(original)!=1 or original[0]['t'] not in {'一','-','—','–'}):continue
-            offset=cell['row']-table['body_rows'][0]
+            data_rows=table['evidence'].get('numeric_row_indices')
+            if data_rows is not None:
+                if cell['row'] not in data_rows:continue
+                offset=data_rows.index(cell['row'])
+            else:offset=cell['row']-table['body_rows'][0]
             baselines=table['evidence']['numeric_row_centers']
             if offset>=len(baselines):continue
             center=baselines[offset]*height

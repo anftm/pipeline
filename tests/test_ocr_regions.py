@@ -94,3 +94,42 @@ class RegionRecognitionTests(unittest.TestCase):
         self.assertEqual(table['grid_region_box'],[.5,0,1,1])
         self.assertTrue(all(cell['box'][0]>=.5 for cell in table['cells']))
         self.assertTrue(all('b0' not in cell['region_ids'] for cell in table['cells']))
+
+    def test_grouped_numeric_table_is_detected_in_rotated_crop_without_losing_right_prose(self):
+        from tests.test_ocr_grouped_table import fixture
+        image,local,base,expected=fixture()
+        options=[{'box':[0,0,.5,1],'rotation':90,'writing_mode':'horizontal-ltr'},
+                 {'box':[.5,0,1,1],'writing_mode':'horizontal-ltr'}]
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'page.png';page=Image.new('RGB',(2000,1200),'white')
+            page.paste(image.rotate(90,expand=True),(0,0));page.save(path)
+            calls=[]
+            def read(*args):
+                calls.append(args)
+                return copy.deepcopy(local) if len(calls)==1 else [
+                    {'t':'Right original prose.','b':[.1,.1,.9,.2],'s':'ocr','c':1}]
+            ocr=SimpleNamespace(ocr_page=read,actual_ocr_models=lambda *args:{'models':{
+                'det':{'sha256':'a'*64},'rec':{'sha256':'b'*64}},'diagnostics':{}})
+            blocks,models=regions.recognize(path,options,'en','fixture',ocr)
+            regional=models['diagnostics']['regional_recognition']
+            self.assertEqual(regional['regions'][0]['original_recognition_blocks'],local)
+            tables=regional['regions'][0]['local_tables']
+            self.assertEqual(len(tables),1)
+            self.assertEqual(tables[0]['profile'],'grouped-statistical-source-bands-v1')
+            result=regions.arrange(blocks,2000,1200,{'regions':options},regional)
+            self.assertTrue(result['text'].endswith('Right original prose.'))
+            self.assertEqual(sorted(s['block'] for s in result['text_spans']),list(range(len(blocks))))
+            layer=pdf_text_layer.from_page({'kind':'pdf-ocr-page','page':183,'source':'ocr',
+                'width':2000,'height':1200,**result},'c'*64,'en')
+            pdf_text_layer.validate(layer)
+            table=layer['tables'][0]
+            self.assertTrue(all(cell['box'][2]<=.5 for cell in table['cells']))
+            self.assertEqual(table['grid_rotation_clockwise'],90)
+            # Removing an unowned title block must not shift data ownership;
+            # removing a real table member must fail rather than lose text.
+            trimmed=blocks[1:]
+            remapped=regions.arrange(trimmed,2000,1200,{'regions':options},regional)
+            self.assertIn('\t0.01\t',remapped['text'])
+            target=next(i for i,b in enumerate(blocks) if b['t']=='0.01')
+            with self.assertRaisesRegex(ValueError,'source member'):
+                regions.arrange(blocks[:target]+blocks[target+1:],2000,1200,{'regions':options},regional)
