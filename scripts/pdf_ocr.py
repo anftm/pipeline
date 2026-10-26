@@ -689,15 +689,16 @@ def strict_rapid_steps(engine, image, operations):
     return detection, TextClsOutput(), recognition, crops
 
 
-def get_ocr_engine(language=None, backend=None):
+def get_ocr_engine(language=None, backend=None, *, model_size=None):
     language, version, backend = resolve_ocr_config(language, backend)
+    model_size=RAPID_MODEL_SIZE if model_size is None else model_size
     if backend == 'ndlocr_onnxruntime':
         try:
             from . import ndl_ocr
         except ImportError:
             import ndl_ocr
         return ndl_ocr.engine()
-    cache_key = (language, version, backend, RAPID_MODEL_SIZE, RAPID_THREADS, RAPID_REC_BATCH)
+    cache_key = (language, version, backend, model_size, RAPID_THREADS, RAPID_REC_BATCH)
     if cache_key not in _OCR_ENGINE_INSTANCES:
         if backend == "rapidocr_onnxruntime":
             try:
@@ -705,7 +706,7 @@ def get_ocr_engine(language=None, backend=None):
             except ImportError as exc:
                 raise RuntimeError("RapidOCR ONNX dependencies are not installed") from exc
             rapid_version = getattr(OCRVersion, version.replace("-", "").upper())
-            if RAPID_MODEL_SIZE not in {'small', 'medium'} or not 1 <= RAPID_THREADS <= 16 or not 1 <= RAPID_REC_BATCH <= 64:
+            if model_size not in {'small', 'medium'} or not 1 <= RAPID_THREADS <= 16 or not 1 <= RAPID_REC_BATCH <= 64:
                 raise ValueError('invalid RapidOCR model or CPU configuration')
             class DocumentOCR(RapidOCR):
                 reader_horizontal_crops = rapid_language(language) in {'cyrillic', 'en', 'latin', 'de', 'fr', 'el'}
@@ -743,8 +744,8 @@ def get_ocr_engine(language=None, backend=None):
                 "Rec.engine_type": EngineType.ONNXRUNTIME, "Det.lang_type": 'ch',
                 "Rec.lang_type": rapid_language(language), "Det.ocr_version": OCRVersion.PPOCRV6,
                 "Rec.ocr_version": rapid_version,
-                'Det.model_type': ModelType(RAPID_MODEL_SIZE),
-                'Rec.model_type': ModelType(RAPID_MODEL_SIZE if version == 'PP-OCRv6' else 'mobile'),
+                'Det.model_type': ModelType(model_size),
+                'Rec.model_type': ModelType(model_size if version == 'PP-OCRv6' else 'mobile'),
                 'Global.use_cls': False, 'Global.text_score': 0.0, 'Rec.rec_batch_num': RAPID_REC_BATCH,
                 'EngineConfig.onnxruntime.intra_op_num_threads': RAPID_THREADS,
                 'EngineConfig.onnxruntime.inter_op_num_threads': 1,
@@ -777,9 +778,9 @@ def rapid_language(language):
     return language
 
 
-def actual_ocr_models(language=None, backend=None):
+def actual_ocr_models(language=None, backend=None, *, model_size=None):
     """Record the loaded files rather than a configured marketing-size label."""
-    engine = get_ocr_engine(language, backend)
+    engine = get_ocr_engine(language, backend) if model_size is None else get_ocr_engine(language,backend,model_size=model_size)
     if resolve_ocr_config(language, backend)[2] == 'ndlocr_onnxruntime':
         return engine.models()
     if not hasattr(engine, 'cfg'):

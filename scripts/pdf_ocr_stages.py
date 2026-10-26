@@ -1114,6 +1114,7 @@ def recognition_identity(entry, options):
                 'region_recognition':ocr_regions.PROFILE,
                 'symbolic_tables':ocr_symbolic_table.PROFILE,
                 'formula_tokens':ocr_formula_scripts.PROFILE,
+                'formula_confirmation_rec':ocr_formula_scripts.CONFIRMATION_REC_SHA256,
                 'numeric_fractions':ocr_fraction_layout.PROFILE,
                 'grouped_tables':ocr_grouped_table.PROFILE,
                 'flow_diagrams':ocr_flow_diagram.PROFILE,
@@ -1486,8 +1487,21 @@ def recognize_task(task, bundle, adopt_existing=False):
                             def read_formula(pixels):
                                 recognized=engine.recognize_txt([pixels[:,:,::-1]])
                                 return recognized.txts[0],float(recognized.scores[0])
+                            def read_secondary_formula(pixels):
+                                # Do not mutate the worker's global model size:
+                                # the primary model and checkpoint identity stay
+                                # intact while a distinct small rec is loaded.
+                                secondary=pdf_ocr.get_ocr_engine(language,backend,model_size='small')
+                                recognized=secondary.recognize_txt([pixels[:,:,::-1]])
+                                identity=pdf_ocr.actual_ocr_models(language,backend,model_size='small')['models']['rec']
+                                if (identity.get('sha256')!=ocr_formula_scripts.CONFIRMATION_REC_SHA256
+                                        or identity.get('sha256')==models.get('models',{}).get('rec',{}).get('sha256')):
+                                    raise ValueError('formula confirmation must use a distinct recognizer')
+                                models.setdefault('models',{})['formula_confirmation_rec']=identity
+                                return recognized.txts[0],float(recognized.scores[0])
                             with Image.open(png) as image:
-                                blocks,formula=ocr_formula_scripts.refine_tokens(image,blocks,read_formula)
+                                secondary_read=read_secondary_formula if language=='ch' and pdf_ocr.RAPID_MODEL_SIZE=='medium' else None
+                                blocks,formula=ocr_formula_scripts.refine_tokens(image,blocks,read_formula,read_secondary=secondary_read)
                             if formula:models.setdefault('diagnostics',{})['formula_scripts']=formula
                     if table is None and not any(region.get('rotation') for region in options.get('regions',[])):
                         with Image.open(png) as image:

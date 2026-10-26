@@ -59,6 +59,25 @@ class FormulaScriptTests(unittest.TestCase):
         self.assertTrue(proof['isolated_digit_attempts'])
         self.assertIsNone(scripts.minus_sign(np.array([[255,0,255],[0,0,0],[255,0,255]],np.uint8)))
 
+    def test_independent_complete_and_charge_confirmation_preserves_all_primary_failures(self):
+        pixels=self.crop();pixels[7:17,31:34]=255;pixels[10:13,28:37]=0
+        primary=iter([('OH-1',.84)]*4+[('OH',.999)]*4+[('-1',.89)]*4+[('1',.91)]*4)
+        secondary=iter([('OH-1',.95)]*4+[('-1',.97)]*4)
+        value,proof=scripts.recognize(pixels,lambda image:next(primary),read_secondary=lambda image:next(secondary))
+        self.assertEqual(value,'OH⁻¹')
+        self.assertTrue(proof['secondary_confirmation_accepted'])
+        self.assertEqual([a['confidence'] for a in proof['isolated_digit_attempts']],[.91]*4)
+        self.assertEqual([a['confidence'] for a in proof['attempts']],[.84]*4)
+
+    def test_secondary_model_cannot_guess_different_base_or_omit_charge_or_lower_threshold(self):
+        pixels=self.crop();pixels[7:17,31:34]=255;pixels[10:13,28:37]=0
+        for whole,suffix,score in [('NH-1','-1',.99),('OH1','-1',.99),('OH-1','1',.99),('OH-1','-1',.94)]:
+            primary=iter([('OH-1',.84)]*4+[('OH',.999)]*4+[('-1',.89)]*4+[('1',.91)]*4)
+            secondary=iter([(whole,.99)]*4+[(suffix,score)]*4)
+            value,proof=scripts.recognize(pixels,lambda image:next(primary),read_secondary=lambda image:next(secondary))
+            with self.subTest(whole=whole,suffix=suffix,score=score):
+                self.assertIsNone(value);self.assertFalse(proof['accepted'])
+
     def subscript_crop(self):
         pixels=np.full((32,60,3),255,np.uint8)
         pixels[5:25,3:15]=0;pixels[5:25,38:52]=0

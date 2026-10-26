@@ -246,6 +246,20 @@ class PdfOcrContractTests(unittest.TestCase):
         profile = pdf_ocr_stages.recognition_identity({'key': 'book', 'ocr_language': 'japan'}, {})
         self.assertTrue(pdf_ocr.valid_published_profile(profile), profile)
 
+    def test_independent_model_size_uses_distinct_cache_without_mutating_primary_worker(self):
+        from types import SimpleNamespace
+        primary=SimpleNamespace(name='primary-medium');secondary=SimpleNamespace(name='secondary-small')
+        with patch.object(pdf_ocr,'resolve_ocr_config',return_value=('ch','PP-OCRv6','rapidocr_onnxruntime')), \
+                patch.object(pdf_ocr,'RAPID_MODEL_SIZE','medium'):
+            key=('ch','PP-OCRv6','rapidocr_onnxruntime')
+            values={(*key,'medium',pdf_ocr.RAPID_THREADS,pdf_ocr.RAPID_REC_BATCH):primary,
+                    (*key,'small',pdf_ocr.RAPID_THREADS,pdf_ocr.RAPID_REC_BATCH):secondary}
+            with patch.dict(pdf_ocr._OCR_ENGINE_INSTANCES,values):
+                self.assertIs(pdf_ocr.get_ocr_engine('ch','rapidocr_onnxruntime'),primary)
+                self.assertIs(pdf_ocr.get_ocr_engine('ch','rapidocr_onnxruntime',model_size='small'),secondary)
+                self.assertIs(pdf_ocr.get_ocr_engine('ch','rapidocr_onnxruntime'),primary)
+                self.assertEqual(pdf_ocr.RAPID_MODEL_SIZE,'medium')
+
 
 if __name__ == "__main__":
     unittest.main()

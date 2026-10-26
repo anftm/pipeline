@@ -116,6 +116,8 @@ class QualityTests(unittest.TestCase):
             self.assertFalse(stages.reusable_profile(current,stages.recognition_identity(entry,{})))
         with patch.object(stages.ocr_chronology_table,'PROFILE','different-chronology'):
             self.assertFalse(stages.reusable_profile(current,stages.recognition_identity(entry,{})))
+        with patch.object(stages.ocr_formula_scripts,'CONFIRMATION_REC_SHA256','different-secondary-model'):
+            self.assertFalse(stages.reusable_profile(current,stages.recognition_identity(entry,{})))
 
     def test_high_line_confidence_cannot_hide_unresolved_formula_script(self):
         payload=page([block('H2', [.1,.1,.3,.2])])

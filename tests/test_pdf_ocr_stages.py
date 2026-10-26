@@ -16,6 +16,39 @@ from scripts.build_reader_assets_index import build_index
 
 
 class PdfOcrStagesTests(unittest.TestCase):
+    def test_secondary_formula_identity_is_recorded_without_overwriting_primary_model(self):
+        from types import SimpleNamespace
+        import numpy as np
+        result=self.render_fixture(native=False)
+        with patch.object(stages,'read_object',side_effect=self.read):
+            queue=stages.plan_images({result['key']:result},{},{},target=500)
+            task=queue['shards'][0][0]
+            primary=SimpleNamespace(recognize_txt=lambda images:SimpleNamespace(txts=['OH-1'],scores=[.84]))
+            secondary=SimpleNamespace(recognize_txt=lambda images:SimpleNamespace(txts=['-1'],scores=[.99]))
+            calls=[]
+            def engine(*args,**kwargs):
+                calls.append(kwargs.get('model_size','medium'))
+                return secondary if kwargs.get('model_size')=='small' else primary
+            def models(*args,**kwargs):
+                return {'models':{'det':{'sha256':'a'*64},'rec':{
+                    'sha256':stages.ocr_formula_scripts.CONFIRMATION_REC_SHA256 if kwargs.get('model_size')=='small' else 'b'*64}}}
+            def refine(image,blocks,read,*,read_secondary=None):
+                self.assertEqual(read(np.zeros((20,20,3),np.uint8)),('OH-1',.84))
+                self.assertEqual(read_secondary(np.zeros((20,20,3),np.uint8)),('-1',.99))
+                return blocks,None
+            with patch.object(pdf_ocr,'RAPID_MODEL_SIZE','medium'), \
+                    patch.object(pdf_ocr,'ocr_page',return_value=[{'t':'正文','b':[.1,.1,.5,.2],'c':.8,'s':'ocr'}]), \
+                    patch.object(pdf_ocr,'get_ocr_engine',side_effect=engine), \
+                    patch.object(pdf_ocr,'actual_ocr_models',side_effect=models), \
+                    patch.object(stages.ocr_formula_scripts,'refine_tokens',side_effect=refine):
+                actual=stages.recognize_task(task,self.root/'secondary-formula')
+            self.assertEqual(actual['errors'],[])
+            self.assertIn('small',calls)
+            for page in actual['pages']:
+                model=page['recognition']['models']['models']
+                self.assertEqual(model['rec']['sha256'],'b'*64)
+                self.assertEqual(model['formula_confirmation_rec']['sha256'],stages.ocr_formula_scripts.CONFIRMATION_REC_SHA256)
+
     def test_language_override_changes_recognition_profile(self):
         key = "repo\0中文目录/俄文书.pdf"
         options = stages.layout_options({}, key)

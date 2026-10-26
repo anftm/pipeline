@@ -6,7 +6,8 @@ import copy
 import re
 import statistics
 
-PROFILE='formula-scripts-pixels-v3-baseline-relative-digits'
+PROFILE='formula-scripts-pixels-v4-independent-charge-confirmation'
+CONFIRMATION_REC_SHA256='6f327246b50388f3c176ae304bd95767ea6dc0c9ae92153ef8cbe210b3c14884'
 SUPERSCRIPT=str.maketrans('+-0123456789','⁺⁻⁰¹²³⁴⁵⁶⁷⁸⁹')
 SUBSCRIPT=str.maketrans('0123456789','₀₁₂₃₄₅₆₇₈₉')
 
@@ -89,7 +90,7 @@ def minus_sign(gray):
     return {'thresholds':checks}
 
 
-def recognize(crop,read):
+def recognize(crop,read,*,read_secondary=None):
     """Return a charged term and proof; callers retain rejected attempts too.
 
     ``read`` recognizes an RGB image as ``(text, confidence)``. No dictionary,
@@ -173,6 +174,32 @@ def recognize(crop,read):
         accepted=bool(sign) and any(all(any(a['padding']==pad and a['scale']==scale
             and a['text']==match[2][1:] and a['confidence']>=.95 for a in digit_attempts)
             for scale in (3,4)) for pad in (3,6))
+    if not accepted and read_secondary is not None:
+        # A separately trained recognizer can verify the *complete* unchanged
+        # term and raised suffix; it cannot repair spelling, charge order or a
+        # different base. The primary failures above remain verbatim.
+        secondary_whole=[];secondary_script=[]
+        for padding in (4,8):
+            padded=ImageOps.expand(image,padding,fill='white')
+            for scale in (2,3):
+                selected=padded.resize((padded.width*scale,padded.height*scale),Image.Resampling.LANCZOS)
+                value,confidence=read_secondary(np.asarray(selected))
+                secondary_whole.append({'padding':padding,'scale':scale,'text':value,'confidence':float(confidence),
+                    'pixels_sha256':hashlib.sha256(selected.tobytes()).hexdigest()})
+        if all(a['text']==original and a['confidence']>=.9 for a in secondary_whole):
+            for padding in (3,6):
+                padded=ImageOps.expand(script,padding,fill='white')
+                for scale in (3,4):
+                    selected=padded.resize((padded.width*scale,padded.height*scale),Image.Resampling.LANCZOS)
+                    value,confidence=read_secondary(np.asarray(selected))
+                    secondary_script.append({'padding':padding,'scale':scale,'text':value,'confidence':float(confidence),
+                        'pixels_sha256':hashlib.sha256(selected.tobytes()).hexdigest()})
+        proof['secondary_complete_attempts']=secondary_whole
+        proof['secondary_script_attempts']=secondary_script
+        accepted=bool(proof.get('isolated_sign_geometry')) and any(all(any(
+            a['padding']==pad and a['scale']==scale and a['text']==match[2] and a['confidence']>=.95
+            for a in secondary_script) for scale in (3,4)) for pad in (3,6))
+        proof['secondary_confirmation_accepted']=accepted
     proof['accepted']=accepted
     if not accepted:return None,proof
     value=match[1]+match[2].translate(SUPERSCRIPT);proof['text']=value
@@ -280,7 +307,7 @@ def recognize_subscript(crop,read):
     return selected,proof
 
 
-def refine_tokens(image,blocks,read):
+def refine_tokens(image,blocks,read,*,read_secondary=None):
     """Refine positioned complete Latin tokens; preserve every primary block.
 
     Whole reactions, prose, operators, mixed Han and already positioned Unicode
@@ -307,7 +334,7 @@ def refine_tokens(image,blocks,read):
             continue
         crop=pixels[y0:y1,x0:x1].copy()
         charged=bool(re.search(r'[+\-][0-9]{1,2}$',primary))
-        selected,proof=(recognize(crop,read) if charged else recognize_subscript(crop,read))
+        selected,proof=(recognize(crop,read,read_secondary=read_secondary) if charged else recognize_subscript(crop,read))
         if proof is None:continue
         row={'region':index,'primary':copy.deepcopy(blocks[index]),'source_crop_box':[x0,y0,x1,y1],
              'source_pixels_sha256':hashlib.sha256(crop.tobytes()).hexdigest(),'recognition':proof,
