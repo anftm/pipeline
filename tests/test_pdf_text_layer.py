@@ -108,7 +108,45 @@ class TextLayerTests(unittest.TestCase):
                 'base_generation':original['generation'],'raw_sha256':original['raw_sha256'],
                 'page_identity':original['page_identity'],'replacements':[],
                 'visual_review':{'kind':'source-image-review','source_sha256':original['source_sha256'],
-                    'page':original['page'],'input_png_sha256':'c'*64,'basis':'Complete source map and enlarged glyphs'}}
+                     'page':original['page'],'input_png_sha256':'c'*64,'basis':'Complete source map and enlarged glyphs'}}
+
+    def test_wrapped_ionic_formula_preserves_equal_sign_and_exact_continuation_without_branch(self):
+        first='2Ag⁺¹ + 2NO₃⁻¹ + Ca⁺² + 2Cl⁻¹ = 2AgCl↓ +'
+        last='Ca⁺² + 2NO₃⁻¹'
+        blocks=[{'t':first,'b':[.1,.1,.8,.2],'c':.8,'s':'ocr'},
+                {'t':last,'b':[.6,.21,.9,.3],'c':.7,'s':'ocr'}]
+        payload={**raw_page(),**ocr_layout.arrange(blocks,100,200,{'writing_mode':'horizontal-ltr'})}
+        original=layer.from_page(payload,'a'*64,'ch');before=copy.deepcopy(original)
+        anchor=lambda identity,value,start:{'region_id':identity,'text':value,'start':start,'end':start+len(value)}
+        link={'id':'c'+'1'*16,'kind':'printed-formula-continuation','join_separator':' ',
+            'from':anchor('b0',first,0),'to':anchor('b1',last,0),'operator':anchor('b0','+',len(first)-1),
+            'box':[.1,.1,.9,.3],'quad':[[.1,.1],[.9,.1],[.9,.3],[.1,.3]],
+            'evidence':{'crop_sha256':'d'*64,'reason':'User full source right-hand terms wrap after the final plus'}}
+        proposal=self.visual_proposal(original);proposal['formula_continuations']=[link]
+        accepted=layer.accept_proposal(original,proposal,actor='explicit-source-formula-review')
+        self.assertEqual(original,before)
+        self.assertEqual(accepted['text'],original['text'])
+        self.assertEqual(accepted['regions'],original['regions'])
+        self.assertEqual(accepted['formula_continuations'],[link])
+        self.assertNotIn('formula_relations',accepted)
+        self.assertIn(' = ',accepted['text']);self.assertNotIn('⇌',accepted['text'])
+        self.assertEqual(accepted['raw_sha256'],original['raw_sha256'])
+        for change in [{'join_separator':'⇌'},{'from':anchor('b0','missing',0)},
+                       {'operator':anchor('b1','+',5)},{'evidence':{}},
+                       {'to':anchor('b0',first,0)}]:
+            altered=copy.deepcopy(proposal);altered['formula_continuations'][0].update(change)
+            with self.subTest(change=change),self.assertRaises(ValueError):
+                layer.accept_proposal(original,altered,actor='reviewer')
+        altered=copy.deepcopy(proposal);altered['formula_continuations']*=2
+        with self.assertRaises(ValueError):layer.accept_proposal(original,altered,actor='reviewer')
+        # Later correction/order changes cannot quietly leave a stale link.
+        changed=self.visual_proposal(accepted)
+        changed['replacements']=[{'region_id':'b1','before':last,'after':'Ca² + 2NO₃⁻'}]
+        with self.assertRaisesRegex(ValueError,'continuation anchor'):
+            layer.accept_proposal(accepted,changed,actor='reviewer')
+        changed=self.visual_proposal(accepted);changed['region_order']=['b1','b0']
+        with self.assertRaisesRegex(ValueError,'adjacent wrapped'):
+            layer.accept_proposal(accepted,changed,actor='reviewer')
 
     def test_visual_additions_and_nontext_exclusions_preserve_raw_and_source_geometry(self):
         blocks=[{'t':'MONGOLIAS','b':[.1,.1,.5,.2],'c':.99,'s':'ocr'},

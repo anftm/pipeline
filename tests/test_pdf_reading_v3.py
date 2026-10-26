@@ -422,6 +422,34 @@ class ReadingV3Tests(unittest.TestCase):
         self.assertEqual(search['pages'][0]['text'],original['text'])
         self.assertEqual(verified[0]['annotations'][0]['confidence'],0)
 
+    def test_wrapped_formula_link_survives_text_and_search_without_joining_physical_lines(self):
+        from scripts import ocr_layout
+        first='2Ag⁺¹ + 2NO₃⁻¹ + Ca⁺² + 2Cl⁻¹ = 2AgCl↓ +';last='Ca⁺² + 2NO₃⁻¹'
+        blocks=[{'t':first,'b':[.1,.1,.9,.2],'s':'ocr','c':.8},
+                {'t':last,'b':[.65,.3,.9,.4],'s':'ocr','c':.7}]
+        payload={**raw_page(),**ocr_layout.arrange(blocks,100,200,{'writing_mode':'horizontal-ltr'})}
+        original=text.from_page(payload,'a'*64,'ch')
+        anchor=lambda identity,value,start:{'region_id':identity,'text':value,'start':start,'end':start+len(value)}
+        link={'id':'c'+'1'*16,'kind':'printed-formula-continuation','join_separator':' ',
+            'from':anchor('b0',first,0),'to':anchor('b1',last,0),'operator':anchor('b0','+',len(first)-1),
+            'box':[.1,.1,.9,.4],'quad':[[.1,.1],[.9,.1],[.9,.4],[.1,.4]],
+            'evidence':{'crop_sha256':'d'*64,'reason':'Original product ion terms wrap after final+'}}
+        proposal={'kind':'pdf-text-correction','version':1,'page':1,'base_generation':original['generation'],
+            'raw_sha256':original['raw_sha256'],'page_identity':original['page_identity'],'replacements':[],
+            'formula_continuations':[link],'visual_review':{'kind':'source-image-review','source_sha256':'a'*64,
+                'page':1,'input_png_sha256':'c'*64,'basis':'Exact user full and enlarged two-line formula'}}
+        layers,pages=self.layers(1)
+        layers[0]=text.accept_proposal(original,proposal,actor='source-formula-review')
+        ref=v3.build_text_bundle(layers,pages,Path('objects/aa/'+'a'*64+'/'+'b'*16),self.bundle)
+        self.generated();verified=[]
+        manifest=v3.verify_text_bundle(ref,self.read,'a'*64,1,verified_layers=verified)
+        self.assertEqual(verified[0]['formula_continuations'],[link])
+        self.assertEqual(verified[0]['raw_sha256'],original['raw_sha256'])
+        search=v3.decode(self.read(manifest['search_partitions'][0]['resource']))
+        self.assertEqual(search['pages'][0]['text'],original['text'])
+        self.assertIn('\n',search['pages'][0]['text'])
+        self.assertEqual([r['box'] for r in verified[0]['regions']],[b['b'] for b in blocks])
+
 
 if __name__ == "__main__":
     unittest.main()

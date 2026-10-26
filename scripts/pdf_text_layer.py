@@ -85,6 +85,48 @@ def validate_formula_relations(relations, regions):
         identities.add(identity)
 
 
+def validate_formula_continuations(continuations, regions, content):
+    """Keep one printed formula's wrapped line distinct from a reaction branch.
+
+    These links join existing exact text spans, never insert an arrow, change
+    '=' to equilibrium, drop a repeated term, or infer a missing coefficient.
+    """
+    if not isinstance(continuations,list) or len(continuations)>1000:
+        raise ValueError('invalid formula continuations')
+    known={r['id']:r for r in regions};identities=set();pairs=set()
+    def anchor(item):
+        if not isinstance(item,dict) or item.get('region_id') not in known:
+            raise ValueError('unknown formula continuation anchor')
+        region=known[item['region_id']];start,end=item.get('start'),item.get('end')
+        if (type(start) is not int or type(end) is not int or not 0<=start<end<=len(region['text'])
+                or region['text'][start:end]!=item.get('text')):
+            raise ValueError('stale formula continuation anchor')
+        return region
+    for link in continuations:
+        if not isinstance(link,dict):raise ValueError('invalid formula continuation')
+        identity=link.get('id')
+        if (not isinstance(identity,str) or not re.fullmatch(r'c[0-9a-f]{16}',identity)
+                or identity in identities or link.get('kind')!='printed-formula-continuation'
+                or link.get('join_separator') not in {'',' '}):
+            raise ValueError('invalid formula continuation identity')
+        first=anchor(link.get('from'));last=anchor(link.get('to'));operator=anchor(link.get('operator'))
+        pair=(first['id'],last['id'])
+        if (pair in pairs or first['id']==last['id'] or operator['id']!=first['id']
+                or link['operator']['text'] not in {'+','-','−','=','⇌','⇋'}
+                or link['operator']['end']!=len(first['text']) or link['from']['end']!=len(first['text'])
+                or link['operator']['start']<link['from']['start'] or link['to']['start']!=0
+                or first['order']+1!=last['order']):
+            raise ValueError('formula continuation is not an adjacent wrapped source line')
+        gap=content[first['end']:last['start']]
+        if not gap or '\n' not in gap or any(c not in ' \t\r\n' for c in gap):
+            raise ValueError('formula continuation lost its printed line break')
+        box(link.get('box'));quad(link.get('quad'))
+        proof=link.get('evidence',{})
+        if not isinstance(proof,dict) or not isinstance(proof.get('reason'),str) or not proof['reason'].strip():
+            raise ValueError('formula continuation lacks source evidence')
+        sha(proof.get('crop_sha256'));identities.add(identity);pairs.add(pair)
+
+
 def validate_flow_diagrams(diagrams,regions):
     """Check stable source memberships and directed routes, without copying text."""
     if not isinstance(diagrams,list) or len(diagrams)>100:raise ValueError('invalid flow diagrams')
@@ -368,6 +410,7 @@ def validate(layer):
         if len(occupied) != (len(table['rows'])-1)*(len(table['columns'])-1):
             raise ValueError('incomplete table cell coverage')
     validate_formula_relations(layer.get('formula_relations',[]),layer['regions'])
+    validate_formula_continuations(layer.get('formula_continuations',[]),layer['regions'],layer['text'])
     validate_flow_diagrams(layer.get('flow_diagrams',[]),layer['regions'])
     for fraction in layer.get('fractions',[]):
         box(fraction.get('box'));box(fraction.get('bar_box'))
@@ -437,13 +480,15 @@ def accept_proposal(layer, proposal, *, actor):
     annotation_additions = proposal.get('annotation_additions', [])
     separators = proposal.get('separators', [])
     relations = proposal.get('formula_relations', [])
+    continuations = proposal.get('formula_continuations', [])
     if not isinstance(relations,list):raise ValueError('invalid formula relations')
+    if not isinstance(continuations,list):raise ValueError('invalid formula continuations')
     if (not isinstance(additions,list) or not isinstance(exclusions,list) or not isinstance(annotations,list)
             or not isinstance(separators,list)
             or not isinstance(annotation_additions,list)
             or any(not isinstance(row,dict) for row in additions+exclusions+annotations+separators+annotation_additions)):
         raise ValueError('invalid positioned correction scope')
-    positioned = bool(additions or exclusions or annotations or annotation_additions or separators or relations or any('geometry' in row for row in replacements or []))
+    positioned = bool(additions or exclusions or annotations or annotation_additions or separators or relations or continuations or any('geometry' in row for row in replacements or []))
     visual_review = proposal.get('visual_review', {})
     if positioned:
         if (not isinstance(visual_review, dict) or visual_review.get('kind') != 'source-image-review'
@@ -533,7 +578,7 @@ def accept_proposal(layer, proposal, *, actor):
             or (added or removed) and not requested_order):
         raise ValueError("correction order must name every region exactly once")
     reorder = bool(requested_order and requested_order != original_order)
-    if not isinstance(replacements, list) or not replacements and not reorder and not relations and not separators and not new_annotations:
+    if not isinstance(replacements, list) or not replacements and not reorder and not relations and not continuations and not separators and not new_annotations:
         raise ValueError("empty correction proposal")
     # Source-reviewed line/space corrections are independent from glyph text.
     # Require the exact original adjacent pair and gap so no hidden text can
@@ -625,6 +670,10 @@ def accept_proposal(layer, proposal, *, actor):
         combined=[*result.get('formula_relations',[]),*copy.deepcopy(relations)]
         validate_formula_relations(combined,result['regions'])
         result['formula_relations']=combined
+    if continuations:
+        combined=[*result.get('formula_continuations',[]),*copy.deepcopy(continuations)]
+        validate_formula_continuations(combined,result['regions'],result['text'])
+        result['formula_continuations']=combined
     result.update(revision="accepted", quality="partially-reviewed", parent_generation=layer["generation"])
     result.setdefault("acceptances", []).append({"proposal_sha256": digest(proposal), "actor": actor,
                                                  "region_ids": sorted(changes),
@@ -638,6 +687,7 @@ def accept_proposal(layer, proposal, *, actor):
                                                           'updated_geometry':copy.deepcopy(geometry[identity])}
                                                           for identity in sorted(geometry)],
                                                        'formula_relation_ids':[r['id'] for r in relations],
+                                                       **({'formula_continuation_ids':[r['id'] for r in continuations]} if continuations else {}),
                                                        **({'separator_changes':copy.deepcopy(list(separator_changes.values()))} if separator_changes else {}),
                                                      'visual_review':copy.deepcopy(visual_review)} if positioned else {}),
                                                 **({"region_order": requested_order} if reorder else {})})
