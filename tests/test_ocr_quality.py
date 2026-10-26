@@ -42,6 +42,18 @@ def reorder(payload, indices):
 
 
 class QualityTests(unittest.TestCase):
+    def test_slanted_bibliography_lines_do_not_overlap_by_their_outer_rectangles(self):
+        first=block('Hansen, Bent. 1951. A Study in the Theory of Inflation. London: Allen and',
+                    [.1,.1,.9,.23])
+        first['q']=[[.1,.1],[.9,.2],[.9,.23],[.1,.13]]
+        second=block('Unwin.',[.12,.14,.25,.188])
+        second['q']=[[.12,.14],[.25,.158],[.25,.188],[.12,.17]]
+        self.assertNotIn('overlapping-recognized-regions',codes(quality.check_page(page([first,second],'en'))))
+        duplicate={**first,'t':'Hansen duplicate'}
+        self.assertIn('overlapping-recognized-regions',codes(quality.check_page(page([first,duplicate],'en'))))
+        second['q']=[[float('nan'),.1]]*4
+        self.assertEqual(quality.ocr_geometry.polygon(second),[(.12,.14),(.25,.14),(.25,.188),(.12,.188)])
+
     def test_native_assembly_keeps_original_evidence_indices(self):
         blocks = [block('second', [.1, .4, .4, .45]), block('first', [.1, .1, .4, .15])]
         payload = {**pdf_ocr.page_payload(1, 1000, 1500, blocks, 'native'),

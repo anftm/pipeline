@@ -45,6 +45,13 @@ def check(spec, layers, read):
                 or layer['revision'] == 'raw' and baseline['generation'] != layer['generation']):
             raise QualityRejection(f"page {layer['page']} text differs from its recognition evidence")
         recognition = payload.get('recognition', {})
+        for audit in layer.get('acceptances', []):
+            visual = audit.get('visual_review')
+            if visual and (visual.get('kind') != 'source-image-review'
+                    or visual.get('source_sha256') != spec['source_sha256']
+                    or visual.get('page') != layer['page']
+                    or visual.get('input_png_sha256') != recognition.get('input_sha256')):
+                raise QualityRejection(f"page {layer['page']} positioned review belongs to a different source image")
         if source == 'ocr':
             if not re.fullmatch(r'[0-9a-f]{64}', str(recognition.get('input_sha256', ''))):
                 raise QualityRejection(f"page {layer['page']} lacks the OCR input identity")

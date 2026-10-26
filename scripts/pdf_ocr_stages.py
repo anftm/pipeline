@@ -32,7 +32,7 @@ from huggingface_hub.utils import get_session, hf_raise_for_status
 
 try:
     from . import pdf_ocr, pdf_assets, lin_pdf_text, pdf_render_schedule, pdf_worker_lanes, plan_pdf_ocr, publish_pdf_ocr_assets as publication, shared, ocr_layout, reader_lifecycle, pdf_text_layer, pdf_reading_v3
-    from . import pdf_ocr_progress, djvu_pages, ocr_quality, ndl_ocr, native_text_quality, ocr_mixed_text, ocr_script_evidence
+    from . import pdf_ocr_progress, djvu_pages, ocr_quality, ndl_ocr, native_text_quality, ocr_mixed_text, ocr_script_evidence, ocr_latin_spacing, ocr_source_review, ocr_aligned_table, ocr_regions
     from .run_pdf_ocr import source_path, _bucket_retry_delay
     from .reader_bucket import index_path, publish_bytes, publish_json, publish_json_batch, publish_catalog, read_json as read_bucket_json
 except ImportError:
@@ -46,6 +46,10 @@ except ImportError:
     import native_text_quality
     import ocr_mixed_text
     import ocr_script_evidence
+    import ocr_latin_spacing
+    import ocr_source_review
+    import ocr_aligned_table
+    import ocr_regions
     from run_pdf_ocr import source_path, _bucket_retry_delay
     from reader_bucket import index_path, publish_bytes, publish_json, publish_json_batch, publish_catalog, read_json as read_bucket_json
 
@@ -1096,6 +1100,12 @@ def assemble_render_book(book, descriptors, bundle):
 
 def recognition_identity(entry, options):
     recipe = {"options": normalized_layout(options), "quality": ocr_quality.POLICY,
+                'quality_geometry': ocr_quality.ocr_geometry.PROFILE,
+                'latin_spacing': ocr_latin_spacing.PROFILE,
+                'source_reviews': ocr_source_review.for_source(entry.get('source_sha256')),
+                'source_review_profile': ocr_source_review.PROFILE,
+                'aligned_tables': ocr_aligned_table.PROFILE,
+                'region_recognition':ocr_regions.PROFILE,
                "japanese_models": ndl_ocr.PROFILE,
                'native_text': native_text_quality.PROFILE,
                'mixed_scripts': ocr_mixed_text.PROFILE,
@@ -1302,7 +1312,8 @@ def plan_images(rendered, current, progress, limit=20, target=500, overrides=Non
                            "ocr_language": entry["ocr_language"], "ocr_backend": entry["ocr_backend"],
                            "language_source": language_source,
                            "routing_backend": backend if language_source in {"override", "global"} else pdf_ocr.OCR_BACKEND,
-                          "source_sha256": entry["source_sha256"], "layout_options": options,
+                           "source_sha256": entry["source_sha256"], "layout_options": options,
+                           'source_reviews':ocr_source_review.for_source(entry['source_sha256']),
                           "pages": pending[start:start + task_target]})
     # Pack small books together, while large books can span several workers.
     count = min(256, len(tasks), max(1, math.ceil(sum(len(t["pages"]) for t in tasks) / target)))
@@ -1388,6 +1399,10 @@ def recognize_task(task, bundle, adopt_existing=False):
                           f"({task['key']})", flush=True)
                 else:
                     def recognize(selected):
+                        if any(region.get('rotation') for region in options.get('regions',[])):
+                            if page.get('native_components'):
+                                raise ValueError('rotated region recognition cannot replace native components')
+                            return ocr_regions.recognize(png,options['regions'],selected,backend,pdf_ocr)
                         if page.get('native_components'):
                             if rotation:
                                 raise ValueError('mixed native/raster recognition requires original page orientation')
@@ -1406,7 +1421,26 @@ def recognize_task(task, bundle, adopt_existing=False):
                         png, evidence, blocks, models, recognize)
                     language = evidence['language']
                     evidence = ocr_script_evidence.corroborate(png, evidence, blocks)
+                    if language=='en':
+                        blocks,spacing=ocr_latin_spacing.recognize(png,blocks)
+                        if spacing:models.setdefault('diagnostics',{})['latin_spacing']=spacing
+                    if task.get('source_reviews'):
+                        with Image.open(png) as original:
+                            # Reviews refer to the exact unrotated input pixels.
+                            if not rotation:
+                                blocks,models=ocr_source_review.apply(original,blocks,models,task['source_reviews'],
+                                    page=page['p'],input_sha256=page['is'])
                 table = None
+                aligned_tables=[]
+                if language=='en' and not degenerate and not page.get('native_components') and not any(
+                        region.get('rotation') for region in options.get('regions',[])):
+                    with Image.open(png) as image:
+                        aligned_tables=ocr_aligned_table.detect(image,blocks)
+                        if aligned_tables:
+                            blocks,aligned_tables,dashes=ocr_aligned_table.recover_dashes(image,blocks,aligned_tables)
+                            aligned_tables=ocr_aligned_table.separate_category_rows(blocks,aligned_tables)
+                            aligned_tables=ocr_aligned_table.align_wrapped_labels(blocks,aligned_tables)
+                            if dashes:models.setdefault('diagnostics',{})['table_dashes']=dashes
                 if language in {'ch', 'chinese_cht'} and not degenerate and not page.get('native_components'):
                     try:
                         from . import ocr_table_geometry, ocr_diagonal_header, ocr_sparse_cells
@@ -1429,7 +1463,9 @@ def recognize_task(task, bundle, adopt_existing=False):
                     payload['native_components'] = page['native_components']
                 if degenerate:
                     payload["ocr_warning"] = "degenerate-image-below-minimum-side"
-                arranged = (ocr_table_geometry.arrange(blocks, width, height, table, options, include_writing_modes=True)
+                arranged = (ocr_regions.arrange(blocks,width,height,options) if any(r.get('rotation') for r in options.get('regions',[])) else
+                            ocr_aligned_table.arrange(blocks,width,height,aligned_tables,options) if aligned_tables else
+                            ocr_table_geometry.arrange(blocks, width, height, table, options, include_writing_modes=True)
                             if table else ocr_layout.arrange(blocks, width, height, options))
                 payload.update(ocr_layout.restore_coordinates(arranged, rotation))
                 payload["recognition"] = {"policy": ocr_quality.POLICY, "profile": task["profile"],

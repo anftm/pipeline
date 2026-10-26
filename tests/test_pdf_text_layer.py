@@ -15,6 +15,124 @@ def raw_page(text="English", confidence=.99, mode="horizontal-ltr"):
 
 
 class TextLayerTests(unittest.TestCase):
+    def test_formula_relation_uses_exact_corrected_text_and_source_arrow_order(self):
+        blocks=[{'t':'S-2+H2O=HS-1+OH-1','b':[.1,.1,.9,.2],'c':.8,'s':'ocr'},
+                {'t':'1','b':[.3,.21,.4,.3],'c':.5,'s':'ocr'},
+                {'t':'H+1+OH-1','b':[.2,.32,.6,.4],'c':.8,'s':'ocr'}]
+        payload={**raw_page(),**ocr_layout.arrange(blocks,100,200,{'writing_mode':'horizontal-ltr'})}
+        original=layer.from_page(payload,'a'*64,'ch')
+        proposal=self.visual_proposal(original)
+        proposal['replacements']=[{'region_id':'b0','before':blocks[0]['t'],'after':'S⁻² + H₂O ⇌ HS⁻¹ + OH⁻¹'},
+                                  {'region_id':'b1','before':'1','after':'⇅'},
+                                  {'region_id':'b2','before':blocks[2]['t'],'after':'H⁺¹ + OH⁻¹'}]
+        anchor=lambda identity,value,start:{'region_id':identity,'text':value,'start':start,'end':start+len(value)}
+        relation={'id':'f'+'1'*16,'kind':'printed-equilibrium','axis':'vertical','directions':['up','down'],
+                  'box':[.3,.21,.4,.3],'quad':[[.3,.21],[.4,.21],[.4,.3],[.3,.3]],
+                  'operator':anchor('b1','⇅',0),'from':anchor('b0','H₂O',6),
+                  'to':anchor('b2','H⁺¹ + OH⁻¹',0),'evidence':{'crop_sha256':'e'*64,'reason':'Left arrow up, right arrow down'}}
+        proposal['formula_relations']=[relation]
+        accepted=layer.accept_proposal(original,proposal,actor='source-image-review')
+        self.assertEqual(accepted['formula_relations'],[relation])
+        self.assertEqual(accepted['raw_sha256'],original['raw_sha256'])
+        self.assertEqual(original['regions'][0]['text'],blocks[0]['t'])
+        proposal['formula_relations']=[{**relation,'directions':['down','up']}]
+        with self.assertRaisesRegex(ValueError,'arrow order'):
+            layer.accept_proposal(original,proposal,actor='reviewer')
+        proposal['formula_relations']=[{**relation,'from':anchor('b0','H20',6)}]
+        with self.assertRaisesRegex(ValueError,'anchor text'):
+            layer.accept_proposal(original,proposal,actor='reviewer')
+
+    def test_reversed_source_arrow_order_is_not_normalized_to_chemical_convention(self):
+        blocks=[{'t':'H₂O','b':[.1,.1,.3,.2],'c':1,'s':'ocr'},
+                {'t':'⇵','b':[.1,.2,.2,.3],'c':1,'s':'ocr'},
+                {'t':'H⁺¹ + OH⁻¹','b':[.1,.3,.4,.4],'c':1,'s':'ocr'}]
+        payload={**raw_page(),**ocr_layout.arrange(blocks,100,200,{'writing_mode':'horizontal-ltr'})}
+        original=layer.from_page(payload,'a'*64,'ch');proposal=self.visual_proposal(original)
+        def anchor(identity,value):return {'region_id':identity,'text':value,'start':0,'end':len(value)}
+        proposal['formula_relations']=[{'id':'f'+'1'*16,'kind':'printed-equilibrium','axis':'vertical',
+            'directions':['down','up'],'operator':anchor('b1','⇵'),'from':anchor('b0','H₂O'),
+            'to':anchor('b2','H⁺¹ + OH⁻¹'),'box':[.1,.2,.2,.3],
+            'quad':[[.1,.2],[.2,.2],[.2,.3],[.1,.3]],
+            'evidence':{'crop_sha256':'d'*64,'reason':'Original reversed arrow pairing'}}]
+        accepted=layer.accept_proposal(original,proposal,actor='reviewer')
+        self.assertEqual(accepted['text'],original['text'])
+        self.assertEqual(accepted['formula_relations'][0]['directions'],['down','up'])
+
+    def visual_proposal(self,original):
+        return {'kind':'pdf-text-correction','version':1,'page':original['page'],
+                'base_generation':original['generation'],'raw_sha256':original['raw_sha256'],
+                'page_identity':original['page_identity'],'replacements':[],
+                'visual_review':{'kind':'source-image-review','source_sha256':original['source_sha256'],
+                    'page':original['page'],'input_png_sha256':'c'*64,'basis':'Complete source map and enlarged glyphs'}}
+
+    def test_visual_additions_and_nontext_exclusions_preserve_raw_and_source_geometry(self):
+        blocks=[{'t':'MONGOLIAS','b':[.1,.1,.5,.2],'c':.99,'s':'ocr'},
+                {'t':'D','b':[.7,.7,.8,.8],'c':.99,'s':'ocr'},
+                {'t':'BÉNIN','b':[.1,.4,.4,.5],'c':.99,'s':'ocr'}]
+        payload={**raw_page(),**ocr_layout.arrange(blocks,100,200,{'writing_mode':'horizontal-ltr'})}
+        original=layer.from_page(payload,'a'*64,'en');before=copy.deepcopy(original)
+        proposal=self.visual_proposal(original)
+        proof={'crop_sha256':'d'*64,'reason':'Source reviewed printed glyph, not inferred from a country name'}
+        proposal.update(replacements=[{'region_id':'b0','before':'MONGOLIAS','after':'MONGOLIA'}],
+            exclusions=[{'region_id':'b1','before':'D','classification':'map-geometry','evidence':proof}],
+            additions=[{'region_id':'v'+'1'*16,'text':'H','box':[.4,.3,.5,.4],
+                'quad':[[.4,.3],[.5,.3],[.5,.4],[.4,.4]],'evidence':proof}],
+            region_order=['b0','v'+'1'*16,'b2'])
+        accepted=layer.accept_proposal(original,proposal,actor='explicit-source-review')
+        self.assertEqual(accepted['text'],'MONGOLIA\nH\nBÉNIN')
+        self.assertEqual(original,before)
+        self.assertEqual(accepted['raw_sha256'],original['raw_sha256'])
+        self.assertEqual(accepted['regions'][1]['confidence'],0)
+        self.assertEqual(accepted['regions'][1]['recognition_status'],'source-reviewed-not-model-recognized')
+        self.assertEqual(accepted['regions'][2]['quad'],next(r['quad'] for r in original['regions'] if r['id']=='b2'))
+        audit=accepted['acceptances'][-1]
+        self.assertEqual(audit['excluded_regions'][0]['region'],next(r for r in original['regions'] if r['id']=='b1'))
+        self.assertEqual(accepted['quality'],'partially-reviewed')
+        self.assertIn('BÉNIN',accepted['text'])
+
+    def test_positioned_changes_need_source_review_and_exact_complete_order(self):
+        original=layer.from_page(raw_page('real text'),'a'*64,'en')
+        proposal=self.visual_proposal(original)
+        proof={'crop_sha256':'d'*64,'reason':'Original source pixels'}
+        proposal.update(additions=[{'region_id':'v'+'1'*16,'text':'P','box':[.1,.3,.2,.4],
+            'quad':[[.1,.3],[.2,.3],[.2,.4],[.1,.4]],'evidence':proof}],region_order=['b0','v'+'1'*16])
+        for change in [{'visual_review':{}},{'visual_review':{**proposal['visual_review'],'source_sha256':'b'*64}},
+                       {'region_order':['b0']},{'region_order':['b0','b0']},
+                       {'additions':[{**proposal['additions'][0],'evidence':{}}]}]:
+            with self.subTest(change=change),self.assertRaises(ValueError):
+                layer.accept_proposal(original,{**proposal,**change},actor='reviewer')
+
+    def test_positioned_map_additions_preserve_unchanged_body_separators(self):
+        blocks=[{'t':'map','b':[.1,.1,.3,.2],'c':.99,'s':'ocr'},
+                {'t':'Right paragraph one.','b':[.6,.1,.9,.2],'c':.99,'s':'ocr'},
+                {'t':'Right paragraph two.','b':[.6,.4,.9,.5],'c':.99,'s':'ocr'}]
+        payload={**raw_page(),**ocr_layout.arrange(blocks,100,200,{'writing_mode':'horizontal-ltr'})}
+        original=layer.from_page(payload,'a'*64,'en')
+        body_start=original['text'].index('Right paragraph one.')
+        body=original['text'][body_start:]
+        proposal=self.visual_proposal(original)
+        proposal.update(additions=[{'region_id':'v'+'1'*16,'text':'H','box':[.2,.3,.3,.4],
+            'quad':[[.2,.3],[.3,.3],[.3,.4],[.2,.4]],
+            'evidence':{'crop_sha256':'f'*64,'reason':'Printed source glyph'}}],
+            region_order=['b0','v'+'1'*16,'b1','b2'])
+        accepted=layer.accept_proposal(original,proposal,actor='reviewer')
+        self.assertEqual(accepted['text'][accepted['text'].index('Right paragraph one.'):],body)
+
+    def test_visual_geometry_change_requires_exact_previous_geometry(self):
+        original=layer.from_page(raw_page('1'),'a'*64,'en');proposal=self.visual_proposal(original)
+        region=original['regions'][0]
+        change={'region_id':'b0','before':'1','after':'B','evidence':{'crop_sha256':'e'*64,'reason':'Full source B glyph'},
+                'geometry':{'before_box':region['box'],'before_quad':region['quad'],
+                            'box':[.2,.1,.3,.2],'quad':[[.2,.1],[.3,.1],[.3,.2],[.2,.2]]}}
+        proposal['replacements']=[change]
+        accepted=layer.accept_proposal(original,proposal,actor='reviewer')
+        self.assertEqual(accepted['regions'][0]['box'],[.2,.1,.3,.2])
+        self.assertEqual(accepted['raw_sha256'],original['raw_sha256'])
+        self.assertEqual(accepted['acceptances'][-1]['geometry_changes'][0]['original_region'],original['regions'][0])
+        proposal['replacements'][0]['geometry']['before_box']=[0,0,1,1]
+        with self.assertRaisesRegex(ValueError,'geometry'):
+            layer.accept_proposal(original,proposal,actor='reviewer')
+
     def test_explicit_order_acceptance_preserves_regions_and_rejects_unpositioned_text(self):
         blocks = [{"t": "First", "b": [.1, .1, .4, .2], "c": .8, "s": "ocr"},
                   {"t": "Second", "b": [.6, .1, .9, .2], "c": .8, "s": "ocr"}]

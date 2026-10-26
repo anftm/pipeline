@@ -1,0 +1,11 @@
+{
+ "version": 1,
+ "kind": "ocr-image-reviews",
+ "sources": {
+  "97211a0c95f226a77c4e21459556a95bc10222b3b856e2cad00d13d1c03b86c8": [
+   {"page":1,"input_sha256":"4ceaa81b5a565a91239c3cf91e314fec4d72d2b9fed266c7a3617138072eb7e2","box":[0.975,0.02,0.997,0.045],"classification":"scan-artifact","basis":"Full original title page plus user enlarged diagonal fragmented edge ink, 2026-10-25; not a printed S"},
+   {"page":1,"input_sha256":"4ceaa81b5a565a91239c3cf91e314fec4d72d2b9fed266c7a3617138072eb7e2","box":[0.970,0.554,0.984,0.580],"classification":"scan-artifact","basis":"Full original title page plus user enlarged ragged isolated edge ink, 2026-10-25; not a printed Chinese character"},
+   {"page":336,"input_sha256":"74b86b1d3959b9b41f87e97dc6e0dbc9b2d922b5ba751351dc6841d0d0a8016a","box":[0.954,0.028,0.999,0.048],"classification":"scan-artifact","basis":"User enlarged ragged horizontal margin ink, 2026-10-25; not a printed body period"}
+  ]
+ }
+}

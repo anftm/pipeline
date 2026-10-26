@@ -51,6 +51,40 @@ def quad(value):
     return value
 
 
+def validate_formula_relations(relations, regions):
+    """Positioned source relations refer to stable regions and exact local text."""
+    if not isinstance(relations,list) or len(relations)>1000:
+        raise ValueError('invalid formula relations')
+    known={r['id']:r for r in regions}
+    identities=set()
+    def anchor(item):
+        if not isinstance(item,dict) or item.get('region_id') not in known:
+            raise ValueError('unknown formula relation anchor')
+        region=known[item['region_id']];start,end=item.get('start'),item.get('end')
+        if (type(start) is not int or type(end) is not int or not 0<=start<end<=len(region['text'])
+                or region['text'][start:end]!=item.get('text')):
+            raise ValueError('stale formula relation anchor text')
+    for relation in relations:
+        if not isinstance(relation,dict):raise ValueError('invalid formula relation')
+        identity=relation.get('id')
+        if (not isinstance(identity,str) or not re.fullmatch(r'f[0-9a-f]{16}',identity)
+                or identity in identities or relation.get('kind')!='printed-equilibrium'
+                or relation.get('axis') not in {'horizontal','vertical'}):
+            raise ValueError('invalid formula relation identity')
+        operators=({'⇌':['right','left'],'⇋':['left','right']} if relation['axis']=='horizontal'
+                   else {'⇅':['up','down'],'⇵':['down','up']})
+        operator=relation.get('operator',{}).get('text')
+        if relation.get('directions')!=operators.get(operator) or operator not in operators:
+            raise ValueError('formula relation arrow order differs from its printed operator')
+        box(relation.get('box'));quad(relation.get('quad'))
+        for key in ('operator','from','to'):anchor(relation.get(key))
+        proof=relation.get('evidence',{})
+        if not isinstance(proof,dict) or not isinstance(proof.get('reason'),str) or not proof['reason'].strip():
+            raise ValueError('formula relation lacks image evidence')
+        sha(proof.get('crop_sha256'))
+        identities.add(identity)
+
+
 def direction(text):
     strong = {unicodedata.bidirectional(c) for c in text} & {"L", "R", "AL"}
     if "L" in strong and strong & {"R", "AL"}:
@@ -267,6 +301,7 @@ def validate(layer):
             members.update(refs)
         if len(occupied) != (len(table['rows'])-1)*(len(table['columns'])-1):
             raise ValueError('incomplete table cell coverage')
+    validate_formula_relations(layer.get('formula_relations',[]),layer['regions'])
     content = {k: v for k, v in layer.items() if k != "generation"}
     if digest(content) != layer["generation"]:
         raise ValueError("text generation mismatch")
@@ -296,23 +331,94 @@ def accept_proposal(layer, proposal, *, actor):
             or proposal.get("page_identity") != layer["page_identity"]):
         raise ValueError("stale or mismatched correction")
     replacements = proposal.get("replacements")
+    if not isinstance(replacements,list) or any(not isinstance(row,dict) for row in replacements):
+        raise ValueError('invalid correction replacements')
+    additions = proposal.get('additions', [])
+    exclusions = proposal.get('exclusions', [])
+    relations = proposal.get('formula_relations', [])
+    if not isinstance(relations,list):raise ValueError('invalid formula relations')
+    if (not isinstance(additions,list) or not isinstance(exclusions,list)
+            or any(not isinstance(row,dict) for row in additions+exclusions)):
+        raise ValueError('invalid positioned correction scope')
+    positioned = bool(additions or exclusions or relations or any('geometry' in row for row in replacements or []))
+    visual_review = proposal.get('visual_review', {})
+    if positioned:
+        if (not isinstance(visual_review, dict) or visual_review.get('kind') != 'source-image-review'
+                or visual_review.get('source_sha256') != layer['source_sha256']
+                or visual_review.get('page') != layer['page']
+                or not isinstance(visual_review.get('basis'), str) or not visual_review['basis'].strip()):
+            raise ValueError('positioned correction requires exact-source visual review')
+        sha(visual_review.get('input_png_sha256'))
+    if not isinstance(additions, list) or not isinstance(exclusions, list) or len(additions)+len(exclusions)>1000:
+        raise ValueError('invalid positioned correction scope')
     requested_order = proposal.get("region_order", [])
     original_order = [r["id"] for r in layer["regions"]]
+    known = {r['id']: r for r in layer['regions']}
+    excluded = {}
+    def evidence(item):
+        proof = item.get('evidence')
+        if (not isinstance(proof, dict) or not isinstance(proof.get('reason'), str)
+                or not proof['reason'].strip()):
+            raise ValueError('positioned change lacks source evidence')
+        sha(proof.get('crop_sha256'))
+        return copy.deepcopy(proof)
+    def reviewed_geometry(bounds,polygon):
+        bounds=box(copy.deepcopy(bounds));polygon=quad(copy.deepcopy(polygon))
+        if any(not bounds[0]-1e-8<=x<=bounds[2]+1e-8 or not bounds[1]-1e-8<=y<=bounds[3]+1e-8
+               for x,y in polygon):
+            raise ValueError('reviewed quadrilateral is outside its source box')
+        return bounds,polygon
+    for item in exclusions:
+        target = item.get('region_id')
+        if (target not in known or target in excluded or item.get('before') != known[target]['text']
+                or item.get('classification') not in {'map-geometry', 'scan-artifact'}):
+            raise ValueError('invalid reviewed nontext exclusion')
+        excluded[target] = {'region':copy.deepcopy(known[target]), 'classification':item['classification'],
+                            'evidence':evidence(item)}
+    added = {}
+    for item in additions:
+        identity = item.get('region_id')
+        if (not isinstance(identity, str) or not re.fullmatch(r'v[0-9a-f]{16}', identity)
+                or identity in known or identity in added or not isinstance(item.get('text'), str)
+                or not 1<=len(item['text'])<=10000 or item.get('writing_mode', 'horizontal-ltr') not in
+                    {'horizontal-ltr','horizontal-rtl','vertical-lr','vertical-rl'}):
+            raise ValueError('invalid source-positioned addition')
+        bounds,polygon=reviewed_geometry(item.get('box'),item.get('quad'))
+        proof=evidence(item)
+        added[identity]={'id':identity,'text':item['text'],'box':bounds,'quad':polygon,
+            'mapping_precision':'corrected-block','source':'ocr','confidence':0.,
+            'language_hint':item.get('language_hint', layer['provenance']['language_hint']),
+            'scripts':scripts(item['text']),'direction':direction(item['text']),
+            'writing_mode':item.get('writing_mode','horizontal-ltr'),'layout_region':item.get('layout_region',0),
+            'visual_review_evidence':proof,'recognition_status':'source-reviewed-not-model-recognized'}
+    table_members={identity for table in layer.get('tables',[]) for cell in table['cells'] for identity in cell['region_ids']}
+    if table_members.intersection(excluded):
+        raise ValueError('reviewed exclusion cannot silently remove a table member')
+    expected_order=(set(original_order)-set(excluded))|set(added)
     if (not isinstance(requested_order, list) or any(not isinstance(i, str) for i in requested_order)
-            or requested_order and (len(requested_order) != len(original_order) or set(requested_order) != set(original_order))):
+            or requested_order and (len(requested_order) != len(expected_order) or set(requested_order) != expected_order)
+            or (added or excluded) and not requested_order):
         raise ValueError("correction order must name every region exactly once")
     reorder = bool(requested_order and requested_order != original_order)
-    if not isinstance(replacements, list) or not replacements and not reorder:
+    if not isinstance(replacements, list) or not replacements and not reorder and not relations:
         raise ValueError("empty correction proposal")
-    known = {r["id"]: r for r in layer["regions"]}
     changes = {}
+    geometry = {}
     for item in replacements:
         target = item.get("region_id")
-        if (target not in known or target in changes or item.get("before") != known[target]["text"]
+        if (target not in known or target in excluded or target in changes or item.get("before") != known[target]["text"]
                 or not isinstance(item.get("after"), str) or not item["after"]
                 or len(item["after"]) > 10000):
             raise ValueError("invalid correction region or text")
         changes[target] = item["after"]
+        if 'geometry' in item:
+            update=item['geometry']
+            if (not isinstance(update,dict) or update.get('before_box')!=known[target]['box']
+                    or update.get('before_quad')!=known[target]['quad'] or target in table_members):
+                raise ValueError('stale or unsupported reviewed geometry')
+            bounds,polygon=reviewed_geometry(update.get('box'),update.get('quad'))
+            geometry[target]={'box':bounds,'quad':polygon,
+                              'visual_review_evidence':evidence(item)}
     result = copy.deepcopy(layer)
     if reorder:
         cursor = 0
@@ -322,12 +428,21 @@ def accept_proposal(layer, proposal, *, actor):
             cursor = region["end"]
         if layer["text"][cursor:].strip():
             raise ValueError("cannot reorder text with unpositioned content")
-        by_id = {r["id"]: r for r in result["regions"]}
+        by_id = {r["id"]: r for r in result["regions"] if r['id'] not in excluded}
+        by_id.update(added)
         result["regions"] = [by_id[identity] for identity in requested_order]
     parts, position, length = [], 0, 0
+    original_predecessors={identity:original_order[at-1] if at else None
+                           for at,identity in enumerate(original_order)}
     for index, region in enumerate(result["regions"]):
-        old_start, old_end = region["start"], region["end"]
+        old_start, old_end = region.get('start',0), region.get('end',0)
         gap = ("\n" if index else "") if reorder else layer["text"][position:old_start]
+        if positioned and reorder and region['id'] in known:
+            predecessor=original_predecessors[region['id']]
+            previous=result['regions'][index-1]['id'] if index else None
+            if predecessor==previous:
+                previous_end=known[predecessor]['end'] if predecessor is not None else 0
+                gap=layer['text'][previous_end:old_start]
         parts.append(gap)
         length += len(gap)
         if region["id"] in changes:
@@ -335,6 +450,8 @@ def accept_proposal(layer, proposal, *, actor):
             region["mapping_precision"] = "corrected-block"
             region["scripts"] = scripts(region["text"])
             region["direction"] = direction(region["text"])
+        if region['id'] in geometry:
+            region.update(geometry[region['id']])
         region["start"] = length
         region["order"] = index
         length += len(region["text"])
@@ -343,10 +460,25 @@ def accept_proposal(layer, proposal, *, actor):
         position = old_end
     if not reorder:
         parts.append(layer["text"][position:])
+    elif positioned and result['regions'] and result['regions'][-1]['id']==original_order[-1]:
+        parts.append(layer['text'][known[original_order[-1]]['end']:])
     result["text"] = "".join(parts)
+    if relations:
+        combined=[*result.get('formula_relations',[]),*copy.deepcopy(relations)]
+        validate_formula_relations(combined,result['regions'])
+        result['formula_relations']=combined
     result.update(revision="accepted", quality="partially-reviewed", parent_generation=layer["generation"])
     result.setdefault("acceptances", []).append({"proposal_sha256": digest(proposal), "actor": actor,
-                                                "region_ids": sorted(changes),
+                                                 "region_ids": sorted(changes),
+                                                 **({'positioned_additions':copy.deepcopy(list(added.values())),
+                                                     'excluded_regions':copy.deepcopy(list(excluded.values())),
+                                                      'geometry_regions':sorted(geometry),
+                                                      'geometry_changes':[{'region_id':identity,
+                                                          'original_region':copy.deepcopy(known[identity]),
+                                                          'updated_geometry':copy.deepcopy(geometry[identity])}
+                                                          for identity in sorted(geometry)],
+                                                      'formula_relation_ids':[r['id'] for r in relations],
+                                                     'visual_review':copy.deepcopy(visual_review)} if positioned else {}),
                                                 **({"region_order": requested_order} if reorder else {})})
     result["generation"] = digest({k: v for k, v in result.items() if k != "generation"})
     return validate(result)

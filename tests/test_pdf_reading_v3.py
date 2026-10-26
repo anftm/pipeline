@@ -313,6 +313,34 @@ class ReadingV3Tests(unittest.TestCase):
         with self.assertRaises(ValueError):
             v3.accept_text_bundle(ref, [proposal, proposal], self.read, self.bundle, actor="reviewer")
 
+    def test_positioned_reviewed_glyph_reaches_search_with_parent_and_raw_identity_intact(self):
+        layers,pages=self.layers(2)
+        ref=v3.build_text_bundle(layers,pages,Path('objects/aa/'+'a'*64+'/'+'b'*16),self.bundle)
+        self.generated()
+        source=layers[0]
+        proposal={'kind':'pdf-text-correction','version':1,'page':1,
+            'base_generation':source['generation'],'raw_sha256':source['raw_sha256'],
+            'page_identity':source['page_identity'],'replacements':[],
+            'visual_review':{'kind':'source-image-review','source_sha256':'a'*64,'page':1,
+                            'input_png_sha256':'c'*64,'basis':'Full source map and enlarged glyph'},
+            'additions':[{'region_id':'v'+'1'*16,'text':'BÉNIN','box':[.1,.3,.4,.4],
+                'quad':[[.1,.3],[.4,.3],[.4,.4],[.1,.4]],
+                'evidence':{'crop_sha256':'d'*64,'reason':'Retain printed acute accent'}}],
+            'region_order':['b0','v'+'1'*16]}
+        accepted=v3.accept_text_bundle(ref,[proposal],self.read,self.bundle,actor='explicit-source-review')
+        self.generated()
+        manifest=v3.verify_text_bundle(accepted,self.read,'a'*64,2)
+        self.assertEqual(manifest['parent'],ref)
+        search=v3.decode(self.read(manifest['search_partitions'][0]['resource']))
+        self.assertEqual(search['pages'][0]['text'],'Text\nBÉNIN')
+        index=v3.decode(self.read(manifest['book_text']))
+        self.assertEqual(index['pages'][1]['text'],'Text')
+        partition=v3.decode(self.read(manifest['partitions'][0]['resource']))
+        effective=v3.decode(self.read(partition['pages'][0]['resource']))
+        self.assertEqual(effective['raw_sha256'],source['raw_sha256'])
+        self.assertEqual(effective['regions'][1]['confidence'],0)
+        self.assertEqual(effective['quality'],'partially-reviewed')
+
 
 if __name__ == "__main__":
     unittest.main()

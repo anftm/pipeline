@@ -18,7 +18,7 @@ except ImportError:
     import audit_ocr_language as languages
 
 
-PROFILE = 'script-crops-v4-three-regions-per-band'
+PROFILE = 'script-crops-v5-explicit-latin-conflicts'
 
 
 def recover_chinese_route(path, evidence, blocks, models, recognize):
@@ -58,9 +58,9 @@ def recover_chinese_route(path, evidence, blocks, models, recognize):
 
 
 def corroborate(path, evidence, blocks):
-    japanese_conflict = (evidence['language'] == 'japan' and evidence.get('planned_language') == 'japan'
+    explicit_conflict = (evidence['language'] in {'en','japan'} and evidence.get('planned_language') == evidence['language']
                          and any(row['code']=='explicit-language-conflicts-with-image' for row in evidence.get('issues',[])))
-    if evidence.get('scripts') and not japanese_conflict or evidence['language'] not in {'ch', 'chinese_cht', 'en', 'japan'}:
+    if evidence.get('scripts') and not explicit_conflict or evidence['language'] not in {'ch', 'chinese_cht', 'en', 'japan'}:
         return evidence
     expected = languages.LANGUAGE_SCRIPTS[evidence['language']]
     model = 'chi_sim' if expected == 'Han' else 'jpn' if expected == 'Japanese' else 'eng'
@@ -123,7 +123,7 @@ def corroborate(path, evidence, blocks):
         corroborated = corroborated and any(sum(languages.script_counts(c).get('Japanese',0)
             for c in row['independent'] if c in row['primary']) >= 2 for row in valid)
     previous = {}
-    if corroborated and japanese_conflict:
+    if corroborated and explicit_conflict:
         previous={'previous_script_evidence': {k:evidence.get(k) for k in ['language','source','scripts','issues']},
                   'issues':[row for row in evidence.get('issues',[]) if row['code']!='explicit-language-conflicts-with-image']}
     return {**evidence, **previous, 'scripts': [expected] if corroborated else evidence.get('scripts', []),

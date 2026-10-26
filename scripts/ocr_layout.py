@@ -31,6 +31,23 @@ def validate_options(options):
             raise ValueError("invalid layout region")
         if region.get("writing_mode", "auto") not in MODES:
             raise ValueError("invalid region writing mode")
+        if region.get('rotation',0) not in (0,90,180,270):
+            raise ValueError('invalid region recognition rotation')
+        if 'rotation' in region:
+            if region.get('writing_mode','auto') not in {'auto','horizontal-ltr'}:
+                raise ValueError('rotated region recognition requires horizontal-ltr or auto')
+    rotated=[r for r in options.get('regions',[]) if r.get('rotation',0)]
+    if rotated:
+        regions=options['regions']
+        for index,first in enumerate(regions):
+            a=first['box']
+            for second in regions[index+1:]:
+                b=second['box']
+                if min(a[2],b[2])>max(a[0],b[0])+1e-9 and min(a[3],b[3])>max(a[1],b[1])+1e-9:
+                    raise ValueError('recognition regions must not overlap')
+        area=sum((r['box'][2]-r['box'][0])*(r['box'][3]-r['box'][1]) for r in regions)
+        if abs(area-1)>1e-8:
+            raise ValueError('rotated recognition regions require complete page coverage')
     return options
 
 

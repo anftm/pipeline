@@ -65,3 +65,24 @@ class ReaderTextAdmissionTests(unittest.TestCase):
         self.objects[ref['bucket'], ref['path']] += b'corrupted'
         with self.assertRaisesRegex(ValueError, 'checksum'):
             admission.check(self.spec, layers, self.read)
+
+    def test_positioned_review_requires_the_actual_raw_image_not_just_the_book_sha(self):
+        layers=recognized_layers(['正文','末页'],'a'*64,self.objects)
+        original=layers[0]
+        proposal={'kind':'pdf-text-correction','version':1,'page':1,
+            'base_generation':original['generation'],'raw_sha256':original['raw_sha256'],
+            'page_identity':original['page_identity'],'replacements':[],
+            'visual_review':{'kind':'source-image-review','source_sha256':'a'*64,'page':1,
+                'input_png_sha256':'c'*64,'basis':'Full source image'},
+            'additions':[{'region_id':'v'+'1'*16,'text':'P','box':[.1,.3,.2,.4],
+                'quad':[[.1,.3],[.2,.3],[.2,.4],[.1,.4]],
+                'evidence':{'crop_sha256':'f'*64,'reason':'Printed source glyph'}}],
+            'region_order':['b0','v'+'1'*16]}
+        layers[0]=text.accept_proposal(original,proposal,actor='explicit-review')
+        with self.assertRaisesRegex(admission.QualityRejection,'different source image'):
+            admission.check(self.spec,layers,self.read)
+        proposal['visual_review']['input_png_sha256']='d'*64
+        layers[0]=text.accept_proposal(original,proposal,actor='explicit-review')
+        report=admission.check(self.spec,layers,self.read)
+        self.assertEqual(report['quality_check']['status'],'passed')
+        self.assertEqual(report['pages'][0]['text_generation'],layers[0]['generation'])

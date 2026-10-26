@@ -30,6 +30,11 @@ class CorrectionTests(unittest.TestCase):
         self.assertEqual(accepted["text"], "right")
         self.assertEqual(self.layer["text"], "wrong")
 
+    def test_model_answer_cannot_add_or_exclude_source_regions(self):
+        for field in ('additions','exclusions','visual_review','formula_relations'):
+            with self.subTest(field=field),self.assertRaises(ValueError):
+                correction.validate_answer(self.layer,{**self.answer,field:[]})
+
     def test_unique_literal_patch_expands_without_changing_other_text(self):
         layer = text.from_page(raw_page("prefix wrong suffix"), "a" * 64)
         proposal = correction.validate_answer(layer, self.answer)

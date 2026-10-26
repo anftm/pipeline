@@ -100,3 +100,19 @@ class ScriptEvidenceTests(unittest.TestCase):
                 result=evidence.corroborate(image,original,blocks)
             self.assertTrue(result['independent_script']['corroborated'])
             self.assertEqual(len(result['independent_script']['regions']),3)
+
+    def test_english_cyrillic_osd_conflict_needs_independent_latin_pixels(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);(root/'eng.traineddata').write_bytes(b'fixture-english-model')
+            image=root/'page.png';Image.new('L',(600,900),255).save(image)
+            blocks=[{'t':'THE SOCIALIST SYSTEM','b':[.2,.1,.8,.2]},
+                    {'t':'THE POLITICAL ECONOMY OF COMMUNISM','b':[.2,.4,.8,.6]}]
+            original={'language':'en','planned_language':'en','scripts':['Cyrillic'],'source':'override',
+                'issues':[{'code':'explicit-language-conflicts-with-image','severity':'error','evidence':{}}]}
+            outputs=[SimpleNamespace(returncode=0,stderr='',stdout='level\ttext\n5\t'+b['t']+'\n') for b in blocks]
+            with patch.dict('os.environ',{'OCR_SCRIPT_MODEL_DIR':temp}),patch.object(evidence.subprocess,'run',side_effect=outputs):
+                actual=evidence.corroborate(image,original,blocks)
+            self.assertEqual(actual['scripts'],['Latin'])
+            self.assertEqual(actual['issues'],[])
+            self.assertEqual(actual['previous_script_evidence']['scripts'],['Cyrillic'])
+            self.assertEqual(original['scripts'],['Cyrillic'])

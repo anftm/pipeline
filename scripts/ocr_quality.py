@@ -12,10 +12,11 @@ import unicodedata
 from difflib import SequenceMatcher
 
 try:
-    from . import audit_ocr_language as languages, ocr_layout
+    from . import audit_ocr_language as languages, ocr_layout, ocr_geometry
 except ImportError:
     import audit_ocr_language as languages
     import ocr_layout
+    import ocr_geometry
 
 POLICY = "ocr-quality-v1"
 ROUTING_PROFILE = 'language-routing-v4-corroborated-cjk'
@@ -209,8 +210,7 @@ def check_page(payload, recognition=None, *, source_sha256=None, input_sha256=No
                 b = other['b']
                 if b[0] >= a[2]:
                     break
-                intersection = max(0, min(a[2], b[2]) - b[0]) * max(0, min(a[3], b[3]) - max(a[1], b[1]))
-                if intersection / min((a[2] - a[0]) * (a[3] - a[1]), (b[2] - b[0]) * (b[3] - b[1])) >= .85:
+                if ocr_geometry.overlap(block,other)>=.85:
                     issues.append(issue('overlapping-recognized-regions', 'review', blocks=[index, other_index]))
     if raw:
         seen = []
