@@ -102,6 +102,18 @@ class TextLayerTests(unittest.TestCase):
             with self.subTest(change=change),self.assertRaises(ValueError):
                 layer.accept_proposal(original,{**proposal,**change},actor='reviewer')
 
+    def test_illustration_woodgrain_is_reviewed_geometry_not_unpositioned_text_deletion(self):
+        blocks=[{'t':'Title','b':[.1,.1,.6,.2],'s':'ocr','c':1},
+                {'t':'umms','b':[.1,.5,.4,.6],'s':'ocr','c':.4}]
+        raw={**raw_page(),**ocr_layout.arrange(blocks,100,200,{'writing_mode':'horizontal-ltr'})}
+        original=layer.from_page(raw,'a'*64,'ch');proposal=self.visual_proposal(original)
+        proposal.update(exclusions=[{'region_id':'b1','before':'umms','classification':'illustration-geometry',
+            'evidence':{'crop_sha256':'d'*64,'reason':'Original illustration woodgrain, not lettering'}}],region_order=['b0'])
+        accepted=layer.accept_proposal(original,proposal,actor='source-image-review')
+        self.assertEqual(accepted['text'],'Title')
+        self.assertEqual(accepted['acceptances'][-1]['excluded_regions'][0]['region']['text'],'umms')
+        self.assertEqual(original['text'],'Title\n\numms')
+
     def test_positioned_map_additions_preserve_unchanged_body_separators(self):
         blocks=[{'t':'map','b':[.1,.1,.3,.2],'c':.99,'s':'ocr'},
                 {'t':'Right paragraph one.','b':[.6,.1,.9,.2],'c':.99,'s':'ocr'},

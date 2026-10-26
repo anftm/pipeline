@@ -385,7 +385,7 @@ def accept_proposal(layer, proposal, *, actor):
     for item in exclusions:
         target = item.get('region_id')
         if (target not in known or target in excluded or item.get('before') != known[target]['text']
-                or item.get('classification') not in {'map-geometry', 'scan-artifact'}):
+                or item.get('classification') not in {'map-geometry', 'illustration-geometry', 'scan-artifact'}):
             raise ValueError('invalid reviewed nontext exclusion')
         excluded[target] = {'region':copy.deepcopy(known[target]), 'classification':item['classification'],
                             'evidence':evidence(item)}
