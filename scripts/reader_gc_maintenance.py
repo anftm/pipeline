@@ -3,6 +3,7 @@
 
 import argparse
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -21,6 +22,7 @@ except ImportError:
 
 ACTIVE = ("queued", "pending", "in_progress", "waiting", "requested")
 DURABLE_JOURNAL = 'reader-index/gc/maintenance/current.json'
+DURABLE_HISTORY_PREFIX = 'reader-index/gc/maintenance/history/'
 _STORE = None
 
 
@@ -203,6 +205,19 @@ def pages(repo, path, field):
         page += 1
 
 
+def archive_journal(store, raw):
+    """Keep exact terminal/recovery evidence beyond the next maintenance window.
+
+    The mutable current journal is a recovery cursor, not permanent history.
+    Content-addressed snapshots retain failures even after recovery succeeds or
+    Actions artifacts expire, and never pin obsolete document content.
+    """
+    target = DURABLE_HISTORY_PREFIX + hashlib.sha256(raw).hexdigest() + '.json'
+    store.put_bytes('vomebook/reader-assets-v2', target, raw)
+    if store.read_bytes('vomebook/reader-assets-v2', target) != raw:
+        raise RuntimeError('maintenance history readback mismatch')
+
+
 def journal(path, state):
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".pending")
@@ -211,6 +226,10 @@ def journal(path, state):
     store = durable_store()
     if store and not state.get('preflight_only'):
         raw = path.read_bytes()
+        # Archive before advancing the mutable cursor. Failure to preserve the
+        # evidence must not silently replace the last recoverable journal.
+        if 'restored' in state or state.get('restore_attempt_errors'):
+            archive_journal(store, raw)
         store.put_bytes('vomebook/reader-assets-v2', DURABLE_JOURNAL, raw)
         if store.read_bytes('vomebook/reader-assets-v2', DURABLE_JOURNAL) != raw:
             raise RuntimeError('maintenance journal readback mismatch')
@@ -233,6 +252,10 @@ def recover(path):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(raw)
         restore(path)
+    else:
+        # Upgrade an older completed current journal before a new window can
+        # overwrite it. No producer or dispatch mutation is needed here.
+        archive_journal(store, raw)
 
 
 def kick_restored(path, state):

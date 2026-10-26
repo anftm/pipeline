@@ -1,4 +1,5 @@
 from datetime import date, timedelta, datetime, timezone
+import hashlib
 import json
 from pathlib import Path
 import tempfile
@@ -177,6 +178,76 @@ class RetirementTests(unittest.TestCase):
         permissions.assert_called_once_with('repo/test', state['repositories']['repo/test']['permission'])
         workflows.assert_called_once_with('repo/test', {'id': 12, 'state': 'active'}, True)
         self.assertTrue(json.loads(store.read_bytes(ASSETS, maintenance.DURABLE_JOURNAL))['restored'])
+
+    def test_terminal_maintenance_history_survives_a_new_current_window(self):
+        store = Store()
+        failed = {'version': 1, 'kind': 'reader-maintenance-journal', 'maintenance_id': 'a' * 32,
+            'repositories': {}, 'restored': False,
+            'restore_attempt_errors': [{'repository': 'repo/test', 'error': 'MaintenanceReadbackError',
+                                        'stage': 'permissions', 'attempt': 1}]}
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(maintenance, 'durable_store', return_value=store):
+            path = Path(directory) / 'journal.json'
+            maintenance.journal(path, failed)
+            failed_raw = path.read_bytes()
+            recovered = {**failed, 'restored': True, 'restore_errors': []}
+            maintenance.journal(path, recovered)
+            recovered_raw = path.read_bytes()
+            maintenance.journal(path, {'version': 1, 'kind': 'reader-maintenance-journal',
+                'maintenance_id': 'b' * 32, 'repositories': {}})
+        for raw in (failed_raw, recovered_raw):
+            target = maintenance.DURABLE_HISTORY_PREFIX + hashlib.sha256(raw).hexdigest() + '.json'
+            self.assertEqual(store.read_bytes(ASSETS, target), raw)
+        current = json.loads(store.read_bytes(ASSETS, maintenance.DURABLE_JOURNAL))
+        self.assertEqual(current['maintenance_id'], 'b' * 32)
+        reference = graph.ReferenceGraph(store)
+        scanned = reference.build()
+        self.assertTrue(scanned['graph_complete'], scanned['blockers'])
+        self.assertEqual(scanned['buckets'][ASSETS]['candidates'], [])
+
+    def test_completed_legacy_cursor_is_archived_without_repeating_restore_or_dispatch(self):
+        store = Store()
+        completed = {'version': 1, 'kind': 'reader-maintenance-journal', 'repositories': {},
+            'maintenance_id': 'a' * 32, 'restored': True, 'restore_attempt_errors': [
+                {'repository': 'repo/test', 'error': 'MaintenanceAPIError', 'status': 503}]}
+        store.put(ASSETS, maintenance.DURABLE_JOURNAL, completed)
+        raw = store.read_bytes(ASSETS, maintenance.DURABLE_JOURNAL)
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(maintenance, 'durable_store', return_value=store), \
+                patch.object(maintenance, 'restore') as restore, patch.object(maintenance, 'api') as api:
+            maintenance.recover(Path(directory) / 'journal.json')
+        target = maintenance.DURABLE_HISTORY_PREFIX + hashlib.sha256(raw).hexdigest() + '.json'
+        self.assertEqual(store.read_bytes(ASSETS, target), raw)
+        self.assertEqual(store.read_bytes(ASSETS, maintenance.DURABLE_JOURNAL), raw)
+        restore.assert_not_called()
+        api.assert_not_called()
+
+    def test_history_readback_failure_does_not_advance_the_durable_recovery_cursor(self):
+        store = Store()
+        original = {'version': 1, 'kind': 'reader-maintenance-journal',
+            'maintenance_id': 'a' * 32, 'repositories': {}, 'restored': False}
+        store.put(ASSETS, maintenance.DURABLE_JOURNAL, original)
+        before = store.read_bytes(ASSETS, maintenance.DURABLE_JOURNAL)
+        read = store.read_bytes
+        def corrupted_history(bucket, path):
+            if path.startswith(maintenance.DURABLE_HISTORY_PREFIX):
+                return b'wrong snapshot'
+            return read(bucket, path)
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(maintenance, 'durable_store', return_value=store), \
+                patch.object(store, 'read_bytes', side_effect=corrupted_history):
+            with self.assertRaisesRegex(RuntimeError, 'history readback mismatch'):
+                maintenance.journal(Path(directory) / 'journal.json', {**original, 'restored': True})
+        self.assertEqual(store.read_bytes(ASSETS, maintenance.DURABLE_JOURNAL), before)
+
+    def test_preflight_does_not_write_durable_history_or_current(self):
+        store = Store()
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(maintenance, 'durable_store', return_value=store), \
+                patch.object(store, 'put_bytes') as put:
+            maintenance.journal(Path(directory) / 'preflight.json',
+                {'preflight_only': True, 'repositories': {}, 'remote_writes': 0})
+        put.assert_not_called()
 
 
 if __name__ == '__main__':
