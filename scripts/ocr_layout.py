@@ -343,6 +343,12 @@ def restore_coordinates(payload, clockwise):
             block["b"] = map_box_back(block["b"], clockwise)
             if "q" in block:
                 block["q"] = [list(map_point_back(x, y, clockwise)) for x, y in block["q"]]
+            if block.get('fraction_bar_evidence'):
+                proof=block['fraction_bar_evidence']
+                proof['recognition_bar_box']=list(proof['bar_box'])
+                proof['recognition_rotation_clockwise']=clockwise
+                proof['bar_box']=map_box_back(proof['bar_box'],clockwise)
+                proof['box']=map_box_back(proof['box'],clockwise)
     for span in payload["text_spans"]:
         span["box"] = map_box_back(span["box"], clockwise)
     for table in payload['layout'].get('tables', []):
@@ -359,5 +365,11 @@ def restore_coordinates(payload, clockwise):
             if 'segments' in edge:
                 edge['segments'] = [[*map_point_back(x0,y0,clockwise),*map_point_back(x1,y1,clockwise)]
                                     for x0,y0,x1,y1 in edge['segments']]
+    for fraction in payload['layout'].get('fractions',[]):
+        fraction['recognition_box']=list(fraction['box'])
+        fraction['recognition_bar_box']=list(fraction['bar_box'])
+        fraction['recognition_rotation_clockwise']=clockwise
+        fraction['box']=map_box_back(fraction['box'],clockwise)
+        fraction['bar_box']=map_box_back(fraction['bar_box'],clockwise)
     payload["layout"]["rotation_clockwise"] = clockwise
     return payload

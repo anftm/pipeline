@@ -117,6 +117,27 @@ class QualityTests(unittest.TestCase):
             quality.issue('formula-script-token-unresolved','review',region=0)]}}
         self.assertIn('formula-script-token-unresolved',codes(quality.check_page(payload)))
 
+    def test_reviewed_scientific_symbol_page_still_needs_exact_source_loaded_model_and_formula_pixels(self):
+        content='Pb(NO3)2+Na2S=2NaNO3+PbS↓ Cu+2+2OH-1=Cu(OH)2↓ '*3
+        payload=page([block(content,[.1,.1,.9,.3])])
+        recognition=payload['recognition'];recognition['language_evidence']['issues']=[
+            quality.issue('explicit-language-conflicts-with-image','error',planned='ch',observed='en')]
+        self.assertIn('recognition-language-script-mismatch',codes(quality.check_page(payload)))
+        recognition['models']['models']['rec']['language']='ch'
+        recognition['language_evidence']['scientific_symbol_coverage']={
+            'classification':'scientific-symbols','page':1,'source_sha256':'a'*64,'input_sha256':'b'*64,
+            'language':'ch','script_coverage':['Han','Latin'],'review':{'basis':'Full original formula page'}}
+        self.assertNotIn('explicit-language-conflicts-with-image',codes(quality.check_page(payload)))
+        self.assertNotIn('recognition-language-script-mismatch',codes(quality.check_page(payload)))
+        recognition['language_evidence']['scientific_symbol_coverage']['input_sha256']='c'*64
+        self.assertIn('recognition-language-script-mismatch',codes(quality.check_page(payload)))
+        recognition['language_evidence']['scientific_symbol_coverage']['input_sha256']='b'*64
+        recognition['models']['models']['rec']['language']='en'
+        self.assertIn('recognition-language-script-mismatch',codes(quality.check_page(payload)))
+        recognition['models']['models']['rec']['language']='ch'
+        payload.update(ocr_layout.arrange([block('This is ordinary English prose with H2O = 2 + 5 - 1 = 4 '*3, [.1,.1,.9,.3])],1200,1800))
+        self.assertIn('recognition-language-script-mismatch',codes(quality.check_page(payload)))
+
     def test_three_consistent_low_confidence_votes_are_recorded(self):
         probe = {"regions": [{"script": "Han", "confidence": n} for n in (.81, .98, 1.03)]}
         result = quality.select_language("en", "filename", probe)

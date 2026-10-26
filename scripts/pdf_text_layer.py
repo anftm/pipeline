@@ -217,6 +217,11 @@ def from_page(payload, source_sha256, language="und", raw_resource=None, *, layo
             for cell in table['cells']:
                 cell['region_ids'] = [f'b{index}' for index in cell.pop('blocks')]
                 cell.pop('text', None)
+    if layout.get('fractions'):
+        result['fractions']=copy.deepcopy(layout['fractions'])
+        for fraction in result['fractions']:
+            for role in ('numerator','denominator','operator'):
+                fraction[role+'_region_id']='b'+str(fraction.pop(role+'_block'))
     result["generation"] = digest(result)
     validate(result)
     return result
@@ -302,6 +307,15 @@ def validate(layer):
         if len(occupied) != (len(table['rows'])-1)*(len(table['columns'])-1):
             raise ValueError('incomplete table cell coverage')
     validate_formula_relations(layer.get('formula_relations',[]),layer['regions'])
+    for fraction in layer.get('fractions',[]):
+        box(fraction.get('box'));box(fraction.get('bar_box'))
+        sha(fraction.get('bar_pixels_sha256'))
+        members=[fraction.get(role+'_region_id') for role in ('numerator','denominator','operator')]
+        if len(set(members))!=3 or any(identity not in ids for identity in members):
+            raise ValueError('invalid positioned fraction ownership')
+        found={r['id']:r for r in layer['regions']}
+        if (found[members[2]]['text']!='/' or any(not re.fullmatch('[0-9]+',found[identity]['text']) for identity in members[:2])):
+            raise ValueError('positioned numeric fraction text changed')
     content = {k: v for k, v in layer.items() if k != "generation"}
     if digest(content) != layer["generation"]:
         raise ValueError("text generation mismatch")

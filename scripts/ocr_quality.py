@@ -134,6 +134,28 @@ def _valid_box(box):
             and 0 <= box[0] < box[2] <= 1 and 0 <= box[1] < box[3] <= 1)
 
 
+def scientific_symbol_coverage(payload,recognition):
+    proof=recognition.get('language_evidence',{}).get('scientific_symbol_coverage',{})
+    model=recognition.get('models',{}).get('models',{}).get('rec',{})
+    if (proof.get('classification')!='scientific-symbols' or proof.get('page')!=payload.get('page')
+            or proof.get('source_sha256')!=recognition.get('source_sha256')
+            or proof.get('input_sha256')!=recognition.get('input_sha256')
+            or proof.get('language')!=recognition.get('language')
+            or proof.get('script_coverage')!=['Han','Latin'] or not proof.get('review',{}).get('basis')
+            or recognition.get('language') not in {'ch','chinese_cht'}
+            or model.get('language') not in {'ch','chinese_cht'}
+            or not re.fullmatch('[0-9a-f]{64}',str(model.get('sha256','')))):
+        return False
+    content=payload.get('text','')
+    # This structural check is deliberately not a chemical dictionary. Long
+    # Latin words/prose cannot acquire scientific coverage from filename,
+    # document language or a cached review badge.
+    latin=re.findall('[A-Za-z]+',content)
+    if not latin or any(not re.fullmatch(r'(?:[A-Z][a-z]?)+',word) for word in latin):return False
+    operator_count=sum(content.count(char) for char in '=→⇌↑↓+-⁺⁻')
+    return operator_count>=4 and sum(c.isdigit() or c in '₀₁₂₃₄₅₆₇₈₉⁰¹²³⁴⁵⁶⁷⁸⁹' for c in content)>=8
+
+
 def check_page(payload, recognition=None, *, source_sha256=None, input_sha256=None, profile=None):
     """Recompute checks from stored text/geometry; never trust a cached green flag."""
     recognition = recognition or payload.get("recognition") or {}
@@ -150,7 +172,10 @@ def check_page(payload, recognition=None, *, source_sha256=None, input_sha256=No
         if recognition.get("policy") != POLICY:
             issues.append(issue("quality-evidence-missing", "review"))
         evidence = recognition.get("language_evidence", {})
-        issues.extend(evidence.get("issues", []))
+        scientific=scientific_symbol_coverage(payload,recognition)
+        issues.extend(row for row in evidence.get('issues',[]) if not(scientific
+            and row.get('code')=='explicit-language-conflicts-with-image'
+            and row.get('evidence',{}).get('observed')=='en'))
         models = recognition.get("models", {}).get("models", {})
         diagnostics = recognition.get("models", {}).get("diagnostics", {})
         secondary = diagnostics.get("secondary_check", {})
@@ -187,7 +212,7 @@ def check_page(payload, recognition=None, *, source_sha256=None, input_sha256=No
             latin_covered = (expected in {'Cyrillic', 'Greek'} and 'Latin' in evidence.get('scripts', [])
                              and models.get('rec', {}).get('language') in {'cyrillic', 'el'}
                              and (counts.get('Latin', 0) + counts.get(expected, 0)) / total >= .95)
-            if own < languages.MIN_SCRIPT_SHARE.get(language, .05) and not latin_covered:
+            if own < languages.MIN_SCRIPT_SHARE.get(language, .05) and not latin_covered and not scientific:
                 issues.append(issue("recognition-language-script-mismatch", "error", language=language, counts=counts))
             if language in {"ch", "chinese_cht"} and counts.get("Japanese", 0) >= max(4, total * .015):
                 issues.append(issue("japanese-text-under-chinese-language", "error", counts=counts))
@@ -211,6 +236,18 @@ def check_page(payload, recognition=None, *, source_sha256=None, input_sha256=No
                 b = other['b']
                 if b[0] >= a[2]:
                     break
+                fraction_overlap=False
+                for operator,operator_index,parent_index in [(block,index,other_index),(other,other_index,index)]:
+                    proof=operator.get('fraction_bar_evidence',{})
+                    parents=operator.get('structural_parent_blocks',[])
+                    if (operator.get('t')=='/' and operator.get('confidence_source')=='original-fraction-bar-geometry'
+                            and type(proof.get('numerator')) is int and type(proof.get('denominator')) is int
+                            and parents==[proof['numerator'],proof['denominator']] and parent_index in parents
+                            and operator.get('b')==proof.get('bar_box')
+                            and re.fullmatch(r'[0-9a-f]{64}',str(proof.get('bar_pixels_sha256','')))
+                            and {r.get('threshold') for r in proof.get('threshold_evidence',[])}=={128,180,220}):
+                        fraction_overlap=True
+                if fraction_overlap:continue
                 if ocr_geometry.overlap(block,other)>=.85:
                     issues.append(issue('overlapping-recognized-regions', 'review', blocks=[index, other_index]))
     if raw:

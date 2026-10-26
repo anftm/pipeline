@@ -32,7 +32,7 @@ from huggingface_hub.utils import get_session, hf_raise_for_status
 
 try:
     from . import pdf_ocr, pdf_assets, lin_pdf_text, pdf_render_schedule, pdf_worker_lanes, plan_pdf_ocr, publish_pdf_ocr_assets as publication, shared, ocr_layout, reader_lifecycle, pdf_text_layer, pdf_reading_v3
-    from . import pdf_ocr_progress, djvu_pages, ocr_quality, ndl_ocr, native_text_quality, ocr_mixed_text, ocr_script_evidence, ocr_latin_spacing, ocr_source_review, ocr_aligned_table, ocr_regions, ocr_symbolic_table, ocr_formula_scripts
+    from . import pdf_ocr_progress, djvu_pages, ocr_quality, ndl_ocr, native_text_quality, ocr_mixed_text, ocr_script_evidence, ocr_latin_spacing, ocr_source_review, ocr_aligned_table, ocr_regions, ocr_symbolic_table, ocr_formula_scripts, ocr_fraction_layout
     from .run_pdf_ocr import source_path, _bucket_retry_delay
     from .reader_bucket import index_path, publish_bytes, publish_json, publish_json_batch, publish_catalog, read_json as read_bucket_json
 except ImportError:
@@ -52,6 +52,7 @@ except ImportError:
     import ocr_regions
     import ocr_symbolic_table
     import ocr_formula_scripts
+    import ocr_fraction_layout
     from run_pdf_ocr import source_path, _bucket_retry_delay
     from reader_bucket import index_path, publish_bytes, publish_json, publish_json_batch, publish_catalog, read_json as read_bucket_json
 
@@ -1110,6 +1111,7 @@ def recognition_identity(entry, options):
                 'region_recognition':ocr_regions.PROFILE,
                 'symbolic_tables':ocr_symbolic_table.PROFILE,
                 'formula_tokens':ocr_formula_scripts.PROFILE,
+                'numeric_fractions':ocr_fraction_layout.PROFILE,
                "japanese_models": ndl_ocr.PROFILE,
                'native_text': native_text_quality.PROFILE,
                'mixed_scripts': ocr_mixed_text.PROFILE,
@@ -1429,6 +1431,9 @@ def recognize_task(task, bundle, adopt_existing=False):
                         blocks,spacing=ocr_latin_spacing.recognize(png,blocks)
                         if spacing:models.setdefault('diagnostics',{})['latin_spacing']=spacing
                     if task.get('source_reviews'):
+                        coverage=ocr_source_review.scientific_coverage(task['source_reviews'],page=page['p'],
+                            input_sha256=page['is'],source_sha256=task['source_sha256'],language=language)
+                        if coverage:evidence={**evidence,'scientific_symbol_coverage':coverage}
                         with Image.open(png) as original:
                             # Reviews refer to the exact unrotated input pixels.
                             if not rotation:
@@ -1436,6 +1441,7 @@ def recognize_task(task, bundle, adopt_existing=False):
                                     page=page['p'],input_sha256=page['is'])
                 table = None
                 aligned_tables=[]
+                fractions=[]
                 if language=='en' and not degenerate and not page.get('native_components') and not any(
                         region.get('rotation') for region in options.get('regions',[])):
                     with Image.open(png) as image:
@@ -1470,6 +1476,9 @@ def recognize_task(task, bundle, adopt_existing=False):
                             with Image.open(png) as image:
                                 blocks,formula=ocr_formula_scripts.refine_tokens(image,blocks,read_formula)
                             if formula:models.setdefault('diagnostics',{})['formula_scripts']=formula
+                    if table is None and not any(region.get('rotation') for region in options.get('regions',[])):
+                        with Image.open(png) as image:
+                            fractions=ocr_fraction_layout.detect(image,blocks)
                 payload = pdf_ocr.page_payload(page["p"], page["width"], page["height"], blocks, "ocr")
                 if page.get('native_rejection'):
                     payload['native_rejection'] = page['native_rejection']
@@ -1481,6 +1490,7 @@ def recognize_task(task, bundle, adopt_existing=False):
                                 models.get('diagnostics',{}).get('regional_recognition'))
                             if any(r.get('rotation') for r in options.get('regions',[])) else
                             ocr_aligned_table.arrange(blocks,width,height,aligned_tables,options) if aligned_tables else
+                            ocr_fraction_layout.arrange(blocks,width,height,fractions,options) if fractions else
                             ocr_table_geometry.arrange(blocks, width, height, table, options, include_writing_modes=True)
                             if table else ocr_layout.arrange(blocks, width, height, options))
                 payload.update(ocr_layout.restore_coordinates(arranged, rotation))

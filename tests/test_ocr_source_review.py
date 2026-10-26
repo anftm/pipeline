@@ -9,6 +9,14 @@ from scripts import ocr_source_review as review
 
 
 class SourceReviewTests(unittest.TestCase):
+    def test_scientific_symbol_coverage_is_exact_page_and_input_not_character_acceptance(self):
+        rules=[{'page':74,'input_sha256':'a'*64,'classification':'scientific-symbols',
+                'script_coverage':['Han','Latin'],'basis':'Original source chemical equations, not English prose'}]
+        proof=review.scientific_coverage(rules,page=74,input_sha256='a'*64,source_sha256='b'*64,language='ch')
+        self.assertEqual(proof['character_accuracy'],'unreviewed')
+        self.assertEqual(proof['script_coverage'],['Han','Latin'])
+        for page,sha,language in [(75,'a'*64,'ch'),(74,'c'*64,'ch'),(74,'a'*64,'en')]:
+            self.assertIsNone(review.scientific_coverage(rules,page=page,input_sha256=sha,source_sha256='b'*64,language=language))
     def test_only_exact_page_input_and_reviewed_region_can_be_excluded(self):
         image=Image.new('RGB',(100,200),'white')
         blocks=[{'t':'S','b':[.95,.03,.99,.05],'c':.2,'s':'ocr'},

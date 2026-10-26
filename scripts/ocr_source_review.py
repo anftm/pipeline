@@ -8,7 +8,7 @@ import io
 import json
 from pathlib import Path
 
-PROFILE='source-nontext-reviews-v2-positioned-empty-detections'
+PROFILE='source-image-reviews-v3-scientific-symbol-coverage'
 STATE=Path(__file__).resolve().parents[1]/'state/ocr_image_reviews.json'
 
 
@@ -58,3 +58,21 @@ def apply(image, blocks, models, reviews, *, page, input_sha256):
             'original_blocks':copy.deepcopy(blocks),'original_empty_regions':original_empty,
             'excluded':removed,'excluded_empty_detections':empty_checks}
     return retained,actual
+
+
+def scientific_coverage(reviews,*,page,input_sha256,source_sha256,language):
+    """Exact source-image review of scientific symbols is not an English route.
+
+    This records only script coverage, not spelling/character acceptance. The
+    consistency checker independently verifies that the loaded CJK recognizer
+    covers Latin and the retained page actually has formula-like tokens.
+    """
+    matches=[r for r in reviews if r.get('page')==page and r.get('input_sha256')==input_sha256
+             and r.get('classification')=='scientific-symbols' and r.get('basis')]
+    if len(matches)!=1 or language not in {'ch','chinese_cht'}:return None
+    row=matches[0]
+    if row.get('script_coverage')!=['Han','Latin']:return None
+    return {'profile':PROFILE,'classification':'scientific-symbols','page':page,
+        'source_sha256':source_sha256,'input_sha256':input_sha256,'language':language,
+        'script_coverage':['Han','Latin'],'review':copy.deepcopy(row),
+        'character_accuracy':'unreviewed'}
