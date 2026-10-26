@@ -102,3 +102,16 @@ class ReaderTextAdmissionTests(unittest.TestCase):
         text.validate(accepted);layers[0]=accepted
         with self.assertRaisesRegex(admission.QualityRejection,'unresolved source annotations'):
             admission.check(self.spec,layers,self.read)
+
+    def test_retaining_undetected_handwriting_cannot_bypass_body_admission(self):
+        layers=recognized_layers(['Printed','Last page'],'a'*64,self.objects);original=layers[0]
+        proposal={'kind':'pdf-text-correction','version':1,'page':1,'base_generation':original['generation'],
+            'raw_sha256':original['raw_sha256'],'page_identity':original['page_identity'],'replacements':[],
+            'visual_review':{'kind':'source-image-review','source_sha256':'a'*64,'page':1,
+                'input_png_sha256':'d'*64,'basis':'Original undetected margin ink'},
+            'annotation_additions':[{'id':'a'+'1'*16,'classification':'handwritten-annotation','status':'unresolved',
+                'literal_text':None,'box':[.8,.2,.9,.3],'quad':[[.8,.2],[.9,.2],[.9,.3],[.8,.3]],
+                'evidence':{'crop_sha256':'f'*64,'reason':'Keep literal reading unresolved'}}]}
+        layers[0]=text.accept_proposal(original,proposal,actor='explicit-source-review')
+        with self.assertRaisesRegex(admission.QualityRejection,'unresolved source annotations'):
+            admission.check(self.spec,layers,self.read)

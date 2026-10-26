@@ -383,14 +383,18 @@ def validate(layer):
     annotation_ids=set()
     for annotation in annotations:
         if not isinstance(annotation,dict):raise ValueError('invalid source annotation')
-        identity=annotation.get('id');original=annotation.get('original_region',{})
+        identity=annotation.get('id');original=annotation.get('original_region')
         if (not isinstance(identity,str) or identity in ids or identity in annotation_ids
-                or not isinstance(original,dict)
                 or annotation.get('classification') not in {'handwritten-annotation','marginal-mark'}
-                or annotation.get('status')!='unresolved' or annotation.get('literal_text') is not None
-                or original.get('id')!=identity or not isinstance(original.get('text'),str)
-                or annotation.get('box')!=original.get('box') or annotation.get('quad')!=original.get('quad')):
+                or annotation.get('status')!='unresolved' or annotation.get('literal_text') is not None):
             raise ValueError('source annotation loses original recognition evidence')
+        if original is not None:
+            if (not isinstance(original,dict) or original.get('id')!=identity or not isinstance(original.get('text'),str)
+                    or annotation.get('box')!=original.get('box') or annotation.get('quad')!=original.get('quad')):
+                raise ValueError('source annotation loses original recognition evidence')
+        elif (not re.fullmatch(r'a[0-9a-f]{16}',identity) or annotation.get('confidence')!=0.
+                or annotation.get('recognition_status')!='source-reviewed-not-model-recognized'):
+            raise ValueError('unrecognized source annotation lacks explicit review identity')
         box(annotation['box']);quad(annotation['quad']);proof=annotation.get('evidence',{})
         if not isinstance(proof,dict):raise ValueError('annotation lacks original-source evidence')
         sha(proof.get('crop_sha256'))
@@ -430,12 +434,16 @@ def accept_proposal(layer, proposal, *, actor):
     additions = proposal.get('additions', [])
     exclusions = proposal.get('exclusions', [])
     annotations = proposal.get('annotations', [])
+    annotation_additions = proposal.get('annotation_additions', [])
+    separators = proposal.get('separators', [])
     relations = proposal.get('formula_relations', [])
     if not isinstance(relations,list):raise ValueError('invalid formula relations')
     if (not isinstance(additions,list) or not isinstance(exclusions,list) or not isinstance(annotations,list)
-            or any(not isinstance(row,dict) for row in additions+exclusions+annotations)):
+            or not isinstance(separators,list)
+            or not isinstance(annotation_additions,list)
+            or any(not isinstance(row,dict) for row in additions+exclusions+annotations+separators+annotation_additions)):
         raise ValueError('invalid positioned correction scope')
-    positioned = bool(additions or exclusions or annotations or relations or any('geometry' in row for row in replacements or []))
+    positioned = bool(additions or exclusions or annotations or annotation_additions or separators or relations or any('geometry' in row for row in replacements or []))
     visual_review = proposal.get('visual_review', {})
     if positioned:
         if (not isinstance(visual_review, dict) or visual_review.get('kind') != 'source-image-review'
@@ -444,7 +452,7 @@ def accept_proposal(layer, proposal, *, actor):
                 or not isinstance(visual_review.get('basis'), str) or not visual_review['basis'].strip()):
             raise ValueError('positioned correction requires exact-source visual review')
         sha(visual_review.get('input_png_sha256'))
-    if len(additions)+len(exclusions)+len(annotations)>1000:
+    if len(additions)+len(exclusions)+len(annotations)+len(annotation_additions)+len(separators)>1000:
         raise ValueError('invalid positioned correction scope')
     requested_order = proposal.get("region_order", [])
     original_order = [r["id"] for r in layer["regions"]]
@@ -482,6 +490,20 @@ def accept_proposal(layer, proposal, *, actor):
         separated[target]={'id':target,'classification':item['classification'],'status':'unresolved','literal_text':None,
             'box':copy.deepcopy(region['box']),'quad':copy.deepcopy(region['quad']),
             'original_region':copy.deepcopy(region),'evidence':evidence(item)}
+    new_annotations = {}
+    existing_annotations = {a['id'] for a in layer.get('annotations',[])}
+    for item in annotation_additions:
+        identity=item.get('id')
+        if (not isinstance(identity,str) or not re.fullmatch(r'a[0-9a-f]{16}',identity)
+                or identity in known or identity in new_annotations or identity in existing_annotations
+                or item.get('classification') not in {'handwritten-annotation','marginal-mark'}
+                or item.get('status')!='unresolved' or item.get('literal_text') is not None
+                or set(item)-{'id','classification','status','literal_text','box','quad','evidence'}):
+            raise ValueError('invalid source-positioned annotation addition')
+        bounds,polygon=reviewed_geometry(item.get('box'),item.get('quad'))
+        new_annotations[identity]={'id':identity,'classification':item['classification'],
+            'status':'unresolved','literal_text':None,'box':bounds,'quad':polygon,'confidence':0.,
+            'recognition_status':'source-reviewed-not-model-recognized','evidence':evidence(item)}
     added = {}
     for item in additions:
         identity = item.get('region_id')
@@ -511,8 +533,28 @@ def accept_proposal(layer, proposal, *, actor):
             or (added or removed) and not requested_order):
         raise ValueError("correction order must name every region exactly once")
     reorder = bool(requested_order and requested_order != original_order)
-    if not isinstance(replacements, list) or not replacements and not reorder and not relations:
+    if not isinstance(replacements, list) or not replacements and not reorder and not relations and not separators and not new_annotations:
         raise ValueError("empty correction proposal")
+    # Source-reviewed line/space corrections are independent from glyph text.
+    # Require the exact original adjacent pair and gap so no hidden text can
+    # be removed, invented or moved by an apparently harmless separator edit.
+    final_order = requested_order or original_order
+    separator_changes = {}
+    for item in separators:
+        left,right = item.get('after_region_id'),item.get('before_region_id')
+        before,after = item.get('before'),item.get('after')
+        if (not isinstance(left,str) or not isinstance(right,str)
+                or left not in known or right not in known or right in separator_changes
+                or left in removed or right in removed
+                or original_order.index(right) != original_order.index(left)+1
+                or final_order.index(right) != final_order.index(left)+1
+                or not isinstance(before,str) or not isinstance(after,str) or before == after
+                or len(before)>64 or len(after)>64
+                or any(c not in ' \t\r\n' for c in before+after)
+                or layer['text'][known[left]['end']:known[right]['start']] != before):
+            raise ValueError('stale or invalid source-reviewed separator')
+        separator_changes[right] = {'after_region_id':left,'before_region_id':right,
+            'before':before,'after':after,'evidence':evidence(item)}
     changes = {}
     geometry = {}
     for item in replacements:
@@ -554,6 +596,8 @@ def accept_proposal(layer, proposal, *, actor):
             if predecessor==previous:
                 previous_end=known[predecessor]['end'] if predecessor is not None else 0
                 gap=layer['text'][previous_end:old_start]
+        if region['id'] in separator_changes:
+            gap=separator_changes[region['id']]['after']
         parts.append(gap)
         length += len(gap)
         if region["id"] in changes:
@@ -574,8 +618,8 @@ def accept_proposal(layer, proposal, *, actor):
     elif positioned and result['regions'] and result['regions'][-1]['id']==original_order[-1]:
         parts.append(layer['text'][known[original_order[-1]]['end']:])
     result["text"] = "".join(parts)
-    if separated:
-        result.setdefault('annotations',[]).extend(copy.deepcopy(list(separated.values())))
+    if separated or new_annotations:
+        result.setdefault('annotations',[]).extend(copy.deepcopy([*separated.values(),*new_annotations.values()]))
         result['review_flags']=sorted(set(result['review_flags'])|{'unresolved-source-annotation'})
     if relations:
         combined=[*result.get('formula_relations',[]),*copy.deepcopy(relations)]
@@ -586,13 +630,15 @@ def accept_proposal(layer, proposal, *, actor):
                                                  "region_ids": sorted(changes),
                                                  **({'positioned_additions':copy.deepcopy(list(added.values())),
                                                       'excluded_regions':copy.deepcopy(list(excluded.values())),
-                                                      **({'separated_annotations':copy.deepcopy(list(separated.values()))} if separated else {}),
+                                                       **({'separated_annotations':copy.deepcopy(list(separated.values()))} if separated else {}),
+                                                       **({'source_positioned_annotations':copy.deepcopy(list(new_annotations.values()))} if new_annotations else {}),
                                                       'geometry_regions':sorted(geometry),
                                                       'geometry_changes':[{'region_id':identity,
                                                           'original_region':copy.deepcopy(known[identity]),
                                                           'updated_geometry':copy.deepcopy(geometry[identity])}
                                                           for identity in sorted(geometry)],
-                                                      'formula_relation_ids':[r['id'] for r in relations],
+                                                       'formula_relation_ids':[r['id'] for r in relations],
+                                                       **({'separator_changes':copy.deepcopy(list(separator_changes.values()))} if separator_changes else {}),
                                                      'visual_review':copy.deepcopy(visual_review)} if positioned else {}),
                                                 **({"region_order": requested_order} if reorder else {})})
     result["generation"] = digest({k: v for k, v in result.items() if k != "generation"})

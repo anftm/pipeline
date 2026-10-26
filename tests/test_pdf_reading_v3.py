@@ -379,6 +379,49 @@ class ReadingV3Tests(unittest.TestCase):
         search=v3.decode(self.read(manifest['search_partitions'][0]['resource']))
         self.assertEqual(search['pages'][0]['text'],'Printed text')
 
+    def test_source_reviewed_separator_reaches_search_without_changing_raw_or_glyph_geometry(self):
+        from scripts import ocr_layout
+        blocks=[{'t':'水','b':[.1,.1,.2,.2],'s':'ocr','c':1},
+                {'t':'解','b':[.1,.3,.2,.4],'s':'ocr','c':1}]
+        payload={**raw_page(),**ocr_layout.arrange(blocks,100,200,{'writing_mode':'horizontal-ltr'})}
+        payload['text']='水解'
+        payload['text_spans'][0].update(start=0,end=1)
+        payload['text_spans'][1].update(start=1,end=2)
+        original=text.from_page(payload,'a'*64,'ch')
+        proposal={'kind':'pdf-text-correction','version':1,'page':1,'base_generation':original['generation'],
+            'raw_sha256':original['raw_sha256'],'page_identity':original['page_identity'],'replacements':[],
+            'visual_review':{'kind':'source-image-review','source_sha256':'a'*64,'page':1,
+                'input_png_sha256':'c'*64,'basis':'Two separately printed original lines'},
+            'separators':[{'after_region_id':'b0','before_region_id':'b1','before':'','after':'\n',
+                'evidence':{'crop_sha256':'d'*64,'reason':'Original physical line boundary'}}]}
+        accepted=text.accept_proposal(original,proposal,actor='user-source-boundary-review')
+        layers,pages=self.layers(1);layers[0]=accepted
+        ref=v3.build_text_bundle(layers,pages,Path('objects/aa/'+'a'*64+'/'+'b'*16),self.bundle)
+        self.generated();verified=[]
+        manifest=v3.verify_text_bundle(ref,self.read,'a'*64,1,verified_layers=verified)
+        self.assertEqual(verified[0]['raw_sha256'],original['raw_sha256'])
+        search=v3.decode(self.read(manifest['search_partitions'][0]['resource']))
+        self.assertEqual(search['pages'][0]['text'],'水\n解')
+        self.assertEqual(verified[0]['acceptances'][-1]['separator_changes'][0]['before'],'')
+
+    def test_undetected_source_annotation_survives_packaging_without_adding_search_text(self):
+        layers,pages=self.layers(1);original=layers[0]
+        proposal={'kind':'pdf-text-correction','version':1,'page':1,'base_generation':original['generation'],
+            'raw_sha256':original['raw_sha256'],'page_identity':original['page_identity'],'replacements':[],
+            'visual_review':{'kind':'source-image-review','source_sha256':'a'*64,'page':1,
+                'input_png_sha256':'c'*64,'basis':'Undetected original faint interlinear handwriting'},
+            'annotation_additions':[{'id':'a'+'1'*16,'classification':'handwritten-annotation','status':'unresolved',
+                'literal_text':None,'box':[.8,.2,.9,.3],'quad':[[.8,.2],[.9,.2],[.9,.3],[.8,.3]],
+                'evidence':{'crop_sha256':'d'*64,'reason':'Keep source handwriting without a guessed transcription'}}]}
+        accepted=text.accept_proposal(original,proposal,actor='user-source-annotation-review');layers[0]=accepted
+        ref=v3.build_text_bundle(layers,pages,Path('objects/aa/'+'a'*64+'/'+'b'*16),self.bundle)
+        self.generated();verified=[]
+        manifest=v3.verify_text_bundle(ref,self.read,'a'*64,1,verified_layers=verified)
+        self.assertEqual(verified[0]['annotations'],accepted['annotations'])
+        search=v3.decode(self.read(manifest['search_partitions'][0]['resource']))
+        self.assertEqual(search['pages'][0]['text'],original['text'])
+        self.assertEqual(verified[0]['annotations'][0]['confidence'],0)
+
 
 if __name__ == "__main__":
     unittest.main()

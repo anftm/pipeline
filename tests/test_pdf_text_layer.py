@@ -58,6 +58,51 @@ class TextLayerTests(unittest.TestCase):
         self.assertEqual(accepted['text'],original['text'])
         self.assertEqual(accepted['formula_relations'][0]['directions'],['down','up'])
 
+    def test_appended_acid_branch_keeps_repeated_water_and_existing_source_relations(self):
+        blocks=[{'t':'NH₄HSO₄ + H₂O ⇌ NH₃↑ + H₂O + H₂SO₄','b':[.1,.1,.9,.2],'c':.8,'s':'ocr'},
+                {'t':'⇅','b':[.3,.2,.35,.3],'c':.4,'s':'ocr'},
+                {'t':'H⁺¹ + OH⁻¹','b':[.1,.3,.4,.4],'c':.8,'s':'ocr'},
+                {'t':'H⁺¹ + HSO₄⁻¹','b':[.6,.3,.9,.4],'c':.6,'s':'ocr'},
+                {'t':'⇌ 2H⁺¹ + SO₄⁻²','b':[.55,.5,.9,.6],'c':.6,'s':'ocr'}]
+        payload={**raw_page(),**ocr_layout.arrange(blocks,100,200,{'writing_mode':'horizontal-ltr'})}
+        original=layer.from_page(payload,'a'*64,'ch')
+        values={r['id']:r['text'] for r in original['regions']}
+        def anchor(identity,literal):
+            start=values[identity].index(literal)
+            return {'region_id':identity,'start':start,'end':start+len(literal),'text':literal}
+        def relation(identity,axis,operator,origin,target,bounds):
+            a,b,c,d=bounds
+            return {'id':'f'+identity*16,'kind':'printed-equilibrium','axis':axis,
+                'directions':['up','down'] if axis=='vertical' else ['right','left'],
+                'operator':operator,'from':origin,'to':target,'box':bounds,
+                'quad':[[a,b],[c,b],[c,d],[a,d]],
+                'evidence':{'crop_sha256':'e'*64,'reason':'Separate original water and acid arrows'}}
+        first=self.visual_proposal(original)
+        first['formula_relations']=[relation('1','vertical',anchor('b1','⇅'),anchor('b0','H₂O'),
+            anchor('b2','H⁺¹ + OH⁻¹'),[.3,.2,.35,.3])]
+        parent=layer.accept_proposal(original,first,actor='source-water-review')
+        second=self.visual_proposal(parent);identity='v'+'1'*16
+        values[identity]='⇅'
+        second['additions']=[{'region_id':identity,'text':'⇅','box':[.7,.2,.75,.3],
+            'quad':[[.7,.2],[.75,.2],[.75,.3],[.7,.3]],
+            'evidence':{'crop_sha256':'d'*64,'reason':'User original acid arrow omitted by OCR'}}]
+        order=[r['id'] for r in parent['regions']];order.insert(order.index('b3'),identity)
+        second['region_order']=order
+        second['formula_relations']=[
+            relation('2','vertical',anchor(identity,'⇅'),anchor('b0','H₂SO₄'),anchor('b3','H⁺¹ + HSO₄⁻¹'),[.7,.2,.75,.3]),
+            relation('3','horizontal',anchor('b4','⇌'),anchor('b3','H⁺¹ + HSO₄⁻¹'),anchor('b4','2H⁺¹ + SO₄⁻²'),[.55,.5,.6,.6])]
+        accepted=layer.accept_proposal(parent,second,actor='source-acid-review')
+        self.assertEqual(accepted['acceptances'][:-1],parent['acceptances'])
+        self.assertEqual(accepted['formula_relations'][0],parent['formula_relations'][0])
+        self.assertEqual(accepted['formula_relations'][0]['from']['text'],'H₂O')
+        self.assertEqual(accepted['formula_relations'][1]['from']['text'],'H₂SO₄')
+        self.assertEqual(accepted['formula_relations'][2]['from']['region_id'],'b3')
+        self.assertEqual(accepted['formula_relations'][2]['to']['region_id'],'b4')
+        self.assertEqual(next(r for r in accepted['regions'] if r['id']=='b0')['text'].count('H₂O'),2)
+        self.assertEqual(next(r for r in accepted['regions'] if r['id']==identity)['confidence'],0)
+        self.assertEqual(accepted['raw_sha256'],original['raw_sha256'])
+        self.assertEqual(original['revision'],'raw')
+
     def visual_proposal(self,original):
         return {'kind':'pdf-text-correction','version':1,'page':original['page'],
                 'base_generation':original['generation'],'raw_sha256':original['raw_sha256'],
@@ -158,6 +203,84 @@ class TextLayerTests(unittest.TestCase):
             region_order=['b0','v'+'1'*16,'b1','b2'])
         accepted=layer.accept_proposal(original,proposal,actor='reviewer')
         self.assertEqual(accepted['text'][accepted['text'].index('Right paragraph one.'):],body)
+
+    def test_missed_handwriting_can_be_retained_without_inventing_ocr_region_or_literal_text(self):
+        original=layer.from_page(raw_page('Printed body and footnote.'),'a'*64,'en')
+        proposal=self.visual_proposal(original)
+        item={'id':'a'+'1'*16,'classification':'handwritten-annotation','status':'unresolved',
+            'literal_text':None,'box':[.82,.2,.95,.3],'quad':[[.82,.2],[.95,.2],[.95,.3],[.82,.3]],
+            'evidence':{'crop_sha256':'d'*64,'reason':'User full source has undetected faint handwriting'}}
+        proposal['annotation_additions']=[item]
+        accepted=layer.accept_proposal(original,proposal,actor='explicit-source-review')
+        self.assertEqual(accepted['text'],original['text'])
+        self.assertEqual(accepted['regions'],original['regions'])
+        self.assertEqual(accepted['raw_sha256'],original['raw_sha256'])
+        annotation=accepted['annotations'][0]
+        self.assertEqual(annotation['confidence'],0)
+        self.assertEqual(annotation['recognition_status'],'source-reviewed-not-model-recognized')
+        self.assertNotIn('original_region',annotation)
+        self.assertIsNone(annotation['literal_text'])
+        self.assertIn('unresolved-source-annotation',accepted['review_flags'])
+        self.assertEqual(accepted['acceptances'][-1]['source_positioned_annotations'],[annotation])
+        for change in [{'id':'b99'},{'literal_text':'guessed'},{'confidence':.99},
+                       {'original_region':{'text':'fabricated'}},{'evidence':{}}]:
+            altered=copy.deepcopy(proposal);altered['annotation_additions'][0].update(change)
+            with self.subTest(change=change),self.assertRaises(ValueError):
+                layer.accept_proposal(original,altered,actor='reviewer')
+        repeated=self.visual_proposal(accepted);repeated['annotation_additions']=[item]
+        with self.assertRaises(ValueError):layer.accept_proposal(accepted,repeated,actor='reviewer')
+
+    def test_source_review_can_restore_line_boundary_without_changing_regions_or_old_acceptance(self):
+        blocks=[{'t':'能进行水','b':[.1,.1,.8,.2],'c':.9,'s':'ocr'},
+                {'t':'解，其溶液呈酸性反应。','b':[.1,.3,.8,.4],'c':.9,'s':'ocr'}]
+        raw={**raw_page(),**ocr_layout.arrange(blocks,100,200,{'writing_mode':'horizontal-ltr'})}
+        # Exact legacy layout joined the two physical lines without a gap.
+        raw['text']=blocks[0]['t']+blocks[1]['t']
+        raw['text_spans'][0].update(start=0,end=len(blocks[0]['t']))
+        raw['text_spans'][1].update(start=len(blocks[0]['t']),end=len(raw['text']))
+        original=layer.from_page(raw,'a'*64,'ch')
+        first=self.visual_proposal(original)
+        first['replacements']=[{'region_id':'b0','before':'能进行水','after':'能进行水'}]
+        parent=layer.accept_proposal(original,first,actor='user-formula-review')
+        before=copy.deepcopy(parent);proposal=self.visual_proposal(parent)
+        proposal['separators']=[{'after_region_id':'b0','before_region_id':'b1','before':'','after':'\n',
+            'evidence':{'crop_sha256':'d'*64,'reason':'Original printed water/hydrolysis line break'}}]
+        accepted=layer.accept_proposal(parent,proposal,actor='user-source-boundary-review')
+        self.assertEqual(accepted['text'],'能进行水\n解，其溶液呈酸性反应。')
+        self.assertEqual(parent,before)
+        self.assertEqual(accepted['raw_sha256'],parent['raw_sha256'])
+        self.assertEqual(accepted['acceptances'][:-1],parent['acceptances'])
+        self.assertEqual(accepted['acceptances'][-1]['separator_changes'][0]['before'],'')
+        for old,new in zip(parent['regions'],accepted['regions']):
+            for key in ('text','box','quad','confidence'):self.assertEqual(old[key],new[key])
+        for mutation in [{'before':' '},{'after':'supplemented'},{'after':'\n'*65},
+                         {'before_region_id':'missing'},{'evidence':{}}]:
+            changed=copy.deepcopy(proposal);changed['separators'][0].update(mutation)
+            with self.subTest(mutation=mutation),self.assertRaises(ValueError):
+                layer.accept_proposal(parent,changed,actor='reviewer')
+        changed=copy.deepcopy(proposal);changed['separators']*=2
+        with self.assertRaises(ValueError):layer.accept_proposal(parent,changed,actor='reviewer')
+        changed=copy.deepcopy(proposal);changed.pop('visual_review')
+        with self.assertRaises(ValueError):layer.accept_proposal(parent,changed,actor='reviewer')
+        changed=copy.deepcopy(proposal);changed['region_order']=['b1','b0']
+        with self.assertRaisesRegex(ValueError,'separator'):
+            layer.accept_proposal(parent,changed,actor='reviewer')
+
+    def test_source_separator_cannot_skip_intervening_formula_branch_or_change_unpositioned_text(self):
+        blocks=[{'t':'H₂SO₄','b':[.6,.1,.8,.2],'c':1,'s':'ocr'},
+                {'t':'H⁺¹ + OH⁻¹','b':[.1,.3,.4,.4],'c':1,'s':'ocr'},
+                {'t':'H⁺¹ + HSO₄⁻¹','b':[.6,.3,.9,.4],'c':1,'s':'ocr'}]
+        raw={**raw_page(),**ocr_layout.arrange(blocks,100,200,{'writing_mode':'horizontal-ltr'})}
+        original=layer.from_page(raw,'a'*64,'ch')
+        order=[r['id'] for r in original['regions']]
+        proposal=self.visual_proposal(original)
+        first,last=original['regions'][0],original['regions'][2]
+        proposal['separators']=[{'after_region_id':first['id'],'before_region_id':last['id'],
+            'before':original['text'][first['end']:last['start']],'after':'\n',
+            'evidence':{'crop_sha256':'d'*64,'reason':'Cannot skip the intervening source branch'}}]
+        with self.assertRaisesRegex(ValueError,'separator'):
+            layer.accept_proposal(original,proposal,actor='reviewer')
+        self.assertEqual([r['id'] for r in original['regions']],order)
 
     def test_visual_geometry_change_requires_exact_previous_geometry(self):
         original=layer.from_page(raw_page('1'),'a'*64,'en');proposal=self.visual_proposal(original)
