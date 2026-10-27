@@ -122,7 +122,7 @@ def build_store(*, generations=4, open_upload=False, branch=False):
     store.put(gc.CURRENT, {"version": 1, "kind": "ccrd-ocr-current",
                            "generation": current["generation"],
                            "release": current["release"], "resources": [current["release"]],
-                           "parent": releases[-2]["generation"]})
+                           "parent": releases[-2]["generation"] if len(releases) > 1 else None})
     store.put(gc.IDS, {"version": 1, "kind": "ccrd-ocr-id-registry",
                        "ids": {"a" * 64: {"doc_id": "OCR:1", "readable_rel_path": "x.txt"}},
                        "resources": [current["release"]]})
@@ -156,6 +156,30 @@ def build_store(*, generations=4, open_upload=False, branch=False):
                                                     "documents": 1, "fts_rows": 1,
                                                     "sha256": "a" * 64, "bytes": 3}}})
     return store, releases
+
+
+def add_reset_tombstone(store, *, intent=True, retention=True, reset_id='document-rebuild-20261025'):
+    generation = 'd' * 64
+    intent_path = f'control/intents/{generation}.json'
+    retention_path = f'control/retained/{generation}.json'
+    records = []
+    if intent:
+        store.put(intent_path, {'version': 1, 'kind': 'ccrd-ocr-intent', 'generation': generation,
+            'expected_parent': 'c' * 64, 'status': 'retired', 'resources': [],
+            'retirement_reason': 'explicit-document-reset', 'reset_id': reset_id})
+        records.append({'path': intent_path, 'generation': generation, 'sha256': 'a' * 64,
+                        'bytes': 123, 'status': 'committed'})
+    if retention:
+        store.put(retention_path, {'version': 1, 'kind': 'ccrd-ocr-retention', 'status': 'retired',
+            'resources': [], 'retirement_reason': 'explicit-document-reset', 'reset_id': reset_id})
+        records.append({'path': retention_path, 'generation': None, 'sha256': 'b' * 64,
+                        'bytes': 124, 'status': None})
+    path = f'reports/ccrd-ocr-reset/{reset_id}/withdrawal.json'
+    store.put(path, {'version': 1, 'kind': 'ccrd-ocr-reset', 'reset_id': reset_id,
+                     'status': 'withdrawn', 'applied': True, 'retired_control': records,
+                     'consumer': {'ready': True, 'ocr_release': None, 'loaded_sources': ['CCRD', 'CW', 'RMRB', 'PLA']},
+                     'previous_pointer': {'kind': 'ccrd-ocr-current', 'generation': generation}})
+    return generation, path
 
 
 class CcrdGcTests(unittest.TestCase):
@@ -264,6 +288,253 @@ class CcrdGcTests(unittest.TestCase):
         with self.assertRaisesRegex(gc.Blocker, "exact current OCR generation"):
             gc.plan(store, keep_generations=2, client=Live("0" * 64))
         self.assertNotIn(gc.CURRENT, store.deleted)
+
+    def test_verified_reset_tombstones_are_audit_only_not_deletion_authority(self):
+        store, releases = build_store(generations=1)
+        # A post-reset library has no historical OCR data, unlike the general
+        # fixture's deliberately collectable orphan.
+        del store.objects['text/objects/orphan.txt']
+        generation, receipt = add_reset_tombstone(store)
+        old_pointer = store.objects[gc.CURRENT]
+        before = dict(store.objects)
+        report = gc.plan(store, client=Live(releases[-1]['generation']))
+        self.assertEqual(report['generations']['reset_tombstones'], [generation])
+        self.assertEqual(report['kept'], [releases[-1]['generation']])
+        self.assertEqual(report['expiring'], [])
+        self.assertEqual(report['candidates'], [], 'unexplained objects remain protected')
+        self.assertEqual(store.objects, before, 'planning never writes')
+        gc.apply(store, report, client=Live(releases[-1]['generation']))
+        self.assertTrue(report['complete'])
+        self.assertEqual(report['deleted']['objects'], 0)
+        self.assertEqual(store.objects[gc.CURRENT], old_pointer)
+        self.assertIn(receipt, store.objects)
+        self.assertIn(f'control/intents/{generation}.json', store.objects)
+        self.assertIn(f'control/retained/{generation}.json', store.objects)
+
+    def test_empty_apply_does_not_accept_nonempty_plan_even_if_hold_flag_is_tampered(self):
+        store, releases = build_store(generations=1)
+        del store.objects['text/objects/orphan.txt']
+        add_reset_tombstone(store)
+        report = gc.plan(store, client=Live(releases[-1]['generation']))
+        report['candidates'] = [releases[-1]['paths'][0]]
+        with self.assertRaisesRegex(gc.Blocker, 'reset history'):
+            gc.apply(store, report, client=Live(releases[-1]['generation']))
+        self.assertEqual(store.deleted, [])
+
+    def test_reset_empty_apply_has_no_control_or_delete_writes(self):
+        store, releases = build_store(generations=1)
+        del store.objects['text/objects/orphan.txt']
+        add_reset_tombstone(store)
+        report = gc.plan(store, client=Live(releases[-1]['generation']))
+        with patch.object(store, 'put_json', side_effect=AssertionError('no control writes')), \
+                patch.object(store, 'delete', side_effect=AssertionError('no data deletes')):
+            gc.apply(store, report, client=Live(releases[-1]['generation']))
+        self.assertEqual(report['deleted']['objects'], 0)
+        self.assertEqual(report['batches'], [])
+        self.assertTrue(report['live_after']['checked'])
+
+    def test_absent_reset_hold_metadata_is_never_a_deletion_grant(self):
+        store, releases = build_store(generations=4)
+        add_reset_tombstone(store)
+        report = gc.plan(store, client=Live(releases[-1]['generation']))
+        report.pop('reset_history_safety_hold')
+        with self.assertRaisesRegex(gc.Blocker, 'reset history'):
+            gc.apply(store, report, client=Live(releases[-1]['generation']))
+        self.assertEqual(store.deleted, [])
+
+    def test_removing_reset_tombstone_list_cannot_bypass_the_apply_guard(self):
+        store, releases = build_store(generations=1)
+        del store.objects['text/objects/orphan.txt']
+        add_reset_tombstone(store)
+        report = gc.plan(store, client=Live(releases[-1]['generation']))
+        report['generations']['reset_tombstones'] = []
+        report['reset_history_safety_hold'] = {'active': False, 'automatic_deletion_blocked': False}
+        report['candidates'] = [releases[-1]['paths'][0]]
+        with self.assertRaisesRegex(gc.Blocker, 'reset history'):
+            gc.apply(store, report, client=Live(releases[-1]['generation']))
+        self.assertEqual(store.deleted, [])
+
+    def test_reset_tombstone_requires_completed_matching_receipt(self):
+        for mutation in ['missing', 'not-applied', 'wrong-reset', 'missing-audit', 'invalid-hash',
+                         'duplicate-audit', 'wrong-intent-generation', 'wrong-retention-generation', 'bad-size']:
+            with self.subTest(mutation=mutation):
+                store, releases = build_store(generations=1)
+                generation, path = add_reset_tombstone(store)
+                receipt = json.loads(store.objects[path])
+                if mutation == 'missing':del store.objects[path]
+                elif mutation == 'not-applied':receipt['applied'] = False;store.put(path, receipt)
+                elif mutation == 'wrong-reset':receipt['reset_id'] = 'different-reset';store.put(path, receipt)
+                elif mutation == 'missing-audit':receipt['retired_control'] = receipt['retired_control'][:1];store.put(path, receipt)
+                elif mutation == 'invalid-hash':receipt['retired_control'][0]['sha256'] = 'not-a-sha';store.put(path, receipt)
+                elif mutation == 'duplicate-audit':receipt['retired_control'].append(receipt['retired_control'][0]);store.put(path, receipt)
+                elif mutation == 'wrong-intent-generation':receipt['retired_control'][0]['generation'] = 'c' * 64;store.put(path, receipt)
+                elif mutation == 'wrong-retention-generation':receipt['retired_control'][1]['generation'] = 'c' * 64;store.put(path, receipt)
+                else:receipt['retired_control'][0]['bytes'] = True;store.put(path, receipt)
+                with self.assertRaises(gc.Blocker):gc.plan(store, client=Live(releases[-1]['generation']))
+                self.assertEqual(store.deleted, [])
+
+    def test_failed_reset_withdrawal_consumer_or_malformed_parent_blocks(self):
+        for mutation in ['consumer-not-ready', 'consumer-wrong-release', 'pointer-absent',
+                         'pointer-invalid-kind', 'pointer-wrong-generation']:
+            with self.subTest(mutation=mutation):
+                store, releases = build_store(generations=1)
+                generation, path = add_reset_tombstone(store)
+                receipt = json.loads(store.objects[path])
+                receipt['consumer'] = {'ready': True, 'ocr_release': None,
+                    'loaded_sources': ['CCRD', 'CW', 'RMRB', 'PLA']}
+                receipt['previous_pointer'] = {'kind': 'ccrd-ocr-current', 'generation': generation}
+                if mutation == 'consumer-not-ready':receipt['consumer']['ready'] = False
+                elif mutation == 'consumer-wrong-release':receipt['consumer']['ocr_release'] = generation
+                elif mutation == 'pointer-absent':receipt.pop('previous_pointer')
+                elif mutation == 'pointer-invalid-kind':receipt['previous_pointer']['kind'] = 'other'
+                else:receipt['previous_pointer']['generation'] = 'invalid'
+                store.put(path, receipt)
+                with self.assertRaises(gc.Blocker):gc.plan(store, client=Live(releases[-1]['generation']))
+                self.assertEqual(store.deleted, [])
+
+    def test_chain_outside_retired_controls_with_resources_or_live_retention_block(self):
+        store, releases = build_store(generations=1)
+        generation, _ = add_reset_tombstone(store)
+        path = f'control/intents/{generation}.json'
+        intent = json.loads(store.objects[path]);intent['resources'] = [releases[-1]['text']];store.put(path, intent)
+        with self.assertRaises(gc.Blocker):gc.plan(store, client=Live(releases[-1]['generation']))
+        store, releases = build_store(generations=1)
+        generation, _ = add_reset_tombstone(store)
+        path = f'control/retained/{generation}.json'
+        store.put(path, {'version': 1, 'kind': 'ccrd-ocr-retention', 'status': 'committed',
+                         'resources': [releases[-1]['release']]})
+        with self.assertRaises(gc.Blocker):gc.plan(store, client=Live(releases[-1]['generation']))
+
+    def test_reset_unmatched_or_nonempty_chain_outside_controls_are_blocked(self):
+        for mutation in ['retention-only', 'retention-resource', 'missing-reason', 'mismatched-reset', 'missing-resources']:
+            with self.subTest(mutation=mutation):
+                store, releases = build_store(generations=1)
+                generation, _ = add_reset_tombstone(store)
+                intent_path = f'control/intents/{generation}.json'
+                retention_path = f'control/retained/{generation}.json'
+                if mutation == 'retention-only':del store.objects[intent_path]
+                else:
+                    value = json.loads(store.objects[retention_path])
+                    if mutation == 'retention-resource':value['resources'] = [releases[-1]['release']]
+                    elif mutation == 'missing-reason':value.pop('retirement_reason')
+                    elif mutation == 'missing-resources':value.pop('resources')
+                    else:value['reset_id'] = 'different-reset'
+                    store.put(retention_path, value)
+                before = dict(store.objects)
+                with self.assertRaises(gc.Blocker):gc.plan(store, client=Live(releases[-1]['generation']))
+                self.assertEqual(store.objects, before)
+                self.assertEqual(store.deleted, [])
+    def test_reset_receipt_or_control_change_blocks_before_apply(self):
+        for changed in ['receipt', 'intent']:
+            with self.subTest(changed=changed):
+                store, releases = build_store(generations=1)
+                del store.objects['text/objects/orphan.txt']
+                generation, receipt = add_reset_tombstone(store)
+                report = gc.plan(store, client=Live(releases[-1]['generation']))
+                path = receipt if changed == 'receipt' else f'control/intents/{generation}.json'
+                value = json.loads(store.objects[path]);value['changed'] = True;store.put(path, value)
+                with self.assertRaisesRegex(gc.Blocker, 'content changed'):
+                    gc.apply(store, report, client=Live(releases[-1]['generation']))
+                self.assertEqual(store.deleted, [])
+
+    def test_reset_history_does_not_retire_existing_or_newer_unexplained_data(self):
+        store, releases = build_store(generations=4)
+        generation, receipt = add_reset_tombstone(store)
+        unproven = f'releases/ocr-{generation}/manifest.json'
+        store.put(unproven, b'uncertain post-reset residue')
+        before = dict(store.objects)
+        report = gc.plan(store, client=Live(releases[-1]['generation']))
+        self.assertEqual(report['candidates'], [])
+        self.assertEqual(report['expiring'], [])
+        self.assertEqual(report['retire_intents'], [])
+        self.assertEqual(report['retire_retention'], [])
+        self.assertEqual(set(report['deferred']), {r['generation'] for r in releases[:2]})
+        self.assertTrue(report['reset_history_safety_hold']['active'])
+        self.assertTrue(report['reset_history_safety_hold']['automatic_deletion_blocked'])
+        self.assertEqual(store.objects, before)
+        with self.assertRaisesRegex(gc.Blocker, 'reset history'):
+            gc.apply(store, report, client=Live(releases[-1]['generation']))
+        self.assertEqual(store.objects, before)
+        self.assertEqual(store.deleted, [])
+
+    def test_control_tombstone_can_never_name_live_chain(self):
+        store, releases = build_store(generations=4)
+        current = releases[-1]['generation']
+        path = f'control/intents/{current}.json'
+        value = json.loads(store.objects[path]);value.update(status='retired', resources=[])
+        store.put(path, value)
+        with self.assertRaisesRegex(gc.Blocker, 'current generation is not committed'):
+            gc.plan(store, client=Live(current))
+        self.assertEqual(store.deleted, [])
+
+    def test_current_generation_can_never_be_its_own_retired_rollback(self):
+        store, releases = build_store(generations=1)
+        generation = releases[-1]['generation']
+        store.put(f'control/retained/{generation}.json', {
+            'version': 1, 'kind': 'ccrd-ocr-retention', 'status': 'retired', 'resources': []})
+        with self.assertRaisesRegex(gc.Blocker, 'current generation has a retention record'):
+            gc.plan(store, client=Live(generation))
+        self.assertEqual(store.deleted, [])
+
+    def test_verified_reset_tombstone_keeps_all_781_stable_ids_and_release(self):
+        store, releases = build_store(generations=1)
+        del store.objects['text/objects/orphan.txt']
+        add_reset_tombstone(store)
+        registry = {'version': 1, 'kind': 'ccrd-ocr-id-registry',
+            'ids': {f'{index:064x}': {'doc_id': f'OCR:{index}', 'readable_rel_path': f'{index}.txt'}
+                    for index in range(1, 782)}, 'resources': [releases[-1]['release']]}
+        original_ids = store.put(gc.IDS, registry)
+        original_current = store.objects[gc.CURRENT]
+        report = gc.plan(store, client=Live(releases[-1]['generation']))
+        self.assertEqual(report['candidates'], [])
+        gc.apply(store, report, client=Live(releases[-1]['generation']))
+        self.assertEqual(store.objects[gc.IDS], original_ids)
+        self.assertEqual(store.objects[gc.CURRENT], original_current)
+        self.assertEqual(len(json.loads(store.objects[gc.IDS])['ids']), 781)
+        self.assertTrue(set(releases[-1]['paths']) <= set(store.objects))
+        self.assertEqual(report['deleted']['objects'], 0)
+
+    def test_empty_reset_noop_still_requires_exact_live_consumer_generation(self):
+        store, releases = build_store(generations=1)
+        del store.objects['text/objects/orphan.txt']
+        add_reset_tombstone(store)
+        before = dict(store.objects)
+        with self.assertRaisesRegex(gc.Blocker, 'exact current OCR generation'):
+            gc.plan(store, client=Live('0' * 64))
+        report = gc.plan(store, client=Live(releases[-1]['generation']))
+        with self.assertRaisesRegex(gc.Blocker, 'exact current OCR generation'):
+            gc.apply(store, report, client=Live('0' * 64))
+        self.assertEqual(store.objects, before)
+        self.assertEqual(store.deleted, [])
+
+    def test_noop_refuses_control_appearing_during_live_acceptance(self):
+        store, releases = build_store(generations=1)
+        del store.objects['text/objects/orphan.txt']
+        add_reset_tombstone(store)
+        generation = releases[-1]['generation']
+        report = gc.plan(store, client=Live(generation))
+        class PublishDuringAcceptance(Live):
+            def get(self, url, **kwargs):
+                store.put('control/intents/' + 'e' * 64 + '.json', {
+                    'version': 1, 'kind': 'ccrd-ocr-intent', 'generation': 'e' * 64,
+                    'status': 'committed', 'expected_parent': generation, 'resources': []})
+                return super().get(url, **kwargs)
+        with self.assertRaisesRegex(gc.Blocker, 'control history changed'):
+            gc.apply(store, report, client=PublishDuringAcceptance(generation))
+        self.assertEqual(store.deleted, [])
+
+    def test_unverified_reset_tombstone_cannot_hide_an_upload_or_committed_branch(self):
+        store, releases = build_store(generations=1, open_upload=True)
+        del store.objects['text/objects/orphan.txt']
+        add_reset_tombstone(store)
+        report = gc.plan(store, client=Live(releases[-1]['generation']))
+        pending = 'f' * 64
+        self.assertIn(pending, report['generations']['open_intents'])
+        self.assertNotIn(f'indexes/ocr/{pending}/OCR.sqlite3', report['candidates'])
+        self.assertFalse(report['reset_history_safety_hold']['automatic_deletion_blocked'])
+        gc.apply(store, report, client=Live(releases[-1]['generation']))
+        self.assertIn(f'indexes/ocr/{pending}/OCR.sqlite3', store.objects)
+        self.assertEqual(report['deleted']['objects'], 0)
 
     def test_control_history_changed_between_plan_and_apply_blocks(self):
         store, releases = build_store()

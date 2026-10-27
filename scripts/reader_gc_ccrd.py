@@ -10,8 +10,9 @@ frontier.
 Deletion order is control roots first, then data. If the data phase is
 interrupted, the next plan still sees the expired generation as unreachable
 and lists its members as orphans; it cannot make a kept release incomplete.
-Any intent that is still `uploading`, or any generation that cannot be tied
-into the current parent chain, blocks the whole plan.
+An actual committed or retained branch outside the current parent chain blocks
+the whole plan. Uploading intents stay protected. An explicit completed reset's
+empty retired control records are auditable tombstones, never deletion grants.
 """
 from __future__ import annotations
 
@@ -264,6 +265,58 @@ def accept_live(client, generation):
     return status
 
 
+def reset_tombstone_receipt(store, gen, intent, retained, cache):
+    """Validate an out-of-chain control pair retired by a completed reset.
+
+    This only recognizes an audit record, not authority to delete any prior
+    generation's data. Apply rechecks the exact receipt and control hashes.
+    """
+    controls = [item for item in (intent, retained) if item is not None]
+    if not controls or intent is None:
+        raise Blocker(f"outside-chain retired history lacks an intent: {gen}")
+    values = [item['payload'] for item in controls]
+    if any(value.get('status') != 'retired' or value.get('resources') != []
+           or value.get('retirement_reason') != 'explicit-document-reset' for value in values):
+        raise Blocker(f"outside-chain retirement is not an empty reset tombstone: {gen}")
+    reset_id = values[0].get('reset_id')
+    if (not isinstance(reset_id, str) or not re.fullmatch(r'[a-z0-9-]{8,80}', reset_id)
+            or any(value.get('reset_id') != reset_id for value in values)):
+        raise Blocker(f"outside-chain reset identity mismatch: {gen}")
+    path = f'reports/ccrd-ocr-reset/{reset_id}/withdrawal.json'
+    if path not in cache:
+        receipt, raw = read_json(store, path)
+        rows = receipt.get('retired_control')
+        consumer = receipt.get('consumer')
+        previous = receipt.get('previous_pointer')
+        if (receipt.get('version') != 1 or receipt.get('kind') != 'ccrd-ocr-reset'
+                or receipt.get('reset_id') != reset_id or receipt.get('status') != 'withdrawn'
+                or receipt.get('applied') is not True or not isinstance(rows, list)
+                or not isinstance(consumer, dict) or consumer.get('ready') is not True
+                or consumer.get('ocr_release') is not None or not isinstance(consumer.get('loaded_sources'), list)
+                or not {'CCRD', 'CW', 'RMRB', 'PLA'} <= set(consumer['loaded_sources'])
+                or not isinstance(previous, dict) or previous.get('kind') != 'ccrd-ocr-current'
+                or not re.fullmatch(r'[0-9a-f]{64}', str(previous.get('generation', '')))):
+            raise Blocker(f"reset receipt is not a completed withdrawal: {path}")
+        by_path = {}
+        for row in rows:
+            if (not isinstance(row, dict) or not isinstance(row.get('path'), str)
+                    or row['path'] in by_path or type(row.get('bytes')) is not int or row['bytes'] < 1
+                    or not re.fullmatch(r'[0-9a-f]{64}', str(row.get('sha256', '')))):
+                raise Blocker(f"reset receipt has invalid control audit: {path}")
+            by_path[row['path']] = row
+        cache[path] = (digest(raw), by_path)
+    receipt_sha, by_path = cache[path]
+    for item in controls:
+        audit = by_path.get(item['path'])
+        if not audit:
+            raise Blocker(f"reset receipt lacks retired control: {item['path']}")
+        if item is intent and audit.get('generation') != gen:
+            raise Blocker(f"reset receipt intent generation mismatch: {item['path']}")
+        if item is retained and audit.get('generation') not in (None, gen):
+            raise Blocker(f"reset receipt retention generation mismatch: {item['path']}")
+    return path, receipt_sha
+
+
 def plan(store, *, keep_generations=2, limit=0, include_staging=False,
          client=None, verify_live=True, verify_contents=False):
     """Build a plan without writing or deleting anything."""
@@ -325,15 +378,15 @@ def plan(store, *, keep_generations=2, limit=0, include_staging=False,
         if history.get("kind") != "ccrd-ocr-retention" or history.get("version") != 1:
             raise Blocker(f"{path}: unknown retention schema")
         status = history.get("status", "committed")
+        refs = schema(history, path)
         if status == "retired":
             if history.get("resources") != []:
                 raise Blocker(f"{path}: retired retention still names resources")
-            retained[gen] = {"path": path, "status": "retired", "ref": None, "raw": raw}
+            retained[gen] = {"path": path, "status": "retired", "ref": None, "raw": raw, "payload": history}
         elif status == "committed":
-            refs = schema(history, path)
             if len(refs) != 1 or refs[0]["path"] != f"releases/ocr-{gen}/manifest.json":
                 raise Blocker(f"{path}: retention does not name its own release")
-            retained[gen] = {"path": path, "status": "committed", "ref": refs[0], "raw": raw}
+            retained[gen] = {"path": path, "status": "committed", "ref": refs[0], "raw": raw, "payload": history}
         else:
             raise Blocker(f"{path}: unknown retention status")
         control_snapshot.add(path)
@@ -354,8 +407,10 @@ def plan(store, *, keep_generations=2, limit=0, include_staging=False,
         raise Blocker("current pointer parent differs from the intent chain")
 
     # A committed generation outside the live chain is a publication race, not
-    # history: its pointer may be about to move or the Space may not have
-    # caught up. Never delete around that state.
+    # history. Only completed explicit-reset tombstones may be acknowledged;
+    # their audit records never authorize deletion of old generation data.
+    reset_receipts = {}
+    reset_tombstones = []
     for gen, item in sorted(intents.items()):
         if gen in chain:
             continue
@@ -364,12 +419,19 @@ def plan(store, *, keep_generations=2, limit=0, include_staging=False,
             # block reclamation of older committed history either. Its members
             # stay protected until an operator resolves the intent.
             continue
+        if item['status'] == 'retired':
+            path, receipt_sha = reset_tombstone_receipt(store, gen, item, retained.get(gen), reset_receipts)
+            control_hashes[path] = receipt_sha
+            reset_tombstones.append(gen)
+            continue
         raise Blocker(f"committed generation is outside the current parent chain: {gen}")
     for gen in sorted(retained):
-        if gen not in chain:
+        if gen not in chain and gen not in reset_tombstones:
             raise Blocker(f"retained generation is outside the current parent chain: {gen}")
     if intents[generation]["status"] != "committed":
         raise Blocker("the current generation is not committed")
+    if generation in retained:
+        raise Blocker("current generation has a retention record outside its rollback history")
 
     open_intents = sorted(gen for gen, item in intents.items()
                           if gen not in chain and item["status"] == "uploading")
@@ -392,6 +454,14 @@ def plan(store, *, keep_generations=2, limit=0, include_staging=False,
         # the newest rollback ancestors survive longest.
         expiring = fresh[-limit:] if limit else fresh
         deferred = fresh[:len(fresh) - len(expiring)]
+    # Unknown pre-reset ownership makes even newly expiring closures unsafe to
+    # retire: their payloads may share objects with old data. If a fully
+    # evidenced reset tombstone is present, only a truly empty automatic apply
+    # can proceed; any surviving unprotected data/history remains blocked.
+    held_expiring = list(expiring) if reset_tombstones else []
+    if held_expiring:
+        deferred = list(dict.fromkeys([*deferred, *held_expiring]))
+        expiring = []
     # A retired generation with no leftover objects is already complete and
     # must not be treated as a deferred closure root.
     completed = [gen for gen in already_retired if gen not in cleanup]
@@ -448,6 +518,12 @@ def plan(store, *, keep_generations=2, limit=0, include_staging=False,
                         "intent": intents[gen]["path"],
                         "retained": retained[gen]["path"] if gen in retained else None}
 
+    # A reset tombstone has discarded its old member list. It proves only that
+    # control was withdrawn, not that any surviving unreferenced data is safe
+    # to erase. Fail closed instead of laundering an orphan into a candidate.
+    unproven = sorted(path for path in sizes if path not in protected) if reset_tombstones else []
+    if reset_tombstones:
+        protected.update(sizes)
     candidates = sorted(path for path in sizes if path not in protected)
     release_generations = {
         path[len("releases/ocr-"):].split("/", 1)[0]
@@ -508,7 +584,10 @@ def plan(store, *, keep_generations=2, limit=0, include_staging=False,
                         "expiring": len(expiring), "deferred": len(deferred),
                         "already_retired": already_retired,
                         "completed": completed,
-                        "open_intents": open_intents},
+                        "open_intents": open_intents, "reset_tombstones": reset_tombstones},
+        'reset_history_safety_hold': {'active': bool(reset_tombstones),
+            'unproven_objects': len(unproven), 'held_generations': held_expiring,
+            'automatic_deletion_blocked': bool(unproven or held_expiring)},
         "limit": limit,
         "control_snapshot": sorted(control_snapshot),
         'control_hashes': control_hashes,
@@ -575,6 +654,60 @@ def apply(store, report, *, client=None, checkpoint=None, batch_size=500):
             if (digest(raw) if raw is not None else None) != expected:
                 raise Blocker('OCR control content changed before deletion: ' + path)
     barrier()
+    # Never trust a plan-supplied flag alone: re-derive whether this exact
+    # control snapshot contains out-of-chain reset tombstones before writing.
+    # Historical reset records do not confer any deletion authority.
+    all_intents, all_retained = {}, {}
+    for path in sorted(current_control):
+        value, _ = read_json(store, path, cached=True)
+        if path.startswith('control/intents/'):
+            gen = generation_of(path, 'control/intents/')
+            all_intents[gen] = {'path': path, 'payload': value}
+        else:
+            gen = generation_of(path, 'control/retained/')
+            all_retained[gen] = {'path': path, 'payload': value}
+    chain, cursor = set(), report['current']
+    while cursor:
+        if cursor in chain or cursor not in all_intents:
+            raise Blocker('OCR parent chain changed before deletion')
+        chain.add(cursor)
+        cursor = all_intents[cursor]['payload'].get('expected_parent')
+    reset_cache, actual_tombstones = {}, []
+    for gen, item in sorted(all_intents.items()):
+        if gen in chain:
+            continue
+        status = item['payload'].get('status')
+        if status == 'uploading':
+            continue
+        if status != 'retired':
+            raise Blocker('committed generation is outside the current parent chain: ' + gen)
+        receipt_path, receipt_sha = reset_tombstone_receipt(store, gen, item, all_retained.get(gen), reset_cache)
+        if expected_controls.get(receipt_path) != receipt_sha:
+            raise Blocker('reset history receipt was not pinned by the plan')
+        actual_tombstones.append(gen)
+    if any(gen not in chain and gen not in actual_tombstones for gen in all_retained):
+        raise Blocker('retained generation is outside the current parent chain')
+    if actual_tombstones:
+        hold = report.get('reset_history_safety_hold')
+        if (actual_tombstones != report.get('generations', {}).get('reset_tombstones')
+                or not isinstance(hold, dict) or hold.get('active') is not True
+                or hold.get('automatic_deletion_blocked') is not False
+                or type(hold.get('unproven_objects')) is not int or hold['unproven_objects'] != 0
+                or hold.get('held_generations') != []
+                or any(report.get(field) for field in ('candidates', 'expiring', 'retire_intents',
+                                                       'retire_retention', 'control_candidates'))):
+            raise Blocker('reset history is only eligible for an explicitly proven empty apply')
+        # An empty apply has no data/control mutation. Check the consumer and
+        # exact pinned controls once more and return without a deletion phase.
+        barrier()
+        if client is not None:
+            accept_live(client, report['current'])
+            report['live_after'] = {'checked': True, 'generation': report['current'], 'ready': True}
+        report.update(applied=True, complete=True, deletion_enabled=True,
+                      batches=[], accepted={'objects': 0, 'bytes': 0},
+                      deleted={'objects': 0, 'bytes': 0, 'control': 0,
+                               'intents_retired': 0, 'retention_retired': 0}, finished_at=now())
+        return report
 
     retire = sorted(set(report.get("retire_intents", [])))
     retire_retention = sorted(set(report.get("retire_retention", [])))
