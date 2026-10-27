@@ -14,7 +14,6 @@ import os
 import json
 import re
 import struct
-import shutil
 import subprocess
 import tempfile
 import warnings
@@ -30,6 +29,7 @@ except ImportError:
 
 PROFILE_VERSION = "djvu-native-v1"
 BITONAL_READER_PROFILE = "djvu-bitonal-reader-png-v1"
+DIRECT_READER_PROFILE = "djvu-primary-ocr-only-v1"
 MAGIC = b"AT&TFORM"
 PDF_MAGIC = b"%PDF-"
 COMMAND_TIMEOUT = int(os.environ.get("PDF_DJVU_COMMAND_TIMEOUT", "600"))
@@ -87,13 +87,7 @@ EXCEPTIONS = Path(__file__).resolve().parents[1] / "djvu-native-exceptions.json"
 
 
 def native_exceptions() -> dict[str, dict]:
-    """Source keys whose recorded derived stream stays authoritative.
-
-    A DjVu whose bytes DjVuLibre cannot decode has no native page stream at all.
-    The recorded derived PDF is then the only readable form; keeping it is an
-    explicit, auditable exception rather than a silent fallback. Missing source
-    pages and the page shift are part of the record.
-    """
+    """Historical DjVu decode failures, retained for audit, not routing."""
     return _native_exceptions()
 
 
@@ -124,7 +118,7 @@ def native_exception(item: dict | None) -> dict | None:
 def render_profile(base: str) -> str:
     """Distinct namespace on top of the PDF profile's shared delivery settings."""
     return (f"{base}-{PROFILE_VERSION}-native-dpi-maxpix-{pdf_ocr.MAX_PAGE_PIXELS}"
-            f"-textlayer-{int(use_text_layer())}-{BITONAL_READER_PROFILE}")
+             f"-textlayer-{int(use_text_layer())}-{DIRECT_READER_PROFILE}")
 
 
 def _chunks(raw: bytes, start: int, end: int):
@@ -299,39 +293,17 @@ def render(path: Path, page: int, destination: Path, *, info: dict, dpi: int | N
 
 
 def render_page(path: Path, page: int, directory: Path, *, info: dict,
-                reader_jxl: bool = False, reader_images: bool = True):
-    """One native render supplies independent OCR and reading resources.
-
-    The OCR input is native resolution (capped at MAX_PAGE_PIXELS) and stored
-    as gray for bitonal/gray pages. Bitonal reading keeps the exact lossless
-    bitmap rather than downscaling/recompressing fine text to a lossy codec.
-    """
+                reader_jxl: bool = False, reader_images: bool = False):
+    """Produce a lossless, bounded OCR input; never produce reading images."""
+    if reader_jxl or reader_images:
+        raise ValueError('DjVu document reading images are retired')
     from PIL import Image
     prefix = directory / f"page-{page:06d}"
     png = prefix.with_suffix(".png")
     _, width, height, mode, _ = render(path, page, png, info=info)
-    bitonal = info.get('layers') == 'bitonal'
-    if reader_images and bitonal:
-        # Copy before converting the OCR input to gray. Separate public reading
-        # and processing paths let OCR inputs retire without deleting the page.
-        shutil.copyfile(png, prefix.with_name(prefix.name + '-reader').with_suffix('.png'))
     if mode == "1":
         with Image.open(png) as image:
             image.convert("L").save(png, "PNG")
-    if not reader_images or bitonal:
-        return png, width, height
-    with Image.open(png) as image:
-        rgb = image.convert("RGB")
-    scale = min(1.0, pdf_ocr.WEBP_MAX_DIMENSION / max(width, height)) if pdf_ocr.WEBP_MAX_DIMENSION else 1.0
-    if scale < 1:
-        resized = rgb.resize((max(1, int(width * scale)), max(1, int(height * scale))), Image.Resampling.LANCZOS)
-        rgb.close()
-        rgb = resized
-    if reader_jxl:
-        rgb.save(prefix.with_name(prefix.name + "-reader").with_suffix(".ppm"))
-    else:
-        rgb.save(prefix.with_suffix(".webp"), "WEBP", quality=pdf_ocr.reader_webp_quality(rgb, True), method=6)
-    rgb.close()
     return png, width, height
 
 
@@ -464,6 +436,5 @@ def probe(path: Path) -> dict:
 
 
 def reader_presentation(_path: Path | None = None) -> dict:
-    # Browsers cannot render DjVu, so the page stream is the only Reader form.
-    return {"strategy": "page-stream", "reason": "djvu-native-page-images", "complete": True,
+    return {"strategy": "preserve-djvu", "reason": "djvu-primary-browser-decoding", "complete": True,
             "source_format": "djvu"}

@@ -71,15 +71,9 @@ def add_index(files: dict, payload: dict, mode_for: dict[str, str], bucket: str,
 
 
 def add_pdf_streams(files: dict, payload: dict, bucket: str) -> None:
-    for key, entry in payload.get("files", {}).items():
-        if not isinstance(entry, dict) or entry.get("status") not in {"ready", "rendered"}:
-            continue
-        if entry.get('source_format') != 'djvu':
-            continue
-        page_manifest = entry.get("page_manifest")
-        path = page_manifest.get("path") if isinstance(page_manifest, dict) else ""
-        if isinstance(path, str) and path.endswith("/page-manifest.json"):
-            files[key] = {**files.get(key, {}), **shared.pdf_pages_sidecar_entry(path, entry, files.get(key)), "b": bucket}
+    # Document images are historical; the v3 primary-document projection is
+    # built separately. Never re-advertise a stale document image route.
+    return None
 
 
 def release_processing_roots(indexes: list[dict], generation: str, read, publish) -> int:
@@ -187,15 +181,6 @@ def build(fs: HfFileSystem, assets_bucket: str, pdf_bucket: str, derived_path: s
             if isinstance(object_path, str):
                 actual_mode = {"audio": "a", "video": "v", "swf": "f"}.get(entry.get("mode"), mode)
                 files[entry["key"]] = {"s": 2, "m": actual_mode, "p": object_path, "b": assets_bucket}
-
-    for index_path in (render_path, ocr_path):
-        try:
-            add_pdf_streams(files, read_json(fs, assets_bucket, index_path), pdf_bucket)
-        except FileNotFoundError:
-            try:
-                add_pdf_streams(files, read_json(fs, pdf_bucket, index_path), pdf_bucket)
-            except FileNotFoundError:
-                pass
 
     derived = read_json(fs, pdf_bucket, derived_path)
     for entry in derived.get("files", []):

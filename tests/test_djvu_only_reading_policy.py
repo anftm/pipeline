@@ -59,7 +59,7 @@ class DjvuOnlyReadingPolicyTests(unittest.TestCase):
                 result = pdf_assets.build_item({'extension': 'pdf', 'range_risk_candidate': True}, source, root)
             self.assertEqual(result['strategy'], 'preserve-pdf')
             self.assertEqual(result['status'], 'skipped')
-            with self.assertRaisesRegex(ValueError, 'only DjVu'):
+            with self.assertRaisesRegex(ValueError, 'page-image rendering is retired'):
                 pdf_assets._render(source, 1, root)
 
     def test_retiring_stale_pdf_image_route_never_removes_ocr_metadata(self):

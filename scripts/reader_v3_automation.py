@@ -128,7 +128,7 @@ def primary_spec(key, entry):
                     "path": root + "/document" + suffix, "sha256": source, "bytes": size, "role": "runtime"})
         if djvu:
             # Separate key only for DjVu, so existing PDF task identities are unchanged.
-            spec["primary_format"] = "djvu"
+            spec.update(primary_format="djvu", reading_policy="djvu-primary-only-v1", vector_previews=False)
     else:
         url = urlsplit(entry.get("source_url", ""))
         match = re.fullmatch(r"/buckets/(vomebook/(?:pdf-pages-v2|reader-assets-v2))/resolve/(.+)", url.path)
@@ -428,7 +428,7 @@ def _eligible(state, catalog, budget, now, priority_source=None, *, skip_buildin
 
 
 def build_order(eligible):
-    """Share each bounded wave between new page streams and ready text packages."""
+    """Share each bounded wave between primary-only and full-text packages."""
     pairs = [pair for pair in eligible if not pair[1].get("candidate")]
     previews = iter(pair for pair in pairs if pair[1]["spec"].get("preview_only"))
     complete = iter(pair for pair in pairs if not pair[1]["spec"].get("preview_only"))

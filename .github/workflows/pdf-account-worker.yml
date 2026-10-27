@@ -36,6 +36,7 @@ concurrency:
   queue: max
 
 env:
+  # Retained solely in existing OCR identity strings; no Reader JXL encoding.
   PDF_JXL_ENABLED: "true"
   PDF_OCR_LANG: auto
   PDF_OCR_BACKEND: rapidocr_onnxruntime
@@ -60,6 +61,8 @@ jobs:
           WORKER_OWNER: ${{ github.repository_owner }}
         run: python scripts/pdf_worker_lanes.py --owner "$WORKER_OWNER"
       - run: pip install -r scripts/requirements.txt
+      - name: Verify OCR-only document raster policy
+        run: python -m unittest tests.test_direct_document_policy
       - name: Plan only this account's sources
         id: plan
         env:
@@ -99,7 +102,7 @@ jobs:
                 "$(jq -r '.shard_count' output/pdf-ocr/queue.json)" == 0 && \
                 "$(jq -r '(.books // []) | length' output/pdf-ocr/queue.json)" == 0 ) ]]; then
             sudo apt-get update
-            sudo apt-get install -y --no-install-recommends poppler-utils poppler-data fonts-noto-cjk fonts-liberation djvulibre-bin libjxl-tools
+            sudo apt-get install -y --no-install-recommends poppler-utils poppler-data fonts-noto-cjk fonts-liberation djvulibre-bin
             FORCE_SYNC=true python scripts/fetch_and_parse.py
             retry_args=()
             if [[ "$RETRY_FAILED_RENDER" == "true" ]]; then retry_args+=(--retry-failed); fi
@@ -144,7 +147,7 @@ jobs:
         run: |
           pip install -r scripts/requirements.txt
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends poppler-utils poppler-data fonts-noto-cjk fonts-liberation djvulibre-bin libjxl-tools
+          sudo apt-get install -y --no-install-recommends poppler-utils poppler-data fonts-noto-cjk fonts-liberation djvulibre-bin
       - name: Install OCR dependencies
         if: needs.plan.outputs.stage == 'ocr'
         run: |

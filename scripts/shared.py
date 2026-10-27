@@ -232,14 +232,12 @@ def merge_pdf_ocr_sidecar_entry(current: dict | None, result: dict) -> dict | No
                 entry["s"] = 4
         return entry or {"s": 4, "om": "failed", "oe": result.get("error", "OCR failed")}
     if result.get("status") == "ready":
-        page_manifest = result.get("page_manifest")
-        if result.get('source_format') != 'djvu':
-            page_manifest = None
-        # A completed page stream must take precedence over an older optimized
-        # PDF route.  OCR recognition can publish after rendering, so keeping
-        # the PDF in `p` would make Reader ignore the already available pages.
-        if (isinstance(page_manifest, dict) and isinstance(page_manifest.get("path"), str)):
-            apply_pdf_pages_sidecar_entry(entry, page_manifest["path"], result)
+        # Document page images are historical, not a new Reader route. The
+        # separately published v3 projection owns DjVu primary availability.
+        if result.get('source_format') == 'djvu' and str(entry.get('p', '')).endswith('/page-manifest.json'):
+            for field in ('p', 'pd', 'pdb'):
+                entry.pop(field, None)
+            entry['s'] = 3
         entry.update({
             "o": result["ocr_manifest"],
             "om": result.get("classification", ""),

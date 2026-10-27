@@ -8,11 +8,9 @@ from pathlib import Path
 
 try:
     from .reader_assets import SPREADSHEET_EXTENSIONS, load_json, validate_manifest
-    from .pdf_assets import PDF_DECISION_PROFILE, PDF_PROFILE
     from . import shared
 except ImportError:
     from reader_assets import SPREADSHEET_EXTENSIONS, load_json, validate_manifest
-    from pdf_assets import PDF_DECISION_PROFILE, PDF_PROFILE
     import shared
 
 STATUS = {"ready": 2, "failed": 4}
@@ -43,29 +41,10 @@ def build_index(manifest: dict, pdf_manifest: dict | None = None,
             if entry.get("fallback_path"):
                 compact["f"] = entry["fallback_path"]
         files[key] = compact
-    for key, entry in (pdf_manifest or {}).get("files", {}).items():
-        if entry.get('source_format') != 'djvu':
-            continue
-        if key in spreadsheet_keys:
-            continue
-        if entry.get("status") != "ready":
-            continue
-        if (entry.get("strategy") != "sampled-jxl"
-                or entry.get("render_profile") != PDF_PROFILE
-                or entry.get("decision_profile") != PDF_DECISION_PROFILE):
-            continue
-        path = entry.get("path") or entry.get("page_manifest", {}).get("path")
-        if path:
-            files[key] = {**files.get(key, {}), **shared.pdf_pages_sidecar_entry(path, entry, files.get(key))}
     for key, entry in (ocr_manifest or {}).get("files", {}).items():
         if key in spreadsheet_keys:
             continue
-        # Rendering may finish before recognition (or recognition may fail).
-        # Preserve its complete Reader stream during unrelated sidecar rebuilds.
-        page_path = (entry.get("page_manifest") or {}).get("path")
-        if (entry.get('source_format') == 'djvu' and entry.get("status") in {"rendered", "failed"} and page_path
-                and entry.get("render_manifest")):
-            files[key] = {**files.get(key, {}), **shared.pdf_pages_sidecar_entry(page_path, entry, files.get(key))}
+        # OCR status never turns a historical DjVu page stream into a route.
         if entry.get("status") != "ready" or not isinstance(entry.get("ocr_manifest"), str):
             continue
         merged = shared.merge_pdf_ocr_sidecar_entry(files.get(key), entry)

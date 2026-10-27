@@ -166,7 +166,7 @@ class ReaderGcGraphTests(unittest.TestCase):
         self.assertTrue(report["graph_complete"], report["blockers"])
         self.assertTrue(all(not value["candidates"] for value in report["buckets"].values()))
 
-    def test_native_djvu_reading_primary_is_retained_and_orphan_collectable(self):
+    def test_native_djvu_primary_and_historical_visuals_are_retained_until_separate_retirement(self):
         import hashlib, shutil, tempfile
         from pathlib import Path
         from scripts import pdf_reading_v3 as v3
@@ -180,15 +180,19 @@ class ReaderGcGraphTests(unittest.TestCase):
             source = hashlib.sha256(raw).hexdigest()
             primary = f"objects/{source[:2]}/{source}/{'b' * 16}/document.djvu"
             orphan = f"objects/{source[:2]}/{source}/{'c' * 16}/document.djvu"
+            old_page = f"objects/{source[:2]}/{source}/{'d' * 16}/pages/page-000001.png"
             store.put(PDF, primary, raw)
             store.put(PDF, orphan, raw)
+            store.put(PDF, old_page, b'historical reading image')
             ref = {"bucket": PDF, "path": primary, "sha256": source, "bytes": len(raw), "role": "runtime"}
             read = lambda item: store.read_bytes(item["bucket"], item["path"])
             bundle = work / "bundle"
             spec = v3.generate_previews({"source_key": "book", "source_sha256": source, "primary": ref}, read, bundle)
             for path in (item for item in bundle.rglob("*") if item.is_file()):
                 store.put(PDF, path.relative_to(bundle).as_posix(), path.read_bytes())
-            reading, _ = v3.build_reading(spec, read, bundle)
+            reading, manifest = v3.build_reading(spec, read, bundle)
+            self.assertEqual(manifest['preview']['status'], 'skipped')
+            map_path = manifest['page_map']['path']
             for path in (item for item in bundle.rglob("*") if item.is_file()):
                 store.put(PDF, path.relative_to(bundle).as_posix(), path.read_bytes())
         store.put(ASSETS, SIDECAR, {"v": 1, "f": {"book": {"s": 2, "m": "p", "p": reading["path"], "b": PDF}}})
@@ -196,7 +200,30 @@ class ReaderGcGraphTests(unittest.TestCase):
         report = graph.build()
         self.assertTrue(report["graph_complete"], report["blockers"])
         self.assertIn((PDF, primary), graph.references)
+        self.assertIn((PDF, map_path), graph.references)
+        self.assertIn((PDF, reading['path']), graph.references)
         self.assertIn(orphan, report["buckets"][PDF]["candidates"])
+        self.assertIn((PDF, old_page), graph.references)
+        self.assertNotIn(old_page, report["buckets"][PDF]["candidates"])
+
+        # A visual object that arrives between the first and final inventories
+        # must receive the same protection before a deletion plan is produced.
+        late = f"objects/{source[:2]}/{source}/{'e' * 16}/preview/page-000002.jxl"
+        class LateStore(MemoryStore):
+            def __init__(self, initial):
+                self.objects = {bucket: dict(files) for bucket, files in initial.objects.items()}
+                self.pdf_listings = 0
+            def list_files(self, bucket, prefixes):
+                if bucket == PDF:
+                    self.pdf_listings += 1
+                    if self.pdf_listings >= 2:
+                        self.objects[PDF][late] = b'late visual'
+                return super().list_files(bucket, prefixes)
+        late_graph = gc.ReferenceGraph(LateStore(store))
+        late_report = late_graph.build()
+        self.assertTrue(late_report['graph_complete'], late_report['blockers'])
+        self.assertIn((PDF, late), late_graph.references)
+        self.assertNotIn(late, late_report['buckets'][PDF]['candidates'])
 
     def test_v3_text_review_retains_cross_bucket_evidence_and_raw_provenance(self):
         from scripts import pdf_reading_v3 as v3, pdf_text_layer as text

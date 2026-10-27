@@ -108,6 +108,7 @@ class ReferenceGraph:
         self.missing = set()
         self.ambiguous = set()
         self.trees = set()
+        self.djvu_visual_sources = set()
         self.generation_grace_days = generation_grace_days
         self.catalog = {}
         self.retired_roots = set()
@@ -314,6 +315,25 @@ class ReferenceGraph:
                     self.external_pins.add(child_ref)
                 if is_manifest(child) and child_ref not in self.seen:
                     self.pending.add(child_ref)
+
+    def protect_historical_djvu_visuals(self, bucket: str, source: str):
+        """Pin old reading images until an independent retirement protocol exists.
+
+        A whole-source tree would also pin unrelated OCR-input metadata and make
+        previously retired provenance look like a live missing reference. Only
+        immutable visual paths are guarded; existing graphs still own OCR/text.
+        """
+        if (bucket, source) not in self.djvu_visual_sources:
+            self.djvu_visual_sources.add((bucket, source))
+        prefix = f"objects/{source[:2]}/{source}/"
+        ordered = self.ordered.get(bucket, [])
+        start, end = bisect.bisect_left(ordered, prefix), bisect.bisect_left(ordered, prefix + "\U0010ffff")
+        for path in ordered[start:end]:
+            if (
+                    re.search(r"/(?:preview|pages)/page-[0-9]{6}\.(?:png|jxl|webp|jpeg|svg)$", path)
+                    or path.endswith('/page-manifest.json')
+                    or re.search(r"/preview/partition-[0-9]{6}-[0-9]{6}-manifest\.json$", path)):
+                self.references.add((bucket, path))
 
     def path(self, value: str, bucket: str, origin: str, explicit: bool, field: str):
         if is_manifest(origin) and field in PATH_FIELDS:
@@ -575,6 +595,13 @@ class ReferenceGraph:
                         from pdf_reading_v3 import validate_text_manifest, validate_reading_manifest
                     validator = validate_text_manifest if payload["kind"] == "pdf-text-layer-index" else validate_reading_manifest
                     validator(payload)
+                    if payload["kind"] == "pdf-reading" and payload["primary"]["kind"] == "djvu" \
+                            and payload["preview"].get("status") == "skipped":
+                        # A direct-primary switch is not deletion authority.
+                        # Retain historical visual resources until a separate
+                        # four-bucket migration/consumer-ack retirement closes.
+                        source = payload["source_sha256"]
+                        self.protect_historical_djvu_visuals(bucket, source)
                 except (ValueError, KeyError, TypeError):
                     self.blockers.add(f"invalid v3 manifest: {bucket}:{path}")
                     return False
@@ -724,6 +751,9 @@ class ReferenceGraph:
             self.files[bucket] = latest
             self.ordered[bucket] = sorted(latest)
             self.protect_additions(bucket, latest - previous)
+            for protected_bucket, source in self.djvu_visual_sources:
+                if protected_bucket == bucket:
+                    self.protect_historical_djvu_visuals(bucket, source)
             roots = {path for path in latest if is_root(path, bucket)}
             new_roots |= bool(roots - known)
             self.root_names[bucket] = known | roots

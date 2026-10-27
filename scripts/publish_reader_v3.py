@@ -341,7 +341,7 @@ def stage(store, ref, bundle=None, *, apply=False):
     reader = CandidateReader(store, bundle)
     manifest = v3.verify_reading(ref, reader)
     if not v3.reading_surface_ready(manifest):
-        raise ValueError("promotion requires a primary PDF or complete DjVu previews")
+        raise ValueError("promotion requires a primary PDF or DjVu without previews")
     reader.closure()
     body = {"version": 1, "kind": "reader-reading-candidate", "source_key": manifest["source_key"],
             "source_sha256": manifest["source_sha256"], "reading_generation": manifest["generation"],
@@ -472,17 +472,30 @@ def build_stage(store, spec, workspace, *, apply=False):
     key = spec.get("source_key")
     if not isinstance(key, str) or not key:
         raise ValueError("single-book source key required")
+    if spec.get("direct_reading"):
+        # Explicitly migrate a verified existing generation without rebuilding,
+        # changing, or re-recognizing its text/correction identities.
+        reader = CandidateReader(store, workspace)
+        previous = v3.verify_reading(validate_reading_ref(spec["direct_reading"]), reader,
+                                     verify_historical_previews=False)
+        if (previous["source_key"] != key or previous["source_sha256"] != source
+                or previous["primary"]["kind"] != "djvu"):
+            raise ValueError("direct reading source identity mismatch")
+        reading_spec = {"source_key": key, "source_sha256": source,
+                        "primary": previous["primary"]["resource"], "text_layer": previous.get("text_layer")}
+        ref, manifest = v3.build_reading(reading_spec, reader, workspace)
+        reader.close()
+        result = stage(store, ref, workspace, apply=apply)
+        result.update(reading=ref, components=manifest["components"], preserved_text_layer=previous.get("text_layer"))
+        return result
     if spec.get("reindex_reading"):
         reader = CandidateReader(store, workspace)
-        previous = v3.verify_reading(spec["reindex_reading"], reader)
+        previous = v3.verify_reading(spec["reindex_reading"], reader, verify_historical_previews=False)
         if previous["source_key"] != key or previous["source_sha256"] != source:
             raise ValueError("reindex source identity mismatch")
         effective = v3.repartition_text_bundle(previous["text_layer"], reader, workspace)
-        previews = [entry for part in previous["preview"]["partitions"]
-                    for entry in v3.decode(v3.verified_read(part["resource"], reader))["pages"]]
         reading_spec = {"source_key": key, "source_sha256": source,
-                        "primary": previous["primary"]["resource"], "previews": previews,
-                        "text_layer": effective, "require_complete_preview": True}
+                        "primary": previous["primary"]["resource"], "text_layer": effective}
         ref, manifest = v3.build_reading(reading_spec, reader, workspace)
         result = stage(store, ref, workspace, apply=apply)
         result.update(reading=ref, components=manifest["components"])
@@ -493,13 +506,11 @@ def build_stage(store, spec, workspace, *, apply=False):
     reuse = spec.get("reuse_reading")
     previews = None
     if reuse:
-        previous = v3.verify_reading(validate_reading_ref(reuse), reader)
+        previous = v3.verify_reading(validate_reading_ref(reuse), reader, verify_historical_previews=False)
         if (previous["source_key"] != key or previous["source_sha256"] != source
-                or previous["primary"]["resource"] != spec["primary"]
-                or previous['primary']['kind'] == 'djvu' and not previous["preview"]["complete"]):
-            raise ValueError("preview reuse source mismatch")
-        previews = [entry for part in previous["preview"]["partitions"]
-                    for entry in v3.decode(v3.verified_read(part["resource"], reader))["pages"]]
+                or previous["primary"]["resource"] != spec["primary"]):
+            raise ValueError("primary reuse source mismatch")
+        previews = []
     if spec.get("preview_only"):
         reading_spec = {"source_key": key, "source_sha256": source, "primary": spec["primary"],
                         "require_complete_preview": True, "vector_previews": spec.get("vector_previews", False)}
@@ -622,18 +633,14 @@ def promote(store, candidate_ref, expected_parent, *, apply=False, replace_sourc
     if replace_source and not migration:
         raise ValueError("DjVu migration does not match the live reading")
     if (previous_entry and not migration and previous_entry.get("components", {}).get("text") == "pending"):
-        previous = v3.verify_reading(previous_entry["resource"], verified)
-        def previews(value):
-            return [page for part in value["preview"]["partitions"]
-                    for page in v3.decode(v3.verified_read(part["resource"], verified))["pages"]]
+        previous = v3.verify_reading(previous_entry["resource"], verified, verify_historical_previews=False)
         same_map = (previous["page_map"] == manifest["page_map"] or
                     v3.decode(v3.verified_read(previous["page_map"], verified)) ==
                     v3.decode(v3.verified_read(manifest["page_map"], verified)))
         if (previous["source_sha256"] != manifest["source_sha256"]
                 or previous["primary"] != manifest["primary"]
-                or not same_map
-                or (manifest['primary']['kind'] == 'djvu' and previews(previous) != previews(manifest))):
-            raise ValueError("text upgrade must preserve the complete existing preview")
+                or not same_map):
+            raise ValueError("text upgrade must preserve the primary and complete page map")
     verified.close()
     files = {**old["files"], key: entry}
     catalog = {"version": 3, "kind": "reader-reading-catalog", "files": files,

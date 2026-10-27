@@ -113,7 +113,7 @@ def plan(records: list[dict], workers: int = 4, current: dict | None = None,
                 inspected = {**item, "source_sha256": digest, "source_bytes": size, "probe": probe,
                              "reader_presentation": djvu_pages.reader_presentation(source),
                              "page_count": probe["page_count"], "status": "planned",
-                             "profile": pdf_ocr.asset_profile(), "force_image_render": True}
+                             "profile": pdf_ocr.asset_profile()}
                 if render_estimator is not None:
                     inspected["_render_cost"] = render_estimator(inspected, source)
                 return inspected

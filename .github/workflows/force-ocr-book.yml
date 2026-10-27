@@ -61,7 +61,7 @@ jobs:
       - name: Install render and OCR dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends poppler-utils poppler-data fonts-noto-cjk fonts-liberation libjxl-tools tesseract-ocr tesseract-ocr-osd tesseract-ocr-eng tesseract-ocr-chi-sim tesseract-ocr-jpn
+          sudo apt-get install -y --no-install-recommends poppler-utils poppler-data fonts-noto-cjk fonts-liberation tesseract-ocr tesseract-ocr-osd tesseract-ocr-eng tesseract-ocr-chi-sim tesseract-ocr-jpn
           pip install -r scripts/requirements.txt -r scripts/requirements-pdf-ocr.txt
       - name: Prepare protected immutable objects only
         env:

@@ -326,93 +326,17 @@ def _image_dimensions(path: Path) -> tuple[int, int]:
 
 
 def _render(pdf: Path, page: int, directory: Path, extension: str = "pdf") -> Path:
-    if extension.lower() != 'djvu':
-        raise ValueError('only DjVu documents may generate Reader page images')
-    with pdf.open('rb') as source:
-        if source.read(8) != b'AT&TFORM':
-            raise ValueError('DjVu page images require original DjVu bytes')
-    from PIL import Image
-    stem = directory / f"page-{page:06d}"
-    _run(["ddjvu", "-format=ppm", f"-page={page}", str(pdf), str(stem.with_suffix(".ppm"))])
-    pixels = stem.with_suffix('.ppm')
-    jxl = stem.with_suffix(".jxl")
-    try:
-        with Image.open(pixels) as image:
-            image.load()
-            if WEBP_MAX_DIMENSION > 0 and max(image.size) > WEBP_MAX_DIMENSION:
-                image.thumbnail((WEBP_MAX_DIMENSION, WEBP_MAX_DIMENSION), Image.Resampling.LANCZOS)
-            reader_page_codec.encode_image(image, jxl)
-    finally:
-        pixels.unlink(missing_ok=True)
-    return jxl
+    raise ValueError('document Reader page-image rendering is retired; use primary bytes')
 
 
 def build_item(item: dict, source: Path, bundle: Path) -> dict:
     source_sha, actual_bytes = digest(source)
     base = {**item, "source_sha256": source_sha, "source_bytes": actual_bytes}
-    if str(item.get('extension') or '').lower() != 'djvu':
-        return {**base, 'status': 'skipped', 'strategy': 'preserve-pdf',
-                'reason': 'document-page-streams-djvu-only', 'decision_profile': 'pdf-primary-only-v1'}
-    base['source_format'] = 'djvu'
-    risk_candidate = bool(item.get("range_risk_candidate"))
-    if actual_bytes < LARGE_BYTES and not risk_candidate:
-        return {**base, "status": "skipped", "reason": "below-minimum-100-mib", "strategy": "none",
-                "decision_profile": PDF_DECISION_PROFILE}
-    object_dir = object_root(source_sha, str(item.get("key") or ""))
-    ranged = "page_start" in item or "page_end" in item
-    pages = _pages(source, str(item.get("extension") or "pdf"))
-    page_start = int(item.get("page_start", 1))
-    page_end = int(item.get("page_end", pages))
-    if not 1 <= page_start <= page_end <= pages:
-        raise ValueError("invalid PDF page range")
-    outline = item.get("outline")
-    if not isinstance(outline, list):
-        outline = extract_pdf_outline(source, pages)
-    with tempfile.TemporaryDirectory(dir=bundle) as temp:
-        sample = sorted(set([page_start, (page_start + page_end) // 2, page_end]))[:max(1, SAMPLE_PAGES)]
-        sample_sizes = []
-        sample_end = max(sample)
-        classification = str(item.get("classification") or classify_pdf(source, pages))
-        decision_profile = PDF_RISK_DECISION_PROFILE if risk_candidate else PDF_DECISION_PROFILE
-        metadata = {"pages": pages, "classification": classification, "sample_pages": sample,
-                    "range_risk_candidate": risk_candidate}
-        if classification == "native-text":
-            return {**base, "status": "skipped", "reason": "native-text-pdf",
-                    "strategy": "native-text", "decision_profile": decision_profile, "pdf": metadata}
-        for page in sample:
-            sample_sizes.append(_render(source, page, Path(temp), str(item.get("extension") or "pdf")).stat().st_size)
-        range_pages = page_end - page_start + 1
-        estimated = int(round(sum(sample_sizes) / len(sample_sizes) * range_pages))
-        metadata.update({"codec": "jxl", "sample_jxl_bytes": sample_sizes,
-                         "estimated_jxl_bytes": estimated})
-        page_entries = []
-        for page in range(page_start, page_end + 1):
-            rendered = Path(temp) / f'page-{page:06d}.jxl'
-            if not rendered.is_file():
-                rendered = _render(source, page, Path(temp), str(item.get("extension") or "pdf"))
-            page_sha, page_bytes = digest(rendered)
-            destination = bundle / object_dir / "pages" / f"page-{page:06d}.jxl"
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(rendered, destination)
-            page_entries.append({"page": page, "path": (object_dir / "pages" / destination.name).as_posix(),
-                                 "sha256": page_sha, "bytes": page_bytes})
-    if ranged:
-        return {**base, "path": "", "status": "ready", "strategy": "sampled-jxl", "pdf": metadata,
-                "render_profile": PDF_PROFILE, "decision_profile": decision_profile,
-                "pages": page_entries, "outline": outline}
-    page_manifest = compact_page_manifest(
-        source_sha, PDF_PROFILE, page_entries, outline, object_dir)
-    manifest_path = bundle / object_dir / PAGE_MANIFEST_NAME
-    manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    manifest_path.write_text(json.dumps(page_manifest, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
-    manifest_sha, manifest_bytes = digest(manifest_path)
-    return {**base, "path": "", "status": "ready", "strategy": "sampled-jxl", "pdf": metadata,
-        "render_profile": PDF_PROFILE, "decision_profile": decision_profile,
-            "pages": page_entries, "outline": outline, "page_manifest": {
-                "path": (object_dir / PAGE_MANIFEST_NAME).as_posix(),
-                "sha256": manifest_sha, "bytes": manifest_bytes,
-                "version": PAGE_MANIFEST_VERSION,
-            }}
+    if str(item.get('extension') or '').lower() == 'djvu':
+        return {**base, 'source_format': 'djvu', 'status': 'skipped', 'strategy': 'preserve-djvu',
+                'reason': 'djvu-primary-browser-decoding', 'decision_profile': 'djvu-primary-only-v1'}
+    return {**base, 'status': 'skipped', 'strategy': 'preserve-pdf',
+            'reason': 'document-primary-direct-reading', 'decision_profile': 'pdf-primary-only-v1'}
 
 
 def empty_manifest() -> dict:
@@ -475,16 +399,8 @@ def remote_sidecar(api: HfApi, repo: str) -> dict:
 
 def update_sidecar(sidecar: dict, results: list[dict]) -> bytes:
     updated = {"v": 1, "f": dict(sidecar.get("f", {}))}
-    for result in results:
-        if result.get('source_format') != 'djvu' and str(result.get('extension') or '').lower() != 'djvu':
-            continue
-        updated["f"].pop(result.get("key"), None)
-        if result.get("status") != "ready":
-            continue
-        path = result.get("path") or result.get("page_manifest", {}).get("path")
-        if not path:
-            continue
-        updated["f"][result["key"]] = shared.pdf_pages_sidecar_entry(path, result, updated["f"].get(result["key"]))
+    # Retired producer results are never an authority to modify live routes or
+    # republish document page images. The v3 writer handles primary promotion.
     payload = json.dumps(updated, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
     return gzip.compress(payload, compresslevel=9, mtime=0)
 

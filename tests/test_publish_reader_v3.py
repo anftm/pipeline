@@ -471,12 +471,12 @@ class V3PublicationTests(unittest.TestCase):
         self.assertTrue(all(not value["candidates"] for value in report["buckets"].values()))
 
 
-    def test_text_upgrade_cannot_silently_change_existing_preview_resources(self):
+    def test_text_upgrade_cannot_silently_change_existing_primary(self):
         preview = self.preview_candidate()
         staged = publish.stage(self.store, preview, self.bundle, apply=True)
         first = publish.promote(self.store, staged["candidate"], None, apply=True)
         altered = publish.stage(self.store, self.candidate(label="Different preview prefix"), self.bundle, apply=True)
-        with self.assertRaisesRegex(ValueError, "preserve the complete existing preview"):
+        with self.assertRaisesRegex(ValueError, "preserve the primary and complete page map"):
             publish.promote(self.store, altered["candidate"], first["generation"], apply=True)
         self.assertEqual(publish.current(self.store)[0]["generation"], first["generation"])
 

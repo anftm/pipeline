@@ -808,7 +808,7 @@ def decide(store, command, options, *, apply=False, auto_actor=None):
     with tempfile.TemporaryDirectory(prefix="reader-accept-") as directory:
         workspace = Path(directory)
         reader = publication.CandidateReader(store, workspace)
-        reading = v3.verify_reading(active["resource"], reader)
+        reading = v3.verify_reading(active["resource"], reader, verify_historical_previews=False)
         # A retry after a successful pointer write may only finish the decision journal.
         manifest = v3.decode(v3.verified_read(reading["text_layer"], reader))
         audits = set()
@@ -823,11 +823,8 @@ def decide(store, command, options, *, apply=False, auto_actor=None):
             # The bundle acceptor checks each page generation, allowing untouched
             # pages to be reviewed after an unrelated page was already accepted.
             effective = v3.accept_text_bundle(reading["text_layer"], proposals, reader, workspace, actor=actor)
-            previews = [entry for partition in reading["preview"]["partitions"]
-                        for entry in v3.decode(v3.verified_read(partition["resource"], reader))["pages"]]
             spec = {"source_key": key, "source_sha256": reading["source_sha256"],
-                    "primary": reading["primary"]["resource"], "previews": previews,
-                    "text_layer": effective, "require_complete_preview": True}
+                    "primary": reading["primary"]["resource"], "text_layer": effective}
             ref, _ = v3.build_reading(spec, reader, workspace)
             staged = publication.stage(store, ref, workspace, apply=apply)
             if apply:

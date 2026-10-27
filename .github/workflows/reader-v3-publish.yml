@@ -13,7 +13,7 @@ on:
         options: [build-stage, stage, promote, rollback, withdraw, ack, inspect, auto, correct, accept, reject, retry, retire, retire-ocr-progress, unify, repair-gbk, reset-documents]
         default: inspect
       resource_json:
-        description: Pinned build-stage spec or qualified reading/candidate/rollback resource JSON
+        description: Pinned build-stage spec (direct_reading preserves existing text) or qualified candidate/rollback JSON
         type: string
         default: '{}'
       expected_parent:
@@ -54,6 +54,8 @@ jobs:
         with:
           python-version: '3.11'
       - run: pip install -r scripts/requirements.txt
+      - name: Guard direct-document and GC contracts before publication
+        run: python -m unittest tests.test_direct_document_policy
       - name: Verify and execute the central v3 operation
         id: operation
         env:

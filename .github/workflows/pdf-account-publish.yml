@@ -27,6 +27,7 @@ concurrency:
   queue: max
 
 env:
+  # Retained solely in existing OCR identity strings; no Reader JXL encoding.
   PDF_JXL_ENABLED: "true"
   PDF_OCR_LANG: auto
   PDF_OCR_BACKEND: rapidocr_onnxruntime

@@ -1075,7 +1075,7 @@ def source_records(search_data: Path, revisions: Path, assets_manifest: dict | N
     # through their derived PDF. Default off keeps production unchanged.
     native_djvu = {item["key"]: {**item, "source_format": "djvu"}
                    for item in pdf_assets.load_records(search_data, revisions, repo, "djvu")
-                   if djvu_pages.native_enabled(item) and not djvu_pages.native_exception(item)} \
+                   if djvu_pages.native_enabled(item)} \
         if djvu_pages.native_enabled() else {}
     original_sizes = {item["key"]: item.get("source_bytes") for item in records}
     original_sizes.update({key: item.get("source_bytes") for key, item in native_djvu.items()})
