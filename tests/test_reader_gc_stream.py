@@ -52,6 +52,23 @@ def chunks(payload, size=7):
 
 
 class CatalogCompactionStreamTests(unittest.TestCase):
+    def test_streamed_graph_keeps_reading_png_mixed_codec_and_integrity(self):
+        from scripts.reader_gc_stream import graph_json
+        import hashlib
+        value = {'kind': 'pdf-render', 'source_format': 'djvu', 'pages': [
+            {'p': 1, 'r': 'objects/aa/book/pages/page-000001.png', 'rs': 'a' * 64,
+             'rb': 40, 'rbucket': 'vomebook/pdf-pages-v2', 'text': 'large recognized text'}],
+            'codec': 'mixed', 'images': [{'codec': 'png', 'sha256': 'a' * 64, 'bytes': 40}]}
+        raw = json.dumps(value).encode()
+        for compressed in (False, True):
+            wire = gzip.compress(raw) if compressed else raw
+            result, sha = graph_json(chunks(wire), compressed)
+            self.assertEqual(sha, hashlib.sha256(wire).hexdigest())
+            self.assertNotIn('text', result['pages'][0])
+            self.assertEqual(result['pages'][0]['rbucket'], 'vomebook/pdf-pages-v2')
+            self.assertEqual(result['pages'][0]['r'], value['pages'][0]['r'])
+            self.assertEqual(result['images'], value['images'])
+
     def test_compaction_keeps_current_references_and_grace_history(self):
         wire = json.dumps(catalog(), sort_keys=True).encode()
         for compressed in (False, True):

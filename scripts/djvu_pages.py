@@ -14,6 +14,7 @@ import os
 import json
 import re
 import struct
+import shutil
 import subprocess
 import tempfile
 import warnings
@@ -28,6 +29,7 @@ except ImportError:
 
 
 PROFILE_VERSION = "djvu-native-v1"
+BITONAL_READER_PROFILE = "djvu-bitonal-reader-png-v1"
 MAGIC = b"AT&TFORM"
 PDF_MAGIC = b"%PDF-"
 COMMAND_TIMEOUT = int(os.environ.get("PDF_DJVU_COMMAND_TIMEOUT", "600"))
@@ -122,7 +124,7 @@ def native_exception(item: dict | None) -> dict | None:
 def render_profile(base: str) -> str:
     """Distinct namespace on top of the PDF profile's shared delivery settings."""
     return (f"{base}-{PROFILE_VERSION}-native-dpi-maxpix-{pdf_ocr.MAX_PAGE_PIXELS}"
-            f"-textlayer-{int(use_text_layer())}")
+            f"-textlayer-{int(use_text_layer())}-{BITONAL_READER_PROFILE}")
 
 
 def _chunks(raw: bytes, start: int, end: int):
@@ -298,19 +300,25 @@ def render(path: Path, page: int, destination: Path, *, info: dict, dpi: int | N
 
 def render_page(path: Path, page: int, directory: Path, *, info: dict,
                 reader_jxl: bool = False, reader_images: bool = True):
-    """Drop-in for ``pdf_ocr.render_page``: PNG OCR input plus Reader WebP.
+    """One native render supplies independent OCR and reading resources.
 
     The OCR input is native resolution (capped at MAX_PAGE_PIXELS) and stored
-    as gray for bitonal/gray pages; it is never resampled from a PDF render.
+    as gray for bitonal/gray pages. Bitonal reading keeps the exact lossless
+    bitmap rather than downscaling/recompressing fine text to a lossy codec.
     """
     from PIL import Image
     prefix = directory / f"page-{page:06d}"
     png = prefix.with_suffix(".png")
     _, width, height, mode, _ = render(path, page, png, info=info)
+    bitonal = info.get('layers') == 'bitonal'
+    if reader_images and bitonal:
+        # Copy before converting the OCR input to gray. Separate public reading
+        # and processing paths let OCR inputs retire without deleting the page.
+        shutil.copyfile(png, prefix.with_name(prefix.name + '-reader').with_suffix('.png'))
     if mode == "1":
         with Image.open(png) as image:
             image.convert("L").save(png, "PNG")
-    if not reader_images:
+    if not reader_images or bitonal:
         return png, width, height
     with Image.open(png) as image:
         rgb = image.convert("RGB")

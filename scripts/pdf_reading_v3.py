@@ -492,20 +492,56 @@ def render_previews(spec, read, mapping):
         raise ValueError("shared render source or page sequence mismatch")
     if descriptor.get("reader_presentation", {}).get("strategy") == "preserve-pdf":
         return {}
+    bitonal_profile = descriptor.get('render_profile', '').endswith('-' + djvu_pages.BITONAL_READER_PROFILE)
     previews = {}
     for page, geometry in zip(descriptor["pages"], mapping["pages"]):
-        if geometry["classification"] in {"bitonal-image", "unknown", "native-vector"} or not page.get("j"):
+        protected = geometry['classification'] == 'bitonal-image'
+        if bitonal_profile and protected and 'r' not in page:
+            raise ValueError('shared lossless DjVu render lacks its reading PNG')
+        if 'r' in page:
+            policy = re.search(
+                rf'-{djvu_pages.PROFILE_VERSION}-native-dpi-maxpix-([1-9][0-9]*)-textlayer-[01]'
+                rf'-{djvu_pages.BITONAL_READER_PROFILE}$', descriptor.get('render_profile', ''))
+            if (not protected or descriptor.get('source_format') != 'djvu' or not policy
+                    or any(field in page for field in ('w', 'j'))
+                    or page.get('rbucket') != shared.PDF_PAGES_BUCKET
+                    or any(field not in page for field in ('rs', 'rb', 'width', 'height'))):
+                raise ValueError('shared lossless DjVu render policy mismatch')
+            codec, field = 'png', 'r'
+        elif any(field in page for field in ('rs', 'rb', 'rbucket')):
+            raise ValueError('orphaned shared lossless DjVu metadata')
+        elif geometry["classification"] in {"bitonal-image", "unknown", "native-vector"} or not page.get("j"):
             continue
-        path = page["j"]
-        if (page.get("jbucket", shared.PDF_PAGES_BUCKET) != shared.PDF_PAGES_BUCKET or not re.fullmatch(
-                rf"objects/{source[:2]}/{source}/[0-9a-f]{{16}}/pages/page-{page['p']:06d}\.jxl", path)):
+        else:
+            codec, field = 'jxl', 'j'
+        path = page[field]
+        if (page.get(field + 'bucket', shared.PDF_PAGES_BUCKET) != shared.PDF_PAGES_BUCKET or not re.fullmatch(
+                rf"objects/{source[:2]}/{source}/[0-9a-f]{{16}}/pages/page-{page['p']:06d}\.{codec}", path)):
             raise ValueError("shared render image source identity mismatch")
         media = resource({"bucket": shared.PDF_PAGES_BUCKET, "path": path,
-                          "sha256": page["js"], "bytes": page["jb"], "role": "runtime"})
-        width, height = preview_geometry(verified_read(media, read), "jxl")
+                           "sha256": page[field + 's'], "bytes": page[field + 'b'], "role": "runtime"})
+        raw = verified_read(media, read)
+        width, height = preview_geometry(raw, codec)
+        if protected and [width, height] != [page['width'], page['height']]:
+            raise ValueError('shared lossless DjVu pixel dimensions changed')
+        if protected:
+            native_width, native_height = geometry['djvu']['pixels']
+            if geometry['rotation'] in {90, 270}:
+                native_width, native_height = native_height, native_width
+            budget = int(policy[1])
+            scale = min(1., (budget / (native_width * native_height)) ** .5)
+            if (width * height > budget or any(abs(actual - max(1, int(native * scale))) > (1 if scale < 1 else 0)
+                    for actual, native in ((width, native_width), (height, native_height)))):
+                raise ValueError('shared lossless DjVu native pixel geometry mismatch')
+            if scale == 1:
+                from PIL import Image
+                import io
+                with Image.open(io.BytesIO(raw)) as image:
+                    if image.mode != '1':
+                        raise ValueError('shared native bitonal DjVu requires a 1-bit PNG')
         if abs((width / height) / (geometry["width"] / geometry["height"]) - 1) > .01:
             raise ValueError("shared render geometry mismatch")
-        previews[page["p"]] = {"page": page["p"], "page_identity": geometry["identity"], "codec": "jxl",
+        previews[page["p"]] = {"page": page["p"], "page_identity": geometry["identity"], "codec": codec,
             "width": width, "height": height, "resource": media,
             "recipe": {"policy": "shared-document-render-v1", "render_profile": descriptor["render_profile"],
                        "render_sha256": ref["sha256"], "role": "preview-not-archival"}}
@@ -544,8 +580,8 @@ def _djvu_previews(spec, raw, mapping, bundle, start, end, dpi, max_pixels, shar
     from PIL import Image
     source = spec["source_sha256"]
     recipe = text.digest({"source": source, "primary": spec["primary"], "dpi": dpi,
-                           "max_pixels": max_pixels, "codec_profile": reader_page_codec.PROFILE,
-                           "policy": "djvu-native-preview-jxl-v1"})
+                            "max_pixels": max_pixels, "codec_profile": reader_page_codec.PROFILE,
+                            "policy": "djvu-native-preview-jxl-v1", 'bitonal_policy': djvu_pages.BITONAL_READER_PROFILE})
     root = Path("objects") / source[:2] / source / recipe[:16]
     infos = djvu_pages.inspect(raw)
     generated = []
@@ -558,7 +594,7 @@ def _djvu_previews(spec, raw, mapping, bundle, start, end, dpi, max_pixels, shar
                 continue
             geometry = mapping["pages"][number - 1]
             protected = geometry["classification"] == "bitonal-image"
-            requested_dpi = max(dpi, 300) if protected else dpi
+            requested_dpi = max(dpi, infos[number - 1]['dpi']) if protected else dpi
             target = Path(directory) / f"page-{number:06d}.png"
             _, width, height, mode, scale = djvu_pages.render(
                 local, number, target, info=infos[number - 1], dpi=requested_dpi, max_pixels=max_pixels)

@@ -233,7 +233,7 @@ def upload_objects(bundle: Path) -> list[str]:
                 if rel.parts[0] == "ocr-input":
                     continue
                 if not (rel.parts[0] in {"ocr", "text"}
-                        or (rel.parts[0] == "pages" and rel.suffix in {".webp", ".jxl"})
+                        or (rel.parts[0] == "pages" and rel.suffix in {".webp", ".jxl", ".png"})
                         or rel.name in {"text-layer-manifest.json", "text-review-manifest.json",
                                          "ocr-manifest.json", "page-manifest.json", "render-manifest.json"}
                         or rel.name.startswith("render-range-") and rel.suffix == ".json"):
@@ -318,7 +318,7 @@ def set_page_meta(page: dict, field: str, meta: dict) -> None:
 
 
 def reading_meta(page):
-    return page_meta(page, 'j' if 'j' in page else 'w')
+    return page_meta(page, 'r' if 'r' in page else 'j' if 'j' in page else 'w')
 
 
 def load_registry(api, repo, name, revision=None):
@@ -699,7 +699,7 @@ def validate_range(book, start, end, descriptor, *, with_toc=False):
         raise ValueError("incomplete render range")
     if (djvu_pages.is_native_item(book) and book.get("force_image_render")
             and book["probe"]["classification"] == "native-text"
-            and (not payload.get("image_rendered") or any(not ({'w', 'j'} & page.keys()) for page in pages))):
+            and (not payload.get("image_rendered") or any(not ({'w', 'j', 'r'} & page.keys()) for page in pages))):
         raise ValueError("native render range lacks required page images")
     validate_render({**book, "page_manifest": None}, {**book, "version": 1, "kind": "pdf-render",
                                                     "complete": True, "page_manifest": None,
@@ -933,15 +933,21 @@ def render_book(item: dict, source: Path, bundle: Path, *, force_ocr_native=Fals
                                              'blocks': native_text[number]['blocks'],
                     **{key: native_text[number][key] for key in ('native_evidence', 'extracted_text', 'extracted_blocks')
                        if key in native_text[number]}}
+            bitonal_reader = (Path(temp) / f'page-{number:06d}-reader.png') if djvu else None
+            if bitonal_reader and bitonal_reader.is_file():
+                destination = bundle / root / 'pages' / f'page-{number:06d}.png'
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(bitonal_reader), destination)
+                set_page_meta(page, 'r', {**metadata(destination, bundle), 'bucket': shared.PDF_PAGES_BUCKET})
             for field, local, folder in (("i", png, "ocr-input"),
                                           ("w", png.with_suffix(".webp"), "pages")):
-                if field == "w" and (not reader_images or pdf_ocr.JXL_ENABLED):
+                if field == "w" and (not reader_images or pdf_ocr.JXL_ENABLED or 'r' in page):
                     continue
                 destination = bundle / root / folder / local.name
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(local), destination)
                 set_page_meta(page, field, metadata(destination, bundle))
-            if pdf_ocr.JXL_ENABLED and reader_images:
+            if pdf_ocr.JXL_ENABLED and reader_images and 'r' not in page:
                 jxl = bundle / root / "pages" / f"page-{number:06d}.jxl"
                 jxl.parent.mkdir(parents=True, exist_ok=True)
                 reader_png = Path(temp) / f"page-{number:06d}-reader.ppm"
@@ -961,7 +967,7 @@ def render_book(item: dict, source: Path, bundle: Path, *, force_ocr_native=Fals
                              "text_spans": payload["text_spans"], "layout": payload["layout"]})
             pages.append(page)
             print(f"rendered {number}/{probe['page_count']}: {item['key']}", flush=True)
-    timing = {"page_count": len(pages), "image_rendered": any({'w', 'j'} & page.keys() for page in pages),
+    timing = {"page_count": len(pages), "image_rendered": any({'w', 'j', 'r'} & page.keys() for page in pages),
               "page_seconds": time.perf_counter() - page_started,
               "setup_seconds": page_started - started}
     if "start" in item:
@@ -970,18 +976,19 @@ def render_book(item: dict, source: Path, bundle: Path, *, force_ocr_native=Fals
             raise ValueError("invalid render page range")
         descriptor = bundle / root / f"render-range-{range_id(start, end)}.json"
         pdf_ocr.write_json(descriptor, {**range_identity(base), "version": 1, "kind": "pdf-render-range",
-                                        "image_rendered": any({'w', 'j'} & page.keys() for page in pages),
+                                        "image_rendered": any({'w', 'j', 'r'} & page.keys() for page in pages),
                                         "start": start, "end": end, "pages": pages,
                                         **({"toc": toc} if toc else {})})
         return {**range_identity(base), "status": "range", "start": start, "end": end,
                 "timing": timing,
                 "descriptor": metadata(descriptor, bundle)}
-    image_pages = [{"page": p["p"], **reading_meta(p)} for p in pages if {'w', 'j'} & p.keys()]
+    image_pages = [{"page": p["p"], **reading_meta(p)} for p in pages if {'w', 'j', 'r'} & p.keys()]
     page_manifest_meta = None
     if image_pages:
         page_manifest = bundle / root / "page-manifest.json"
         pdf_ocr.write_json(page_manifest, pdf_assets.compact_page_manifest(
-            source_sha, profile, image_pages, toc, manifest_dir=root))
+            source_sha, profile, image_pages, toc, manifest_dir=root,
+            source_format='djvu' if djvu else None))
         page_manifest_meta = {**metadata(page_manifest, bundle), "version": pdf_assets.PAGE_MANIFEST_VERSION}
     manifest = {**base, "version": 1, "kind": "pdf-render", "complete": True,
                 "image_rendered": bool(image_pages), "pages": pages, "page_manifest": page_manifest_meta}
@@ -1014,14 +1021,25 @@ def validate_render(item, manifest, page_numbers=None):
     for p in pages:
         if p.get("source") not in {"native", "ocr"} or p["width"] <= 0 or p["height"] <= 0:
             raise ValueError("invalid rendered page")
-        if manifest.get('image_rendered') and not {'w', 'j'} & p.keys():
+        if manifest.get('image_rendered') and not {'w', 'j', 'r'} & p.keys():
             raise ValueError('incomplete reader image stream')
-        for field, suffix in (("i", ".png"), ("w", ".webp"), ("j", ".jxl"), ("o", ".json.gz")):
+        if 'r' in p:
+            if (not djvu_pages.is_native_item(item) or not djvu_pages.is_native_item(manifest)
+                    or 'w' in p or 'j' in p or preserve_pdf
+                    or not manifest.get('image_rendered')
+                    or not item['render_profile'].endswith('-' + djvu_pages.BITONAL_READER_PROFILE)
+                    or p.get('rbucket') != shared.PDF_PAGES_BUCKET):
+                raise ValueError('lossless reading PNG requires one qualified native DjVu page resource')
+        elif any(field in p for field in ('rs', 'rb', 'rbucket')):
+            raise ValueError('orphaned lossless reading PNG metadata')
+        for field, suffix in (("i", ".png"), ("r", ".png"), ("w", ".webp"), ("j", ".jxl"), ("o", ".json.gz")):
             if p.get('native_text_only'):
-                if p['source'] != 'native' or any(key in p for key in ('i', 'w', 'j')):
+                if p['source'] != 'native' or any(key in p for key in ('i', 'w', 'j', 'r')):
                     raise ValueError('invalid native text-only page')
                 if field != 'o':
                     continue
+            if (field == 'r' and 'r' not in p) or (field in {'w', 'j'} and 'r' in p):
+                continue
             jxl_only = 'reader-jxl-v' in item['render_profile']
             if field == 'w' and jxl_only and not preserve_pdf:
                 if 'w' in p:
@@ -1044,10 +1062,11 @@ def validate_render(item, manifest, page_numbers=None):
                 continue
             meta = page_meta(p, field)
             pdf_ocr.validate_ocr_object_path(meta["path"], f"page-{p['p']:06d}{suffix}")
-            folder = {"i": "ocr-input", "w": "pages", "j": "pages", "o": "ocr"}[field]
+            folder = {"i": "ocr-input", "w": "pages", "j": "pages", "r": "pages", "o": "ocr"}[field]
             if meta["path"] != (root / folder / f"page-{p['p']:06d}{suffix}").as_posix():
                 raise ValueError("rendered page object outside book profile")
-            if meta["bytes"] < 1 or len(meta["sha256"]) != 64:
+            if (type(meta["bytes"]) is not int or meta["bytes"] < 1
+                    or not isinstance(meta["sha256"], str) or not re.fullmatch(r'[0-9a-f]{64}', meta["sha256"])):
                 raise ValueError("invalid rendered object metadata")
     return manifest
 
@@ -1084,13 +1103,14 @@ def assemble_render_book(book, descriptors, bundle):
     if len(pages) != book["page_count"]:
         return None
     root = root_for(book["source_sha256"], book["key"], book["render_profile"])
-    image_pages = [{"page": p["p"], **reading_meta(p)} for p in pages if {'w', 'j'} & p.keys()]
+    image_pages = [{"page": p["p"], **reading_meta(p)} for p in pages if {'w', 'j', 'r'} & p.keys()]
     page_manifest_meta = None
     if image_pages:
         page_manifest = bundle / root / "page-manifest.json"
         page_manifest.parent.mkdir(parents=True, exist_ok=True)
         pdf_ocr.write_json(page_manifest, pdf_assets.compact_page_manifest(
-            book["source_sha256"], book["render_profile"], image_pages, toc, manifest_dir=root))
+            book["source_sha256"], book["render_profile"], image_pages, toc, manifest_dir=root,
+            source_format='djvu' if djvu_pages.is_native_item(book) else None))
         page_manifest_meta = {**metadata(page_manifest, bundle), "version": pdf_assets.PAGE_MANIFEST_VERSION}
     base = {**public_item(book), "classification": book["probe"]["classification"],
             "render_profile": book["render_profile"], "profile": book["profile"]}
@@ -1661,6 +1681,7 @@ def assemble_book(book, saved, bundle):
         "engine": f"{backend} / {pdf_ocr.resolve_ocr_config(language, backend)[1]} / CPU / {language}",
         "language": language, "ocr_version": pdf_ocr.resolve_ocr_config(language, backend)[1],
         "backend": backend, "source_sha256": book["source_sha256"],
+        **({'source_format': 'djvu'} if djvu_pages.is_native_item(book) else {}),
         "source_bytes": book["source_bytes"], "source_revision": book.get("source_revision", ""),
         "classification": book["classification"], "page_count": book["page_count"],
         "dpi": pdf_ocr.OCR_DPI, "pages": pages, "book_text": metadata(text_path, bundle),

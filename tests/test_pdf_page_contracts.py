@@ -31,6 +31,25 @@ class PdfPageContractsTests(unittest.TestCase):
         manifest = pdf_assets.compact_page_manifest("c" * 64, "profile", pages, ocr_pages=ocr)
         self.assertEqual(manifest["ocr"], [{"p": 1, "o": ocr[0]["o"], "os": "d" * 64, "ob": 20}])
 
+    def test_djvu_png_and_each_mixed_codec_carry_independent_integrity(self):
+        for codecs in [('png', 'png'), ('png', 'jxl'), ('png', 'webp'), ('webp', 'jxl')]:
+            with self.subTest(codecs=codecs):
+                pages = [{'page': n, 'path': f'objects/aa/book/pages/page-{n:06d}.{codec}',
+                          'sha256': 'a' * 64, 'bytes': n} for n, codec in enumerate(codecs, 1)]
+                manifest = pdf_assets.compact_page_manifest('c' * 64, 'profile', pages, source_format='djvu')
+                self.assertEqual(manifest['codec'], 'png' if codecs == ('png', 'png') else 'mixed')
+                self.assertEqual(manifest['source_format'], 'djvu')
+                self.assertEqual([ref['bytes'] for ref in manifest['images']], [1, 2])
+                if manifest['codec'] == 'mixed':
+                    self.assertEqual([ref['codec'] for ref in manifest['images']], list(codecs))
+                for source_format in (None, 'pdf'):
+                    with self.assertRaisesRegex(ValueError, 'native DjVu'):
+                        pdf_assets.compact_page_manifest('c' * 64, 'profile', pages, source_format=source_format)
+                for corrupt in ({'sha256': 'g' * 64}, {'bytes': True}, {'bytes': 0}):
+                    with self.assertRaisesRegex(ValueError, 'integrity'):
+                        pdf_assets.compact_page_manifest('c' * 64, 'profile', [{**pages[0], **corrupt}, pages[1]],
+                                                         source_format='djvu')
+
     def test_extract_pdf_outline_returns_page_and_depth_metadata(self):
         with tempfile.TemporaryDirectory() as root:
             path = Path(root) / "outlined.pdf"

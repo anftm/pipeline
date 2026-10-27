@@ -6,6 +6,7 @@ import gzip
 import hashlib
 import json
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -77,15 +78,23 @@ def object_root(source_sha: str, key: str) -> Path:
 
 def compact_page_manifest(source_sha: str, profile: str, pages: list[dict],
                           toc: list[dict] | None = None, manifest_dir: Path | None = None,
-                          ocr_pages: list[dict] | None = None) -> dict:
+                          ocr_pages: list[dict] | None = None, *, source_format: str | None = None) -> dict:
     if not pages:
         raise ValueError("PDF page manifest must contain at least one page")
     manifest_dir = manifest_dir or Path(str(pages[0].get("path") or "")).parent.parent
-    codec = 'jxl' if str(pages[0].get('path', '')).endswith('.jxl') else 'webp'
+    codecs = [Path(str(page.get('path', ''))).suffix.lstrip('.') for page in pages]
+    if any(codec not in {'png', 'jxl', 'webp'} for codec in codecs):
+        raise ValueError('unsupported reading page codec')
+    codec = codecs[0] if len(set(codecs)) == 1 else 'mixed'
+    if codec in {'png', 'mixed'} and source_format != 'djvu':
+        raise ValueError('lossless or mixed reading pages require native DjVu')
     for number, page in enumerate(pages, 1):
-        expected = (manifest_dir / "pages" / f"page-{number:06d}.{codec}").as_posix()
+        expected = (manifest_dir / "pages" / f"page-{number:06d}.{codecs[number - 1]}").as_posix()
         if page.get("page") != number or page.get("path") != expected:
             raise ValueError("PDF pages do not match derived manifest paths")
+        if codec != 'webp' and (not re.fullmatch(r'[0-9a-f]{64}', str(page.get('sha256', '')))
+                               or type(page.get('bytes')) is not int or page['bytes'] < 1):
+            raise ValueError('invalid reading page integrity metadata')
     manifest = {
         "version": PAGE_MANIFEST_VERSION,
         "kind": "pdf-pages",
@@ -93,9 +102,13 @@ def compact_page_manifest(source_sha: str, profile: str, pages: list[dict],
         "profile": profile,
         "page_count": len(pages),
     }
-    if codec == 'jxl':
+    if codec != 'webp':
         manifest['codec'] = codec
-        manifest['images'] = [{'sha256': page['sha256'], 'bytes': page['bytes']} for page in pages]
+        manifest['images'] = [{'sha256': page['sha256'], 'bytes': page['bytes'],
+                              **({'codec': codecs[index]} if codec == 'mixed' else {})}
+                             for index, page in enumerate(pages)]
+    if source_format == 'djvu':
+        manifest['source_format'] = source_format
     if toc:
         manifest["toc"] = toc
     if ocr_pages is not None:

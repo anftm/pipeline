@@ -63,6 +63,14 @@ class ReaderLifecycleTests(unittest.TestCase):
         reader_lifecycle.validate_processing_handoff(record, {
             "manifest": "chapters/ebook/epub/abc/def/chapter-manifest.json"})
 
+    def test_reading_png_is_a_processing_handoff_but_not_a_foreign_root(self):
+        root = 'objects/aa/' + 'a' * 64 + '/' + 'b' * 16
+        record = reader_lifecycle.processing_record([{'bucket': reader_lifecycle.PDF_PAGES_BUCKET,
+            'root': root}], 'djvu-reading-upload', {})
+        reader_lifecycle.validate_processing_handoff(record, {'pages': [{'r': root + '/pages/page-000001.png'}]})
+        with self.assertRaisesRegex(ValueError, 'does not belong'):
+            reader_lifecycle.validate_processing_handoff(record, {'pages': [{'r': 'objects/cc/foreign/pages/page-000001.png'}]})
+
     def test_catalog_compaction_keeps_current_and_unacked_history(self):
         catalog = {"version": 1, "kind": "reader-catalog", "current": {"generation": "new"},
                    "generations": {

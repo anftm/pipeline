@@ -108,7 +108,7 @@ def validate_processing_handoff(record: dict, result: dict) -> None:
             for key, child in value.items():
                 if key == "processing_roots":
                     continue
-                if key in {"path", "manifest", "manifest_path", "new_path", "object", "o", "i", "w", "j", "ocr_manifest"} and isinstance(child, str) \
+                if key in {"path", "manifest", "manifest_path", "new_path", "object", "o", "i", "w", "j", "r", "ocr_manifest"} and isinstance(child, str) \
                         and child.startswith(("objects/", "pages/image/", "derived/", "chapters/", "documents/", "media/", "native/")):
                     paths.add(child)
                 elif isinstance(child, (dict, list)):

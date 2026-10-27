@@ -243,6 +243,62 @@ class ReaderGcGraphTests(unittest.TestCase):
         self.assertEqual(report["buckets"][INPUT]["candidates"], ["objects/unused/ocr-input/page-000001.png"])
         self.assertEqual(report["buckets"][PDF]["candidates"], [])
 
+    def test_mixed_djvu_manifest_keeps_lossless_reading_png_separate_from_retired_ocr_input(self):
+        store = MemoryStore();source = 'a' * 64
+        root = f'objects/aa/{source}/' + 'b' * 16
+        page = root + '/pages/page-000001.png';color = root + '/pages/page-000002.jxl'
+        manifest = {'version': 2, 'kind': 'pdf-pages', 'source_sha256': source,
+            'source_format': 'djvu', 'page_count': 2, 'codec': 'mixed', 'images': [
+                {'codec': 'png', 'sha256': 'c' * 64, 'bytes': 4},
+                {'codec': 'jxl', 'sha256': 'd' * 64, 'bytes': 5}]}
+        store.put(ASSETS, SIDECAR, {'v': 1, 'f': {'repo\0book.djvu': {'s': 2, 'm': 'p',
+            'p': root + '/page-manifest.json', 'b': PDF}}})
+        store.put(PDF, root + '/page-manifest.json', manifest)
+        store.put(PDF, page, b'page');store.put(PDF, color, b'color')
+        store.put(INPUT, root + '/ocr-input/page-000001.png', b'ocr')
+        reference = gc.ReferenceGraph(store);report = reference.build()
+        self.assertTrue(report['graph_complete'], report['blockers'])
+        self.assertIn((PDF, page), reference.references)
+        self.assertIn((PDF, color), reference.references)
+        self.assertEqual(report['buckets'][PDF]['candidates'], [])
+        self.assertEqual(report['buckets'][INPUT]['candidates'], [root + '/ocr-input/page-000001.png'])
+        for changed in [{'codec': 'gif'}, {'source_format': 'pdf'},
+                        {'images': manifest['images'][:1]}, {'images': [{**manifest['images'][0], 'codec': '../png'}, manifest['images'][1]]}]:
+            store.put(PDF, root + '/page-manifest.json', {**manifest, **changed})
+            self.assertFalse(gc.ReferenceGraph(store).build()['graph_complete'])
+
+    def test_reading_png_in_render_range_uses_its_qualified_reading_bucket(self):
+        store = MemoryStore();root = 'objects/aa/book/render'
+        page = root + '/pages/page-000001.png'
+        descriptor = root + '/render-range-000001-000001.json'
+        store.put(ASSETS, 'reader-index/pdf_render_progress.json', {'version': 1, 'files': {
+            'book': {'ranges': {'000001-000001': {'path': descriptor, 'bucket': PDF}}}}})
+        store.put(PDF, descriptor, {'version': 1, 'kind': 'pdf-render-range', 'pages': [
+            {'p': 1, 'r': page, 'rbucket': PDF, 'rs': 'a' * 64, 'rb': 4}]})
+        store.put(PDF, page, b'page')
+        graph = gc.ReferenceGraph(store);report = graph.build()
+        self.assertTrue(report['graph_complete'], report['blockers'])
+        self.assertIn((PDF, page), graph.references)
+
+    def test_retiring_ocr_input_does_not_release_the_same_pages_lossless_reading_png(self):
+        store = MemoryStore();source = 'a' * 64
+        root = 'objects/aa/' + source + '/' + 'b' * 16
+        reading = root + '/pages/page-000001.png'
+        evidence = root + '/ocr-input/page-000001.png'
+        store.put(ASSETS, 'reader-index/native-djvu.json', {'resources': [
+            {'p': 1, 'r': reading, 'rs': 'c' * 64, 'rb': 4, 'rbucket': PDF,
+             'i': evidence, 'is': 'd' * 64, 'ib': 3}]})
+        store.put(ASSETS, 'reader-index/v3/retirement.json', {'version': 1, 'kind': 'reader-v3-retirement',
+            'replacement_acks': {'hf': True, 'pages': True}, 'resources': [], 'retired_paths': [],
+            'retired_inputs': {evidence: {'bucket': INPUT, 'path': evidence, 'source_sha256': source}}})
+        store.put(PDF, reading, b'page');store.put(INPUT, evidence, b'ocr')
+        graph = gc.ReferenceGraph(store);report = graph.build()
+        self.assertTrue(report['graph_complete'], report['blockers'])
+        self.assertIn((PDF, reading), graph.references)
+        self.assertNotIn((INPUT, evidence), graph.references)
+        self.assertEqual(report['buckets'][PDF]['candidates'], [])
+        self.assertEqual(report['buckets'][INPUT]['candidates'], [evidence])
+
     def test_all_ebook_extensions_and_fallback_resources_are_kept(self):
         store = MemoryStore()
         for ext in ("epub", "mobi", "azw3", "fb2", "chm"):
@@ -641,7 +697,10 @@ class ReaderGcGraphTests(unittest.TestCase):
 
     def test_scheduled_gc_is_artifact_only_without_blocking_writers(self):
         root = Path(__file__).resolve().parents[1]
-        workflow = yaml.safe_load((root / ".github/workflows/reader-gc.yml").read_text())
+        path = root / '.github/workflows/reader-gc.yml'
+        if not path.is_file() and sorted(p.name for p in (root / '.github/workflows').glob('*.yml')) == ['pdf-account-worker.yml']:
+            self.skipTest('central GC report workflow is not distributed to account workers')
+        workflow = yaml.safe_load(path.read_text())
         self.assertIn("reader-gc-report", workflow["concurrency"]["group"])
         self.assertIn("reader-sidecar", workflow["concurrency"]["group"])
         self.assertIn("record_observations", workflow["concurrency"]["group"])

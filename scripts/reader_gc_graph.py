@@ -47,12 +47,12 @@ MANAGED_PREFIXES = (
 RETAINED_PREFIXES = ("reader-index/gc/", "reader-index/reader_gc_acknowledgments.json")
 PATH_FIELDS = {
     "path", "paths", "object", "fallback", "manifest", "manifest_path", "root",
-    "new_path", "reader_assets_path", "ocr_manifest", "p", "o", "i", "w", "j",
+    "new_path", "reader_assets_path", "ocr_manifest", "p", "o", "i", "w", "j", "r",
     "c", "f", "pd", "document", "stream", "text", "resources", "inputs", "outputs",
 }
 BUCKET_FIELDS = {
     "p": "b", "o": "ob", "c": "cb", "f": "fb", "pd": "pdb",
-    "i": "ibucket", "w": "wbucket", "j": "jbucket",
+    "i": "ibucket", "w": "wbucket", "j": "jbucket", "r": "rbucket",
     "reader_assets_path": "reader_assets_bucket",
 }
 MANIFEST_KINDS = {
@@ -586,11 +586,22 @@ class ReferenceGraph:
                 if payload["kind"] == "pdf-pages":
                     root = posixpath.dirname(path)
                     codec = payload.get('codec', 'webp')
-                    if codec not in {'webp', 'jxl'}:
+                    if codec not in {'webp', 'jxl', 'png', 'mixed'}:
                         self.blockers.add(f"unknown page codec: {bucket}:{path}")
                         return False
+                    if codec in {'png', 'mixed'}:
+                        images = payload.get('images')
+                        if (payload.get('source_format') != 'djvu' or not isinstance(images, list)
+                                or len(images) != count or any(not isinstance(entry, dict)
+                                or not re.fullmatch(r'[0-9a-f]{64}', str(entry.get('sha256', '')))
+                                or type(entry.get('bytes')) is not int or entry['bytes'] < 1
+                                or codec == 'mixed' and entry.get('codec') not in {'png', 'webp', 'jxl'}
+                                for entry in images)):
+                            self.blockers.add(f'invalid mixed DjVu page resources: {bucket}:{path}')
+                            return False
                     for number in range(1, count + 1):
-                        self.mark(bucket, f"{root}/pages/page-{number:06d}.{codec}")
+                        page_codec = payload['images'][number - 1]['codec'] if codec == 'mixed' else codec
+                        self.mark(bucket, f"{root}/pages/page-{number:06d}.{page_codec}")
         return True
 
     def inventory(self, bucket):

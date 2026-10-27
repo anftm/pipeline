@@ -1,4 +1,5 @@
 import gzip
+import copy
 import hashlib
 import json
 import os
@@ -163,7 +164,18 @@ class RealDjvuTests(unittest.TestCase):
         first, second = manifest["pages"]
         self.assertEqual((first["source"], second["source"]), ("native", "ocr"))
         self.assertEqual(first["text"], "你好 world")
-        self.assertTrue(all("i" in page and "w" in page for page in manifest["pages"]))
+        self.assertIn('r', first)
+        self.assertNotIn('w', first)
+        self.assertIn('w', second)
+        self.assertTrue(all('i' in page for page in manifest['pages']))
+        with Image.open(self.root / 'bundle' / first['r']) as reading, Image.open(self.root / 'p1.pbm') as original:
+            self.assertEqual(reading.mode, '1')
+            self.assertEqual(reading.size, original.size)
+            self.assertEqual(reading.tobytes(), original.tobytes())
+        page_manifest = json.loads((self.root / 'bundle' / result['page_manifest']['path']).read_bytes())
+        self.assertEqual(page_manifest['codec'], 'mixed')
+        self.assertEqual(page_manifest['source_format'], 'djvu')
+        self.assertEqual([entry['codec'] for entry in page_manifest['images']], ['png', 'webp'])
         with Image.open(self.root / "bundle" / second["i"]) as png:
             self.assertEqual((png.size, png.mode), ((300, 200), "RGB"))
         with Image.open(self.root / "bundle" / first["i"]) as png:
@@ -177,6 +189,157 @@ class RealDjvuTests(unittest.TestCase):
         fake.write_bytes(b"%PDF-1.4 not djvu")
         with self.assertRaisesRegex(ValueError, "DjVu source bytes"):
             stages.render_book(self.item(), fake, self.root / "x")
+
+    def test_shared_bitonal_reading_is_reused_without_another_djvu_render_or_jxl_encode(self):
+        spec = self.reading_spec()
+        bundle = self.root / 'shared'
+        with patch.object(pdf_ocr, 'MIN_NATIVE_PAGE_CHARS', 3), patch.object(pdf_ocr, 'JXL_ENABLED', True):
+            result = stages.render_book(self.item(), self.source, bundle)
+        descriptor = json.loads((bundle / result['render_manifest']['path']).read_bytes())
+        for path in bundle.rglob('*'):
+            if path.is_file():
+                self.objects[(shared.PDF_PAGES_BUCKET, path.relative_to(bundle).as_posix())] = path.read_bytes()
+        spec['render_manifest'] = {**result['render_manifest'], 'bucket': shared.PDF_PAGES_BUCKET, 'role': 'provenance'}
+        bitonal = descriptor['pages'][0]
+        self.assertIn('r', bitonal)
+        self.assertNotIn('j', bitonal)
+        with patch.object(djvu_pages, 'render', side_effect=AssertionError('shared page must not render again')), \
+                patch.object(v3.reader_page_codec, 'encode_image', side_effect=AssertionError('shared page must not encode again')):
+            generated = v3.generate_previews(spec, self.read, self.root / 'v3-shared')
+        self.assertEqual([entry['codec'] for entry in generated['previews']], ['png', 'jxl'])
+        self.assertEqual(generated['previews'][0]['resource']['path'], bitonal['r'])
+        self.assertEqual(generated['previews'][0]['recipe']['policy'], 'shared-document-render-v1')
+        self.objects[(shared.PDF_PAGES_BUCKET, bitonal['r'])] = b'changed'
+        with self.assertRaisesRegex(ValueError, 'checksum'):
+            v3.generate_previews(spec, self.read, self.root / 'corrupt-shared')
+
+    def test_bitonal_reading_has_no_downscale_or_lossy_encode_and_ocr_gray_pixels_stay_identical(self):
+        directory = self.root / 'bitonal';directory.mkdir()
+        expected = self.root / 'original.png'
+        info = djvu_pages.inspect(self.raw)[0]
+        djvu_pages.render(self.source, 1, expected, info=info)
+        with patch.object(pdf_ocr, 'WEBP_MAX_DIMENSION', 100), \
+                patch.object(Image.Image, 'resize', side_effect=AssertionError('bitonal text must not downscale')):
+            png, width, height = djvu_pages.render_page(self.source, 1, directory, info=info, reader_jxl=True)
+        reading = directory / 'page-000001-reader.png'
+        with Image.open(png) as ocr, Image.open(reading) as page, Image.open(expected) as original:
+            self.assertEqual((width, height), (400, 600))
+            self.assertEqual(ocr.mode, 'L')
+            self.assertEqual(page.mode, '1')
+            self.assertEqual(page.tobytes(), original.tobytes())
+            self.assertEqual(ocr.tobytes(), original.convert('L').tobytes())
+        self.assertFalse((directory / 'page-000001-reader.ppm').exists())
+        self.assertEqual(list(directory.glob('*.webp')), [])
+
+    def test_reading_png_worker_rejects_wrong_bucket_policy_and_duplicate_or_orphaned_fields(self):
+        with patch.object(pdf_ocr, 'JXL_ENABLED', False):
+            result = stages.render_book(self.item(), self.source, self.root / 'validated')
+        original = json.loads((self.root / 'validated' / result['render_manifest']['path']).read_bytes())
+        for changed in [{'rbucket': shared.PDF_OCR_INPUT_BUCKET}, {'rbucket': None},
+                        {'w': 'redundant'}, {'j': 'redundant'}, {'rs': 'g' * 64}, {'rb': True}]:
+            manifest = copy.deepcopy(original)
+            manifest['pages'][0].update(changed)
+            with self.subTest(changed=changed), self.assertRaises(ValueError):
+                stages.validate_render(result, manifest)
+        for field in ['source_format', 'render_profile']:
+            changed = {**result, field: 'pdf'}
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                stages.validate_render(changed, {**original, field: 'pdf'})
+        with self.assertRaisesRegex(ValueError, 'qualified native DjVu'):
+            stages.validate_render(result, {**original, 'source_format': 'pdf'})
+        manifest = copy.deepcopy(original)
+        del manifest['pages'][0]['r']
+        manifest['image_rendered'] = False
+        with self.assertRaisesRegex(ValueError, 'orphaned'):
+            stages.validate_render(result, manifest)
+
+    def test_shared_reading_rejects_foreign_policy_duplicate_and_self_consistent_downscale(self):
+        spec = self.reading_spec()
+        with patch.object(pdf_ocr, 'JXL_ENABLED', False):
+            result = stages.render_book(self.item(), self.source, self.root / 'shared-validation')
+        descriptor = json.loads((self.root / 'shared-validation' / result['render_manifest']['path']).read_bytes())
+        mapping = djvu_pages.page_map(self.raw, self.sha)
+        for path in (self.root / 'shared-validation').rglob('*'):
+            if path.is_file():
+                self.objects[(shared.PDF_PAGES_BUCKET, path.relative_to(self.root / 'shared-validation').as_posix())] = path.read_bytes()
+        ref = {**result['render_manifest'], 'bucket': shared.PDF_PAGES_BUCKET, 'role': 'provenance'}
+        def adopt(value):
+            raw = json.dumps(value).encode()
+            self.objects[(ref['bucket'], ref['path'])] = raw
+            return v3.render_previews({**spec, 'render_manifest': {**ref, 'sha256': hashlib.sha256(raw).hexdigest(),
+                                      'bytes': len(raw)}}, self.read, mapping)
+        for changed in [{'rbucket': shared.PDF_OCR_INPUT_BUCKET}, {'rbucket': None}, {'r': None},
+                        {'j': 'duplicate'}, {'width': 200}, {'height': 300}]:
+            value = copy.deepcopy(descriptor)
+            value['pages'][0].update(changed)
+            with self.subTest(changed=changed), self.assertRaises((ValueError, TypeError)):
+                adopt(value)
+        for changed in [{'source_format': None}, {'render_profile': 'unversioned'},
+                        {'render_profile': descriptor['render_profile'] + '-not-the-policy'}]:
+            with self.subTest(changed=changed), self.assertRaises(ValueError):
+                adopt({**descriptor, **changed})
+        value = copy.deepcopy(descriptor)
+        for field in ('r', 'rs', 'rb', 'rbucket'):
+            del value['pages'][0][field]
+        with self.assertRaisesRegex(ValueError, 'lacks its reading PNG'):
+            adopt(value)
+        value = copy.deepcopy(descriptor)
+        image_path = self.root / 'small.png'
+        Image.new('1', (200, 300), 1).save(image_path)
+        raw = image_path.read_bytes()
+        page = value['pages'][0]
+        page.update(width=200, height=300, rs=hashlib.sha256(raw).hexdigest(), rb=len(raw))
+        self.objects[(shared.PDF_PAGES_BUCKET, page['r'])] = raw
+        with self.assertRaisesRegex(ValueError, 'native pixel geometry'):
+            adopt(value)
+
+    def test_shared_bitonal_capped_geometry_is_explicit_and_never_claims_native_dimensions(self):
+        spec = self.reading_spec()
+        with patch.object(pdf_ocr, 'MAX_PAGE_PIXELS', 60000), patch.object(pdf_ocr, 'JXL_ENABLED', False):
+            result = stages.render_book(self.item(), self.source, self.root / 'capped-shared')
+        render = json.loads((self.root / 'capped-shared' / result['render_manifest']['path']).read_bytes())
+        for path in (self.root / 'capped-shared').rglob('*'):
+            if path.is_file():
+                self.objects[(shared.PDF_PAGES_BUCKET, path.relative_to(self.root / 'capped-shared').as_posix())] = path.read_bytes()
+        spec['render_manifest'] = {**result['render_manifest'], 'bucket': shared.PDF_PAGES_BUCKET, 'role': 'provenance'}
+        previews = v3.render_previews(spec, self.read, djvu_pages.page_map(self.raw, self.sha))
+        bitonal = previews[1]
+        self.assertLessEqual(bitonal['width'] * bitonal['height'], 60000)
+        self.assertNotEqual([bitonal['width'], bitonal['height']], [400, 600])
+        self.assertEqual([bitonal['width'], bitonal['height']], [render['pages'][0]['width'], render['pages'][0]['height']])
+        self.assertIn('maxpix-60000', bitonal['recipe']['render_profile'])
+
+    def test_range_resume_and_upload_keep_reading_png_and_ocr_in_separate_buckets(self):
+        bundle = self.root / 'range'
+        with patch.object(pdf_ocr, 'JXL_ENABLED', False):
+            result = stages.render_book({**self.item(), 'start': 1, 'end': 2}, self.source, bundle)
+        descriptor = json.loads((bundle / result['descriptor']['path']).read_bytes())
+        book = {**self.item(), **stages.range_identity(result), 'probe': djvu_pages.probe(self.source),
+                'classification': 'mixed', 'profile': pdf_ocr.asset_profile()}
+        reads = lambda ref, *_a: (bundle / ref['path']).read_bytes()
+        with patch.object(stages, 'read_object', side_effect=reads):
+            pages = stages.validate_range(book, 1, 2, result['descriptor'])
+            self.assertIn('r', pages[0])
+            assembled = stages.assemble_render_book(book, {'000001-000002': result['descriptor']}, bundle)
+        manifest = json.loads((bundle / assembled['page_manifest']['path']).read_bytes())
+        self.assertEqual(manifest['codec'], 'mixed')
+        uploaded = {}
+        with patch.object(shared, 'batch_bucket_files_with_retry', side_effect=lambda bucket, additions, _token:
+                          uploaded.setdefault(bucket, []).extend(remote for _local, remote in additions)), \
+                patch.object(stages, 'remote_sizes', return_value={}), patch.object(stages, 'publish_json_batch'):
+            stages.upload_objects(bundle)
+        self.assertIn(pages[0]['r'], uploaded[shared.PDF_PAGES_BUCKET])
+        self.assertNotIn(pages[0]['r'], uploaded[shared.PDF_OCR_INPUT_BUCKET])
+        self.assertIn(pages[0]['i'], uploaded[shared.PDF_OCR_INPUT_BUCKET])
+        self.assertNotIn(pages[0]['i'], uploaded[shared.PDF_PAGES_BUCKET])
+
+    def test_bitonal_fallback_at_600dpi_preserves_native_samples_instead_of_halving_resolution(self):
+        spec = self.reading_spec()
+        generated = v3.generate_previews(spec, self.read, self.root / 'native', start=1, end=1, dpi=150)
+        first = generated['previews'][0]
+        self.assertEqual((first['width'], first['height']), (400, 600))
+        self.assertEqual(first['recipe']['actual_scale'], 1.)
+        self.assertEqual(first['recipe']['native_dpi'], 600)
 
     def test_plan_inspects_native_or_keeps_pdf_magic_on_derived_path(self):
         derived = {"key": self.item()["key"], "source_kind": "generated", "reader_assets_path":

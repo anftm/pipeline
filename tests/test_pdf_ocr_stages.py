@@ -945,6 +945,29 @@ class PdfOcrStagesTests(unittest.TestCase):
             pending = stages.plan_images({result["key"]: altered}, {result["key"]: old}, {})
             self.assertEqual(pending["total_ocr_pages"], 1)
 
+    def test_lossless_reading_png_refresh_preserves_failed_ocr_checkpoint_without_rerun_or_relabel(self):
+        source = 'a' * 64
+        root = 'objects/aa/' + source + '/' + 'b' * 16
+        image = {'p': 1, 'source': 'ocr', 'i': root + '/ocr-input/page-000001.png',
+                 'is': 'c' * 64, 'ib': 30, 'width': 400, 'height': 600,
+                 'r': root + '/pages/page-000001.png', 'rs': 'd' * 64, 'rb': 20,
+                 'rbucket': stages.shared.PDF_PAGES_BUCKET}
+        profile = 'original-model-quality-v1-layout-v2-matching'
+        prior = {key: value for key, value in image.items() if key not in {'r', 'rs', 'rb', 'rbucket'}}
+        prior.update(j=root + '/pages/page-000001.jxl', js='e' * 64, jb=50,
+                     o=root + '/ocr/page-000001.json.gz', os='f' * 64, ob=100,
+                     text='Literal failed recognition', text_spans=[], layout={}, chars=26,
+                     recognition={'backend': 'original-model'}, quality_check={'status': 'failed', 'issues': ['unresolved']})
+        previous = {'source_sha256': source, 'profile': profile, 'pages': {'1': prior}}
+        with patch.object(pdf_ocr, 'ocr_page', side_effect=AssertionError('page image refresh must not rerun OCR')):
+            saved = stages.reuse_progress_pages(previous, {'source_sha256': source, 'profile': profile}, [image])
+        self.assertEqual(saved['1']['r'], image['r'])
+        self.assertNotIn('j', saved['1'])
+        self.assertEqual(saved['1']['o'], prior['o'])
+        self.assertEqual(saved['1']['text'], prior['text'])
+        self.assertEqual(saved['1']['recognition'], prior['recognition'])
+        self.assertEqual(saved['1']['quality_check'], prior['quality_check'])
+
     def test_result_discovery_handles_one_flat_artifact_and_multiple_nested_artifacts(self):
         results = self.root / "results"
         results.mkdir()

@@ -44,7 +44,7 @@ class PublicationReviewRequired(ValueError):
 PUBLIC_OBJECT = re.compile(
     r"objects/[0-9a-f]{2}/[0-9a-f]{64}/[0-9a-f]{16}/(?:document\.pdf|document\.djvu|"
     r"reading-manifest\.json|page-map\.json\.gz|text-layer-manifest\.json|"
-    r"pages/page-[0-9]{6}\.jxl|"
+    r"pages/page-[0-9]{6}\.(?:jxl|png)|"
     r"text/(?:page-[0-9]{6}\.json\.gz|book-text\.json\.gz|search-[0-9]{6}-[0-9]{6}\.json\.gz|partition-[0-9]{6}-[0-9]{6}-manifest\.json)|"
     r"preview/(?:page-[0-9]{6}\.(?:png|webp|jpeg|svg|jxl)|partition-[0-9]{6}-[0-9]{6}-manifest\.json))")
 
