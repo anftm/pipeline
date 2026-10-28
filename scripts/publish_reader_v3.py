@@ -219,10 +219,26 @@ def disposable_evidence(ref):
             and "/ocr-input/" in ref.get("path", "") and ref["path"].endswith(".png"))
 
 
+def read_dataset_primary(ref):
+    """Read a fixed dataset revision for verification, never materialize it in a bucket."""
+    if not isinstance(ref, dict) or not isinstance(ref.get('repo'), str) or not isinstance(ref.get('path'), str):
+        raise ValueError('invalid dataset primary identity')
+    v3.validate_dataset_primary(ref, ref['repo'] + '\0' + ref['path'], ref.get('sha256'))
+    from huggingface_hub import HfApi, hf_hub_download
+    entries = HfApi().get_paths_info(ref['repo'], [ref['path']], repo_type='dataset', revision=ref['revision'])
+    if len(entries) != 1 or entries[0].size != ref['bytes']:
+        raise ValueError('pinned dataset primary size mismatch')
+    cached = hf_hub_download(ref['repo'], ref['path'], repo_type='dataset', revision=ref['revision'])
+    raw = Path(cached).read_bytes()
+    if len(raw) != ref['bytes'] or hashlib.sha256(raw).hexdigest() != ref['sha256']:
+        raise ValueError('pinned dataset primary checksum mismatch')
+    return raw
+
+
 class CandidateReader:
     def __init__(self, store, bundle=None, *, cache_bytes=128 * 1024 * 1024):
         self.store, self.bundle = store, bundle.resolve() if bundle else None
-        self.refs, self.local = {}, {}
+        self.refs, self.local, self.dataset_sources = {}, {}, {}
         self.verified = set()
         self.cache_bytes, self.cached_bytes = cache_bytes, 0
         self.cache = OrderedDict()
@@ -246,6 +262,42 @@ class CandidateReader:
         self.cached_bytes = 0
 
     def __call__(self, ref):
+        if isinstance(ref, dict) and ref.get('kind') == 'dataset-source':
+            repo, source_path = ref.get('repo'), ref.get('path')
+            if not isinstance(repo, str) or not isinstance(source_path, str):
+                raise ValueError('invalid dataset primary identity')
+            v3.validate_dataset_primary(ref, repo + '\0' + source_path, ref.get('sha256'))
+            key = (ref['repo'], ref['path'], ref['revision'])
+            cache_key = ('dataset', *key, ref['sha256'])
+            with self.lock:
+                prior = self.dataset_sources.get(key)
+                if prior is not None and prior != ref:
+                    raise ValueError('conflicting pinned dataset source')
+                self.dataset_sources[key] = dict(ref)
+                if cache_key in self.cache:
+                    self.read_stats['cache_hits'] += 1
+                    cached, size = self.cache.pop(cache_key)
+                    self.cache[cache_key] = (cached, size)
+                    return cached.read_bytes()
+            raw = read_dataset_primary(ref)
+            if len(raw) != ref['bytes'] or hashlib.sha256(raw).hexdigest() != ref['sha256']:
+                raise ValueError('pinned dataset primary checksum mismatch')
+            with self.lock:
+                prior = self.dataset_sources.get(key)
+                if prior is not None and prior != ref:
+                    raise ValueError('conflicting pinned dataset source')
+                self.read_stats['remote_reads'] += 1
+                self.read_stats['remote_bytes'] += len(raw)
+                if len(raw) <= self.cache_bytes and cache_key not in self.cache:
+                    while self.cached_bytes + len(raw) > self.cache_bytes:
+                        _, (old, size) = self.cache.popitem(last=False)
+                        old.unlink()
+                        self.cached_bytes -= size
+                    target = self.cache_directory / text.digest(cache_key)
+                    target.write_bytes(raw)
+                    self.cache[cache_key] = (target, len(raw))
+                    self.cached_bytes += len(raw)
+            return raw
         v3.resource(ref)
         if ref["role"] == "runtime" and not (
                 ref["bucket"] == shared.PDF_PAGES_BUCKET and PUBLIC_OBJECT.fullmatch(ref["path"]) or
@@ -318,7 +370,9 @@ class CandidateReader:
             payload = v3.decode(raw)
             def walk(value):
                 if isinstance(value, dict):
-                    if {"bucket", "path", "sha256", "bytes", "role"} <= value.keys():
+                    if value.get('kind') == 'dataset-source':
+                        self(value)
+                    elif {"bucket", "path", "sha256", "bytes", "role"} <= value.keys():
                         if value["path"].startswith("reader-index/v3/"):
                             index_resource(value)
                             read_index(self.store, value)
@@ -335,6 +389,28 @@ class CandidateReader:
             walk(payload)
 
 
+def reject_original_bucket_copy(reader, manifest):
+    """Block staging a local copy of a native original, including old jobs."""
+    primary = manifest.get('primary', {}).get('resource') or {}
+    if primary.get('kind') == 'dataset-source':
+        return
+    key = (primary.get('bucket'), primary.get('path'))
+    source = manifest.get('source_sha256')
+    path = primary.get('path')
+    if (key in reader.local and primary.get('sha256') == source and isinstance(source, str)
+            and isinstance(path, str)
+            and re.fullmatch(r'objects/' + source[:2] + '/' + source +
+                             r'/[0-9a-f]{16}/document\.(?:pdf|djvu)', path)):
+        raise ValueError('new original requires a pinned dataset primary, not a bucket copy')
+
+
+def require_dataset_primary_rollout(manifest, *, apply):
+    """No new external-primary publication until both Reader surfaces are ready."""
+    if (apply and manifest.get('primary', {}).get('resource', {}).get('kind') == 'dataset-source'
+            and os.environ.get('READER_DATASET_PRIMARY_ENABLED', '').strip().lower() != 'true'):
+        raise ValueError('dataset primary rollout is disabled until both Readers are verified')
+
+
 def stage(store, ref, bundle=None, *, apply=False):
     started = time.monotonic()
     validate_reading_ref(ref)
@@ -343,10 +419,14 @@ def stage(store, ref, bundle=None, *, apply=False):
     if not v3.reading_surface_ready(manifest):
         raise ValueError("promotion requires a primary PDF or DjVu without previews")
     reader.closure()
+    reject_original_bucket_copy(reader, manifest)
+    require_dataset_primary_rollout(manifest, apply=apply)
     body = {"version": 1, "kind": "reader-reading-candidate", "source_key": manifest["source_key"],
             "source_sha256": manifest["source_sha256"], "reading_generation": manifest["generation"],
             "reading": ref, "components": manifest["components"], "page_count": manifest["page_count"],
             "resources": [reader.refs[key] for key in sorted(reader.refs)]}
+    if reader.dataset_sources:
+        body['dataset_sources'] = [reader.dataset_sources[key] for key in sorted(reader.dataset_sources)]
     identity = text.digest(body)
     path = f"reader-index/v3/candidates/{identity}.json"
     raw = encode(body)
@@ -408,38 +488,29 @@ def stage(store, ref, bundle=None, *, apply=False):
 
 
 def import_primary(spec, workspace):
-    """Materialize an original PDF or native DjVu from its immutable dataset revision."""
+    """Block historical original-copy tasks; new tasks retain dataset references."""
     origin = spec.get("primary_source")
     if origin is None:
         return
-    ref = v3.resource(spec["primary"])
-    source = text.sha(spec.get("source_sha256"))
-    suffix = ".djvu" if spec.get("primary_format") == "djvu" else ".pdf"
-    if (not isinstance(origin, dict) or not isinstance(origin.get("repo"), str)
-            or not re.fullmatch(r"VoiceOfML/[A-Za-z0-9._-]+", origin["repo"])
-            or not isinstance(origin.get("revision"), str)
-            or not re.fullmatch(r"[0-9a-f]{40}", origin["revision"])
-            or not isinstance(origin.get("path"), str)
-            or any(part in {"", ".", ".."} for part in origin["path"].split("/"))
-            or "\\" in origin["path"] or not origin["path"].lower().endswith(suffix)
-            or spec.get("source_key") != origin["repo"] + "\0" + origin["path"]
-            or ref["bucket"] != shared.PDF_PAGES_BUCKET or ref["role"] != "runtime"
-            or ref["sha256"] != source or ref["bytes"] > 512 * 1024 * 1024
-            or not re.fullmatch(r"objects/" + source[:2] + "/" + source + r"/[0-9a-f]{16}/document" + re.escape(suffix), ref["path"])):
-        raise ValueError("primary import requires matching pinned original-source identity")
-    from huggingface_hub import HfApi, hf_hub_download
-    entries = HfApi().get_paths_info(origin["repo"], [origin["path"]], repo_type="dataset", revision=origin["revision"])
-    if len(entries) != 1 or entries[0].size != ref["bytes"]:
-        raise ValueError("pinned primary source size mismatch")
-    cached = hf_hub_download(origin["repo"], origin["path"], repo_type="dataset", revision=origin["revision"])
-    raw = Path(cached).read_bytes()
-    if len(raw) != ref["bytes"] or hashlib.sha256(raw).hexdigest() != source:
-        raise ValueError("pinned primary source checksum mismatch")
-    if suffix == ".djvu" and v3.djvu_pages.sniff(raw) != "djvu":
-        raise ValueError("native DjVu primary lacks DjVu magic bytes")
-    target = workspace / ref["path"]
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(raw)
+    raise ValueError('legacy original copy is retired; use a pinned dataset primary')
+
+
+def same_primary_identity(previous, proposed):
+    """Allow an old bucket copy to upgrade text without replacing that copy."""
+    if previous == proposed:
+        return True
+    if (not isinstance(previous, dict) or not isinstance(proposed, dict)
+            or proposed.get('kind') != 'dataset-source'
+            or previous.get('kind') == 'dataset-source'
+            or previous.get('sha256') != proposed.get('sha256')
+            or previous.get('bytes') != proposed.get('bytes')
+            or previous.get('role') != 'runtime'):
+        return False
+    source = proposed['sha256']
+    return bool(previous.get('bucket') == shared.PDF_PAGES_BUCKET
+                and re.fullmatch(r'objects/' + source[:2] + '/' + source +
+                                 r'/[0-9a-f]{16}/document\.(?:pdf|djvu)', previous.get('path', ''))
+                and previous['path'].rsplit('.', 1)[-1] == proposed['path'].rsplit('.', 1)[-1].lower())
 
 
 def native_ocr(spec, workspace, primary, unusable="native rebuild source is not a complete native-text PDF"):
@@ -472,6 +543,19 @@ def build_stage(store, spec, workspace, *, apply=False):
     key = spec.get("source_key")
     if not isinstance(key, str) or not key:
         raise ValueError("single-book source key required")
+    if spec.get('primary_source') is not None:
+        # Saved tasks from the former publisher would copy an original into a
+        # bucket. Reject them even if reuse_reading was also specified.
+        raise ValueError('legacy original copy is retired; use a pinned dataset primary')
+    primary = spec.get('primary')
+    if (isinstance(primary, dict) and primary.get('kind') != 'dataset-source'
+            and not spec.get('reuse_reading') and primary.get('sha256') == source
+            and isinstance(primary.get('path'), str)
+            and primary['path'].startswith(f'objects/{source[:2]}/{source}/')
+            and primary['path'].endswith(('/document.pdf', '/document.djvu'))):
+        raise ValueError('new original requires a pinned dataset primary, not a bucket copy')
+    if isinstance(primary, dict) and primary.get('kind') == 'dataset-source':
+        require_dataset_primary_rollout({'primary': {'resource': primary}}, apply=apply)
     if spec.get("direct_reading"):
         # Explicitly migrate a verified existing generation without rebuilding,
         # changing, or re-recognizing its text/correction identities.
@@ -508,8 +592,11 @@ def build_stage(store, spec, workspace, *, apply=False):
     if reuse:
         previous = v3.verify_reading(validate_reading_ref(reuse), reader, verify_historical_previews=False)
         if (previous["source_key"] != key or previous["source_sha256"] != source
-                or previous["primary"]["resource"] != spec["primary"]):
+                or not same_primary_identity(previous["primary"]["resource"], spec["primary"])):
             raise ValueError("primary reuse source mismatch")
+        # A published bucket copy stays the active primary during an additive
+        # text upgrade; never silently change routing or delete its bytes.
+        spec = {**spec, 'primary': previous['primary']['resource']}
         previews = []
     if spec.get("preview_only"):
         reading_spec = {"source_key": key, "source_sha256": source, "primary": spec["primary"],
@@ -538,8 +625,11 @@ def build_stage(store, spec, workspace, *, apply=False):
             raise ValueError("native rebuild is defined only for PDF primaries")
         if spec.get("primary", {}).get("path") is None:
             raise ValueError("native rebuild requires primary PDF")
-        primary = workspace / spec["primary"]["path"]
-        raw_ocr = native_ocr(spec, workspace, primary)
+        primary = v3.verified_primary(spec['primary'], reader, key, source)
+        with tempfile.TemporaryDirectory(prefix='reader-v3-native-source-') as directory:
+            local = Path(directory) / 'document.pdf'
+            local.write_bytes(primary)
+            raw_ocr = native_ocr(spec, workspace, local)
     else:
         raw_ocr = v3.decode(v3.verified_read(spec["ocr_manifest"], reader))
     if raw_ocr.get("source_sha256") != source:
@@ -556,7 +646,7 @@ def build_stage(store, spec, workspace, *, apply=False):
             # Converted documents were sometimes classified as scans by an older
             # probe although the derived PDF carries a complete text layer.
             # Use that layer instead of the unusable OCR; still refuse otherwise.
-            primary = v3.verified_read(spec["primary"], reader)
+            primary = v3.verified_primary(spec["primary"], reader, key, source)
             with tempfile.TemporaryDirectory(prefix="reader-v3-native-probe-") as probe_dir:
                 local = Path(probe_dir) / "document.pdf"
                 local.write_bytes(primary)
@@ -600,6 +690,7 @@ def promote(store, candidate_ref, expected_parent, *, apply=False, replace_sourc
     verified = CandidateReader(store)
     manifest = v3.verify_reading(candidate["reading"], verified)
     verified.closure()
+    require_dataset_primary_rollout(manifest, apply=apply)
     if (not v3.reading_surface_ready(manifest)
             or candidate["source_key"] != manifest["source_key"]
             or candidate["reading_generation"] != manifest["generation"]
@@ -624,6 +715,15 @@ def promote(store, candidate_ref, expected_parent, *, apply=False, replace_sourc
         if ocr.get("status") in {"ready", "skipped"} or ocr.get("ocr_manifest") or ocr.get("text_layer"):
             raise ValueError("preview-only publication cannot hide already available OCR text")
     previous_entry = old["files"].get(key)
+    primary = manifest['primary']['resource']
+    source_path = key.split('\0', 1)[-1].lower() if isinstance(key, str) else ''
+    if (not previous_entry and primary.get('kind') != 'dataset-source'
+            and primary.get('sha256') == manifest['source_sha256']
+            and source_path.endswith(('.pdf', '.djvu'))
+            and str(primary.get('path', '')).startswith(
+                f"objects/{manifest['source_sha256'][:2]}/{manifest['source_sha256']}/")
+            and str(primary.get('path', '')).endswith(('/document.pdf', '/document.djvu'))):
+        raise ValueError('staged original requires a pinned dataset primary')
     if previous_entry and not manifest.get("text_layer"):
         raise ValueError("preview-only publication cannot replace an existing reading")
     migration = bool(replace_source and previous_entry
@@ -706,12 +806,19 @@ def rollback(store, target_ref, expected_parent, *, apply=False):
     pointer, _ = current(store)
     if not pointer or pointer["generation"] != expected_parent:
         raise ValueError("rollback requires the current expected parent")
-    for key, entry in target["files"].items():
-        manifest = v3.verify_reading(entry["resource"], lambda ref: store.read_bytes(ref["bucket"], ref["path"]))
-        if manifest["source_key"] != key or manifest["generation"] != entry["reading_generation"]:
-            raise ValueError("rollback resource identity mismatch")
+    reader = CandidateReader(store)
+    try:
+        for key, entry in target["files"].items():
+            manifest = v3.verify_reading(entry["resource"], reader)
+            if manifest["source_key"] != key or manifest["generation"] != entry["reading_generation"]:
+                raise ValueError("rollback resource identity mismatch")
+        reader.closure()
+    finally:
+        reader.close()
     catalog = {"version": 3, "kind": "reader-reading-catalog", "files": target["files"],
                "parent_generation": expected_parent, "rollback_target": target["generation"]}
+    if apply and reader.dataset_sources and os.environ.get('READER_DATASET_PRIMARY_ENABLED', '').strip().lower() != 'true':
+        raise ValueError('dataset primary rollout is disabled until both Readers are verified')
     if target.get("base_sidecar"):
         catalog["base_sidecar"] = target["base_sidecar"]
     return commit_catalog(store, catalog, pointer, apply=apply)

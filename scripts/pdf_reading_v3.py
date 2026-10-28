@@ -87,6 +87,45 @@ def resource(value):
     return value
 
 
+def validate_dataset_primary(value, source_key, source_sha256):
+    """A bounded immutable upstream original, never a bucket object reference."""
+    import unicodedata
+    if (not isinstance(value, dict) or set(value) != {
+            'kind', 'repo', 'path', 'revision', 'sha256', 'bytes', 'role'}
+            or value.get('kind') != 'dataset-source' or value.get('role') != 'runtime'):
+        raise ValueError('invalid dataset primary')
+    repo, path = value.get('repo'), value.get('path')
+    if (not isinstance(repo, str) or not re.fullmatch(r'VoiceOfML/[A-Za-z0-9._-]+', repo)
+            or repo.rsplit('/', 1)[-1] in {'.', '..'}
+            or not isinstance(path, str) or not path or path.startswith('/')
+            or any(part in {'', '.', '..'} for part in path.split('/'))
+            or any(char in path for char in ('\\', '%', '?', '#'))
+            or any(ord(char) < 32 or ord(char) == 127 for char in path)
+            or any(unicodedata.category(char) == 'Cs' for char in path)
+            or not path.lower().endswith(('.pdf', '.djvu'))
+            or not isinstance(value.get('revision'), str)
+            or not re.fullmatch(r'[0-9a-f]{40}', value['revision'])
+            or type(value.get('bytes')) is not int or not 1 <= value['bytes'] <= 512 * 1024 * 1024
+            or source_key != repo + '\0' + path
+            or text.sha(value.get('sha256')) != text.sha(source_sha256)):
+        raise ValueError('invalid pinned dataset primary identity')
+    return value
+
+
+def primary_resource(value, source_key, source_sha256):
+    if isinstance(value, dict) and value.get('kind') == 'dataset-source':
+        return validate_dataset_primary(value, source_key, source_sha256)
+    return resource(value)
+
+
+def verified_primary(ref, read, source_key, source_sha256):
+    primary_resource(ref, source_key, source_sha256)
+    raw = read(ref)
+    if len(raw) != ref['bytes'] or hashlib.sha256(raw).hexdigest() != ref['sha256']:
+        raise ValueError('primary resource checksum mismatch')
+    return raw
+
+
 def verified_read(ref, read):
     resource(ref)
     raw = read(ref)
@@ -437,9 +476,11 @@ PRIMARY_KINDS = {".pdf": "pdf", ".djvu": "djvu"}
 def primary_kind(ref):
     """Reading primary kind from its public path; only PDF and native DjVu."""
     path = ref["path"]
-    kind = next((value for suffix, value in PRIMARY_KINDS.items() if path.endswith(suffix)), None)
-    if (kind is None or ref["bucket"] == shared.PDF_OCR_INPUT_BUCKET or ref["role"] != "runtime"
-            or (kind == "djvu" and not re.fullmatch(r"objects/[0-9a-f]{2}/[0-9a-f]{64}/[0-9a-f]{16}/document\.djvu", path))):
+    dataset = ref.get('kind') == 'dataset-source'
+    kind = next((value for suffix, value in PRIMARY_KINDS.items()
+                 if (path.lower() if dataset else path).endswith(suffix)), None)
+    if (kind is None or (not dataset and ref["bucket"] == shared.PDF_OCR_INPUT_BUCKET) or ref["role"] != "runtime"
+            or (kind == "djvu" and not dataset and not re.fullmatch(r"objects/[0-9a-f]{2}/[0-9a-f]{64}/[0-9a-f]{16}/document\.djvu", path))):
         raise ValueError("invalid primary reading document")
     return kind
 
@@ -484,7 +525,7 @@ def generate_previews(spec, read, bundle, *, start=1, end=None, dpi=150, max_pix
     if type(dpi) is not int or not 72 <= dpi <= 600 or type(max_pixels) is not int or max_pixels < 4096:
         raise ValueError("invalid preview render budget")
     text.sha(spec["source_sha256"])
-    primary_kind(resource(spec["primary"]))
+    primary_kind(primary_resource(spec["primary"], spec["source_key"], spec["source_sha256"]))
     return {**spec, 'previews': [], 'require_complete_preview': False}
 
 
@@ -500,15 +541,17 @@ def validate_reading_manifest(manifest):
     if type(count) is not int or count < 1:
         raise ValueError("invalid reading page count")
     resource(manifest["page_map"])
-    primary = resource(manifest["primary"]["resource"])
+    primary = primary_resource(manifest["primary"]["resource"], manifest["source_key"], manifest["source_sha256"])
     if primary_kind(primary) != manifest["primary"]["kind"]:
         raise ValueError("invalid primary reading document")
-    if manifest["primary"]["kind"] == "djvu" and (
+    if manifest["primary"]["kind"] == "djvu" and primary.get('kind') != 'dataset-source' and (
             primary["bucket"] != shared.PDF_PAGES_BUCKET
             or primary["sha256"] != manifest["source_sha256"]
             or primary["bytes"] > 512 * 1024 * 1024 or count > 10000
             or not primary["path"].startswith(f"objects/{manifest['source_sha256'][:2]}/{manifest['source_sha256']}/")):
         raise ValueError("DjVu primary/source identity mismatch")
+    if manifest['primary']['kind'] == 'djvu' and count > 10000:
+        raise ValueError('DjVu primary exceeds browser resource limits')
     preview = manifest["preview"]
     if (preview.get("page_count") != count or type(preview.get("complete")) is not bool
             or type(preview.get("ready_pages")) is not int or not 0 <= preview["ready_pages"] <= count):
@@ -545,17 +588,17 @@ def validate_reading_manifest(manifest):
 def build_reading(spec, read, bundle):
     """Build primary-PDF or native-DjVu reading without document page images."""
     source = text.sha(spec["source_sha256"])
-    primary = resource(spec["primary"])
+    primary = primary_resource(spec["primary"], spec["source_key"], source)
     try:
         kind = primary_kind(primary)
     except ValueError:
         raise ValueError("primary must be a reading-bucket PDF or native DjVu") from None
-    if kind == 'djvu' and (primary['bucket'] != shared.PDF_PAGES_BUCKET
+    if kind == 'djvu' and primary.get('kind') != 'dataset-source' and (primary['bucket'] != shared.PDF_PAGES_BUCKET
                            or primary['sha256'] != source
                            or primary['bytes'] > 512 * 1024 * 1024
                            or not primary['path'].startswith(f'objects/{source[:2]}/{source}/')):
         raise ValueError('DjVu primary/source identity mismatch')
-    mapping = primary_page_map(verified_read(primary, read), source, kind)
+    mapping = primary_page_map(verified_primary(primary, read, spec['source_key'], source), source, kind)
     count = len(mapping["pages"])
     if kind == 'djvu' and count > 10000:
         raise ValueError('DjVu primary exceeds browser resource limits')
@@ -592,11 +635,11 @@ def verify_reading(ref, read, *, read_workers=4, verify_historical_previews=True
     manifest = validate_reading_manifest(decode(verified_read(ref, read)))
     source = text.sha(manifest["source_sha256"])
     text.sha(manifest["generation"])
-    primary = resource(manifest["primary"]["resource"])
+    primary = primary_resource(manifest["primary"]["resource"], manifest['source_key'], source)
     kind = primary_kind(primary)
     if kind != manifest["primary"]["kind"]:
         raise ValueError("invalid primary reading document")
-    expected = primary_page_map(verified_read(primary, read), source, kind)
+    expected = primary_page_map(verified_primary(primary, read, manifest['source_key'], source), source, kind)
     mapping = decode(verified_read(manifest["page_map"], read))
     if mapping != expected or len(mapping["pages"]) != manifest["page_count"]:
         raise ValueError("reading page map differs from primary document")
@@ -665,8 +708,17 @@ def reading_surface_ready(manifest):
 def local_reader(directory):
     directory = directory.resolve()
     def read(ref):
-        resource(ref)
-        target = (directory / ref["bucket"] / PurePosixPath(ref["path"])).resolve()
+        if isinstance(ref, dict) and ref.get('kind') == 'dataset-source':
+            repo, path = ref.get('repo'), ref.get('path')
+            if not isinstance(repo, str) or not isinstance(path, str):
+                raise ValueError('invalid dataset primary identity')
+            validate_dataset_primary(ref, repo+'\0'+path, ref.get('sha256'))
+            # Explicit local fixture, not a remote bucket: deterministic and
+            # bounded by the same digest checks as the published primary.
+            target = (directory / 'dataset-sources' / ref['sha256']).resolve()
+        else:
+            resource(ref)
+            target = (directory / ref["bucket"] / PurePosixPath(ref["path"])).resolve()
         if not target.is_relative_to(directory):
             raise ValueError("local resource escapes bucket mirror")
         return target.read_bytes()

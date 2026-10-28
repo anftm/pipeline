@@ -123,9 +123,8 @@ def primary_spec(key, entry):
                 or not isinstance(origin["revision"], str) or not re.fullmatch(r"[0-9a-f]{40}", origin["revision"])
                 or key != origin["repo"] + "\0" + origin["path"]):
             raise ValueError("original source is not pinned")
-        root = f"objects/{source[:2]}/{source}/{text.digest({'primary': 1})[:16]}"
-        spec.update(primary_source=origin, primary={"bucket": shared.PDF_PAGES_BUCKET,
-                    "path": root + "/document" + suffix, "sha256": source, "bytes": size, "role": "runtime"})
+        primary = {"kind": "dataset-source", **origin, "sha256": source, "bytes": size, "role": "runtime"}
+        spec["primary"] = publication.v3.validate_dataset_primary(primary, key, source)
         if djvu:
             # Separate key only for DjVu, so existing PDF task identities are unchanged.
             spec.update(primary_format="djvu", reading_policy="djvu-primary-only-v1", vector_previews=False)

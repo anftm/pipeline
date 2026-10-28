@@ -95,9 +95,8 @@ class AutomationTests(unittest.TestCase):
             "reading_policy": "pdf-primary-only-v1",
             "ocr_manifest": {"bucket": "vomebook/pdf-pages-v2", "path": book["ocr_manifest"],
                              "sha256": book["ocr_manifest_sha256"], "bytes": book["ocr_manifest_bytes"], "role": "provenance"},
-            "primary_source": {"repo": book["repo"], "path": book["path"], "revision": book["source_revision"]},
-            "primary": {"bucket": "vomebook/pdf-pages-v2", "path": "objects/aa/" + "a" * 64 + "/" +
-                        auto.text.digest({"primary": 1})[:16] + "/document.pdf",
+            "primary": {"kind": "dataset-source", "repo": book["repo"], "path": book["path"],
+                        "revision": book["source_revision"],
                         "sha256": "a" * 64, "bytes": 100, "role": "runtime"}})
         pending = {k: v for k, v in book.items() if not k.startswith("ocr_manifest")}
         self.add_entries({**pending, "status": "rendered"})

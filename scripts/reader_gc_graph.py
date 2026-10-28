@@ -377,6 +377,31 @@ class ReferenceGraph:
                 self.mark(*key, external_pin=True)
             return
         if isinstance(value, dict):
+            if value.get('kind') == 'dataset-source':
+                # A dataset original is not an object in any of the GC buckets.
+                # Validate its complete bounded identity, but do not interpret
+                # its source path as a relative manifest child or deletion root.
+                # The exact path/revision belong in local provenance, not in
+                # operator logs. This stable fingerprint still distinguishes
+                # individual source identities without huge repeated paths.
+                fingerprint = hashlib.sha256(repr(value).encode('utf-8', 'backslashreplace')).hexdigest()[:16]
+                try:
+                    try:
+                        from .pdf_reading_v3 import validate_dataset_primary
+                    except ImportError:
+                        from pdf_reading_v3 import validate_dataset_primary
+                    repo, source_path = value.get('repo'), value.get('path')
+                    if not isinstance(repo, str) or not isinstance(source_path, str):
+                        raise ValueError('invalid dataset identity')
+                    validate_dataset_primary(value, repo + '\0' + source_path, value.get('sha256'))
+                except (ValueError, TypeError, KeyError):
+                    self.blockers.add(f'invalid dataset primary: {fingerprint}')
+                else:
+                    # The external primary is outside our four-bucket graph.
+                    # Until exact dataset revision availability is checked under
+                    # the collection fence, this scan is never deletion authority.
+                    self.blockers.add(f'dataset primary availability not verified: {fingerprint}')
+                return
             if value.get("kind") == "reader-v3-retirement":
                 self.walk(value.get("resources", []), bucket, origin, explicit, "resources")
                 return

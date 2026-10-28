@@ -65,6 +65,7 @@ jobs:
           GC_PRODUCER_TOKENS_JSON: ${{ secrets.GC_PRODUCER_TOKENS_JSON }}
           READER_V3_PREVIEW_FIRST: ${{ vars.READER_V3_PREVIEW_FIRST || 'false' }}
           READER_V3_DJVU_MIGRATION: ${{ vars.READER_V3_DJVU_MIGRATION || 'false' }}
+          READER_DATASET_PRIMARY_ENABLED: ${{ vars.READER_DATASET_PRIMARY_ENABLED || 'false' }}
           OCR_CORRECTION_API_BASE: ${{ secrets.OCR_CORRECTION_API_BASE }}
           OCR_CORRECTION_API_KEY: ${{ secrets.OCR_CORRECTION_API_KEY }}
           OPERATION: ${{ inputs.operation }}

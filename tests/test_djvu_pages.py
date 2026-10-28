@@ -370,13 +370,14 @@ class RealDjvuTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             v3.primary_kind(outside)
 
-    def test_v3_primary_spec_and_import_for_native_djvu(self):
+    def test_v3_primary_spec_and_verified_dataset_read_for_native_djvu(self):
         entry = {"status": "ready", "source_sha256": self.sha, "source_bytes": len(self.raw), "page_count": 2,
                  "source_kind": "upstream", "repo": "VoiceOfML/A", "path": "book.djvu",
                  "source_revision": "c" * 40, "source_format": "djvu"}
         spec, count = automation.primary_spec(self.item()["key"], entry)
         self.assertEqual((count, spec["primary_format"]), (2, "djvu"))
-        self.assertTrue(spec["primary"]["path"].endswith("/document.djvu"))
+        self.assertEqual(spec["primary"]["kind"], "dataset-source")
+        self.assertEqual(spec["primary"]["path"], "book.djvu")
         with self.assertRaises(ValueError):
             automation.primary_spec(self.item()["key"], {**entry, "source_format": None})
         cached = self.root / "cached.djvu"
@@ -384,18 +385,18 @@ class RealDjvuTests(unittest.TestCase):
         from unittest.mock import Mock
         with patch("huggingface_hub.HfApi") as api, patch("huggingface_hub.hf_hub_download", return_value=str(cached)):
             api.return_value.get_paths_info.return_value = [Mock(size=len(self.raw))]
-            publish.import_primary(spec, self.root / "ws")
-            self.assertEqual((self.root / "ws" / spec["primary"]["path"]).read_bytes(), self.raw)
+            self.assertEqual(publish.read_dataset_primary(spec['primary']), self.raw)
+            read = lambda requested: self.raw
+            reading, manifest = v3.build_reading(spec, read, self.root / 'reading')
+            self.assertEqual(manifest['primary']['resource'], spec['primary'])
+            self.assertFalse(list((self.root / 'reading').rglob('*.djvu')))
             cached.write_bytes(b"%PDF" + self.raw[4:])
-            changed = {**spec, "source_sha256": hashlib.sha256(cached.read_bytes()).hexdigest()}
-            other = changed["source_sha256"]
-            changed["primary"] = {**spec["primary"], "sha256": other,
-                                  "path": f"objects/{other[:2]}/{other}/" + spec["primary"]["path"].split("/")[3] + "/document.djvu"}
-            with self.assertRaisesRegex(ValueError, "magic"):
-                publish.import_primary(changed, self.root / "ws2")
-        self.assertTrue(publish.PUBLIC_OBJECT.fullmatch(spec["primary"]["path"]))
+            with self.assertRaisesRegex(ValueError, 'checksum mismatch'):
+                publish.read_dataset_primary(spec['primary'])
+        self.assertNotIn('primary_source', spec)
 
 
+@patch.dict(os.environ, {'READER_DATASET_PRIMARY_ENABLED':'true'})
 @unittest.skipUnless(TOOLS, "djvulibre command-line tools are not installed")
 class DjvuPromotionTests(unittest.TestCase):
     def setUp(self):
@@ -408,13 +409,15 @@ class DjvuPromotionTests(unittest.TestCase):
         self.pdf_case.bundle, self.pdf_case.store = self.bundle, self.store
         self.raw = build_djvu(Path(tempfile.mkdtemp(dir=self.bundle))).read_bytes()
         self.sha = hashlib.sha256(self.raw).hexdigest()
+        dataset_reader = patch.object(publish, 'read_dataset_primary', return_value=self.raw)
+        dataset_reader.start()
+        self.addCleanup(dataset_reader.stop)
 
     def djvu_candidate(self, key):
-        path = self.bundle / f"objects/{self.sha[:2]}/{self.sha}/{'d' * 16}/document.djvu"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(self.raw)
-        read = lambda ref: (self.bundle / ref["path"]).read_bytes()
-        primary = publish.metadata(shared.PDF_PAGES_BUCKET, path.relative_to(self.bundle).as_posix(), self.raw)
+        repo, source_path = key.split('\0')
+        primary = {'kind': 'dataset-source', 'repo': repo, 'path': source_path, 'revision': 'c'*40,
+                   'sha256': self.sha, 'bytes': len(self.raw), 'role': 'runtime'}
+        read = lambda ref: self.raw if ref.get('kind') == 'dataset-source' else (self.bundle / ref['path']).read_bytes()
         spec = v3.generate_previews({"source_key": key, "source_sha256": self.sha, "primary": primary,
                                      "require_complete_preview": True}, read, self.bundle)
         mapping = djvu_pages.page_map(self.raw, self.sha)
@@ -426,12 +429,11 @@ class DjvuPromotionTests(unittest.TestCase):
         return v3.build_reading(spec, read, self.bundle)[0]
 
     def test_native_djvu_stages_and_replaces_only_named_derived_source(self):
-        key = "repo\0book.pdf"
-        pdf = publish.stage(self.store, self.pdf_case.candidate(), self.bundle, apply=True)
+        key = "VoiceOfML/A\0book.djvu"
+        pdf = publish.stage(self.store, self.pdf_case.candidate(key=key), self.bundle, apply=True)
         first = publish.promote(self.store, pdf["candidate"], None, apply=True)
         staged = publish.stage(self.store, self.djvu_candidate(key), self.bundle, apply=True)
-        self.assertIn((shared.PDF_PAGES_BUCKET, f"objects/{self.sha[:2]}/{self.sha}/{'d' * 16}/document.djvu"),
-                      self.store.objects)
+        self.assertFalse(any(path.endswith('.djvu') for _,path in self.store.objects))
         with self.assertRaisesRegex(ValueError, "migration does not match"):
             publish.promote(self.store, staged["candidate"], first["generation"], apply=True,
                             replace_source="f" * 64)

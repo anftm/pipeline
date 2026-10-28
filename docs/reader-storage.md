@@ -128,6 +128,9 @@ state, exact run and artifacts; do not infer it from these source files.
 * Introducing dataset-source primaries requires the graph to fail closed until
   exact external source availability can be checked under the collection fence;
   four-bucket inventory alone cannot establish that a dataset revision exists.
+  Dataset-primary stage/promotion defaults to disabled via
+  `READER_DATASET_PRIMARY_ENABLED`; both deployed Reader surfaces and the
+  pinned-origin proxy must be verified before that flag is explicitly enabled.
 * Do not automatically publish OCR corrections, reset stable IDs, retire source
   evidence, enable a paused producer or clean historical objects as part of a
   naming/architecture refactor.

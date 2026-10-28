@@ -47,6 +47,7 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_INPUT_TOKEN: ${{ secrets.HF_INPUT_TOKEN }}
+          READER_DATASET_PRIMARY_ENABLED: ${{ vars.READER_DATASET_PRIMARY_ENABLED || 'false' }}
           TASK_JSON: ${{ toJSON(matrix.task) }}
         run: python scripts/publish_reader_v3.py build-task --resource-json "$TASK_JSON" --output output/v3/build.json
 

@@ -104,6 +104,8 @@ def save(store, state):
 
 
 def read(store, ref):
+    if isinstance(ref, dict) and ref.get('kind') == 'dataset-source':
+        return publication.read_dataset_primary(ref)
     return store.read_bytes(ref["bucket"], ref["path"])
 
 
@@ -356,27 +358,51 @@ def prepare(store, task, workspace, cache=None):
     if current_page["generation"] != layer["generation"]:
         raise ValueError("stale correction page")
     primary = reading["primary"]["resource"]
-    cache_key = (primary["bucket"], primary["path"], primary["sha256"])
+    cache_key = ((primary['repo'], primary['path'], primary['revision'], primary['sha256'])
+                 if primary.get('kind') == 'dataset-source'
+                 else (primary['bucket'], primary['path'], primary['sha256']))
     raw = (cache or {}).get(cache_key)
     if raw is None:
-        raw = v3.verified_read(primary, lambda ref: read(store, ref))
+        raw = v3.verified_primary(primary, lambda ref: read(store, ref), reading['source_key'], reading['source_sha256'])
         if cache is not None:
             cache.clear()
             cache[cache_key] = raw
-    with pymupdf.open(stream=raw, filetype="pdf") as document:
-        if len(document) != reading["page_count"]:
-            raise ValueError("correction PDF page count mismatch")
-        page = document[task["page"] - 1]
-        scale = min(150 / 72, math.sqrt(4000000 / (page.rect.width * page.rect.height)))
-        page.get_pixmap(matrix=pymupdf.Matrix(scale, scale), alpha=False).save(workspace / "page.png")
+    if reading['primary']['kind'] == 'djvu':
+        with tempfile.TemporaryDirectory(prefix='reader-v3-correction-djvu-') as directory:
+            source = Path(directory) / 'source.djvu'
+            source.write_bytes(raw)
+            info = v3.djvu_pages.inspect(raw)
+            if len(info) != reading['page_count']:
+                raise ValueError('correction DjVu page count mismatch')
+            page_map = v3.decode(v3.verified_read(reading['page_map'], lambda ref: read(store, ref)))
+            if page_map != v3.djvu_pages.page_map(raw, reading['source_sha256']):
+                raise ValueError('correction DjVu page map differs from primary')
+            page = page_map['pages'][task['page'] - 1]
+            if (abs(layer['geometry']['width'] - page['width']) > .01
+                    or abs(layer['geometry']['height'] - page['height']) > .01):
+                raise ValueError('correction DjVu text geometry differs from primary')
+            v3.djvu_pages.render(source, task['page'], workspace / 'page.png',
+                                 info=info[task['page'] - 1], max_pixels=4000000)
+    else:
+        with pymupdf.open(stream=raw, filetype="pdf") as document:
+            if len(document) != reading["page_count"]:
+                raise ValueError("correction PDF page count mismatch")
+            page = document[task["page"] - 1]
+            scale = min(150 / 72, math.sqrt(4000000 / (page.rect.width * page.rect.height)))
+            page.get_pixmap(matrix=pymupdf.Matrix(scale, scale), alpha=False).save(workspace / "page.png")
     payload = {"page": task["page"], "issues": task["issues"], "text": layer["text"],
                "regions": [{k: r[k] for k in ("id", "text", "box", "writing_mode", "confidence")}
                            for r in layer["regions"]]}
     raw_task = publication.encode(payload)
     (workspace / "task.json").write_bytes(raw_task)
-    return layer, len(raw_task.decode()), {"primary": reading["primary"]["resource"],
-        "page": task["page"], "image_sha256": hashlib.sha256((workspace / "page.png").read_bytes()).hexdigest(),
-        "render_dpi_max": 150, "max_pixels": 4000000}
+    evidence = {"primary": reading["primary"]["resource"], "page": task["page"],
+        "image_sha256": hashlib.sha256((workspace / "page.png").read_bytes()).hexdigest(),
+        "max_pixels": 4000000}
+    if reading['primary']['kind'] == 'pdf':
+        evidence['render_dpi_max'] = 150
+    else:
+        evidence['render_policy'] = 'djvu-source-max-pixels-v1'
+    return layer, len(raw_task.decode()), evidence
 
 
 def correction_limits(options):
