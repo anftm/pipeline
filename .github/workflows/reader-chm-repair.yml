@@ -101,7 +101,7 @@ jobs:
           name: chm-source-snapshot
           path: output
       - run: tar -xzf output/chm-source-snapshot.tgz
-      - name: Reconvert from pinned original CHMs and verify source text
+      - name: Build chapter streams from pinned CHMs (EPUB is temporary)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}

@@ -10,21 +10,24 @@ import os
 import subprocess
 import tempfile
 import time
+from datetime import datetime, timezone
 import urllib.error
 import urllib.request
 from pathlib import Path
-
-from huggingface_hub import HfFileSystem, batch_bucket_files
 
 try:
     from .convert_reader_assets import convert_tiff, validate_pdf_content
     from .pilot_office_stream import converted_output, run_libreoffice
     from .reader_assets import decode_search_payload, relative_path, source_url
+    from .reader_stream_index import publish_checkpoint, read_index
+    from .shared import hash_file as stream_file_hash
     from . import office_symbol_fonts
 except ImportError:
     from convert_reader_assets import convert_tiff, validate_pdf_content
     from pilot_office_stream import converted_output, run_libreoffice
     from reader_assets import decode_search_payload, relative_path, source_url
+    from reader_stream_index import publish_checkpoint, read_index
+    from shared import hash_file as stream_file_hash
     import office_symbol_fonts
 
 
@@ -86,13 +89,7 @@ def download(url: str, target: Path, token: str | None) -> None:
 
 
 def existing_index(bucket: str, token: str | None, root: str) -> dict:
-    try:
-        fs = HfFileSystem(token=token)
-        with fs.open(f"hf://buckets/{bucket}/{root}/index.json", "rb") as stream:
-            data = json.loads(stream.read().decode("utf-8"))
-        return data if isinstance(data, dict) and isinstance(data.get("files"), list) else {"files": []}
-    except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError):
-        return {"files": []}
+    return read_index(bucket, f"{root}/index.json", token, "static-pdf-stream-index")
 
 
 def records(path: Path, revisions: dict, extension: str) -> list[dict]:
@@ -176,13 +173,15 @@ def main() -> int:
     token = os.environ.get("HF_TOKEN")
     revisions = json.loads(args.revisions.read_text(encoding="utf-8"))
     selected = records(args.search_data, revisions, extension)
-    entries, uploads, failures = [], {}, {}
+    entries, failures = [], {}
     with tempfile.TemporaryDirectory(prefix="reader-static-pdf-") as directory:
         root = Path(directory)
-        by_category = {}
+        by_category, category_uploads, planned = {}, {}, {}
         for number, item in enumerate(selected):
             category = f"documents/pdf/{item['extension']}"
-            old = existing_index(args.bucket, token, category)
+            if category not in planned:
+                planned[category] = existing_index(args.bucket, token, category)
+            old = planned[category]
             key = f"{item['repo']}\0{item['path']}"
             handled = list(old.get("files", []))
             if not args.retry_failures:
@@ -191,16 +190,24 @@ def main() -> int:
                     and (item['extension'] != 'pptx' or e.get('conversion_profile') == office_symbol_fonts.PROFILE)
                    for e in handled if isinstance(e, dict)):
                 continue
+            attempted_at = datetime.now(timezone.utc).isoformat()
             try:
                 entry, files = build(item, root / str(number), token)
             except Exception as error:
                 failures[key] = {"key": key, "repo": item["repo"], "path": item["path"],
                                   "extension": item["extension"], "source_revision": item["revision"],
                                   **({'conversion_profile': office_symbol_fonts.PROFILE} if item['extension'] == 'pptx' else {}),
-                                 "error": f"{type(error).__name__}: {error}"[:1000]}
+                                  "checkpointed_at": attempted_at,
+                                  "error": f"{type(error).__name__}: {error}"[:1000]}
                 print(f"failed: {item['repo']}/{item['path']}: {type(error).__name__}: {error}")
                 continue
-            entries.append(entry); by_category.setdefault(category, []).append(entry); uploads.update(files)
+            entry['checkpointed_at'] = attempted_at
+            entries.append(entry); by_category.setdefault(category, []).append(entry)
+            owned = category_uploads.setdefault(category, {})
+            for remote, local in files.items():
+                if remote in owned and stream_file_hash(Path(owned[remote])) != stream_file_hash(Path(local)):
+                    raise ValueError(f"conflicting static PDF outputs at one immutable path: {remote}")
+                owned[remote] = local
             if args.limit and len(entries) >= args.limit:
                 break
         for failure in failures.values():
@@ -210,24 +217,37 @@ def main() -> int:
             return 0
         for category, added in by_category.items():
             old = existing_index(args.bucket, token, category)
-            merged = {e.get("key"): e for e in old.get("files", []) if isinstance(e, dict)}
-            merged.update({e["key"]: e for e in added})
-            old_failures = {e.get("key"): e for e in old.get("failures", []) if isinstance(e, dict)}
-            old_failures.update({k: v for k, v in failures.items() if f"documents/pdf/{v['extension']}" == category})
-            old_failures = {k: v for k, v in old_failures.items() if k not in merged}
-            index_file = root / category.replace("/", "_") / "index.json"
-            index_file.parent.mkdir(parents=True, exist_ok=True)
-            index_file.write_text(json.dumps({"version": 1, "kind": "static-pdf-stream-index",
-                                               "files": [merged[k] for k in sorted(merged)],
-                                               "failures": [old_failures[k] for k in sorted(old_failures)]},
-                                              ensure_ascii=False, sort_keys=True, indent=2) + "\n")
-            uploads[f"{category}/index.json"] = str(index_file)
-        print(f"processed={len(entries)} failures={len(failures)} objects={len(uploads)}")
-        if args.apply:
-            batch_bucket_files(args.bucket, add=[(local, remote) for remote, local in sorted(uploads.items())], token=token)
-            print(f"published={len(uploads)}")
-        else:
-            print("report-only; pass --apply to publish")
+            category_failures = [v for v in failures.values() if f"documents/pdf/{v['extension']}" == category]
+            # Each source has its own immutable processing record and exact
+            # checkpoint. Reuse verified uploads for a shared source root.
+            for number, entry in enumerate(added):
+                current = [item for field in ('files', 'failures') for item in old.get(field, [])
+                           if item.get('key') == entry['key']]
+                if any(item.get('checkpointed_at', '') > entry['checkpointed_at'] for item in current):
+                    print(f"skipped stale static PDF result: {entry['key']}")
+                    continue
+                object_path, manifest_path = entry.get('object'), entry.get('manifest')
+                if not isinstance(object_path, str) or not isinstance(manifest_path, str):
+                    raise ValueError('static PDF entry lacks object and manifest')
+                owner = str(Path(object_path).parent)
+                if str(Path(manifest_path).parent) != owner or not owner.startswith(category + '/'):
+                    raise ValueError('static PDF manifest does not share its source root')
+                uploads = {remote: local for remote, local in category_uploads.get(category, {}).items()
+                           if str(Path(remote).parent) == owner}
+                if object_path not in uploads or manifest_path not in uploads:
+                    raise ValueError('static PDF source checkpoint is incomplete')
+                work = root / category.replace("/", "_") / str(number)
+                work.mkdir(parents=True, exist_ok=True)
+                old = publish_checkpoint(args.bucket, f"{category}/index.json", old, [entry], [],
+                                         uploads, work, token, apply=args.apply,
+                                         kind="static-pdf-stream-index")
+            if category_failures:
+                work = root / category.replace("/", "_") / 'failures'
+                work.mkdir(parents=True, exist_ok=True)
+                publish_checkpoint(args.bucket, f"{category}/index.json", old, [], category_failures,
+                                   {}, work, token, apply=args.apply, kind="static-pdf-stream-index")
+        print(f"processed={len(entries)} failures={len(failures)} "
+              f"objects={sum(len(files) for files in category_uploads.values())} apply={args.apply}")
         if args.strict and failures:
             print(f"strict static PDF conversion failed for {len(failures)} source(s)")
             return 1

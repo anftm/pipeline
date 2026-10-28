@@ -178,7 +178,7 @@ class ChmChapterPilotTests(unittest.TestCase):
         root = _parse_package_xml(raw)
         self.assertEqual(root.tag, "{urn:opf}package")
 
-    def test_chm_publishes_chapter_tree_and_native_epub_fallback(self):
+    def test_chm_publishes_chapters_without_a_long_lived_epub_copy(self):
         with tempfile.TemporaryDirectory() as temporary:
             work = Path(temporary)
             source_bytes = b"source chm"
@@ -194,7 +194,8 @@ class ChmChapterPilotTests(unittest.TestCase):
                 (chapter_root / "chapters").mkdir(parents=True)
                 (chapter_root / "chapters" / "chapter-0001.xhtml").write_text("<p>body</p>")
                 (chapter_root / "epub-search-index.json.gz").write_bytes(b"search")
-                manifest = {"version": 1, "kind": "epub-chapters", "chapters": [{
+                manifest = {"version": 1, "kind": "epub-chapters",
+                    "fallback": "objects/aa/"+"b"*64+"/profile/document.epub", "chapters": [{
                     "index": 1, "title": "Book", "path": "chapters/chapter-0001.xhtml",
                     "bytes": 11, "sha256": "a" * 64,
                 }]}
@@ -213,11 +214,58 @@ class ChmChapterPilotTests(unittest.TestCase):
             self.assertEqual(entry["source_sha256"], source_digest)
             self.assertEqual(entry["source_extension"], "chm")
             self.assertEqual(entry["profile"], pilot_epub_chapters.CHM_PROFILE)
-            self.assertTrue(entry["fallback"].startswith("native/ebook/chm/"))
-            self.assertIn(hashlib.sha256(b"native epub").hexdigest(), entry["fallback"])
+            self.assertNotIn("fallback", entry)
+            self.assertNotIn("object", entry)
             self.assertTrue(any(path.endswith("chapter-manifest.json") and path.startswith("chapters/ebook/chm/")
                                 for path in uploads))
-            self.assertIn(entry["fallback"], uploads)
+            self.assertFalse(any(path.startswith("native/ebook/") for path in uploads))
+            chapter_manifest = next(local for path, local in uploads.items() if path.endswith('/chapter-manifest.json'))
+            self.assertNotIn('fallback', json.loads(Path(chapter_manifest).read_bytes()))
+
+    def test_chm_recovery_still_publishes_only_the_chapter_stream(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary)
+            item = {"repo": "VoiceOfML/Test", "path": "book.chm", "revision": "rev",
+                    "source_bytes": 10, "extension": "chm"}
+            def download(_url, target, _token):
+                target.write_bytes(b'source chm')
+            def recover(_source, target, _title):
+                target.write_bytes(b'recovered epub')
+            def build(_source, bundle):
+                bundle.mkdir(parents=True)
+                (bundle/'chapter-manifest.json').write_text(json.dumps({'chapters': [{'index':1}]}))
+                (bundle/'epub-search-index.json.gz').write_bytes(b'search')
+                return {'chapters':[{'index':1}]}
+            with patch.object(pilot_epub_chapters, 'download', side_effect=download), \
+                 patch.object(pilot_epub_chapters, 'convert_item', side_effect=ValueError('failed')), \
+                 patch.object(pilot_epub_chapters, 'recover_chm', side_effect=recover), \
+                 patch.object(pilot_epub_chapters, 'build_bundle', side_effect=build):
+                entry,uploads=pilot_epub_chapters.build_one(item,work/'book',None,'vomebook/reader-assets-v2')
+            self.assertNotIn('fallback',entry)
+            self.assertNotIn('object',entry)
+            self.assertTrue(any(path.endswith('/chapter-manifest.json') for path in uploads))
+            self.assertFalse(any(path.endswith('.epub') for path in uploads))
+
+    def test_chm_reconversion_preserves_existing_fallback_reference_without_upload(self):
+        key='VoiceOfML/Test\0book.chm';fallback='native/ebook/chm/'+'a'*64+'/document.epub'
+        old={'key':key,'source_sha256':'a'*64,'fallback':fallback,'object':fallback,'fallback_sha256':'b'*64,'fallback_bytes':123}
+        fresh={'key':key,'source_sha256':'c'*64,'root':'chapters/ebook/chm/'+'c'*64+'/'+'d'*16}
+        result=pilot_epub_chapters.preserve_existing_chm_fallback({'files':[old]},fresh)
+        self.assertEqual(result['fallback'],fallback)
+        self.assertEqual(result['object'],fallback)
+        self.assertEqual(result['fallback_sha256'],'b'*64)
+        self.assertEqual(result['fallback_bytes'],123)
+        self.assertEqual(result['fallback_source_sha256'],'a'*64)
+        self.assertNotIn('fallback',fresh)
+        self.assertEqual(pilot_epub_chapters.preserve_existing_chm_fallback({'files':[]},fresh),fresh)
+        for invalid in [
+            {'files':[old,{**old}]},
+            {'files':[{**old,'object':'native/ebook/chm/'+'f'*64+'/document.epub'}]},
+            {'files':[{**old,'fallback':'native/ebook/chm/../bad'}]},
+            {'files':[{**old,'fallback_source_sha256':'f'*64}]},
+        ]:
+            with self.subTest(invalid=invalid),self.assertRaises(ValueError):
+                pilot_epub_chapters.preserve_existing_chm_fallback(invalid,fresh)
 
     def test_office_sources_share_epub_chapter_namespace_and_bound_flow(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -100,6 +100,12 @@ def stream_processing_indexes(assets_bucket: str) -> list[tuple[str, str]]:
                                            for kind in ("audio", "video", "swf")]
 
 
+def static_pdf_processing_indexes(assets_bucket: str) -> list[tuple[str, str]]:
+    """Canonical source indexes whose conversion uploads have protected roots."""
+    return [(assets_bucket, f"documents/pdf/{extension}/index.json")
+            for extension in ("ppt", "pptx", "pps", "wps", "ps")]
+
+
 def build(fs: HfFileSystem, assets_bucket: str, pdf_bucket: str, derived_path: str,
           render_path: str, ocr_path: str) -> dict:
     files = {}
@@ -214,6 +220,7 @@ def main() -> int:
         for bucket, path in [(args.pdf_bucket, args.derived_manifest),
                              (args.assets_bucket, "documents/text/index.json"),
                              *stream_processing_indexes(args.assets_bucket),
+                             *static_pdf_processing_indexes(args.assets_bucket),
                              *ebook_chapter_indexes(args.assets_bucket)]:
             try:
                 payload = read_bucket_json(path, token, bucket=bucket)

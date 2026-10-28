@@ -86,6 +86,43 @@ def verify_search(raw, manifest):
     return data
 
 
+def fallback_identity(entry, store):
+    """Read existing fallback unchanged, separating content and legacy identities.
+
+    A source-addressed historical object has no independently recorded EPUB
+    checksum. Double-reading observes stable bytes but does not prove that
+    those bytes are the original conversion, so report that limitation.
+    """
+    path = entry.get('fallback')
+    if path is None:
+        return None
+    if not isinstance(path, str):
+        raise ValueError('unexpected native fallback identity')
+    match = re.fullmatch(r'native/ebook/(epub|mobi|azw3|fb2|chm)/([0-9a-f]{64})/document\.epub', path)
+    extension = str(entry.get('source_extension') or entry.get('extension') or '').lower().lstrip('.')
+    if not match or match[1] != extension:
+        raise ValueError('unexpected native fallback identity')
+    payload = store.read_bytes(BUCKET, path)
+    if not isinstance(payload, bytes) or not payload or len(payload) > MAX_BYTES:
+        raise ValueError('native fallback is empty or exceeds repair bound')
+    actual = digest(payload)
+    explicit = entry.get('fallback_sha256')
+    if explicit is not None:
+        if not isinstance(explicit, str) or not re.fullmatch(r'[0-9a-f]{64}', explicit) or actual != explicit:
+            raise ValueError('preserved fallback checksum mismatch')
+        identity = 'explicit-sha256'
+    elif actual == match[2]:
+        identity = 'content-sha256'
+    elif (match[1] == 'chm' and match[2] ==
+          (entry.get('fallback_source_sha256') or entry.get('source_sha256'))):
+        if store.read_bytes(BUCKET, path) != payload:
+            raise ValueError('legacy fallback changed during inspection')
+        identity = 'legacy-source-address-unverified'
+    else:
+        raise ValueError('preserved fallback checksum mismatch')
+    return {'path': path, 'sha256': actual, 'bytes': len(payload), 'identity': identity}
+
+
 def rebuild(entry, selection, store, work):
     """Read every old object, then replace only search index/manifest locally."""
     if (entry.get("source_sha256") != selection["source_sha256"]
@@ -150,17 +187,15 @@ def rebuild(entry, selection, store, work):
     updated.pop("processing_roots", None)
     updated["search_repair"] = {"from_manifest": selection["manifest"],
         "from_manifest_sha256": selection["manifest_sha256"], "text_profile": PROFILE}
-    if entry.get("fallback"):
-        if not re.fullmatch(r"native/ebook/(epub|mobi|azw3|fb2|chm)/[0-9a-f]{64}/document.epub", entry["fallback"]):
-            raise ValueError("unexpected native fallback identity")
-        payload = store.read_bytes(BUCKET, entry["fallback"])
-        if digest(payload) != entry["fallback"].split("/")[-2]:
-            raise ValueError("preserved fallback checksum mismatch")
+    fallback = fallback_identity(entry, store)
     uploads = {new_root + "/" + p: str(bundle / p) for p in originals}
     return updated, uploads, {"key": entry["key"], "old_manifest": selection["manifest"],
         "new_manifest": updated["manifest"], "new_manifest_sha256": digest((bundle / "chapter-manifest.json").read_bytes()),
         "changed_text_chapters": changed_chapters, "chapter_and_resource_bytes_unchanged": True,
-        "fallback_unchanged": entry.get("fallback"), "files": len(originals), "old_bundle_bytes": total}
+        "fallback_unchanged": entry.get("fallback"),
+        **({'fallback_sha256': fallback['sha256'], 'fallback_bytes': fallback['bytes'],
+            'fallback_identity': fallback['identity']} if fallback else {}),
+        "files": len(originals), "old_bundle_bytes": total}
 
 
 def run(selections, store, work, *, apply=False):

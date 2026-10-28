@@ -72,6 +72,60 @@ class ChapterSearchRepairTests(unittest.TestCase):
         self.assertEqual(search['chapters'][0]['text'], 'literal &nbsp; and &#0 tail')
         self.assertEqual(manifest['search_index']['text_profile'], search['text_profile'])
 
+    def test_fallback_content_and_source_hash_conventions_are_explicit(self):
+        for old_naming in (False, True):
+            with self.subTest(old_naming=old_naming):
+                root, entry, selection, store = self.fixture()
+                payload=b'original fallback epub'; actual=repair.digest(payload)
+                address=entry['source_sha256'] if old_naming else actual
+                entry['fallback']='native/ebook/chm/'+address+'/document.epub'
+                store.values[entry['fallback']]=payload
+                fixed, uploads, receipt=repair.rebuild(entry,selection,store,root/'repair')
+                self.assertEqual(fixed['fallback'],entry['fallback'])
+                self.assertEqual(receipt['fallback_sha256'],actual)
+                self.assertEqual(receipt['fallback_identity'], 'legacy-source-address-unverified' if old_naming else 'content-sha256')
+                self.assertNotIn(entry['fallback'],uploads)
+                self.assertNotIn('fallback_sha256',fixed, 'a fresh observation is not an independently pinned checksum')
+
+    def test_fallback_corruption_or_unknown_hash_convention_blocks_repair(self):
+        for mode in ('explicit-mismatch','foreign-name','unstable-read'):
+            with self.subTest(mode=mode):
+                root, entry, selection, store = self.fixture();payload=b'original fallback epub'
+                actual=repair.digest(payload)
+                path_digest='b'*64 if mode=='foreign-name' else entry['source_sha256']
+                entry['fallback']='native/ebook/chm/'+path_digest+'/document.epub'
+                store.values[entry['fallback']]=payload
+                if mode=='explicit-mismatch':entry['fallback_sha256']='f'*64
+                if mode=='unstable-read':
+                    original=store.read_bytes;count=[0]
+                    def changing(bucket,path):
+                        if path==entry['fallback']:
+                            count[0]+=1
+                            return payload if count[0]==1 else b'changed fallback bytes'
+                        return original(bucket,path)
+                    store.read_bytes=changing
+                with self.assertRaises(ValueError):repair.rebuild(entry,selection,store,root/'repair')
+
+    def test_explicit_legacy_fallback_digest_is_independently_verified(self):
+        root, entry, selection, store=self.fixture();payload=b'legacy fallback epub'
+        entry['fallback']='native/ebook/chm/'+entry['source_sha256']+'/document.epub'
+        entry['fallback_sha256']=repair.digest(payload)
+        store.values[entry['fallback']]=payload
+        fixed,_,receipt=repair.rebuild(entry,selection,store,root/'repair')
+        self.assertEqual(fixed['fallback_sha256'],entry['fallback_sha256'])
+        self.assertEqual(receipt['fallback_identity'],'explicit-sha256')
+
+    def test_preserved_legacy_fallback_remembers_prior_source_sha_after_rebuild(self):
+        root,entry,selection,store=self.fixture();payload=b'previous source fallback'
+        old_sha='b'*64
+        entry['fallback']='native/ebook/chm/'+old_sha+'/document.epub'
+        entry['fallback_source_sha256']=old_sha
+        store.values[entry['fallback']]=payload
+        fixed,_,receipt=repair.rebuild(entry,selection,store,root/'repair')
+        self.assertEqual(fixed['fallback_source_sha256'],old_sha)
+        self.assertEqual(receipt['fallback_identity'],'legacy-source-address-unverified')
+        self.assertEqual(receipt['fallback_sha256'],repair.digest(payload))
+
     def test_corrupt_middle_resource_and_stale_selection_fail_before_publish(self):
         for corrupt in ('manifest', 'resource', 'chapter'):
             root, entry, selection, store = self.fixture()

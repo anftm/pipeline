@@ -79,6 +79,12 @@ jobs:
       fromJSON(needs.plan.outputs.matrix).include[0] != null
     runs-on: ubuntu-24.04
     timeout-minutes: 360
+    # Format indexes and processing roots must not race a full sidecar scan.
+    # Each matrix job owns one writer slot; finalize takes the same lock later.
+    concurrency:
+      group: reader-sidecar
+      cancel-in-progress: false
+      queue: max
     strategy:
       fail-fast: false
       max-parallel: 5

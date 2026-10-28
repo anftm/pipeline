@@ -168,6 +168,46 @@ def merge_index_entries(previous: dict, entries: list[dict]) -> dict[str, dict]:
     return merged
 
 
+def preserve_existing_chm_fallback(previous: dict, entry: dict) -> dict:
+    """Keep an already indexed compatibility reference without uploading it.
+
+    Chapter publication is not a retirement decision. Carry forward the exact
+    old reference and any existing explicit checksum across reconversions; do
+    not synthesize fallback metadata for a source which never had one.
+    """
+    prior = [item for item in previous.get('files', []) if isinstance(item, dict)
+             and item.get('key') == entry.get('key')]
+    if len(prior) > 1:
+        raise ValueError('duplicate existing CHM source key')
+    if not prior or not prior[0].get('fallback'):
+        return entry
+    old = prior[0]
+    path = old['fallback']
+    if (not isinstance(path, str)
+            or not re.fullmatch(r'native/ebook/chm/[0-9a-f]{64}/document\.epub', path)
+            or old.get('object') not in (None, path)):
+        raise ValueError('invalid existing CHM fallback; preserve the previous checkpoint')
+    # Some legacy names are addressed by the *old source* SHA. After a source
+    # revision changes, the current source SHA alone is no longer enough to
+    # interpret that preserved historical convention.
+    legacy_source = old.get('fallback_source_sha256')
+    address = path.split('/')[-2]
+    if legacy_source is None and address == old.get('source_sha256'):
+        legacy_source = old['source_sha256']
+    if legacy_source is not None and (not isinstance(legacy_source, str)
+            or not re.fullmatch(r'[0-9a-f]{64}', legacy_source) or legacy_source != address):
+        raise ValueError('invalid preserved CHM fallback source identity')
+    result = {**entry, 'fallback': path}
+    if 'object' in old:
+        result['object'] = old['object']
+    for field in ('fallback_sha256', 'fallback_bytes'):
+        if field in old:
+            result[field] = old[field]
+    if legacy_source is not None:
+        result['fallback_source_sha256'] = legacy_source
+    return result
+
+
 def completed_revisions(index: dict, retry_failures: bool = False, profile: str | None = None) -> dict[str, str]:
     # An entry without a recorded profile predates profile identity and must be
     # rebuilt when a profile is required; otherwise old bundles are reused.
@@ -466,7 +506,6 @@ def build_one(item: dict, work: Path, token: str | None, bucket: str) -> tuple[d
     download(source_url(item["repo"], item["revision"], item["path"]), source, token)
     source_bytes = source.read_bytes()
     source_digest = hashlib.sha256(source_bytes).hexdigest()
-    native_fallback = None
     if extension in OFFICE_EXTENSIONS:
         legacy_html = None
         if extension == "doc":
@@ -499,10 +538,15 @@ def build_one(item: dict, work: Path, token: str | None, bucket: str) -> tuple[d
             if not converted.get("chapter_manifest") or converted.get("chapter_bundle_error"):
                 raise RuntimeError(converted.get("chapter_bundle_error") or "CHM chapter stream was not produced")
             source_chapter_dir = converted_root / Path(converted["chapter_manifest"]).parent
-            native_source = converted_root / converted["path"]
             bundle = work / "bundle"
             shutil.copytree(source_chapter_dir, bundle)
             manifest = json.loads((bundle / "chapter-manifest.json").read_text(encoding="utf-8"))
+            # Old converter variants can embed a native fallback in the
+            # manifest; a chapter-only bundle must not advertise an absent file.
+            if 'fallback' in manifest:
+                manifest = {key: value for key, value in manifest.items() if key != 'fallback'}
+                (bundle / 'chapter-manifest.json').write_text(
+                    json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2) + '\n', encoding='utf-8')
         except Exception as primary_error:
             # Calibre and its CHM navigation repair are not reliable for every
             # legacy container. Recover static pages directly, then feed the
@@ -512,15 +556,12 @@ def build_one(item: dict, work: Path, token: str | None, bucket: str) -> tuple[d
                 recover_chm(source, recovered, Path(item["path"]).stem)
                 bundle = work / "bundle"
                 manifest = build_bundle(recovered, bundle)
-                native_source = recovered
                 print(f"CHM recovery fallback succeeded: {item['repo']}/{item['path']}")
             except Exception as recovery_error:
                 raise RuntimeError(
                     f"CHM conversion failed ({type(primary_error).__name__}: {primary_error}); "
                     f"recovery failed ({type(recovery_error).__name__}: {recovery_error})"
                 ) from recovery_error
-        native_digest = hashlib.sha256(native_source.read_bytes()).hexdigest()
-        native_fallback = f"native/ebook/chm/{native_digest}/document.epub"
         root_extension = extension
     else:
         chapter_source = source
@@ -538,11 +579,12 @@ def build_one(item: dict, work: Path, token: str | None, bucket: str) -> tuple[d
     else:
         version = bundle_version(bundle)
         root = f"chapters/ebook/{root_extension}/{source_digest}/{version}"
+    # The conversion EPUB is a local input to the chapter builder, not a
+    # published reader asset. Existing fallback entries remain untouched until
+    # a future explicit index update; this producer never deletes old objects.
     uploads = {}
     for path in sorted(item for item in bundle.rglob("*") if item.is_file()):
         uploads[f"{root}/{path.relative_to(bundle).as_posix()}"] = str(path)
-    if native_fallback:
-        uploads[native_fallback] = str(native_source)
     return {
         "key": f"{item['repo']}\0{item['path']}", "repo": item["repo"], "path": item["path"],
         "source_extension": extension, "extension": root_extension, "source_revision": item["revision"],
@@ -552,7 +594,6 @@ def build_one(item: dict, work: Path, token: str | None, bucket: str) -> tuple[d
         "root": root, "manifest": f"{root}/chapter-manifest.json",
         "chapter_count": len(manifest["chapters"]),
         "search_index": f"{root}/epub-search-index.json.gz",
-        **({"fallback": native_fallback, "object": native_fallback} if native_fallback else {}),
     }, uploads
 
 
@@ -630,6 +671,8 @@ def main() -> int:
                         failed += 1
                         print(f"failed: {item['repo']}/{item['path']}: {failure['error']}", flush=True)
                     else:
+                        if extension == 'chm':
+                            entry = preserve_existing_chm_fallback(previous, entry)
                         entries.append(entry)
                         uploads.update(files)
                         converted += 1
