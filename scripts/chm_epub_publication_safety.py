@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Read-only gates for an eventual two-site CHM EPUB withdrawal."""
+"""Narrow CHM EPUB retirement gates and exact, journalled batch helper.
+
+The batch helper is not an execution entry point; callers must establish the
+actual four-bucket and two-consumer barriers before invoking it.
+"""
 import json
 
 try:
@@ -292,6 +296,18 @@ def recheck_actual_graph(store, traversal, proof, rows, fence, client, plan):
     return True
 
 
+def verify_live_chm_controls(store, plan):
+    """Require every staged CHM publication control to match the exact plan."""
+    assert_all_buckets_available(store)
+    for path, expected in plan['overrides'].items():
+        if store.read_bytes(chm.ASSETS, path) != expected:
+            raise ValueError('live CHM control differs from the approved plan: ' + path)
+    for path, expected in plan['immutable'].items():
+        if store.read_bytes(chm.ASSETS, path) != expected:
+            raise ValueError('live CHM immutable replacement differs from the approved plan: ' + path)
+    return True
+
+
 def validate_preserved_catalog_roots(plan, old_catalogs, rows):
     """Every withdrawn v3 root must have an independently verified successor."""
     import gzip
@@ -321,6 +337,41 @@ def validate_preserved_catalog_roots(plan, old_catalogs, rows):
                if isinstance(mapping, dict) for value in mapping.values()):
             raise ValueError('CHM rollback replacement still contains an approved EPUB')
     return True
+
+
+def validate_old_base_routes(store, plan, old_catalogs, rows):
+    """Compare sanitized rollback bases with independently verified originals."""
+    import gzip
+    targets = {row['path'] for row in rows}
+    for generation, old_catalog in old_catalogs.items():
+        old_base = publication.pinned_base(store, old_catalog, None)
+        expected, _ = chm.sanitize_historical_v3_base(old_base, targets)
+        alias_ref = plan['rollback_aliases'][generation]
+        replacement = publication.validate_catalog(json.loads(plan['immutable'][alias_ref['path']]))
+        actual = json.loads(gzip.decompress(plan['immutable'][replacement['base_sidecar']['path']]))
+        if actual != expected:
+            raise ValueError('sanitized rollback changes preserved historical routes: ' + generation)
+    return True
+
+
+def confirm_initial_snapshot(store, plan):
+    """Capture original control hashes without accepting changes since planning."""
+    assert_all_buckets_available(store)
+    paths = set(plan['overrides']) | set(plan['immutable'])
+    values = before_values(store, paths)
+    expected = {**plan['index_hashes_before'], chm.SIDECAR: plan['sidecar_sha256_before'],
+                chm.CATALOG: plan['catalog_sha256_before']}
+    # Source pointer formatting may differ; compare decoded identity separately.
+    live_pointer, _ = publication.current(store)
+    if live_pointer != plan['v3_pointer_before']:
+        raise ValueError('Reader pointer moved after CHM planning')
+    for path, digest in expected.items():
+        if values[path]['sha256'] != digest:
+            raise ValueError('CHM control changed after planning: ' + path)
+    for path, raw in plan['immutable'].items():
+        if values[path]['present'] and values[path]['sha256'] != chm.digest(raw):
+            raise ValueError('CHM immutable replacement conflicts: ' + path)
+    return values
 
 
 def verify_exact_epub_targets(store, rows, *, workers=8):
@@ -440,3 +491,61 @@ def compare_before_write(store, path, before_digest, after):
     elif current is None or chm.digest(current) != before_digest:
         raise ValueError('CHM control changed after planning: ' + path)
     return True
+
+
+def delete_exact_epub_batches(store, rows, fence, checkpoint, *, batches=None, batch_size=100):
+    """Delete only submitted exact keys, recording partial outcomes durably."""
+    import copy
+    if not 1 <= batch_size <= 100:
+        raise ValueError('invalid CHM deletion batch size')
+    progress = copy.deepcopy(batches or [])
+    status = reconcile_epub_deletions(store, rows, progress)
+    def serializable(value):
+        return {key: item for key, item in value.items() if key != 'missing'}
+    checkpoint('reconciled', progress, serializable(status))
+    by_key = {(r['bucket'], r['path']): r for r in rows}
+    submitted = {(batch['bucket'], p) for batch in progress for p in batch['paths']}
+    remaining = [row for row in rows if (row['bucket'], row['path']) not in submitted]
+    work = list(progress)
+    work.extend({'bucket': chm.ASSETS, 'paths': [r['path'] for r in remaining[i:i + batch_size]],
+                 'status': 'new'} for i in range(0, len(remaining), batch_size))
+    for batch in work:
+        refs = [(batch['bucket'], p) for p in batch['paths']]
+        validate_delete_batch(rows, refs)
+        fence.check()
+        existing = []
+        for ref in refs:
+            row = by_key[ref]
+            try:
+                raw = store.read_bytes(*ref)
+            except FileNotFoundError:
+                if batch['status'] == 'new':
+                    raise ValueError('unsubmitted CHM EPUB disappeared before deletion')
+                continue
+            if len(raw) != row['bytes'] or chm.digest(raw) != row['sha256']:
+                raise ValueError('CHM EPUB target changed before deletion: ' + row['path'])
+            existing.append(row['path'])
+        if batch['status'] == 'new':
+            batch['status'] = 'submitted'
+            progress.append(batch)
+        checkpoint('batch-submitted', progress, serializable(status))
+        if existing:
+            store.delete(chm.ASSETS, existing)
+        assert_bucket_available(store)
+        for ref in refs:
+            try:
+                store.read_bytes(*ref)
+            except FileNotFoundError:
+                continue
+            raise ValueError('CHM EPUB remains readable after deletion: ' + ref[1])
+        batch['status'] = 'verified-absent'
+        completed = {(entry['bucket'], p) for entry in progress
+                     if entry['status'] == 'verified-absent' for p in entry['paths']}
+        status = {'confirmed_absent_objects': len(completed),
+                  'confirmed_absent_bytes': sum(by_key[key]['bytes'] for key in completed)}
+        checkpoint('batch-verified', progress, status)
+    status = reconcile_epub_deletions(store, rows, progress)
+    if status['present_objects'] or status['confirmed_absent_objects'] != len(rows):
+        raise ValueError('not every reviewed CHM EPUB is absent')
+    checkpoint('all-direct-reads-absent', progress, serializable(status))
+    return progress, serializable(status)

@@ -166,6 +166,21 @@ class ChmPublicationSafetyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'checksum mismatch'):
             safety.validate_preserved_catalog_roots(plan, {old['generation']: old}, rows)
 
+    def test_historical_base_must_preserve_every_non_chm_route(self):
+        from unittest.mock import patch
+        base = {'v': 1, 'f': {'book.pdf': {'p': 'original'}}}
+        packed = gzip.compress(publication.encode(base), mtime=0)
+        replacement = {'base_sidecar': {'path': 'snapshot'}, 'generation': 'new'}
+        plan = {'rollback_aliases': {'old': {'path': 'catalog'}},
+                'immutable': {'catalog': publication.encode(replacement), 'snapshot': packed}}
+        with patch.object(publication, 'pinned_base', return_value=base), \
+                patch.object(publication, 'validate_catalog', side_effect=lambda value: value):
+            self.assertTrue(safety.validate_old_base_routes(None, plan, {'old': {}}, []))
+            altered = {'v': 1, 'f': {'book.pdf': {'p': 'changed'}}}
+            plan['immutable']['snapshot'] = gzip.compress(publication.encode(altered), mtime=0)
+            with self.assertRaisesRegex(ValueError, 'preserved historical routes'):
+                safety.validate_old_base_routes(None, plan, {'old': {}}, [])
+
     def test_book_originals_and_chapter_resource_inventories_cannot_change(self):
         root = 'chapters/ebook/chm/' + 'a' * 64 + '/' + 'b' * 16
         before = {('dataset', 'source.chm'): ('sha', 7),
@@ -246,6 +261,18 @@ class ChmPublicationSafetyTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'root changed'):
                 safety.recheck_actual_graph(Store(), None, proof, rows, Fence(), None, self.plan)
 
+    def test_live_controls_must_equal_the_exact_approved_plan(self):
+        plan = {'overrides': {'reader-index/a.json': b'planned'},
+                'immutable': {'reader-index/snapshots/x': b'snapshot'}}
+        objects = {**plan['overrides'], **plan['immutable']}
+        class Store:
+            def assert_buckets_available(self):pass
+            def read_bytes(self, bucket, path):return objects[path]
+        self.assertTrue(safety.verify_live_chm_controls(Store(), plan))
+        objects['reader-index/a.json'] = b'foreign'
+        with self.assertRaisesRegex(ValueError, 'differs from the approved plan'):
+            safety.verify_live_chm_controls(Store(), plan)
+
     def test_exact_chm_recovery_requires_a_durable_submitted_batch(self):
         data = b'epub'
         row = {'bucket': publication.ASSETS, 'path': 'native/ebook/chm/x/document.epub',
@@ -265,6 +292,32 @@ class ChmPublicationSafetyTests(unittest.TestCase):
         self.assertEqual(safety.reconcile_epub_deletions(Store(), [row], receipt)['confirmed_absent_objects'], 1)
         with self.assertRaisesRegex(RuntimeError, 'availability'):
             safety.reconcile_epub_deletions(object(), [row], receipt)
+
+    def test_chm_delete_batches_log_before_writing_and_recover_partial_success(self):
+        data = [b'one', b'two']
+        rows = [{'bucket': publication.ASSETS, 'path': f'native/ebook/chm/{i}/document.epub',
+                 'bytes': len(raw), 'sha256': safety.chm.digest(raw)} for i, raw in enumerate(data)]
+        objects = {row['path']: raw for row, raw in zip(rows, data)}
+        class Store:
+            def assert_chm_bucket_available(self):return True
+            def read_bytes(self, bucket, path):
+                if path not in objects:raise FileNotFoundError(path)
+                return objects[path]
+            def delete(self, bucket, paths):
+                self.asserted = list(paths)
+                for path in paths:objects.pop(path, None)
+        class Fence:
+            def check(self):pass
+        receipt = [{'bucket': publication.ASSETS, 'paths': [row['path'] for row in rows],
+                    'status': 'submitted'}]
+        objects.pop(rows[0]['path'])
+        events = []
+        batches, result = safety.delete_exact_epub_batches(Store(), rows, Fence(),
+            lambda phase, batches, status: events.append((phase, copy.deepcopy(batches))), batches=receipt)
+        self.assertEqual(result['confirmed_absent_objects'], 2)
+        self.assertEqual(batches[0]['status'], 'verified-absent')
+        self.assertLess([x[0] for x in events].index('batch-submitted'),
+                        [x[0] for x in events].index('batch-verified'))
 
 
 if __name__ == '__main__':
