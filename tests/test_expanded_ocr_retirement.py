@@ -81,7 +81,7 @@ class ExpandedRetirementSimulationTests(unittest.TestCase):
         target = parent + 'page-000001.json.gz'
         unrelated_sibling = parent + 'page-000002.json.gz'
         origin = (expanded.ASSETS, 'reader-index/live-consumer.json')
-        graph = SimpleNamespace(direct={origin: {(bucket, unrelated_sibling)}}, trees=set())
+        graph = SimpleNamespace(direct={origin: {(bucket, unrelated_sibling)}}, trees=set(), tree_origins={})
         hits = expanded.external_target_origins(graph, [{'bucket': bucket, 'path': target}])
         self.assertEqual(hits[origin], {(bucket, target)})
 
@@ -89,17 +89,70 @@ class ExpandedRetirementSimulationTests(unittest.TestCase):
         bucket = expanded.PAGES
         origin = (bucket, 'objects/aa/' + 'a' * 64 + '/' + 'b' * 16 + '/text-layer-manifest.json')
         target = (bucket, 'objects/aa/' + 'a' * 64 + '/' + 'b' * 16 + '/text/page-000001.json.gz')
-        graph = SimpleNamespace(direct={origin: {target}}, trees=set())
+        graph = SimpleNamespace(direct={origin: {target}}, trees=set(), tree_origins={})
         rows = [{'bucket': b, 'path': p} for b, p in (origin, target)]
         self.assertEqual(expanded.external_target_origins(graph, rows), {})
 
-    def test_tree_root_is_a_conservative_external_protection(self):
+    def test_unknown_tree_owner_blocks_conservatively(self):
         bucket = expanded.PAGES
         root = 'objects/aa/' + 'a' * 64 + '/' + 'b' * 16
         target = root + '/text/page-000001.json.gz'
-        graph = SimpleNamespace(direct={}, trees={(bucket, root)})
+        graph = SimpleNamespace(direct={}, trees={(bucket, root)}, tree_origins={})
         hits = expanded.external_target_origins(graph, [{'bucket': bucket, 'path': target}])
-        self.assertEqual(hits[(bucket, root + '/<tree-protection>')], {(bucket, target)})
+        self.assertEqual(hits[(bucket, root + '/<unknown-tree-owner>')], {(bucket, target)})
+
+    def test_internal_tree_owner_is_excluded_but_independent_owner_is_not(self):
+        bucket = expanded.PAGES
+        root = 'objects/aa/' + 'a' * 64 + '/' + 'b' * 16
+        target = root + '/text/page-000001.json.gz'
+        origin = (bucket, root + '/text-layer-manifest.json')
+        rows = [{'bucket': b, 'path': p} for b, p in (origin, (bucket, target))]
+        graph = SimpleNamespace(direct={}, trees={(bucket, root)},
+                                tree_origins={(bucket, root): {origin}})
+        self.assertEqual(expanded.external_target_origins(graph, rows), {})
+        external = (expanded.ASSETS, 'reader-index/audit.json')
+        graph.tree_origins[bucket, root].add(external)
+        self.assertEqual(expanded.external_target_origins(graph, rows)[external],
+                         {origin, (bucket, target)})
+
+    def test_same_tree_records_every_owner_even_after_first_expansion(self):
+        store = MemoryStore()
+        bucket = expanded.PAGES
+        root = 'objects/aa/' + 'a' * 64 + '/' + 'b' * 16
+        one, two = root + '/ocr/page-000001.json.gz', root + '/ocr/page-000002.json.gz'
+        store.put(bucket, one, b'one')
+        store.put(bucket, two, b'two')
+        graph = expanded.OriginReferenceGraph(store)
+        for domain in expanded.graph.BUCKETS:
+            graph.set_inventory(domain, set(store.objects[domain]))
+        first = (bucket, root + '/text-review-manifest.json')
+        second = (expanded.ASSETS, 'reader-index/live-consumer.json')
+        graph.origin = first
+        graph.mark(bucket, one)
+        graph.origin = second
+        graph.mark(bucket, two)
+        self.assertEqual(graph.tree_origins[bucket, root + '/ocr'], {first, second})
+        self.assertIn(second, expanded.external_target_origins(
+            graph, [{'bucket': bucket, 'path': one}, {'bucket': first[0], 'path': first[1]}]))
+
+    def test_missing_tree_tracking_never_silently_grants_authority(self):
+        with self.assertRaisesRegex(ValueError, 'origins were not recorded'):
+            expanded.external_target_origins(SimpleNamespace(direct={}, trees=set()), [])
+
+    def test_attestation_rejects_unread_or_missing_bucket_roots(self):
+        fake = SimpleNamespace(files={b: set() for b in expanded.graph.BUCKETS},
+                               root_hashes={}, retired_roots=set())
+        fake.files[expanded.ASSETS].add('reader-index/a.json')
+        report = {'graph_complete': True, 'blockers': [], 'ambiguous_paths': []}
+        with self.assertRaisesRegex(ValueError, 'did not read every active root'):
+            expanded.attest_root_fingerprints(report, fake)
+        fake.root_hashes[(expanded.ASSETS, 'reader-index/a.json')] = 'a' * 64
+        proof = expanded.attest_root_fingerprints(report, fake)
+        self.assertEqual(len(proof['root_members']), 1)
+        self.assertEqual(proof['root_sha256'][0]['sha256'], 'a' * 64)
+        fake.files.pop(expanded.CCRD)
+        with self.assertRaisesRegex(ValueError, 'complete four-bucket'):
+            expanded.attest_root_fingerprints(report, fake)
 
 
 if __name__ == '__main__':

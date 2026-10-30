@@ -100,6 +100,26 @@ def prepare(store, client, rows):
     return plan
 
 
+def attest_root_fingerprints(report, ref_graph):
+    """Return complete root membership and immutable read-time hashes."""
+    expected_buckets = set(graph.BUCKETS)
+    if (report.get('graph_complete') is not True or report.get('blockers')
+            or report.get('ambiguous_paths') or set(ref_graph.files) != expected_buckets):
+        raise ValueError('a complete four-bucket graph is required')
+    root_members = {(bucket, path) for bucket, paths in ref_graph.files.items()
+                    for path in paths if graph.is_root(path, bucket)}
+    unrecorded = root_members - set(ref_graph.root_hashes) - ref_graph.retired_roots
+    if unrecorded:
+        raise ValueError('the complete graph did not read every active root')
+    return {
+        'root_members': [{'bucket': bucket, 'path': path} for bucket, path in sorted(root_members)],
+        'root_sha256': [{'bucket': bucket, 'path': path, 'sha256': digest}
+                        for (bucket, path), digest in sorted(ref_graph.root_hashes.items())],
+        'retired_root_members': [{'bucket': bucket, 'path': path}
+                                 for bucket, path in sorted(root_members & ref_graph.retired_roots)],
+    }
+
+
 def simulate(store, plan, fence, *, workers=8, deadline_minutes=300, progress=None):
     """Find remaining target pins without changing a single production object."""
     overrides = {(CCRD, PRESERVED): encode(plan['updates']['external']),
@@ -150,8 +170,8 @@ def simulate(store, plan, fence, *, workers=8, deadline_minutes=300, progress=No
             return sha(overrides[ref]) if ref in overrides else store.digest(bucket, path)
 
     fence.check()
-    ref_graph = graph.ReferenceGraph(View(), workers=workers, max_rounds=40, progress=progress,
-                                    deadline=time.monotonic() + deadline_minutes * 60)
+    ref_graph = OriginReferenceGraph(View(), workers=workers, max_rounds=40, progress=progress,
+                                     deadline=time.monotonic() + deadline_minutes * 60)
     report = ref_graph.build()
     if not report['graph_complete'] or report['blockers'] or report.get('ambiguous_paths'):
         raise ValueError('current four-bucket graph incomplete or ambiguous: ' + repr(report['blockers'][:5]))
@@ -170,14 +190,44 @@ def simulate(store, plan, fence, *, workers=8, deadline_minutes=300, progress=No
         raise ValueError('CCRD controls changed during reference simulation')
     if sha(store.read_bytes(ASSETS, exact.READER_CONSUMERS)) != plan['reader_consumer_sha256_before']:
         raise ValueError('Reader consumers changed during reference simulation')
+    attestation = attest_root_fingerprints(report, ref_graph)
     return {'kind': 'expanded-ocr-reference-simulation', 'graph_complete': True,
             'target_count': len(targets), 'retained_target_count': len(retained),
             'retained_targets': [f'{bucket}:{path}' for bucket, path in sorted(retained)],
             'remaining_origins': sorted(origins, key=lambda x: (x['bucket'], x['path'])),
             'non_target_origins': [{'bucket': b, 'path': p, 'targets': len(refs)}
                                    for (b, p), refs in sorted(external_origins.items())],
+            'tree_root_count': len(ref_graph.trees),
+            'tree_roots_with_origin': len(ref_graph.tree_origins),
+            'tree_roots_without_origin': len(ref_graph.trees - set(ref_graph.tree_origins)),
+            'origin_tracking_complete': not bool(ref_graph.trees - set(ref_graph.tree_origins)),
             'protected_non_ocr_refs': len(preserved), 'root_count': len(report['roots']),
+            **attestation,
             'deletion_authorized': False, 'remote_mutations': 0}
+
+
+class OriginReferenceGraph(graph.ReferenceGraph):
+    """Record the source of both exact and automatically expanded tree pins.
+
+    The base scanner's ``trees`` is a union: an identical directory may have
+    several independent owners, and the first expansion wins. Record every
+    request *before* the base implementation deduplicates that tree. Entries are
+    retained for old root versions as well: stale pins are conservative.
+    """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.tree_origins = {}
+
+    def mark(self, bucket, path, *, tree=False, external_pin=False):
+        if (bucket in graph.BUCKETS and isinstance(path, str) and path
+                and not path.startswith('/') and '\\' not in path and '\0' not in path
+                and not any(part in {'', '.', '..'} for part in path.split('/'))
+                and bucket != CCRD and bucket in self.files
+                and (tree or path in self.files[bucket])):
+            root = path if tree else posixpath.dirname(path)
+            if root and not graph.is_root(path):
+                self.tree_origins.setdefault((bucket, root), set()).add(self.origin)
+        return super().mark(bucket, path, tree=tree, external_pin=external_pin)
 
 
 def external_target_origins(ref_graph, rows):
@@ -189,8 +239,8 @@ def external_target_origins(ref_graph, rows):
     retiring their SCC; expand every non-target document reference in the same
     way the graph's ``mark`` implementation does.
     """
-    # Tree references are tracked separately from ``direct``; do not infer
-    # external ownership solely from the direct-origin list.
+    if not hasattr(ref_graph, 'tree_origins'):
+        raise ValueError('tree protection origins were not recorded')
     targets = {(row['bucket'], row['path']) for row in rows}
     directories = {}
     for bucket, path in targets:
@@ -216,11 +266,19 @@ def external_target_origins(ref_graph, rows):
             selected.update(directories.get(bucket, {}).get(parent, set()))
         if selected:
             hits[origin] = selected
-    # Tree roots are not recorded in ``direct`` by the scanner. Their source
-    # therefore cannot be proven here; always treat their target closure as an
-    # independent protection rather than guessing that it is target-internal.
+    # An unobserved or unowned tree remains a blocker; only a tree exclusively
+    # initiated by target documents is part of the proposed retirement SCC.
     for bucket, root in ref_graph.trees:
         closure = directories.get(bucket, {}).get(root, set())
-        if closure:
-            hits[(bucket, root + '/<tree-protection>')] = set(closure)
+        if not closure:
+            continue
+        owners = ref_graph.tree_origins.get((bucket, root))
+        if not owners:
+            hits[(bucket, root + '/<unknown-tree-owner>')] = set(closure)
+            continue
+        for owner in owners:
+            if owner is None:
+                hits[(bucket, root + '/<unknown-tree-owner>')] = set(closure)
+            elif owner not in targets:
+                hits.setdefault(owner, set()).update(closure)
     return hits
