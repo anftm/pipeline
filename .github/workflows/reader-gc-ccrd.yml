@@ -2,7 +2,8 @@ name: CCRD · GC Collect Retired Index and OCR Generations
 
 on:
   schedule:
-    - cron: '23 9 * * *'
+    # Retain independent legacy index maintenance; OCR is not collected on a
+    # schedule while its consumer is being withdrawn.
     - cron: '23 10 * * *'
   workflow_dispatch:
     inputs:
@@ -63,7 +64,7 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
           HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
-          SCOPE: ${{ github.event.schedule == '23 10 * * *' && 'legacy-generations' || inputs.scope || 'ocr' }}
+          SCOPE: ${{ github.event_name == 'schedule' && 'legacy-generations' || inputs.scope || 'ocr' }}
           APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
           KEEP_GENERATIONS: ${{ inputs.keep_generations || '2' }}
           LIMIT: ${{ inputs.limit || '0' }}

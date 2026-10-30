@@ -557,6 +557,36 @@ class ReaderGcCollectTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'exact current OCR release'):
             collector.observe_ccrd_projection(store, client)
 
+        # A detached consumer is accepted only with an exact acknowledged
+        # withdrawal receipt. Its previous pointer keeps the release graph live.
+        pointer_raw = store.read_bytes(ccrd, 'control/ocr-current.json')
+        client.get.return_value.json.return_value = {
+            'ready': True, 'ocr_release': None, 'loaded_sources': ['CCRD', 'CW', 'RMRB', 'PLA'],
+            'bucket': {'generation': 'ccrd-four-' + 'a' * 64}}
+        with self.assertRaisesRegex(ValueError, 'withdrawal receipt is missing'):
+            collector.observe_ccrd_projection(store, client)
+        withdrawal = {'version': 1, 'kind': 'ccrd-ocr-consumer', 'status': 'consumer-withdrawn',
+                      'resources': [], 'previous_generation': pointer['generation'],
+                      'pointer_sha256': hashlib.sha256(pointer_raw).hexdigest(),
+                      'base_generation': 'ccrd-four-' + 'a' * 64}
+        store.put(ccrd, 'control/ocr-consumer.json', withdrawal)
+        detached = collector.observe_ccrd_projection(store, client)
+        self.assertTrue(detached['consumer_withdrawn'])
+        self.assertEqual(detached['generation'], pointer['generation'])
+        for mutation in ('pointer', 'generation', 'base', 'resources', 'sources'):
+            with self.subTest(mutation=mutation):
+                altered = dict(withdrawal)
+                status = client.get.return_value.json.return_value
+                if mutation == 'pointer': altered['pointer_sha256'] = '0' * 64
+                elif mutation == 'generation': altered['previous_generation'] = '0' * 64
+                elif mutation == 'base': altered['base_generation'] = 'ccrd-four-' + 'f' * 64
+                elif mutation == 'resources': altered['resources'] = [pointer['release']]
+                else: status['loaded_sources'] = ['CCRD', 'CW']
+                store.put(ccrd, 'control/ocr-consumer.json', altered)
+                with self.assertRaises(ValueError):
+                    collector.observe_ccrd_projection(store, client)
+                status['loaded_sources'] = ['CCRD', 'CW', 'RMRB', 'PLA']
+
 
 if __name__ == '__main__':
     unittest.main()

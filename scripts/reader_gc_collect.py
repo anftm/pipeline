@@ -89,9 +89,29 @@ def observe_ccrd_projection(store, client):
                           headers={'Cache-Control': 'no-cache'})
     response.raise_for_status()
     status = response.json()
-    if (status.get('ready') is not True or status.get('ocr_release') != pointer['generation']
-            or release['generation'] != pointer['generation']
-            or not {'CCRD', 'CW'} <= set(status.get('loaded_sources', []))):
+    if release['generation'] != pointer['generation']:
+        raise ValueError('CCRD current release differs from its pointer')
+    if status.get('ready') is not True or not {'CCRD', 'CW'} <= set(status.get('loaded_sources', [])):
+        raise ValueError('CCRD consumer is not ready with its base sources')
+    withdrawn = status.get('ocr_release') is None
+    receipt = None
+    if withdrawn:
+        try:
+            receipt_raw = store.read_bytes(bucket, 'control/ocr-consumer.json')
+        except FileNotFoundError as error:
+            raise ValueError('CCRD OCR withdrawal receipt is missing') from error
+        receipt = json.loads(receipt_raw)
+        graph.ccrd_lifecycle.references(receipt, 'control/ocr-consumer.json')
+        if (receipt.get('status') != 'consumer-withdrawn'
+                or receipt.get('previous_generation') != pointer['generation']
+                or receipt.get('pointer_sha256') != hashlib.sha256(raw).hexdigest()
+                or receipt.get('resources') != []
+                or not {'CCRD', 'CW', 'RMRB', 'PLA'} <= set(status.get('loaded_sources', []))
+                or (status.get('bucket') or {}).get('generation') != receipt.get('base_generation')):
+            raise ValueError('CCRD OCR withdrawal receipt is stale or incomplete')
+        if store.read_bytes(bucket, 'control/ocr-consumer.json') != receipt_raw:
+            raise RuntimeError('CCRD OCR consumer receipt changed during acceptance')
+    elif status.get('ocr_release') != pointer['generation']:
         # `ocr_release` is set only after the Space pinned the exact OCR
         # activation; the source list names logical OCR repositories, not a
         # literal "OCR" database.
@@ -100,7 +120,7 @@ def observe_ccrd_projection(store, client):
         raise RuntimeError('CCRD pointer changed during consumer acceptance')
     return {'checked_url': 'https://vomebook-search.hf.space/api/index-status',
             'checked_at': lifecycle.now_iso(), 'generation': pointer['generation'], 'release': ref,
-            'projection_verified': True}
+            'projection_verified': True, 'consumer_withdrawn': withdrawn}
 
 
 def encode(payload):

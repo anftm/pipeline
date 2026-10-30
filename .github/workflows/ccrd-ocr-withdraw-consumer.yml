@@ -1,0 +1,81 @@
+name: CCRD · Withdraw OCR Search Consumer
+
+on:
+  workflow_dispatch:
+    inputs:
+      space_revision:
+        description: Exact current vomebook/Search Space commit
+        type: string
+        required: true
+      ocr_generation:
+        description: Exact currently active OCR generation SHA-256
+        type: string
+        required: true
+      ocr_release_sha256:
+        description: SHA-256 of the exact active OCR release manifest
+        type: string
+        required: true
+      base_activation_sha256:
+        description: SHA-256 of the unchanged base index activation file
+        type: string
+        required: true
+      resume_revision:
+        description: Optional exact Space commit from an interrupted withdrawal
+        type: string
+        default: ''
+      apply:
+        description: Remove the OCR activation only after validating all identities
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: read
+
+# Exactly the same lock used by ordinary CCRD publication and CCRD OCR GC.
+concurrency:
+  group: publish-ccrd-index
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  withdraw:
+    if: github.repository == 'anftm/pipeline' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    # Share the same lock as the automatic maintenance orchestrator. The job
+    # cannot overlap maintenance, yet it is not itself a Reader asset producer.
+    concurrency:
+      group: reader-global-maintenance
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - run: pip install -r scripts/requirements.txt
+      - name: Validate exact live identities and optionally withdraw OCR activation
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          SPACE_REVISION: ${{ inputs.space_revision }}
+          OCR_GENERATION: ${{ inputs.ocr_generation }}
+          OCR_RELEASE_SHA256: ${{ inputs.ocr_release_sha256 }}
+          BASE_ACTIVATION_SHA256: ${{ inputs.base_activation_sha256 }}
+          RESUME_REVISION: ${{ inputs.resume_revision }}
+          APPLY: ${{ inputs.apply }}
+        run: |
+          args=(--space-revision "$SPACE_REVISION" --ocr-generation "$OCR_GENERATION"
+                --ocr-release-sha256 "$OCR_RELEASE_SHA256" --base-activation-sha256 "$BASE_ACTIVATION_SHA256"
+                --output output/ccrd-ocr-withdrawal/receipt.json)
+          if [[ -n "$RESUME_REVISION" ]]; then args+=(--resume-revision "$RESUME_REVISION"); fi
+          if [[ "$APPLY" == true ]]; then args+=(--apply); fi
+          python -u scripts/withdraw_ccrd_ocr_consumer.py "${args[@]}"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: ccrd-ocr-consumer-withdrawal
+          path: output/ccrd-ocr-withdrawal/receipt.json
+          retention-days: 30
+          if-no-files-found: warn
