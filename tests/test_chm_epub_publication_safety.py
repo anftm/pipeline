@@ -52,6 +52,17 @@ class ChmPublicationSafetyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'unexpectedly exists'):
             safety.enforce_transition('new', b'foreign', None, b'new')
 
+    def test_book_originals_and_chapter_resource_inventories_cannot_change(self):
+        root = 'chapters/ebook/chm/' + 'a' * 64 + '/' + 'b' * 16
+        before = {('dataset', 'source.chm'): ('sha', 7),
+                  (publication.ASSETS, root + '/chapter-manifest.json'): ('manifest-sha', 5)}
+        self.assertEqual(safety.verify_originals_and_chapter_retention(before, dict(before), {root})
+                         ['unrelated_objects_verified'], 2)
+        after = dict(before)
+        after[('dataset', 'source.chm')] = ('changed', 7)
+        with self.assertRaisesRegex(ValueError, 'identity changed'):
+            safety.verify_originals_and_chapter_retention(before, after, {root})
+
 
 if __name__ == '__main__':
     unittest.main()

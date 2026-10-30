@@ -49,6 +49,22 @@ def validate_document_reset_identity(plan, reports):
             'remote_mutations': 0, 'document_collection_authorized': False}
 
 
+def verify_originals_and_chapter_retention(before, after, chapter_roots):
+    """Prove a bounded metadata transition leaves all unrelated paths intact."""
+    expected = set(before)
+    observed = set(after)
+    if expected != observed:
+        raise ValueError('unrelated object inventory changed during CHM retirement')
+    for key in expected:
+        if before[key] != after[key]:
+            raise ValueError('unrelated object identity changed during CHM retirement')
+    for root in chapter_roots:
+        if not any(path.startswith(root + '/') for bucket, path in observed if bucket == chm.ASSETS):
+            raise ValueError('preserved CHM chapter bundle disappeared')
+    return {'unrelated_objects_verified': len(expected), 'chapter_roots_verified': len(chapter_roots),
+            'remote_mutations': 0}
+
+
 def before_values(store, paths):
     """Capture exact current bytes for resumable compare-before-write planning."""
     values = {}
