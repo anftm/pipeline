@@ -283,6 +283,28 @@ def create_plan(store, client, rows, save_local):
     return plan
 
 
+def verify_saved_plan(store, client, rows, saved):
+    """Reconstruct a saved dry-run plan from current state before using it.
+
+    The durable plan is not authority by itself. Apart from observation times,
+    its complete proposed update must match a freshly checked intent, external
+    provenance set, Reader consumer receipt, and live consumer projections.
+    Partially mutated controls fail create_plan and need explicit recovery.
+    """
+    fresh = create_plan(store, client, rows, lambda _: None)
+
+    def normalize(value):
+        result = copy.deepcopy(value)
+        result.pop('created_at', None)
+        for receipt in result.get('reader_acknowledgments', {}).values():
+            receipt.pop('checked_at', None)
+        result['updates']['reader_consumers']['receipts']['ccrd'].pop('checked_at', None)
+        return result
+
+    if normalize(saved) != normalize(fresh):
+        raise ValueError('saved plan differs from the freshly verified controls and consumers')
+
+
 def post_control_hashes(plan):
     value = dict(plan['control_hashes_before'])
     value.pop(CURRENT)
@@ -313,7 +335,11 @@ def simulate_retired_graph(store, plan, fence, *, deadline_minutes=300, workers=
             return files
 
         def list_roots(self, bucket, parents):
-            roots = dict(store.list_roots(bucket, parents))
+            # The wrapped store may not have the graph's root predicate set:
+            # filter explicitly so telemetry and retired snapshots are not
+            # accidentally interpreted as new live roots by the simulation.
+            roots = {path: etag for path, etag in store.list_roots(bucket, parents).items()
+                     if graph.is_root(path, bucket)}
             for b, path in hidden:
                 if b == bucket:
                     roots.pop(path, None)
@@ -352,9 +378,9 @@ def simulate_retired_graph(store, plan, fence, *, deadline_minutes=300, workers=
     eligible_after_graph(report, ref_graph.references,
                          {(BUCKET, row['path']) for row in plan['targets']}, external)
     fence.check()
-    for ref in ref_graph.root_hashes:
-        if ref_graph.changed(ref) or ref in ref_graph.unreadable:
-            raise ValueError('reference root changed during four-bucket simulation: ' + ':'.join(ref))
+    # Re-list every root before checking fingerprints: checking previously
+    # listed ETags alone cannot detect newly added roots or a stale listing.
+    collector.verify_roots(ref_graph.store, ref_graph)
     controls, _ = inspect_roots(store, None)
     if controls != plan['control_hashes_before']:
         raise ValueError('CCRD controls changed while the reference graph was scanned')
@@ -487,9 +513,7 @@ def delete_exact(store, plan, fence, client, checkpoint):
     # revalidated against its last observed hash or listed S3 ETag.
     fence.check()
     current_status(client, plan['base_generation'])
-    for ref in reference_graph.root_hashes:
-        if reference_graph.changed(ref) or ref in reference_graph.unreadable:
-            raise ValueError('reference root changed before exact deletion: ' + ':'.join(ref))
+    collector.verify_roots(store, reference_graph)
     for row in rows:
         if row['path'] in existing:
             raw = store.read_bytes(BUCKET, row['path'])
@@ -548,14 +572,16 @@ def run(output: Path, client, *, delete=False, resume=False, graph_deadline=300,
             prior, _ = read_json(store, BUCKET, REPORT_PREFIX + 'progress.json')
             if (plan.get('kind') != 'ccrd-exact-ocr-retirement-plan' or plan.get('targets') != rows
                     or plan.get('target_config_sha256') != CONFIG_SHA
-                    or prior.get('graph', {}).get('graph_complete') is not True
-                    or prior.get('graph', {}).get('target_references') != 0
-                    or prior.get('graph', {}).get('external_provenance_references') != 2531
-                    or prior.get('phase') in {'starting', 'planning', 'four-bucket-simulation'}):
-                raise ValueError('saved run lacks an exact complete-graph retirement proof')
-            state['graph'] = prior['graph']
+                    or plan.get('generation') != GENERATION or plan.get('version') != 1):
+                raise ValueError('saved plan does not match the exact approved targets')
+            verify_saved_plan(store, client, rows, plan)
             state['resumed'] = True
-            checkpoint('resuming-after-graph')
+            state['prior_phase'] = prior.get('phase')
+            checkpoint('four-bucket-simulation')
+            # Never use a saved dry-run result as deletion authority. A resumed
+            # operation must prove the current closure with this code version.
+            state['graph'] = simulate_retired_graph(store, plan, fence, deadline_minutes=graph_deadline, workers=workers)
+            checkpoint('full-graph-verified')
         else:
             checkpoint('planning')
             plan = create_plan(store, client, rows, save_plan)

@@ -28,6 +28,12 @@ class S3NotFound(FileNotFoundError):
     pass
 
 
+# Parsed cache entries depend on graph_json's filtering semantics. Version 1
+# omitted nested text references, so it must never be reused by the corrected
+# scanner even when the underlying object's ETag is unchanged.
+GRAPH_JSON_CACHE_FORMAT = 'graph-json-v2'
+
+
 def resolver_retry_delay(error: BaseException, attempt: int) -> int:
     """Use HF's explicit reset countdown, including the response-body form."""
     response = getattr(error, "response", None)
@@ -447,7 +453,7 @@ class S3BucketStore:
             from reader_gc_stream import graph_json
         default_parser = parser is None
         if default_parser:
-            cached = self._cached(bucket, path, 'graph-json-v1')
+            cached = self._cached(bucket, path, GRAPH_JSON_CACHE_FORMAT)
             if cached:
                 return json.loads(cached[0]), cached[1]
             raw = self._cached(bucket, path, 'raw-v1')
@@ -464,7 +470,7 @@ class S3BucketStore:
                 body.close()
             self._remember_etag(bucket, path, response)
             if default_parser:
-                self._cache_read(bucket, path, 'graph-json-v1',
+                self._cache_read(bucket, path, GRAPH_JSON_CACHE_FORMAT,
                                  json.dumps(result[0], ensure_ascii=False, separators=(',', ':')).encode(), result[1])
             return result
         return retry_s3(read)

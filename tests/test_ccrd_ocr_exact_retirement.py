@@ -3,6 +3,7 @@ import gzip
 import hashlib
 import json
 from pathlib import Path
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -330,6 +331,73 @@ class ExactRetirementTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'ambiguous'):
             exact.eligible_after_graph({'graph_complete': True, 'blockers': [], 'ambiguous_paths': ['x']},
                                        {('other', 'p')}, {('bucket', 'a')}, {('other', 'p')})
+
+    def test_resume_rebuilds_graph_before_any_reference_mutation(self):
+        rows = exact.load_targets()
+        store = MemoryStore()
+        plan = {'version': 1, 'kind': 'ccrd-exact-ocr-retirement-plan',
+                'generation': exact.GENERATION, 'target_config_sha256': exact.CONFIG_SHA, 'targets': rows}
+        store.put(exact.BUCKET, exact.PLAN, plan)
+        store.put(exact.BUCKET, exact.REPORT_PREFIX + 'progress.json', {
+            'phase': 'complete', 'graph': {'graph_complete': True, 'target_references': 0,
+                                           'external_provenance_references': 2531}})
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(exact, 'assert_writer'), \
+                patch.object(exact, 'CcrdCollectionStore', return_value=store), \
+                patch.object(exact, 'GitHubProducerFence', return_value=Fence()), \
+                patch.object(exact, 'verify_saved_plan') as verify_plan, \
+                patch.object(exact, 'simulate_retired_graph', side_effect=ValueError('new scan incomplete')) as scan, \
+                patch.object(exact, 'apply_reference_retirement') as retire:
+            with self.assertRaisesRegex(ValueError, 'new scan incomplete'):
+                exact.run(Path(directory) / 'result.json', Client(), delete=True, resume=True)
+        scan.assert_called_once()
+        verify_plan.assert_called_once()
+        retire.assert_not_called()
+        self.assertEqual(store.deletions, [])
+
+    def test_saved_plan_must_match_freshly_checked_reference_updates(self):
+        saved = {'created_at': 'before', 'reader_acknowledgments': {
+            'hf': {'checked_at': 'before', 'generation': 'abc'},
+            'pages': {'checked_at': 'before', 'generation': 'abc'},
+            'ccrd': {'checked_at': 'before'}}, 'updates': {
+                'reader_consumers': {'receipts': {'ccrd': {'checked_at': 'before'}}},
+                'external': {'resources': [{'path': 'important'}]}}}
+        fresh = copy.deepcopy(saved)
+        fresh['created_at'] = 'after'
+        for receipt in fresh['reader_acknowledgments'].values():
+            receipt['checked_at'] = 'after'
+        fresh['updates']['reader_consumers']['receipts']['ccrd']['checked_at'] = 'after'
+        with patch.object(exact, 'create_plan', return_value=fresh):
+            exact.verify_saved_plan(None, None, [], saved)
+            saved['updates']['external']['resources'] = []
+            with self.assertRaisesRegex(ValueError, 'differs from the freshly verified'):
+                exact.verify_saved_plan(None, None, [], saved)
+
+    def test_new_root_after_graph_blocks_the_retirement_simulation(self):
+        store, plan, generation, intent_path, release_path, _ = self.make_fixture()
+        original = exact.collector.verify_roots
+        def add_root_and_verify(store_view, reference_graph):
+            store.put(exact.ASSETS, 'reader-index/new-root.json', {'resources': []})
+            original(store_view, reference_graph)
+        with self.helpers(generation, intent_path, release_path), \
+                patch.object(exact.collector, 'verify_roots', side_effect=add_root_and_verify):
+            with self.assertRaisesRegex(RuntimeError, 'root inventory changed'):
+                exact.simulate_retired_graph(store, plan, Fence(), deadline_minutes=1, workers=2)
+        self.assertEqual(store.deletions, [])
+
+    def test_simulation_filters_non_roots_even_if_underlying_store_lists_them(self):
+        store, plan, generation, intent_path, release_path, _ = self.make_fixture()
+        store.put(exact.ASSETS, 'reader-index/gc/progress.json', {'test': 'not a root'})
+        original = store.list_roots
+        def unfiltered(bucket, parents):
+            roots = original(bucket, parents)
+            if bucket == exact.ASSETS:
+                roots['reader-index/gc/progress.json'] = None
+            return roots
+        with self.helpers(generation, intent_path, release_path), \
+                patch.object(store, 'list_roots', side_effect=unfiltered):
+            report = exact.simulate_retired_graph(store, plan, Fence(), deadline_minutes=1, workers=2)
+        self.assertTrue(report['graph_complete'])
 
 
 if __name__ == '__main__':

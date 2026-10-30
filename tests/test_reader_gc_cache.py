@@ -45,6 +45,30 @@ class CacheTests(unittest.TestCase):
             cache.db.execute('UPDATE reads SET packed=?', (b'corrupt',))
             self.assertIsNone(cache.get('b', 'p', 'graph-json-v1', 'e'))
 
+    def test_graph_parser_never_reuses_old_cache_with_omitted_nested_references(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cache = ReadCache(Path(directory) / 'cache.sqlite3')
+            self.addCleanup(cache.close)
+            path = 'reader-index/a.json'
+            raw = json.dumps({'files': {'book': {'text': [
+                {'bucket': 'vomebook/ccrd-index', 'path': 'text/objects/x.txt'}]}}}).encode()
+            digest = hashlib.sha256(raw).hexdigest()
+            cache.put('bucket', path, 'graph-json-v1', 'etag1', b'{"files":{"book":{}}}', digest)
+            store = S3BucketStore.__new__(S3BucketStore)
+            store.read_cache = cache
+            store.object_etags = {'bucket': {path: 'etag1'}}
+            store._location = Mock(return_value=('namespace', 'bucket'))
+            client = Mock()
+            client.get_object.return_value = {'Body': io.BytesIO(raw), 'ETag': 'etag1'}
+            store._client = Mock(return_value=client)
+            parsed, observed = store.read_graph_json('bucket', path)
+            self.assertEqual(parsed['files']['book']['text'][0]['path'], 'text/objects/x.txt')
+            self.assertEqual(observed, digest)
+            client.get_object.assert_called_once()
+            parsed_again, observed_again = store.read_graph_json('bucket', path)
+            self.assertEqual((parsed_again, observed_again), (parsed, digest))
+            client.get_object.assert_called_once()
+
     def test_pacer_throttles_every_attempt_and_honors_shared_cooldown(self):
         now = [0.0]
         sleeps = []
