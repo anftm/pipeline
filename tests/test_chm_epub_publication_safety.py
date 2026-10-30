@@ -181,11 +181,48 @@ class ChmPublicationSafetyTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'unrelated resource'):
                 safety.validate_reference_handoff(before, plan, [])
 
+    def test_pre_ack_catalog_preserves_original_epub_refs_and_has_no_false_ack(self):
+        from unittest.mock import patch
+        old = {'version': 1, 'kind': 'reader-catalog', 'current': {'generation': 'old'},
+               'generations': {'old': {'generation': 'old', 'status': 'current',
+                                       'references': [{'bucket': publication.ASSETS, 'path': 'old.epub'}]}}}
+        new = copy.deepcopy(old)
+        new['current'] = {'generation': 'new'}
+        new['generations']['old'].update(status='superseded', superseded_at='2026-10-30T00:00:00Z', references=[])
+        new['generations']['new'] = {'generation': 'new', 'status': 'current', 'acks': {'hf': True, 'pages': True}}
+        pointer = {'generation': 'new'}
+        plan = {'v3_pointer_before': {'generation': 'old-v3'}, 'new_v3_generation': 'new', 'base_generation': 'new',
+                'immutable': {}, 'overrides': {safety.chm.SIDECAR: b'sidecar', safety.chm.CATALOG: publication.encode(new),
+                'reader-index/v3/current.json': publication.encode(pointer),
+                'reader-index/v3/promotions/new.json': publication.encode({'acks': {'hf': True, 'pages': True}}),
+                'reader-index/chm-epub-withdrawal-retention.json': b'retention'}}
+        objects = {safety.chm.CATALOG: publication.encode(old), safety.chm.SIDECAR: b'old-sidecar',
+                   'reader-index/v3/current.json': publication.encode(plan['v3_pointer_before'])}
+        before = {path: {'present': path in objects, 'sha256': safety.chm.digest(objects[path]) if path in objects else None}
+                  for path in plan['overrides']}
+        before[safety.chm.CATALOG]['raw'] = publication.encode(old).decode()
+        class Store:
+            def read_bytes(self, bucket, path):
+                if path not in objects:raise FileNotFoundError(path)
+                return objects[path]
+            def put_bytes(self, bucket, path, raw):objects[path] = raw
+        class Fence:
+            def check(self):pass
+        def current(store):return json.loads(objects['reader-index/v3/current.json']), {}
+        with patch.object(publication, 'current', side_effect=current):
+            staged = safety.apply_pre_ack_publication(Store(), plan, before, Fence(), lambda *_: None)
+        staged_catalog = json.loads(staged[safety.chm.CATALOG])
+        self.assertEqual(staged_catalog['generations']['old']['references'], old['generations']['old']['references'])
+        self.assertEqual(staged_catalog['generations']['new']['acks'], {'hf': False, 'pages': False})
+        self.assertEqual(json.loads(staged['reader-index/v3/promotions/new.json'])['acks'], {'hf': False, 'pages': False})
+
     def test_acknowledgment_writes_are_blocked_until_both_surfaces_accept(self):
+        from unittest.mock import patch
         bad = copy.deepcopy(self.reports)
         bad['pages']['active'] = False
-        with self.assertRaisesRegex(ValueError, 'has not accepted'):
-            safety.apply_acknowledged_controls(None, self.plan, {}, {}, bad, None, lambda *_: None)
+        with patch.object(safety, 'observe_planned_projection', return_value=bad):
+            with self.assertRaisesRegex(ValueError, 'has not accepted'):
+                safety.apply_acknowledged_controls(None, self.plan, {}, {}, None, None, lambda *_: None)
 
     def test_staged_plan_rejects_any_foreign_control(self):
         from unittest.mock import patch

@@ -371,6 +371,10 @@ def confirm_initial_snapshot(store, plan):
     for path, raw in plan['immutable'].items():
         if values[path]['present'] and values[path]['sha256'] != chm.digest(raw):
             raise ValueError('CHM immutable replacement conflicts: ' + path)
+    catalog_raw = store.read_bytes(chm.ASSETS, chm.CATALOG)
+    if chm.digest(catalog_raw) != values[chm.CATALOG]['sha256']:
+        raise ValueError('CHM base catalog changed while capturing recovery state')
+    values[chm.CATALOG]['raw'] = catalog_raw.decode('utf-8')
     return values
 
 
@@ -421,6 +425,14 @@ def apply_pre_ack_publication(store, plan, before, fence, checkpoint):
         raise ValueError('Reader pointer moved before CHM publication')
     store_immutable_replacements(store, plan, fence, checkpoint)
     catalog = json.loads(plan['overrides'][chm.CATALOG])
+    # Before both deployments acknowledge, retain the old base generation's
+    # original complete reference set and snapshot unchanged. The post-ack
+    # plan sanitizes that generation only after the consumer handoff.
+    old_catalog = json.loads(before[chm.CATALOG]['raw'].encode('utf-8'))
+    old_generation = old_catalog['current']['generation']
+    old_entry = old_catalog['generations'][old_generation]
+    catalog['generations'][old_generation] = {**old_entry, 'status': 'superseded',
+          'superseded_at': catalog['generations'][old_generation]['superseded_at']}
     for generation, entry in catalog['generations'].items():
         if generation == plan['base_generation']:
             entry['acks'] = {'hf': False, 'pages': False}
@@ -482,8 +494,9 @@ def validate_reference_handoff(before, plan, rows):
     return True
 
 
-def apply_acknowledged_controls(store, plan, before, staged, reports, fence, checkpoint):
+def apply_acknowledged_controls(store, plan, before, staged, client, fence, checkpoint):
     """After real consumer acceptance, retire only the planned CHM references."""
+    reports = observe_planned_projection(store, client, plan)
     require_projection_acceptance(plan, reports)
     journal = 'reader-index/v3/retirement.json'
     pointer = 'reader-index/v3/current.json'
