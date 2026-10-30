@@ -678,6 +678,20 @@ def simulate_complete_withdrawal(store, overrides, rows, fence, *, workers=8, de
     except ImportError:
         import reader_gc_graph as graph
         import reader_gc_stream as stream
+    class OriginReferenceGraph(graph.ReferenceGraph):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.tree_origins = {}
+
+        def mark(self, bucket, path, *, tree=False, external_pin=False):
+            import posixpath
+            if (bucket in graph.BUCKETS and isinstance(path, str) and path
+                    and bucket != graph.ccrd_lifecycle.BUCKET and bucket in self.files
+                    and (tree or path in self.files[bucket])):
+                root = path if tree else posixpath.dirname(path)
+                if root and not graph.is_root(path):
+                    self.tree_origins.setdefault((bucket, root), set()).add(self.origin)
+            return super().mark(bucket, path, tree=tree, external_pin=external_pin)
     immutable = immutable or {}
     overlay = {(ASSETS, p): raw for p, raw in {**overrides, **immutable}.items()}
     before = {}
@@ -713,7 +727,7 @@ def simulate_complete_withdrawal(store, overrides, rows, fence, *, workers=8, de
             return digest(overlay[(bucket, path)]) if (bucket, path) in overlay else store.digest(bucket, path)
 
     fence.check()
-    graph_view = graph.ReferenceGraph(View(), workers=workers, max_rounds=40,
+    graph_view = OriginReferenceGraph(View(), workers=workers, max_rounds=40,
                                       deadline=time.monotonic() + deadline_minutes * 60)
     report = graph_view.build()
     if not report['graph_complete'] or report['blockers'] or report.get('ambiguous_paths'):
@@ -722,6 +736,21 @@ def simulate_complete_withdrawal(store, overrides, rows, fence, *, workers=8, de
     retained = targets & graph_view.references
     origins = [{'bucket': b, 'path': p, 'targets': len(refs & targets)}
                for (b, p), refs in graph_view.direct.items() if refs & targets]
+    # A directory-valued reference does not appear in the generic graph's
+    # direct-edge map; report every protecting tree, including its target paths.
+    protecting_trees = []
+    for bucket, root in sorted(graph_view.trees):
+        if bucket != ASSETS or not (root.startswith(preview.PREFIX) or
+                                    preview.PREFIX.rstrip('/').startswith(root.rstrip('/') + '/')):
+            continue
+        selected = sorted(path for owner, path in retained
+                          if owner == bucket and path.startswith(root + '/'))
+        if selected:
+            protecting_trees.append({'bucket': bucket, 'root': root,
+                                     'target_count': len(selected), 'target_paths': selected,
+                                     'owners': [{'bucket': owner[0], 'path': owner[1]} if owner else None
+                                                for owner in sorted(graph_view.tree_origins.get((bucket, root), set()),
+                                                                    key=lambda owner: owner or ('', ''))]})
     fence.check()
     collector.verify_roots(graph_view.store, graph_view)
     for ref, expected in before.items():
@@ -732,7 +761,9 @@ def simulate_complete_withdrawal(store, overrides, rows, fence, *, workers=8, de
         if actual != expected:
             raise ValueError('CHM controls changed during simulated graph traversal')
     return {'graph_complete': True, 'target_count': len(targets), 'retained_targets': len(retained),
-            'origins': origins, 'roots': len(report['roots']), 'remote_mutations': 0,
+            'retained_target_paths': [{'bucket': b, 'path': p} for b, p in sorted(retained)],
+            'protecting_trees': protecting_trees, 'origins': origins,
+            'roots': len(report['roots']), 'remote_mutations': 0,
             'deletion_authorized': False}
 
 
