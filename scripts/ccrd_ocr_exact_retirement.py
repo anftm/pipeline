@@ -197,7 +197,7 @@ def inspect_roots(store, reader_ref, expected_controls=None, require_initial=Tru
     return digests, payloads
 
 
-def create_plan(store, client, rows, save_local):
+def create_plan(store, client, rows, save_local, *, expected_reader_consumer_sha=READER_CONSUMERS_INITIAL_SHA):
     controls, payloads = inspect_roots(store, None)
     for path, expected in INITIAL_HASHES.items():
         if controls.get(path) != expected:
@@ -235,7 +235,7 @@ def create_plan(store, client, rows, save_local):
     if not receipt.get('consumer_withdrawn') or receipt.get('generation') != GENERATION:
         raise ValueError('both Reader surfaces and withdrawn OCR consumer were not acknowledged')
     current_consumer, old_consumer_raw = read_json(store, ASSETS, READER_CONSUMERS)
-    if sha(old_consumer_raw) != READER_CONSUMERS_INITIAL_SHA:
+    if expected_reader_consumer_sha and sha(old_consumer_raw) != expected_reader_consumer_sha:
         raise ValueError('Reader consumer receipt changed since the approved snapshot')
     old_refs = current_consumer.get('resources')
     if (current_consumer.get('kind') != 'reader-gc-consumers' or not isinstance(old_refs, list)

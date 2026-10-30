@@ -90,7 +90,11 @@ def inventory(path: Path):
 
 def prepare(store, client, rows):
     """Rebuild the exact OCR withdrawal plan, preserving only non-target sources."""
-    prior = exact.create_plan(store, client, exact.load_targets(), lambda _: None)
+    # Scheduled maintenance may legitimately refresh only the consumer
+    # receipt. Re-read and re-verify it rather than pinning an obsolete digest;
+    # create_plan still verifies the exact release and snapshots the fresh SHA.
+    prior = exact.create_plan(store, client, exact.load_targets(), lambda _: None,
+                              expected_reader_consumer_sha=None)
     targets = {(row['bucket'], row['path']) for row in rows}
     external = prior['updates']['external']['resources']
     kept = [ref for ref in external if (ref['bucket'], ref['path']) not in targets]
