@@ -503,6 +503,22 @@ class ChmPublicationSafetyTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'graph document changed'):
                 safety.recheck_actual_graph(Store(),None,proof,rows,Fence(),None,self.plan)
 
+    def test_simulation_barrier_rejects_changed_nonoverlay_dependency(self):
+        from unittest.mock import patch
+        ref=(publication.ASSETS,'reader-index/snapshots/nested.json')
+        class Graph:
+            store=None
+            loaded_digests={ref:'a'*64}
+        class Store:
+            def assert_buckets_available(self):pass
+            def digest(self,*args):return 'b'*64
+        class Fence:
+            def check(self):pass
+        details={'graph':Graph(),'live_control_sha256':{},'overlay_paths':set()}
+        with patch('scripts.reader_gc_collect.verify_roots'):
+            with self.assertRaisesRegex(ValueError,'live input changed'):
+                safety.recheck_simulation_inputs(Store(),details,Fence())
+
     def test_live_controls_must_equal_the_exact_approved_plan(self):
         plan = {'overrides': {'reader-index/a.json': b'planned'},
                 'immutable': {'reader-index/snapshots/x': b'snapshot'}}
@@ -514,6 +530,25 @@ class ChmPublicationSafetyTests(unittest.TestCase):
         objects['reader-index/a.json'] = b'foreign'
         with self.assertRaisesRegex(ValueError, 'differs from the approved plan'):
             safety.verify_live_chm_controls(Store(), plan)
+
+    def test_live_failed_upload_controls_and_rollback_aliases_are_rechecked(self):
+        from unittest.mock import patch
+        updates={'reader-index/processing/exact.json':{'after':b'expected'}}
+        old='a'*64;alias={'path':'reader-index/v3/generations/'+'b'*64+'/catalog.json'}
+        objects={'reader-index/processing/exact.json':b'expected',
+                 f'reader-index/v3/generations/{old}/catalog.json':b'old'}
+        class Store:
+            def assert_buckets_available(self):pass
+            def read_bytes(self,bucket,path):return objects[path]
+        self.assertTrue(safety.verify_live_processing_controls(Store(),updates))
+        with patch.object(safety.chm,'resolve_retired_rollback',return_value=alias):
+            self.assertTrue(safety.verify_retired_rollback_aliases(Store(),{'rollback_aliases':{old:alias}}))
+        with patch.object(safety.chm,'resolve_retired_rollback',return_value={'path':'wrong'}):
+            with self.assertRaisesRegex(ValueError,'does not resolve'):
+                safety.verify_retired_rollback_aliases(Store(),{'rollback_aliases':{old:alias}})
+        objects['reader-index/processing/exact.json']=b'changed'
+        with self.assertRaisesRegex(ValueError,'differs'):
+            safety.verify_live_processing_controls(Store(),updates)
 
     def test_exact_chm_recovery_requires_a_durable_submitted_batch(self):
         data = b'epub'

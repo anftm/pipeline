@@ -349,6 +349,34 @@ def recheck_actual_graph(store, traversal, proof, rows, fence, client, plan):
     return True
 
 
+def recheck_simulation_inputs(store, details, fence):
+    """Bind a proposed transition to the still-current real graph inputs."""
+    from concurrent.futures import ThreadPoolExecutor
+    try:
+        from . import reader_gc_collect as collector
+    except ImportError:
+        import reader_gc_collect as collector
+    graph = details['graph']
+    assert_all_buckets_available(store)
+    fence.check()
+    collector.verify_roots(graph.store, graph)
+    originals = details['live_control_sha256']
+    def verify(item):
+        ref, expected = item
+        try:
+            current = store.digest(*ref)
+        except FileNotFoundError:
+            current = None
+        if current != expected:
+            raise ValueError('CHM live input changed after simulation: ' + ':'.join(ref))
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(verify, sorted(originals.items())))
+        list(pool.map(verify, [(ref, graph.loaded_digests[ref])
+                              for ref in sorted(set(graph.loaded_digests) - details['overlay_paths'])]))
+    fence.check()
+    return True
+
+
 def verify_live_chm_controls(store, plan):
     """Require every staged CHM publication control to match the exact plan."""
     assert_all_buckets_available(store)
@@ -358,6 +386,25 @@ def verify_live_chm_controls(store, plan):
     for path, expected in plan['immutable'].items():
         if store.read_bytes(chm.ASSETS, path) != expected:
             raise ValueError('live CHM immutable replacement differs from the approved plan: ' + path)
+    return True
+
+
+def verify_live_processing_controls(store, updates):
+    assert_all_buckets_available(store)
+    for path, item in updates.items():
+        if store.read_bytes(chm.ASSETS, path) != item['after']:
+            raise ValueError('live CHM processing protection differs: ' + path)
+    return True
+
+
+def verify_retired_rollback_aliases(store, plan):
+    """Exercise the production rollback resolver without changing a pointer."""
+    for generation, alias in plan['rollback_aliases'].items():
+        path = f'reader-index/v3/generations/{generation}/catalog.json'
+        original = store.read_bytes(chm.ASSETS, path)
+        ref = publication.metadata(chm.ASSETS, path, original)
+        if chm.resolve_retired_rollback(store, ref) != alias:
+            raise ValueError('CHM rollback alias does not resolve: ' + generation)
     return True
 
 
@@ -870,8 +917,9 @@ def run_guarded_retirement(store, fence, client, plan, rows, *, preflight, persi
     if reviewed_processing['updates'] != processing_updates:
         raise ValueError('CHM processing protection plan changed before publication')
     overlays = {**plan['overrides'], **{path: item['after'] for path, item in processing_updates.items()}}
+    simulation_details = {}
     fresh_preflight = chm.simulate_complete_withdrawal(store, overlays, rows, fence,
-                          workers=8, deadline_minutes=300, immutable=plan['immutable'])
+                          workers=8, deadline_minutes=300, immutable=plan['immutable'], details=simulation_details)
     if (fresh_preflight.get('graph_complete') is not True or fresh_preflight.get('retained_targets') != 0
             or fresh_preflight.get('target_count') != len(rows)):
         raise ValueError('current simulated CHM graph has unresolved references')
@@ -900,6 +948,7 @@ def run_guarded_retirement(store, fence, client, plan, rows, *, preflight, persi
          generation=plan['current_v3_generation'],
          acknowledged_generations={'hf': plan['current_v3_generation'], 'pages': plan['current_v3_generation']})
     reset_evidence = verify_document_reset_prerequisites(store, plan)
+    recheck_simulation_inputs(store, simulation_details, fence)
     save_plan(plan, before, processing_updates)
     state = {'kind': 'chm-epub-retirement', 'complete': False, 'target_count': len(rows),
              'confirmed_deleted_objects': 0, 'confirmed_deleted_bytes': 0, 'batches': [],
@@ -961,6 +1010,8 @@ def run_guarded_retirement(store, fence, client, plan, rows, *, preflight, persi
         state['confirmed_deleted_bytes'] = final['confirmed_absent_bytes']
         recheck_actual_graph(store, traversal, actual, rows, fence, client, plan)
         verify_live_chm_controls(store, plan)
+        verify_live_processing_controls(store, processing_updates)
+        verify_retired_rollback_aliases(store, plan)
         state['complete'] = True
         persist('complete', state, before)
         return state

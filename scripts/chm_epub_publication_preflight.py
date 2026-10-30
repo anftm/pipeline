@@ -764,7 +764,7 @@ def plan_chm_withdrawal(store, inventory_path, *, acknowledged_generations):
 
 
 def simulate_complete_withdrawal(store, overrides, rows, fence, *, workers=8, deadline_minutes=300,
-                                 immutable=None):
+                                 immutable=None, details=None):
     """Read-only four-bucket check of an explicit CHM-only publication plan."""
     import time
     try:
@@ -854,6 +854,9 @@ def simulate_complete_withdrawal(store, overrides, rows, fence, *, workers=8, de
             actual = None
         if actual != expected:
             raise ValueError('CHM controls changed during simulated graph traversal')
+    if details is not None:
+        details.update(graph=graph_view, live_control_sha256=before,
+                       overlay_paths=set(overlay), nonoverlay_roots=set(graph_view.root_hashes) - set(overlay))
     return {'graph_complete': True, 'target_count': len(targets), 'retained_targets': len(retained),
             'retained_target_paths': [{'bucket': b, 'path': p} for b, p in sorted(retained)],
             'protecting_trees': protecting_trees, 'origins': origins,

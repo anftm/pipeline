@@ -248,6 +248,10 @@ def recover(path):
     if (state.get('kind') != 'reader-maintenance-journal' or state.get('version') != 1
             or not isinstance(state.get('repositories'), dict)):
         raise RuntimeError('invalid durable maintenance journal')
+    if (not state.get('restored') and
+            (state.get('callback_recovery_required') or
+             state.get('callback_mutation_started') and not state.get('callback_committed'))):
+        raise RuntimeError('callback recovery is required before restoring producers')
     if not state.get('restored'):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(raw)
@@ -272,6 +276,9 @@ def restore(path):
     state = json.loads(path.read_text())
     if state.get("preflight_only"):
         return
+    if (state.get('callback_recovery_required') or
+            state.get('callback_mutation_started') and not state.get('callback_committed')):
+        raise RuntimeError('callback recovery is required before restoring producers')
     if state.get("dispatch_requested"):
         central = load_config()["publisher_repository"]
         run_id = state.get("collector_run_id")
@@ -341,7 +348,7 @@ def restore(path):
 
 
 def run(path, *, limit=0, apply=True, scope='unreferenced', isolated_callback=None,
-        suppress_resume_dispatch=False, preserve_queued_runs=False):
+        suppress_resume_dispatch=False, preserve_queued_runs=False, require_callback_commit=False):
     if scope not in {'unreferenced', 'retired-assets'}:
         raise ValueError('invalid automatic collection scope')
     central = load_config()["publisher_repository"]
@@ -411,7 +418,19 @@ def run(path, *, limit=0, apply=True, scope='unreferenced', isolated_callback=No
             # Explicit bounded operations may use the same fully drained
             # producer window. They own their own preflight/receipts and must
             # still pass GitHubProducerFence before any destructive operation.
-            return isolated_callback(state)
+            try:
+                outcome = isolated_callback(state)
+            except Exception:
+                if require_callback_commit and state.get('callback_mutation_started'):
+                    state['callback_recovery_required'] = True
+                    journal(path, state)
+                raise
+            if require_callback_commit and state.get('callback_mutation_started'):
+                if not state.get('callback_committed') or state.get('callback_recovery_required'):
+                    state['callback_recovery_required'] = True
+                    journal(path, state)
+                    raise RuntimeError('callback requires recovery; keep producers isolated')
+            return outcome
         identifier = state["maintenance_id"]
         state["dispatch_requested"] = True
         journal(path, state)
@@ -437,6 +456,10 @@ def run(path, *, limit=0, apply=True, scope='unreferenced', isolated_callback=No
                 raise RuntimeError("collector deadline exceeded")
             time.sleep(30)
     finally:
+        if require_callback_commit and state.get('callback_mutation_started') and not state.get('callback_committed'):
+            state['callback_recovery_required'] = True
+            journal(path, state)
+            raise RuntimeError('callback requires recovery; producers remain isolated')
         if state.get("dispatch_requested") and not state.get("collector_run_id"):
             matching = [task for task in pages(central,
                 "actions/workflows/reader-gc-collect.yml/runs", "workflow_runs")

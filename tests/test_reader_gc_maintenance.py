@@ -76,6 +76,33 @@ class MaintenanceTests(unittest.TestCase):
             self.assertTrue(json.loads(journal.read_text())['restored'])
         self.assertTrue(state['active'])
 
+    def test_mutating_callback_failure_keeps_producers_isolated_until_recovery(self):
+        state={'active':True}
+        def api(repo,path,*,method='GET',body=None):
+            if path=='actions/workflows/1':return {'state':'active' if state['active'] else 'disabled_manually'}
+            if path.endswith('/disable'):state['active']=False;return {}
+            if path.endswith('/enable'):state['active']=True;return {}
+            raise AssertionError(path)
+        def pages(repo,path,field):
+            return ([{'id':1,'state':'active','path':'.github/workflows/pdf-account-worker.yml'}]
+                    if path=='actions/workflows' else [])
+        def partial(snapshot):
+            snapshot['callback_mutation_started']=True
+            raise ValueError('partial update')
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(maintenance,'producer_repositories',return_value=['central/repo']), \
+             patch.object(maintenance,'load_config',return_value={'publisher_repository':'central/repo'}), \
+             patch.object(maintenance,'pages',side_effect=pages), patch.object(maintenance,'api',side_effect=api):
+            path=Path(directory)/'journal.json'
+            with self.assertRaisesRegex(RuntimeError,'producers remain isolated'):
+                maintenance.run(path,isolated_callback=partial,require_callback_commit=True)
+            journal=json.loads(path.read_text())
+            self.assertTrue(journal['callback_recovery_required'])
+            self.assertFalse(state['active'])
+            with self.assertRaisesRegex(RuntimeError,'recovery is required'):
+                maintenance.restore(path)
+            self.assertFalse(state['active'])
+
     def test_bounded_window_preserves_queued_producer_work(self):
         state = {'active': True}
         calls = []
