@@ -208,6 +208,17 @@ class ExactRetirementTests(unittest.TestCase):
                         exact.simulate_retired_graph(store, plan, Fence(), deadline_minutes=1, workers=2)
                 self.assertEqual(store.deletions, [])
 
+    def test_nested_text_resource_keeps_the_ocr_target(self):
+        store, plan, generation, intent_path, release_path, _ = self.make_fixture()
+        selected = next(row for row in plan['targets'] if row['path'].endswith('.txt'))
+        store.put(exact.ASSETS, 'reader-index/nested-resource.json', {'files': {'book': {
+            'text': {'bucket': exact.BUCKET, 'path': selected['path'],
+                     'bytes': selected['bytes'], 'sha256': selected['sha256'], 'role': 'runtime'}}}})
+        with self.helpers(generation, intent_path, release_path):
+            with self.assertRaisesRegex(ValueError, 'still retains'):
+                exact.simulate_retired_graph(store, plan, Fence(), deadline_minutes=1, workers=2)
+        self.assertEqual(store.deletions, [])
+
     def test_incomplete_graph_blocks_before_control_changes(self):
         store, plan, generation, intent_path, release_path, _ = self.make_fixture()
         store.put(exact.ASSETS, 'reader-index/unknown.json', {'unexpected': 42})

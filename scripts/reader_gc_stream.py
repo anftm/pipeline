@@ -52,7 +52,8 @@ def graph_json(chunks, compressed=False):
         elif skip_value:
             skip_value = False
             skip_depth = int(event in {"start_map", "start_array"})
-        elif event == "map_key" and value == "text" and not prefix:
+        elif (event == "map_key" and value == "text"
+              and prefix.rsplit(".", 1)[-1] != "components"):
             possible_text_resource = True
         elif (event == "map_key" and value in SKIP_FIELDS
               and not (value == 'source' and (prefix in {'databases.RMRB', 'databases.PLA'} or prefix == 'archives.item'))

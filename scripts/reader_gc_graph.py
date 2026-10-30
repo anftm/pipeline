@@ -471,8 +471,12 @@ class ReferenceGraph:
                     return
                 bucket, explicit = context, True
             for key, item in value.items():
-                if key in {"orphans", "source_url", "source_path", "source", "text", "error",
+                if key in {"orphans", "source_url", "source_path", "source", "error",
                            "processing_roots", "observations", "components"}:
+                    continue
+                # Raw OCR text is not a path. A structured text resource,
+                # however, can itself carry an exact cross-bucket reference.
+                if key == 'text' and not isinstance(item, dict):
                     continue
                 if key == "path" and (value.get("kind") in {"pdf-render", "pdf-render-range"} or (
                         value.get("repo") and "new_path" not in value and any(

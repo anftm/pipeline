@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -8,6 +9,16 @@ from scripts import reader_gc_maintenance as maintenance
 
 
 class MaintenanceTests(unittest.TestCase):
+    def setUp(self):
+        # These are offline fixtures. A production Actions environment may set
+        # durable maintenance globally; never let a unit test touch that bucket.
+        environment = patch.dict(os.environ, {'READER_GC_DURABLE_MAINTENANCE': 'false'})
+        environment.start()
+        self.addCleanup(environment.stop)
+        store = patch.object(maintenance, '_STORE', None)
+        store.start()
+        self.addCleanup(store.stop)
+
     def test_isolated_callback_restores_producers_and_does_not_dispatch_collector(self):
         state = {'active': True}
         events = []

@@ -49,6 +49,8 @@ jobs:
           python-version: '3.11'
       - run: pip install -r scripts/requirements.txt
       - name: Verify isolated retirement and producer-fence tests
+        env:
+          READER_GC_DURABLE_MAINTENANCE: 'false'
         run: python -B -m unittest tests.test_ccrd_ocr_exact_retirement tests.test_reader_gc_maintenance tests.test_reader_gc_fence -q
       - uses: actions/cache/restore@v4
         with:
