@@ -138,7 +138,8 @@ def historical_v3_replacement(store, old_catalog, targets):
             'remote_mutations': 0}
 
 
-def current_v3_replacement(store, old_catalog, sanitized_sidecar, targets, *, parent_generation):
+def current_v3_replacement(store, old_catalog, sanitized_sidecar, targets, *, parent_generation,
+                           document_reset=None):
     """Keep the exact current non-CHM projection while replacing its fallback base."""
     publication.validate_catalog(old_catalog)
     if old_catalog['generation'] != parent_generation:
@@ -152,6 +153,10 @@ def current_v3_replacement(store, old_catalog, sanitized_sidecar, targets, *, pa
     ref = publication.metadata(ASSETS, f'reader-index/snapshots/{hashed}/reader_assets.json.gz', packed)
     result = {'version': 3, 'kind': 'reader-reading-catalog', 'files': copy.deepcopy(old_catalog['files']),
               'base_sidecar': ref, 'parent_generation': parent_generation}
+    if document_reset:
+        if not isinstance(document_reset, str) or not re.fullmatch(r'[a-z0-9-]{8,80}', document_reset):
+            raise ValueError('invalid preserved document reset identity')
+        result['document_reset'] = document_reset
     result['generation'] = publication.text.digest(result)
     publication.validate_catalog(result)
     return {'old_generation': parent_generation, 'generation': result['generation'], 'catalog': result,
@@ -166,6 +171,8 @@ def rollback_alias_from_current(replacement):
              'base_sidecar': copy.deepcopy(current['base_sidecar']),
              'parent_generation': current['parent_generation'],
              'rollback_target': replacement['old_generation']}
+    if current.get('document_reset'):
+        alias['document_reset'] = current['document_reset']
     alias['generation'] = publication.text.digest(alias)
     publication.validate_catalog(alias)
     return {'old_generation': replacement['old_generation'], 'generation': alias['generation'],
@@ -196,6 +203,10 @@ def resolve_retired_rollback(store, target_ref):
     catalog = publication.validate_catalog(publication.read_index(store, successor))
     if catalog.get('rollback_target') != generation:
         raise ValueError('sanitized rollback replacement has the wrong original generation')
+    base = publication.pinned_base(store, catalog, None)
+    if any(isinstance(entry, dict) and any(isinstance(value, str) and value.startswith(preview.PREFIX)
+            for value in entry.values()) for entry in base['f'].values()):
+        raise ValueError('rollback replacement still references a CHM EPUB')
     return successor
 
 
@@ -434,12 +445,20 @@ def plan_chm_withdrawal(store, inventory_path, *, acknowledged_generations):
     if historical.get('generation') != old_generation:
         raise ValueError('historical Reader catalog identity changed')
     history = historical_v3_replacement(store, historical, targets)
+    receipt_path = 'reader-index/gc/document-reset/withdrawal.json'
+    receipt = json.loads(store.read_bytes(ASSETS, receipt_path))
+    if (receipt.get('kind') != 'reader-document-reset' or receipt.get('status') != 'withdrawn'
+            or receipt.get('generation') != old_generation or current.get('files')
+            or receipt.get('reset_id') != historical.get('document_reset')
+            or receipt.get('base_snapshot', {}).get('sha256') != historical['base_sidecar']['sha256']):
+        raise ValueError('document reset receipt no longer binds the reviewed historical generation')
     processing = {path for entry in indexes[INDEX]['files'] for path in entry.get('processing_roots', [])}
     missing = processing - store.existing_files(ASSETS, processing)
     synced = synchronize_indexes(indexes, sidecar, catalog, rows, missing,
                         current_generation=pointer['generation'], receipts=acknowledged_generations)
     current_new = current_v3_replacement(store, current, synced['sidecar'], targets,
-                                         parent_generation=pointer['generation'])
+                                         parent_generation=pointer['generation'],
+                                         document_reset=receipt['reset_id'])
     current_alias = rollback_alias_from_current(current_new)
     replacements = {old_generation: history, pointer['generation']: current_alias}
     alias_refs = {}
@@ -480,6 +499,14 @@ def plan_chm_withdrawal(store, inventory_path, *, acknowledged_generations):
                    'acks': {'hf': True, 'pages': True}, 'retention_days': 30,
                    'created_at': publication.reader_lifecycle.now_iso()}
     overrides[f"reader-index/v3/promotions/{new_pointer['generation']}.json"] = publication.encode(new_history)
+    adapted_receipt = copy.deepcopy(receipt)
+    adapted_receipt['generation'] = new_pointer['generation']
+    adapted_receipt['base_generation'] = synced['generation']
+    adapted_receipt['base_snapshot'] = current_new['snapshot']
+    adapted_receipt['sidecar_sha256'] = digest(current_new['snapshot_bytes'])
+    adapted_receipt['chm_epub_withdrawal'] = {'previous_generation': old_generation,
+        'historical_replacement_generation': history['generation'], 'inventory_sha256': preview.INVENTORY_SHA256}
+    overrides[receipt_path] = publication.encode(adapted_receipt)
     consumer_path = 'reader-index/reader_gc_consumers.json'
     consumers = json.loads(store.read_bytes(ASSETS, consumer_path))
     if consumers.get('kind') != 'reader-gc-consumers' or not isinstance(consumers.get('resources'), list):
