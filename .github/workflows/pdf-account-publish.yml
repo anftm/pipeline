@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       worker_repository:
-        description: Account pipeline repository from pdf-worker-lanes.json
+        description: Historical account repository (OCR publication is retired)
         type: string
         required: true
       worker_run_id:

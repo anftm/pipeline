@@ -1800,8 +1800,8 @@ aW1hZ2U=
         }}}
         pdf_manifest = {"files": {key: {
             "status": "ready", "strategy": "sampled-jxl",
-            "render_profile": build_reader_assets_index.PDF_PROFILE,
-            "decision_profile": build_reader_assets_index.PDF_DECISION_PROFILE,
+            "render_profile": "retired-page-render-profile",
+            "decision_profile": "retired-page-decision-profile",
             "path": pdf_path,
         }}}
         ocr_manifest = {"files": {key: {

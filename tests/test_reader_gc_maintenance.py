@@ -119,9 +119,18 @@ class MaintenanceTests(unittest.TestCase):
             {'path': '.github/workflows/reader-v3-publish.yml', 'state': 'active'},
             {'path': '.github/workflows/pdf-lane-watchdog.yml', 'state': 'active'}]}},
             'resumption_dispatches': {'pdf-lane-watchdog.yml': 'suppressed', 'reader-v3-publish.yml': 'suppressed'}}
-        with patch.object(maintenance, 'load_config', return_value={'publisher_repository': 'central/repo'}), \
+        with tempfile.TemporaryDirectory() as directory, \
                 patch.object(maintenance, 'api', side_effect=AssertionError('unexpected dispatch')):
-            maintenance.kick_restored(Path('/not-used'), state)
+            maintenance.kick_restored(Path(directory) / 'journal.json', state)
+
+    def test_restore_never_restarts_retired_ocr_matrix_without_suppression_flag(self):
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(maintenance, 'api', side_effect=AssertionError('unexpected dispatch')):
+            path=Path(directory)/'journal.json'
+            state={'repositories': {}}
+            maintenance.kick_restored(path,state)
+            self.assertEqual(state['resumption_dispatches'],
+                             {'pdf-lane-watchdog.yml':'retired','reader-v3-publish.yml':'retired'})
 
     def test_failure_after_disabling_producers_restores_prior_permissions(self):
         permissions = {"enabled": True, "allowed_actions": "all"}

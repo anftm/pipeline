@@ -1122,9 +1122,9 @@ class CentralHubStore(HubBucketStore):
 
     def assert_serialized_writer(self, protocol):
         try:
-            from .pdf_worker_lanes import load_config
+            from .reader_producer_scope import load_config
         except ImportError:
-            from pdf_worker_lanes import load_config
+            from reader_producer_scope import load_config
         expected = load_config()["publisher_repository"]
         if (protocol != PROTOCOL or os.environ.get("GITHUB_ACTIONS") != "true"
                 or os.environ.get("GITHUB_REPOSITORY") != expected
@@ -1136,9 +1136,9 @@ class CentralHubStore(HubBucketStore):
 
     def assert_candidate_builder(self, protocol):
         try:
-            from .pdf_worker_lanes import load_config
+            from .reader_producer_scope import load_config
         except ImportError:
-            from pdf_worker_lanes import load_config
+            from reader_producer_scope import load_config
         expected = load_config()["publisher_repository"]
         if (protocol != BUILD_PROTOCOL or os.environ.get("GITHUB_ACTIONS") != "true"
                 or os.environ.get("GITHUB_REPOSITORY") != expected

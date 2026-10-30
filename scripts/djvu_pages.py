@@ -83,7 +83,7 @@ def is_native_item(item: dict) -> bool:
     return item.get("source_format") == "djvu"
 
 
-EXCEPTIONS = Path(__file__).resolve().parents[1] / "djvu-native-exceptions.json"
+EXCEPTIONS = Path(__file__).resolve().parents[1] / "config/djvu-source-integrity-notes.json"
 
 
 def native_exceptions() -> dict[str, dict]:

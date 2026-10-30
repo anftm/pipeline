@@ -11,11 +11,12 @@ import yaml
 
 from scripts import pdf_ocr, pdf_ocr_stages as stages, pdf_worker_lanes as lanes
 from scripts.validate_pdf_worker_run import validate_run
+from tests.legacy_pdf_worker_fixture import legacy_worker_fixture
 
 
 class PdfWorkerLaneTests(unittest.TestCase):
     def setUp(self):
-        self.config = lanes.load_config()
+        self.config = legacy_worker_fixture()
 
     def item(self, name="book.pdf", size=1024, **fields):
         return {"key": "repo\0" + name, "repo": "repo", "path": name,
@@ -202,6 +203,7 @@ class PdfWorkerLaneTests(unittest.TestCase):
                 argv = ["pdf_ocr_stages.py", stage, "--worker-lane", "native-under-100m",
                         "--worker-owner", "vomebook", "--queue", str(queue_path), "--output", str(output)]
                 with patch.object(sys, "argv", argv), patch.object(stages, "HfApi"), \
+                        patch.object(lanes, "load_config", return_value=self.config), \
                         patch.object(stages, "load_registry", side_effect=registry), \
                         patch.object(pdf_ocr, "source_records", return_value=records), \
                         patch.object(stages.plan_pdf_ocr, "plan", plan), \

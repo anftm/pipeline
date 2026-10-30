@@ -80,6 +80,8 @@ def handoff(config, repository, after_run, publisher_run, *, apply=False, api=gi
     All automatic callers hold reader-sidecar. This does not claim an atomic
     lock against independently/manual-dispatched GitHub runs.
     """
+    if apply:
+        raise RuntimeError('multi-account document OCR dispatch is retired')
     if type(after_run) is not int or after_run < 1 or type(publisher_run) is not int or publisher_run < 1:
         raise ValueError("positive worker and publisher run IDs required")
     owner, separator, _ = repository.partition("/")
@@ -168,6 +170,8 @@ def watchdog(config, *, apply=False, api=github, now=None):
     """Restart a lane whose continuation chain broke (failed callback,
     disabled publisher, empty OCR queue). A lane with an active worker, a
     pending central publication or a recently finished worker is left alone."""
+    if apply:
+        raise RuntimeError('multi-account document OCR dispatch is retired')
     now = now or datetime.now(timezone.utc)
     central = config["publisher_repository"]
     awaiting = set()

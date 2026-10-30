@@ -383,6 +383,7 @@ def rollout(store, space, value, root, *, apply=False):
 
 
 def main():
+    raise RuntimeError('CCRD OCR generation and publication are retired')
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--transport-url', required=True)
     parser.add_argument('--transport-sha256', required=True)

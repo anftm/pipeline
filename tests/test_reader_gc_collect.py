@@ -277,19 +277,11 @@ class ReaderGcCollectTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 assert_collector_context()
 
-    def test_retired_routing_lanes_stay_in_the_producer_fence(self):
-        # A routing change must not drop an account that still owns a queued run.
+    def test_retired_repositories_stay_in_the_producer_fence(self):
+        # Historical accounts can still own queued jobs, but no size-routing
+        # matrix is needed to ensure isolation covers them.
         config = {'publisher_repository': 'anftm/pipeline',
-                  'native_lanes': [{'name': 'current', 'owner': 'vomebook',
-                                    'repository': 'vomebook/pdf-pipeline'}],
-                  'converted_lane': {'name': 'converted', 'owner': 'ambrossee768',
-                                     'repository': 'ambrossee768/pdf-pipeline'},
-                  'legacy_configs': [{
-                      'publisher_repository': 'anftm/pipeline',
-                      'native_lanes': [{'name': 'retired', 'owner': 'alicetran68',
-                                        'repository': 'alicetran68/pipeline'}],
-                      'converted_lane': {'name': 'converted', 'owner': 'ambrossee768',
-                                         'repository': 'ambrossee768/pdf-pipeline'}}]}
+                  'repositories': ['anftm/pipeline', 'vomebook/pdf-pipeline', 'alicetran68/pipeline']}
         with patch('scripts.reader_gc_fence.load_config', return_value=config):
             self.assertIn('alicetran68/pipeline', producer_repositories())
             self.assertIn('vomebook/pdf-pipeline', producer_repositories())

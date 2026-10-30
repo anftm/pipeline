@@ -14,6 +14,12 @@ from tests.test_reader_gc_collect import Store
 
 
 class ReaderResourceRepairTests(unittest.TestCase):
+    def test_retired_text_mode_cannot_write_or_read_remote_data(self):
+        class Store:
+            def read_bytes(self, *args):raise AssertionError('unexpected remote read')
+        with self.assertRaisesRegex(ValueError, 'text recovery has been retired'):
+            repair.run(Store(), {}, Path('unused.json'), apply=True, mode='text')
+
     def test_source_artifacts_are_only_completed_central_gc_workflows(self):
         self.assertEqual(repair.report_artifact({'path': '.github/workflows/reader-gc.yml',
             'status': 'completed'}), ('reader-gc-report', 'reader-gc-report.json'))

@@ -26,6 +26,12 @@ class RetiredDocumentProducerTests(unittest.TestCase):
                 for job in workflow['jobs'].values():
                     self.assertEqual(job.get('if'), '${{ false }}')
 
+    def test_worker_plan_cannot_dispatch_ocr_or_publish_artifacts(self):
+        workflow = yaml.safe_load((ROOT / 'pdf-account-worker.yml').read_text())
+        self.assertEqual(workflow['jobs']['plan']['if'], '${{ false }}')
+        self.assertIn('plan', workflow['jobs']['build']['needs'])
+        self.assertIn('plan', workflow['jobs']['notify']['needs'])
+
     def test_v3_unify_and_status_remain_available_but_old_text_operations_stop(self):
         workflow = (ROOT / 'reader-v3-publish.yml').read_text()
         self.assertIn('auto|build-stage|stage|promote|rollback|correct|accept|reject|retry|repair-gbk)', workflow)

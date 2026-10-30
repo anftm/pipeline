@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exclusive account ownership for PDF render and OCR work."""
+"""Legacy queue helpers. The multi-account OCR routing configuration is retired."""
 
 import argparse
 import hashlib
@@ -8,7 +8,7 @@ import re
 from pathlib import Path
 
 
-DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "pdf-worker-lanes.json"
+DEFAULT_CONFIG = None
 NAME = re.compile(r"[a-z0-9][a-z0-9-]*")
 OWNER = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}")
 
@@ -60,6 +60,8 @@ def _validate_config(config, *, allow_legacy=True):
 
 
 def load_config(path=DEFAULT_CONFIG):
+    if path is None:
+        raise RuntimeError('multi-account PDF/OCR worker routing has been retired')
     return _validate_config(json.loads(Path(path).read_text(encoding="utf-8")))
 
 

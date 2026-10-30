@@ -85,13 +85,7 @@ class ReaderProjectionSyncTests(unittest.TestCase):
         self.assertFalse(condition(gate, operation='unify', paused='true', repository='other/repo'))
         build = self.workflow('reader-v3-build.yml')
         for job in build['jobs'].values():
-            self.assertFalse(condition(job['if'], paused='true'))
-            self.assertTrue(condition(job['if'], paused='false'))
-        callback = build['jobs']['promote']['if']
-        self.assertFalse(condition(callback, cancelled=True))
-        self.assertFalse(condition(callback, build_result='cancelled'))
-        self.assertFalse(condition(callback, build_result='skipped'))
-        self.assertTrue(condition(callback, build_result='failure'))
+            self.assertEqual(job['if'], '${{ false }}')
 
 
 if __name__ == '__main__':

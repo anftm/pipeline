@@ -41,15 +41,15 @@ class RetirementTests(unittest.TestCase):
         from scripts.reader_gc_fence import producer_path
         self.assertTrue(producer_path('.github/workflows/reader-gc-ccrd.yml'))
 
-    def test_restore_dispatches_only_previously_enabled_entrypoints_once(self):
+    def test_restore_does_not_restart_retired_ocr_entrypoints(self):
         state = {'repositories': {'anftm/pipeline': {'workflows': [
             {'path': '.github/workflows/pdf-lane-watchdog.yml', 'state': 'active'},
             {'path': '.github/workflows/reader-v3-publish.yml', 'state': 'disabled_manually'}]}}}
         with patch.object(maintenance, 'journal'), patch.object(maintenance, 'api') as api:
             maintenance.kick_restored(Path('unused'), state)
             maintenance.kick_restored(Path('unused'), state)
-        self.assertEqual(api.call_count, 1)
-        self.assertIn('pdf-lane-watchdog.yml/dispatches', api.call_args.args[1])
+        api.assert_not_called()
+        self.assertEqual(state['resumption_dispatches']['pdf-lane-watchdog.yml'], 'retired')
 
     def test_every_format_reclaims_old_bundles_and_preserves_shared_live_objects(self):
         store = Store()

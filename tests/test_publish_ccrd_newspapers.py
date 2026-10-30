@@ -412,7 +412,7 @@ class NewspaperPublicationTests(unittest.TestCase):
         self.assertEqual(value['concurrency']['group'],'publish-ccrd-index')
         self.assertEqual(value['concurrency']['queue'],'max')
         job=value['jobs']['newspapers']
-        self.assertIn("startsWith(inputs.release_path, 'https://')",job['if'])
+        self.assertEqual(job['if'], '${{ false }}')
         names=[step.get('name','') for step in job['steps']]
         self.assertLess(next(i for i,n in enumerate(names) if n.startswith('Verify the exact production')),
                         next(i for i,n in enumerate(names) if n.startswith('Pin the accepted')))

@@ -228,27 +228,11 @@ class AutoCcrdOcrTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'committed newspaper rollout base differs'):
                 self.run_auto('mismatch', apply=True)
 
-    def test_cli_reports_in_progress_rollout_as_neutral_skip_receipt(self):
-        """main() must exit 0 and write a no-generation skip receipt, never a failure."""
-        import io
-        from contextlib import redirect_stdout
-        output = self.root / 'skip' / 'publication.json'
-        config = self.root / 'consumer.json'; config.write_bytes(contract.canonical(APPROVED))
-        with patch.object(auto, 'prepare_consumer'), \
-                patch.object(auto.publisher, 'HubBucketStore', return_value=self.store), \
-                patch.object(auto, 'reconcile', side_effect=auto.RolloutNotReady('fenced by staging rollout')):
-            argv = ['auto_ccrd_ocr.py', '--config', str(config), '--root', str(self.root / 'cand'),
-                    '--output', str(output), '--apply']
-            import sys
-            with patch.object(sys, 'argv', argv), redirect_stdout(io.StringIO()):
-                code = auto.main()
-        self.assertEqual(code, 0)
-        report = json.loads(output.read_bytes())
-        self.assertTrue(report['skipped'])
-        self.assertFalse(report['applied'])
-        self.assertEqual(report['phase'], 'newspaper-rollout-not-ready')
-        self.assertNotIn('generation', report)
-        self.assertIn('fenced by staging rollout', report['reason'])
+    def test_cli_cannot_restart_retired_ocr_rollout(self):
+        with patch.object(auto, 'prepare_consumer', side_effect=AssertionError('must not prepare')), \
+                patch.object(auto.publisher, 'HubBucketStore', side_effect=AssertionError('must not access remote')):
+            with self.assertRaisesRegex(RuntimeError, 'retired'):
+                auto.main()
 
     def test_unusable_source_text_is_a_terminal_disposition_not_a_batch_failure(self):
         """Unchanged binary-control sources must not fail every later batch."""
@@ -369,18 +353,12 @@ class AutoCcrdOcrTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'downgrade'):
             publisher.verify_text_upgrade(self.store, protected, replacement)
 
-    def test_actual_workflow_automates_only_trusted_completion_and_keeps_writer(self):
+    def test_ocr_publication_workflow_is_retired_for_all_inputs(self):
+        import yaml
         workflow = (Path(__file__).parents[1] / '.github/workflows/publish-ccrd-ocr.yml').read_text()
-        for required in ('schedule:', 'workflow_run:', 'CCRD_OCR_AUTO_ENABLED', 'head_repository.full_name',
-                         "head_branch == 'main'", 'group: publish-ccrd-index', 'queue: max',
-                         'scripts/auto_ccrd_ocr.py', '--apply --activate-space'):
-            self.assertIn(required, workflow)
-        self.assertNotIn('OCR_CORRECTION_API', workflow)
-        self.assertNotIn('download-artifact', workflow.rsplit('\n  automatic:\n', 1)[1])
-        automatic = workflow.rsplit('\n  automatic:\n', 1)[1].split('\n  newspapers:\n', 1)[0]
-        self.assertIn('Coalesce automatic OCR runs to a single flight', automatic)
-        self.assertIn("steps.coalesce.outputs.skip != 'true'", automatic)
-        self.assertIn('if: github.event_name != \'workflow_dispatch\'', automatic)
+        jobs = yaml.safe_load(workflow)['jobs']
+        self.assertEqual(set(jobs), {'publish','automatic','newspapers'})
+        self.assertTrue(all(job.get('if') == '${{ false }}' for job in jobs.values()))
 
     def test_automatic_verify_step_has_headroom_over_observed_acceptance_time(self):
         workflow = (Path(__file__).parents[1] / '.github/workflows/publish-ccrd-ocr.yml').read_text()

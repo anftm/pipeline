@@ -1,6 +1,8 @@
 {
   "version": 1,
   "kind": "djvu-native-exceptions",
+  "status": "historical-audit-only",
+  "purpose": "Source integrity observations only; these do not enable OCR, change Reader routing, or authorize deletion.",
   "books": [
     {
       "key": "VoiceOfML/SovMaterials\u0000一手资料/苏联-俄罗斯历史/斯大林时代的古拉格/第6卷 暴动、骚乱与罢工.djvu",

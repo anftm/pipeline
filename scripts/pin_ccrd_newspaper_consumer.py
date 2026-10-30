@@ -88,6 +88,7 @@ def publish_pin(pin, path=Path('ccrd-ocr-consumer.json')):
 
 
 def main():
+    raise RuntimeError('CCRD OCR consumer publication is retired')
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--publication', type=Path, required=True)
     parser.add_argument('--acceptance', type=Path, required=True)

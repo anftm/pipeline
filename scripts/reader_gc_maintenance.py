@@ -14,10 +14,10 @@ import uuid
 
 try:
     from .reader_gc_fence import producer_repositories, producer_path
-    from .pdf_worker_lanes import load_config
+    from .reader_producer_scope import load_config
 except ImportError:
     from reader_gc_fence import producer_repositories, producer_path
-    from pdf_worker_lanes import load_config
+    from reader_producer_scope import load_config
 
 
 ACTIVE = ("queued", "pending", "in_progress", "waiting", "requested")
@@ -259,21 +259,11 @@ def recover(path):
 
 
 def kick_restored(path, state):
-    """New work uses fresh queues; never rerun cancelled immutable task attempts."""
-    central = load_config()['publisher_repository']
-    enabled = {w['path'].rsplit('/', 1)[-1] for w in state['repositories'].get(central, {}).get('workflows', [])
-               if w['state'] == 'active'}
-    for name, inputs in [('pdf-lane-watchdog.yml', {'apply': 'true'}),
-                         ('reader-v3-publish.yml', {'operation': 'auto', 'apply': 'true'})]:
-        if name not in enabled or name in state.setdefault('resumption_dispatches', {}):
-            continue
-        # Persist before dispatch. An ambiguous request is left to the scheduled
-        # watchdog instead of submitting the same continuation twice.
-        state['resumption_dispatches'][name] = 'requested'
-        journal(path, state)
-        api(central, 'actions/workflows/' + name + '/dispatches', method='POST', body={'ref': 'main', 'inputs': inputs})
-        state['resumption_dispatches'][name] = 'accepted'
-        journal(path, state)
+    """Restore isolation without restarting the retired OCR producer matrix."""
+    dispatches = state.setdefault('resumption_dispatches', {})
+    for name in ('pdf-lane-watchdog.yml', 'reader-v3-publish.yml'):
+        dispatches.setdefault(name, 'retired')
+    journal(path, state)
 
 
 def restore(path):

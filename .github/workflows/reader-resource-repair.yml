@@ -8,7 +8,7 @@ on:
         required: true
       mode:
         type: choice
-        options: [all, images, text]
+        options: [all, images]
         default: all
       limit:
         description: Maximum bundles; zero repairs all selected missing bundles
@@ -52,7 +52,7 @@ jobs:
           path: output/gc-report
           github-token: ${{ github.token }}
           run-id: ${{ inputs.report_run_id }}
-      - name: Restore exact missing image and text-layer bundles
+      - name: Restore exact missing original-image streams only
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_INPUT_TOKEN: ${{ secrets.HF_INPUT_TOKEN }}

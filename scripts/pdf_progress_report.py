@@ -177,9 +177,9 @@ def build_report(store=None):
 
 def record_progress(store, report):
     try:
-        from .pdf_worker_lanes import load_config
+        from .reader_producer_scope import load_config
     except ImportError:
-        from pdf_worker_lanes import load_config
+        from reader_producer_scope import load_config
     central = load_config()["publisher_repository"]
     ref = os.environ.get("GITHUB_WORKFLOW_REF")
     if (os.environ.get("GITHUB_ACTIONS") != "true" or os.environ.get("GITHUB_REPOSITORY") != central

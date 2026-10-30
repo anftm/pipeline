@@ -17,7 +17,7 @@ try:
     from . import pdf_reading_v3 as v3, pdf_text_layer as text, pdf_ocr, ocr_layout
     from . import pilot_image_page_stream as images, reader_lifecycle as lifecycle
     from .reader_bucket_store import HubBucketStore, retry_read
-    from .pdf_worker_lanes import load_config
+    from .reader_producer_scope import load_config
 except ImportError:
     import pdf_reading_v3 as v3
     import pdf_text_layer as text
@@ -26,7 +26,7 @@ except ImportError:
     import pilot_image_page_stream as images
     import reader_lifecycle as lifecycle
     from reader_bucket_store import HubBucketStore, retry_read
-    from pdf_worker_lanes import load_config
+    from reader_producer_scope import load_config
 
 ASSETS, PDF = lifecycle.READER_ASSETS_BUCKET, lifecycle.PDF_PAGES_BUCKET
 SIDECAR = "reader-index/reader_assets.json.gz"
@@ -219,15 +219,15 @@ def publish_bundle(store, bucket, files, ref, *, apply):
 
 
 def run(store, report, output, *, apply=False, limit=0, mode="all"):
+    if mode not in {'all', 'images'}:
+        raise ValueError('detached document text recovery has been retired')
     if apply:
         assert_writer()
     missing = missing_references(report)
     sidecar = json.loads(gzip.decompress(retry_read(lambda: store.read_bytes(ASSETS, SIDECAR))))
-    plan = image_plan(sidecar, missing) if mode != "text" else {}
+    plan = image_plan(sidecar, missing)
     pinned = pin_image_sources(store.api, plan) if plan else {}
     selected = [("image", bucket, path) for bucket, path in sorted(plan)]
-    if mode != "images":
-        selected.extend(("text", bucket, path) for bucket, path in sorted(missing) if bucket == PDF)
     if limit:
         selected = selected[:limit]
     result = {"version": 1, "applied": apply, "selected": len(selected), "restored": [],
@@ -283,7 +283,7 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--limit", type=int, default=0)
-    parser.add_argument("--mode", choices=("all", "images", "text"), default="all")
+    parser.add_argument("--mode", choices=("all", "images"), default="all")
     args = parser.parse_args()
     if args.limit < 0:
         parser.error("limit must be non-negative")

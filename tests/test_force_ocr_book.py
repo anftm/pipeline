@@ -247,7 +247,8 @@ class ForceOcrBookTests(unittest.TestCase):
         self.assertTrue(producer_path(".github/workflows/force-ocr-book.yml"))
         trigger = workflow.get("on", workflow.get(True))["workflow_dispatch"]["inputs"]
         self.assertIn("prepared_run_id", trigger)
-        self.assertIn("inputs.prepared_run_id == ''", prepare["if"])
+        self.assertEqual(prepare["if"], '${{ false }}')
+        self.assertEqual(publish["if"], '${{ false }}')
         self.assertEqual(workflow["permissions"]["actions"], "read")
         downloaded = next(s["with"] for s in publish["steps"] if s.get("uses") == "actions/download-artifact@v8")
         self.assertIn("inputs.prepared_run_id", downloaded["run-id"])

@@ -7,9 +7,9 @@ import time
 from datetime import datetime, timezone
 
 try:
-    from .pdf_worker_lanes import load_config
+    from .reader_producer_scope import load_config
 except ImportError:
-    from pdf_worker_lanes import load_config
+    from reader_producer_scope import load_config
 
 
 COLLECTOR = ".github/workflows/reader-gc-collect.yml"
@@ -41,15 +41,9 @@ def producer_path(path):
 
 
 def producer_repositories():
-    # Retired routing lanes may still own queued or rerun workflows. A routing
-    # change must not silently drop a repository from the drain fence.
-    config = load_config()
-    repositories = set()
-    for routing in [config, *config.get("legacy_configs", [])]:
-        repositories.add(routing["publisher_repository"])
-        for lane in [*routing["native_lanes"], routing["converted_lane"]]:
-            repositories.add(lane.get("repository", lane["owner"] + "/pipeline"))
-    return sorted(repositories)
+    # Retired producers may still have queued or rerun jobs. This is an
+    # isolation-only inventory, not an OCR lane or work scheduling plan.
+    return sorted(load_config()['repositories'])
 
 
 class GitHubProducerFence:
