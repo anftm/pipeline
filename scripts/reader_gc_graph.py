@@ -476,7 +476,7 @@ class ReferenceGraph:
                     continue
                 # Raw OCR text is not a path. A structured text resource,
                 # however, can itself carry an exact cross-bucket reference.
-                if key == 'text' and not isinstance(item, dict):
+                if key == 'text' and not isinstance(item, (dict, list)):
                     continue
                 if key == "path" and (value.get("kind") in {"pdf-render", "pdf-render-range"} or (
                         value.get("repo") and "new_path" not in value and any(

@@ -44,11 +44,11 @@ def graph_json(chunks, compressed=False):
             skip_depth -= event in {"end_map", "end_array"}
         elif possible_text_resource:
             possible_text_resource = False
-            if event == "start_map":
+            if event in {"start_map", "start_array"}:
                 builder.event("map_key", "text")
                 builder.event(event, value)
             else:
-                skip_depth = int(event == "start_array")
+                skip_depth = 0
         elif skip_value:
             skip_value = False
             skip_depth = int(event in {"start_map", "start_array"})
