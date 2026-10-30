@@ -75,6 +75,45 @@ class ExpandedRetirementSimulationTests(unittest.TestCase):
         self.assertFalse(expanded.ALLOWED[expanded.ASSETS].fullmatch(
             'documents/pdf/ps/' + 'a' * 64 + '/document.pdf'))
 
+    def test_saved_plan_cannot_expand_processing_or_reader_scope(self):
+        preserved = {'bucket': expanded.PAGES, 'root': expanded.PRESERVED_DERIVED_ROOT}
+        first = {'resources': [{'bucket': expanded.PAGES, 'root': 'objects/aa/first'}, preserved]}
+        second = {'status': 'uploaded', 'resources': [{'bucket': expanded.PAGES, 'root': 'objects/aa/first'}]}
+        originals = {expanded.FIRST_PROCESSING: first, expanded.SECOND_PROCESSING: second}
+        hashes = {p: exact.sha(expanded.encode(v)) for p, v in originals.items()}
+        changes = {}
+        for path, before in originals.items():
+            keep = [preserved] if path == expanded.FIRST_PROCESSING else []
+            after = {**before, 'resources': keep, 'withdrawal': {'kind': 'explicit-ocr-withdrawal',
+                'inventory_sha256': expanded.INVENTORY_SHA256, 'removed_root_count': len(before['resources']) - len(keep),
+                'original_sha256': hashes[path]}}
+            if not keep:
+                after['status'] = 'withdrawn'
+            changes[path] = {'sha256_before': hashes[path], 'before': before,
+                             'before_raw': expanded.encode(before).decode(), 'after': after}
+        rows = [{'bucket': expanded.PAGES, 'path': 'objects/aa/first/target', 'bytes': 1, 'sha256': 'a' * 64}]
+        plan = {'kind': 'ccrd-exact-ocr-retirement-plan', 'version': 1, 'generation': exact.GENERATION,
+                'inventory_sha256': expanded.INVENTORY_SHA256, 'expanded_targets': rows, 'targets': [],
+                'control_hashes_before': exact.INITIAL_HASHES, 'processing_updates': changes,
+                'updates': {'external': {'resources': [{'bucket': expanded.PAGES,
+                    'path': expanded.PRESERVED_DERIVED_ROOT + '/derived-manifest.json'}]},
+                    'intent': {'status': 'retired', 'resources': []}, 'ids': {'status': 'withdrawn', 'resources': []},
+                    'reader_consumers': {'resources': []}}}
+        with patch.object(expanded, 'PROCESSING_HASHES', hashes):
+            expanded.assert_same_inventory(plan, rows)
+            damaged = copy.deepcopy(plan)
+            damaged['updates']['external']['resources'] = []
+            with self.assertRaisesRegex(ValueError, 'narrowly scoped'):
+                expanded.assert_same_inventory(damaged, rows)
+            damaged = copy.deepcopy(plan)
+            damaged['processing_updates'][expanded.FIRST_PROCESSING]['after']['resources'] = []
+            with self.assertRaisesRegex(ValueError, 'processing update'):
+                expanded.assert_same_inventory(damaged, rows)
+            damaged = copy.deepcopy(plan)
+            damaged['updates']['reader_consumers']['resources'] = [{'bucket': rows[0]['bucket'], 'path': rows[0]['path']}]
+            with self.assertRaisesRegex(ValueError, 'still pins'):
+                expanded.assert_same_inventory(damaged, rows)
+
     def test_expanded_prepare_requests_fresh_consumer_snapshot(self):
         external = [{'bucket': expanded.PAGES,
                      'path': expanded.PRESERVED_DERIVED_ROOT + '/derived-manifest.json',
@@ -277,6 +316,131 @@ class ExpandedRetirementSimulationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'no exact retired resources'):
                 expanded.prepare_processing_updates(store, [{'bucket': expanded.PAGES, 'path': target}])
         self.assertEqual(store.deletions, [])
+
+    def test_actual_deletion_requires_a_fresh_zero_reachable_graph(self):
+        rows = [{'bucket': expanded.PAGES, 'path': 'some-target'}]
+        with self.assertRaisesRegex(ValueError, 'does not authorize'):
+            expanded.require_actual_zero_proof({'graph_complete': True,
+                'target_exclusivity_proven': True, 'target_count': 1,
+                'retained_target_count': 0, 'tree_roots_without_origin': 0}, rows)
+        proof = {'graph_complete': True, 'actual_retired_controls_checked': True,
+                 'internal_target_manifests_omitted': True, 'target_exclusivity_proven': True,
+                 'target_count': 1, 'retained_target_count': 0, 'non_target_origins': [],
+                 'tree_roots_without_origin': 0}
+        expanded.require_actual_zero_proof(proof, rows)
+        proof['non_target_origins'] = [{'path': 'reader-index/live.json'}]
+        with self.assertRaisesRegex(ValueError, 'does not authorize'):
+            expanded.require_actual_zero_proof(proof, rows)
+
+    def test_actual_graph_reads_real_controls_and_never_hides_recreated_pointer(self):
+        store, plan, path = self.fixture()
+        # Install only the planned control replacements in the in-memory store.
+        for bucket, name, raw in ((expanded.CCRD, expanded.PRESERVED, expanded.encode(plan['updates']['external'])),
+                                  (expanded.CCRD, exact.INTENT, expanded.encode(plan['updates']['intent'])),
+                                  (expanded.CCRD, exact.IDS, expanded.encode(plan['updates']['ids'])),
+                                  (expanded.ASSETS, exact.READER_CONSUMERS,
+                                   expanded.encode(plan['updates']['reader_consumers']))):
+            store.put(bucket, name, raw)
+        store.objects[expanded.CCRD].pop(exact.CURRENT)
+        with patch.object(exact, 'verify_reference_retirement'):
+            result = expanded.simulate(store, plan, Fence(), workers=2, deadline_minutes=1,
+                                       omit_internal_target_manifests=True, actual=True)
+        self.assertTrue(result['actual_retired_controls_checked'])
+        self.assertTrue(result['target_exclusivity_proven'])
+        store.put(expanded.CCRD, exact.CURRENT, {'kind': 'unexpected'})
+        with self.assertRaisesRegex(ValueError, 'pointer still exists'):
+            expanded.simulate(store, plan, Fence(), actual=True)
+
+    def test_actual_scan_fails_if_pointer_reappears_after_first_check(self):
+        store, plan, _ = self.fixture()
+        for bucket, name, raw in ((expanded.CCRD, expanded.PRESERVED, expanded.encode(plan['updates']['external'])),
+                                  (expanded.CCRD, exact.INTENT, expanded.encode(plan['updates']['intent'])),
+                                  (expanded.CCRD, exact.IDS, expanded.encode(plan['updates']['ids'])),
+                                  (expanded.ASSETS, exact.READER_CONSUMERS,
+                                   expanded.encode(plan['updates']['reader_consumers']))):
+            store.put(bucket, name, raw)
+        store.objects[expanded.CCRD].pop(exact.CURRENT)
+        original = store.list_files
+        def inject(bucket, prefixes):
+            if bucket == expanded.CCRD and not store.objects[bucket].get(exact.CURRENT):
+                store.put(bucket, exact.CURRENT, {'kind': 'unexpected'})
+            return original(bucket, prefixes)
+        store.list_files = inject
+        with patch.object(exact, 'verify_reference_retirement'):
+            with self.assertRaisesRegex(ValueError, 'incomplete'):
+                expanded.simulate(store, plan, Fence(), workers=2, deadline_minutes=1,
+                                  omit_internal_target_manifests=True, actual=True)
+
+    def test_exact_targets_and_partial_submission_reconcile(self):
+        store = MemoryStore()
+        rows = []
+        for n in range(3):
+            data = bytes([n + 1])
+            row = {'bucket': expanded.PAGES, 'path': f'objects/aa/target-{n}',
+                   'bytes': len(data), 'sha256': exact.sha(data)}
+            rows.append(row)
+            store.put(row['bucket'], row['path'], data)
+        self.assertEqual(expanded.verify_exact_targets(store, rows, workers=2), 3)
+        store.delete(expanded.PAGES, [rows[0]['path']])
+        with self.assertRaisesRegex(ValueError, 'without a durable'):
+            expanded.reconcile_targets(store, rows, {'batches': []})
+        prior = {'batches': [{'bucket': expanded.PAGES, 'paths': [rows[0]['path'], rows[1]['path']],
+                              'status': 'submitted'}]}
+        result = expanded.reconcile_targets(store, rows, prior)
+        self.assertEqual((result['present'], result['confirmed_absent']), (2, 1))
+        receipts = []
+        result = expanded.delete_approved_batches(store, rows, Fence(), None,
+                    lambda phase, report: receipts.append((phase, copy.deepcopy(report))),
+                    batch_size=2, progress=prior)
+        self.assertEqual(result['confirmed_deleted_objects'], 3)
+        self.assertEqual(result['confirmed_deleted_bytes'], 3)
+        self.assertEqual(len(result['batches']), 2)
+        self.assertEqual({entry['status'] for entry in result['batches']}, {'verified-absent'})
+
+    def test_read_failure_is_not_classified_as_deleted(self):
+        class Unavailable(MemoryStore):
+            def read_bytes(self, bucket, path):
+                raise TimeoutError('S3 unavailable')
+        row = {'bucket': expanded.PAGES, 'path': 'objects/aa/target', 'bytes': 1, 'sha256': 'a' * 64}
+        with self.assertRaises(TimeoutError):
+            expanded.reconcile_targets(Unavailable(), [row], {'batches': []})
+
+    def test_root_recheck_rejects_changed_bytes_and_new_root(self):
+        store = MemoryStore()
+        root = 'reader-index/test-root.json'
+        raw = store.put(expanded.ASSETS, root, {'kind': 'reader-gc-consumers', 'resources': []})
+        rows = [{'bucket': expanded.PAGES, 'path': 'objects/aa/target'}]
+        proof = {'graph_complete': True, 'actual_retired_controls_checked': True,
+                 'internal_target_manifests_omitted': True, 'target_exclusivity_proven': True,
+                 'target_count': 1, 'retained_target_count': 0, 'non_target_origins': [],
+                 'tree_roots_without_origin': 0,
+                 'root_members': [{'bucket': expanded.ASSETS, 'path': root}],
+                 'root_sha256': [{'bucket': expanded.ASSETS, 'path': root, 'sha256': exact.sha(raw)}],
+                 'retired_root_members': []}
+        plan = {'expanded_targets': rows, 'processing_updates': {}, 'base_generation': 'base'}
+        with patch.object(exact, 'verify_reference_retirement'), patch.object(exact, 'current_status'):
+            expanded.recheck_roots_and_controls(store, plan, proof, Fence(), None)
+            store.put(expanded.ASSETS, root, {'kind': 'different'})
+            with self.assertRaisesRegex(ValueError, 'root changed'):
+                expanded.recheck_roots_and_controls(store, plan, proof, Fence(), None)
+            store.put(expanded.ASSETS, root, raw)
+            store.put(expanded.ASSETS, 'reader-index/new-root.json', {'kind': 'unexpected'})
+            with self.assertRaisesRegex(ValueError, 'root inventory changed'):
+                expanded.recheck_roots_and_controls(store, plan, proof, Fence(), None)
+
+    def test_exact_delete_rejects_false_not_found_and_keeps_partial_receipt(self):
+        class StickyStore(MemoryStore):
+            def delete(self, bucket, paths):
+                self.deletions.extend((bucket, path) for path in paths)
+        store = StickyStore()
+        row = {'bucket': expanded.PAGES, 'path': 'objects/aa/target', 'bytes': 1, 'sha256': exact.sha(b'x')}
+        store.put(expanded.PAGES, row['path'], b'x')
+        receipts = []
+        with self.assertRaisesRegex(ValueError, 'remains directly readable'):
+            expanded.delete_approved_batches(store, [row], Fence(), None,
+                lambda phase, report: receipts.append((phase, copy.deepcopy(report))))
+        self.assertEqual(receipts[-1][0], 'deletion-batch-submitted')
+        self.assertEqual(receipts[-1][1]['confirmed_deleted_objects'], 0)
 
 
 if __name__ == '__main__':

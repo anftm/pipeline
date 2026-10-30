@@ -351,7 +351,7 @@ def restore(path):
 
 
 def run(path, *, limit=0, apply=True, scope='unreferenced', isolated_callback=None,
-        suppress_resume_dispatch=False):
+        suppress_resume_dispatch=False, preserve_queued_runs=False):
     if scope not in {'unreferenced', 'retired-assets'}:
         raise ValueError('invalid automatic collection scope')
     central = load_config()["publisher_repository"]
@@ -376,7 +376,9 @@ def run(path, *, limit=0, apply=True, scope='unreferenced', isolated_callback=No
             for workflow in record["workflows"]:
                 if workflow["state"] == "active":
                     workflow_state(repo, workflow, False)
-            for status in ACTIVE:
+            # When requested, leave queued work intact. The independent fence
+            # must still prove it cannot execute in this isolation window.
+            for status in (() if preserve_queued_runs else ACTIVE):
                 for task in pages(repo, f"actions/runs?status={status}", "workflow_runs"):
                     if not producer_path(task["path"]) or task["status"] != "queued":
                         continue

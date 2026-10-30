@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Read-only planning and reference simulation for a bounded OCR withdrawal.
+"""Plan and verify a bounded OCR withdrawal.
 
-This module cannot delete or mutate production. It explicitly distinguishes
-external text copies from documents, and leaves current non-OCR Reader routes
-and all historical CHM indexes untouched. A complete current graph and the
-producer fence remain mandatory before any future mutation can be considered.
+Mutation helpers are deliberately separate from the read-only preview. An
+execution entry point must supply durable checkpoints, a producer fence, an
+actual post-retirement graph and the exact reviewed inventory before using them.
 """
 from __future__ import annotations
 
@@ -168,7 +167,13 @@ def prepare_processing_updates(store, rows):
             # the audit describes why its protection is empty.
             update['status'] = 'withdrawn'
         kept_roots.extend(keep)
-        result[path] = {'sha256_before': PROCESSING_HASHES[path], 'before': value, 'after': update}
+        # Preserve exact original wire bytes, not a reserialized object: this
+        # binds the recovery plan to the reviewed SHA and supports safe rollback.
+        raw = store.read_bytes(ASSETS, path)
+        if sha(raw) != PROCESSING_HASHES[path] or json.loads(raw) != value:
+            raise ValueError('processing root changed while planning: ' + path)
+        result[path] = {'sha256_before': PROCESSING_HASHES[path], 'before': value,
+                        'before_raw': raw.decode('utf-8'), 'after': update}
     if kept_roots != [{'bucket': PAGES, 'root': PRESERVED_DERIVED_ROOT}]:
         raise ValueError('unexpected mixed or non-target OCR processing tree')
     return result
@@ -224,8 +229,297 @@ def zero_root_target_proof(report, ref_graph, rows):
             'target_exclusivity_proven': True, 'deletion_authorized': False, **attest}
 
 
+def verify_exact_targets(store, rows, *, workers=8):
+    """Freshly compare every approved object's length and SHA, never infer from paths."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    def check(row):
+        raw = store.read_bytes(row['bucket'], row['path'])
+        if len(raw) != row['bytes'] or sha(raw) != row['sha256']:
+            raise ValueError('approved target changed: ' + row['bucket'] + ':' + row['path'])
+        return len(raw)
+
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        total = sum(pool.map(check, rows))
+    if total != sum(row['bytes'] for row in rows):
+        raise ValueError('approved target byte total changed')
+    return total
+
+
+def assert_same_inventory(plan, rows):
+    if (plan.get('inventory_sha256') != INVENTORY_SHA256 or plan.get('expanded_targets') != rows
+            or plan.get('generation') != exact.GENERATION or plan.get('version') != 1
+            or plan.get('kind') != 'ccrd-exact-ocr-retirement-plan'):
+        raise ValueError('saved plan does not match the exact approved inventory')
+    approved_ccrd = {(row['path'], row['bytes'], row['sha256']) for row in rows if row['bucket'] == CCRD}
+    if approved_ccrd != {(r['path'], r['bytes'], r['sha256']) for r in plan.get('targets', [])}:
+        raise ValueError('saved CCRD targets differ from the approved inventory')
+    if any(plan.get('control_hashes_before', {}).get(path) != digest
+           for path, digest in exact.INITIAL_HASHES.items()):
+        raise ValueError('saved CCRD controls are not the reviewed originals')
+    if set(plan.get('processing_updates', {})) != set(PROCESSING_HASHES):
+        raise ValueError('saved plan does not contain exactly the reviewed processing roots')
+    for path, change in plan['processing_updates'].items():
+        before, after = change.get('before'), change.get('after')
+        if (not isinstance(before, dict) or not isinstance(after, dict)
+                or change.get('sha256_before') != PROCESSING_HASHES[path]
+                or not isinstance(change.get('before_raw'), str)
+                or sha(change['before_raw'].encode('utf-8')) != change['sha256_before']
+                or json.loads(change['before_raw']) != before):
+            raise ValueError('saved processing root is not the reviewed original')
+        original = before.get('resources')
+        if not isinstance(original, list):
+            raise ValueError('invalid saved processing resources')
+        allowed_retained = ([{'bucket': PAGES, 'root': PRESERVED_DERIVED_ROOT}]
+                            if path == FIRST_PROCESSING else [])
+        expected_after = copy.deepcopy(before)
+        expected_after['resources'] = allowed_retained
+        expected_after['withdrawal'] = {'kind': 'explicit-ocr-withdrawal',
+            'inventory_sha256': INVENTORY_SHA256, 'removed_root_count': len(original) - len(allowed_retained),
+            'original_sha256': PROCESSING_HASHES[path]}
+        if not allowed_retained:
+            expected_after['status'] = 'withdrawn'
+        if after != expected_after or any(ref not in original for ref in allowed_retained):
+            raise ValueError('saved processing update exceeds the reviewed withdrawal')
+        for ref in original:
+            if ref in allowed_retained:
+                continue
+            if not isinstance(ref, dict) or not any(row['bucket'] == ref.get('bucket')
+                    and row['path'].startswith(str(ref.get('root', '')) + '/') for row in rows):
+                raise ValueError('saved processing update removes a foreign root')
+    updates = plan.get('updates', {})
+    external = updates.get('external', {}).get('resources')
+    if (not isinstance(external, list) or len(external) != 1 or not isinstance(external[0], dict)
+            or external[0].get('bucket') != PAGES
+            or external[0].get('path') != PRESERVED_DERIVED_ROOT + '/derived-manifest.json'
+            or updates.get('intent', {}).get('status') != 'retired' or updates['intent'].get('resources') != []
+            or updates.get('ids', {}).get('status') != 'withdrawn' or updates['ids'].get('resources') != []):
+        raise ValueError('saved CCRD retirement is not narrowly scoped')
+    target = {(row['bucket'], row['path']) for row in rows}
+    retained = updates.get('reader_consumers', {}).get('resources')
+    if not isinstance(retained, list) or any((ref.get('bucket'), ref.get('path')) in target for ref in retained):
+        raise ValueError('saved Reader consumer still pins an OCR retirement target')
+
+
+def verify_saved_plan_controls(store, plan):
+    """Prove proposed post-state is derived from each exact reviewed root."""
+    changes = ((CCRD, exact.INTENT, plan['updates']['intent'], 'intent'),
+               (CCRD, exact.IDS, plan['updates']['ids'], 'ids'))
+    for bucket, path, replacement, kind in changes:
+        raw = store.read_bytes(bucket, path)
+        if sha(raw) == plan['control_hashes_before'][path]:
+            expected = json.loads(raw)
+            if kind == 'intent':
+                expected.update(status='retired', resources=[], retirement_reason='explicit-document-reset',
+                                reset_id=exact.RESET_ID)
+            else:
+                expected.update(status='withdrawn', resources=[], reset_id=exact.RESET_ID)
+            if expected != replacement:
+                raise ValueError('saved replacement changes unrelated CCRD fields: ' + path)
+        elif raw != encode(replacement):
+            raise ValueError('CCRD root is neither the reviewed original nor replacement: ' + path)
+    raw = store.read_bytes(ASSETS, exact.READER_CONSUMERS)
+    proposed = plan['updates']['reader_consumers']
+    if sha(raw) == plan['reader_consumer_sha256_before']:
+        before = json.loads(raw)
+        expected = copy.deepcopy(before)
+        release = exact.identity(plan['pointer_before']['release'])
+        expected['resources'] = [ref for ref in before['resources'] if exact.identity(ref) != release]
+        expected['receipts']['ccrd'] = copy.deepcopy(proposed['receipts']['ccrd'])
+        if expected != proposed or len(before['resources']) != len(expected['resources']) + 1:
+            raise ValueError('saved Reader consumer update removes unrelated resources')
+    elif raw != encode(proposed):
+        raise ValueError('Reader consumer is neither the reviewed original nor replacement')
+
+
+def apply_planned_reference_retirement(store, plan, fence, client, checkpoint):
+    """Apply the bounded reference changes, without deleting target data."""
+    fence.check()
+    exact.current_status(client, plan['base_generation'])
+    for path, change in plan['processing_updates'].items():
+        observed = store.read_bytes(ASSETS, path)
+        if sha(observed) != change['sha256_before'] and observed != encode(change['after']):
+            raise ValueError('OCR upload protection changed before retirement: ' + path)
+    exact.apply_reference_retirement(store, plan, fence, client, checkpoint)
+    for path, change in sorted(plan['processing_updates'].items()):
+        fence.check()
+        exact.ensure_bytes(store, ASSETS, path, change['sha256_before'], encode(change['after']))
+        checkpoint('ocr-upload-protection-retired')
+    exact.verify_reference_retirement(store, plan)
+
+
+def require_actual_zero_proof(proof, rows):
+    if (proof.get('graph_complete') is not True or proof.get('actual_retired_controls_checked') is not True
+            or proof.get('internal_target_manifests_omitted') is not True
+            or proof.get('target_exclusivity_proven') is not True
+            or proof.get('retained_target_count') != 0 or proof.get('non_target_origins')
+            or proof.get('tree_roots_without_origin') != 0
+            or proof.get('target_count') != len(rows)):
+        raise ValueError('current actual four-bucket closure does not authorize exact retirement')
+
+
+def check_target_identity(store, row):
+    """Return present/absent only after rejecting transport and bucket failures."""
+    raw = exact.read_optional(store, row['bucket'], row['path'])
+    if raw is None:
+        return False
+    if len(raw) != row['bytes'] or sha(raw) != row['sha256']:
+        raise ValueError('approved target changed: ' + row['bucket'] + ':' + row['path'])
+    return True
+
+
+def submitted_targets(progress, rows):
+    """A missing object is recoverable only if a durable record submitted it."""
+    keys = {(row['bucket'], row['path']) for row in rows}
+    submitted = set()
+    for batch in progress.get('batches', []):
+        paths = batch.get('paths')
+        if (batch.get('status') not in {'submitted', 'verified-absent'} or not isinstance(paths, list)
+                or not paths or len(paths) > 100 or len(paths) != len(set(paths))):
+            raise ValueError('invalid saved deletion batch')
+        entries = {(batch.get('bucket'), path) for path in paths}
+        if not entries <= keys or entries & submitted:
+            raise ValueError('saved deletion batches overlap or exceed the approved inventory')
+        submitted.update(entries)
+    return submitted
+
+
+def reconcile_targets(store, rows, progress, *, workers=8):
+    """Individually re-read targets and account for interrupted batch outcomes."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    submitted = submitted_targets(progress, rows)
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        present = list(pool.map(lambda row: check_target_identity(store, row), rows))
+    missing = {(row['bucket'], row['path']) for row, exists in zip(rows, present) if not exists}
+    if not missing <= submitted:
+        raise ValueError('an approved target disappeared without a durable deletion submission')
+    return {'present': sum(present), 'confirmed_absent': len(missing),
+            'confirmed_absent_bytes': sum(row['bytes'] for row, exists in zip(rows, present) if not exists),
+            'missing': missing}
+
+
+def delete_approved_batches(store, rows, fence, client, checkpoint, *, batch_size=100, progress=None):
+    """Submit only reviewed identities; reconcile per-key results after failures."""
+    if not 1 <= batch_size <= 100:
+        raise ValueError('invalid exact deletion batch size')
+    result = copy.deepcopy(progress or {'batches': []})
+    state = reconcile_targets(store, rows, result)
+    result.update(confirmed_deleted_objects=state['confirmed_absent'],
+                  confirmed_deleted_bytes=state['confirmed_absent_bytes'])
+    checkpoint('deletion-reconciled', result)
+    order = (INPUT, PAGES, ASSETS, CCRD)
+    authorized = {(r['bucket'], r['path']): r for r in rows}
+    for bucket in order:
+        # Previously submitted batches are retried in place. Missing keys are
+        # harmless only because they were already included in that durable batch.
+        batches = [batch for batch in result['batches'] if batch['bucket'] == bucket]
+        submitted = submitted_targets(result, rows)
+        unsubmitted = [r for r in rows if r['bucket'] == bucket and (bucket, r['path']) not in submitted]
+        batches.extend({'bucket': bucket, 'paths': [r['path'] for r in unsubmitted[i:i + batch_size]],
+                        'status': 'new'} for i in range(0, len(unsubmitted), batch_size))
+        for receipt in batches:
+            fence.check()
+            batch = [authorized[(bucket, path)] for path in receipt['paths']]
+            existing = [row for row in batch if check_target_identity(store, row)]
+            if receipt['status'] == 'new':
+                if len(existing) != len(batch):
+                    raise ValueError('unsubmitted target disappeared before deletion')
+                receipt['status'] = 'submitted'
+                result['batches'].append(receipt)
+            checkpoint('deletion-batch-submitted', result)
+            if existing:
+                store.delete(bucket, [row['path'] for row in existing])
+            for row in batch:
+                if exact.read_optional(store, bucket, row['path']) is not None:
+                    raise ValueError('target remains directly readable: ' + bucket + ':' + row['path'])
+            receipt['status'] = 'verified-absent'
+            verified = {(entry['bucket'], path) for entry in result['batches']
+                        if entry['status'] == 'verified-absent' for path in entry['paths']}
+            verified.update(state['missing'])
+            result['confirmed_deleted_objects'] = len(verified)
+            result['confirmed_deleted_bytes'] = sum(authorized[key]['bytes'] for key in verified)
+            checkpoint('deletion-batch-verified', result)
+    verified = reconcile_targets(store, rows, result)
+    if verified['present']:
+        raise ValueError('approved targets still exist after deletion')
+    result.update(confirmed_deleted_objects=verified['confirmed_absent'],
+                  confirmed_deleted_bytes=verified['confirmed_absent_bytes'])
+    for row in rows:
+        if row['bucket'] == CCRD and row['path'].endswith('.txt'):
+            response = client.get('https://huggingface.co/buckets/' + CCRD + '/resolve/' + row['path'],
+                                  headers={'Range': 'bytes=0-0', 'Cache-Control': 'no-cache'}, timeout=60)
+            if response.status_code not in {404, 410}:
+                raise ValueError('public OCR TXT remains accessible: ' + row['path'])
+    if result['confirmed_deleted_objects'] != len(rows):
+        raise ValueError('not all approved objects have been verified absent')
+    return result
+
+
+def recheck_roots_and_controls(store, plan, proof, fence, client):
+    """Re-list roots and verify their exact read-time bytes before first deletion."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    require_actual_zero_proof(proof, plan['expanded_targets'])
+    expected = {(r['bucket'], r['path']) for r in proof['root_members']}
+    expected_hashes = {(r['bucket'], r['path']): r['sha256'] for r in proof['root_sha256']}
+    retired = {(r['bucket'], r['path']) for r in proof['retired_root_members']}
+    if not (expected - retired) <= set(expected_hashes):
+        raise ValueError('root fingerprint evidence is incomplete')
+    observed = set()
+    for bucket in graph.BUCKETS:
+        if bucket == CCRD:
+            roots = {p for p in store.list_files(bucket, ('control/', 'current.json'))
+                     if graph.is_root(p, bucket)}
+        else:
+            parents = {posixpath.dirname(path) + '/' for owner, path in expected
+                       if owner == bucket and not path.startswith('reader-index/') and '/' in path}
+            roots = {p for p in store.list_roots(bucket, parents) if graph.is_root(p, bucket)}
+        observed.update((bucket, path) for path in roots)
+    if observed != expected:
+        raise ValueError('root inventory changed before exact deletion')
+    def read_hash(item):
+        ref, expected_digest = item
+        if store.digest(*ref) != expected_digest:
+            raise ValueError('root changed before exact deletion: ' + ':'.join(ref))
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(read_hash, sorted(expected_hashes.items())))
+    exact.verify_reference_retirement(store, plan)
+    for path, change in plan['processing_updates'].items():
+        if store.read_bytes(ASSETS, path) != encode(change['after']):
+            raise ValueError('OCR processing protection changed before deletion: ' + path)
+    fence.check()
+    exact.current_status(client, plan['base_generation'])
+
+
+def check_partial_controls(store, plan):
+    """Only exact original or planned control bytes are valid during recovery."""
+    controls, _ = exact.inspect_roots(store, None, require_initial=False)
+    expected = dict(plan['control_hashes_before'])
+    allowed_paths = set(expected) | {exact.EXTERNAL}
+    if set(controls) - allowed_paths or set(expected) - set(controls) - {exact.CURRENT}:
+        raise ValueError('CCRD control inventory changed during partial retirement')
+    replacements = {exact.INTENT: sha(encode(plan['updates']['intent'])),
+                    exact.IDS: sha(encode(plan['updates']['ids'])),
+                    exact.EXTERNAL: sha(encode(plan['updates']['external']))}
+    for path, actual in controls.items():
+        allowed = {expected.get(path), replacements.get(path)} - {None}
+        if actual not in allowed:
+            raise ValueError('CCRD control changed during partial retirement: ' + path)
+    reader_hash = sha(store.read_bytes(ASSETS, exact.READER_CONSUMERS))
+    if reader_hash not in {plan['reader_consumer_sha256_before'], sha(encode(plan['updates']['reader_consumers']))}:
+        raise ValueError('Reader consumer changed during partial retirement')
+    for path, change in plan['processing_updates'].items():
+        raw = store.read_bytes(ASSETS, path)
+        if sha(raw) != change['sha256_before'] and raw != encode(change['after']):
+            raise ValueError('processing root changed during partial retirement: ' + path)
+    receipt = exact.read_optional(store, CCRD, exact.WITHDRAWAL)
+    if receipt is not None and receipt != encode(plan['updates']['withdrawal']):
+        raise ValueError('withdrawal receipt changed during partial retirement')
+
+
 def simulate(store, plan, fence, *, workers=8, deadline_minutes=300, progress=None,
-             omit_internal_target_manifests=False):
+             omit_internal_target_manifests=False, actual=False, details=None, allow_partial=False):
     """Find remaining target pins without changing a single production object."""
     overrides = {(CCRD, PRESERVED): encode(plan['updates']['external']),
                  (CCRD, exact.INTENT): encode(plan['updates']['intent']),
@@ -234,15 +528,29 @@ def simulate(store, plan, fence, *, workers=8, deadline_minutes=300, progress=No
     overrides.update({(ASSETS, path): encode(change['after'])
                       for path, change in plan.get('processing_updates', {}).items()})
     hidden = {(CCRD, exact.CURRENT)}
+    if actual and allow_partial:
+        raise ValueError('actual graph cannot use partial control overlays')
+    if allow_partial:
+        check_partial_controls(store, plan)
+    if actual:
+        for (bucket, path), expected in overrides.items():
+            if store.read_bytes(bucket, path) != expected:
+                raise ValueError('actual retired root differs from the verified plan: ' + bucket + ':' + path)
+        if exact.read_optional(store, CCRD, exact.CURRENT) is not None:
+            raise ValueError('OCR current pointer still exists')
 
     class View:
         def __init__(self):
             self.object_sizes = store.object_sizes
-            self.read_etags = {}
-            self.root_etags = {}
+            # Actual traversal must expose fresh listed and read-time ETags.
+            # The simulated overlay instead uses synthetic hashes for its roots.
+            self.read_etags = getattr(store, 'read_etags', {}) if actual else {}
+            self.root_etags = getattr(store, 'root_etags', {}) if actual else {}
 
         def list_files(self, bucket, prefixes):
             files = set(store.list_files(bucket, prefixes))
+            if actual:
+                return files
             files.difference_update(path for owner, path in hidden if owner == bucket)
             files.update(path for owner, path in overrides if owner == bucket and path.startswith(prefixes))
             return files
@@ -250,6 +558,8 @@ def simulate(store, plan, fence, *, workers=8, deadline_minutes=300, progress=No
         def list_roots(self, bucket, parents):
             roots = {path: etag for path, etag in store.list_roots(bucket, parents).items()
                      if graph.is_root(path, bucket)}
+            if actual:
+                return roots
             for owner, path in hidden:
                 if owner == bucket:
                     roots.pop(path, None)
@@ -260,20 +570,31 @@ def simulate(store, plan, fence, *, workers=8, deadline_minutes=300, progress=No
 
         def read_bytes(self, bucket, path):
             ref = (bucket, path)
-            if ref in hidden:
+            if not actual and ref in hidden:
                 raise FileNotFoundError(path)
+            if actual:
+                return store.read_bytes(bucket, path)
             return overrides[ref] if ref in overrides else store.read_bytes(bucket, path)
 
         def read_graph_json(self, bucket, path, parser=None):
             ref = (bucket, path)
-            if ref in hidden:
+            if not actual and ref in hidden:
                 raise FileNotFoundError(path)
+            if actual:
+                # Actual destructive proof must read the current bytes, not a
+                # cache entry selected by a potentially stale listed ETag.
+                if ref == graph.CATALOG_REF:
+                    return store.read_graph_json(bucket, path, parser=parser)
+                raw = store.read_bytes(bucket, path)
+                return (parser or stream.graph_json)([raw], path.endswith('.gz'))
             if ref in overrides:
                 return (parser or stream.graph_json)([overrides[ref]], path.endswith('.gz'))
             return store.read_graph_json(bucket, path, parser=parser)
 
         def digest(self, bucket, path):
             ref = (bucket, path)
+            if actual:
+                return store.digest(bucket, path)
             return sha(overrides[ref]) if ref in overrides else store.digest(bucket, path)
 
     fence.check()
@@ -294,17 +615,27 @@ def simulate(store, plan, fence, *, workers=8, deadline_minutes=300, progress=No
     external_origins = external_target_origins(ref_graph, plan['expanded_targets'])
     fence.check()
     collector.verify_roots(ref_graph.store, ref_graph)
-    controls, _ = exact.inspect_roots(store, None)
-    if controls != plan['control_hashes_before']:
-        raise ValueError('CCRD controls changed during reference simulation')
-    if sha(store.read_bytes(ASSETS, exact.READER_CONSUMERS)) != plan['reader_consumer_sha256_before']:
-        raise ValueError('Reader consumers changed during reference simulation')
-    for path, update in plan.get('processing_updates', {}).items():
-        if sha(store.read_bytes(ASSETS, path)) != update['sha256_before']:
-            raise ValueError('OCR upload protection changed during simulation: ' + path)
+    if actual:
+        exact.verify_reference_retirement(store, plan)
+        for path, update in plan.get('processing_updates', {}).items():
+            if store.read_bytes(ASSETS, path) != encode(update['after']):
+                raise ValueError('OCR upload protection changed during actual scan: ' + path)
+    elif allow_partial:
+        check_partial_controls(store, plan)
+    else:
+        controls, _ = exact.inspect_roots(store, None)
+        if controls != plan['control_hashes_before']:
+            raise ValueError('CCRD controls changed during reference simulation')
+        if sha(store.read_bytes(ASSETS, exact.READER_CONSUMERS)) != plan['reader_consumer_sha256_before']:
+            raise ValueError('Reader consumers changed during reference simulation')
+        for path, update in plan.get('processing_updates', {}).items():
+            if sha(store.read_bytes(ASSETS, path)) != update['sha256_before']:
+                raise ValueError('OCR upload protection changed during simulation: ' + path)
     attestation = attest_root_fingerprints(report, ref_graph)
     zero_proof = (zero_root_target_proof(report, ref_graph, plan['expanded_targets'])
                   if omit_internal_target_manifests else None)
+    if details is not None:
+        details.update(reference_graph=ref_graph, report=report)
     return {'kind': 'expanded-ocr-reference-simulation', 'graph_complete': True,
             'target_count': len(targets), 'retained_target_count': len(retained),
             'retained_targets': [f'{bucket}:{path}' for bucket, path in sorted(retained)],
@@ -316,6 +647,7 @@ def simulate(store, plan, fence, *, workers=8, deadline_minutes=300, progress=No
             'tree_roots_without_origin': len(ref_graph.trees - set(ref_graph.tree_origins)),
             'origin_tracking_complete': not bool(ref_graph.trees - set(ref_graph.tree_origins)),
             'internal_target_manifests_omitted': omit_internal_target_manifests,
+            'actual_retired_controls_checked': actual,
             'target_exclusivity_proven': bool(zero_proof and zero_proof['target_exclusivity_proven']),
             'protected_non_ocr_refs': len(preserved), 'root_count': len(report['roots']),
             **attestation,
