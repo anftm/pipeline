@@ -120,7 +120,38 @@ def attest_root_fingerprints(report, ref_graph):
     }
 
 
-def simulate(store, plan, fence, *, workers=8, deadline_minutes=300, progress=None):
+def zero_root_target_proof(report, ref_graph, rows):
+    """Prove reachability from every live root without trusting internal SCC pins.
+
+    This is a read-only proof for the exact supplied set, not deletion authority.
+    A target manifest reached from any non-target root is a blocker. Target
+    manifests are not read merely because another target references them; their
+    remaining internal edges disappear only if that whole target set is later
+    retired as a single journalled operation.
+    """
+    attest = attest_root_fingerprints(report, ref_graph)
+    if not isinstance(ref_graph, OriginReferenceGraph):
+        raise ValueError('origin-aware tree tracing is required')
+    untracked = ref_graph.trees - set(ref_graph.tree_origins)
+    if untracked:
+        raise ValueError('a protected tree has no recorded owner')
+    targets = {(row['bucket'], row['path']) for row in rows}
+    direct_targets = ref_graph.references & targets
+    external = external_target_origins(ref_graph, rows)
+    if direct_targets or external:
+        return {'graph_complete': True, 'target_count': len(targets),
+                'root_reachable_targets': len(direct_targets),
+                'external_origins': len(external), 'all_active_roots_read': True,
+                'untracked_trees': 0, 'target_exclusivity_proven': False,
+                'deletion_authorized': False, **attest}
+    return {'graph_complete': True, 'target_count': len(targets),
+            'root_reachable_targets': 0, 'external_origins': 0,
+            'all_active_roots_read': True, 'untracked_trees': 0,
+            'target_exclusivity_proven': True, 'deletion_authorized': False, **attest}
+
+
+def simulate(store, plan, fence, *, workers=8, deadline_minutes=300, progress=None,
+             omit_internal_target_manifests=False):
     """Find remaining target pins without changing a single production object."""
     overrides = {(CCRD, PRESERVED): encode(plan['updates']['external']),
                  (CCRD, exact.INTENT): encode(plan['updates']['intent']),
@@ -170,7 +201,9 @@ def simulate(store, plan, fence, *, workers=8, deadline_minutes=300, progress=No
             return sha(overrides[ref]) if ref in overrides else store.digest(bucket, path)
 
     fence.check()
+    target_set = {(row['bucket'], row['path']) for row in plan['expanded_targets']}
     ref_graph = OriginReferenceGraph(View(), workers=workers, max_rounds=40, progress=progress,
+                                     omit_internal=target_set if omit_internal_target_manifests else None,
                                      deadline=time.monotonic() + deadline_minutes * 60)
     report = ref_graph.build()
     if not report['graph_complete'] or report['blockers'] or report.get('ambiguous_paths'):
@@ -191,6 +224,8 @@ def simulate(store, plan, fence, *, workers=8, deadline_minutes=300, progress=No
     if sha(store.read_bytes(ASSETS, exact.READER_CONSUMERS)) != plan['reader_consumer_sha256_before']:
         raise ValueError('Reader consumers changed during reference simulation')
     attestation = attest_root_fingerprints(report, ref_graph)
+    zero_proof = (zero_root_target_proof(report, ref_graph, plan['expanded_targets'])
+                  if omit_internal_target_manifests else None)
     return {'kind': 'expanded-ocr-reference-simulation', 'graph_complete': True,
             'target_count': len(targets), 'retained_target_count': len(retained),
             'retained_targets': [f'{bucket}:{path}' for bucket, path in sorted(retained)],
@@ -201,6 +236,8 @@ def simulate(store, plan, fence, *, workers=8, deadline_minutes=300, progress=No
             'tree_roots_with_origin': len(ref_graph.tree_origins),
             'tree_roots_without_origin': len(ref_graph.trees - set(ref_graph.tree_origins)),
             'origin_tracking_complete': not bool(ref_graph.trees - set(ref_graph.tree_origins)),
+            'internal_target_manifests_omitted': omit_internal_target_manifests,
+            'target_exclusivity_proven': bool(zero_proof and zero_proof['target_exclusivity_proven']),
             'protected_non_ocr_refs': len(preserved), 'root_count': len(report['roots']),
             **attestation,
             'deletion_authorized': False, 'remote_mutations': 0}
@@ -214,9 +251,19 @@ class OriginReferenceGraph(graph.ReferenceGraph):
     request *before* the base implementation deduplicates that tree. Entries are
     retained for old root versions as well: stale pins are conservative.
     """
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, omit_internal=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.tree_origins = {}
+        self.omit_internal = frozenset(omit_internal or ())
+        self.omitted_manifest_reads = set()
+
+    def load(self, ref):
+        if ref in self.omit_internal and not graph.is_root(ref[1], ref[0]):
+            # Target bytes were independently hashed in the inventory; a target
+            # is treated as a terminal boundary in this hypothetical view.
+            self.omitted_manifest_reads.add(ref)
+            return None
+        return super().load(ref)
 
     def mark(self, bucket, path, *, tree=False, external_pin=False):
         if (bucket in graph.BUCKETS and isinstance(path, str) and path

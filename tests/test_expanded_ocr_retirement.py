@@ -154,6 +154,54 @@ class ExpandedRetirementSimulationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'complete four-bucket'):
             expanded.attest_root_fingerprints(report, fake)
 
+    def test_target_internal_manifest_cycle_is_not_a_live_root(self):
+        store, plan, path = self.fixture()
+        root = path.rsplit('/text/', 1)[0]
+        manifest = root + '/text-layer-manifest.json'
+        doc = {'version': 1, 'kind': 'pdf-text-layer-index', 'resources': [
+            {'bucket': expanded.PAGES, 'path': path}]}
+        store.put(expanded.PAGES, manifest, doc)
+        raw = store.read_bytes(expanded.PAGES, manifest)
+        plan['expanded_targets'].append({'bucket': expanded.PAGES, 'path': manifest,
+                                        'bytes': len(raw), 'sha256': exact.sha(raw)})
+        with patch.object(exact, 'inspect_roots', return_value=(plan['control_hashes_before'], {})):
+            report = expanded.simulate(store, plan, Fence(), workers=2, deadline_minutes=1,
+                                       omit_internal_target_manifests=True)
+        self.assertTrue(report['target_exclusivity_proven'])
+        self.assertEqual(report['retained_target_count'], 0)
+        self.assertEqual(store.deletions, [])
+
+    def test_external_root_pin_still_blocks_without_reading_target_manifest(self):
+        store, plan, path = self.fixture()
+        root = path.rsplit('/text/', 1)[0]
+        manifest = root + '/text-layer-manifest.json'
+        store.put(expanded.PAGES, manifest, {'kind': 'pdf-text-layer-index', 'resources': []})
+        raw = store.read_bytes(expanded.PAGES, manifest)
+        plan['expanded_targets'].append({'bucket': expanded.PAGES, 'path': manifest,
+                                        'bytes': len(raw), 'sha256': exact.sha(raw)})
+        store.put(expanded.ASSETS, 'reader-index/independent-pin.json', {'resources': [{
+            'bucket': expanded.PAGES, 'path': manifest}]})
+        with patch.object(exact, 'inspect_roots', return_value=(plan['control_hashes_before'], {})):
+            report = expanded.simulate(store, plan, Fence(), workers=2, deadline_minutes=1,
+                                       omit_internal_target_manifests=True)
+        self.assertFalse(report['target_exclusivity_proven'])
+        self.assertGreater(report['retained_target_count'], 0)
+        self.assertTrue(report['non_target_origins'])
+        self.assertEqual(store.deletions, [])
+
+    def test_retained_directory_root_still_blocks_internal_scc_retirement(self):
+        store, plan, path = self.fixture()
+        directory = path.rsplit('/text/', 1)[0]
+        store.put(expanded.ASSETS, 'reader-index/independent-tree.json', {'resources': [{
+            'bucket': expanded.PAGES, 'root': directory}]})
+        with patch.object(exact, 'inspect_roots', return_value=(plan['control_hashes_before'], {})):
+            report = expanded.simulate(store, plan, Fence(), workers=2, deadline_minutes=1,
+                                       omit_internal_target_manifests=True)
+        self.assertFalse(report['target_exclusivity_proven'])
+        self.assertEqual(report['retained_target_count'], 1)
+        self.assertTrue(report['non_target_origins'])
+        self.assertEqual(store.deletions, [])
+
 
 if __name__ == '__main__':
     unittest.main()

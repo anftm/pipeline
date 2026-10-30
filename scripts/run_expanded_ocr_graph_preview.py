@@ -52,6 +52,7 @@ def main():
             (OUTPUT / 'plan.json').write_bytes(expanded.encode(plan))
             checkpoint('four-bucket-simulation')
             proof = expanded.simulate(store, plan, fence, workers=8, deadline_minutes=300,
+                                      omit_internal_target_manifests=True,
                                       progress=lambda stage, **counts: print(
                                           json.dumps({'scan': stage, **counts}, ensure_ascii=False), flush=True))
             result['simulation'] = proof
