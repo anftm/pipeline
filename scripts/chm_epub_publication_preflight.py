@@ -457,6 +457,21 @@ def retained_reader_snapshot_refs(store, history_refs):
     return state
 
 
+def acknowledge_base_catalog(catalog, generation):
+    """Mark only the accepted CHM replacement base and its predecessor."""
+    value = copy.deepcopy(catalog)
+    if (value.get('current') or {}).get('generation') != generation:
+        raise ValueError('base catalog moved before consumer acknowledgment')
+    entry = value.get('generations', {}).get(generation)
+    if not isinstance(entry, dict) or entry.get('generation') != generation:
+        raise ValueError('replacement base generation is missing')
+    entry['acks'] = {'hf': True, 'pages': True}
+    for previous in value['generations'].values():
+        if previous.get('status') == 'superseded':
+            previous['replacement_acks'] = {'hf': True, 'pages': True}
+    return value
+
+
 def preserved_v3_reading_refs(old_catalogs):
     """Retain each explicit non-CHM v3 reading override from replaced history."""
     refs = {}
@@ -550,7 +565,14 @@ def plan_chm_withdrawal(store, inventory_path, *, acknowledged_generations):
                             {'hf': True, 'pages': True}, aliases=alias_refs)
     overrides = {p: publication.encode(value) for p, value in synced['indexes'].items()}
     overrides[SIDECAR] = current_new['snapshot_bytes']
-    overrides[CATALOG] = publication.encode(synced['catalog'])
+    current_base_gen = synced['generation']
+    new_base = synced['catalog']['generations'][current_base_gen]
+    new_base_snapshot_path = f'reader-index/generations/{current_base_gen}/reader_assets.json.gz'
+    immutable[new_base_snapshot_path] = current_new['snapshot_bytes']
+    new_base['snapshot'] = {'bucket': ASSETS, 'path': new_base_snapshot_path,
+                            'sha256': digest(current_new['snapshot_bytes']),
+                            'bytes': len(current_new['snapshot_bytes'])}
+    overrides[CATALOG] = publication.encode(acknowledge_base_catalog(synced['catalog'], current_base_gen))
     overrides['reader-index/v3/current.json'] = publication.encode(new_pointer)
     overrides['reader-index/v3/retirement.json'] = publication.encode(journal)
     old_base_gen = (catalog.get('current') or {}).get('generation')

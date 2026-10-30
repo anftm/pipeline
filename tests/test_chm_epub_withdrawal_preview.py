@@ -380,6 +380,11 @@ class ChmWithdrawalPreviewTests(unittest.TestCase):
         self.assertIn(self.generation, result['catalog']['generations'])
         self.assertEqual(cleaned['generations'][result['generation']],
                          result['catalog']['generations'][result['generation']])
+        accepted = preflight.acknowledge_base_catalog(result['catalog'], result['generation'])
+        self.assertEqual(accepted['generations'][result['generation']]['acks'], {'hf': True, 'pages': True})
+        self.assertEqual(accepted['generations'][self.generation]['replacement_acks'], {'hf': True, 'pages': True})
+        with self.assertRaisesRegex(ValueError, 'moved'):
+            preflight.acknowledge_base_catalog(result['catalog'], 'not-current')
 
 
 if __name__ == '__main__':
