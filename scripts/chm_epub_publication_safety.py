@@ -374,6 +374,141 @@ def confirm_initial_snapshot(store, plan):
     return values
 
 
+def store_immutable_replacements(store, plan, fence, checkpoint):
+    """Upload only content-addressed CHM replacement snapshots/catalogs."""
+    for path, raw in sorted(plan['immutable'].items()):
+        fence.check()
+        publication.immutable_put(store, chm.ASSETS, path, raw)
+        checkpoint('immutable-replacement-verified', path)
+
+
+def apply_exact_controls(store, plan, before, paths, fence, checkpoint):
+    """Apply approved controls one by one, accepting idempotent retries only."""
+    if len(paths) != len(set(paths)) or any(path not in plan['overrides'] for path in paths):
+        raise ValueError('CHM control write exceeds the approved plan')
+    for path in paths:
+        fence.check()
+        raw = plan['overrides'][path]
+        if compare_before_write(store, path, before[path]['sha256'], raw):
+            store.put_bytes(chm.ASSETS, path, raw)
+        if store.read_bytes(chm.ASSETS, path) != raw:
+            raise ValueError('CHM control readback differs after publication: ' + path)
+        checkpoint('control-verified', path)
+
+
+def validate_publication_order(plan, receipt_state):
+    """Do not release old CHM references until both real surfaces accept."""
+    staged = set(receipt_state.get('staged_controls', []))
+    post = set(receipt_state.get('post_ack_controls', []))
+    allowed_pre_ack = {chm.SIDECAR, chm.CATALOG, 'reader-index/v3/current.json',
+                       f"reader-index/v3/promotions/{plan['new_v3_generation']}.json",
+                       'reader-index/chm-epub-withdrawal-retention.json'}
+    if not staged <= allowed_pre_ack or post & staged:
+        raise ValueError('CHM publication checkpoint contains an invalid phase')
+    if post and receipt_state.get('both_surfaces_accepted') is not True:
+        raise ValueError('CHM history references cannot retire before both surfaces accept')
+    if receipt_state.get('delete_started') and not receipt_state.get('actual_graph_verified'):
+        raise ValueError('CHM deletion cannot start before the actual graph barrier')
+    return True
+
+
+def apply_pre_ack_publication(store, plan, before, fence, checkpoint):
+    """Publish replacement Reader pointer while keeping old history live."""
+    pointer_path = 'reader-index/v3/current.json'
+    planned_pointer = json.loads(plan['overrides'][pointer_path])
+    live_pointer, _ = publication.current(store)
+    if live_pointer not in (plan['v3_pointer_before'], planned_pointer):
+        raise ValueError('Reader pointer moved before CHM publication')
+    store_immutable_replacements(store, plan, fence, checkpoint)
+    catalog = json.loads(plan['overrides'][chm.CATALOG])
+    for generation, entry in catalog['generations'].items():
+        if generation == plan['base_generation']:
+            entry['acks'] = {'hf': False, 'pages': False}
+        elif entry.get('status') == 'superseded':
+            entry.pop('replacement_acks', None)
+    promotion_path = f"reader-index/v3/promotions/{plan['new_v3_generation']}.json"
+    promotion = json.loads(plan['overrides'][promotion_path])
+    promotion['acks'] = {'hf': False, 'pages': False}
+    staged = {chm.SIDECAR: plan['overrides'][chm.SIDECAR],
+              chm.CATALOG: publication.encode(catalog), promotion_path: publication.encode(promotion),
+              'reader-index/chm-epub-withdrawal-retention.json':
+                  plan['overrides']['reader-index/chm-epub-withdrawal-retention.json'],
+              pointer_path: plan['overrides'][pointer_path]}
+    for path in (promotion_path, 'reader-index/chm-epub-withdrawal-retention.json',
+                 chm.SIDECAR, chm.CATALOG, pointer_path):
+        fence.check()
+        raw = staged[path]
+        current = store.read_bytes(chm.ASSETS, path) if before[path]['present'] else None
+        # A prior interrupted run may already have uploaded the exact staged
+        # bytes even when the original control did not exist.
+        if current is None:
+            try:current = store.read_bytes(chm.ASSETS, path)
+            except FileNotFoundError:pass
+        if current != raw:
+            if current is None and before[path]['present']:
+                raise ValueError('original CHM control disappeared: ' + path)
+            if current is not None and chm.digest(current) != before[path]['sha256']:
+                raise ValueError('CHM control moved during publication: ' + path)
+            store.put_bytes(chm.ASSETS, path, raw)
+        if store.read_bytes(chm.ASSETS, path) != raw:
+            raise ValueError('staged CHM control readback differs: ' + path)
+        checkpoint('pre-ack-control-verified', path)
+    if publication.current(store)[0] != planned_pointer:
+        raise ValueError('planned CHM Reader pointer did not publish')
+    return staged
+
+
+def validate_reference_handoff(before, plan, rows):
+    """Before acknowledgement no current or rollback route may be dropped."""
+    import gzip
+    old_sidecar = json.loads(gzip.decompress(before[chm.SIDECAR]))
+    new_sidecar = json.loads(gzip.decompress(plan['overrides'][chm.SIDECAR]))
+    expected, _ = chm.sanitize_historical_v3_base(old_sidecar, {r['path'] for r in rows})
+    if new_sidecar != expected:
+        raise ValueError('CHM handoff changes unrelated Reader routes')
+    old_catalog = json.loads(before[chm.CATALOG])
+    planned = json.loads(plan['overrides'][chm.CATALOG])
+    old_id = old_catalog['current']['generation']
+    prior = old_catalog['generations'][old_id]
+    replacement = planned['generations'][old_id]
+    previous_refs = {(r['bucket'], r['path']) for r in prior['references']}
+    replacement_refs = {(r['bucket'], r['path']) for r in replacement['references']}
+    target_refs = {(r['bucket'], r['path']) for r in rows}
+    if previous_refs - replacement_refs != previous_refs & target_refs or replacement_refs - previous_refs:
+        raise ValueError('CHM base history loses unrelated resource references')
+    if plan['v3_pointer_before']['generation'] != plan['current_v3_generation']:
+        raise ValueError('CHM handoff parent generation changed')
+    verify_prepared_chapter_retention(plan)
+    return True
+
+
+def apply_acknowledged_controls(store, plan, before, staged, reports, fence, checkpoint):
+    """After real consumer acceptance, retire only the planned CHM references."""
+    require_projection_acceptance(plan, reports)
+    journal = 'reader-index/v3/retirement.json'
+    pointer = 'reader-index/v3/current.json'
+    promotion = f"reader-index/v3/promotions/{plan['new_v3_generation']}.json"
+    # These controls were published in a deliberately unacknowledged form.
+    # Verify their exact bytes before applying the acknowledged replacement.
+    for path in (chm.CATALOG, promotion):
+        fence.check()
+        current = store.read_bytes(chm.ASSETS, path)
+        desired = plan['overrides'][path]
+        if current not in (staged[path], desired):
+            raise ValueError('staged CHM acknowledgment changed: ' + path)
+        if current != desired:
+            store.put_bytes(chm.ASSETS, path, desired)
+        if store.read_bytes(chm.ASSETS, path) != desired:
+            raise ValueError('CHM acknowledgment readback differs: ' + path)
+        checkpoint('acknowledgment-verified', path)
+    untouched = {chm.SIDECAR, pointer, chm.CATALOG, promotion,
+                 'reader-index/chm-epub-withdrawal-retention.json'}
+    ordered = sorted(set(plan['overrides']) - untouched - {journal}) + [journal]
+    apply_exact_controls(store, plan, before, ordered, fence, checkpoint)
+    verify_live_chm_controls(store, plan)
+    return ordered
+
+
 def verify_exact_epub_targets(store, rows, *, workers=8):
     """Read every reviewed EPUB and verify its exact length and SHA-256."""
     from concurrent.futures import ThreadPoolExecutor
@@ -549,3 +684,13 @@ def delete_exact_epub_batches(store, rows, fence, checkpoint, *, batches=None, b
         raise ValueError('not every reviewed CHM EPUB is absent')
     checkpoint('all-direct-reads-absent', progress, serializable(status))
     return progress, serializable(status)
+
+
+def write_exact_progress(store, path, state):
+    """Persist and read back a narrow CHM operation checkpoint."""
+    if not path.startswith('reader-index/gc/chm-epub-withdrawal/') or '..' in path.split('/'):
+        raise ValueError('CHM checkpoint escaped its audit prefix')
+    raw = publication.encode(state)
+    store.put_bytes(chm.ASSETS, path, raw)
+    if store.read_bytes(chm.ASSETS, path) != raw:
+        raise ValueError('CHM checkpoint readback mismatch')

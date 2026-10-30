@@ -129,6 +129,64 @@ class ChmPublicationSafetyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'changed after planning'):
             safety.compare_before_write(Store(), 'control', expected, b'new')
 
+    def test_exact_controls_are_idempotent_and_reject_foreign_paths(self):
+        objects = {'reader-index/a.json': b'old'}
+        class Store:
+            def assert_chm_bucket_available(self):return True
+            def read_bytes(self, bucket, path):
+                if path not in objects:raise FileNotFoundError(path)
+                return objects[path]
+            def put_bytes(self, bucket, path, raw):objects[path] = raw
+        class Fence:
+            def check(self):pass
+        plan = {'overrides': {'reader-index/a.json': b'new'}}
+        before = {'reader-index/a.json': {'sha256': safety.chm.digest(b'old')}}
+        events = []
+        safety.apply_exact_controls(Store(), plan, before, ['reader-index/a.json'], Fence(),
+                                    lambda phase, path: events.append((phase, path)))
+        self.assertEqual(objects['reader-index/a.json'], b'new')
+        safety.apply_exact_controls(Store(), plan, before, ['reader-index/a.json'], Fence(),
+                                    lambda phase, path: events.append((phase, path)))
+        self.assertEqual(len(events), 2)
+        with self.assertRaisesRegex(ValueError, 'exceeds'):
+            safety.apply_exact_controls(Store(), plan, before, ['documents/pdf/ps/index.json'], Fence(),
+                                        lambda phase, path: None)
+
+    def test_publication_order_never_retires_history_before_both_sites(self):
+        staged = {'staged_controls': [safety.chm.SIDECAR], 'post_ack_controls': []}
+        self.assertTrue(safety.validate_publication_order(self.plan, staged))
+        bad = {**staged, 'post_ack_controls': ['reader-index/v3/retirement.json']}
+        with self.assertRaisesRegex(ValueError, 'before both surfaces'):
+            safety.validate_publication_order(self.plan, bad)
+        bad = {**staged, 'delete_started': True}
+        with self.assertRaisesRegex(ValueError, 'actual graph'):
+            safety.validate_publication_order(self.plan, bad)
+
+    def test_reference_handoff_rejects_loss_of_unrelated_history(self):
+        from unittest.mock import patch
+        sidecar = {'v': 1, 'f': {'book.pdf': {'p': 'unrelated'}}}
+        catalog = {'current': {'generation': 'old'}, 'generations': {'old': {
+            'references': [{'bucket': publication.ASSETS, 'path': 'unrelated'}]}}}
+        pointer = {'generation': 'old-v3'}
+        plan = {'overrides': {safety.chm.SIDECAR: gzip.compress(publication.encode(sidecar)),
+                              safety.chm.CATALOG: publication.encode(copy.deepcopy(catalog))},
+                'v3_pointer_before': pointer, 'current_v3_generation': 'old-v3'}
+        before = {safety.chm.SIDECAR: gzip.compress(publication.encode(sidecar)),
+                  safety.chm.CATALOG: publication.encode(catalog)}
+        with patch.object(safety, 'verify_prepared_chapter_retention'):
+            self.assertTrue(safety.validate_reference_handoff(before, plan, []))
+            changed = copy.deepcopy(catalog)
+            changed['generations']['old']['references'] = []
+            plan['overrides'][safety.chm.CATALOG] = publication.encode(changed)
+            with self.assertRaisesRegex(ValueError, 'unrelated resource'):
+                safety.validate_reference_handoff(before, plan, [])
+
+    def test_acknowledgment_writes_are_blocked_until_both_surfaces_accept(self):
+        bad = copy.deepcopy(self.reports)
+        bad['pages']['active'] = False
+        with self.assertRaisesRegex(ValueError, 'has not accepted'):
+            safety.apply_acknowledged_controls(None, self.plan, {}, {}, bad, None, lambda *_: None)
+
     def test_staged_plan_rejects_any_foreign_control(self):
         from unittest.mock import patch
         plan = copy.deepcopy(self.plan)
@@ -318,6 +376,15 @@ class ChmPublicationSafetyTests(unittest.TestCase):
         self.assertEqual(batches[0]['status'], 'verified-absent')
         self.assertLess([x[0] for x in events].index('batch-submitted'),
                         [x[0] for x in events].index('batch-verified'))
+
+    def test_progress_checkpoint_cannot_escape_narrow_audit_prefix(self):
+        objects = {}
+        class Store:
+            def put_bytes(self, bucket, path, raw):objects[path] = raw
+            def read_bytes(self, bucket, path):return objects[path]
+        safety.write_exact_progress(Store(), 'reader-index/gc/chm-epub-withdrawal/current.json', {'phase': 'planned'})
+        with self.assertRaisesRegex(ValueError, 'escaped'):
+            safety.write_exact_progress(Store(), 'reader-index/v3/current.json', {'phase': 'planned'})
 
 
 if __name__ == '__main__':
