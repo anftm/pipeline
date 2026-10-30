@@ -23,7 +23,7 @@ concurrency:
 
 jobs:
   repin:
-    if: github.repository == 'anftm/pipeline'
+    if: ${{ false }} # retired OCR pages must not be republished
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:

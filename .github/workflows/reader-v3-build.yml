@@ -21,7 +21,7 @@ concurrency:
 
 jobs:
   build:
-    if: github.repository == 'anftm/pipeline' && vars.READER_V3_AUTO_PAUSED != 'true'
+    if: ${{ false }} # automatic OCR/text candidate generation is retired
     runs-on: ubuntu-24.04
     timeout-minutes: 300
     strategy:
@@ -53,10 +53,7 @@ jobs:
 
   promote:
     needs: build
-    if: >-
-      always() && !cancelled() && needs.build.result != 'cancelled' &&
-      needs.build.result != 'skipped' && github.repository == 'anftm/pipeline' &&
-      vars.READER_V3_AUTO_PAUSED != 'true'
+    if: ${{ false }} # no promotion wave from retired automatic candidates
     runs-on: ubuntu-24.04
     steps:
       - name: Promote staged candidates and plan the next wave under the writer lock

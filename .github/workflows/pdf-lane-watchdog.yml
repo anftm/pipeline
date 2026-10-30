@@ -23,7 +23,9 @@ concurrency:
 
 jobs:
   watchdog:
-    if: github.repository == 'anftm/pipeline'
+    # Document OCR and detached native-text generation are retired. Keep the
+    # workflow definition for audit, but never restart its producer lanes.
+    if: ${{ false }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:

@@ -59,7 +59,7 @@ concurrency:
 
 jobs:
   publish:
-    if: github.repository == 'anftm/pipeline' && github.event_name == 'workflow_dispatch' && !inputs.automatic && !startsWith(inputs.release_path, 'https://')
+    if: ${{ false }} # OCR release retirement is permanent; preserve the base index
     runs-on: ubuntu-latest
     timeout-minutes: 40
     env:
@@ -121,16 +121,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
   automatic:
-    if: >-
-      github.repository == 'anftm/pipeline' &&
-      ((github.event_name == 'workflow_dispatch' && inputs.automatic && !startsWith(inputs.release_path, 'https://')) ||
-       (vars.CCRD_OCR_AUTO_ENABLED == 'true' &&
-        (github.event_name == 'schedule' ||
-         (github.event_name == 'workflow_run' &&
-          github.event.workflow_run.conclusion == 'success' &&
-          github.event.workflow_run.head_branch == 'main' &&
-          github.event.workflow_run.head_repository.full_name == github.repository &&
-          contains(fromJSON('[".github/workflows/pdf-account-publish.yml",".github/workflows/reader-v3-publish.yml"]'), github.event.workflow_run.path)))))
+    if: ${{ false }} # never rebuild the withdrawn OCR release or its TXT exports
     runs-on: ubuntu-latest
     timeout-minutes: 180
     env:
@@ -202,7 +193,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
   newspapers:
-    if: github.repository == 'anftm/pipeline' && github.event_name == 'workflow_dispatch' && startsWith(inputs.release_path, 'https://') && !inputs.automatic
+    if: ${{ false }} # retired OCR release publication is disabled for every source
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     permissions:

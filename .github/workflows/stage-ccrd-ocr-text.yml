@@ -21,6 +21,7 @@ permissions:
 
 jobs:
   stage:
+    if: ${{ false }} # retired OCR text and indexes must not be recreated
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:

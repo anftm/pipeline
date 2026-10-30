@@ -50,7 +50,7 @@ env:
 
 jobs:
   prepare:
-    if: github.repository == 'anftm/pipeline' && inputs.prepared_run_id == ''
+    if: ${{ false }} # retired OCR must not be recreated
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     steps:
@@ -83,9 +83,7 @@ jobs:
 
   publish:
     needs: prepare
-    if: >-
-      always() && !cancelled() && inputs.apply && github.repository == 'anftm/pipeline' &&
-      ((inputs.prepared_run_id != '') || needs.prepare.result == 'success')
+    if: ${{ false }} # retired OCR must not be republished
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     concurrency:

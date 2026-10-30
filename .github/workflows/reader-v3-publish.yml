@@ -83,6 +83,13 @@ jobs:
             APPLY=true
             if [[ "$SCHEDULE" == '23 5 * * *' ]]; then OPERATION=retire; fi
           fi
+          # Keep non-OCR sidecar maintenance available, but never build, admit,
+          # correct, or republish detached document text through old entrypoints.
+          case "$OPERATION" in
+            auto|build-stage|stage|promote|rollback|correct|accept|reject|retry|repair-gbk)
+              echo "Retired document OCR/text operation is disabled: $OPERATION" >&2
+              exit 1 ;;
+          esac
           echo "operation=$OPERATION" >> "$GITHUB_OUTPUT"
           echo "apply=$APPLY" >> "$GITHUB_OUTPUT"
           if [[ -z "$RESOURCE_JSON" ]]; then RESOURCE_JSON='{}'; fi

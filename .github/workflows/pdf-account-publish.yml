@@ -34,6 +34,8 @@ env:
 
 jobs:
   publish:
+    # Old account artifacts must not recreate retired OCR/text references.
+    if: ${{ false }}
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     steps:
