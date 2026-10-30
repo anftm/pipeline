@@ -802,6 +802,11 @@ def commit_catalog(store, catalog, pointer, *, apply=False):
 
 
 def rollback(store, target_ref, expected_parent, *, apply=False):
+    try:
+        from .chm_epub_publication_preflight import resolve_retired_rollback
+    except ImportError:
+        from chm_epub_publication_preflight import resolve_retired_rollback
+    target_ref = resolve_retired_rollback(store, target_ref)
     target = validate_catalog(read_index(store, target_ref))
     pointer, _ = current(store)
     if not pointer or pointer["generation"] != expected_parent:

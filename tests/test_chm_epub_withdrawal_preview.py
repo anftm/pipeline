@@ -180,6 +180,18 @@ class ChmWithdrawalPreviewTests(unittest.TestCase):
         self.assertEqual(repaired['indexes'][f'chapters/ebook/chm/index-0{number}.json']['files'][0],
                          canonical['files'][0])
 
+    def test_late_stale_shard_cannot_restore_retired_chm_epub(self):
+        from scripts.reader_stream_index import merge_shards, shard_for
+        old = copy.deepcopy(self.index)
+        canonical = preview.preview(self.index, self.sidecar, self.catalog, self.rows)['index']
+        old['files'][0]['manifest'] = self.manifest.replace('b' * 16, 'c' * 16)
+        old['files'][0]['checkpointed_at'] = '2099-01-01T00:00:00Z'
+        number = shard_for(self.key, 8)
+        merged = merge_shards(canonical, [(number, old)], 'ebook-chapter-stream-index', {'chm'})
+        self.assertNotIn('fallback', merged['files'][0])
+        self.assertNotIn('object', merged['files'][0])
+        self.assertEqual(merged['files'][0]['manifest'], self.manifest)
+
     def test_missing_processing_roots_are_reported_before_publication(self):
         class Store:
             def existing_files(self, bucket, paths):
@@ -294,7 +306,8 @@ class ChmWithdrawalPreviewTests(unittest.TestCase):
     def test_retired_chm_rollback_cannot_restore_epub_route(self):
         generation = 'd' * 64
         path = 'reader-index/v3/generations/' + generation + '/catalog.json'
-        state = {'version': 1, 'kind': 'reader-v3-retirement', 'retired_paths': [path]}
+        state = {'version': 1, 'kind': 'reader-v3-retirement', 'retired_paths': [path],
+                 'rollback_replacements': {generation: None}}
         class Store:
             def read_bytes(self, bucket, name):return json.dumps(state).encode()
         target = {'bucket': preview.ASSETS, 'path': path, 'bytes': 1, 'sha256': 'a' * 64}
@@ -302,6 +315,33 @@ class ChmWithdrawalPreviewTests(unittest.TestCase):
             preflight.resolve_retired_rollback(Store(), target)
         other = {**target, 'path': path.replace(generation, 'e' * 64)}
         self.assertEqual(preflight.resolve_retired_rollback(Store(), other), other)
+
+    def test_retired_rollback_resolves_exact_sanitized_alias(self):
+        raw = gzip.compress(publication.encode(self.sidecar), mtime=0)
+        snapshot = publication.metadata(preview.ASSETS,
+            f'reader-index/snapshots/{hashlib.sha256(raw).hexdigest()}/reader_assets.json.gz', raw)
+        old = {'version': 3, 'kind': 'reader-reading-catalog', 'files': {}, 'base_sidecar': snapshot,
+               'parent_generation': 'd' * 64}
+        old['generation'] = publication.text.digest(old)
+        class Source:
+            def read_bytes(self, bucket, path):return raw
+        replacement = preflight.historical_v3_replacement(Source(), old, {self.fallback})
+        encoded = publication.encode(replacement['catalog'])
+        alias = publication.metadata(preview.ASSETS,
+            f"reader-index/v3/generations/{replacement['generation']}/catalog.json", encoded)
+        old_ref = publication.metadata(preview.ASSETS,
+            f"reader-index/v3/generations/{old['generation']}/catalog.json", publication.encode(old))
+        state = {'version': 1, 'kind': 'reader-v3-retirement', 'retired_paths': [old_ref['path']],
+                 'rollback_replacements': {old['generation']: alias}}
+        objects = {'reader-index/v3/retirement.json': json.dumps(state).encode(), alias['path']: encoded,
+                   replacement['snapshot']['path']: replacement['snapshot_bytes']}
+        class Store:
+            def read_bytes(self, bucket, path):return objects[path]
+        self.assertEqual(preflight.resolve_retired_rollback(Store(), old_ref), alias)
+        state['rollback_replacements'][old['generation']]['sha256'] = 'f' * 64
+        objects['reader-index/v3/retirement.json'] = json.dumps(state).encode()
+        with self.assertRaisesRegex(ValueError, 'checksum'):
+            preflight.resolve_retired_rollback(Store(), old_ref)
 
     def test_missing_chapter_or_checksum_blocks_epub_retirement(self):
         chapter = b'<html>book</html>'

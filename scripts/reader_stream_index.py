@@ -263,7 +263,29 @@ def merge_shards(canonical: dict, shards: list[tuple[int, dict]], kind: str,
                             Path(entry["key"].split("\0")[-1]).suffix.lstrip(".")).lower()
             return extension in source_extensions and shard_for(entry["key"], shard_count) == shard
 
-        result = merge_indexes(result, [e for e in payload.get("files", []) if owned(e)],
+        current_files = {entry['key']: entry for entry in result.get('files', [])}
+        selected = []
+        for entry in payload.get('files', []):
+            if not owned(entry):
+                continue
+            # Once a canonical CHM chapter route has explicitly dropped its
+            # legacy EPUB, an old pending shard must not reintroduce it. Keep
+            # every chapter field unchanged; other ebook formats are unaffected.
+            previous = current_files.get(entry['key'])
+            if (kind == 'ebook-chapter-stream-index' and
+                    str(entry.get('source_extension') or
+                        Path(entry['key'].split('\0')[-1]).suffix.lstrip('.')).lower() == 'chm'
+                    and previous and not previous.get('fallback') and not previous.get('object')):
+                if entry.get('fallback') or entry.get('object'):
+                    # A stale shard must not restore either the EPUB or its
+                    # old chapter version over a sanitized canonical route.
+                    entry = previous
+                else:
+                    entry = dict(entry)
+                    for field in ('fallback_sha256', 'fallback_bytes', 'fallback_source_sha256'):
+                        entry.pop(field, None)
+            selected.append(entry)
+        result = merge_indexes(result, selected,
                                [e for e in payload.get("failures", []) if owned(e)], kind)
     return result
 

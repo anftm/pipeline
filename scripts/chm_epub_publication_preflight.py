@@ -197,7 +197,12 @@ def resolve_retired_rollback(store, target_ref):
     generation = match[1]
     if target_ref['path'] not in state['retired_paths']:
         return target_ref
-    successor = (state.get('rollback_replacements') or {}).get(generation)
+    aliases = state.get('rollback_replacements') or {}
+    if generation not in aliases:
+        # Other formats' ordinary expired histories retain their existing
+        # rollback semantics; this guard only owns explicit CHM retirements.
+        return target_ref
+    successor = aliases[generation]
     if not isinstance(successor, dict):
         raise ValueError('rollback generation was retired; select its sanitized replacement')
     catalog = publication.validate_catalog(publication.read_index(store, successor))
