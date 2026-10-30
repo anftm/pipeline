@@ -709,11 +709,13 @@ def compare_before_write(store, path, before_digest, after):
     return True
 
 
-def delete_exact_epub_batches(store, rows, fence, checkpoint, *, batches=None, batch_size=100):
+def delete_exact_epub_batches(store, rows, fence, checkpoint, *, barrier, batches=None, batch_size=100):
     """Delete only submitted exact keys, recording partial outcomes durably."""
     import copy
     if not 1 <= batch_size <= 100:
         raise ValueError('invalid CHM deletion batch size')
+    if not callable(barrier):
+        raise ValueError('CHM per-batch root and consumer barrier is required')
     progress = copy.deepcopy(batches or [])
     status = reconcile_epub_deletions(store, rows, progress)
     def serializable(value):
@@ -746,6 +748,10 @@ def delete_exact_epub_batches(store, rows, fence, checkpoint, *, batches=None, b
             progress.append(batch)
         checkpoint('batch-submitted', progress, serializable(status))
         if existing:
+            # The previous graph may have been scanned hours earlier. Recheck
+            # both consumers and every actual root immediately before each POST.
+            barrier()
+            fence.check()
             store.delete(chm.ASSETS, existing)
         assert_bucket_available(store)
         for ref in refs:
@@ -879,7 +885,8 @@ def run_guarded_retirement(store, fence, client, plan, rows, *, preflight, persi
             state['confirmed_deleted_bytes'] = status.get('confirmed_absent_bytes', 0)
             persist(phase, state, before)
 
-        state['batches'], final = delete_exact_epub_batches(store, rows, fence, deletion_checkpoint)
+        state['batches'], final = delete_exact_epub_batches(store, rows, fence, deletion_checkpoint,
+            barrier=lambda: recheck_actual_graph(store, traversal, actual, rows, fence, client, plan))
         state['confirmed_deleted_objects'] = final['confirmed_absent_objects']
         state['confirmed_deleted_bytes'] = final['confirmed_absent_bytes']
         recheck_actual_graph(store, traversal, actual, rows, fence, client, plan)

@@ -490,11 +490,27 @@ class ChmPublicationSafetyTests(unittest.TestCase):
         objects.pop(rows[0]['path'])
         events = []
         batches, result = safety.delete_exact_epub_batches(Store(), rows, Fence(),
-            lambda phase, batches, status: events.append((phase, copy.deepcopy(batches))), batches=receipt)
+            lambda phase, batches, status: events.append((phase, copy.deepcopy(batches))),
+            barrier=lambda: events.append(('actual-barrier', None)), batches=receipt)
         self.assertEqual(result['confirmed_absent_objects'], 2)
         self.assertEqual(batches[0]['status'], 'verified-absent')
         self.assertLess([x[0] for x in events].index('batch-submitted'),
+                        [x[0] for x in events].index('actual-barrier'))
+        self.assertLess([x[0] for x in events].index('actual-barrier'),
                         [x[0] for x in events].index('batch-verified'))
+
+    def test_failed_batch_barrier_never_calls_delete(self):
+        row={'bucket': publication.ASSETS,'path':'native/ebook/chm/a/document.epub',
+             'bytes':3,'sha256':safety.chm.digest(b'one')}
+        class Store:
+            def assert_chm_bucket_available(self):return True
+            def read_bytes(self, bucket, path):return b'one'
+            def delete(self, bucket, paths):raise AssertionError('must not delete')
+        class Fence:
+            def check(self):pass
+        def blocked():raise ValueError('consumer moved')
+        with self.assertRaisesRegex(ValueError, 'consumer moved'):
+            safety.delete_exact_epub_batches(Store(), [row], Fence(), lambda *_: None, barrier=blocked)
 
     def test_progress_checkpoint_cannot_escape_narrow_audit_prefix(self):
         objects = {}
