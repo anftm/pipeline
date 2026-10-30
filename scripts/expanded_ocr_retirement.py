@@ -605,6 +605,9 @@ def simulate(store, plan, fence, *, workers=8, deadline_minutes=300, progress=No
     report = ref_graph.build()
     if not report['graph_complete'] or report['blockers'] or report.get('ambiguous_paths'):
         raise ValueError('current four-bucket graph incomplete or ambiguous: ' + repr(report['blockers'][:5]))
+    if ref_graph.omitted_retired_input_pins:
+        raise ValueError('a retired OCR input is referenced by a non-target root: '
+                         + repr(sorted(ref_graph.omitted_retired_input_pins)[:5]))
     targets = {(row['bucket'], row['path']) for row in plan['expanded_targets']}
     retained = targets & ref_graph.references
     preserved = {(r['bucket'], r['path']) for r in plan['updates']['external']['resources']}
@@ -667,6 +670,7 @@ class OriginReferenceGraph(graph.ReferenceGraph):
         self.tree_origins = {}
         self.omit_internal = frozenset(omit_internal or ())
         self.omitted_manifest_reads = set()
+        self.omitted_retired_input_pins = set()
 
     def load(self, ref):
         if ref in self.omit_internal and not graph.is_root(ref[1], ref[0]):
@@ -677,6 +681,15 @@ class OriginReferenceGraph(graph.ReferenceGraph):
         return super().load(ref)
 
     def mark(self, bucket, path, *, tree=False, external_pin=False):
+        # The generic collector intentionally ignores older Reader pins to
+        # retired OCR inputs. This exact withdrawal cannot assume those pins
+        # are stale: record an explicit source even if the base graph skips it.
+        ref = (bucket, path)
+        if (self.origin is not None and not tree and isinstance(path, str)
+                and bucket in graph.BUCKETS and self.input_retired(ref)):
+            self.direct.setdefault(self.origin, set()).add(ref)
+            if self.origin not in self.omit_internal:
+                self.omitted_retired_input_pins.add((self.origin, ref))
         if (bucket in graph.BUCKETS and isinstance(path, str) and path
                 and not path.startswith('/') and '\\' not in path and '\0' not in path
                 and not any(part in {'', '.', '..'} for part in path.split('/'))
