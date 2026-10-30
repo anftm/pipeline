@@ -440,6 +440,37 @@ def retire_old_base_catalog_generation(catalog, previous, replacement, *, acknow
     return value
 
 
+def retained_reader_snapshot_refs(store, history_refs):
+    """Build a GC root that continues to pin every retained CHM chapter bundle."""
+    from concurrent.futures import ThreadPoolExecutor
+    def read(path):
+        if not preview.MANIFEST.fullmatch(path):
+            raise ValueError('unexpected preserved chapter manifest path')
+        raw = store.read_bytes(ASSETS, path)
+        return publication.metadata(ASSETS, path, raw)
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        refs = list(pool.map(read, sorted(set(history_refs))))
+    if not refs:
+        raise ValueError('no CHM chapters to retain')
+    state = {'version': 1, 'kind': 'reader-chm-epub-withdrawal-retention', 'resources': refs,
+             'inventory_sha256': preview.INVENTORY_SHA256}
+    return state
+
+
+def preserved_v3_reading_refs(old_catalogs):
+    """Retain each explicit non-CHM v3 reading override from replaced history."""
+    refs = {}
+    for catalog in old_catalogs:
+        publication.validate_catalog(catalog)
+        for entry in catalog['files'].values():
+            ref = copy.deepcopy(entry['resource'])
+            key = (ref['bucket'], ref['path'])
+            if key in refs and refs[key] != ref:
+                raise ValueError('historical Reader resource has conflicting identities')
+            refs[key] = ref
+    return [refs[key] for key in sorted(refs)]
+
+
 def plan_chm_withdrawal(store, inventory_path, *, acknowledged_generations):
     """Construct immutable replacements and exact metadata updates, read-only."""
     inventory = preview.load_inventory(inventory_path)
@@ -550,6 +581,12 @@ def plan_chm_withdrawal(store, inventory_path, *, acknowledged_generations):
                               not in target_refs]
     overrides[consumer_path] = publication.encode(consumers)
     history_refs = preserved_chapter_closure([sidecar, publication.pinned_base(store, historical, None)])
+    # Replacement catalogs already protect these exact chapter manifests. A
+    # second, independent current root ensures a later generic history pruning
+    # cannot collect their bundles while the repaired rollback remains offered.
+    retention = retained_reader_snapshot_refs(store, history_refs)
+    retention['resources'].extend(preserved_v3_reading_refs([current, historical]))
+    overrides['reader-index/chm-epub-withdrawal-retention.json'] = publication.encode(retention)
     return {'kind': 'chm-epub-withdrawal-plan', 'target_count': len(rows), 'target_bytes': inventory['logical_bytes'],
             'inventory_sha256': preview.INVENTORY_SHA256,
             'old_v3_generation': old_generation, 'current_v3_generation': pointer['generation'],

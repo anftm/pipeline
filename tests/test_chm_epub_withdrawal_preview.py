@@ -281,6 +281,16 @@ class ChmWithdrawalPreviewTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'qualified chapter manifest'):
             preflight.preserved_chapter_closure([old])
 
+    def test_retention_root_pins_exact_chapter_manifests(self):
+        payload = b'{"kind":"epub-chapters"}'
+        class Store:
+            def read_bytes(self, bucket, path):return payload
+        result = preflight.retained_reader_snapshot_refs(Store(), [self.manifest])
+        self.assertEqual(result['resources'][0]['path'], self.manifest)
+        self.assertEqual(result['resources'][0]['sha256'], hashlib.sha256(payload).hexdigest())
+        with self.assertRaisesRegex(ValueError, 'unexpected preserved chapter'):
+            preflight.retained_reader_snapshot_refs(Store(), [self.fallback])
+
     def test_retired_chm_rollback_cannot_restore_epub_route(self):
         generation = 'd' * 64
         path = 'reader-index/v3/generations/' + generation + '/catalog.json'
