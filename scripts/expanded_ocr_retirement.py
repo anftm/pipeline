@@ -32,6 +32,13 @@ ASSETS, PAGES, INPUT, CCRD = graph.BUCKETS
 INVENTORY_SHA256 = '511e5aa26cd16ca4f190b6c86b7816ef3d186ed4ac99a85211d765f9ec8aec06'
 INVENTORY_BYTES = 492873072
 PRESERVED = f'control/ocr-preserved-reader-{exact.GENERATION}.json'
+FIRST_PROCESSING = 'reader-index/processing/ccrd-body-rebuild-d0d56b80639bf808-20261025.json'
+SECOND_PROCESSING = 'reader-index/processing/ccrd-body-rebuild-fb1abf531f3a630d-20261025.json'
+PROCESSING_HASHES = {
+    FIRST_PROCESSING: '38c54d4d99abcf516c0b199cb32a702b0b75749d3c0757a32371f43d2635aa05',
+    SECOND_PROCESSING: '33a94ca27d53b9a7737f1d53e7932d75096c5752d3ce0986acba59448dbfc048',
+}
+PRESERVED_DERIVED_ROOT = 'derived/migration-20261007/6f9f9f251a929f25e1b5be3beb32ec60'
 OBJECT_BASE = r'objects/[0-9a-f]{2}/[0-9a-f]{64}/[0-9a-f]{16}/'
 PS_REBUILD = r'documents/pdf/ps-rebuild-20261025/[0-9a-f]{64}/(?:document\.pdf|document-manifest\.json)'
 ALLOWED = {
@@ -97,7 +104,68 @@ def prepare(store, client, rows):
     plan['inventory_sha256'] = INVENTORY_SHA256
     plan['preserved_external_resources'] = len(kept)
     plan['retired_ocr_or_ps_external_resources'] = len(external) - len(kept)
+    plan['processing_updates'] = prepare_processing_updates(store, rows)
     return plan
+
+
+def prepare_processing_updates(store, rows):
+    """Retire only exact OCR upload protections, retaining any non-target trees."""
+    target_paths = {}
+    for row in rows:
+        target_paths.setdefault(row['bucket'], set()).add(row['path'])
+    old = {}
+    for path, expected in PROCESSING_HASHES.items():
+        raw = store.read_bytes(ASSETS, path)
+        if sha(raw) != expected:
+            raise ValueError('OCR processing protection changed: ' + path)
+        value = json.loads(raw)
+        if (value.get('version') != 1 or value.get('kind') != 'reader-processing-roots'
+                or value.get('operation') != 'ccrd-body-evidence-upload'
+                or value.get('status') != 'uploaded'
+                or value.get('release_policy') != 'explicit-publisher-handoff'
+                or not isinstance(value.get('resources'), list)):
+            raise ValueError('unexpected OCR processing protection schema')
+        old[path] = value
+    first, second = old[FIRST_PROCESSING], old[SECOND_PROCESSING]
+    if (second.get('candidate_generation') != exact.GENERATION
+            or second.get('previous_protection') != FIRST_PROCESSING
+            or second.get('previous_protection_sha256') != PROCESSING_HASHES[FIRST_PROCESSING]):
+        raise ValueError('OCR processing protection chain changed')
+    result = {}
+    kept_roots = []
+    for path, value in old.items():
+        keep, removed = [], []
+        for ref in value['resources']:
+            if (not isinstance(ref, dict) or ref.get('bucket') not in {ASSETS, PAGES, INPUT}
+                    or not isinstance(ref.get('root'), str)):
+                raise ValueError('invalid OCR processing root')
+            bucket, root = ref['bucket'], ref['root']
+            # A root is retained whole when even one object in it is not part of
+            # the approved deletion list; never narrow a mixed shared tree.
+            files = store.list_files(bucket, (root + '/',))
+            target = {p for p in target_paths.get(bucket, set()) if p.startswith(root + '/')}
+            if target and not target <= files:
+                raise ValueError('an OCR target is absent from its protected tree')
+            if target and files == target:
+                removed.append(copy.deepcopy(ref))
+            else:
+                keep.append(copy.deepcopy(ref))
+        if not removed:
+            raise ValueError('OCR processing record has no exact retired resources')
+        update = copy.deepcopy(value)
+        update['resources'] = keep
+        update['withdrawal'] = {'kind': 'explicit-ocr-withdrawal', 'inventory_sha256': INVENTORY_SHA256,
+                                'removed_root_count': len(removed), 'original_sha256': PROCESSING_HASHES[path]}
+        if not keep:
+            # No current generic code understands a special terminal status for
+            # an empty processing record. Keep the schema but no retained roots;
+            # the audit describes why its protection is empty.
+            update['status'] = 'withdrawn'
+        kept_roots.extend(keep)
+        result[path] = {'sha256_before': PROCESSING_HASHES[path], 'before': value, 'after': update}
+    if kept_roots != [{'bucket': PAGES, 'root': PRESERVED_DERIVED_ROOT}]:
+        raise ValueError('unexpected mixed or non-target OCR processing tree')
+    return result
 
 
 def attest_root_fingerprints(report, ref_graph):
@@ -157,6 +225,8 @@ def simulate(store, plan, fence, *, workers=8, deadline_minutes=300, progress=No
                  (CCRD, exact.INTENT): encode(plan['updates']['intent']),
                  (CCRD, exact.IDS): encode(plan['updates']['ids']),
                  (ASSETS, exact.READER_CONSUMERS): encode(plan['updates']['reader_consumers'])}
+    overrides.update({(ASSETS, path): encode(change['after'])
+                      for path, change in plan.get('processing_updates', {}).items()})
     hidden = {(CCRD, exact.CURRENT)}
 
     class View:
@@ -223,6 +293,9 @@ def simulate(store, plan, fence, *, workers=8, deadline_minutes=300, progress=No
         raise ValueError('CCRD controls changed during reference simulation')
     if sha(store.read_bytes(ASSETS, exact.READER_CONSUMERS)) != plan['reader_consumer_sha256_before']:
         raise ValueError('Reader consumers changed during reference simulation')
+    for path, update in plan.get('processing_updates', {}).items():
+        if sha(store.read_bytes(ASSETS, path)) != update['sha256_before']:
+            raise ValueError('OCR upload protection changed during simulation: ' + path)
     attestation = attest_root_fingerprints(report, ref_graph)
     zero_proof = (zero_root_target_proof(report, ref_graph, plan['expanded_targets'])
                   if omit_internal_target_manifests else None)
@@ -326,6 +399,8 @@ def external_target_origins(ref_graph, rows):
         for owner in owners:
             if owner is None:
                 hits[(bucket, root + '/<unknown-tree-owner>')] = set(closure)
+            elif not isinstance(owner, tuple) or len(owner) != 2:
+                raise ValueError('invalid recorded tree owner')
             elif owner not in targets:
                 hits.setdefault(owner, set()).update(closure)
     return hits

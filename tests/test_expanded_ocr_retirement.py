@@ -202,6 +202,62 @@ class ExpandedRetirementSimulationTests(unittest.TestCase):
         self.assertTrue(report['non_target_origins'])
         self.assertEqual(store.deletions, [])
 
+    def test_processing_roots_keep_only_non_target_derived_tree(self):
+        store = MemoryStore()
+        target = 'objects/aa/' + 'a' * 64 + '/' + 'b' * 16 + '/ocr/page-000001.json.gz'
+        root = target.rsplit('/ocr/', 1)[0]
+        retained_root = expanded.PRESERVED_DERIVED_ROOT
+        store.put(expanded.PAGES, target, b'target')
+        store.put(expanded.PAGES, retained_root + '/document.pdf', b'keep')
+        first = {'version': 1, 'kind': 'reader-processing-roots',
+                 'operation': 'ccrd-body-evidence-upload', 'status': 'uploaded',
+                 'release_policy': 'explicit-publisher-handoff',
+                 'resources': [{'bucket': expanded.PAGES, 'root': root},
+                               {'bucket': expanded.PAGES, 'root': retained_root}]}
+        first_raw = store.put(expanded.ASSETS, expanded.FIRST_PROCESSING, first)
+        second = {'version': 1, 'kind': 'reader-processing-roots',
+                  'operation': 'ccrd-body-evidence-upload', 'status': 'uploaded',
+                  'release_policy': 'explicit-publisher-handoff', 'candidate_generation': exact.GENERATION,
+                  'previous_protection': expanded.FIRST_PROCESSING,
+                  'previous_protection_sha256': exact.sha(first_raw),
+                  'resources': [{'bucket': expanded.PAGES, 'root': root}]}
+        second_raw = store.put(expanded.ASSETS, expanded.SECOND_PROCESSING, second)
+        hashes = {expanded.FIRST_PROCESSING: exact.sha(first_raw),
+                  expanded.SECOND_PROCESSING: exact.sha(second_raw)}
+        with patch.object(expanded, 'PROCESSING_HASHES', hashes):
+            result = expanded.prepare_processing_updates(
+                store, [{'bucket': expanded.PAGES, 'path': target}])
+        self.assertEqual(result[expanded.FIRST_PROCESSING]['after']['resources'],
+                         [{'bucket': expanded.PAGES, 'root': retained_root}])
+        self.assertEqual(result[expanded.SECOND_PROCESSING]['after']['resources'], [])
+        self.assertEqual(result[expanded.SECOND_PROCESSING]['after']['status'], 'withdrawn')
+        self.assertNotIn('removed_roots', result[expanded.FIRST_PROCESSING]['after']['withdrawal'])
+        self.assertEqual(store.deletions, [])
+
+    def test_mixed_processing_tree_must_not_be_partially_retired(self):
+        store = MemoryStore()
+        root = 'objects/aa/' + 'a' * 64 + '/' + 'b' * 16
+        target = root + '/ocr/page-000001.json.gz'
+        store.put(expanded.PAGES, target, b'target')
+        store.put(expanded.PAGES, root + '/document.pdf', b'shared')
+        store.put(expanded.PAGES, expanded.PRESERVED_DERIVED_ROOT + '/document.pdf', b'keep')
+        first = {'version': 1, 'kind': 'reader-processing-roots',
+                 'operation': 'ccrd-body-evidence-upload', 'status': 'uploaded',
+                 'release_policy': 'explicit-publisher-handoff',
+                 'resources': [{'bucket': expanded.PAGES, 'root': root},
+                               {'bucket': expanded.PAGES, 'root': expanded.PRESERVED_DERIVED_ROOT}]}
+        first_raw = store.put(expanded.ASSETS, expanded.FIRST_PROCESSING, first)
+        second = {**first, 'resources': [{'bucket': expanded.PAGES, 'root': root}],
+                  'candidate_generation': exact.GENERATION,
+                  'previous_protection': expanded.FIRST_PROCESSING,
+                  'previous_protection_sha256': exact.sha(first_raw)}
+        second_raw = store.put(expanded.ASSETS, expanded.SECOND_PROCESSING, second)
+        with patch.object(expanded, 'PROCESSING_HASHES', {
+                expanded.FIRST_PROCESSING: exact.sha(first_raw), expanded.SECOND_PROCESSING: exact.sha(second_raw)}):
+            with self.assertRaisesRegex(ValueError, 'no exact retired resources'):
+                expanded.prepare_processing_updates(store, [{'bucket': expanded.PAGES, 'path': target}])
+        self.assertEqual(store.deletions, [])
+
 
 if __name__ == '__main__':
     unittest.main()
