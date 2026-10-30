@@ -1,0 +1,67 @@
+name: Reader · Preview CHM EPUB Withdrawal Graph
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: publish-ccrd-index
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  preview:
+    if: github.repository == 'anftm/pipeline' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 430
+    concurrency:
+      group: reader-global-maintenance
+      cancel-in-progress: false
+      queue: max
+    env:
+      READER_GC_DURABLE_MAINTENANCE: 'true'
+      READER_GC_CACHE: .cache/reader-gc/reads.sqlite3
+      READER_GC_S3_RATE: '6'
+      READER_S3_LIST_WORKERS: '4'
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      HF_INPUT_TOKEN: ${{ secrets.HF_INPUT_TOKEN }}
+      HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+      HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+      HF_S3_INPUT_ACCESS_KEY_ID: ${{ secrets.HF_S3_INPUT_ACCESS_KEY_ID }}
+      HF_S3_INPUT_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_INPUT_SECRET_ACCESS_KEY }}
+      GC_PRODUCER_TOKENS_JSON: ${{ secrets.GC_PRODUCER_TOKENS_JSON }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - run: pip install -r scripts/requirements.txt
+      - name: Verify history, rollback and chapter preservation tests
+        env:
+          READER_GC_DURABLE_MAINTENANCE: 'false'
+        run: python -B -m unittest tests.test_chm_epub_withdrawal_preview tests.test_reader_lifecycle tests.test_reader_gc_graph tests.test_reader_gc_fence tests.test_reader_gc_maintenance tests.test_publish_reader_v3 -q
+      - uses: actions/cache/restore@v4
+        with:
+          path: .cache/reader-gc
+          key: reader-gc-reads-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: reader-gc-reads-v1-
+      - name: Preview exact reference changes with producers isolated
+        run: python -u -B scripts/run_chm_epub_graph_preview.py
+      - name: Restore interrupted producer isolation
+        if: always()
+        run: python -u -B scripts/reader_gc_maintenance.py restore --journal output/chm-epub-graph-preview/maintenance.json
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: .cache/reader-gc
+          key: reader-gc-reads-v1-${{ github.run_id }}-${{ github.run_attempt }}
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: chm-epub-graph-preview
+          path: output/chm-epub-graph-preview/*.json
+          retention-days: 30
+          if-no-files-found: warn
