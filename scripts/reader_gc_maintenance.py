@@ -252,6 +252,11 @@ def recover(path):
             (state.get('callback_recovery_required') or
              state.get('callback_mutation_started') and not state.get('callback_committed'))):
         raise RuntimeError('callback recovery is required before restoring producers')
+    if not state.get('restored') and state.get('callback_owner_run_id'):
+        owner = api(load_config()['publisher_repository'],
+                    f"actions/runs/{state['callback_owner_run_id']}")
+        if owner.get('status') != 'completed':
+            raise RuntimeError('isolated callback is still active; do not restore producers')
     if not state.get('restored'):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(raw)
@@ -357,6 +362,11 @@ def run(path, *, limit=0, apply=True, scope='unreferenced', isolated_callback=No
         raise RuntimeError("unfinished maintenance journal requires restoration first")
     state = {"version": 1, "kind": "reader-maintenance-journal", "repositories": {},
              "maintenance_id": uuid.uuid4().hex, "started_at": datetime.now(timezone.utc).isoformat()}
+    if require_callback_commit:
+        run_id = os.environ.get('GITHUB_RUN_ID', '')
+        if not run_id.isdigit():
+            raise RuntimeError('fenced callback requires its central Actions run identity')
+        state['callback_owner_run_id'] = run_id
     if suppress_resume_dispatch:
         # This isolated operation never paused the user's automation flags;
         # restore workflow states without starting new OCR admission tasks.

@@ -90,6 +90,7 @@ class MaintenanceTests(unittest.TestCase):
             snapshot['callback_mutation_started']=True
             raise ValueError('partial update')
         with tempfile.TemporaryDirectory() as directory, \
+             patch.dict(os.environ,{'GITHUB_RUN_ID':'123'}), \
              patch.object(maintenance,'producer_repositories',return_value=['central/repo']), \
              patch.object(maintenance,'load_config',return_value={'publisher_repository':'central/repo'}), \
              patch.object(maintenance,'pages',side_effect=pages), patch.object(maintenance,'api',side_effect=api):
@@ -102,6 +103,19 @@ class MaintenanceTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError,'recovery is required'):
                 maintenance.restore(path)
             self.assertFalse(state['active'])
+
+    def test_recovery_cannot_restore_an_active_guarded_callback(self):
+        class Store:
+            def read_bytes(self,bucket,path):
+                return json.dumps({'version':1,'kind':'reader-maintenance-journal',
+                    'repositories':{},'callback_owner_run_id':'123'}).encode()
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(maintenance,'durable_store',return_value=Store()), \
+             patch.object(maintenance,'load_config',return_value={'publisher_repository':'central/repo'}), \
+             patch.object(maintenance,'api',return_value={'status':'in_progress'}), \
+             patch.object(maintenance,'restore',side_effect=AssertionError('must not restore')):
+            with self.assertRaisesRegex(RuntimeError,'still active'):
+                maintenance.recover(Path(directory)/'journal.json')
 
     def test_bounded_window_preserves_queued_producer_work(self):
         state = {'active': True}
