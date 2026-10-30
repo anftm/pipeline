@@ -251,6 +251,25 @@ class ExactRetirementTests(unittest.TestCase):
                 exact.apply_reference_retirement(store, plan, Fence(), Client(), lambda _: None)
         self.assertEqual(store.deletions, [])
 
+    def test_reference_retirement_checks_large_catalog_by_digest_not_full_read(self):
+        store, plan, generation, intent_path, release_path, _ = self.make_fixture()
+        read = store.read_bytes
+        catalog = read(exact.ASSETS, collector.CATALOG)
+        def bounded_read(bucket, path):
+            if (bucket, path) == (exact.ASSETS, collector.CATALOG):
+                raise AssertionError('must not load the full Reader catalog')
+            return read(bucket, path)
+        def streaming_digest(bucket, path):
+            if (bucket, path) == (exact.ASSETS, collector.CATALOG):
+                return exact.sha(catalog)
+            return exact.sha(read(bucket, path))
+        with self.helpers(generation, intent_path, release_path), \
+                patch.object(store, 'read_bytes', side_effect=bounded_read), \
+                patch.object(store, 'digest', side_effect=streaming_digest), \
+                patch.object(exact.collector, 'observe_projections', return_value=self.acknowledgments(plan)):
+            exact.apply_reference_retirement(store, plan, Fence(), Client(), lambda _: None)
+            exact.verify_reference_retirement(store, plan)
+
     def test_partial_reference_retirement_can_resume_and_preserves_source(self):
         store, plan, generation, intent_path, release_path, ext = self.make_fixture()
         def stop(phase):

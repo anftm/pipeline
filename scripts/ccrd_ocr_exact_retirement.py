@@ -428,7 +428,9 @@ def apply_reference_retirement(store, plan, fence, client, checkpoint):
                                  sha(encode(plan['updates']['reader_consumers']))}:
         raise ValueError('Reader consumers changed before retirement')
     verify_targets(store, plan['targets'])
-    if sha(store.read_bytes(ASSETS, collector.CATALOG)) != plan['catalog_identity']['digest']:
+    # Reader's catalog can exceed 2 GB: verify the exact digest by streaming,
+    # never materialize the shared catalog in memory.
+    if collector.snapshot_digest(store, ASSETS, collector.CATALOG) != plan['catalog_identity']['digest']:
         raise ValueError('Reader catalog changed after reference graph verification')
     saved_withdrawal = read_optional(store, BUCKET, WITHDRAWAL)
     if saved_withdrawal is not None and saved_withdrawal != encode(plan['updates']['withdrawal']):
