@@ -103,3 +103,20 @@ def require_exact_epub_inventory(plan, rows):
         raise ValueError('CHM retirement plan differs from the exact reviewed inventory')
     if len({(row['bucket'], row['path']) for row in rows}) != len(rows):
         raise ValueError('CHM retirement inventory contains duplicates')
+
+
+def require_actual_zero_graph(proof, rows):
+    """Never use hypothetical CHM graph evidence as deletion authority."""
+    if (proof.get('graph_complete') is not True or proof.get('mode') != 'actual'
+            or proof.get('target_count') != len(rows) or proof.get('retained_targets') != 0
+            or proof.get('origins') or proof.get('ambiguous_paths') or proof.get('blockers')
+            or proof.get('root_recheck_complete') is not True
+            or proof.get('reader_acceptance_complete') is not True):
+        raise ValueError('actual CHM graph and two-site acceptance have not cleared every target')
+
+
+def validate_delete_batch(rows, batch):
+    allowed = {(row['bucket'], row['path']) for row in rows}
+    if not batch or len(batch) > 100 or len(batch) != len(set(batch)) or not set(batch) <= allowed:
+        raise ValueError('CHM delete batch exceeds the reviewed exact list')
+    return True

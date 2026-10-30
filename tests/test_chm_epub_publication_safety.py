@@ -63,6 +63,19 @@ class ChmPublicationSafetyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'identity changed'):
             safety.verify_originals_and_chapter_retention(before, after, {root})
 
+    def test_hypothetical_graph_and_foreign_batch_never_authorize_delete(self):
+        rows = [{'bucket': publication.ASSETS, 'path': 'native/ebook/chm/reviewed/document.epub'}]
+        proof = {'graph_complete': True, 'mode': 'simulated', 'target_count': 1, 'retained_targets': 0,
+                 'origins': [], 'ambiguous_paths': [], 'blockers': [], 'root_recheck_complete': True,
+                 'reader_acceptance_complete': True}
+        with self.assertRaisesRegex(ValueError, 'actual CHM graph'):
+            safety.require_actual_zero_graph(proof, rows)
+        proof['mode'] = 'actual'
+        safety.require_actual_zero_graph(proof, rows)
+        self.assertTrue(safety.validate_delete_batch(rows, [(publication.ASSETS, rows[0]['path'])]))
+        with self.assertRaisesRegex(ValueError, 'exceeds'):
+            safety.validate_delete_batch(rows, [(publication.ASSETS, 'source.chm')])
+
 
 if __name__ == '__main__':
     unittest.main()
