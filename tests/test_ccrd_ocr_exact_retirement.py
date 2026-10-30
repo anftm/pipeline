@@ -269,6 +269,31 @@ class ExactRetirementTests(unittest.TestCase):
                 exact.delete_exact(store, plan, Fence(), Client(), lambda _: None)
         self.assertEqual([path for _, path in store.deletions], [exact.CURRENT])
 
+    def test_missing_optional_control_is_not_a_transport_error(self):
+        store, plan, generation, intent_path, release_path, _ = self.make_fixture()
+        self.assertIsNone(exact.read_optional(store, exact.BUCKET, exact.EXTERNAL))
+        store.put(exact.BUCKET, exact.EXTERNAL, b'fresh')
+        self.assertEqual(exact.read_optional(store, exact.BUCKET, exact.EXTERNAL), b'fresh')
+
+    def test_fence_loss_blocks_before_data_deletion(self):
+        store, plan, generation, intent_path, release_path, _ = self.make_fixture()
+        with self.helpers(generation, intent_path, release_path), \
+                patch.object(exact.collector, 'observe_projections', return_value=self.acknowledgments(plan)):
+            exact.apply_reference_retirement(store, plan, Fence(), Client(), lambda _: None)
+            class LostFence:
+                def check(self):raise RuntimeError('producer fence lost')
+            with self.assertRaisesRegex(RuntimeError, 'producer fence lost'):
+                exact.delete_exact(store, plan, LostFence(), Client(), lambda _: None)
+        self.assertEqual([path for _, path in store.deletions], [exact.CURRENT])
+
+    def test_missing_s3_object_retains_file_not_found_semantics(self):
+        from botocore.exceptions import ClientError
+        from scripts.reader_bucket_store import S3NotFound, retry_s3
+        error = ClientError({'Error': {'Code': 'NoSuchKey', 'Message': 'missing'},
+                             'ResponseMetadata': {'HTTPStatusCode': 404}}, 'GetObject')
+        with self.assertRaises(S3NotFound):
+            retry_s3(lambda: (_ for _ in ()).throw(error))
+
     def test_final_graph_guard_never_treats_snapshot_as_unreferenced(self):
         data = {'graph_complete': False, 'blockers': ['unfinished']}
         with self.assertRaisesRegex(ValueError, 'incomplete'):

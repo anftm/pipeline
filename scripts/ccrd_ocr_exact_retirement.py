@@ -124,6 +124,14 @@ def read_json(store, bucket, path):
     return json.loads(raw), raw
 
 
+def read_optional(store, bucket, path):
+    """Optional controls use a fresh read; adapters map an actual 404 to None."""
+    try:
+        return store.read_bytes(bucket, path)
+    except FileNotFoundError:
+        return None
+
+
 def current_status(client, expected_base=None):
     response = client.get('https://vomebook-search.hf.space/api/index-status',
                           headers={'Cache-Control': 'no-cache'}, timeout=60)
@@ -360,10 +368,7 @@ def simulate_retired_graph(store, plan, fence, *, deadline_minutes=300, workers=
 
 
 def ensure_bytes(store, bucket, path, expected, replacement):
-    try:
-        current = store.read_bytes(bucket, path)
-    except FileNotFoundError:
-        current = None
+    current = read_optional(store, bucket, path)
     if current == replacement:
         return
     if current is None and expected != 'never' or current is not None and sha(current) != expected:
@@ -399,10 +404,7 @@ def apply_reference_retirement(store, plan, fence, client, checkpoint):
     verify_targets(store, plan['targets'])
     if sha(store.read_bytes(ASSETS, collector.CATALOG)) != plan['catalog_identity']['digest']:
         raise ValueError('Reader catalog changed after reference graph verification')
-    try:
-        saved_withdrawal = store.read_bytes(BUCKET, WITHDRAWAL)
-    except FileNotFoundError:
-        saved_withdrawal = None
+    saved_withdrawal = read_optional(store, BUCKET, WITHDRAWAL)
     if saved_withdrawal is not None and saved_withdrawal != encode(plan['updates']['withdrawal']):
         raise ValueError('an unrelated OCR withdrawal receipt already exists')
     # Re-prove Reader surfaces immediately before reference mutation, not just
@@ -419,9 +421,8 @@ def apply_reference_retirement(store, plan, fence, client, checkpoint):
                     raise ValueError('Reader consumer changed before retirement: ' + surface)
     updates = plan['updates']
     external_raw = encode(updates['external'])
-    try:
-        existing = store.read_bytes(BUCKET, EXTERNAL)
-    except FileNotFoundError:
+    existing = read_optional(store, BUCKET, EXTERNAL)
+    if existing is None:
         store.put_bytes(BUCKET, EXTERNAL, external_raw)
     else:
         if existing != external_raw:
@@ -437,19 +438,12 @@ def apply_reference_retirement(store, plan, fence, client, checkpoint):
     checkpoint('ocr-intent-and-id-reference-retired')
     fence.check()
     current_status(client, plan['base_generation'])
-    try:
-        current_raw = store.read_bytes(BUCKET, CURRENT)
-    except FileNotFoundError:
-        current_raw = None
+    current_raw = read_optional(store, BUCKET, CURRENT)
     if current_raw is not None:
         if sha(current_raw) != plan['control_hashes_before'][CURRENT]:
             raise ValueError('OCR current pointer changed before retirement')
         store.delete(BUCKET, [CURRENT])
-    try:
-        store.read_bytes(BUCKET, CURRENT)
-    except FileNotFoundError:
-        pass
-    else:
+    if read_optional(store, BUCKET, CURRENT) is not None:
         raise ValueError('OCR current pointer still exists')
     inspect_roots(store, None, expected_controls=post_control_hashes(plan), require_initial=False)
     checkpoint('ocr-current-pointer-retired')
