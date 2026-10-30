@@ -379,6 +379,24 @@ class ChmWithdrawalPreviewTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'missing'):
             preflight.verify_preserved_chapter(Store(), self.manifest)
 
+    def test_complete_chapter_bundle_version_detects_resource_changes(self):
+        files = {'chapter-manifest.json': b'manifest', 'chapters/chapter-0001.xhtml': b'body',
+                 'resources/image.png': b'image'}
+        h = hashlib.sha256()
+        for path, raw in sorted(files.items()):
+            h.update(path.encode() + b'\0')
+            h.update(hashlib.sha256(raw).digest())
+        root = 'chapters/ebook/chm/' + self.source + '/' + h.hexdigest()[:16]
+        objects = {root + '/' + path: raw for path, raw in files.items()}
+        class Store:
+            def read_bytes(self, bucket, path):return objects[path]
+            def list_files(self, bucket, prefixes):return {p for p in objects if p.startswith(prefixes)}
+        report = preflight.verify_chm_immutable_bundle(Store(), root + '/chapter-manifest.json')
+        self.assertEqual(report['objects'], 3)
+        objects[root + '/resources/image.png'] = b'wrong'
+        with self.assertRaisesRegex(ValueError, 'bundle checksum differs'):
+            preflight.verify_chm_immutable_bundle(Store(), root + '/chapter-manifest.json')
+
     def test_historical_base_sanitization_blocks_foreign_reference(self):
         old = copy.deepcopy(self.sidecar)
         old['f']['other.pdf']['f'] = self.fallback

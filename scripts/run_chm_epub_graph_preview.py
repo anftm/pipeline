@@ -49,7 +49,8 @@ def main():
                                            acknowledged_generations=generations)
             if identity['digest'] != plan['catalog_sha256_before']:
                 raise ValueError('Reader catalog changed during planning')
-            result['plan'] = {key: value for key, value in plan.items() if key not in ('overrides', 'immutable')}
+            result['plan'] = {key: value for key, value in plan.items()
+                              if key not in ('overrides', 'immutable', 'chapter_manifests_to_preserve')}
             checkpoint('verify-preserved-chapter-routes')
             closure = chm.verify_chm_reading_closure(store, plan['chapter_manifests_to_preserve'], workers=4,
                               checkpoint=lambda done, total: print(json.dumps(

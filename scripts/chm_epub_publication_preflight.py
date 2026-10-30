@@ -273,21 +273,52 @@ def verify_preserved_chapter(store, path, *, hash_bodies=False):
             'chapter_bodies_hashed': bool(hash_bodies), 'remote_mutations': 0}
 
 
-def verify_chm_reading_closure(store, manifests, *, workers=4, hash_bodies=False, checkpoint=None):
+def verify_chm_reading_closure(store, manifests, *, workers=4, hash_bodies=False, hash_bundle=False,
+                               checkpoint=None):
     """Validate chapter identities and companion existence without modifying them."""
     from concurrent.futures import ThreadPoolExecutor
     if len(set(manifests)) != len(manifests) or not manifests:
         raise ValueError('invalid CHM reading-manifest inventory')
     checked = []
+    def check(path):
+        result = verify_preserved_chapter(store, path, hash_bodies=hash_bodies)
+        if hash_bundle:
+            result['immutable_bundle'] = verify_chm_immutable_bundle(store, path)
+        return result
     with ThreadPoolExecutor(max_workers=max(1, min(workers, 8))) as pool:
-        for result in pool.map(lambda path: verify_preserved_chapter(store, path, hash_bodies=hash_bodies),
-                               sorted(manifests)):
+        for result in pool.map(check, sorted(manifests)):
             checked.append(result)
             if checkpoint and len(checked) % 25 == 0:
                 checkpoint(len(checked), len(manifests))
     return {'manifests': len(checked), 'required_objects': sum(row['required'] for row in checked),
             'companion_objects': sum(row['other_resources'] for row in checked),
-            'chapter_bodies_hashed': bool(hash_bodies), 'results': checked, 'remote_mutations': 0}
+            'chapter_bodies_hashed': bool(hash_bodies or hash_bundle),
+            'all_bundle_resources_hashed': bool(hash_bundle), 'results': checked, 'remote_mutations': 0}
+
+
+def verify_chm_immutable_bundle(store, manifest_path):
+    """Recompute a complete chapter bundle's content-addressed 16-hex version."""
+    if not preview.MANIFEST.fullmatch(manifest_path):
+        raise ValueError('invalid CHM bundle identity')
+    root = manifest_path.rsplit('/', 1)[0]
+    paths = store.list_files(ASSETS, (root + '/',))
+    if not paths or manifest_path not in paths:
+        raise ValueError('CHM immutable bundle is missing')
+    content = hashlib.sha256()
+    total = 0
+    for path in sorted(paths):
+        relative = path[len(root) + 1:]
+        if not relative or '\\' in relative or any(p in {'', '.', '..'} for p in relative.split('/')):
+            raise ValueError('invalid CHM immutable bundle path')
+        raw = store.read_bytes(ASSETS, path)
+        total += len(raw)
+        content.update(relative.encode('utf-8') + b'\0')
+        content.update(hashlib.sha256(raw).digest())
+    actual = content.hexdigest()[:16]
+    if actual != root.rsplit('/', 1)[-1]:
+        raise ValueError('CHM immutable chapter/resource bundle checksum differs')
+    return {'manifest': manifest_path, 'bundle_version': actual, 'objects': len(paths),
+            'bytes': total, 'remote_mutations': 0}
 
 
 def retirement_journal_for_replaced_history(state, replacements, current_pointer, acks, *, aliases=None):
