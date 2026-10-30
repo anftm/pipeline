@@ -1,4 +1,5 @@
 import copy
+import gzip
 import json
 import unittest
 
@@ -31,6 +32,45 @@ class ChmPublicationSafetyTests(unittest.TestCase):
         bad['pages']['catalog_sha256'] = 'f' * 64
         with self.assertRaisesRegex(ValueError, 'has not accepted'):
             safety.require_projection_acceptance(self.plan, bad)
+
+    def test_projection_acceptance_compares_full_routes_on_both_sites(self):
+        from unittest.mock import patch
+        base = {'v': 1, 'f': {'repo\0book.chm': {'s': 2, 'm': 'e', 'p': 'chapter'}}}
+        raw_base = gzip.compress(publication.encode(base), mtime=0)
+        base_ref = publication.metadata(publication.ASSETS,
+                    f'reader-index/snapshots/{safety.chm.digest(raw_base)}/reader_assets.json.gz', raw_base)
+        catalog = {'version': 3, 'kind': 'reader-reading-catalog', 'files': {},
+                   'base_sidecar': base_ref, 'parent_generation': 'a' * 64}
+        catalog['generation'] = publication.text.digest(catalog)
+        raw_catalog = publication.encode(catalog)
+        ref = publication.metadata(publication.ASSETS,
+                    f"reader-index/v3/generations/{catalog['generation']}/catalog.json", raw_catalog)
+        pointer = {'version': 1, 'kind': 'reader-reading-pointer', 'generation': catalog['generation'],
+                   'catalog': ref, 'resources': [ref]}
+        plan = {'new_v3_generation': catalog['generation'],
+                'overrides': {'reader-index/v3/current.json': publication.encode(pointer)},
+                'immutable': {ref['path']: raw_catalog, base_ref['path']: raw_base}}
+        projection = publication.project_sidecar(base, catalog)
+        hf = publication.encode(projection)
+        pages = gzip.compress(hf, mtime=0)
+        receipts = {site: {'version': 1, 'surface': site, 'active': True,
+                    'generation': catalog['generation'], 'catalog_sha256': ref['sha256']} for site in ('hf', 'pages')}
+        receipts['pages'].update(reader_contract='pdf-reading-v3-v1', sidecar_sha256=safety.chm.digest(pages))
+        class Response:
+            def __init__(self, content):self.content = content
+            def raise_for_status(self):pass
+            def json(self):return json.loads(self.content)
+        class Client:
+            def get(self, url, **kwargs):
+                if url.endswith('reader-v3-status'):return Response(publication.encode(receipts['hf']))
+                if url.endswith('reader_v3_receipt.json'):return Response(publication.encode(receipts['pages']))
+                return Response(pages if url.endswith('.gz') else hf)
+        with patch.object(publication, 'current', return_value=(pointer, catalog)):
+            accepted = safety.observe_planned_projection(None, Client(), plan)
+            self.assertTrue(accepted['pages']['projection_verified'])
+            receipts['hf']['generation'] = 'f' * 64
+            with self.assertRaisesRegex(ValueError, 'has not accepted'):
+                safety.observe_planned_projection(None, Client(), plan)
 
     def test_document_reset_identity_is_checked_but_does_not_authorize_gc(self):
         result = safety.validate_document_reset_identity(self.plan, self.reports)

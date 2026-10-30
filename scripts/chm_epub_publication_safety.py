@@ -27,6 +27,40 @@ def require_projection_acceptance(plan, reports):
     return {'hf': True, 'pages': True}
 
 
+def observe_planned_projection(store, client, plan):
+    """Read both deployed surfaces and compare their complete planned routes."""
+    import gzip
+    pointer = json.loads(plan['overrides']['reader-index/v3/current.json'])
+    catalog = publication.validate_catalog(json.loads(plan['immutable'][pointer['catalog']['path']]))
+    base = json.loads(gzip.decompress(plan['immutable'][catalog['base_sidecar']['path']]))
+    expected = publication.project_sidecar(base, catalog)['f']
+    urls = {'hf': ('https://voiceofml-search.hf.space/api/reader-v3-status',
+                   'https://voiceofml-search.hf.space/api/reader-assets'),
+            'pages': ('https://vomebook.github.io/search/data/reader_v3_receipt.json',
+                      'https://vomebook.github.io/search/data/reader_assets.json.gz')}
+    reports = {}
+    for surface, (status_url, projection_url) in urls.items():
+        status_response = client.get(status_url, headers={'Cache-Control': 'no-cache'}, timeout=60)
+        status_response.raise_for_status()
+        receipt = status_response.json()
+        response = client.get(projection_url, headers={'Cache-Control': 'no-cache'}, timeout=120)
+        response.raise_for_status()
+        raw = response.content
+        if surface == 'pages':
+            if (receipt.get('reader_contract') != 'pdf-reading-v3-v1'
+                    or chm.digest(raw) != receipt.get('sidecar_sha256')):
+                raise ValueError('Pages sidecar receipt does not match the deployed projection')
+            raw = gzip.decompress(raw)
+        projection = json.loads(raw)
+        if projection.get('v') != 1 or projection.get('f') != expected:
+            raise ValueError('Reader surface does not serve the complete planned projection: ' + surface)
+        reports[surface] = {**receipt, 'projection_verified': True, 'checked_url': status_url}
+    require_projection_acceptance(plan, reports)
+    if publication.current(store)[0] != pointer:
+        raise ValueError('Reader pointer changed during consumer acceptance')
+    return reports
+
+
 def validate_document_reset_identity(plan, reports):
     """Validate the planned receipt identity without authorizing document GC.
 
