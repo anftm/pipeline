@@ -336,6 +336,12 @@ def validate_preserved_catalog_roots(plan, old_catalogs, rows):
         if any(isinstance(value, str) and value in targets for mapping in base['f'].values()
                if isinstance(mapping, dict) for value in mapping.values()):
             raise ValueError('CHM rollback replacement still contains an approved EPUB')
+        expected_retired = {f'reader-index/v3/generations/{generation}/catalog.json',
+                            f'reader-index/v3/promotions/{generation}.json'}
+        if not expected_retired <= set(journal.get('retired_paths', [])):
+            raise ValueError('CHM old history roots were not explicitly retired')
+        if journal.get('rollback_replacements', {}).get(generation) != alias:
+            raise ValueError('CHM rollback alias is not recorded in the history journal')
     return True
 
 
@@ -492,6 +498,23 @@ def validate_reference_handoff(before, plan, rows):
         raise ValueError('CHM handoff parent generation changed')
     verify_prepared_chapter_retention(plan)
     return True
+
+
+def validate_chm_index_transition(before_indexes, planned_indexes, rows, sidecar, *, missing_processing,
+                                  generation, acknowledged_generations):
+    """Recompute every chapter-index update from exact pre-operation bytes."""
+    # Catalog generation identity is immaterial to the index comparison; the
+    # same canonical sidecar builds a deterministic temporary base catalog.
+    catalog, _ = publication.reader_lifecycle.catalog_generation(sidecar)
+    original = {path: json.loads(raw) for path, raw in before_indexes.items()}
+    result = chm.synchronize_indexes(original, sidecar, catalog, rows, missing_processing,
+                    current_generation=generation, receipts=acknowledged_generations)
+    if set(planned_indexes) != set(result['indexes']):
+        raise ValueError('planned CHM index inventory differs from recomputed scope')
+    for path, expected in result['indexes'].items():
+        if json.loads(planned_indexes[path]) != expected:
+            raise ValueError('planned CHM index changes unapproved fields: ' + path)
+    return {'indexes_verified': len(planned_indexes), 'remote_mutations': 0}
 
 
 def apply_acknowledged_controls(store, plan, before, staged, client, fence, checkpoint):

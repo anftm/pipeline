@@ -181,6 +181,37 @@ class ChmPublicationSafetyTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'unrelated resource'):
                 safety.validate_reference_handoff(before, plan, [])
 
+    def test_index_transition_recomputes_each_chapter_route(self):
+        from scripts import chm_epub_withdrawal_preview as preview
+        source = 'a' * 64
+        root = 'chapters/ebook/chm/' + source + '/' + 'b' * 16
+        manifest = root + '/chapter-manifest.json'
+        fallback = 'native/ebook/chm/' + source + '/document.epub'
+        key = 'repo\0book.chm'
+        entry = {'key': key, 'source_sha256': source, 'bucket': publication.ASSETS, 'mode': 'chapter-stream',
+                 'root': root, 'manifest': manifest, 'search_index': root + '/epub-search-index.json.gz',
+                 'chapter_count': 1, 'fallback': fallback, 'object': fallback}
+        index = {'version': 1, 'kind': 'ebook-chapter-stream-index', 'files': [entry], 'failures': []}
+        sidecar = {'v': 1, 'f': {key: {'s': 2, 'm': 'e', 'p': manifest, 'b': publication.ASSETS,
+                                      'c': manifest, 'cb': publication.ASSETS, 'f': fallback}}}
+        indexes = {safety.chm.INDEX: index, **{f'{safety.chm.INDEX_PREFIX}index-0{i}.json': copy.deepcopy(index)
+                                              for i in range(8)}}
+        catalog, _ = publication.reader_lifecycle.catalog_generation(sidecar)
+        rows = [{'path': fallback}]
+        result = safety.chm.synchronize_indexes(indexes, sidecar, catalog, rows, set(),
+                            current_generation='g', receipts={'hf': 'g', 'pages': 'g'})
+        before = {path: publication.encode(value) for path, value in indexes.items()}
+        planned = {path: publication.encode(value) for path, value in result['indexes'].items()}
+        self.assertEqual(safety.validate_chm_index_transition(before, planned, rows, sidecar,
+              missing_processing=set(), generation='g', acknowledged_generations={'hf': 'g', 'pages': 'g'})
+              ['indexes_verified'], 9)
+        bad = json.loads(planned[safety.chm.INDEX])
+        bad['files'][0]['manifest'] = 'foreign'
+        planned[safety.chm.INDEX] = publication.encode(bad)
+        with self.assertRaisesRegex(ValueError, 'unapproved fields'):
+            safety.validate_chm_index_transition(before, planned, rows, sidecar,
+                 missing_processing=set(), generation='g', acknowledged_generations={'hf': 'g', 'pages': 'g'})
+
     def test_pre_ack_catalog_preserves_original_epub_refs_and_has_no_false_ack(self):
         from unittest.mock import patch
         old = {'version': 1, 'kind': 'reader-catalog', 'current': {'generation': 'old'},
@@ -252,8 +283,11 @@ class ChmPublicationSafetyTests(unittest.TestCase):
         raw = publication.encode(new)
         alias = publication.metadata(publication.ASSETS,
                     f"reader-index/v3/generations/{new['generation']}/catalog.json", raw)
+        retired = [f"reader-index/v3/generations/{old['generation']}/catalog.json",
+                   f"reader-index/v3/promotions/{old['generation']}.json"]
         plan = {'rollback_aliases': {old['generation']: alias},
-                'overrides': {'reader-index/v3/retirement.json': publication.encode({'resources': [alias]})},
+                'overrides': {'reader-index/v3/retirement.json': publication.encode({'resources': [alias],
+                    'retired_paths': retired, 'rollback_replacements': {old['generation']: alias}})},
                 'immutable': {alias['path']: raw, base_ref['path']: packed}}
         rows = [{'path': 'native/ebook/chm/target/document.epub'}]
         self.assertTrue(safety.validate_preserved_catalog_roots(plan, {old['generation']: old}, rows))
