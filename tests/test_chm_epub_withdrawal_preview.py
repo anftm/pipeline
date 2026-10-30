@@ -326,6 +326,18 @@ class ChmWithdrawalPreviewTests(unittest.TestCase):
         other = {**target, 'path': path.replace(generation, 'e' * 64)}
         self.assertEqual(preflight.resolve_retired_rollback(Store(), other), other)
 
+    def test_missing_chm_journal_fails_closed_when_retention_marker_exists(self):
+        class Store:
+            def read_bytes(self, bucket, path):
+                if path.endswith('/retirement.json'):
+                    raise FileNotFoundError(path)
+                return b'{}'
+        generation = 'd' * 64
+        target = {'bucket': preview.ASSETS, 'path': f'reader-index/v3/generations/{generation}/catalog.json',
+                  'bytes': 1, 'sha256': 'a' * 64}
+        with self.assertRaisesRegex(ValueError, 'journal is missing'):
+            preflight.resolve_retired_rollback(Store(), target)
+
     def test_retired_rollback_resolves_exact_sanitized_alias(self):
         raw = gzip.compress(publication.encode(self.sidecar), mtime=0)
         snapshot = publication.metadata(preview.ASSETS,

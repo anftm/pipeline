@@ -189,7 +189,13 @@ def resolve_retired_rollback(store, target_ref):
     try:
         raw = store.read_bytes(ASSETS, 'reader-index/v3/retirement.json')
     except FileNotFoundError:
-        return target_ref
+        # If the dedicated retirement marker exists, disappearance of the
+        # alias journal must fail closed instead of restoring stale EPUB pins.
+        try:
+            store.read_bytes(ASSETS, 'reader-index/chm-epub-withdrawal-retention.json')
+        except FileNotFoundError:
+            return target_ref
+        raise ValueError('CHM withdrawal history journal is missing') from None
     state = json.loads(raw)
     if (state.get('version') != 1 or state.get('kind') != 'reader-v3-retirement'
             or not isinstance(state.get('retired_paths'), list)):
