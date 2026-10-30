@@ -304,7 +304,12 @@ def actual_graph_evidence(store, fence, client, rows, plan, *, workers=8, deadli
              'root_members': [{'bucket': bucket, 'path': path} for bucket, path in sorted(expected_roots)],
              'root_sha256': [{'bucket': b, 'path': p, 'sha256': sha}
                              for (b, p), sha in sorted(traversal.root_hashes.items())],
-             'retired_roots': [{'bucket': b, 'path': p} for b, p in sorted(traversal.retired_roots)]}
+             'retired_roots': [{'bucket': b, 'path': p} for b, p in sorted(traversal.retired_roots)],
+             # Immutable graph documents carry nested edges. A root can remain
+             # unchanged while an unversioned dependency is rewritten, so bind
+             # every document actually traversed, not only top-level controls.
+             'closure_sha256': [{'bucket': b, 'path': p, 'sha256': sha}
+                                for (b, p), sha in sorted(traversal.loaded_digests.items())]}
     return proof, traversal
 
 
@@ -327,16 +332,19 @@ def recheck_actual_graph(store, traversal, proof, rows, fence, client, plan):
     fence.check()
     collector.verify_roots(store, traversal)
     expected = {(row['bucket'], row['path']): row['sha256'] for row in proof['root_sha256']}
+    closure = {(row['bucket'], row['path']): row['sha256'] for row in proof['closure_sha256']}
     members = {(row['bucket'], row['path']) for row in proof['root_members']}
     retired = {(row['bucket'], row['path']) for row in proof['retired_roots']}
-    if not (members - retired) <= set(expected) or len(expected) != len(proof['root_sha256']):
+    if (not (members - retired) <= set(expected) or len(expected) != len(proof['root_sha256'])
+            or len(closure) != len(proof['closure_sha256'])
+            or any(closure.get(key) != value for key, value in expected.items())):
         raise ValueError('CHM root fingerprint evidence is incomplete')
     def check(item):
         ref, digest = item
         if store.digest(*ref) != digest:
-            raise ValueError('CHM graph root changed before deletion: ' + ':'.join(ref))
+            raise ValueError('CHM graph document changed before deletion: ' + ':'.join(ref))
     with ThreadPoolExecutor(max_workers=8) as pool:
-        list(pool.map(check, sorted(expected.items())))
+        list(pool.map(check, sorted(closure.items())))
     observe_planned_projection(store, client, plan)
     return True
 

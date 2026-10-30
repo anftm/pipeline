@@ -408,6 +408,7 @@ class ChmPublicationSafetyTests(unittest.TestCase):
                 from scripts import reader_gc_graph
                 self.files = {bucket: set() for bucket in reader_gc_graph.BUCKETS}
                 self.root_hashes = {}
+                self.loaded_digests = {}
                 self.retired_roots = set()
             def build(self):return {'graph_complete': True, 'blockers': [], 'ambiguous_paths': [], 'roots': []}
         with patch('scripts.reader_gc_graph.ReferenceGraph', FakeGraph), \
@@ -427,6 +428,8 @@ class ChmPublicationSafetyTests(unittest.TestCase):
                  'origins': [], 'root_recheck_complete': True, 'reader_acceptance_complete': True,
                  'root_sha256': [{'bucket': publication.ASSETS, 'path': 'reader-index/root.json',
                                   'sha256': 'a' * 64}],
+                 'closure_sha256': [{'bucket': publication.ASSETS, 'path': 'reader-index/root.json',
+                                     'sha256': 'a' * 64}],
                  'root_members': [{'bucket': publication.ASSETS, 'path': 'reader-index/root.json'}],
                  'retired_roots': []}
         class Store:
@@ -435,8 +438,26 @@ class ChmPublicationSafetyTests(unittest.TestCase):
         class Fence:
             def check(self):pass
         with patch('scripts.reader_gc_collect.verify_roots'), patch.object(safety, 'observe_planned_projection'):
-            with self.assertRaisesRegex(ValueError, 'root changed'):
+            with self.assertRaisesRegex(ValueError, 'graph document changed'):
                 safety.recheck_actual_graph(Store(), None, proof, rows, Fence(), None, self.plan)
+
+    def test_predelete_barrier_checks_non_root_graph_documents(self):
+        from unittest.mock import patch
+        rows = [{'bucket': publication.ASSETS, 'path': 'native/ebook/chm/reviewed/document.epub'}]
+        root={'bucket':publication.ASSETS,'path':'reader-index/root.json','sha256':'a'*64}
+        nested={'bucket':publication.ASSETS,'path':'reader-index/snapshots/nested.json','sha256':'b'*64}
+        proof={'graph_complete':True,'mode':'actual','target_count':1,'retained_targets':0,'origins':[],
+               'root_recheck_complete':True,'reader_acceptance_complete':True,'root_sha256':[root],
+               'root_members':[{'bucket':root['bucket'],'path':root['path']}], 'retired_roots':[],
+               'closure_sha256':[root,nested]}
+        class Store:
+            def assert_buckets_available(self):pass
+            def digest(self, bucket, path):return 'a'*64 if path == root['path'] else 'c'*64
+        class Fence:
+            def check(self):pass
+        with patch('scripts.reader_gc_collect.verify_roots'), patch.object(safety,'observe_planned_projection'):
+            with self.assertRaisesRegex(ValueError,'graph document changed'):
+                safety.recheck_actual_graph(Store(),None,proof,rows,Fence(),None,self.plan)
 
     def test_live_controls_must_equal_the_exact_approved_plan(self):
         plan = {'overrides': {'reader-index/a.json': b'planned'},
