@@ -730,3 +730,123 @@ def write_exact_progress(store, path, state):
     store.put_bytes(chm.ASSETS, path, raw)
     if store.read_bytes(chm.ASSETS, path) != raw:
         raise ValueError('CHM checkpoint readback mismatch')
+
+
+def run_guarded_retirement(store, fence, client, plan, rows, *, preflight, persist, save_plan,
+                           publish_pages, acknowledge_timeout=1200):
+    """Execute a freshly planned CHM withdrawal with fail-closed phase barriers.
+
+    The caller supplies durable plan/preflight evidence and a serialized
+    producer-isolated window. No broad collector or document reset is invoked.
+    """
+    import time
+    import httpx
+    validate_staged_plan(plan, rows)
+    if (preflight.get('graph_complete') is not True or preflight.get('retained_targets') != 0
+            or preflight.get('target_count') != len(rows) or preflight.get('remote_mutations') != 0):
+        raise ValueError('fresh simulated CHM graph has unresolved references')
+    if preflight.get('deletion_authorized') is not False:
+        raise ValueError('CHM preflight does not identify itself as simulation')
+    assert_all_buckets_available(store)
+    fence.check()
+    verify_exact_epub_targets(store, rows)
+    # A prior Actions preview is diagnostic only. Rebuild the hypothetical
+    # closure from current roots under the same isolation window.
+    fresh_preflight = chm.simulate_complete_withdrawal(store, plan['overrides'], rows, fence,
+                          workers=8, deadline_minutes=300, immutable=plan['immutable'])
+    if (fresh_preflight.get('graph_complete') is not True or fresh_preflight.get('retained_targets') != 0
+            or fresh_preflight.get('target_count') != len(rows)):
+        raise ValueError('current simulated CHM graph has unresolved references')
+    preflight = fresh_preflight
+    before = confirm_initial_snapshot(store, plan)
+    old_catalogs = {}
+    for generation in (plan['current_v3_generation'], plan['old_v3_generation']):
+        path = f'reader-index/v3/generations/{generation}/catalog.json'
+        value = publication.validate_catalog(json.loads(store.read_bytes(chm.ASSETS, path)))
+        if value['generation'] != generation:
+            raise ValueError('historical Reader catalog identity changed')
+        old_catalogs[generation] = value
+    validate_preserved_catalog_roots(plan, old_catalogs, rows)
+    validate_old_base_routes(store, plan, old_catalogs, rows)
+    old_sidecar = store.read_bytes(chm.ASSETS, chm.SIDECAR)
+    old_catalog = store.read_bytes(chm.ASSETS, chm.CATALOG)
+    validate_reference_handoff({chm.SIDECAR: old_sidecar, chm.CATALOG: old_catalog}, plan, rows)
+    verify_prepared_chapter_retention(plan)
+    index_bytes = {path: store.read_bytes(chm.ASSETS, path) for path in plan['index_hashes_before']}
+    index = json.loads(index_bytes[chm.INDEX])
+    processing = {path for item in index['files'] for path in item.get('processing_roots', [])}
+    missing = processing - store.existing_files(chm.ASSETS, processing)
+    import gzip
+    validate_chm_index_transition(index_bytes, {path: plan['overrides'][path] for path in index_bytes}, rows,
+         json.loads(gzip.decompress(old_sidecar)), missing_processing=missing,
+         generation=plan['current_v3_generation'],
+         acknowledged_generations={'hf': plan['current_v3_generation'], 'pages': plan['current_v3_generation']})
+    reset_evidence = verify_document_reset_prerequisites(store, plan)
+    save_plan(plan, before)
+    state = {'kind': 'chm-epub-retirement', 'complete': False, 'target_count': len(rows),
+             'confirmed_deleted_objects': 0, 'confirmed_deleted_bytes': 0, 'batches': [],
+             'preflight': preflight, 'document_reset_prerequisites': reset_evidence,
+             'staged_controls': [], 'post_ack_controls': [], 'both_surfaces_accepted': False,
+             'actual_graph_verified': False, 'delete_started': False}
+    persist('plan-and-preconditions-verified', state, before)
+
+    def checkpoint(phase, path):
+        if phase == 'pre-ack-control-verified' and path not in state['staged_controls']:
+            state['staged_controls'].append(path)
+        if phase == 'control-verified' and path not in state['post_ack_controls']:
+            state['post_ack_controls'].append(path)
+        validate_publication_order(plan, state)
+        persist(phase, state, before)
+
+    try:
+        staged = apply_pre_ack_publication(store, plan, before, fence, checkpoint)
+        publish_pages(plan)
+        deadline = time.monotonic() + acknowledge_timeout
+        while True:
+            try:
+                reports = observe_planned_projection(store, client, plan)
+                break
+            except (ValueError, OSError, httpx.HTTPError):
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(15)
+        state['both_surfaces_accepted'] = True
+        state['consumer_receipts'] = reports
+        persist('both-readers-accepted', state, before)
+        apply_acknowledged_controls(store, plan, before, staged, client, fence, checkpoint)
+        validate_document_reset_identity(plan, reports)
+        persist('chm-references-retired', state, before)
+        actual, traversal = actual_graph_evidence(store, fence, client, rows, plan)
+        require_actual_zero_graph(actual, rows)
+        state['actual_graph_verified'] = True
+        state['actual_graph'] = actual
+        persist('actual-graph-verified', state, before)
+        recheck_actual_graph(store, traversal, actual, rows, fence, client, plan)
+        state['delete_started'] = True
+        validate_publication_order(plan, state)
+        persist('deletion-started', state, before)
+
+        def deletion_checkpoint(phase, batches, status):
+            state['batches'] = batches
+            state['confirmed_deleted_objects'] = status.get('confirmed_absent_objects', 0)
+            state['confirmed_deleted_bytes'] = status.get('confirmed_absent_bytes', 0)
+            persist(phase, state, before)
+
+        state['batches'], final = delete_exact_epub_batches(store, rows, fence, deletion_checkpoint)
+        state['confirmed_deleted_objects'] = final['confirmed_absent_objects']
+        state['confirmed_deleted_bytes'] = final['confirmed_absent_bytes']
+        recheck_actual_graph(store, traversal, actual, rows, fence, client, plan)
+        verify_live_chm_controls(store, plan)
+        state['complete'] = True
+        persist('complete', state, before)
+        return state
+    except Exception as error:
+        state.update(complete=False, error_type=type(error).__name__, error=str(error))
+        try:
+            counts = reconcile_epub_deletions(store, rows, state['batches'])
+            state['confirmed_deleted_objects'] = counts['confirmed_absent_objects']
+            state['confirmed_deleted_bytes'] = counts['confirmed_absent_bytes']
+        except Exception as reconcile_error:
+            state['reconciliation_error'] = type(reconcile_error).__name__
+        persist('failed', state, before)
+        raise

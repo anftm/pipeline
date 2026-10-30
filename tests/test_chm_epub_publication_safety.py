@@ -255,6 +255,15 @@ class ChmPublicationSafetyTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'has not accepted'):
                 safety.apply_acknowledged_controls(None, self.plan, {}, {}, None, None, lambda *_: None)
 
+    def test_guarded_runner_never_trusts_simulation_with_retained_targets(self):
+        from unittest.mock import patch
+        with patch.object(safety, 'validate_staged_plan'):
+            with self.assertRaisesRegex(ValueError, 'unresolved references'):
+                safety.run_guarded_retirement(None, None, None, self.plan, [],
+                    preflight={'graph_complete': True, 'retained_targets': 1, 'target_count': 0,
+                               'remote_mutations': 0, 'deletion_authorized': False},
+                    persist=lambda *_: None, save_plan=lambda *_: None, publish_pages=lambda *_: None)
+
     def test_staged_plan_rejects_any_foreign_control(self):
         from unittest.mock import patch
         plan = copy.deepcopy(self.plan)
