@@ -24,10 +24,103 @@ INDEX_PREFIX = 'chapters/ebook/chm/'
 SIDECAR = 'reader-index/reader_assets.json.gz'
 CATALOG = 'reader-index/reader_catalog.json'
 INVENTORY = Path('/tmp/opencode/reader-jxl-gc-20261025/chm-history-inventory-20261030.json')
+PROTECTION_INVENTORY = Path(__file__).resolve().parents[1] / 'config/chm-epub-processing-protections-20261030.json'
+PROTECTION_INVENTORY_SHA256 = '48ee107ba59921654f44bc3ba4dd83bfa831f8401f8403297b5432715264b19c'
 
 
 def digest(raw):
     return hashlib.sha256(raw).hexdigest()
+
+
+def processing_protection_inventory(path=PROTECTION_INVENTORY):
+    """Load the exact failed-run owners, not a prefix-wide processing sweep."""
+    raw = Path(path).read_bytes()
+    if digest(raw) != PROTECTION_INVENTORY_SHA256:
+        raise ValueError('reviewed CHM processing inventory changed')
+    value = json.loads(raw)
+    rows = value.get('records')
+    if (value.get('version') != 1 or value.get('kind') != 'chm-epub-processing-protection-inventory'
+            or value.get('inventory_sha256') != preview.INVENTORY_SHA256
+            or value.get('source_repository') != 'anftm/pipeline'
+            or value.get('source_workflow') != '.github/workflows/reader-chm-repair.yml'
+            or value.get('source_run_id') != 39929342496 or value.get('source_run_attempt') != 1
+            or value.get('source_conclusion') != 'failure' or not isinstance(rows, list) or len(rows) != 10):
+        raise ValueError('invalid reviewed CHM processing inventory')
+    for field in ('path', 'target_root', 'chapter_root'):
+        if len({row.get(field) for row in rows}) != len(rows):
+            raise ValueError('duplicate reviewed CHM processing owner or root')
+    for row in rows:
+        if (not re.fullmatch(r'reader-index/processing/stream-upload-[0-9a-f]{32}\.json', row.get('path', ''))
+                or not re.fullmatch(r'[0-9a-f]{64}', row.get('sha256', ''))
+                or not re.fullmatch(r'native/ebook/chm/[0-9a-f]{64}', row.get('target_root', ''))
+                or not re.fullmatch(r'chapters/ebook/chm/[0-9a-f]{64}/[0-9a-f]{16}', row.get('chapter_root', ''))):
+            raise ValueError('invalid reviewed CHM processing owner or root')
+    return value
+
+
+def verify_processing_owner_run(api, inventory):
+    """The exact failed attempt must still be terminal and have no active jobs."""
+    repo = inventory['source_repository']
+    run_id = inventory['source_run_id']
+    attempt = inventory['source_run_attempt']
+    endpoint = f'repos/{repo}/actions/runs/{run_id}'
+    pages = api(endpoint)
+    attempts = api(endpoint + f'/attempts/{attempt}')
+    job_pages = api(endpoint + f'/attempts/{attempt}/jobs?per_page=100')
+    if len(pages) != 1 or len(attempts) != 1:
+        raise ValueError('CHM processing owner run identity is unavailable')
+    for run in (pages[0], attempts[0]):
+        if (run.get('id') != run_id or run.get('run_attempt') != attempt
+                or run.get('path') != inventory['source_workflow'] or run.get('head_branch') != 'main'
+                or run.get('status') != 'completed' or run.get('conclusion') != inventory['source_conclusion']):
+            raise ValueError('CHM processing owner is not the reviewed terminal attempt')
+    jobs = [job for page in job_pages for job in page.get('jobs', [])]
+    if not jobs or any(job.get('status') != 'completed' or not job.get('conclusion') for job in jobs):
+        raise ValueError('CHM processing owner has unfinished or unavailable jobs')
+    return {'repository': repo, 'run_id': run_id, 'attempt': attempt, 'conclusion': 'failure',
+            'completed_jobs': len(jobs), 'remote_mutations': 0}
+
+
+def prepare_processing_protection_updates(store, rows, fence, *, inventory_path=PROTECTION_INVENTORY):
+    """Drop only ten exact EPUB roots while leaving each chapter root protected."""
+    inventory = processing_protection_inventory(inventory_path)
+    fence.check()
+    owner_run = verify_processing_owner_run(fence.api, inventory)
+    targets = {row['path'] for row in rows}
+    updates = {}
+    for entry in inventory['records']:
+        path = entry['path']
+        raw = store.read_bytes(ASSETS, path)
+        if digest(raw) != entry['sha256']:
+            raise ValueError('CHM processing owner changed: ' + path)
+        value = json.loads(raw)
+        run = value.get('run') or {}
+        if (value.get('version') != 1 or value.get('kind') != 'reader-processing-roots'
+                or value.get('operation') != 'reader-stream-upload' or value.get('status') != 'processing'
+                or value.get('release_policy') != 'explicit-publisher-handoff'
+                or run != {'repository': inventory['source_repository'], 'run_id': str(inventory['source_run_id']),
+                           'attempt': str(inventory['source_run_attempt'])}):
+            raise ValueError('CHM processing owner identity changed: ' + path)
+        chapter_ref = {'bucket': ASSETS, 'root': entry['chapter_root']}
+        target_ref = {'bucket': ASSETS, 'root': entry['target_root']}
+        if value.get('resources') != [chapter_ref, target_ref]:
+            raise ValueError('CHM processing roots differ from the exact reviewed pair: ' + path)
+        target = entry['target_root'] + '/document.epub'
+        if target not in targets or store.list_files(ASSETS, (entry['target_root'] + '/',)) != {target}:
+            raise ValueError('CHM target root is mixed, missing or outside the exact inventory: ' + path)
+        manifest = entry['chapter_root'] + '/chapter-manifest.json'
+        chapter = verify_preserved_chapter(store, manifest)
+        updated = copy.deepcopy(value)
+        updated['resources'] = [chapter_ref]
+        # A digest and count are audit fields, not path-bearing graph references.
+        updated['withdrawal'] = {'kind': 'explicit-chm-epub-withdrawal',
+            'inventory_sha256': preview.INVENTORY_SHA256, 'original_sha256': entry['sha256'],
+            'removed_root_count': 1}
+        updates[path] = {'before_sha256': entry['sha256'], 'after': publication.encode(updated),
+                         'chapter': chapter}
+    fence.check()
+    verify_processing_owner_run(fence.api, inventory)
+    return {'updates': updates, 'owner_run': owner_run, 'records': len(updates), 'remote_mutations': 0}
 
 
 def read_index_roots(store):

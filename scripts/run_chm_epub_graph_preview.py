@@ -56,8 +56,16 @@ def main():
                               checkpoint=lambda done, total: print(json.dumps(
                                   {'chapter_manifests_checked': done, 'total': total}), flush=True))
             result['chapter_closure'] = {key: value for key, value in closure.items() if key != 'results'}
+            checkpoint('verify-failed-upload-owner-protections')
+            protection = chm.prepare_processing_protection_updates(store, rows, fence)
+            result['processing_protections'] = {'records': protection['records'],
+                'owner_run': protection['owner_run'], 'remote_mutations': 0,
+                'preserved_chapter_resources': sum(value['chapter']['bundle_objects']
+                                                   for value in protection['updates'].values())}
+            overlays = {**plan['overrides'], **{path: value['after']
+                         for path, value in protection['updates'].items()}}
             checkpoint('simulated-four-bucket-closure')
-            proof = chm.simulate_complete_withdrawal(store, plan['overrides'], rows, fence,
+            proof = chm.simulate_complete_withdrawal(store, overlays, rows, fence,
                                                        workers=8, deadline_minutes=300,
                                                        immutable=plan['immutable'])
             result['simulation'] = proof

@@ -201,6 +201,61 @@ class ChmWithdrawalPreviewTests(unittest.TestCase):
         self.assertEqual(preflight.processing_root_status(Store(), index),
                          {'referenced': 1, 'present': 0, 'missing': 1})
 
+    def test_processing_protection_removes_only_exact_epub_and_keeps_chapter_root(self):
+        from pathlib import Path
+        from unittest.mock import patch
+        inventory=preflight.processing_protection_inventory()
+        objects={}
+        rows=[]
+        for entry in inventory['records']:
+            doc={'version':1,'kind':'reader-processing-roots','operation':'reader-stream-upload',
+                 'status':'processing','release_policy':'explicit-publisher-handoff',
+                 'run':{'repository':'anftm/pipeline','run_id':'39929342496','attempt':'1'},
+                 'resources':[{'bucket':preview.ASSETS,'root':entry['chapter_root']},
+                              {'bucket':preview.ASSETS,'root':entry['target_root']}], 'created_at':'unchanged'}
+            raw=publication.encode(doc)
+            entry['sha256']=preflight.digest(raw)
+            objects[entry['path']]=raw
+            rows.append({'path':entry['target_root']+'/document.epub'})
+        class Store:
+            def read_bytes(self, bucket, path):return objects[path]
+            def list_files(self, bucket, prefixes):return {prefixes[0]+'document.epub'}
+        class Fence:
+            api=None
+            def check(self):pass
+        chapter={'manifest':'unused','required':2,'other_resources':3,'bundle_objects':5,'remote_mutations':0}
+        with patch.object(preflight,'processing_protection_inventory',return_value=inventory), \
+             patch.object(preflight,'verify_processing_owner_run',return_value={'remote_mutations':0}), \
+             patch.object(preflight,'verify_preserved_chapter',return_value=chapter):
+            result=preflight.prepare_processing_protection_updates(Store(),rows,Fence())
+            self.assertEqual(result['records'],10)
+            for item in inventory['records']:
+                before=json.loads(objects[item['path']]);after=json.loads(result['updates'][item['path']]['after'])
+                self.assertEqual(after['resources'],before['resources'][:1])
+                self.assertEqual(after['status'],'processing')
+                self.assertEqual(after['run'],before['run'])
+                self.assertNotIn(item['target_root'],json.dumps(after))
+            target=inventory['records'][0]
+            class Mixed(Store):
+                def list_files(self, bucket, prefixes):return super().list_files(bucket,prefixes)|{prefixes[0]+'other.bin'}
+            with self.assertRaisesRegex(ValueError,'mixed, missing or outside'):
+                preflight.prepare_processing_protection_updates(Mixed(),rows,Fence())
+            objects[target['path']]=b'changed'
+            with self.assertRaisesRegex(ValueError,'owner changed'):
+                preflight.prepare_processing_protection_updates(Store(),rows,Fence())
+
+    def test_processing_owner_must_be_the_terminal_reviewed_attempt(self):
+        inventory=preflight.processing_protection_inventory()
+        run={'id':39929342496,'run_attempt':1,'path':inventory['source_workflow'],
+             'head_branch':'main','status':'completed','conclusion':'failure'}
+        def api(path):
+            if '/jobs?' in path:return [{'jobs':[{'status':'completed','conclusion':'failure'}]}]
+            return [copy.deepcopy(run)]
+        self.assertEqual(preflight.verify_processing_owner_run(api,inventory)['completed_jobs'],1)
+        run['status']='in_progress'
+        with self.assertRaisesRegex(ValueError,'terminal attempt'):
+            preflight.verify_processing_owner_run(api,inventory)
+
     def test_historical_base_sanitization_preserves_every_other_route(self):
         old = copy.deepcopy(self.sidecar)
         clean, removed = preflight.sanitize_historical_v3_base(old, {self.fallback})
