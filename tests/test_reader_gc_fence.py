@@ -176,6 +176,7 @@ class WorkflowClassificationTests(unittest.TestCase):
     def test_ccrd_gc_is_paused_while_shared_reference_graph_is_collected(self):
         self.assertTrue(producer_path('.github/workflows/reader-gc-ccrd.yml'))
         self.assertTrue(producer_path('.github/workflows/publish-ccrd-ocr.yml'))
+        self.assertTrue(producer_path('.github/workflows/stage-ccrd-ocr-text.yml'))
 
     def test_writer_guard_binds_to_the_exact_workflow_path(self):
         environment = {

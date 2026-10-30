@@ -36,7 +36,8 @@ def producer_path(path):
         # Retired/renamed filenames stay listed: their queued or rerun records
         # can still exist after the workflow file moved.
         name in {"force-ocr-book.yml", "publish-source-txt.yml", "publish-ccrd-index.yml", "promote-ccrd-generation.yml",
-                 "update-ccrd-source.yml", "publish-ccrd-ocr.yml", "repair-chm-conversions.yml"})
+                 "update-ccrd-source.yml", "publish-ccrd-ocr.yml", "stage-ccrd-ocr-text.yml",
+                 "repair-chm-conversions.yml"})
 
 
 def producer_repositories():
