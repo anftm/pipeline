@@ -262,7 +262,8 @@ class ChmPublicationSafetyTests(unittest.TestCase):
                 safety.run_guarded_retirement(None, None, None, self.plan, [],
                     preflight={'graph_complete': True, 'retained_targets': 1, 'target_count': 0,
                                'remote_mutations': 0, 'deletion_authorized': False},
-                    persist=lambda *_: None, save_plan=lambda *_: None, publish_pages=lambda *_: None)
+                    persist=lambda *_: None, save_plan=lambda *_: None, publish_pages=lambda *_: None,
+                    chapter_evidence={})
 
     def test_staged_plan_rejects_any_foreign_control(self):
         from unittest.mock import patch

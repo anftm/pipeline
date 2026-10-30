@@ -733,7 +733,7 @@ def write_exact_progress(store, path, state):
 
 
 def run_guarded_retirement(store, fence, client, plan, rows, *, preflight, persist, save_plan,
-                           publish_pages, acknowledge_timeout=1200):
+                           publish_pages, chapter_evidence, acknowledge_timeout=1200):
     """Execute a freshly planned CHM withdrawal with fail-closed phase barriers.
 
     The caller supplies durable plan/preflight evidence and a serialized
@@ -747,6 +747,11 @@ def run_guarded_retirement(store, fence, client, plan, rows, *, preflight, persi
         raise ValueError('fresh simulated CHM graph has unresolved references')
     if preflight.get('deletion_authorized') is not False:
         raise ValueError('CHM preflight does not identify itself as simulation')
+    expected_manifests = set(plan['chapter_manifests_to_preserve'])
+    if (chapter_evidence.get('remote_mutations') != 0
+            or chapter_evidence.get('manifests') != len(expected_manifests)
+            or set(chapter_evidence.get('manifest_paths', [])) != expected_manifests):
+        raise ValueError('preserved CHM chapter closure has not been fully verified')
     assert_all_buckets_available(store)
     fence.check()
     verify_exact_epub_targets(store, rows)
@@ -786,6 +791,7 @@ def run_guarded_retirement(store, fence, client, plan, rows, *, preflight, persi
     state = {'kind': 'chm-epub-retirement', 'complete': False, 'target_count': len(rows),
              'confirmed_deleted_objects': 0, 'confirmed_deleted_bytes': 0, 'batches': [],
              'preflight': preflight, 'document_reset_prerequisites': reset_evidence,
+             'chapter_evidence': chapter_evidence,
              'staged_controls': [], 'post_ack_controls': [], 'both_surfaces_accepted': False,
              'actual_graph_verified': False, 'delete_started': False}
     persist('plan-and-preconditions-verified', state, before)
