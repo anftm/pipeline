@@ -1,0 +1,82 @@
+name: CCRD · Retire Exact Withdrawn OCR Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      delete:
+        description: Delete only the 14 preapproved OCR files after all gates pass
+        type: boolean
+        default: false
+      resume:
+        description: Resume an exact previously verified interrupted removal
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: publish-ccrd-index
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  retire:
+    if: github.repository == 'anftm/pipeline' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 720
+    concurrency:
+      group: reader-global-maintenance
+      cancel-in-progress: false
+      queue: max
+    env:
+      READER_GC_DURABLE_MAINTENANCE: 'true'
+      READER_GC_CACHE: .cache/reader-gc/reads.sqlite3
+      READER_GC_S3_RATE: '6'
+      READER_S3_LIST_WORKERS: '4'
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      HF_INPUT_TOKEN: ${{ secrets.HF_INPUT_TOKEN }}
+      HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+      HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+      HF_S3_INPUT_ACCESS_KEY_ID: ${{ secrets.HF_S3_INPUT_ACCESS_KEY_ID }}
+      HF_S3_INPUT_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_INPUT_SECRET_ACCESS_KEY }}
+      GC_PRODUCER_TOKENS_JSON: ${{ secrets.GC_PRODUCER_TOKENS_JSON }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - run: pip install -r scripts/requirements.txt
+      - name: Verify isolated retirement and producer-fence tests
+        run: python -B -m unittest tests.test_ccrd_ocr_exact_retirement tests.test_reader_gc_maintenance tests.test_reader_gc_fence -q
+      - uses: actions/cache/restore@v4
+        with:
+          path: .cache/reader-gc
+          key: reader-gc-reads-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: reader-gc-reads-v1-
+      - name: Isolate producers, verify four buckets, and optionally retire exact objects
+        env:
+          DELETE_APPROVED: ${{ inputs.delete }}
+          RESUME: ${{ inputs.resume }}
+        run: |
+          args=(--output output/ccrd-ocr-exact-removal/result.json
+                --maintenance-journal output/ccrd-ocr-exact-removal/maintenance.json)
+          if [[ "$RESUME" == true ]]; then args+=(--resume); fi
+          if [[ "$DELETE_APPROVED" == true ]]; then args+=(--delete); fi
+          python -u -B scripts/run_ccrd_ocr_exact_maintenance.py "${args[@]}"
+      - name: Restore any interrupted producer isolation
+        if: always()
+        run: python -u -B scripts/reader_gc_maintenance.py restore --journal output/ccrd-ocr-exact-removal/maintenance.json
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: .cache/reader-gc
+          key: reader-gc-reads-v1-${{ github.run_id }}-${{ github.run_attempt }}
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: ccrd-ocr-exact-removal
+          path: output/ccrd-ocr-exact-removal/*.json
+          retention-days: 30
+          if-no-files-found: warn

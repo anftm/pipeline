@@ -342,6 +342,13 @@ class ReferenceGraph:
                     relative in self.files.get(bucket, set())):
                 self.mark(bucket, relative, tree=field == "root")
                 return
+        # CCRD OCR paths live in a separate namespace from Reader assets. A
+        # bucket-qualified reference from any Reader root must still pin the
+        # target; otherwise a full graph can incorrectly classify it as orphan.
+        if (bucket == ccrd_lifecycle.BUCKET and explicit
+                and value.startswith(ccrd_lifecycle.MANAGED_PREFIXES)):
+            self.mark(bucket, value, tree=field == 'root')
+            return
         if value.startswith(MANAGED_PREFIXES) or value.startswith("reader-index/"):
             if explicit:
                 self.mark(bucket, value, tree=field == "root")

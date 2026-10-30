@@ -350,7 +350,7 @@ def restore(path):
     kick_restored(path, state)
 
 
-def run(path, *, limit=0, apply=True, scope='unreferenced'):
+def run(path, *, limit=0, apply=True, scope='unreferenced', isolated_callback=None):
     if scope not in {'unreferenced', 'retired-assets'}:
         raise ValueError('invalid automatic collection scope')
     central = load_config()["publisher_repository"]
@@ -409,6 +409,11 @@ def run(path, *, limit=0, apply=True, scope='unreferenced'):
             if time.monotonic() >= deadline:
                 raise RuntimeError("producer drain deadline exceeded")
             time.sleep(30)
+        if isolated_callback is not None:
+            # Explicit bounded operations may use the same fully drained
+            # producer window. They own their own preflight/receipts and must
+            # still pass GitHubProducerFence before any destructive operation.
+            return isolated_callback(state)
         identifier = state["maintenance_id"]
         state["dispatch_requested"] = True
         journal(path, state)

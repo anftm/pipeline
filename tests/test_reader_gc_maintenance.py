@@ -8,6 +8,63 @@ from scripts import reader_gc_maintenance as maintenance
 
 
 class MaintenanceTests(unittest.TestCase):
+    def test_isolated_callback_restores_producers_and_does_not_dispatch_collector(self):
+        state = {'active': True}
+        events = []
+        def api(repo, path, *, method='GET', body=None):
+            events.append((repo, path, method))
+            if path == 'actions/workflows/1':
+                return {'state': 'active' if state['active'] else 'disabled_manually'}
+            if path.endswith('/disable'):
+                state['active'] = False
+                return {}
+            if path.endswith('/enable'):
+                state['active'] = True
+                return {}
+            raise AssertionError(path)
+        def pages(repo, path, field):
+            if path == 'actions/workflows':
+                return [{'id': 1, 'state': 'active', 'path': '.github/workflows/pdf-account-worker.yml'}]
+            return []
+        callback = []
+        def isolated(snapshot):
+            self.assertFalse(state['active'])
+            callback.append(snapshot['maintenance_id'])
+            return 'done'
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(maintenance, 'producer_repositories', return_value=['central/repo']), \
+                patch.object(maintenance, 'load_config', return_value={'publisher_repository': 'central/repo'}), \
+                patch.object(maintenance, 'pages', side_effect=pages), \
+                patch.object(maintenance, 'api', side_effect=api):
+            journal = Path(directory) / 'journal.json'
+            self.assertEqual(maintenance.run(journal, isolated_callback=isolated), 'done')
+            self.assertTrue(json.loads(journal.read_text())['restored'])
+        self.assertTrue(state['active'])
+        self.assertEqual(len(callback), 1)
+        self.assertFalse(any(path.endswith('/dispatches') for _, path, _ in events))
+
+    def test_isolated_callback_failure_also_restores_producers(self):
+        state = {'active': True}
+        def api(repo, path, *, method='GET', body=None):
+            if path == 'actions/workflows/1':
+                return {'state': 'active' if state['active'] else 'disabled_manually'}
+            if path.endswith('/disable'):state['active'] = False;return {}
+            if path.endswith('/enable'):state['active'] = True;return {}
+            raise AssertionError(path)
+        def pages(repo, path, field):
+            return ([{'id': 1, 'state': 'active', 'path': '.github/workflows/pdf-account-worker.yml'}]
+                    if path == 'actions/workflows' else [])
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(maintenance, 'producer_repositories', return_value=['central/repo']), \
+                patch.object(maintenance, 'load_config', return_value={'publisher_repository': 'central/repo'}), \
+                patch.object(maintenance, 'pages', side_effect=pages), \
+                patch.object(maintenance, 'api', side_effect=api):
+            journal = Path(directory) / 'journal.json'
+            with self.assertRaisesRegex(RuntimeError, 'callback failure'):
+                maintenance.run(journal, isolated_callback=lambda _: (_ for _ in ()).throw(RuntimeError('callback failure')))
+            self.assertTrue(json.loads(journal.read_text())['restored'])
+        self.assertTrue(state['active'])
+
     def test_failure_after_disabling_producers_restores_prior_permissions(self):
         permissions = {"enabled": True, "allowed_actions": "all"}
         workflow = {"state": "active"}
