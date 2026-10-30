@@ -474,7 +474,8 @@ def recheck_roots_and_controls(store, plan, proof, fence, client):
         else:
             parents = {posixpath.dirname(path) + '/' for owner, path in expected
                        if owner == bucket and not path.startswith('reader-index/') and '/' in path}
-            roots = {p for p in store.list_roots(bucket, parents) if graph.is_root(p, bucket)}
+            listed = store.list_roots(bucket, parents)
+            roots = {p for p in listed if graph.is_root(p, bucket)}
         observed.update((bucket, path) for path in roots)
     if observed != expected:
         raise ValueError('root inventory changed before exact deletion')
@@ -597,6 +598,10 @@ def simulate(store, plan, fence, *, workers=8, deadline_minutes=300, progress=No
                 return store.digest(bucket, path)
             return sha(overrides[ref]) if ref in overrides else store.digest(bucket, path)
 
+    # Graph build normally attaches the predicate to its view; also attach it
+    # to the underlying S3 store so root listings do not cache telemetry and
+    # so freshly listed root ETags are available for convergence.
+    store.root_predicate = graph.is_root
     fence.check()
     target_set = {(row['bucket'], row['path']) for row in plan['expanded_targets']}
     ref_graph = OriginReferenceGraph(View(), workers=workers, max_rounds=40, progress=progress,

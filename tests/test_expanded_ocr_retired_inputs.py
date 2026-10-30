@@ -26,3 +26,19 @@ class RetiredInputExternalSafetyTests(unittest.TestCase):
         self.assertTrue(expanded.external_target_origins(graph, [{'bucket': expanded.INPUT, 'path': path}]))
         self.assertIn(((expanded.ASSETS, 'reader-index/external-user.json'),
                        (expanded.INPUT, path)), graph.omitted_retired_input_pins)
+
+    def test_retired_input_journal_without_live_pin_does_not_block(self):
+        store = MemoryStore()
+        store.put(expanded.ASSETS, 'reader-index/reader_assets.json.gz',
+                  gzip.compress(expanded.encode({'v': 1, 'f': {}})))
+        source = 'a' * 64
+        root = 'objects/aa/' + source + '/' + 'b' * 16 + '/ocr-input'
+        path = root + '/page-000001.png'
+        store.put(expanded.INPUT, path, b'image')
+        store.put(expanded.ASSETS, 'reader-index/v3/retirement.json', {
+            'version': 1, 'kind': 'reader-v3-retirement', 'resources': [], 'retired_paths': [],
+            'replacement_acks': {'hf': True, 'pages': True}, 'retired_input_roots': {root: {
+                'bucket': expanded.INPUT, 'root': root, 'source_sha256': source, 'pages': 1}}})
+        graph = expanded.OriginReferenceGraph(store, workers=2)
+        self.assertTrue(graph.build()['graph_complete'])
+        self.assertFalse(graph.omitted_retired_input_pins)
