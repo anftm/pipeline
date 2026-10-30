@@ -76,6 +76,26 @@ class ChmPublicationSafetyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'exceeds'):
             safety.validate_delete_batch(rows, [(publication.ASSETS, 'source.chm')])
 
+    def test_exact_chm_recovery_requires_a_durable_submitted_batch(self):
+        data = b'epub'
+        row = {'bucket': publication.ASSETS, 'path': 'native/ebook/chm/x/document.epub',
+               'bytes': len(data), 'sha256': safety.chm.digest(data)}
+        objects = {row['path']: data}
+        class Store:
+            def assert_chm_bucket_available(self):return True
+            def read_bytes(self, bucket, path):
+                if path not in objects:
+                    raise FileNotFoundError(path)
+                return objects[path]
+        self.assertEqual(safety.verify_exact_epub_targets(Store(), [row])['verified_objects'], 1)
+        objects.pop(row['path'])
+        with self.assertRaisesRegex(ValueError, 'unsubmitted'):
+            safety.reconcile_epub_deletions(Store(), [row], [])
+        receipt = [{'bucket': row['bucket'], 'paths': [row['path']], 'status': 'submitted'}]
+        self.assertEqual(safety.reconcile_epub_deletions(Store(), [row], receipt)['confirmed_absent_objects'], 1)
+        with self.assertRaisesRegex(RuntimeError, 'availability'):
+            safety.reconcile_epub_deletions(object(), [row], receipt)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -120,3 +120,56 @@ def validate_delete_batch(rows, batch):
     if not batch or len(batch) > 100 or len(batch) != len(set(batch)) or not set(batch) <= allowed:
         raise ValueError('CHM delete batch exceeds the reviewed exact list')
     return True
+
+
+def verify_exact_epub_targets(store, rows, *, workers=8):
+    """Read every reviewed EPUB and verify its exact length and SHA-256."""
+    from concurrent.futures import ThreadPoolExecutor
+    assert_bucket_available(store)
+    def check(row):
+        raw = store.read_bytes(row['bucket'], row['path'])
+        if len(raw) != row['bytes'] or chm.digest(raw) != row['sha256']:
+            raise ValueError('CHM EPUB target changed: ' + row['path'])
+        return len(raw)
+    with ThreadPoolExecutor(max_workers=max(1, min(workers, 16))) as pool:
+        total = sum(pool.map(check, rows))
+    if total != sum(row['bytes'] for row in rows):
+        raise ValueError('CHM EPUB target byte total changed')
+    return {'verified_objects': len(rows), 'verified_bytes': total, 'remote_mutations': 0}
+
+
+def reconcile_epub_deletions(store, rows, batches, *, workers=8):
+    """Count direct absence only for targets previously submitted durably."""
+    from concurrent.futures import ThreadPoolExecutor
+    assert_bucket_available(store)
+    approved = {(row['bucket'], row['path']) for row in rows}
+    submitted = set()
+    for batch in batches:
+        refs = [(batch.get('bucket'), path) for path in batch.get('paths', [])]
+        validate_delete_batch(rows, refs)
+        if batch.get('status') not in {'submitted', 'verified-absent'} or submitted & set(refs):
+            raise ValueError('CHM deletion receipt has conflicting batches')
+        submitted.update(refs)
+    def check(row):
+        try:
+            raw = store.read_bytes(row['bucket'], row['path'])
+        except FileNotFoundError:
+            return False
+        if len(raw) != row['bytes'] or chm.digest(raw) != row['sha256']:
+            raise ValueError('CHM EPUB target changed during recovery: ' + row['path'])
+        return True
+    with ThreadPoolExecutor(max_workers=max(1, min(workers, 16))) as pool:
+        present = list(pool.map(check, rows))
+    missing = {(r['bucket'], r['path']) for r, exists in zip(rows, present) if not exists}
+    if not missing <= submitted or not submitted <= approved:
+        raise ValueError('an unsubmitted CHM EPUB target is missing')
+    return {'present_objects': sum(present), 'confirmed_absent_objects': len(missing),
+            'confirmed_absent_bytes': sum(row['bytes'] for row, exists in zip(rows, present) if not exists),
+            'missing': missing}
+
+
+def assert_bucket_available(store):
+    """A missing/inaccessible bucket is not evidence that EPUBs were deleted."""
+    check = getattr(store, 'assert_chm_bucket_available', None)
+    if not callable(check) or check() is not True:
+        raise RuntimeError('CHM bucket availability was not independently verified')
