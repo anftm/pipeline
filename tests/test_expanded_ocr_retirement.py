@@ -2,6 +2,7 @@ import copy
 import gzip
 import unittest
 from unittest.mock import patch
+from types import SimpleNamespace
 
 from scripts import expanded_ocr_retirement as expanded
 from scripts import ccrd_ocr_exact_retirement as exact
@@ -73,6 +74,32 @@ class ExpandedRetirementSimulationTests(unittest.TestCase):
             'objects/aa/' + 'a' * 64 + '/' + 'b' * 16 + '/document.djvu'))
         self.assertFalse(expanded.ALLOWED[expanded.ASSETS].fullmatch(
             'documents/pdf/ps/' + 'a' * 64 + '/document.pdf'))
+
+    def test_external_sibling_bundle_pin_blocks_target_retirement(self):
+        bucket = expanded.PAGES
+        parent = 'objects/aa/' + 'a' * 64 + '/' + 'b' * 16 + '/ocr/'
+        target = parent + 'page-000001.json.gz'
+        unrelated_sibling = parent + 'page-000002.json.gz'
+        origin = (expanded.ASSETS, 'reader-index/live-consumer.json')
+        graph = SimpleNamespace(direct={origin: {(bucket, unrelated_sibling)}}, trees=set())
+        hits = expanded.external_target_origins(graph, [{'bucket': bucket, 'path': target}])
+        self.assertEqual(hits[origin], {(bucket, target)})
+
+    def test_target_internal_origin_does_not_imply_external_ownership(self):
+        bucket = expanded.PAGES
+        origin = (bucket, 'objects/aa/' + 'a' * 64 + '/' + 'b' * 16 + '/text-layer-manifest.json')
+        target = (bucket, 'objects/aa/' + 'a' * 64 + '/' + 'b' * 16 + '/text/page-000001.json.gz')
+        graph = SimpleNamespace(direct={origin: {target}}, trees=set())
+        rows = [{'bucket': b, 'path': p} for b, p in (origin, target)]
+        self.assertEqual(expanded.external_target_origins(graph, rows), {})
+
+    def test_tree_root_is_a_conservative_external_protection(self):
+        bucket = expanded.PAGES
+        root = 'objects/aa/' + 'a' * 64 + '/' + 'b' * 16
+        target = root + '/text/page-000001.json.gz'
+        graph = SimpleNamespace(direct={}, trees={(bucket, root)})
+        hits = expanded.external_target_origins(graph, [{'bucket': bucket, 'path': target}])
+        self.assertEqual(hits[(bucket, root + '/<tree-protection>')], {(bucket, target)})
 
 
 if __name__ == '__main__':

@@ -11,6 +11,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import posixpath
 from pathlib import Path
 import re
 import time
@@ -161,6 +162,7 @@ def simulate(store, plan, fence, *, workers=8, deadline_minutes=300, progress=No
         raise ValueError('a current Reader source was not protected in simulation')
     origins = [{'bucket': origin[0], 'path': origin[1], 'targets': len(refs & targets)}
                for origin, refs in ref_graph.direct.items() if refs & targets]
+    external_origins = external_target_origins(ref_graph, plan['expanded_targets'])
     fence.check()
     collector.verify_roots(ref_graph.store, ref_graph)
     controls, _ = exact.inspect_roots(store, None)
@@ -172,5 +174,53 @@ def simulate(store, plan, fence, *, workers=8, deadline_minutes=300, progress=No
             'target_count': len(targets), 'retained_target_count': len(retained),
             'retained_targets': [f'{bucket}:{path}' for bucket, path in sorted(retained)],
             'remaining_origins': sorted(origins, key=lambda x: (x['bucket'], x['path'])),
+            'non_target_origins': [{'bucket': b, 'path': p, 'targets': len(refs)}
+                                   for (b, p), refs in sorted(external_origins.items())],
             'protected_non_ocr_refs': len(preserved), 'root_count': len(report['roots']),
             'deletion_authorized': False, 'remote_mutations': 0}
+
+
+def external_target_origins(ref_graph, rows):
+    """Conservatively find non-target origins that can protect exact targets.
+
+    A target may be reached through an explicitly pinned path, or indirectly
+    because the graph protects all siblings of an immutable bundle. A direct
+    listing of target-to-target citations is therefore not enough to authorize
+    retiring their SCC; expand every non-target document reference in the same
+    way the graph's ``mark`` implementation does.
+    """
+    # Tree references are tracked separately from ``direct``; do not infer
+    # external ownership solely from the direct-origin list.
+    targets = {(row['bucket'], row['path']) for row in rows}
+    directories = {}
+    for bucket, path in targets:
+        by_parent = directories.setdefault(bucket, {})
+        parent = posixpath.dirname(path)
+        while parent:
+            by_parent.setdefault(parent, set()).add((bucket, path))
+            parent = posixpath.dirname(parent)
+    hits = {}
+    for origin, refs in ref_graph.direct.items():
+        if origin in targets:
+            continue
+        selected = set()
+        for bucket, path in refs:
+            exact_ref = (bucket, path)
+            if exact_ref in targets:
+                selected.add(exact_ref)
+            if bucket == CCRD or graph.is_root(path, bucket):
+                continue
+            parent = posixpath.dirname(path)
+            if not parent:
+                continue
+            selected.update(directories.get(bucket, {}).get(parent, set()))
+        if selected:
+            hits[origin] = selected
+    # Tree roots are not recorded in ``direct`` by the scanner. Their source
+    # therefore cannot be proven here; always treat their target closure as an
+    # independent protection rather than guessing that it is target-internal.
+    for bucket, root in ref_graph.trees:
+        closure = directories.get(bucket, {}).get(root, set())
+        if closure:
+            hits[(bucket, root + '/<tree-protection>')] = set(closure)
+    return hits
