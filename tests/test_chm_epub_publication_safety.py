@@ -177,6 +177,18 @@ class ChmPublicationSafetyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'identity changed'):
             safety.verify_originals_and_chapter_retention(before, after, {root})
 
+    def test_retention_root_must_pin_every_historical_chapter(self):
+        path = 'chapters/ebook/chm/' + 'a' * 64 + '/' + 'b' * 16 + '/chapter-manifest.json'
+        retention = {'kind': 'reader-chm-epub-withdrawal-retention', 'inventory_sha256': 'abc',
+                     'resources': [{'bucket': publication.ASSETS, 'path': path}]}
+        plan = {'inventory_sha256': 'abc', 'chapter_manifests_to_preserve': [path],
+                'overrides': {'reader-index/chm-epub-withdrawal-retention.json': publication.encode(retention)}}
+        self.assertEqual(safety.verify_prepared_chapter_retention(plan)['protected_chapter_manifests'], 1)
+        retention['resources'] = []
+        plan['overrides']['reader-index/chm-epub-withdrawal-retention.json'] = publication.encode(retention)
+        with self.assertRaisesRegex(ValueError, 'omits'):
+            safety.verify_prepared_chapter_retention(plan)
+
     def test_hypothetical_graph_and_foreign_batch_never_authorize_delete(self):
         rows = [{'bucket': publication.ASSETS, 'path': 'native/ebook/chm/reviewed/document.epub'}]
         proof = {'graph_complete': True, 'mode': 'simulated', 'target_count': 1, 'retained_targets': 0,

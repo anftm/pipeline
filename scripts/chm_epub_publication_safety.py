@@ -129,6 +129,24 @@ def verify_document_reset_prerequisites(store, plan):
             'document_collection_authorized': False, 'remote_mutations': 0}
 
 
+def verify_prepared_chapter_retention(plan):
+    """Every retained current/historical CHM bundle must have an exact root pin."""
+    retention = json.loads(plan['overrides']['reader-index/chm-epub-withdrawal-retention.json'])
+    if (retention.get('kind') != 'reader-chm-epub-withdrawal-retention'
+            or retention.get('inventory_sha256') != plan.get('inventory_sha256')):
+        raise ValueError('CHM reading retention root has the wrong identity')
+    refs = retention.get('resources')
+    if not isinstance(refs, list):
+        raise ValueError('CHM reading retention references are missing')
+    paths = [(r.get('bucket'), r.get('path')) for r in refs if isinstance(r, dict)]
+    if len(paths) != len(refs) or len(paths) != len(set(paths)):
+        raise ValueError('CHM reading retention references are invalid or duplicated')
+    wanted = {(chm.ASSETS, path) for path in plan['chapter_manifests_to_preserve']}
+    if not wanted <= set(paths):
+        raise ValueError('CHM reading retention omits a preserved chapter manifest')
+    return {'protected_chapter_manifests': len(wanted), 'retention_resources': len(refs)}
+
+
 def verify_originals_and_chapter_retention(before, after, chapter_roots):
     """Prove a bounded metadata transition leaves all unrelated paths intact."""
     expected = set(before)
