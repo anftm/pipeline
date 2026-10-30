@@ -490,10 +490,12 @@ def plan_chm_withdrawal(store, inventory_path, *, acknowledged_generations):
     overrides[consumer_path] = publication.encode(consumers)
     history_refs = preserved_chapter_closure([sidecar, publication.pinned_base(store, historical, None)])
     return {'kind': 'chm-epub-withdrawal-plan', 'target_count': len(rows), 'target_bytes': inventory['logical_bytes'],
+            'inventory_sha256': preview.INVENTORY_SHA256,
             'old_v3_generation': old_generation, 'current_v3_generation': pointer['generation'],
             'new_v3_generation': new_pointer['generation'], 'rollback_aliases': alias_refs,
             'base_generation': synced['generation'], 'index_hashes_before': index_hashes,
             'sidecar_sha256_before': digest(side_raw), 'catalog_sha256_before': digest(catalog_raw),
+            'v3_pointer_before': pointer,
             'index_entries_retired': synced['retired_epub_fields'],
             'stale_shard_rows_aligned': synced['shard_entries_synchronized'],
             'missing_processing_refs_removed': synced['missing_processing_refs_removed'],
@@ -513,11 +515,13 @@ def simulate_complete_withdrawal(store, overrides, rows, fence, *, workers=8, de
     immutable = immutable or {}
     overlay = {(ASSETS, p): raw for p, raw in {**overrides, **immutable}.items()}
     before = {}
-    for path in overrides:
+    for path in set(overrides) | set(immutable):
         try:
             before[(ASSETS, path)] = store.digest(ASSETS, path)
         except FileNotFoundError:
             before[(ASSETS, path)] = None
+        if path in immutable and before[(ASSETS, path)] not in {None, digest(immutable[path])}:
+            raise ValueError('planned immutable CHM replacement conflicts with existing bytes: ' + path)
 
     class View:
         def __init__(self):
