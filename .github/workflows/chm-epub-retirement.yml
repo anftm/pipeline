@@ -1,0 +1,68 @@
+name: Reader · Retire Exact Historical CHM EPUBs
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: Type RETIRE-972 to confirm only the reviewed historical EPUB list
+        required: true
+        type: string
+      resume:
+        description: Recover the same isolated CHM transaction after an interruption
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: publish-ccrd-index
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  retire:
+    if: github.repository == 'anftm/pipeline' && github.ref == 'refs/heads/main' && inputs.confirm == 'RETIRE-972'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 720
+    concurrency:
+      group: reader-global-maintenance
+      cancel-in-progress: false
+      queue: max
+    env:
+      READER_GC_DURABLE_MAINTENANCE: 'true'
+      READER_GC_S3_RATE: '6'
+      READER_S3_LIST_WORKERS: '4'
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      HF_INPUT_TOKEN: ${{ secrets.HF_INPUT_TOKEN }}
+      HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+      HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+      HF_S3_INPUT_ACCESS_KEY_ID: ${{ secrets.HF_S3_INPUT_ACCESS_KEY_ID }}
+      HF_S3_INPUT_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_INPUT_SECRET_ACCESS_KEY }}
+      GC_PRODUCER_TOKENS_JSON: ${{ secrets.GC_PRODUCER_TOKENS_JSON }}
+      PAGES_TOKEN: ${{ secrets.PAGES_TOKEN }}
+      PAGES_REPO: ${{ secrets.PAGES_REPO }}
+      RESUME: ${{ inputs.resume }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - run: pip install -r scripts/requirements.txt
+      - name: Test exact scope, two-site handoff, isolation and recovery
+        env:
+          READER_GC_DURABLE_MAINTENANCE: 'false'
+        run: python -B -m unittest tests.test_run_chm_epub_retirement tests.test_chm_epub_journal tests.test_chm_epub_publication_safety tests.test_chm_epub_withdrawal_preview tests.test_chm_epub_bundle_integrity tests.test_reader_gc_graph tests.test_reader_gc_fence tests.test_reader_gc_maintenance -q
+      - name: Verify exact inventory and retire only after actual closure
+        run: python -u -B scripts/run_chm_epub_retirement.py
+      - name: Restore producer isolation when the transaction is safe
+        if: always()
+        run: python -u -B scripts/reader_gc_maintenance.py restore --journal output/chm-epub-retirement/maintenance.json
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: chm-epub-retirement
+          path: output/chm-epub-retirement/*
+          retention-days: 90
+          if-no-files-found: warn

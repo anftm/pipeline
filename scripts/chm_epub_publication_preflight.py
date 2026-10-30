@@ -370,6 +370,7 @@ def verify_preserved_chapter(store, path, *, hash_bodies=False):
         raise ValueError('preserved CHM manifest is missing from bundle')
     return {'manifest': path, 'manifest_sha256': digest(raw), 'required': len(required),
             'bundle_objects': len(listed), 'other_resources': len(listed - required),
+            'bundle_paths_sha256': digest(publication.encode(sorted(listed))),
             'chapter_bodies_hashed': bool(hash_bodies), 'remote_mutations': 0}
 
 

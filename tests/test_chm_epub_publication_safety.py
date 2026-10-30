@@ -395,6 +395,7 @@ class ChmPublicationSafetyTests(unittest.TestCase):
         plan = {'inventory_sha256':'abc', 'chapter_manifests_to_preserve':paths,
                 'overrides':{'reader-index/chm-epub-withdrawal-retention.json':publication.encode(root)}}
         results = [{'manifest':ref['path'], 'manifest_sha256':ref['sha256'], 'required':3,
+                    'bundle_paths_sha256':'a'*64,
                     'other_resources':2, 'bundle_objects':5, 'remote_mutations':0} for ref in refs]
         evidence = {'manifests':2, 'results':results, 'required_objects':6,
                     'companion_objects':4, 'remote_mutations':0}
@@ -550,6 +551,20 @@ class ChmPublicationSafetyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'differs'):
             safety.verify_live_processing_controls(Store(),updates)
 
+    def test_preserved_chapter_paths_are_checked_before_and_after_deletion(self):
+        root='chapters/ebook/chm/'+'a'*64+'/'+'b'*16
+        files={root+'/chapter-manifest.json',root+'/chapter.xhtml',root+'/resources/font.ttf'}
+        proof={'chapter_bundles':[{'root':root,'count':len(files),
+            'paths_sha256':safety.chm.digest(publication.encode(sorted(files)))}]}
+        updates={'reader-index/processing/owner.json':{'after':b'kept'}}
+        class Store:
+            def list_files(self,bucket,prefixes):return set(files)
+            def read_bytes(self,bucket,path):return b'kept'
+        self.assertTrue(safety.verify_predelete_chapter_inventory(Store(),proof,updates))
+        files.remove(root+'/resources/font.ttf')
+        with self.assertRaisesRegex(ValueError,'chapter bundle inventory changed'):
+            safety.verify_predelete_chapter_inventory(Store(),proof,updates)
+
     def test_exact_chm_recovery_requires_a_durable_submitted_batch(self):
         data = b'epub'
         row = {'bucket': publication.ASSETS, 'path': 'native/ebook/chm/x/document.epub',
@@ -569,6 +584,10 @@ class ChmPublicationSafetyTests(unittest.TestCase):
         self.assertEqual(safety.reconcile_epub_deletions(Store(), [row], receipt)['confirmed_absent_objects'], 1)
         with self.assertRaisesRegex(RuntimeError, 'availability'):
             safety.reconcile_epub_deletions(object(), [row], receipt)
+        objects[row['path']]=data
+        receipt[0]['status']='verified-absent'
+        with self.assertRaisesRegex(ValueError, 'republished'):
+            safety.reconcile_epub_deletions(Store(), [row], receipt)
 
     def test_chm_delete_batches_log_before_writing_and_recover_partial_success(self):
         data = [b'one', b'two']

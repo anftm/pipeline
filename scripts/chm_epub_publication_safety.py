@@ -174,6 +174,7 @@ def require_chapter_evidence(plan, evidence):
                 or row.get('manifest') not in expected
                 or row.get('manifest_sha256') != expected[row['manifest']]
                 or row.get('remote_mutations') != 0
+                or not re.fullmatch(r'[0-9a-f]{64}', str(row.get('bundle_paths_sha256', '')))
                 or type(row.get('required')) is not int or row['required'] < 2
                 or type(row.get('other_resources')) is not int or row['other_resources'] < 0
                 or row.get('bundle_objects') != row['required'] + row['other_resources']):
@@ -349,18 +350,40 @@ def recheck_actual_graph(store, traversal, proof, rows, fence, client, plan):
     return True
 
 
-def recheck_simulation_inputs(store, details, fence):
+def recheck_simulation_inputs(store, details, fence, *, applied=None):
     """Bind a proposed transition to the still-current real graph inputs."""
     from concurrent.futures import ThreadPoolExecutor
     try:
-        from . import reader_gc_collect as collector
+        from . import reader_gc_collect as collector, reader_gc_graph as graph_module
     except ImportError:
         import reader_gc_collect as collector
+        import reader_gc_graph as graph_module
     graph = details['graph']
     assert_all_buckets_available(store)
     fence.check()
-    collector.verify_roots(graph.store, graph)
-    originals = details['live_control_sha256']
+    if not applied:
+        collector.verify_roots(graph.store, graph)
+    else:
+        # The overlay already models these exact staged roots. The live root
+        # membership must agree, while contents are checked separately below.
+        for bucket in graph.files:
+            if bucket == graph_module.ccrd_lifecycle.BUCKET:
+                roots = {p for p in store.list_files(bucket, ('control/', 'current.json'))
+                         if graph_module.is_root(p, bucket)}
+            else:
+                parents = {p.rsplit('/', 1)[0] + '/' for p in graph.root_names.get(bucket, set())
+                           if not p.startswith('reader-index/') and '/' in p}
+                roots = {p for p in store.list_roots(bucket, parents) if graph_module.is_root(p, bucket)}
+            planned_missing = {p for (owner, p), old in details['live_control_sha256'].items()
+                               if owner == bucket and old is None and graph_module.is_root(p, bucket)}
+            staged_new = {p for p in (applied or {}) if (bucket, p) in details['overlay_paths']}
+            expected = {p for p in graph.files[bucket] if graph_module.is_root(p, bucket)}
+            expected -= planned_missing - staged_new
+            if roots != expected:
+                raise ValueError('CHM root inventory changed after staged publication')
+    originals = dict(details['live_control_sha256'])
+    for path, raw in (applied or {}).items():
+        originals[(chm.ASSETS, path)] = chm.digest(raw)
     def verify(item):
         ref, expected = item
         try:
@@ -386,6 +409,15 @@ def verify_live_chm_controls(store, plan):
     for path, expected in plan['immutable'].items():
         if store.read_bytes(chm.ASSETS, path) != expected:
             raise ValueError('live CHM immutable replacement differs from the approved plan: ' + path)
+    return True
+
+
+def verify_live_chm_controls_before_retirement(store, plan, staged):
+    """Verify the exact unacknowledged projection plus its immutable snapshots."""
+    assert_all_buckets_available(store)
+    for path, raw in {**plan['immutable'], **staged}.items():
+        if store.read_bytes(chm.ASSETS, path) != raw:
+            raise ValueError('staged CHM replacement changed before acknowledgment: ' + path)
     return True
 
 
@@ -522,14 +554,9 @@ def validate_publication_order(plan, receipt_state):
     return True
 
 
-def apply_pre_ack_publication(store, plan, before, fence, checkpoint):
-    """Publish replacement Reader pointer while keeping old history live."""
+def staged_pre_ack_controls(plan, before):
+    """Derive exact staged bytes deterministically for publication and recovery."""
     pointer_path = 'reader-index/v3/current.json'
-    planned_pointer = json.loads(plan['overrides'][pointer_path])
-    live_pointer, _ = publication.current(store)
-    if live_pointer not in (plan['v3_pointer_before'], planned_pointer):
-        raise ValueError('Reader pointer moved before CHM publication')
-    store_immutable_replacements(store, plan, fence, checkpoint)
     catalog = json.loads(plan['overrides'][chm.CATALOG])
     # Before both deployments acknowledge, retain the old base generation's
     # original complete reference set and snapshot unchanged. The post-ack
@@ -552,8 +579,19 @@ def apply_pre_ack_publication(store, plan, before, fence, checkpoint):
               'reader-index/chm-epub-withdrawal-retention.json':
                   plan['overrides']['reader-index/chm-epub-withdrawal-retention.json'],
               pointer_path: plan['overrides'][pointer_path]}
-    for path in (promotion_path, 'reader-index/chm-epub-withdrawal-retention.json',
-                 chm.SIDECAR, chm.CATALOG, pointer_path):
+    return staged
+
+
+def apply_pre_ack_publication(store, plan, before, fence, checkpoint):
+    """Publish replacement Reader pointer while keeping old history live."""
+    pointer_path = 'reader-index/v3/current.json'
+    planned_pointer = json.loads(plan['overrides'][pointer_path])
+    live_pointer, _ = publication.current(store)
+    if live_pointer not in (plan['v3_pointer_before'], planned_pointer):
+        raise ValueError('Reader pointer moved before CHM publication')
+    staged = staged_pre_ack_controls(plan, before)
+    promotion_path = f"reader-index/v3/promotions/{plan['new_v3_generation']}.json"
+    def apply(path):
         fence.check()
         raw = staged[path]
         current = store.read_bytes(chm.ASSETS, path) if before[path]['present'] else None
@@ -571,6 +609,12 @@ def apply_pre_ack_publication(store, plan, before, fence, checkpoint):
         if store.read_bytes(chm.ASSETS, path) != raw:
             raise ValueError('staged CHM control readback differs: ' + path)
         checkpoint('pre-ack-control-verified', path)
+    # The protection root must exist before the first replacement catalog:
+    # an otherwise unreferenced v3 catalog is itself discovered as a GC root.
+    apply('reader-index/chm-epub-withdrawal-retention.json')
+    store_immutable_replacements(store, plan, fence, checkpoint)
+    for path in (promotion_path, chm.SIDECAR, chm.CATALOG, pointer_path):
+        apply(path)
     if publication.current(store)[0] != planned_pointer:
         raise ValueError('planned CHM Reader pointer did not publish')
     return staged
@@ -665,7 +709,7 @@ def verify_exact_epub_targets(store, rows, *, workers=8):
     return {'verified_objects': len(rows), 'verified_bytes': total, 'remote_mutations': 0}
 
 
-def apply_processing_protection_updates(store, rows, fence, client, plan, updates, checkpoint):
+def apply_processing_protection_updates(store, rows, fence, client, plan, updates, checkpoint, *, deleted=()):
     """After both Readers accept, narrow only the exact failed-upload roots."""
     inventory = chm.processing_protection_inventory()
     expected = {row['path']: row for row in inventory['records']}
@@ -677,7 +721,8 @@ def apply_processing_protection_updates(store, rows, fence, client, plan, update
         if item.get('before_sha256') != entry['sha256'] or not isinstance(item.get('after'), bytes):
             raise ValueError('CHM processing update identity differs: ' + path)
         target = entry['target_root'] + '/document.epub'
-        if target not in targets or store.list_files(chm.ASSETS, (entry['target_root'] + '/',)) != {target}:
+        expected_tree = set() if target in deleted else {target}
+        if target not in targets or store.list_files(chm.ASSETS, (entry['target_root'] + '/',)) != expected_tree:
             raise ValueError('CHM processing target root changed: ' + path)
         fence.check()
         chm.verify_processing_owner_run(fence.api, inventory)
@@ -715,6 +760,27 @@ def apply_processing_protection_updates(store, rows, fence, client, plan, update
     return True
 
 
+def require_initial_chapter_inventory(store, bundles):
+    """All previously checked chapter/resource paths must remain present."""
+    from concurrent.futures import ThreadPoolExecutor
+    def verify(row):
+        current = store.list_files(chm.ASSETS, (row['root'] + '/',))
+        if len(current) != row['count'] or chm.digest(publication.encode(sorted(current))) != row['paths_sha256']:
+            raise ValueError('preserved CHM chapter bundle inventory changed: ' + row['root'])
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        list(pool.map(verify, bundles))
+    return True
+
+
+def verify_predelete_chapter_inventory(store, proof, processing_updates):
+    """All previously checked chapter/resource paths must remain present."""
+    require_initial_chapter_inventory(store, proof['chapter_bundles'])
+    for path, item in processing_updates.items():
+        if store.read_bytes(chm.ASSETS, path) != item['after']:
+            raise ValueError('preserved CHM chapter protection changed: ' + path)
+    return True
+
+
 def reconcile_epub_deletions(store, rows, batches, *, workers=8):
     """Count direct absence only for targets previously submitted durably."""
     from concurrent.futures import ThreadPoolExecutor
@@ -740,6 +806,10 @@ def reconcile_epub_deletions(store, rows, batches, *, workers=8):
     missing = {(r['bucket'], r['path']) for r, exists in zip(rows, present) if not exists}
     if not missing <= submitted or not submitted <= approved:
         raise ValueError('an unsubmitted CHM EPUB target is missing')
+    verified = {(batch['bucket'], path) for batch in batches if batch['status'] == 'verified-absent'
+                for path in batch['paths']}
+    if not verified <= missing:
+        raise ValueError('a previously deleted CHM EPUB was republished')
     return {'present_objects': sum(present), 'confirmed_absent_objects': len(missing),
             'confirmed_absent_bytes': sum(row['bytes'] for row, exists in zip(rows, present) if not exists),
             'missing': missing}
@@ -852,6 +922,8 @@ def delete_exact_epub_batches(store, rows, fence, checkpoint, *, barrier, batche
             if len(raw) != row['bytes'] or chm.digest(raw) != row['sha256']:
                 raise ValueError('CHM EPUB target changed before deletion: ' + row['path'])
             existing.append(row['path'])
+        if batch['status'] == 'verified-absent' and existing:
+            raise ValueError('a previously deleted CHM EPUB was republished')
         if batch['status'] == 'new':
             batch['status'] = 'submitted'
             progress.append(batch)
@@ -948,6 +1020,12 @@ def run_guarded_retirement(store, fence, client, plan, rows, *, preflight, persi
          generation=plan['current_v3_generation'],
          acknowledged_generations={'hf': plan['current_v3_generation'], 'pages': plan['current_v3_generation']})
     reset_evidence = verify_document_reset_prerequisites(store, plan)
+    preserved_chapters = list(chapter_evidence['results']) + [item['chapter'] for item in processing_updates.values()]
+    if len({row['manifest'] for row in preserved_chapters}) != len(preserved_chapters):
+        raise ValueError('CHM preserved chapter evidence contains duplicate bundles')
+    chapter_bundle_inventory = [{'root':row['manifest'].rsplit('/',1)[0], 'count':row['bundle_objects'],
+                                 'paths_sha256':row['bundle_paths_sha256']} for row in preserved_chapters]
+    require_initial_chapter_inventory(store, chapter_bundle_inventory)
     recheck_simulation_inputs(store, simulation_details, fence)
     save_plan(plan, before, processing_updates)
     state = {'kind': 'chm-epub-retirement', 'complete': False, 'target_count': len(rows),
@@ -955,6 +1033,7 @@ def run_guarded_retirement(store, fence, client, plan, rows, *, preflight, persi
              'preflight': preflight, 'document_reset_prerequisites': reset_evidence,
              'chapter_evidence': chapter_evidence,
              'processing_owner': reviewed_processing['owner_run'], 'processing_updates_verified': [],
+             'chapter_bundles': chapter_bundle_inventory,
              'staged_controls': [], 'post_ack_controls': [], 'both_surfaces_accepted': False,
              'actual_graph_verified': False, 'delete_started': False}
     persist('plan-and-preconditions-verified', state, before)
@@ -984,6 +1063,11 @@ def run_guarded_retirement(store, fence, client, plan, rows, *, preflight, persi
         state['both_surfaces_accepted'] = True
         state['consumer_receipts'] = reports
         persist('both-readers-accepted', state, before)
+        verify_live_chm_controls_before_retirement(store, plan, staged)
+        recheck_simulation_inputs(store, simulation_details, fence,
+                                  applied={**plan['immutable'], **staged})
+        state['retirement_started'] = True
+        persist('retirement-started', state, before)
         apply_acknowledged_controls(store, plan, before, staged, client, fence, checkpoint)
         validate_document_reset_identity(plan, reports)
         apply_processing_protection_updates(store, rows, fence, client, plan, processing_updates, checkpoint)
@@ -994,6 +1078,7 @@ def run_guarded_retirement(store, fence, client, plan, rows, *, preflight, persi
         state['actual_graph'] = actual
         persist('actual-graph-verified', state, before)
         recheck_actual_graph(store, traversal, actual, rows, fence, client, plan)
+        verify_predelete_chapter_inventory(store, state, processing_updates)
         state['delete_started'] = True
         validate_publication_order(plan, state)
         persist('deletion-started', state, before)
@@ -1010,7 +1095,7 @@ def run_guarded_retirement(store, fence, client, plan, rows, *, preflight, persi
         state['confirmed_deleted_bytes'] = final['confirmed_absent_bytes']
         recheck_actual_graph(store, traversal, actual, rows, fence, client, plan)
         verify_live_chm_controls(store, plan)
-        verify_live_processing_controls(store, processing_updates)
+        verify_predelete_chapter_inventory(store, state, processing_updates)
         verify_retired_rollback_aliases(store, plan)
         state['complete'] = True
         persist('complete', state, before)
