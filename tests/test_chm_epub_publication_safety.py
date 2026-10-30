@@ -520,6 +520,35 @@ class ChmPublicationSafetyTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'live input changed'):
                 safety.recheck_simulation_inputs(Store(),details,Fence())
 
+    def test_simulation_barrier_after_staging_handles_not_yet_written_roots(self):
+        from scripts import reader_gc_graph
+        bucket=publication.ASSETS;root='reader-index/old.json';staged='reader-index/new.json';later='reader-index/later.json'
+        immutable='reader-index/v3/generations/'+'a'*64+'/catalog.json'
+        class Graph:
+            files={b:set() for b in reader_gc_graph.BUCKETS}
+            root_names={b:set() for b in reader_gc_graph.BUCKETS}
+            loaded_digests={}
+        graph=Graph();graph.files[bucket]={root,staged,later,immutable}
+        graph.root_names[bucket]=set(graph.files[bucket])
+        objects={root:b'old',staged:b'new',immutable:b'catalog'}
+        class Store:
+            def assert_buckets_available(self):pass
+            def list_files(self,b,prefixes):return set()
+            def list_roots(self,b,parents):return {p:None for p in objects} if b==bucket else {}
+            def digest(self,b,p):
+                if p not in objects:raise FileNotFoundError(p)
+                return safety.chm.digest(objects[p])
+        class Fence:
+            def check(self):pass
+        details={'graph':graph,'overlay_paths':{(bucket,p) for p in (staged,later,immutable)},
+                 'live_control_sha256':{(bucket,staged):None,(bucket,later):None,(bucket,immutable):None}}
+        self.assertTrue(safety.recheck_simulation_inputs(Store(),details,Fence(),
+                                                       applied={staged:b'new',immutable:b'catalog'}))
+        objects[later]=b'unapproved'
+        with self.assertRaisesRegex(ValueError,'root inventory changed'):
+            safety.recheck_simulation_inputs(Store(),details,Fence(),
+                                             applied={staged:b'new',immutable:b'catalog'})
+
     def test_live_controls_must_equal_the_exact_approved_plan(self):
         plan = {'overrides': {'reader-index/a.json': b'planned'},
                 'immutable': {'reader-index/snapshots/x': b'snapshot'}}
