@@ -309,6 +309,9 @@ class ChmWithdrawalPreviewTests(unittest.TestCase):
         report = preflight.verify_preserved_chapter(Store(), self.manifest, hash_bodies=True)
         self.assertTrue(report['chapter_bodies_hashed'])
         self.assertEqual(report['required'], 3)
+        closure = preflight.verify_chm_reading_closure(Store(), [self.manifest], workers=2, hash_bodies=True)
+        self.assertEqual(closure['manifests'], 1)
+        self.assertEqual(closure['required_objects'], 3)
         objects[self.root + '/chapters/chapter-0001.xhtml'] = b'wrong'
         with self.assertRaisesRegex(ValueError, 'checksum'):
             preflight.verify_preserved_chapter(Store(), self.manifest, hash_bodies=True)

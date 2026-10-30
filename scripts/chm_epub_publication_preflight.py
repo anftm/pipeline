@@ -241,6 +241,10 @@ def verify_preserved_chapter(store, path, *, hash_bodies=False):
     reader_assets.validate_chapter_manifest(manifest)
     if not isinstance(manifest.get('search_index'), dict):
         raise ValueError('preserved CHM search index is missing')
+    for entry in [*manifest['chapters'], manifest['search_index']]:
+        if type(entry.get('bytes')) is not int or entry['bytes'] < 1 or not re.fullmatch(
+                r'[0-9a-f]{64}', str(entry.get('sha256', ''))):
+            raise ValueError('invalid preserved CHM resource identity')
     root = path.rsplit('/', 1)[0]
     listed = store.list_files(ASSETS, (root + '/',))
     required = {path}
@@ -262,6 +266,23 @@ def verify_preserved_chapter(store, path, *, hash_bodies=False):
     return {'manifest': path, 'manifest_sha256': digest(raw), 'required': len(required),
             'bundle_objects': len(listed), 'other_resources': len(listed - required),
             'chapter_bodies_hashed': bool(hash_bodies), 'remote_mutations': 0}
+
+
+def verify_chm_reading_closure(store, manifests, *, workers=4, hash_bodies=False, checkpoint=None):
+    """Validate chapter identities and companion existence without modifying them."""
+    from concurrent.futures import ThreadPoolExecutor
+    if len(set(manifests)) != len(manifests) or not manifests:
+        raise ValueError('invalid CHM reading-manifest inventory')
+    checked = []
+    with ThreadPoolExecutor(max_workers=max(1, min(workers, 8))) as pool:
+        for result in pool.map(lambda path: verify_preserved_chapter(store, path, hash_bodies=hash_bodies),
+                               sorted(manifests)):
+            checked.append(result)
+            if checkpoint and len(checked) % 25 == 0:
+                checkpoint(len(checked), len(manifests))
+    return {'manifests': len(checked), 'required_objects': sum(row['required'] for row in checked),
+            'companion_objects': sum(row['other_resources'] for row in checked),
+            'chapter_bodies_hashed': bool(hash_bodies), 'results': checked, 'remote_mutations': 0}
 
 
 def retirement_journal_for_replaced_history(state, replacements, current_pointer, acks, *, aliases=None):
