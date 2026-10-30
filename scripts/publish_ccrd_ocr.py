@@ -344,6 +344,7 @@ def activate_space(path, sha256, base_metadata_sha256, builder_sha256, *, apply=
 
 
 def main():
+    raise RuntimeError('CCRD OCR generation and publication are retired')
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', type=Path, required=True)
     parser.add_argument('--release-path', required=True)

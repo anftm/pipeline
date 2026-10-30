@@ -217,7 +217,7 @@ class PdfPublicationRecoveryTests(unittest.TestCase):
                     patch.object(stages, "save_registry") as save, \
                     patch.object(stages, "handoff_worker_results") as handoff, \
                     patch.object(publication, "publish") as publish:
-                self.assertEqual(stages.main(), 0)
+                self.assertEqual(stages._legacy_main_for_offline_fixtures(), 0)
             report = json.loads((output / "publication.json").read_text())
         self.assertEqual(report["superseded_books"], 1)
         save.assert_not_called()

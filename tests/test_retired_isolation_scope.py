@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import Mock
 
 from scripts import (auto_ccrd_ocr, pin_ccrd_newspaper_consumer, publish_ccrd_newspapers,
+                     force_ocr_book, publish_ccrd_ocr, run_pdf_ocr, pdf_ocr_stages,
                      pdf_worker_dispatch, pdf_worker_lanes, reader_producer_scope, reader_gc_fence)
 
 
@@ -28,7 +29,8 @@ class RetiredIsolationScopeTests(unittest.TestCase):
         api.assert_not_called()
 
     def test_retired_ccrd_cli_entrypoints_cannot_use_external_pins(self):
-        for module in (auto_ccrd_ocr, pin_ccrd_newspaper_consumer, publish_ccrd_newspapers):
+        for module in (auto_ccrd_ocr, pin_ccrd_newspaper_consumer, publish_ccrd_newspapers,
+                       force_ocr_book, publish_ccrd_ocr, run_pdf_ocr, pdf_ocr_stages):
             with self.subTest(module=module.__name__), self.assertRaisesRegex(RuntimeError,'is retired|are retired'):
                 module.main()
 

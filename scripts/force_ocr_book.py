@@ -261,6 +261,7 @@ def publish(api, key, report, *, apply=False):
 
 
 def main():
+    raise RuntimeError('document OCR generation and publication are retired')
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-repo", default=REPO)
     parser.add_argument("--source-path", required=True)

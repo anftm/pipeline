@@ -741,8 +741,12 @@ def estimate_render_cost(item, source, progress):
         queue = root / "book.json"
         output = root / "cost"
         pdf_ocr.write_json(queue, book)
-        command = [sys.executable, str(Path(__file__).resolve()), "measure-render", "--queue", str(queue),
-                   "--source", str(source.resolve()), "--output", str(output)]
+        # Isolated offline timing helper only; it never publishes an object.
+        command = [sys.executable, '-c',
+                   'import json,sys; from pathlib import Path; '
+                   'from scripts.pdf_ocr_stages import sample_render_cost; '
+                   'sample_render_cost(json.loads(Path(sys.argv[1]).read_text()),Path(sys.argv[2]),Path(sys.argv[3]))',
+                   str(queue), str(source.resolve()), str(output)]
         with subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                               start_new_session=True) as process:
             try:
@@ -1870,6 +1874,11 @@ def publish_legacy_render(queue, results, api, repo):
 
 
 def main():
+    raise RuntimeError('document OCR and detached-text worker stages are retired')
+
+
+def _legacy_main_for_offline_fixtures():
+    """Old control flow remains for deterministic offline compatibility tests."""
     parser = argparse.ArgumentParser()
     parser.add_argument("stage", choices=("plan-render", "measure-render", "render", "publish-render", "plan-ocr", "ocr", "publish-ocr"))
     parser.add_argument("--queue", type=Path, default=Path("output/pdf-ocr/queue.json"))

@@ -209,7 +209,7 @@ class PdfWorkerLaneTests(unittest.TestCase):
                         patch.object(stages.plan_pdf_ocr, "plan", plan), \
                         patch.object(stages, "plan_render_ranges", side_effect=lambda queue, *args: queue), \
                         patch.object(stages, "plan_images", plan):
-                    self.assertEqual(stages.main(), 0)
+                    self.assertEqual(stages._legacy_main_for_offline_fixtures(), 0)
                 selected = plan.call_args.args[0]
                 if isinstance(selected, dict):
                     selected = list(selected.values())

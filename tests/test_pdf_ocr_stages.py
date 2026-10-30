@@ -519,7 +519,7 @@ class PdfOcrStagesTests(unittest.TestCase):
         process.wait.side_effect = wait
         def start(command, **kwargs):
             self.assertTrue(kwargs["start_new_session"])
-            output = Path(command[command.index("--output") + 1])
+            output = Path(command[-1])
             pdf_ocr.write_json(output / "render-cost.json", {
                 "seconds_per_page": 25, "setup_seconds": 3, "source": "sample", "samples": 1})
             owner = Mock()
@@ -645,7 +645,7 @@ class PdfOcrStagesTests(unittest.TestCase):
                         "page_seconds": 4.0, "setup_seconds": 1.0}}]})
                 with patch.object(sys, "argv", ["pdf_ocr_stages.py", "publish-render", "--queue", str(location),
                                                 "--results-dir", str(results_dir), "--output", str(self.root)]):
-                    stages.main()
+                    stages._legacy_main_for_offline_fixtures()
                 state = updates[-1][1][book["key"]]
                 progress_update = updates[-2][1][book["key"]]
                 self.assertEqual(progress_update["range_timings"][stages.range_id(selected, selected)]["page_seconds"], 4.0)
@@ -1046,7 +1046,7 @@ class PdfOcrStagesTests(unittest.TestCase):
                 patch.object(stages.pdf_ocr, "source_records", return_value=[item, fresh]), \
                 patch.object(stages.plan_pdf_ocr, "plan", return_value=empty) as plan, \
                 patch.object(stages, "plan_render_ranges", return_value=empty):
-            self.assertEqual(stages.main(), 0)
+            self.assertEqual(stages._legacy_main_for_offline_fixtures(), 0)
         self.assertEqual(plan.call_args.args[0], [fresh])
 
     def test_same_size_json_descriptor_is_checked_by_sha(self):

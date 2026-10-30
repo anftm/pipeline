@@ -112,6 +112,7 @@ def build_queue(queue_path: Path, shard: int, output: Path, sync_objects: bool =
 
 
 def main() -> int:
+    raise RuntimeError('document OCR generation and publication are retired')
     parser = argparse.ArgumentParser()
     parser.add_argument("--queue", type=Path, required=True)
     parser.add_argument("--shard", type=int, required=True)
