@@ -350,7 +350,8 @@ def restore(path):
     kick_restored(path, state)
 
 
-def run(path, *, limit=0, apply=True, scope='unreferenced', isolated_callback=None):
+def run(path, *, limit=0, apply=True, scope='unreferenced', isolated_callback=None,
+        suppress_resume_dispatch=False):
     if scope not in {'unreferenced', 'retired-assets'}:
         raise ValueError('invalid automatic collection scope')
     central = load_config()["publisher_repository"]
@@ -359,6 +360,11 @@ def run(path, *, limit=0, apply=True, scope='unreferenced', isolated_callback=No
         raise RuntimeError("unfinished maintenance journal requires restoration first")
     state = {"version": 1, "kind": "reader-maintenance-journal", "repositories": {},
              "maintenance_id": uuid.uuid4().hex, "started_at": datetime.now(timezone.utc).isoformat()}
+    if suppress_resume_dispatch:
+        # This isolated operation never paused the user's automation flags;
+        # restore workflow states without starting new OCR admission tasks.
+        state['resumption_dispatches'] = {'pdf-lane-watchdog.yml': 'suppressed',
+                                          'reader-v3-publish.yml': 'suppressed'}
     journal(path, state)
     try:
         # A read-only preflight checks every credential and inventory before the

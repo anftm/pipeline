@@ -76,6 +76,23 @@ class MaintenanceTests(unittest.TestCase):
             self.assertTrue(json.loads(journal.read_text())['restored'])
         self.assertTrue(state['active'])
 
+    def test_preflight_only_restore_performs_no_mutation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = Path(directory) / 'preflight.json'
+            journal.write_text(json.dumps({'preflight_only': True, 'repositories': {}}))
+            with patch.object(maintenance, 'api', side_effect=AssertionError('remote API accessed')), \
+                    patch.object(maintenance, 'durable_store', side_effect=AssertionError('durable store accessed')):
+                maintenance.restore(journal)
+
+    def test_suppressed_resume_never_dispatches_new_ocr_tasks(self):
+        state = {'repositories': {'central/repo': {'workflows': [
+            {'path': '.github/workflows/reader-v3-publish.yml', 'state': 'active'},
+            {'path': '.github/workflows/pdf-lane-watchdog.yml', 'state': 'active'}]}},
+            'resumption_dispatches': {'pdf-lane-watchdog.yml': 'suppressed', 'reader-v3-publish.yml': 'suppressed'}}
+        with patch.object(maintenance, 'load_config', return_value={'publisher_repository': 'central/repo'}), \
+                patch.object(maintenance, 'api', side_effect=AssertionError('unexpected dispatch')):
+            maintenance.kick_restored(Path('/not-used'), state)
+
     def test_failure_after_disabling_producers_restores_prior_permissions(self):
         permissions = {"enabled": True, "allowed_actions": "all"}
         workflow = {"state": "active"}

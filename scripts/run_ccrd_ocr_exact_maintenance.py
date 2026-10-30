@@ -22,7 +22,7 @@ def main():
         parser.error('--resume requires --delete')
     exact.assert_writer()
     with httpx.Client(timeout=120, follow_redirects=True) as client:
-        return maintenance.run(args.maintenance_journal, isolated_callback=lambda _:
+        return maintenance.run(args.maintenance_journal, suppress_resume_dispatch=True, isolated_callback=lambda _:
             exact.run(args.output, client, delete=args.delete, resume=args.resume))
 
 
