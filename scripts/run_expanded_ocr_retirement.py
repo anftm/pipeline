@@ -187,7 +187,10 @@ def run(store, fence, client, rows, *, resume=False):
     fence.check()
     if resume:
         plan = load_plan(store, rows)
+        plan_digest = exact.read_optional(store, expanded.CCRD, PLAN_DIGEST)
         raw_progress = exact.read_optional(store, expanded.CCRD, PROGRESS)
+        if raw_progress is not None and plan_digest is None:
+            raise ValueError('saved OCR/PS progress lacks its immutable plan digest')
         if raw_progress is None:
             # The immutable plan may have been saved immediately before a
             # runner died. With no progress or deletions, reverify and continue.

@@ -201,6 +201,12 @@ class ExpandedRetirementExecutionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'prior OCR/PS retirement'):
             runner.run(self.store, Fence(), None, self.rows)
 
+    def test_saved_progress_without_immutable_digest_cannot_resume(self):
+        self.store.put(expanded.CCRD, runner.PLAN, expanded.encode(self.plan))
+        self.store.put(expanded.CCRD, runner.PROGRESS, {'kind': 'expanded-ocr-retirement'})
+        with self.assertRaisesRegex(ValueError, 'lacks its immutable plan digest'):
+            runner.run(self.store, Fence(), None, self.rows, resume=True)
+
 
 if __name__ == '__main__':
     unittest.main()
