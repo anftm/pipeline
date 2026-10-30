@@ -440,6 +440,19 @@ def plan_chm_withdrawal(store, inventory_path, *, acknowledged_generations):
     old_generation = current.get('parent_generation')
     if not re.fullmatch(r'[0-9a-f]{64}', str(old_generation)):
         raise ValueError('current historical Reader generation is not identified')
+    expected_v3_roots = {f'reader-index/v3/generations/{g}/catalog.json'
+                         for g in (pointer['generation'], old_generation)}
+    present_v3_roots = set(store.list_files(ASSETS, ('reader-index/v3/generations/',)))
+    if present_v3_roots != expected_v3_roots:
+        raise ValueError('historical Reader v3 root inventory differs from the reviewed two generations')
+    expected_promotions = {f'reader-index/v3/promotions/{g}.json' for g in (pointer['generation'], old_generation)}
+    if set(store.list_files(ASSETS, ('reader-index/v3/promotions/',))) != expected_promotions:
+        raise ValueError('historical Reader promotion inventory differs from the reviewed two generations')
+    for generation in (pointer['generation'], old_generation):
+        promotion = json.loads(store.read_bytes(ASSETS, f'reader-index/v3/promotions/{generation}.json'))
+        if (promotion.get('kind') != 'reader-reading-promotion' or promotion.get('generation') != generation
+                or promotion.get('acks') != {'hf': True, 'pages': True}):
+            raise ValueError('historical Reader promotion lacks both original acknowledgments')
     old_path = f'reader-index/v3/generations/{old_generation}/catalog.json'
     historical = json.loads(store.read_bytes(ASSETS, old_path))
     if historical.get('generation') != old_generation:
