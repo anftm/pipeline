@@ -379,6 +379,21 @@ class ChmPublicationSafetyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'exceeds'):
             safety.validate_delete_batch(rows, [(publication.ASSETS, 'source.chm')])
 
+    def test_exact_inventory_rejects_same_size_foreign_key_or_changed_hash(self):
+        from pathlib import Path
+        from scripts import chm_epub_withdrawal_preview as preview
+        inventory=preview.load_inventory(Path(__file__).resolve().parents[1] /
+                                         'config/chm-history-inventory-20261030.json')
+        rows=inventory['targets']
+        plan={'inventory_sha256':preview.INVENTORY_SHA256,'target_count':len(rows),
+              'target_bytes':inventory['logical_bytes']}
+        safety.require_exact_epub_inventory(plan,rows)
+        for field,value in [('path', 'native/ebook/chm/' + 'f' * 64 + '/document.epub'),
+                            ('sha256', 'f' * 64)]:
+            altered=copy.deepcopy(rows);altered[0][field]=value
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, 'hashed reviewed inventory'):
+                safety.require_exact_epub_inventory(plan,altered)
+
     def test_actual_graph_proof_requires_fresh_root_recheck(self):
         from unittest.mock import patch
         rows = [{'bucket': publication.ASSETS, 'path': 'native/ebook/chm/reviewed/document.epub'}]

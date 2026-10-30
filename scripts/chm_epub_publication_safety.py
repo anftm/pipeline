@@ -242,6 +242,14 @@ def require_exact_epub_inventory(plan, rows):
         raise ValueError('CHM retirement plan differs from the exact reviewed inventory')
     if len({(row['bucket'], row['path']) for row in rows}) != len(rows):
         raise ValueError('CHM retirement inventory contains duplicates')
+    # A matching count, byte sum, and claimed inventory digest do not bind the
+    # supplied keys. Reload the checked-in bytes and compare every exact row.
+    from pathlib import Path
+    inventory = preview.load_inventory(Path(__file__).resolve().parents[1] /
+                                       'config/chm-history-inventory-20261030.json')
+    expected = {(r['bucket'], r['path']): r for r in inventory['targets']}
+    if {(r['bucket'], r['path']): r for r in rows} != expected:
+        raise ValueError('CHM retirement targets differ from the hashed reviewed inventory')
 
 
 def require_actual_zero_graph(proof, rows):
