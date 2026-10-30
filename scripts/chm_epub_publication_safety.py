@@ -581,7 +581,11 @@ def apply_acknowledged_controls(store, plan, before, staged, client, fence, chec
     # Verify their exact bytes before applying the acknowledged replacement.
     for path in (chm.CATALOG, promotion):
         fence.check()
-        current = store.read_bytes(chm.ASSETS, path)
+        try:
+            current = store.read_bytes(chm.ASSETS, path)
+        except FileNotFoundError:
+            assert_all_buckets_available(store)
+            raise ValueError('staged CHM acknowledgment disappeared: ' + path) from None
         desired = plan['overrides'][path]
         if current not in (staged[path], desired):
             raise ValueError('staged CHM acknowledgment changed: ' + path)
@@ -612,6 +616,56 @@ def verify_exact_epub_targets(store, rows, *, workers=8):
     if total != sum(row['bytes'] for row in rows):
         raise ValueError('CHM EPUB target byte total changed')
     return {'verified_objects': len(rows), 'verified_bytes': total, 'remote_mutations': 0}
+
+
+def apply_processing_protection_updates(store, rows, fence, client, plan, updates, checkpoint):
+    """After both Readers accept, narrow only the exact failed-upload roots."""
+    inventory = chm.processing_protection_inventory()
+    expected = {row['path']: row for row in inventory['records']}
+    if set(updates) != set(expected):
+        raise ValueError('CHM processing update differs from the reviewed owner inventory')
+    targets = {row['path'] for row in rows}
+    for path, item in sorted(updates.items()):
+        entry = expected[path]
+        if item.get('before_sha256') != entry['sha256'] or not isinstance(item.get('after'), bytes):
+            raise ValueError('CHM processing update identity differs: ' + path)
+        target = entry['target_root'] + '/document.epub'
+        if target not in targets or store.list_files(chm.ASSETS, (entry['target_root'] + '/',)) != {target}:
+            raise ValueError('CHM processing target root changed: ' + path)
+        fence.check()
+        chm.verify_processing_owner_run(fence.api, inventory)
+        observe_planned_projection(store, client, plan)
+        try:
+            current = store.read_bytes(chm.ASSETS, path)
+        except FileNotFoundError:
+            assert_all_buckets_available(store)
+            raise ValueError('CHM processing owner disappeared: ' + path) from None
+        if current != item['after'] and chm.digest(current) != entry['sha256']:
+            raise ValueError('CHM processing owner changed before update: ' + path)
+        try:
+            prior_raw = item['before_raw'].encode('utf-8')
+            prior = json.loads(prior_raw)
+            after = json.loads(item['after'])
+        except (KeyError, AttributeError, ValueError) as error:
+            raise ValueError('CHM processing recovery bytes are invalid: ' + path) from error
+        chapter_ref = {'bucket': chm.ASSETS, 'root': entry['chapter_root']}
+        target_ref = {'bucket': chm.ASSETS, 'root': entry['target_root']}
+        if chm.digest(prior_raw) != entry['sha256'] or prior.get('resources') != [chapter_ref, target_ref]:
+            raise ValueError('CHM processing owner no longer has reviewed resources: ' + path)
+        expected_after = dict(prior)
+        expected_after['resources'] = [chapter_ref]
+        expected_after['withdrawal'] = {'kind':'explicit-chm-epub-withdrawal',
+            'inventory_sha256':chm.preview.INVENTORY_SHA256, 'original_sha256':entry['sha256'],
+            'removed_root_count':1}
+        if after != expected_after:
+            raise ValueError('CHM processing update changes a protected chapter or other field: ' + path)
+        if current != item['after']:
+            checkpoint('processing-update-submitted', path)
+            store.put_bytes(chm.ASSETS, path, item['after'])
+        if store.read_bytes(chm.ASSETS, path) != item['after']:
+            raise ValueError('CHM processing update readback mismatch: ' + path)
+        checkpoint('processing-update-verified', path)
+    return True
 
 
 def reconcile_epub_deletions(store, rows, batches, *, workers=8):
@@ -792,7 +846,7 @@ def write_exact_progress(store, path, state):
 
 
 def run_guarded_retirement(store, fence, client, plan, rows, *, preflight, persist, save_plan,
-                           publish_pages, chapter_evidence, acknowledge_timeout=1200):
+                           publish_pages, chapter_evidence, processing_updates, acknowledge_timeout=1200):
     """Execute a freshly planned CHM withdrawal with fail-closed phase barriers.
 
     The caller supplies durable plan/preflight evidence and a serialized
@@ -812,7 +866,11 @@ def run_guarded_retirement(store, fence, client, plan, rows, *, preflight, persi
     verify_exact_epub_targets(store, rows)
     # A prior Actions preview is diagnostic only. Rebuild the hypothetical
     # closure from current roots under the same isolation window.
-    fresh_preflight = chm.simulate_complete_withdrawal(store, plan['overrides'], rows, fence,
+    reviewed_processing = chm.prepare_processing_protection_updates(store, rows, fence)
+    if reviewed_processing['updates'] != processing_updates:
+        raise ValueError('CHM processing protection plan changed before publication')
+    overlays = {**plan['overrides'], **{path: item['after'] for path, item in processing_updates.items()}}
+    fresh_preflight = chm.simulate_complete_withdrawal(store, overlays, rows, fence,
                           workers=8, deadline_minutes=300, immutable=plan['immutable'])
     if (fresh_preflight.get('graph_complete') is not True or fresh_preflight.get('retained_targets') != 0
             or fresh_preflight.get('target_count') != len(rows)):
@@ -842,11 +900,12 @@ def run_guarded_retirement(store, fence, client, plan, rows, *, preflight, persi
          generation=plan['current_v3_generation'],
          acknowledged_generations={'hf': plan['current_v3_generation'], 'pages': plan['current_v3_generation']})
     reset_evidence = verify_document_reset_prerequisites(store, plan)
-    save_plan(plan, before)
+    save_plan(plan, before, processing_updates)
     state = {'kind': 'chm-epub-retirement', 'complete': False, 'target_count': len(rows),
              'confirmed_deleted_objects': 0, 'confirmed_deleted_bytes': 0, 'batches': [],
              'preflight': preflight, 'document_reset_prerequisites': reset_evidence,
              'chapter_evidence': chapter_evidence,
+             'processing_owner': reviewed_processing['owner_run'], 'processing_updates_verified': [],
              'staged_controls': [], 'post_ack_controls': [], 'both_surfaces_accepted': False,
              'actual_graph_verified': False, 'delete_started': False}
     persist('plan-and-preconditions-verified', state, before)
@@ -856,6 +915,8 @@ def run_guarded_retirement(store, fence, client, plan, rows, *, preflight, persi
             state['staged_controls'].append(path)
         if phase == 'control-verified' and path not in state['post_ack_controls']:
             state['post_ack_controls'].append(path)
+        if phase == 'processing-update-verified' and path not in state['processing_updates_verified']:
+            state['processing_updates_verified'].append(path)
         validate_publication_order(plan, state)
         persist(phase, state, before)
 
@@ -876,6 +937,7 @@ def run_guarded_retirement(store, fence, client, plan, rows, *, preflight, persi
         persist('both-readers-accepted', state, before)
         apply_acknowledged_controls(store, plan, before, staged, client, fence, checkpoint)
         validate_document_reset_identity(plan, reports)
+        apply_processing_protection_updates(store, rows, fence, client, plan, processing_updates, checkpoint)
         persist('chm-references-retired', state, before)
         actual, traversal = actual_graph_evidence(store, fence, client, rows, plan)
         require_actual_zero_graph(actual, rows)

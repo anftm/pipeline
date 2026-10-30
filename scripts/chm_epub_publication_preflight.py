@@ -116,7 +116,8 @@ def prepare_processing_protection_updates(store, rows, fence, *, inventory_path=
         updated['withdrawal'] = {'kind': 'explicit-chm-epub-withdrawal',
             'inventory_sha256': preview.INVENTORY_SHA256, 'original_sha256': entry['sha256'],
             'removed_root_count': 1}
-        updates[path] = {'before_sha256': entry['sha256'], 'after': publication.encode(updated),
+        updates[path] = {'before_sha256': entry['sha256'], 'before_raw': raw.decode('utf-8'),
+                         'after': publication.encode(updated),
                          'chapter': chapter}
     fence.check()
     verify_processing_owner_run(fence.api, inventory)

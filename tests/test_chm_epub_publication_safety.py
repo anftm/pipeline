@@ -255,6 +255,50 @@ class ChmPublicationSafetyTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'has not accepted'):
                 safety.apply_acknowledged_controls(None, self.plan, {}, {}, None, None, lambda *_: None)
 
+    def test_processing_root_narrowing_requires_live_acceptance_and_retains_chapters(self):
+        from unittest.mock import patch
+        source='a'*64;owner='reader-index/processing/stream-upload-'+'b'*32+'.json'
+        target='native/ebook/chm/'+source
+        chapter='chapters/ebook/chm/'+'c'*64+'/'+'d'*16
+        before=publication.encode({'status':'processing','resources':[
+            {'bucket':publication.ASSETS,'root':chapter},{'bucket':publication.ASSETS,'root':target}]})
+        sha=safety.chm.digest(before)
+        after=json.loads(before);after['resources']=after['resources'][:1]
+        after['withdrawal']={'kind':'explicit-chm-epub-withdrawal',
+            'inventory_sha256':safety.chm.preview.INVENTORY_SHA256,'original_sha256':sha,'removed_root_count':1}
+        item={'path':owner,'sha256':sha,'target_root':target,'chapter_root':chapter}
+        inventory={'records':[item]}
+        update={owner:{'before_sha256':sha,'before_raw':before.decode(),'after':publication.encode(after)}}
+        rows=[{'path':target+'/document.epub'}]
+        objects={owner:before};events=[]
+        class Store:
+            def list_files(self,bucket,prefixes):return {target+'/document.epub'}
+            def read_bytes(self,bucket,path):return objects[path]
+            def put_bytes(self,bucket,path,raw):events.append('write');objects[path]=raw
+        class Fence:
+            api=None
+            def check(self):events.append('fence')
+        with patch.object(safety.chm,'processing_protection_inventory',return_value=inventory), \
+             patch.object(safety.chm,'verify_processing_owner_run'), \
+             patch.object(safety,'observe_planned_projection',side_effect=lambda *_:events.append('acceptance')):
+            safety.apply_processing_protection_updates(Store(),rows,Fence(),None,self.plan,update,
+                                                       lambda phase,path:events.append(phase))
+            self.assertLess(events.index('acceptance'),events.index('processing-update-submitted'))
+            self.assertLess(events.index('processing-update-submitted'),events.index('write'))
+            self.assertEqual(json.loads(objects[owner])['resources'],[{'bucket':publication.ASSETS,'root':chapter}])
+            events.clear()
+            safety.apply_processing_protection_updates(Store(),rows,Fence(),None,self.plan,update,lambda *_:None)
+            self.assertNotIn('write',events)
+            objects[owner]=before
+            altered=copy.deepcopy(update);bad=json.loads(altered[owner]['after']);bad['resources']=[]
+            altered[owner]['after']=publication.encode(bad)
+            with self.assertRaisesRegex(ValueError,'protected chapter'):
+                safety.apply_processing_protection_updates(Store(),rows,Fence(),None,self.plan,altered,lambda *_:None)
+            with patch.object(safety,'observe_planned_projection',side_effect=ValueError('not accepted')):
+                with self.assertRaisesRegex(ValueError,'not accepted'):
+                    safety.apply_processing_protection_updates(Store(),rows,Fence(),None,self.plan,update,lambda *_:None)
+            self.assertEqual(objects[owner],before)
+
     def test_guarded_runner_never_trusts_simulation_with_retained_targets(self):
         from unittest.mock import patch
         with patch.object(safety, 'validate_staged_plan'):
@@ -263,7 +307,7 @@ class ChmPublicationSafetyTests(unittest.TestCase):
                     preflight={'graph_complete': True, 'retained_targets': 1, 'target_count': 0,
                                'remote_mutations': 0, 'deletion_authorized': False},
                     persist=lambda *_: None, save_plan=lambda *_: None, publish_pages=lambda *_: None,
-                    chapter_evidence={})
+                    chapter_evidence={}, processing_updates={})
 
     def test_staged_plan_rejects_any_foreign_control(self):
         from unittest.mock import patch
