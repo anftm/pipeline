@@ -3,9 +3,8 @@ __pycache__/
 *.pyc
 .cache/reader-gc/
 
-# Local documentation is ignored except the repository README and storage guide.
+# Local documentation is ignored except the repository README.
 *.[mM][dD]
-!docs/reader-storage.md
 *.[mM][dD][xX]
 *.[mM][aA][rR][kK][dD][oO][wW][nN]
 *.[rR][sS][tT]
