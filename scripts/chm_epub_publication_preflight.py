@@ -478,11 +478,13 @@ def acknowledge_base_catalog(catalog, generation):
 
 
 def preserved_v3_reading_refs(old_catalogs):
-    """Retain each explicit non-CHM v3 reading override from replaced history."""
+    """Retain v3 overrides but reject CHM overrides with hidden EPUB dependencies."""
     refs = {}
     for catalog in old_catalogs:
         publication.validate_catalog(catalog)
-        for entry in catalog['files'].values():
+        for key, entry in catalog['files'].items():
+            if isinstance(key, str) and key.lower().endswith('.chm'):
+                raise ValueError('CHM v3 reading override needs separate dependency verification')
             ref = copy.deepcopy(entry['resource'])
             key = (ref['bucket'], ref['path'])
             if key in refs and refs[key] != ref:
@@ -608,11 +610,12 @@ def plan_chm_withdrawal(store, inventory_path, *, acknowledged_generations):
                               not in target_refs]
     overrides[consumer_path] = publication.encode(consumers)
     history_refs = preserved_chapter_closure([sidecar, publication.pinned_base(store, historical, None)])
+    historical_reading_refs = preserved_v3_reading_refs([current, historical])
     # Replacement catalogs already protect these exact chapter manifests. A
     # second, independent current root ensures a later generic history pruning
     # cannot collect their bundles while the repaired rollback remains offered.
     retention = retained_reader_snapshot_refs(store, history_refs)
-    retention['resources'].extend(preserved_v3_reading_refs([current, historical]))
+    retention['resources'].extend(historical_reading_refs)
     overrides['reader-index/chm-epub-withdrawal-retention.json'] = publication.encode(retention)
     return {'kind': 'chm-epub-withdrawal-plan', 'target_count': len(rows), 'target_bytes': inventory['logical_bytes'],
             'inventory_sha256': preview.INVENTORY_SHA256,
@@ -624,6 +627,7 @@ def plan_chm_withdrawal(store, inventory_path, *, acknowledged_generations):
             'index_entries_retired': synced['retired_epub_fields'],
             'stale_shard_rows_aligned': synced['shard_entries_synchronized'],
             'missing_processing_refs_removed': synced['missing_processing_refs_removed'],
+            'historical_v3_reading_override_count': len(historical_reading_refs),
             'chapter_manifests_to_preserve': sorted(history_refs), 'overrides': overrides,
             'immutable': immutable, 'remote_mutations': 0, 'deletion_authorized': False}
 

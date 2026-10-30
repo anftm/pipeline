@@ -303,6 +303,16 @@ class ChmWithdrawalPreviewTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'unexpected preserved chapter'):
             preflight.retained_reader_snapshot_refs(Store(), [self.fallback])
 
+    def test_foreign_chm_v3_override_requires_separate_proof(self):
+        from unittest.mock import patch
+        catalog = {'version': 3, 'kind': 'reader-reading-catalog', 'files': {}, 'parent_generation': None}
+        catalog['generation'] = publication.text.digest(catalog)
+        self.assertEqual(preflight.preserved_v3_reading_refs([catalog]), [])
+        catalog['files']['other.chm'] = {'resource': {}}
+        with patch.object(publication, 'validate_catalog'):
+            with self.assertRaisesRegex(ValueError, 'separate dependency verification'):
+                preflight.preserved_v3_reading_refs([catalog])
+
     def test_retired_chm_rollback_cannot_restore_epub_route(self):
         generation = 'd' * 64
         path = 'reader-index/v3/generations/' + generation + '/catalog.json'
