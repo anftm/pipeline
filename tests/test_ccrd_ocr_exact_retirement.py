@@ -59,7 +59,7 @@ class Fence:
 
 
 class Response:
-    def __init__(self, payload):self.payload = payload
+    def __init__(self, payload, status_code=200):self.payload = payload;self.status_code = status_code
     def raise_for_status(self):pass
     def json(self):return self.payload
 
@@ -69,7 +69,8 @@ class Client:
         self.status = {'ready': True, 'ocr_release': None,
                        'loaded_sources': ['CCRD', 'CW', 'RMRB', 'PLA'],
                        'bucket': {'generation': base}}
-    def get(self, *args, **kwargs):return Response(self.status)
+    def get(self, url, **kwargs):
+        return Response({}, 404) if '/buckets/' in url else Response(self.status)
 
 
 class ExactRetirementTests(unittest.TestCase):
@@ -304,6 +305,17 @@ class ExactRetirementTests(unittest.TestCase):
                              'ResponseMetadata': {'HTTPStatusCode': 404}}, 'GetObject')
         with self.assertRaises(S3NotFound):
             retry_s3(lambda: (_ for _ in ()).throw(error))
+
+    def test_public_readback_still_accessible_never_claims_success(self):
+        store, plan, generation, intent_path, release_path, _ = self.make_fixture()
+        class StillPublic(Client):
+            def get(self, url, **kwargs):
+                return Response({}, 206) if '/buckets/' in url else Response(self.status)
+        with self.helpers(generation, intent_path, release_path), \
+                patch.object(exact.collector, 'observe_projections', return_value=self.acknowledgments(plan)):
+            exact.apply_reference_retirement(store, plan, Fence(), Client(), lambda _: None)
+            with self.assertRaisesRegex(ValueError, 'remains directly publicly readable'):
+                exact.delete_exact(store, plan, Fence(), StillPublic(), lambda _: None)
 
     def test_final_graph_guard_never_treats_snapshot_as_unreferenced(self):
         data = {'graph_complete': False, 'blockers': ['unfinished']}

@@ -502,6 +502,15 @@ def delete_exact(store, plan, fence, client, checkpoint):
     remaining = store.list_files(BUCKET, lifecycle.MANAGED_PREFIXES)
     if remaining:
         raise ValueError('OCR managed objects remain after deletion: ' + repr(sorted(remaining)))
+    # Listing alone is not enough: check every exact key through a fresh GET.
+    for row in rows:
+        if read_optional(store, BUCKET, row['path']) is not None:
+            raise ValueError('deleted OCR object is still directly readable: ' + row['path'])
+    public_sample = 'https://huggingface.co/buckets/' + BUCKET + '/resolve/' + next(
+        row['path'] for row in rows if row['path'].endswith('.txt'))
+    public = client.get(public_sample, headers={'Range': 'bytes=0-0', 'Cache-Control': 'no-cache'}, timeout=60)
+    if public.status_code not in {404, 410}:
+        raise ValueError('an OCR text object remains directly publicly readable')
     verify_reference_retirement(store, plan)
     fence.check()
     current_status(client, plan['base_generation'])
