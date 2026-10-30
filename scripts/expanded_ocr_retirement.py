@@ -103,6 +103,8 @@ def prepare(store, client, rows):
         raise ValueError('outside-scope provenance differs from reviewed current-reader source')
     plan = copy.deepcopy(prior)
     plan['updates']['external']['resources'] = kept
+    plan['updates']['withdrawal']['preserved_reader_provenance']['resources'] = len(kept)
+    plan['updates']['withdrawal']['retired_external_resources'] = len(external) - len(kept)
     lifecycle.references(plan['updates']['external'], PRESERVED)
     plan['expanded_targets'] = copy.deepcopy(rows)
     plan['inventory_sha256'] = INVENTORY_SHA256

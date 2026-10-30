@@ -84,13 +84,16 @@ class ExpandedRetirementSimulationTests(unittest.TestCase):
         external.extend({'bucket': expanded.PAGES, 'path': target['path'], 'bytes': 1,
                          'sha256': 'a' * 64, 'role': 'runtime'} for _ in range(2530))
         prior = {'updates': {'external': {'version': 1, 'kind': 'ccrd-ocr-retention',
-                                          'resources': external}}}
+                                          'resources': external},
+                             'withdrawal': {'preserved_reader_provenance': {'resources': 2531}}}}
         with patch.object(exact, 'create_plan', return_value=prior) as create, \
                 patch.object(expanded, 'prepare_processing_updates', return_value={}), \
                 patch.object(expanded.lifecycle, 'references'):
             result = expanded.prepare(None, None, [target])
         self.assertIsNone(create.call_args.kwargs['expected_reader_consumer_sha'])
         self.assertEqual(result['preserved_external_resources'], 1)
+        self.assertEqual(result['updates']['withdrawal']['preserved_reader_provenance']['resources'], 1)
+        self.assertEqual(result['updates']['withdrawal']['retired_external_resources'], 2530)
 
     def test_external_sibling_bundle_pin_blocks_target_retirement(self):
         bucket = expanded.PAGES
