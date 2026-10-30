@@ -151,6 +151,43 @@ def verify_prepared_chapter_retention(plan):
     return {'protected_chapter_manifests': len(wanted), 'retention_resources': len(refs)}
 
 
+def require_chapter_evidence(plan, evidence):
+    """Bind a complete, independently checked closure to each protected manifest."""
+    import re
+    verify_prepared_chapter_retention(plan)
+    manifests = plan['chapter_manifests_to_preserve']
+    if not manifests or len(manifests) != len(set(manifests)):
+        raise ValueError('CHM chapter manifest inventory is empty or duplicated')
+    retention = json.loads(plan['overrides']['reader-index/chm-epub-withdrawal-retention.json'])
+    expected = {r['path']: r['sha256'] for r in retention['resources']
+                if r['bucket'] == chm.ASSETS and r['path'] in manifests}
+    if set(expected) != set(manifests) or any(not re.fullmatch(r'[0-9a-f]{64}', str(value))
+                                               for value in expected.values()):
+        raise ValueError('protected CHM manifest hashes are incomplete')
+    rows = evidence.get('results')
+    if (evidence.get('remote_mutations') != 0 or evidence.get('manifests') != len(manifests)
+            or not isinstance(rows, list) or len(rows) != len(manifests)):
+        raise ValueError('preserved CHM chapter closure has not been fully verified')
+    checked = {}
+    for row in rows:
+        if (not isinstance(row, dict) or row.get('manifest') in checked
+                or row.get('manifest') not in expected
+                or row.get('manifest_sha256') != expected[row['manifest']]
+                or row.get('remote_mutations') != 0
+                or type(row.get('required')) is not int or row['required'] < 2
+                or type(row.get('other_resources')) is not int or row['other_resources'] < 0
+                or row.get('bundle_objects') != row['required'] + row['other_resources']):
+            raise ValueError('CHM chapter evidence is not bound to protected manifest hashes and resources')
+        checked[row['manifest']] = row
+    if (set(checked) != set(expected)
+            or evidence.get('required_objects') != sum(r['required'] for r in rows)
+            or evidence.get('companion_objects') != sum(r['other_resources'] for r in rows)):
+        raise ValueError('CHM chapter evidence totals or manifest inventory differ')
+    return {'manifests': len(checked), 'required_objects': evidence['required_objects'],
+            'companion_objects': evidence['companion_objects'],
+            'all_bundle_resources_hashed': evidence.get('all_bundle_resources_hashed') is True}
+
+
 def verify_originals_and_chapter_retention(before, after, chapter_roots):
     """Prove a bounded metadata transition leaves all unrelated paths intact."""
     expected = set(before)
@@ -747,11 +784,7 @@ def run_guarded_retirement(store, fence, client, plan, rows, *, preflight, persi
         raise ValueError('fresh simulated CHM graph has unresolved references')
     if preflight.get('deletion_authorized') is not False:
         raise ValueError('CHM preflight does not identify itself as simulation')
-    expected_manifests = set(plan['chapter_manifests_to_preserve'])
-    if (chapter_evidence.get('remote_mutations') != 0
-            or chapter_evidence.get('manifests') != len(expected_manifests)
-            or set(chapter_evidence.get('manifest_paths', [])) != expected_manifests):
-        raise ValueError('preserved CHM chapter closure has not been fully verified')
+    require_chapter_evidence(plan, chapter_evidence)
     assert_all_buckets_available(store)
     fence.check()
     verify_exact_epub_targets(store, rows)

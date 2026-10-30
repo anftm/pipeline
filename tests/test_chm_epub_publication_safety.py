@@ -343,6 +343,29 @@ class ChmPublicationSafetyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'omits'):
             safety.verify_prepared_chapter_retention(plan)
 
+    def test_chapter_evidence_requires_exact_manifests_hashes_and_counts(self):
+        paths = [f'chapters/ebook/chm/{c * 64}/' + 'b' * 16 + '/chapter-manifest.json' for c in 'ac']
+        refs = [{'bucket': publication.ASSETS, 'path': path, 'sha256': c * 64}
+                for path, c in zip(paths, 'de')]
+        root = {'kind':'reader-chm-epub-withdrawal-retention', 'inventory_sha256':'abc', 'resources':refs}
+        plan = {'inventory_sha256':'abc', 'chapter_manifests_to_preserve':paths,
+                'overrides':{'reader-index/chm-epub-withdrawal-retention.json':publication.encode(root)}}
+        results = [{'manifest':ref['path'], 'manifest_sha256':ref['sha256'], 'required':3,
+                    'other_resources':2, 'bundle_objects':5, 'remote_mutations':0} for ref in refs]
+        evidence = {'manifests':2, 'results':results, 'required_objects':6,
+                    'companion_objects':4, 'remote_mutations':0}
+        self.assertEqual(safety.require_chapter_evidence(plan, evidence)['manifests'], 2)
+        for name, mutate in [
+            ('wrong digest', lambda v: v['results'][0].update(manifest_sha256='f' * 64)),
+            ('duplicate', lambda v: v['results'].__setitem__(1, copy.deepcopy(v['results'][0]))),
+            ('wrong bundle count', lambda v: v['results'][0].update(bundle_objects=4)),
+            ('wrong total', lambda v: v.update(required_objects=5)),
+            ('mutated', lambda v: v['results'][0].update(remote_mutations=1)),
+        ]:
+            bad=copy.deepcopy(evidence);mutate(bad)
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                safety.require_chapter_evidence(plan, bad)
+
     def test_hypothetical_graph_and_foreign_batch_never_authorize_delete(self):
         rows = [{'bucket': publication.ASSETS, 'path': 'native/ebook/chm/reviewed/document.epub'}]
         proof = {'graph_complete': True, 'mode': 'simulated', 'target_count': 1, 'retained_targets': 0,
