@@ -52,6 +52,21 @@ class ChmPublicationSafetyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'unexpectedly exists'):
             safety.enforce_transition('new', b'foreign', None, b'new')
 
+    def test_compare_before_write_rejects_stale_s3_content(self):
+        objects = {'control': b'old'}
+        class Store:
+            def assert_chm_bucket_available(self):return True
+            def read_bytes(self, bucket, path):
+                if path not in objects:raise FileNotFoundError(path)
+                return objects[path]
+        expected = safety.chm.digest(b'old')
+        self.assertTrue(safety.compare_before_write(Store(), 'control', expected, b'new'))
+        objects['control'] = b'new'
+        self.assertFalse(safety.compare_before_write(Store(), 'control', expected, b'new'))
+        objects['control'] = b'foreign'
+        with self.assertRaisesRegex(ValueError, 'changed after planning'):
+            safety.compare_before_write(Store(), 'control', expected, b'new')
+
     def test_book_originals_and_chapter_resource_inventories_cannot_change(self):
         root = 'chapters/ebook/chm/' + 'a' * 64 + '/' + 'b' * 16
         before = {('dataset', 'source.chm'): ('sha', 7),

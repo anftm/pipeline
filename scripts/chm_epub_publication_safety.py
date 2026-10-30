@@ -173,3 +173,20 @@ def assert_bucket_available(store):
     check = getattr(store, 'assert_chm_bucket_available', None)
     if not callable(check) or check() is not True:
         raise RuntimeError('CHM bucket availability was not independently verified')
+
+
+def compare_before_write(store, path, before_digest, after):
+    """Return whether an exact CHM control still needs its planned update."""
+    assert_bucket_available(store)
+    try:
+        current = store.read_bytes(chm.ASSETS, path)
+    except FileNotFoundError:
+        current = None
+    if current == after:
+        return False
+    if before_digest is None:
+        if current is not None:
+            raise ValueError('new CHM control appeared after planning: ' + path)
+    elif current is None or chm.digest(current) != before_digest:
+        raise ValueError('CHM control changed after planning: ' + path)
+    return True
