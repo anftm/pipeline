@@ -280,7 +280,11 @@ def kick_restored(path, state):
 
 def restore(path, *, expected_owner=None, expected_maintenance_id=None):
     if not path.exists():
+        if expected_owner is not None or expected_maintenance_id is not None:
+            raise RuntimeError('guarded restoration requires its local journal')
         return
+    if expected_maintenance_id is not None and expected_owner is None:
+        raise RuntimeError('expected maintenance window requires its owner identity')
     state = json.loads(path.read_text())
     if expected_owner is not None:
         # An interrupted callback may have persisted newer safety flags to the

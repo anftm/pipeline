@@ -159,6 +159,10 @@ class MaintenanceTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError,'durable owner'):
                     maintenance.restore(path,expected_owner='123')
             self.assertEqual(json.loads(path.read_text()),local)
+            with self.assertRaisesRegex(RuntimeError,'requires its owner'):
+                maintenance.restore(path,expected_maintenance_id='a'*32)
+            with self.assertRaisesRegex(RuntimeError,'requires its local journal'):
+                maintenance.restore(Path(directory)/'missing.json',expected_owner='123')
 
     def test_guarded_restore_uses_latest_safe_state_and_is_idempotent(self):
         local={'version':1,'kind':'reader-maintenance-journal','maintenance_id':'window',
