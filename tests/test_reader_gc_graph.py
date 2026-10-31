@@ -45,6 +45,46 @@ class MemoryStore:
 
 
 class ReaderGcGraphTests(unittest.TestCase):
+    def test_unqualified_tree_lookup_uses_exact_sorted_inventory_without_losing_ambiguity(self):
+        store=MemoryStore();graph=gc.ReferenceGraph(store)
+        root='objects/aa/source/version'
+        for bucket in gc.BUCKETS:
+            graph.set_inventory(bucket,{root+'/child'} if bucket in (ASSETS,PDF) else set())
+        graph.path(root,ASSETS,'reader-index/test.json',False,'root')
+        self.assertIn(root,graph.ambiguous)
+        self.assertIn((ASSETS,root),graph.references)
+        self.assertIn((PDF,root),graph.references)
+
+    def test_unqualified_tree_prefix_does_not_match_a_sibling_name(self):
+        store=MemoryStore();graph=gc.ReferenceGraph(store)
+        for bucket in gc.BUCKETS:
+            graph.set_inventory(bucket,{'objects/aa/source/version-sibling/child'} if bucket==PDF else set())
+        graph.path('objects/aa/source/version',ASSETS,'reader-index/test.json',False,'root')
+        self.assertNotIn((PDF,'objects/aa/source/version'),graph.references)
+
+    def test_sorted_tree_lookup_matches_linear_reference_for_all_bucket_cases(self):
+        import random
+        randomizer=random.Random(20261031)
+        alphabet='abcdef'
+        for _ in range(100):
+            graph=gc.ReferenceGraph(MemoryStore())
+            for bucket in gc.BUCKETS:
+                files={'objects/'+''.join(randomizer.choices(alphabet,k=3))+'/'+
+                       ''.join(randomizer.choices(alphabet,k=3))+'/child' for _ in range(50)}
+                graph.set_inventory(bucket,files)
+            candidates=['objects/'+''.join(randomizer.choices(alphabet,k=3))+'/'+
+                        ''.join(randomizer.choices(alphabet,k=3)) for _ in range(20)]
+            candidates += [path.rsplit('/',1)[0] for path in list(graph.files[ASSETS])[:10]]
+            for value in candidates:
+                expected={bucket for bucket,files in graph.files.items()
+                          if value in files or any(path.startswith(value+'/') for path in files)}
+                graph.references.clear();graph.ambiguous.clear();graph.trees.clear()
+                graph.path(value,ASSETS,'reader-index/test.json',False,'root')
+                actual={bucket for bucket in gc.BUCKETS if (bucket,value) in graph.references}
+                if not expected:expected={ASSETS}
+                self.assertEqual(actual,expected)
+                self.assertEqual(value in graph.ambiguous,len(expected)>1)
+
     def test_sharded_ocr_progress_roots_are_accepted_and_keep_page_objects(self):
         store = MemoryStore()
         key = "VoiceOfML/Test\0book.pdf"

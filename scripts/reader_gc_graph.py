@@ -353,8 +353,18 @@ class ReferenceGraph:
             if explicit:
                 self.mark(bucket, value, tree=field == "root")
                 return
-            matches = [candidate for candidate, files in self.files.items()
-                       if value in files or field == "root" and any(p.startswith(value + "/") for p in files)]
+            def contains(candidate, files):
+                if value in files:
+                    return True
+                if field != 'root':
+                    return False
+                prefix = value + '/'
+                ordered = self.ordered.get(candidate)
+                if ordered is None:
+                    return any(path.startswith(prefix) for path in files)
+                index = bisect.bisect_left(ordered, prefix)
+                return index < len(ordered) and ordered[index].startswith(prefix)
+            matches = [candidate for candidate, files in self.files.items() if contains(candidate, files)]
             if len(matches) > 1:
                 self.ambiguous.add(value)
             if not matches:

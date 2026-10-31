@@ -660,6 +660,23 @@ class ChmPublicationSafetyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'chapter bundle inventory changed'):
             safety.verify_predelete_chapter_inventory(Store(),proof,updates)
 
+    def test_chapter_inventory_groups_hash_prefixes_without_skipping_any_bundle(self):
+        roots=['chapters/ebook/chm/'+source+'/'+'f'*16 for source in
+               ('01'+'a'*62,'01'+'b'*62,'02'+'c'*62)]
+        files={root+'/chapter-manifest.json' for root in roots} | {root+'/chapters/body.xhtml' for root in roots}
+        rows=[{'root':root,'count':2,'paths_sha256':safety.chm.digest(publication.encode(
+               sorted(path for path in files if path.startswith(root+'/'))))} for root in roots]
+        prefixes=[]
+        class Store:
+            def list_files(self,bucket,values):
+                prefixes.extend(values)
+                return {path for path in files if path.startswith(values)}
+        self.assertTrue(safety.require_initial_chapter_inventory(Store(),rows))
+        self.assertEqual(set(prefixes),{'chapters/ebook/chm/01','chapters/ebook/chm/02'})
+        files.remove(roots[1]+'/chapters/body.xhtml')
+        with self.assertRaisesRegex(ValueError,'chapter bundle inventory changed'):
+            safety.require_initial_chapter_inventory(Store(),rows)
+
     def test_exact_chm_recovery_requires_a_durable_submitted_batch(self):
         data = b'epub'
         row = {'bucket': publication.ASSETS, 'path': 'native/ebook/chm/x/document.epub',

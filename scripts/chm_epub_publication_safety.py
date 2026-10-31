@@ -991,6 +991,39 @@ def apply_processing_protection_updates(store, rows, fence, client, plan, update
 def require_initial_chapter_inventory(store, bundles):
     """All previously checked chapter/resource paths must remain present."""
     from concurrent.futures import ThreadPoolExecutor
+    import re
+    roots = [row.get('root') for row in bundles]
+    qualified = all(isinstance(root, str) and re.fullmatch(
+        r'chapters/ebook/chm/[0-9a-f]{64}/[0-9a-f]{16}', root) for root in roots)
+    if qualified and roots and len(roots) == len(set(roots)) and callable(getattr(store, 'list_files', None)):
+        # One fresh listing per source-hash prefix covers every complete
+        # bundle. Do not reuse a previous graph inventory as preservation proof.
+        grouped = {}
+        for root in roots:
+            prefix = 'chapters/ebook/chm/' + root.split('/')[3][:2]
+            grouped.setdefault(prefix, set()).add(root)
+        def scan(item):
+            prefix, wanted = item
+            result = {root: set() for root in wanted}
+            for path in store.list_files(chm.ASSETS, (prefix,)):
+                parts = path.split('/')
+                if len(parts) < 6:
+                    continue
+                root = '/'.join(parts[:5])
+                if root in result:
+                    result[root].add(path)
+            return result
+        # list_files maintains shared listing metadata; keep bucket listings
+        # sequential rather than racing its etag maps across worker threads.
+        listed = {}
+        for item in sorted(grouped.items()):
+            listed.update(scan(item))
+        for row in bundles:
+            current = listed[row['root']]
+            if (len(current) != row['count']
+                    or chm.digest(publication.encode(sorted(current))) != row['paths_sha256']):
+                raise ValueError('preserved CHM chapter bundle inventory changed: ' + row['root'])
+        return True
     def verify(row):
         current = store.list_files(chm.ASSETS, (row['root'] + '/',))
         if len(current) != row['count'] or chm.digest(publication.encode(sorted(current))) != row['paths_sha256']:
