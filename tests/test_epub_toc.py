@@ -174,6 +174,22 @@ class EpubTocTests(unittest.TestCase):
         self.assertEqual(relocated[0]['fragment'],'chm-page-4')
         self.assertEqual(epub_chapters.bundle_toc(relocated,records)[0]['fragment'],'chm-page-4')
 
+    def test_merged_chm_missing_toc_fragment_requires_one_existing_inline_target(self):
+        clean=('<html><body><section id="chm-page-0">'
+               '<a href="#chm-page-4">目录第一篇</a><a href="#chm-page-5">目录第二篇</a>'
+               '<a href="#chm-page-4">歧义</a><a href="#chm-page-5">歧义</a>'
+               '<a href="#chm-page-99">缺失目标</a></section>'
+               '<section id="chm-page-4"><p>正文一</p></section>'
+               '<section id="chm-page-5"><p>正文二</p></section></body></html>')
+        records=[{'index':1,'source_path':'chm-fallback.html','clean':clean,'title':'正文'}]
+        entries=[{'title':title,'source_path':'chm-fallback.html','fragment':fragment,'depth':0}
+                 for title,fragment in [('目录第一篇',''),('目录第二篇',''),('歧义',''),
+                                        ('缺失目标',''),('保留来源','chm-page-5')]]
+        toc=epub_chapters.bundle_toc(entries,records)
+        self.assertEqual([item['fragment'] for item in toc],['chm-page-4','chm-page-5','','','chm-page-5'])
+        other=[{**records[0],'source_path':'unrelated.html'}]
+        self.assertEqual(epub_chapters.bundle_toc([{**entries[0],'source_path':'unrelated.html'}],other)[0]['fragment'],'')
+
     def test_self_closing_heading_title_is_read(self):
         self.assertEqual(epub_chapters._chapter_headings('<html:body><html:h1 title="第一首" id="a" />'
                                                          '<html:p>正文</html:p></html:body>'), ['第一首'])

@@ -218,10 +218,29 @@ def _fallback_toc(records: list[dict]) -> list[dict]:
     return toc
 
 
+def _merged_chm_inline_targets(root):
+    """Index exact book-internal labels with existing, unique merged page anchors."""
+    ids = Counter()
+    for node in root.iter():
+        for value in {node.get('id'), node.get('name')} - {None, ''}:
+            ids[value] += 1
+    targets = {}
+    for node in root.iter():
+        if _local_name(node) != 'a':
+            continue
+        href = node.get('href') or ''
+        if not re.fullmatch(r'#chm-page-[0-9]+', href) or ids[href[1:]] != 1:
+            continue
+        label = _normalized_label(''.join(node.itertext()))
+        if label:
+            targets.setdefault(label, set()).add(href[1:])
+    return targets
+
+
 def bundle_toc(entries: list[dict], records: list[dict]) -> list[dict]:
     by_source = {record["source_path"]: record for record in reversed(records)}
     toc = []
-    documents = {}
+    documents, inline_targets = {}, {}
     for entry in entries:
         record = by_source.get(entry["source_path"])
         if record is None:
@@ -251,6 +270,12 @@ def bundle_toc(entries: list[dict], records: list[dict]) -> list[dict]:
             fragment = ""
         if root is not None:
             fragment = usable_toc_fragment(root, fragment, title)
+        if not fragment and root is not None and posixpath.basename(entry['source_path']) == 'chm-fallback.html':
+            if entry['source_path'] not in inline_targets:
+                inline_targets[entry['source_path']] = _merged_chm_inline_targets(root)
+            targets = inline_targets[entry['source_path']].get(_normalized_label(title), set())
+            if len(targets) == 1:
+                fragment = next(iter(targets))
         toc.append({"title": title, "chapter": record["index"],
                     "fragment": fragment, "depth": entry["depth"]})
     if all(_cover_like(next((r for r in records if r["index"] == item["chapter"]), {}))
