@@ -247,6 +247,25 @@ class ChmPublicationSafetyTests(unittest.TestCase):
         self.assertEqual(staged_catalog['generations']['new']['acks'], {'hf': False, 'pages': False})
         self.assertEqual(json.loads(staged['reader-index/v3/promotions/new.json'])['acks'], {'hf': False, 'pages': False})
 
+    def test_pre_ack_keeps_each_unacknowledged_base_history_exact(self):
+        old={'current':{'generation':'old'},'generations':{
+            'old':{'generation':'old','status':'current','references':[{'path':'current.epub'}]},
+            'older':{'generation':'older','status':'superseded','references':[{'path':'older.epub'}],
+                     'snapshot':{'path':'original'}}}}
+        new=copy.deepcopy(old);new['current']={'generation':'new'}
+        new['generations']['old'].update(status='superseded',superseded_at='today',references=[])
+        new['generations']['older'].update(references=[],snapshot={'path':'cleaned'})
+        new['generations']['new']={'generation':'new','status':'current','acks':{'hf':True,'pages':True}}
+        plan={'base_generation':'new','new_v3_generation':'new','overrides':{
+            safety.chm.SIDECAR:b'sidecar',safety.chm.CATALOG:publication.encode(new),
+            'reader-index/v3/current.json':b'{}','reader-index/v3/promotions/new.json':b'{"acks":{}}',
+            'reader-index/chm-epub-withdrawal-retention.json':b'{}'}}
+        before={safety.chm.CATALOG:{'raw':publication.encode(old).decode()}}
+        staged=json.loads(safety.staged_pre_ack_controls(plan,before)[safety.chm.CATALOG])
+        self.assertEqual(staged['generations']['older']['references'],old['generations']['older']['references'])
+        self.assertEqual(staged['generations']['older']['snapshot'],old['generations']['older']['snapshot'])
+        self.assertEqual(staged['generations']['old']['references'],old['generations']['old']['references'])
+
     def test_pages_dispatch_runs_after_pointer_readback_and_before_pointer_checkpoint(self):
         from unittest.mock import patch
         old={'current':{'generation':'old'},'generations':{'old':{'generation':'old','status':'current'}}}

@@ -23,6 +23,9 @@ class ChmWithdrawalPreviewTests(unittest.TestCase):
         packed=lambda v:gzip.compress(publication.encode(v),mtime=0)
         self.assertEqual(preflight.validate_reviewed_sidecar_extension(Store(),inventory,packed(added))
                          ['added_non_chm_routes'],1)
+        changed_non_chm=copy.deepcopy(added);changed_non_chm['f']['book.pdf']['p']='new-pdf'
+        self.assertEqual(preflight.validate_reviewed_sidecar_extension(Store(),inventory,packed(changed_non_chm))
+                         ['changed_non_chm_routes'],1)
         for mutate in (lambda v:v['f']['source/book.chm'].update(p='changed'),
                        lambda v:v['f'].pop('book.pdf'),
                        lambda v:v['f'].update({'new.chm':{'p':'unreviewed'}}),
@@ -50,6 +53,34 @@ class ChmWithdrawalPreviewTests(unittest.TestCase):
             promotions.remove(f'reader-index/v3/promotions/{generations[1]}.json')
             with self.assertRaisesRegex(ValueError,'inventories differ'):
                 preflight.reader_generation_inventory(Store(),generations[2],generations[0])
+
+    def test_additional_live_base_histories_keep_other_routes_and_remove_only_targets(self):
+        old=copy.deepcopy(self.sidecar)
+        old['f']['historical-only.pdf']={'s':2,'m':'p','p':'derived/other/older.pdf',
+                                        'b':'vomebook/pdf-pages-v2'}
+        raw=gzip.compress(publication.encode(old),mtime=0)
+        ref={'bucket':preview.ASSETS,'path':'reader-index/generations/old/reader_assets.json.gz',
+             'sha256':hashlib.sha256(raw).hexdigest(),'bytes':len(raw)}
+        original={'generations':{'older':{'generation':'older','snapshot':ref}}}
+        planned={'generations':{'new':{'generation':'new','status':'current'},
+             'previous':{'generation':'previous','status':'superseded'},
+             'older':{'generation':'older','status':'superseded','snapshot':ref,
+                      'references':reader_lifecycle.sidecar_references(old)}}}
+        class Store:
+            def read_bytes(self,bucket,path):return raw
+        snapshots,sidecars=preflight.sanitize_additional_base_histories(
+            Store(),original,planned,'previous','new',self.rows)
+        self.assertEqual(len(snapshots),1)
+        self.assertEqual(sidecars[0]['f']['historical-only.pdf'],old['f']['historical-only.pdf'])
+        self.assertEqual(sidecars[0]['f'][self.key]['c'],self.manifest)
+        self.assertNotIn('f',sidecars[0]['f'][self.key])
+        remaining={(x['bucket'],x['path']) for x in planned['generations']['older']['references']}
+        self.assertIn((preview.ASSETS,self.manifest),remaining)
+        self.assertNotIn((preview.ASSETS,self.fallback),remaining)
+        class Corrupt:
+            def read_bytes(self,bucket,path):return b'changed'
+        with self.assertRaisesRegex(ValueError,'checksum differs'):
+            preflight.sanitize_additional_base_histories(Corrupt(),original,planned,'previous','new',self.rows)
 
     def setUp(self):
         self.source = 'a' * 64

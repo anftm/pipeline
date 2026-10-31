@@ -766,10 +766,12 @@ def staged_pre_ack_controls(plan, before):
     # original complete reference set and snapshot unchanged. The post-ack
     # plan sanitizes that generation only after the consumer handoff.
     old_catalog = json.loads(before[chm.CATALOG]['raw'].encode('utf-8'))
-    old_generation = old_catalog['current']['generation']
-    old_entry = old_catalog['generations'][old_generation]
-    catalog['generations'][old_generation] = {**old_entry, 'status': 'superseded',
-          'superseded_at': catalog['generations'][old_generation]['superseded_at']}
+    for generation, entry in old_catalog['generations'].items():
+        if generation not in catalog['generations']:
+            continue  # Already acknowledged/retired before this operation.
+        desired = catalog['generations'][generation]
+        catalog['generations'][generation] = {**entry, 'status': desired['status'],
+            **({'superseded_at': desired['superseded_at']} if desired.get('superseded_at') else {})}
     for generation, entry in catalog['generations'].items():
         if generation == plan['base_generation']:
             entry['acks'] = {'hf': False, 'pages': False}

@@ -201,11 +201,60 @@ def sanitize_historical_v3_base(sidecar, targets):
     return clean, removed
 
 
+def sanitize_additional_base_histories(store, original, planned, previous_id, new_id, rows):
+    """Replace every still-live superseded base with its exact CHM-clean copy."""
+    targets = {row['path'] for row in rows}
+    target_refs = {(ASSETS, path) for path in targets}
+    historical_snapshots = {}
+    sidecars = []
+    for generation, entry in planned['generations'].items():
+        if generation in {new_id, previous_id}:
+            continue
+        if entry.get('status') != 'superseded' or generation not in original['generations']:
+            raise ValueError('unexpected live Reader base generation during CHM handoff')
+        if store is None:
+            raise ValueError('superseded Reader base snapshot store is unavailable')
+        ref = original['generations'][generation].get('snapshot')
+        if (not isinstance(ref, dict) or ref.get('bucket') != ASSETS
+                or not isinstance(ref.get('path'), str)
+                or not re.fullmatch(r'[0-9a-f]{64}', str(ref.get('sha256')))
+                or type(ref.get('bytes')) is not int or ref['bytes'] < 1):
+            raise ValueError('superseded Reader base generation has no exact snapshot')
+        raw = store.read_bytes(ASSETS, ref['path'])
+        if len(raw) != ref['bytes'] or digest(raw) != ref['sha256']:
+            raise ValueError('superseded Reader base snapshot checksum differs')
+        base = json.loads(gzip.decompress(raw))
+        cleaned, _ = sanitize_historical_v3_base(base, targets)
+        previous_refs = {(item['bucket'], item['path']) for item in
+                         publication.reader_lifecycle.sidecar_references(base)}
+        cleaned_refs = {(item['bucket'], item['path']) for item in
+                        publication.reader_lifecycle.sidecar_references(cleaned)}
+        recorded_refs = entry.get('references')
+        if (not isinstance(recorded_refs, list) or any(not isinstance(item, dict)
+                or not isinstance(item.get('bucket'), str) or not isinstance(item.get('path'), str)
+                for item in recorded_refs)):
+            raise ValueError('superseded Reader base reference inventory is malformed')
+        retained_refs = {(item['bucket'], item['path']) for item in recorded_refs} - target_refs
+        if not previous_refs <= {(item['bucket'], item['path']) for item in recorded_refs} or not cleaned_refs <= retained_refs:
+            raise ValueError('superseded Reader base reference inventory omits a preserved route')
+        packed = gzip.compress(publication.encode(cleaned), mtime=0)
+        hashed = digest(packed)
+        target = f'reader-index/snapshots/{hashed}/reader_assets.json.gz'
+        entry['snapshot'] = {'bucket': ASSETS, 'path': target, 'sha256': hashed, 'bytes': len(packed)}
+        entry['references'] = [ref for ref in entry.get('references', [])
+                               if (ref.get('bucket'), ref.get('path')) not in target_refs]
+        entry['sidecar_sha256'] = hashlib.sha256(json.dumps(cleaned, ensure_ascii=False,
+                                  sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        historical_snapshots[target] = packed
+        sidecars.append(cleaned)
+    return historical_snapshots, sidecars
+
+
 def validate_reviewed_sidecar_extension(store, inventory, side_raw):
-    """Allow only added non-CHM routes since the independently reviewed snapshot."""
+    """Preserve every reviewed CHM route; capture later unrelated publications."""
     reviewed = inventory['sidecar_sha256']
     if digest(side_raw) == reviewed:
-        return {'baseline_sha256': reviewed, 'added_non_chm_routes': 0}
+        return {'baseline_sha256': reviewed, 'added_non_chm_routes': 0, 'changed_non_chm_routes': 0}
     path = f'reader-index/snapshots/{reviewed}/reader_assets.json.gz'
     previous = store.read_bytes(ASSETS, path)
     if digest(previous) != reviewed:
@@ -215,12 +264,15 @@ def validate_reviewed_sidecar_extension(store, inventory, side_raw):
             or not isinstance(current.get('f'), dict)
             or {k:v for k,v in old.items() if k != 'f'} != {k:v for k,v in current.items() if k != 'f'}):
         raise ValueError('current sidecar changes the reviewed schema')
-    if any(key not in current['f'] or current['f'][key] != value for key,value in old['f'].items()):
-        raise ValueError('current sidecar changes a reviewed route')
+    if any(key not in current['f'] or key.lower().endswith('.chm') and current['f'][key] != value
+           for key,value in old['f'].items()):
+        raise ValueError('current sidecar removes a reviewed route or changes a reviewed CHM route')
+    changed = {key for key,value in old['f'].items() if current['f'][key] != value}
     additions = set(current['f']) - set(old['f'])
     if any(not isinstance(key, str) or key.lower().endswith('.chm') for key in additions):
         raise ValueError('current sidecar adds an unreviewed CHM route')
-    return {'baseline_sha256': reviewed, 'added_non_chm_routes': len(additions)}
+    return {'baseline_sha256': reviewed, 'added_non_chm_routes': len(additions),
+            'changed_non_chm_routes': len(changed)}
 
 
 def reader_generation_inventory(store, current, reset_generation):
@@ -596,7 +648,7 @@ def synchronize_indexes(indexes, sidecar, catalog, targets, missing_processing, 
     previous_entry['references'] = [ref for ref in previous_entry.get('references', [])
                                     if (ref.get('bucket'), ref.get('path')) not in target_refs]
     previous_entry['sidecar_sha256'] = hashlib.sha256(json.dumps(previous_clean, ensure_ascii=False,
-                                 sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+                                  sort_keys=True, separators=(',', ':')).encode()).hexdigest()
     return {'indexes': planned, 'sidecar': updated['sidecar'], 'catalog': updated['catalog'],
             'generation': updated['generation'], 'retired_epub_fields': updated['entries_changed'],
             'previous_snapshot': previous_snapshot, 'previous_snapshot_bytes': previous_raw,
@@ -710,7 +762,9 @@ def plan_chm_withdrawal(store, inventory_path, *, acknowledged_generations):
     processing = {path for entry in indexes[INDEX]['files'] for path in entry.get('processing_roots', [])}
     missing = processing - store.existing_files(ASSETS, processing)
     synced = synchronize_indexes(indexes, sidecar, catalog, rows, missing,
-                        current_generation=pointer['generation'], receipts=acknowledged_generations)
+                         current_generation=pointer['generation'], receipts=acknowledged_generations)
+    extra_snapshots, extra_sidecars = sanitize_additional_base_histories(store, catalog, synced['catalog'],
+        (catalog.get('current') or {}).get('generation'), synced['generation'], rows)
     current_new = current_v3_replacement(store, current, synced['sidecar'], targets,
                                          parent_generation=pointer['generation'],
                                          document_reset=receipt['reset_id'])
@@ -733,6 +787,7 @@ def plan_chm_withdrawal(store, inventory_path, *, acknowledged_generations):
     immutable[new_path] = new_raw
     immutable[current_new['snapshot']['path']] = current_new['snapshot_bytes']
     immutable[synced['previous_snapshot']['path']] = synced['previous_snapshot_bytes']
+    immutable.update(extra_snapshots)
     new_pointer = {'version': 1, 'kind': 'reader-reading-pointer', 'generation': current_new['generation'],
                    'catalog': new_ref, 'resources': [new_ref]}
     try:
@@ -780,7 +835,8 @@ def plan_chm_withdrawal(store, inventory_path, *, acknowledged_generations):
     consumers['resources'] = [r for r in consumers['resources'] if (r.get('bucket'), r.get('path'))
                               not in target_refs]
     overrides[consumer_path] = publication.encode(consumers)
-    history_refs = preserved_chapter_closure([sidecar] + [
+    base_history = [json.loads(gzip.decompress(synced['previous_snapshot_bytes'])), *extra_sidecars]
+    history_refs = preserved_chapter_closure([sidecar, *base_history] + [
         publication.pinned_base(store, value, None) for value in catalogs.values()])
     historical_reading_refs = preserved_v3_reading_refs(list(catalogs.values()))
     # Replacement catalogs already protect these exact chapter manifests. A
