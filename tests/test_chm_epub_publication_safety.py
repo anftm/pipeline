@@ -383,6 +383,19 @@ class ChmPublicationSafetyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'checksum mismatch'):
             safety.validate_preserved_catalog_roots(plan, {old['generation']: old}, rows)
 
+    def test_saved_plan_loads_every_history_alias(self):
+        from unittest.mock import patch
+        generations=['a'*64,'b'*64,'c'*64]
+        plan={'current_v3_generation':generations[2],'old_v3_generation':generations[0],
+              'history_generations':generations,'rollback_aliases':{g:{} for g in generations}}
+        class Store:
+            def read_bytes(self,bucket,path):return json.dumps({'generation':path.split('/')[-2]}).encode()
+        with patch.object(publication,'validate_catalog',side_effect=lambda value:value):
+            self.assertEqual(set(safety.load_plan_history_catalogs(Store(),plan)),set(generations))
+            altered=copy.deepcopy(plan);altered['history_generations'].remove(generations[1])
+            with self.assertRaisesRegex(ValueError,'every rollback alias'):
+                safety.load_plan_history_catalogs(Store(),altered)
+
     def test_historical_base_must_preserve_every_non_chm_route(self):
         from unittest.mock import patch
         base = {'v': 1, 'f': {'book.pdf': {'p': 'original'}}}

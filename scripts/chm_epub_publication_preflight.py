@@ -201,6 +201,55 @@ def sanitize_historical_v3_base(sidecar, targets):
     return clean, removed
 
 
+def validate_reviewed_sidecar_extension(store, inventory, side_raw):
+    """Allow only added non-CHM routes since the independently reviewed snapshot."""
+    reviewed = inventory['sidecar_sha256']
+    if digest(side_raw) == reviewed:
+        return {'baseline_sha256': reviewed, 'added_non_chm_routes': 0}
+    path = f'reader-index/snapshots/{reviewed}/reader_assets.json.gz'
+    previous = store.read_bytes(ASSETS, path)
+    if digest(previous) != reviewed:
+        raise ValueError('reviewed CHM sidecar baseline checksum mismatch')
+    old, current = json.loads(gzip.decompress(previous)), json.loads(gzip.decompress(side_raw))
+    if (old.get('v') != 1 or current.get('v') != 1 or not isinstance(old.get('f'), dict)
+            or not isinstance(current.get('f'), dict)
+            or {k:v for k,v in old.items() if k != 'f'} != {k:v for k,v in current.items() if k != 'f'}):
+        raise ValueError('current sidecar changes the reviewed schema')
+    if any(key not in current['f'] or current['f'][key] != value for key,value in old['f'].items()):
+        raise ValueError('current sidecar changes a reviewed route')
+    additions = set(current['f']) - set(old['f'])
+    if any(not isinstance(key, str) or key.lower().endswith('.chm') for key in additions):
+        raise ValueError('current sidecar adds an unreviewed CHM route')
+    return {'baseline_sha256': reviewed, 'added_non_chm_routes': len(additions)}
+
+
+def reader_generation_inventory(store, current, reset_generation):
+    """Inventory every real v3 history and its promotion; reject unpaired roots."""
+    paths = set(store.list_files(ASSETS, ('reader-index/v3/generations/',)))
+    promotions = set(store.list_files(ASSETS, ('reader-index/v3/promotions/',)))
+    by_id = {}
+    for path in paths:
+        match = re.fullmatch(r'reader-index/v3/generations/([0-9a-f]{64})/catalog\.json', path)
+        if not match:
+            raise ValueError('unexpected Reader v3 history root: ' + path)
+        by_id[match[1]] = path
+    if not by_id or current not in by_id or reset_generation not in by_id:
+        raise ValueError('current or document-reset Reader generation is missing')
+    if promotions != {f'reader-index/v3/promotions/{g}.json' for g in by_id}:
+        raise ValueError('Reader v3 history and promotion inventories differ')
+    catalogs = {}
+    for generation, path in sorted(by_id.items()):
+        catalog = publication.validate_catalog(json.loads(store.read_bytes(ASSETS, path)))
+        if catalog['generation'] != generation:
+            raise ValueError('Reader v3 historical generation identity mismatch')
+        promotion = json.loads(store.read_bytes(ASSETS, f'reader-index/v3/promotions/{generation}.json'))
+        if (promotion.get('kind') != 'reader-reading-promotion' or promotion.get('generation') != generation
+                or promotion.get('acks') != {'hf': True, 'pages': True}):
+            raise ValueError('historical Reader promotion lacks both original acknowledgments')
+        catalogs[generation] = catalog
+    return catalogs
+
+
 def historical_v3_replacement(store, old_catalog, targets):
     """Construct a rollback generation with the old routes and no CHM EPUBs.
 
@@ -635,37 +684,24 @@ def plan_chm_withdrawal(store, inventory_path, *, acknowledged_generations):
     indexes, index_hashes = read_index_roots(store)
     side_raw = store.read_bytes(ASSETS, SIDECAR)
     catalog_raw = store.read_bytes(ASSETS, CATALOG)
-    if digest(side_raw) != inventory['sidecar_sha256'] or index_hashes[INDEX] != inventory['index_sha256']:
-        raise ValueError('canonical CHM index or sidecar changed since inventory review')
+    if index_hashes[INDEX] != inventory['index_sha256']:
+        raise ValueError('canonical CHM index changed since inventory review')
+    extension_evidence = validate_reviewed_sidecar_extension(store, inventory, side_raw)
     sidecar, catalog = json.loads(gzip.decompress(side_raw)), json.loads(catalog_raw)
     pointer, current = publication.current(store)
     if not pointer or current.get('base_sidecar', {}).get('sha256') != digest(side_raw):
         raise ValueError('current v3 projection does not bind the canonical sidecar')
     if acknowledged_generations != {'hf': pointer['generation'], 'pages': pointer['generation']}:
         raise ValueError('both sites must serve the current Reader generation')
-    old_generation = current.get('parent_generation')
-    if not re.fullmatch(r'[0-9a-f]{64}', str(old_generation)):
-        raise ValueError('current historical Reader generation is not identified')
-    expected_v3_roots = {f'reader-index/v3/generations/{g}/catalog.json'
-                         for g in (pointer['generation'], old_generation)}
-    present_v3_roots = set(store.list_files(ASSETS, ('reader-index/v3/generations/',)))
-    if present_v3_roots != expected_v3_roots:
-        raise ValueError('historical Reader v3 root inventory differs from the reviewed two generations')
-    expected_promotions = {f'reader-index/v3/promotions/{g}.json' for g in (pointer['generation'], old_generation)}
-    if set(store.list_files(ASSETS, ('reader-index/v3/promotions/',))) != expected_promotions:
-        raise ValueError('historical Reader promotion inventory differs from the reviewed two generations')
-    for generation in (pointer['generation'], old_generation):
-        promotion = json.loads(store.read_bytes(ASSETS, f'reader-index/v3/promotions/{generation}.json'))
-        if (promotion.get('kind') != 'reader-reading-promotion' or promotion.get('generation') != generation
-                or promotion.get('acks') != {'hf': True, 'pages': True}):
-            raise ValueError('historical Reader promotion lacks both original acknowledgments')
-    old_path = f'reader-index/v3/generations/{old_generation}/catalog.json'
-    historical = json.loads(store.read_bytes(ASSETS, old_path))
-    if historical.get('generation') != old_generation:
-        raise ValueError('historical Reader catalog identity changed')
-    history = historical_v3_replacement(store, historical, targets)
     receipt_path = 'reader-index/gc/document-reset/withdrawal.json'
     receipt = json.loads(store.read_bytes(ASSETS, receipt_path))
+    old_generation = receipt.get('generation')
+    if not re.fullmatch(r'[0-9a-f]{64}', str(old_generation)):
+        raise ValueError('document-reset Reader generation is not identified')
+    catalogs = reader_generation_inventory(store, pointer['generation'], old_generation)
+    if catalogs[pointer['generation']] != current:
+        raise ValueError('current Reader catalog differs from its pinned root')
+    historical = catalogs[old_generation]
     if (receipt.get('kind') != 'reader-document-reset' or receipt.get('status') != 'withdrawn'
             or receipt.get('generation') != old_generation or current.get('files')
             or receipt.get('reset_id') != historical.get('document_reset')
@@ -679,7 +715,10 @@ def plan_chm_withdrawal(store, inventory_path, *, acknowledged_generations):
                                          parent_generation=pointer['generation'],
                                          document_reset=receipt['reset_id'])
     current_alias = rollback_alias_from_current(current_new)
-    replacements = {old_generation: history, pointer['generation']: current_alias}
+    replacements = {generation: historical_v3_replacement(store, value, targets)
+                    for generation,value in catalogs.items() if generation != pointer['generation']}
+    replacements[pointer['generation']] = current_alias
+    history = replacements[old_generation]
     alias_refs = {}
     immutable = {}
     for generation, value in replacements.items():
@@ -741,8 +780,9 @@ def plan_chm_withdrawal(store, inventory_path, *, acknowledged_generations):
     consumers['resources'] = [r for r in consumers['resources'] if (r.get('bucket'), r.get('path'))
                               not in target_refs]
     overrides[consumer_path] = publication.encode(consumers)
-    history_refs = preserved_chapter_closure([sidecar, publication.pinned_base(store, historical, None)])
-    historical_reading_refs = preserved_v3_reading_refs([current, historical])
+    history_refs = preserved_chapter_closure([sidecar] + [
+        publication.pinned_base(store, value, None) for value in catalogs.values()])
+    historical_reading_refs = preserved_v3_reading_refs(list(catalogs.values()))
     # Replacement catalogs already protect these exact chapter manifests. A
     # second, independent current root ensures a later generic history pruning
     # cannot collect their bundles while the repaired rollback remains offered.
@@ -752,6 +792,7 @@ def plan_chm_withdrawal(store, inventory_path, *, acknowledged_generations):
     return {'kind': 'chm-epub-withdrawal-plan', 'target_count': len(rows), 'target_bytes': inventory['logical_bytes'],
             'inventory_sha256': preview.INVENTORY_SHA256,
             'old_v3_generation': old_generation, 'current_v3_generation': pointer['generation'],
+            'history_generations': sorted(catalogs), 'reviewed_sidecar_extension': extension_evidence,
             'new_v3_generation': new_pointer['generation'], 'rollback_aliases': alias_refs,
             'base_generation': synced['generation'], 'index_hashes_before': index_hashes,
             'sidecar_sha256_before': digest(side_raw), 'catalog_sha256_before': digest(catalog_raw),

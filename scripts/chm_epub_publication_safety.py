@@ -662,6 +662,25 @@ def validate_preserved_catalog_roots(plan, old_catalogs, rows):
     return True
 
 
+def load_plan_history_catalogs(store, plan):
+    """All original roots, including intermediate publications, need aliases."""
+    generations = plan.get('history_generations')
+    if generations is None:
+        generations = sorted({plan['current_v3_generation'], plan['old_v3_generation']})
+    if (not isinstance(generations, list) or generations != sorted(set(generations))
+            or set(generations) != set(plan.get('rollback_aliases', {}))
+            or not {plan['current_v3_generation'], plan['old_v3_generation']} <= set(generations)):
+        raise ValueError('CHM saved history inventory does not bind every rollback alias')
+    catalogs = {}
+    for generation in generations:
+        path = f'reader-index/v3/generations/{generation}/catalog.json'
+        value = publication.validate_catalog(json.loads(store.read_bytes(chm.ASSETS, path)))
+        if value['generation'] != generation:
+            raise ValueError('historical Reader catalog identity changed')
+        catalogs[generation] = value
+    return catalogs
+
+
 def validate_old_base_routes(store, plan, old_catalogs, rows):
     """Compare sanitized rollback bases with independently verified originals."""
     import gzip
@@ -1224,13 +1243,7 @@ def run_guarded_retirement(store, fence, client, plan, rows, *, preflight, persi
                 or not simulation_details.get('graph')):
             raise ValueError('CHM simulated graph is not bound to the exact planned overlay')
     before = confirm_initial_snapshot(store, plan)
-    old_catalogs = {}
-    for generation in (plan['current_v3_generation'], plan['old_v3_generation']):
-        path = f'reader-index/v3/generations/{generation}/catalog.json'
-        value = publication.validate_catalog(json.loads(store.read_bytes(chm.ASSETS, path)))
-        if value['generation'] != generation:
-            raise ValueError('historical Reader catalog identity changed')
-        old_catalogs[generation] = value
+    old_catalogs = load_plan_history_catalogs(store, plan)
     validate_preserved_catalog_roots(plan, old_catalogs, rows)
     validate_old_base_routes(store, plan, old_catalogs, rows)
     old_sidecar = store.read_bytes(chm.ASSETS, chm.SIDECAR)

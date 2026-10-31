@@ -155,9 +155,7 @@ def resume_isolated(store, fence, client, rows, maintenance_state):
     reconciled=safety.reconcile_epub_deletions(store, rows, state.get('batches', []))
     fence.check()
     journal.classify_recovery_controls(store, plan, before, updates, state)
-    old_catalogs = {g:publication.validate_catalog(json.loads(store.read_bytes(chm.ASSETS,
-        f'reader-index/v3/generations/{g}/catalog.json'))) for g in
-        (plan['current_v3_generation'], plan['old_v3_generation'])}
+    old_catalogs = safety.load_plan_history_catalogs(store, plan)
     safety.validate_preserved_catalog_roots(plan,old_catalogs,rows)
     safety.validate_old_base_routes(store,plan,old_catalogs,rows)
     safety.require_initial_chapter_inventory(store,state['chapter_bundles'])

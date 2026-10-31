@@ -14,6 +14,43 @@ from scripts import publish_reader_v3 as publication
 
 
 class ChmWithdrawalPreviewTests(unittest.TestCase):
+    def test_sidecar_extension_accepts_only_new_non_chm_routes(self):
+        old={'v':1,'f':{'source/book.chm':{'p':'chapter','f':'fallback'},'book.pdf':{'p':'pdf'}}}
+        raw=gzip.compress(publication.encode(old),mtime=0);inventory={'sidecar_sha256':hashlib.sha256(raw).hexdigest()}
+        class Store:
+            def read_bytes(self,bucket,path):return raw
+        added=copy.deepcopy(old);added['f']['added.jpg']={'p':'image'}
+        packed=lambda v:gzip.compress(publication.encode(v),mtime=0)
+        self.assertEqual(preflight.validate_reviewed_sidecar_extension(Store(),inventory,packed(added))
+                         ['added_non_chm_routes'],1)
+        for mutate in (lambda v:v['f']['source/book.chm'].update(p='changed'),
+                       lambda v:v['f'].pop('book.pdf'),
+                       lambda v:v['f'].update({'new.chm':{'p':'unreviewed'}}),
+                       lambda v:v.update(extra=True)):
+            changed=copy.deepcopy(added);mutate(changed)
+            with self.subTest(changed=changed),self.assertRaises(ValueError):
+                preflight.validate_reviewed_sidecar_extension(Store(),inventory,packed(changed))
+
+    def test_v3_inventory_preserves_all_generations_and_rejects_unpaired_roots(self):
+        from unittest.mock import patch
+        generations=['a'*64,'b'*64,'c'*64]
+        roots={f'reader-index/v3/generations/{g}/catalog.json' for g in generations}
+        promotions={f'reader-index/v3/promotions/{g}.json' for g in generations}
+        class Store:
+            def list_files(self,bucket,prefixes):return roots if 'generations' in prefixes[0] else promotions
+            def read_bytes(self,bucket,path):
+                generation=path.split('/')[-2] if 'generations/' in path else path.rsplit('/',1)[-1][:-5]
+                value=({'generation':generation} if 'generations/' in path else
+                       {'kind':'reader-reading-promotion','generation':generation,
+                        'acks':{'hf':True,'pages':True}})
+                return json.dumps(value).encode()
+        with patch.object(publication,'validate_catalog',side_effect=lambda value:value):
+            self.assertEqual(set(preflight.reader_generation_inventory(Store(),generations[2],generations[0])),
+                             set(generations))
+            promotions.remove(f'reader-index/v3/promotions/{generations[1]}.json')
+            with self.assertRaisesRegex(ValueError,'inventories differ'):
+                preflight.reader_generation_inventory(Store(),generations[2],generations[0])
+
     def setUp(self):
         self.source = 'a' * 64
         self.root = 'chapters/ebook/chm/' + self.source + '/' + 'b' * 16
