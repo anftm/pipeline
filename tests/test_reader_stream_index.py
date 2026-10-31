@@ -327,7 +327,8 @@ class FormatProducerRegressionTests(unittest.TestCase):
         self.assertEqual(digest, hashlib.sha256(b"complete").hexdigest())
 
     def test_media_publishes_actual_transcoded_filename_kind_and_digest(self):
-        cases = [("m4a", "audio", "audio.mp3"), ("mov", "video", "video.mp4"), ("asx", "audio", "audio.mp3")]
+        cases = [("m4a", "audio", "audio.mp3"), ("aac", "audio", "audio.mp3"),
+                 ("mov", "video", "video.mp4"), ("asx", "audio", "audio.mp3")]
         for extension, mode, filename in cases:
             with self.subTest(extension=extension), tempfile.TemporaryDirectory() as temporary:
                 work = Path(temporary)

@@ -31,7 +31,7 @@ class ReaderAssetContractTests(unittest.TestCase):
             set(reader_assets.CONVERTIBLE_EXTENSIONS),
             {"doc", "docx", "epub", "htm", "html", "mobi", "azw3", "fb2", "odt", "rtf", "chm",
              "ppt", "pptx", "pps", "odp", "xls", "xlsx", "csv", "ods", "wps", "mht", "mhtml", "ps", "caj", "kdh",
-             "ape", "wma", "amr", "flac", "m4a", "mpga", "wav", "asx", "swf", "flv", "f4v", "rm", "rmvb", "mkv", "avi", "mpg",
+             "ape", "wma", "amr", "aac", "flac", "m4a", "mpga", "wav", "asx", "swf", "flv", "f4v", "rm", "rmvb", "mkv", "avi", "mpg",
              "mpeg", "mts", "ts", "wmv", "mov", "mp4"},
         )
         for extension in ("pdg", "dat", "mp3", "djvu"):
@@ -74,6 +74,7 @@ class ReaderAssetContractTests(unittest.TestCase):
             "ape": ("ffmpeg-audio-mp3-v1", "audio", "audio.mp3"),
             "wma": ("ffmpeg-audio-mp3-v1", "audio", "audio.mp3"),
             "amr": ("ffmpeg-audio-mp3-v1", "audio", "audio.mp3"),
+            "aac": ("ffmpeg-audio-mp3-v1", "audio", "audio.mp3"),
             "asx": ("ffmpeg-media-auto-v1", "video", "video.mp4"),
             "swf": ("native-swf-ruffle-v1", "swf", "document.swf"),
             **{extension: ("ffmpeg-video-mp4-h264-aac-v1", "video", "video.mp4") for extension in (
@@ -894,6 +895,19 @@ class ConverterTests(unittest.TestCase):
             self.assertEqual(command[0:6], ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y"])
             self.assertIn("libmp3lame", command)
             self.assertIn("0:a:0", command)
+            self.assertEqual(run.call_args.kwargs["timeout_seconds"], convert_reader_assets.MEDIA_COMMAND_TIMEOUT_SECONDS)
+
+    def test_aac_is_transcoded_to_the_same_validated_mp3_contract(self):
+        with tempfile.TemporaryDirectory() as root:
+            work = Path(root)
+            source, target = work / "source.aac", work / "audio.mp3"
+            source.write_bytes(b"aac-fixture")
+            with patch.object(convert_reader_assets, "run_checked") as run:
+                convert_reader_assets.convert_file({"extension": "aac"}, source, target, work)
+            command = run.call_args.args[0]
+            self.assertIn("0:a:0", command)
+            self.assertIn("libmp3lame", command)
+            self.assertEqual(command[-1], str(target))
             self.assertEqual(run.call_args.kwargs["timeout_seconds"], convert_reader_assets.MEDIA_COMMAND_TIMEOUT_SECONDS)
 
     def test_native_audio_keeps_compatible_source_bytes(self):

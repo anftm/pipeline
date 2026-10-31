@@ -1,8 +1,12 @@
 import io
+import json
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import Mock
 
-from scripts.plan_reader_stream_matrix import completed_entries, read_json
+from scripts.plan_reader_stream_matrix import completed_entries, read_json, selected_records
+from scripts.pilot_media_stream import select_records as select_media_records
 
 
 class ReaderStreamMatrixIndexTests(unittest.TestCase):
@@ -31,11 +35,26 @@ class ReaderStreamMatrixIndexTests(unittest.TestCase):
         self.assertEqual(completed_entries(index, retry_failures=True), {"good": "r1"})
 
     def test_office_workflow_exposes_and_passes_explicit_failure_retry(self):
-        from pathlib import Path
         workflow = (Path(__file__).resolve().parents[1] / ".github" / "workflows" /
                     "reader-office-chapters.yml").read_text(encoding="utf-8")
         self.assertIn("retry_failures:", workflow)
         self.assertEqual(workflow.count("--retry-failures"), 2)
+
+    def test_aac_is_planned_and_selected_only_as_audio(self):
+        rows = [{"Repo": "VoiceOfML/Test", "Folder": ["music"], "File": "clip",
+                 "Extension": "aac", "Size": 123}]
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "search.json"
+            source.write_text(json.dumps(rows), encoding="utf-8")
+            revisions = {"VoiceOfML/Test": "a" * 40}
+            planned = selected_records(source, revisions, "media", {"audio"})
+            converted = select_media_records(source, revisions, "audio")
+            self.assertEqual([(x["key"], x["extension"]) for x in planned],
+                             [("VoiceOfML/Test\0music/clip.aac", "audio")])
+            self.assertEqual([(x["path"], x["extension"]) for x in converted],
+                             [("music/clip.aac", "aac")])
+            self.assertEqual(selected_records(source, revisions, "media", {"video"}), [])
+            self.assertEqual(select_media_records(source, revisions, "video"), [])
 
 
 if __name__ == "__main__":

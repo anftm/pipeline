@@ -27,7 +27,7 @@ except ImportError:
 
 TARGET_BUCKET = "vomebook/reader-assets-v2"
 MEDIA_EXTENSIONS = {
-    "mp3", "wav", "m4a", "flac", "mpga", "ape", "wma", "amr",
+    "mp3", "wav", "m4a", "flac", "mpga", "ape", "wma", "amr", "aac",
     "mp4", "mov", "asx", "flv", "f4v", "rm", "rmvb", "mkv", "avi",
     "mpg", "mpeg", "mts", "ts", "wmv", "swf",
 }

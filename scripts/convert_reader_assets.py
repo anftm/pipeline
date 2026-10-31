@@ -2163,7 +2163,7 @@ def convert_file(item: dict, source: Path, target: Path, work: Path,
         ], timeout_seconds=POSTSCRIPT_COMMAND_TIMEOUT_SECONDS)
     elif ext in {"caj", "kdh"}:
         convert_caj_family(source, target, work)
-    elif ext in {"ape", "wma", "amr", "flac", "m4a", "mpga", "wav", "asx"} and (
+    elif ext in {"ape", "wma", "amr", "aac", "flac", "m4a", "mpga", "wav", "asx"} and (
             ext != "asx" or item.get("source_media_mode") == "audio"):
         run_checked([
             "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",

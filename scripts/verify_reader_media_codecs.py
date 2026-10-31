@@ -28,6 +28,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="reader-codecs-") as directory:
         work = Path(directory)
         cases = (("native-mp3", "mp3", ["-f", "lavfi", "-i", "sine=frequency=440:duration=1", "-c:a", "libmp3lame"], True),
+                 ("adts-aac", "aac", ["-f", "lavfi", "-i", "sine=frequency=440:duration=1", "-c:a", "aac", "-f", "adts"], False),
                  ("alac-m4a", "m4a", ["-f", "lavfi", "-i", "sine=frequency=440:duration=1", "-c:a", "alac"], False),
                  ("native-h264", "mp4", ["-f", "lavfi", "-i", "color=c=red:s=160x120:d=1", "-c:v", "libx264", "-pix_fmt", "yuv420p"], True),
                  ("mpeg4-mp4", "mp4", ["-f", "lavfi", "-i", "color=c=red:s=160x120:d=1", "-c:v", "mpeg4"], False))
