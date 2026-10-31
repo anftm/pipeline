@@ -30,9 +30,11 @@ Image.MAX_IMAGE_PIXELS = 300_000_000
 
 try:
     from .reader_assets import decode_search_payload, relative_path, source_url
+    from .reader_stream_index import unchanged_sources
     from .shared import batch_bucket_files_with_retry
 except ImportError:
     from reader_assets import decode_search_payload, relative_path, source_url
+    from reader_stream_index import unchanged_sources
     from shared import batch_bucket_files_with_retry
 
 
@@ -262,6 +264,12 @@ def main() -> int:
                 if int.from_bytes(hashlib.sha256(
                     f"{item['repo']}\0{item['path']}".encode()).digest()[:8], "big") % args.shard_count == args.shard_index
                 if completed.get(f"{item['repo']}\0{item['path']}") != item["revision"]]
+    # Dataset commits often advance because unrelated files changed. Reuse an
+    # existing image only when the source's pinned LFS SHA-256 still matches;
+    # absent/unknown hashes continue through normal download and conversion.
+    unchanged = set() if args.rebuild else unchanged_sources(selected, previous, token)
+    selected = [item for item in selected if f"{item['repo']}\0{item['path']}" not in unchanged]
+    print(f"unchanged_by_source_sha={len(unchanged)} pending={len(selected)}", flush=True)
     if args.limit:
         selected = selected[:args.limit]
     if not selected:
