@@ -79,7 +79,7 @@ jobs:
         run: python -u -B scripts/run_chm_epub_retirement.py
       - name: Restore producer isolation when the transaction is safe
         if: always() && steps.retirement.outcome != 'success'
-        run: python -u -B scripts/reader_gc_maintenance.py restore --journal output/chm-epub-retirement/maintenance.json
+        run: python -u -B scripts/reader_gc_maintenance.py restore --journal output/chm-epub-retirement/maintenance.json --expected-owner "$GITHUB_RUN_ID"
       - uses: actions/upload-artifact@v7
         if: always()
         with:

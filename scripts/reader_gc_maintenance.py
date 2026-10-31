@@ -278,10 +278,33 @@ def kick_restored(path, state):
     journal(path, state)
 
 
-def restore(path):
+def restore(path, *, expected_owner=None):
     if not path.exists():
         return
     state = json.loads(path.read_text())
+    if expected_owner is not None:
+        # An interrupted callback may have persisted newer safety flags to the
+        # durable cursor after the runner's local file was written. Never use
+        # that older local copy to decide whether producers can be resumed.
+        store = durable_store()
+        if store is None or not str(expected_owner).isdigit():
+            raise RuntimeError('guarded restoration requires a durable owner identity')
+        try:
+            raw = store.read_bytes('vomebook/reader-assets-v2', DURABLE_JOURNAL)
+        except FileNotFoundError as error:
+            raise RuntimeError('guarded restoration requires its durable journal') from error
+        current = json.loads(raw)
+        if (current.get('version') != 1 or current.get('kind') != 'reader-maintenance-journal'
+                or not isinstance(current.get('repositories'), dict)
+                or not state.get('maintenance_id')
+                or state.get('maintenance_id') != current.get('maintenance_id')
+                or str(state.get('callback_owner_run_id')) != str(expected_owner)
+                or str(current.get('callback_owner_run_id')) != str(expected_owner)):
+            raise RuntimeError('guarded restoration does not own the durable journal')
+        state = current
+        if state.get('restored') is True:
+            return
+        path.write_bytes(raw)
     if state.get("preflight_only"):
         return
     if (state.get('callback_recovery_required') or
@@ -516,12 +539,15 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("operation", choices=["run", "restore", "preflight"])
     parser.add_argument("--journal", type=Path, required=True)
+    parser.add_argument('--expected-owner', help='Require this run to own the latest durable journal')
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--plan-only", action="store_true")
     parser.add_argument('--scope', choices=['unreferenced', 'retired-assets'], default='unreferenced')
     arguments = parser.parse_args()
     if arguments.limit < 0:
         parser.error("limit must be non-negative")
+    if arguments.expected_owner is not None and arguments.operation != 'restore':
+        parser.error('--expected-owner is only valid for restore')
     if arguments.operation == "preflight":
         inventory = preflight()
         journal(arguments.journal, {"preflight_only": True, "repositories": inventory,
@@ -535,4 +561,4 @@ if __name__ == "__main__":
         run(arguments.journal, limit=arguments.limit, apply=not arguments.plan_only,
             scope=arguments.scope, preserve_queued_runs=True)
     else:
-        restore(arguments.journal)
+        restore(arguments.journal, expected_owner=arguments.expected_owner)

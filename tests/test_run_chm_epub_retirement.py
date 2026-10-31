@@ -304,6 +304,8 @@ class RunChmRetirementTests(unittest.TestCase):
         self.assertEqual(next(s['if'] for s in job['steps'] if s.get('name') ==
                               'Restore producer isolation when the transaction is safe'),
                          "always() && steps.retirement.outcome != 'success'")
+        self.assertIn('--expected-owner "$GITHUB_RUN_ID"',next(s['run'] for s in job['steps'] if
+                      s.get('name') == 'Restore producer isolation when the transaction is safe'))
         self.assertEqual(job['timeout-minutes'],330)
         for number, predecessor in ((1,'retire'),(2,'continue_1'),(3,'continue_2'),(4,'continue_3')):
             child=workflow['jobs'][f'continue_{number}']

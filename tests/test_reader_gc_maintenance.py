@@ -130,6 +130,56 @@ class MaintenanceTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError,'still active'):
                 maintenance.recover(Path(directory)/'journal.json')
 
+    def test_guarded_restore_uses_newer_durable_mutation_state(self):
+        local={'version':1,'kind':'reader-maintenance-journal','maintenance_id':'window',
+               'callback_owner_run_id':'123','repositories':{}}
+        current={**local,'callback_mutation_started':True,'callback_recovery_required':True}
+        class Store:
+            def read_bytes(self,bucket,path):return json.dumps(current).encode()
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(maintenance,'durable_store',return_value=Store()), \
+             patch.object(maintenance,'workflow_state',side_effect=AssertionError('must remain isolated')):
+            path=Path(directory)/'journal.json';path.write_text(json.dumps(local))
+            with self.assertRaisesRegex(RuntimeError,'callback recovery is required'):
+                maintenance.restore(path,expected_owner='123')
+            self.assertTrue(json.loads(path.read_text())['callback_mutation_started'])
+
+    def test_guarded_restore_rejects_foreign_or_missing_durable_owner(self):
+        local={'version':1,'kind':'reader-maintenance-journal','maintenance_id':'window',
+               'callback_owner_run_id':'123','repositories':{}}
+        class Store:
+            def read_bytes(self,bucket,path):
+                return json.dumps({**local,'maintenance_id':'foreign'}).encode()
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'journal.json';path.write_text(json.dumps(local))
+            with patch.object(maintenance,'durable_store',return_value=Store()):
+                with self.assertRaisesRegex(RuntimeError,'does not own'):
+                    maintenance.restore(path,expected_owner='123')
+            with patch.object(maintenance,'durable_store',return_value=None):
+                with self.assertRaisesRegex(RuntimeError,'durable owner'):
+                    maintenance.restore(path,expected_owner='123')
+            self.assertEqual(json.loads(path.read_text()),local)
+
+    def test_guarded_restore_uses_latest_safe_state_and_is_idempotent(self):
+        local={'version':1,'kind':'reader-maintenance-journal','maintenance_id':'window',
+               'callback_owner_run_id':'123','repositories':{}}
+        current={**local,'repositories':{'central/repo':{'permission_changed':False,'workflows':[
+            {'id':1,'path':'.github/workflows/pdf-account-worker.yml','state':'active'}],
+            'cancelled':[]}}}
+        class Store:
+            def read_bytes(self,bucket,path):return json.dumps(current).encode()
+        events=[]
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(maintenance,'durable_store',return_value=Store()), \
+             patch.object(maintenance,'journal'), patch.object(maintenance,'kick_restored'), \
+             patch.object(maintenance,'workflow_state',side_effect=lambda *args:events.append(args)):
+            path=Path(directory)/'journal.json';path.write_text(json.dumps(local))
+            maintenance.restore(path,expected_owner='123')
+            self.assertEqual(len(events),1)
+            current['restored']=True
+            maintenance.restore(path,expected_owner='123')
+            self.assertEqual(len(events),1)
+
     def test_other_maintenance_cannot_restore_a_committed_staged_callback(self):
         state={'version':1,'kind':'reader-maintenance-journal','repositories':{},
                'callback_owner_run_id':'123','callback_mutation_started':True,
