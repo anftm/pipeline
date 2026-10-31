@@ -71,8 +71,8 @@ jobs:
         run: python -B -m unittest tests.test_chm_retirement_wait tests.test_run_chm_epub_retirement tests.test_chm_epub_journal tests.test_chm_epub_publication_safety tests.test_chm_epub_withdrawal_preview tests.test_chm_epub_bundle_integrity tests.test_reader_bucket_store tests.test_reader_gc_cache tests.test_reader_gc_graph tests.test_reader_gc_fence tests.test_reader_gc_maintenance -q
       - name: Verify exact inventory and retire only after actual closure
         id: retirement
-        # Leave time inside the job for safe restoration and artifact upload
-        # if the read-only graph or a publication barrier takes too long.
+        # Reserve job time for restoration and artifact upload when possible;
+        # interruption still requires checking the durable recovery journal.
         timeout-minutes: 300
         env:
           CHM_STAGE: initial
@@ -119,8 +119,8 @@ jobs:
           python-version: '3.11'
       - run: pip install -r scripts/requirements.txt
       - name: Rebuild actual graph and verify a bounded deletion stage
-        # A timed-out continuation remains isolated for explicit recovery, but
-        # still gets a chance to upload the durable partial-deletion receipt.
+        # A timed-out continuation remains isolated for explicit recovery. The
+        # reserved time permits an artifact upload when the runner allows it.
         timeout-minutes: 300
         run: python -u -B scripts/run_chm_epub_retirement.py
       - uses: actions/upload-artifact@v7
