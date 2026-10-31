@@ -180,6 +180,19 @@ class MaintenanceTests(unittest.TestCase):
             maintenance.restore(path,expected_owner='123')
             self.assertEqual(len(events),1)
 
+    def test_guarded_restore_requires_expected_maintenance_window_when_given(self):
+        local={'version':1,'kind':'reader-maintenance-journal','maintenance_id':'a'*32,
+               'callback_owner_run_id':'123','repositories':{}}
+        class Store:
+            def read_bytes(self,bucket,path):return json.dumps(local).encode()
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(maintenance,'durable_store',return_value=Store()), \
+             patch.object(maintenance,'journal'), patch.object(maintenance,'kick_restored'):
+            path=Path(directory)/'journal.json';path.write_text(json.dumps(local))
+            with self.assertRaisesRegex(RuntimeError,'expected maintenance window'):
+                maintenance.restore(path,expected_owner='123',expected_maintenance_id='b'*32)
+            maintenance.restore(path,expected_owner='123',expected_maintenance_id='a'*32)
+
     def test_other_maintenance_cannot_restore_a_committed_staged_callback(self):
         state={'version':1,'kind':'reader-maintenance-journal','repositories':{},
                'callback_owner_run_id':'123','callback_mutation_started':True,

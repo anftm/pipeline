@@ -278,7 +278,7 @@ def kick_restored(path, state):
     journal(path, state)
 
 
-def restore(path, *, expected_owner=None):
+def restore(path, *, expected_owner=None, expected_maintenance_id=None):
     if not path.exists():
         return
     state = json.loads(path.read_text())
@@ -294,6 +294,10 @@ def restore(path, *, expected_owner=None):
         except FileNotFoundError as error:
             raise RuntimeError('guarded restoration requires its durable journal') from error
         current = json.loads(raw)
+        if expected_maintenance_id is not None and (
+                not re.fullmatch(r'[0-9a-f]{32}', str(expected_maintenance_id))
+                or current.get('maintenance_id') != expected_maintenance_id):
+            raise RuntimeError('guarded restoration does not own the expected maintenance window')
         if (current.get('version') != 1 or current.get('kind') != 'reader-maintenance-journal'
                 or not isinstance(current.get('repositories'), dict)
                 or not state.get('maintenance_id')
@@ -540,14 +544,18 @@ if __name__ == "__main__":
     parser.add_argument("operation", choices=["run", "restore", "preflight"])
     parser.add_argument("--journal", type=Path, required=True)
     parser.add_argument('--expected-owner', help='Require this run to own the latest durable journal')
+    parser.add_argument('--expected-maintenance-id', help='Require this exact durable maintenance window')
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--plan-only", action="store_true")
     parser.add_argument('--scope', choices=['unreferenced', 'retired-assets'], default='unreferenced')
     arguments = parser.parse_args()
     if arguments.limit < 0:
         parser.error("limit must be non-negative")
-    if arguments.expected_owner is not None and arguments.operation != 'restore':
-        parser.error('--expected-owner is only valid for restore')
+    if (arguments.expected_owner is not None or arguments.expected_maintenance_id is not None) \
+            and arguments.operation != 'restore':
+        parser.error('guarded owner and maintenance identity are only valid for restore')
+    if arguments.expected_maintenance_id is not None and arguments.expected_owner is None:
+        parser.error('--expected-maintenance-id requires --expected-owner')
     if arguments.operation == "preflight":
         inventory = preflight()
         journal(arguments.journal, {"preflight_only": True, "repositories": inventory,
@@ -561,4 +569,5 @@ if __name__ == "__main__":
         run(arguments.journal, limit=arguments.limit, apply=not arguments.plan_only,
             scope=arguments.scope, preserve_queued_runs=True)
     else:
-        restore(arguments.journal, expected_owner=arguments.expected_owner)
+        restore(arguments.journal, expected_owner=arguments.expected_owner,
+                expected_maintenance_id=arguments.expected_maintenance_id)
