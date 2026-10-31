@@ -22,8 +22,23 @@ concurrency:
   queue: max
 
 jobs:
-  retire:
+  wait_for_producers:
     if: github.repository == 'anftm/pipeline' && github.ref == 'refs/heads/main' && inputs.confirm == 'RETIRE-972'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 340
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Preserve and await existing producer work without mutation
+        run: python -u -B scripts/chm_retirement_wait.py
+
+  retire:
+    needs: wait_for_producers
+    if: needs.wait_for_producers.result == 'success' && github.repository == 'anftm/pipeline' && github.ref == 'refs/heads/main' && inputs.confirm == 'RETIRE-972'
     runs-on: ubuntu-24.04
     timeout-minutes: 330
     concurrency:
@@ -53,7 +68,7 @@ jobs:
       - name: Test exact scope, two-site handoff, isolation and recovery
         env:
           READER_GC_DURABLE_MAINTENANCE: 'false'
-        run: python -B -m unittest tests.test_run_chm_epub_retirement tests.test_chm_epub_journal tests.test_chm_epub_publication_safety tests.test_chm_epub_withdrawal_preview tests.test_chm_epub_bundle_integrity tests.test_reader_bucket_store tests.test_reader_gc_cache tests.test_reader_gc_graph tests.test_reader_gc_fence tests.test_reader_gc_maintenance -q
+        run: python -B -m unittest tests.test_chm_retirement_wait tests.test_run_chm_epub_retirement tests.test_chm_epub_journal tests.test_chm_epub_publication_safety tests.test_chm_epub_withdrawal_preview tests.test_chm_epub_bundle_integrity tests.test_reader_bucket_store tests.test_reader_gc_cache tests.test_reader_gc_graph tests.test_reader_gc_fence tests.test_reader_gc_maintenance -q
       - name: Verify exact inventory and retire only after actual closure
         id: retirement
         env:

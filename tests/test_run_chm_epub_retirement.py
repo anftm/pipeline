@@ -291,6 +291,8 @@ class RunChmRetirementTests(unittest.TestCase):
         workflow=yaml.safe_load(path.read_text())
         self.assertEqual(workflow['concurrency']['group'],'publish-ccrd-index')
         job=workflow['jobs']['retire']
+        self.assertEqual(job['needs'],'wait_for_producers')
+        self.assertIn('needs.wait_for_producers.result',job['if'])
         self.assertEqual(job['concurrency']['group'],'reader-global-maintenance')
         self.assertIn("inputs.confirm == 'RETIRE-972'",job['if'])
         trigger=workflow.get('on',workflow.get(True))['workflow_dispatch']['inputs']
