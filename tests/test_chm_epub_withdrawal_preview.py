@@ -514,6 +514,31 @@ class ChmWithdrawalPreviewTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'missing'):
             preflight.verify_preserved_chapter(Store(), self.manifest)
 
+    def test_chapter_closure_uses_one_fresh_complete_chm_listing_for_many_bundles(self):
+        bodies={};manifests=[]
+        for source in ('a'*64,'b'*64):
+            root=f'chapters/ebook/chm/{source}/'+('c'*16);path=root+'/chapter-manifest.json'
+            chapter=b'body';search=b'index'
+            value={'version':1,'kind':'epub-chapters','toc':[],
+                   'chapters':[{'index':1,'title':'one','path':'chapters/chapter-0001.xhtml',
+                                'bytes':len(chapter),'sha256':hashlib.sha256(chapter).hexdigest()}],
+                   'search_index':{'path':'epub-search-index.json.gz','bytes':len(search),
+                                   'sha256':hashlib.sha256(search).hexdigest()}}
+            bodies[path]=json.dumps(value).encode();bodies[root+'/chapters/chapter-0001.xhtml']=chapter
+            bodies[root+'/epub-search-index.json.gz']=search;manifests.append(path)
+        listings=[]
+        class Store:
+            def read_bytes(self,bucket,path):return bodies[path]
+            def list_files(self,bucket,prefixes):
+                listings.append(prefixes)
+                return {path for path in bodies if path.startswith(prefixes)}
+        result=preflight.verify_chm_reading_closure(Store(),manifests,workers=2)
+        self.assertEqual(result['manifests'],2)
+        self.assertEqual(listings,[('chapters/ebook/chm/',)])
+        bodies.pop(manifests[1].rsplit('/',1)[0]+'/chapters/chapter-0001.xhtml')
+        with self.assertRaisesRegex(ValueError,'missing'):
+            preflight.verify_chm_reading_closure(Store(),manifests,workers=2)
+
     def test_complete_chapter_bundle_version_detects_resource_changes(self):
         files = {'chapter-manifest.json': b'manifest', 'chapters/chapter-0001.xhtml': b'body',
                  'resources/image.png': b'image'}

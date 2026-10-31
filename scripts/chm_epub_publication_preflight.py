@@ -434,7 +434,7 @@ def preserved_chapter_closure(sidecars):
     return manifests
 
 
-def verify_preserved_chapter(store, path, *, hash_bodies=False):
+def verify_preserved_chapter(store, path, *, hash_bodies=False, listed=None):
     """Validate one manifest, complete bundle inventory, and optionally chapter bytes."""
     try:
         from . import reader_assets
@@ -452,7 +452,9 @@ def verify_preserved_chapter(store, path, *, hash_bodies=False):
                 r'[0-9a-f]{64}', str(entry.get('sha256', ''))):
             raise ValueError('invalid preserved CHM resource identity')
     root = path.rsplit('/', 1)[0]
-    listed = store.list_files(ASSETS, (root + '/',))
+    listed = store.list_files(ASSETS, (root + '/',)) if listed is None else set(listed)
+    if any(not item.startswith(root + '/') for item in listed):
+        raise ValueError('preserved CHM bundle listing includes a foreign path')
     required = {path}
     for entry in [*manifest['chapters'], manifest['search_index']]:
         relative = entry.get('path')
@@ -481,9 +483,23 @@ def verify_chm_reading_closure(store, manifests, *, workers=4, hash_bodies=False
     from concurrent.futures import ThreadPoolExecutor
     if len(set(manifests)) != len(manifests) or not manifests:
         raise ValueError('invalid CHM reading-manifest inventory')
+    # Re-list the entire qualified CHM tree once. Filtering a fresh complete
+    # listing into exact bundle roots avoids thousands of serial prefix scans;
+    # no pre-existing graph cache or prior preview is used as evidence.
+    roots = {path.rsplit('/',1)[0] for path in manifests if preview.MANIFEST.fullmatch(path)}
+    if len(roots) != len(manifests):
+        raise ValueError('invalid CHM reading-manifest inventory')
+    grouped = {root:set() for root in roots}
+    for path in store.list_files(ASSETS, ('chapters/ebook/chm/',)):
+        parts = path.split('/')
+        if len(parts) >= 6:
+            root = '/'.join(parts[:5])
+            if root in grouped:
+                grouped[root].add(path)
     checked = []
     def check(path):
-        result = verify_preserved_chapter(store, path, hash_bodies=hash_bodies)
+        result = verify_preserved_chapter(store, path, hash_bodies=hash_bodies,
+                                          listed=grouped[path.rsplit('/',1)[0]])
         if hash_bundle:
             result['immutable_bundle'] = verify_chm_immutable_bundle(store, path)
         return result
