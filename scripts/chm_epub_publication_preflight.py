@@ -857,7 +857,8 @@ def simulate_complete_withdrawal(store, overrides, rows, fence, *, workers=8, de
             raise ValueError('CHM controls changed during simulated graph traversal')
     if details is not None:
         details.update(graph=graph_view, live_control_sha256=before,
-                       overlay_paths=set(overlay), nonoverlay_roots=set(graph_view.root_hashes) - set(overlay))
+                       overlay_paths=set(overlay), nonoverlay_roots=set(graph_view.root_hashes) - set(overlay),
+                       overlay_sha256={key: digest(value) for key, value in overlay.items()})
     return {'graph_complete': True, 'target_count': len(targets), 'retained_targets': len(retained),
             'retained_target_paths': [{'bucket': b, 'path': p} for b, p in sorted(retained)],
             'protecting_trees': protecting_trees, 'origins': origins,

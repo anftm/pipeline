@@ -660,6 +660,84 @@ class ChmPublicationSafetyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'consumer moved'):
             safety.delete_exact_epub_batches(Store(), [row], Fence(), lambda *_: None, barrier=blocked)
 
+    def test_bounded_stage_keeps_all_unsubmitted_targets_and_resumes(self):
+        rows = [{'bucket': publication.ASSETS, 'path': f'native/ebook/chm/{i}/document.epub',
+                 'bytes': 1, 'sha256': safety.chm.digest(b'x')} for i in range(5)]
+        objects = {row['path']: b'x' for row in rows}
+        class Store:
+            def assert_chm_bucket_available(self):return True
+            def read_bytes(self,bucket,path):
+                if path not in objects:raise FileNotFoundError(path)
+                return objects[path]
+            def delete(self,bucket,paths):
+                for path in paths:objects.pop(path)
+        class Fence:
+            def check(self):pass
+        events=[]
+        batches,partial=safety.delete_exact_epub_batches(Store(),rows,Fence(),
+            lambda phase,batches,status:events.append(phase),barrier=lambda:None,batch_size=2,max_new_batches=1)
+        self.assertEqual(partial['confirmed_absent_objects'],2)
+        self.assertEqual(len(objects),3)
+        self.assertEqual(events[-1],'partial-stage-complete')
+        self.assertEqual(len(batches),1)
+        batches,final=safety.delete_exact_epub_batches(Store(),rows,Fence(),lambda *_:None,
+            barrier=lambda:None,batches=batches,batch_size=2,max_new_batches=2)
+        self.assertEqual(final['confirmed_absent_objects'],5)
+        self.assertEqual(len(batches),3)
+        self.assertTrue(all(batch['status']=='verified-absent' for batch in batches))
+
+    def test_graph_versions_require_every_get_etag_and_reject_changed_or_missing(self):
+        refs={(publication.ASSETS,'reader-index/root.json'):'a'*64,
+              (publication.ASSETS,'chapters/b/chapter-manifest.json'):'b'*64}
+        class Traversal:
+            loaded_digests=refs
+        class Store:
+            read_etags={ref:'"v1"' for ref in refs}
+            current={path:'"v1"' for _,path in refs}
+            def list_exact_versions(self,bucket,paths):return {p:self.current[p] for p in paths if p in self.current}
+        store=Store()
+        versions=safety.capture_graph_versions(store,Traversal())
+        self.assertEqual(set(versions),set(refs))
+        self.assertTrue(safety.recheck_graph_versions(store,versions))
+        store.current['chapters/b/chapter-manifest.json']='"changed"'
+        with self.assertRaisesRegex(ValueError,'version changed'):
+            safety.recheck_graph_versions(store,versions)
+        with self.assertRaisesRegex(ValueError,'changed between read'):
+            safety.capture_graph_versions(store,Traversal())
+        store.current['chapters/b/chapter-manifest.json']='W/"v1"'
+        with self.assertRaisesRegex(ValueError,'changed between read'):
+            safety.capture_graph_versions(store,Traversal())
+        store.current.pop('chapters/b/chapter-manifest.json')
+        with self.assertRaisesRegex(ValueError,'incomplete'):
+            safety.capture_graph_versions(store,Traversal())
+
+    def test_versioned_batch_barrier_rechecks_all_nested_documents_and_both_sites(self):
+        from unittest.mock import patch
+        bucket=publication.ASSETS;root=(bucket,'reader-index/root.json');nested=(bucket,'chapters/a/chapter-manifest.json')
+        digests={root:'a'*64,nested:'b'*64};versions={root:'"r1"',nested:'"n1"'}
+        class Traversal:
+            loaded_digests=digests
+        class Store:
+            def assert_buckets_available(self):pass
+            def list_exact_versions(self,bucket,paths):return {p:versions[(bucket,p)] for p in paths}
+        class Fence:
+            def check(self):pass
+        proof={'mode':'actual','graph_complete':True,'target_count':1,'retained_targets':0,'origins':[],
+               'ambiguous_paths':[],'blockers':[],'root_recheck_complete':True,'reader_acceptance_complete':True,
+               'root_members':[{'bucket':root[0],'path':root[1]}],
+               'root_sha256':[{'bucket':root[0],'path':root[1],'sha256':digests[root]}],
+               'closure_sha256':[{'bucket':b,'path':p,'sha256':d} for (b,p),d in digests.items()],
+               'retired_roots':[]}
+        rows=[{'bucket':bucket,'path':'native/ebook/chm/exact/document.epub'}]
+        with patch('scripts.reader_gc_collect.verify_roots') as rootcheck, \
+             patch.object(safety,'observe_planned_projection') as sites:
+            self.assertTrue(safety.recheck_actual_graph_by_version(Store(),Traversal(),proof,rows,
+                                                                  Fence(),None,{},versions))
+            rootcheck.assert_called_once();sites.assert_called_once()
+            versions.pop(nested)
+            with self.assertRaisesRegex(ValueError,'complete actual graph closure'):
+                safety.recheck_actual_graph_by_version(Store(),Traversal(),proof,rows,Fence(),None,{},versions)
+
     def test_progress_checkpoint_cannot_escape_narrow_audit_prefix(self):
         objects = {}
         class Store:

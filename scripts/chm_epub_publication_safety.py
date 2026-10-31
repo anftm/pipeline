@@ -321,6 +321,113 @@ def validate_delete_batch(rows, batch):
     return True
 
 
+def capture_graph_versions(store, traversal, *, omitted=()):
+    """Bind every parsed graph document to its GET-time and fresh listed ETag."""
+    omitted = set(omitted)
+    expected = set(traversal.loaded_digests) - omitted
+    observed = getattr(store, 'read_etags', {})
+    if not callable(getattr(store, 'list_exact_versions', None)):
+        raise RuntimeError('fresh exact graph version listing is unavailable')
+    versions = {}
+    for bucket in sorted({owner for owner, _ in expected}):
+        paths = {path for owner, path in expected if owner == bucket}
+        current = store.list_exact_versions(bucket, paths)
+        if set(current) != paths:
+            raise ValueError('fresh graph version listing is incomplete')
+        for path in paths:
+            ref = (bucket, path)
+            tag = current[path]
+            if (not isinstance(tag, str) or len(tag) < 3 or not tag.startswith('"')
+                    or not tag.endswith('"') or tag.startswith('W/') or tag != observed.get(ref)):
+                raise ValueError('graph document changed between read and fresh listing: ' + ':'.join(ref))
+            versions[ref] = tag
+    if set(versions) != expected:
+        raise ValueError('graph closure versions are incomplete')
+    return versions
+
+
+def recheck_graph_versions(store, versions):
+    """Compare every closure member with fresh current listing validators."""
+    if not versions or not callable(getattr(store, 'list_exact_versions', None)):
+        raise ValueError('complete fresh graph versions are required')
+    for bucket in sorted({owner for owner, _ in versions}):
+        expected = {path: tag for (owner, path), tag in versions.items() if owner == bucket}
+        if store.list_exact_versions(bucket, set(expected)) != expected:
+            raise ValueError('CHM graph document version changed after traversal: ' + bucket)
+    return True
+
+
+def recheck_actual_graph_by_version(store, traversal, proof, rows, fence, client, plan, versions):
+    """Per-batch full closure/version, root, producer and two-site barrier."""
+    try:
+        from . import reader_gc_collect as collector
+    except ImportError:
+        import reader_gc_collect as collector
+    require_actual_zero_graph(proof, rows)
+    closure = {(item['bucket'], item['path']): item['sha256'] for item in proof['closure_sha256']}
+    roots = {(item['bucket'], item['path']): item['sha256'] for item in proof['root_sha256']}
+    members = {(item['bucket'], item['path']) for item in proof['root_members']}
+    retired = {(item['bucket'], item['path']) for item in proof['retired_roots']}
+    if (len(closure) != len(proof['closure_sha256']) or set(closure) != set(versions)
+            or closure != traversal.loaded_digests or len(roots) != len(proof['root_sha256'])
+            or not (members - retired) <= set(roots)
+            or any(closure.get(key) != digest for key, digest in roots.items())):
+        raise ValueError('versioned CHM barrier lacks complete actual graph closure')
+    assert_all_buckets_available(store)
+    fence.check()
+    collector.verify_roots(store, traversal)
+    recheck_graph_versions(store, versions)
+    observe_planned_projection(store, client, plan)
+    fence.check()
+    return True
+
+
+def recheck_simulation_by_version(store, details, fence, *, versions, applied=None):
+    """Revalidate a simulated closure without treating its ETags as content hashes."""
+    try:
+        from . import reader_gc_collect as collector, reader_gc_graph as graph_module
+    except ImportError:
+        import reader_gc_collect as collector
+        import reader_gc_graph as graph_module
+    traversal = details['graph']
+    omitted = details['overlay_paths']
+    if set(versions) != set(traversal.loaded_digests) - omitted:
+        raise ValueError('versioned CHM simulation does not bind its entire closure')
+    assert_all_buckets_available(store)
+    fence.check()
+    if not applied:
+        collector.verify_roots(traversal.store, traversal)
+    else:
+        for bucket in traversal.files:
+            if bucket == graph_module.ccrd_lifecycle.BUCKET:
+                roots = {p for p in store.list_files(bucket, ('control/', 'current.json'))
+                         if graph_module.is_root(p, bucket)}
+            else:
+                parents = {p.rsplit('/', 1)[0] + '/' for p in traversal.root_names.get(bucket, set())
+                           if not p.startswith('reader-index/') and '/' in p}
+                roots = {p for p in store.list_roots(bucket, parents) if graph_module.is_root(p, bucket)}
+            planned_missing = {p for (owner, p), old in details['live_control_sha256'].items()
+                               if owner == bucket and old is None and graph_module.is_root(p, bucket)}
+            staged_new = {p for p in applied if (bucket, p) in omitted}
+            expected = {p for p in traversal.files[bucket] if graph_module.is_root(p, bucket)}
+            expected -= planned_missing - staged_new
+            if roots != expected:
+                raise ValueError('CHM root inventory changed after staged publication')
+    current = dict(details['live_control_sha256'])
+    for path, raw in (applied or {}).items():
+        current[(chm.ASSETS, path)] = chm.digest(raw)
+    for ref, digest in sorted(current.items()):
+        try:
+            actual = store.digest(*ref)
+        except FileNotFoundError:
+            actual = None
+        if actual != digest:
+            raise ValueError('CHM live input changed after simulation: ' + ':'.join(ref))
+    recheck_graph_versions(store, versions)
+    fence.check()
+    return True
+
+
 def recheck_actual_graph(store, traversal, proof, rows, fence, client, plan):
     """Repeat root membership and SHA checks immediately before deletion."""
     from concurrent.futures import ThreadPoolExecutor
@@ -888,11 +995,14 @@ def compare_before_write(store, path, before_digest, after):
     return True
 
 
-def delete_exact_epub_batches(store, rows, fence, checkpoint, *, barrier, batches=None, batch_size=100):
+def delete_exact_epub_batches(store, rows, fence, checkpoint, *, barrier, batches=None, batch_size=100,
+                              max_new_batches=None):
     """Delete only submitted exact keys, recording partial outcomes durably."""
     import copy
     if not 1 <= batch_size <= 100:
         raise ValueError('invalid CHM deletion batch size')
+    if max_new_batches is not None and (type(max_new_batches) is not int or max_new_batches < 1):
+        raise ValueError('invalid CHM per-stage batch limit')
     if not callable(barrier):
         raise ValueError('CHM per-batch root and consumer barrier is required')
     progress = copy.deepcopy(batches or [])
@@ -906,7 +1016,12 @@ def delete_exact_epub_batches(store, rows, fence, checkpoint, *, barrier, batche
     work = list(progress)
     work.extend({'bucket': chm.ASSETS, 'paths': [r['path'] for r in remaining[i:i + batch_size]],
                  'status': 'new'} for i in range(0, len(remaining), batch_size))
+    attempted = 0
     for batch in work:
+        if batch['status'] == 'verified-absent':
+            continue
+        if max_new_batches is not None and attempted >= max_new_batches:
+            break
         refs = [(batch['bucket'], p) for p in batch['paths']]
         validate_delete_batch(rows, refs)
         fence.check()
@@ -942,6 +1057,7 @@ def delete_exact_epub_batches(store, rows, fence, checkpoint, *, barrier, batche
                 continue
             raise ValueError('CHM EPUB remains readable after deletion: ' + ref[1])
         batch['status'] = 'verified-absent'
+        attempted += 1
         completed = {(entry['bucket'], p) for entry in progress
                      if entry['status'] == 'verified-absent' for p in entry['paths']}
         status = {'confirmed_absent_objects': len(completed),
@@ -949,7 +1065,10 @@ def delete_exact_epub_batches(store, rows, fence, checkpoint, *, barrier, batche
         checkpoint('batch-verified', progress, status)
     status = reconcile_epub_deletions(store, rows, progress)
     if status['present_objects'] or status['confirmed_absent_objects'] != len(rows):
-        raise ValueError('not every reviewed CHM EPUB is absent')
+        if max_new_batches is None:
+            raise ValueError('not every reviewed CHM EPUB is absent')
+        checkpoint('partial-stage-complete', progress, serializable(status))
+        return progress, serializable(status)
     checkpoint('all-direct-reads-absent', progress, serializable(status))
     return progress, serializable(status)
 
@@ -965,7 +1084,8 @@ def write_exact_progress(store, path, state):
 
 
 def run_guarded_retirement(store, fence, client, plan, rows, *, preflight, persist, save_plan,
-                           publish_pages, chapter_evidence, processing_updates, acknowledge_timeout=1200):
+                           publish_pages, chapter_evidence, processing_updates, acknowledge_timeout=1200,
+                           simulation_details=None, stop_after_handoff=False):
     """Execute a freshly planned CHM withdrawal with fail-closed phase barriers.
 
     The caller supplies durable plan/preflight evidence and a serialized
@@ -989,13 +1109,20 @@ def run_guarded_retirement(store, fence, client, plan, rows, *, preflight, persi
     if reviewed_processing['updates'] != processing_updates:
         raise ValueError('CHM processing protection plan changed before publication')
     overlays = {**plan['overrides'], **{path: item['after'] for path, item in processing_updates.items()}}
-    simulation_details = {}
-    fresh_preflight = chm.simulate_complete_withdrawal(store, overlays, rows, fence,
-                          workers=8, deadline_minutes=300, immutable=plan['immutable'], details=simulation_details)
-    if (fresh_preflight.get('graph_complete') is not True or fresh_preflight.get('retained_targets') != 0
-            or fresh_preflight.get('target_count') != len(rows)):
-        raise ValueError('current simulated CHM graph has unresolved references')
-    preflight = fresh_preflight
+    if simulation_details is None:
+        simulation_details = {}
+        fresh_preflight = chm.simulate_complete_withdrawal(store, overlays, rows, fence,
+                              workers=8, deadline_minutes=300, immutable=plan['immutable'], details=simulation_details)
+        if (fresh_preflight.get('graph_complete') is not True or fresh_preflight.get('retained_targets') != 0
+                or fresh_preflight.get('target_count') != len(rows)):
+            raise ValueError('current simulated CHM graph has unresolved references')
+        preflight = fresh_preflight
+    else:
+        if (simulation_details.get('overlay_sha256') != {
+                (chm.ASSETS, path): chm.digest(raw) for path, raw in {**overlays, **plan['immutable']}.items()}
+                or set(simulation_details.get('overlay_paths', ())) != set(simulation_details.get('overlay_sha256', {}))
+                or not simulation_details.get('graph')):
+            raise ValueError('CHM simulated graph is not bound to the exact planned overlay')
     before = confirm_initial_snapshot(store, plan)
     old_catalogs = {}
     for generation in (plan['current_v3_generation'], plan['old_v3_generation']):
@@ -1026,7 +1153,13 @@ def run_guarded_retirement(store, fence, client, plan, rows, *, preflight, persi
     chapter_bundle_inventory = [{'root':row['manifest'].rsplit('/',1)[0], 'count':row['bundle_objects'],
                                  'paths_sha256':row['bundle_paths_sha256']} for row in preserved_chapters]
     require_initial_chapter_inventory(store, chapter_bundle_inventory)
-    recheck_simulation_inputs(store, simulation_details, fence)
+    versions = None
+    if stop_after_handoff:
+        versions = capture_graph_versions(store, simulation_details['graph'],
+                                          omitted=simulation_details['overlay_paths'])
+        recheck_simulation_by_version(store, simulation_details, fence, versions=versions)
+    else:
+        recheck_simulation_inputs(store, simulation_details, fence)
     save_plan(plan, before, processing_updates)
     state = {'kind': 'chm-epub-retirement', 'complete': False, 'target_count': len(rows),
              'confirmed_deleted_objects': 0, 'confirmed_deleted_bytes': 0, 'batches': [],
@@ -1064,14 +1197,22 @@ def run_guarded_retirement(store, fence, client, plan, rows, *, preflight, persi
         state['consumer_receipts'] = reports
         persist('both-readers-accepted', state, before)
         verify_live_chm_controls_before_retirement(store, plan, staged)
-        recheck_simulation_inputs(store, simulation_details, fence,
-                                  applied={**plan['immutable'], **staged})
+        if versions is not None:
+            recheck_simulation_by_version(store, simulation_details, fence, versions=versions,
+                                          applied={**plan['immutable'], **staged})
+        else:
+            recheck_simulation_inputs(store, simulation_details, fence,
+                                      applied={**plan['immutable'], **staged})
         state['retirement_started'] = True
         persist('retirement-started', state, before)
         apply_acknowledged_controls(store, plan, before, staged, client, fence, checkpoint)
         validate_document_reset_identity(plan, reports)
         apply_processing_protection_updates(store, rows, fence, client, plan, processing_updates, checkpoint)
         persist('chm-references-retired', state, before)
+        if stop_after_handoff:
+            state['handoff_complete'] = True
+            persist('handoff-complete', state, before)
+            return state
         actual, traversal = actual_graph_evidence(store, fence, client, rows, plan)
         require_actual_zero_graph(actual, rows)
         state['actual_graph_verified'] = True

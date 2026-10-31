@@ -117,6 +117,60 @@ class MaintenanceTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError,'still active'):
                 maintenance.recover(Path(directory)/'journal.json')
 
+    def test_staged_callback_yields_without_restoring_and_persists_its_owner(self):
+        active={'value':True}
+        def api(repo,path,*,method='GET',body=None):
+            if path=='actions/workflows/1':return {'state':'active' if active['value'] else 'disabled_manually'}
+            if path.endswith('/disable'):active['value']=False;return {}
+            if path.endswith('/enable'):active['value']=True;return {}
+            raise AssertionError(path)
+        def pages(repo,path,field):
+            return ([{'id':1,'state':'active','path':'.github/workflows/pdf-account-worker.yml'}]
+                    if path=='actions/workflows' else [])
+        def callback(state):
+            state.update(callback_mutation_started=True,callback_recovery_required=True,
+                         callback_handoff_ready=True,callback_handoff_stage='references-retired',
+                         callback_handoff_owner_run_id='123')
+            return {'phase':'handoff-complete','handoff_complete':True}
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ,{'GITHUB_RUN_ID':'123'}), \
+             patch.object(maintenance,'producer_repositories',return_value=['central/repo']), \
+             patch.object(maintenance,'load_config',return_value={'publisher_repository':'central/repo'}), \
+             patch.object(maintenance,'pages',side_effect=pages), patch.object(maintenance,'api',side_effect=api):
+            path=Path(directory)/'journal.json'
+            result=maintenance.run(path,isolated_callback=callback,require_callback_commit=True,
+                                   allow_staged_handoff=True,preserve_queued_runs=True)
+            self.assertEqual(result['phase'],'handoff-complete')
+            self.assertFalse(active['value'])
+            saved=json.loads(path.read_text())
+            self.assertTrue(saved['callback_handoff_ready'])
+            self.assertTrue(saved['callback_recovery_required'])
+            with self.assertRaisesRegex(RuntimeError,'recovery is required'):
+                maintenance.restore(path)
+
+    def test_staged_callback_exception_never_counts_as_a_clean_handoff(self):
+        active={'value':True}
+        def api(repo,path,*,method='GET',body=None):
+            if path=='actions/workflows/1':return {'state':'active' if active['value'] else 'disabled_manually'}
+            if path.endswith('/disable'):active['value']=False;return {}
+            if path.endswith('/enable'):active['value']=True;return {}
+            raise AssertionError(path)
+        def pages(repo,path,field):
+            return ([{'id':1,'state':'active','path':'.github/workflows/pdf-account-worker.yml'}]
+                    if path=='actions/workflows' else [])
+        def callback(state):
+            state.update(callback_mutation_started=True,callback_recovery_required=True,
+                         callback_handoff_ready=True,callback_handoff_stage='references-retired',
+                         callback_handoff_owner_run_id='123')
+            raise ValueError('failed after handoff marker')
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ,{'GITHUB_RUN_ID':'123'}), \
+             patch.object(maintenance,'producer_repositories',return_value=['central/repo']), \
+             patch.object(maintenance,'load_config',return_value={'publisher_repository':'central/repo'}), \
+             patch.object(maintenance,'pages',side_effect=pages), patch.object(maintenance,'api',side_effect=api):
+            with self.assertRaisesRegex(RuntimeError,'producers remain isolated'):
+                maintenance.run(Path(directory)/'journal.json',isolated_callback=callback,
+                                require_callback_commit=True,allow_staged_handoff=True)
+            self.assertFalse(active['value'])
+
     def test_bounded_window_preserves_queued_producer_work(self):
         state = {'active': True}
         calls = []

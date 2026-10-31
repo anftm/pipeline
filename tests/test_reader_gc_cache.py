@@ -13,6 +13,26 @@ from scripts import reader_gc_documents as gc, reader_document_reset as reset
 
 
 class CacheTests(unittest.TestCase):
+    def test_fresh_exact_version_listing_is_scoped_and_fails_closed(self):
+        store=S3BucketStore.__new__(S3BucketStore)
+        store.list_workers=2
+        store._location=Mock(return_value=('namespace','bucket'))
+        values={'chapters/a/index.json':'"version-a"','chapters/b/index.json':'"version-b"',
+                'chapters/other/index.json':'"ignored"'}
+        class Paginator:
+            def paginate(self, Bucket, Prefix):
+                return [{'Contents':[{'Key':path,'ETag':etag} for path,etag in values.items()
+                                      if path.startswith(Prefix)]}]
+        client=Mock();client.get_paginator.return_value=Paginator();store._client=Mock(return_value=client)
+        paths={'chapters/a/index.json','chapters/b/index.json'}
+        self.assertEqual(store.list_exact_versions('bucket',paths),{p:values[p] for p in paths})
+        values['chapters/b/index.json']='W/"weak"'
+        with self.assertRaisesRegex(ValueError,'strong'):
+            store.list_exact_versions('bucket',paths)
+        values.pop('chapters/b/index.json')
+        with self.assertRaisesRegex(ValueError,'disappeared'):
+            store.list_exact_versions('bucket',paths)
+
     def test_persisted_cache_needs_current_etag_and_regular_reads_stay_fresh(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'cache.sqlite3'

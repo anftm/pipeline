@@ -402,6 +402,73 @@ class S3BucketStore:
             (key, item.get('ETag')) for key, item in top.items() if cacheable(key))
         return roots
 
+    def list_exact_versions(self, bucket: str, paths: set[str], *, max_prefixes=32) -> dict[str, str]:
+        """Fresh current ETags for exact keys, using bounded flat S3 listings.
+
+        The caller chooses exact keys; sibling objects are ignored. A missing or
+        weak validator is never proof that a previously read document survived.
+        """
+        if not isinstance(paths, set) or any(not isinstance(path, str) or not path for path in paths):
+            raise ValueError('invalid exact object-version inventory')
+        if not paths:
+            return {}
+        namespace, name = self._location(bucket)
+        client = self._client(namespace)
+
+        def common_directory(selected):
+            common = os.path.commonprefix(sorted(selected))
+            return common[:common.rfind('/') + 1]
+
+        # Compress through shared directory components before grouping. This
+        # avoids listing the entire bucket for a small, tightly scoped closure.
+        prefixes = [(common_directory(paths), paths)]
+        while True:
+            expansion = None
+            for index, (prefix, selected) in enumerate(prefixes):
+                if len(selected) <= 8192:
+                    continue
+                parts = {}
+                for path in selected:
+                    next_slash = path.find('/', len(prefix))
+                    child = path[:next_slash + 1] if next_slash >= 0 else path
+                    parts.setdefault(child, set()).add(path)
+                if len(parts) <= 1 or len(prefixes) - 1 + len(parts) > max_prefixes:
+                    continue
+                expansion = index, [(common_directory(values) if len(values) > 1 else child, values)
+                                    for child, values in sorted(parts.items())]
+                break
+            if expansion is None:
+                break
+            index, replacement = expansion
+            prefixes[index:index + 1] = replacement
+
+        def one(item):
+            prefix, selected = item
+            found = {}
+            def listing():
+                found.clear()  # never combine pages from different retry attempts
+                for page in client.get_paginator('list_objects_v2').paginate(Bucket=name, Prefix=prefix):
+                    for value in page.get('Contents', []):
+                        key = value['Key']
+                        if key in selected:
+                            found[key] = value.get('ETag')
+                    if len(found) == len(selected):
+                        break
+            retry_s3(listing)
+            return found
+
+        found = {}
+        workers = max(1, min(getattr(self, 'list_workers', 4), len(prefixes)))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+            for values in pool.map(one, prefixes):
+                found.update(values)
+        if set(found) != paths:
+            raise ValueError('exact graph object disappeared from fresh S3 listing')
+        if any(not isinstance(etag, str) or not re.fullmatch(r'"[^"\r\n]+"', etag)
+               for etag in found.values()):
+            raise ValueError('exact graph object lacks a strong S3 validator')
+        return found
+
     def _cached(self, bucket, path, parser):
         cache = getattr(self, 'read_cache', None)
         etag = getattr(self, 'object_etags', {}).get(bucket, {}).get(path)

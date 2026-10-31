@@ -353,7 +353,8 @@ def restore(path):
 
 
 def run(path, *, limit=0, apply=True, scope='unreferenced', isolated_callback=None,
-        suppress_resume_dispatch=False, preserve_queued_runs=False, require_callback_commit=False):
+        suppress_resume_dispatch=False, preserve_queued_runs=False, require_callback_commit=False,
+        allow_staged_handoff=False):
     if scope not in {'unreferenced', 'retired-assets'}:
         raise ValueError('invalid automatic collection scope')
     central = load_config()["publisher_repository"]
@@ -373,6 +374,7 @@ def run(path, *, limit=0, apply=True, scope='unreferenced', isolated_callback=No
         state['resumption_dispatches'] = {'pdf-lane-watchdog.yml': 'suppressed',
                                           'reader-v3-publish.yml': 'suppressed'}
     journal(path, state)
+    callback_handed_off = False
     try:
         # A read-only preflight checks every credential and inventory before the
         # first disable. A missing worker token must fail here, not mid-isolation.
@@ -436,7 +438,14 @@ def run(path, *, limit=0, apply=True, scope='unreferenced', isolated_callback=No
                     journal(path, state)
                 raise
             if require_callback_commit and state.get('callback_mutation_started'):
-                if not state.get('callback_committed') or state.get('callback_recovery_required'):
+                handed_off = (allow_staged_handoff and state.get('callback_recovery_required') is True
+                              and state.get('callback_handoff_ready') is True
+                              and state.get('callback_handoff_owner_run_id') == state.get('callback_owner_run_id')
+                              and state.get('callback_handoff_stage') == 'references-retired'
+                              and isinstance(outcome, dict) and outcome.get('handoff_complete') is True
+                              and outcome.get('phase') == 'handoff-complete')
+                callback_handed_off = handed_off
+                if not handed_off and (not state.get('callback_committed') or state.get('callback_recovery_required')):
                     state['callback_recovery_required'] = True
                     journal(path, state)
                     raise RuntimeError('callback requires recovery; keep producers isolated')
@@ -466,28 +475,34 @@ def run(path, *, limit=0, apply=True, scope='unreferenced', isolated_callback=No
                 raise RuntimeError("collector deadline exceeded")
             time.sleep(30)
     finally:
-        if require_callback_commit and state.get('callback_mutation_started') and not state.get('callback_committed'):
-            state['callback_recovery_required'] = True
+        if (callback_handed_off and allow_staged_handoff and state.get('callback_mutation_started') and not state.get('callback_committed')
+                and state.get('callback_recovery_required') is True and state.get('callback_handoff_ready') is True
+                and state.get('callback_handoff_owner_run_id') == state.get('callback_owner_run_id')
+                and state.get('callback_handoff_stage') == 'references-retired'):
             journal(path, state)
-            raise RuntimeError('callback requires recovery; producers remain isolated')
-        if state.get("dispatch_requested") and not state.get("collector_run_id"):
-            matching = [task for task in pages(central,
-                "actions/workflows/reader-gc-collect.yml/runs", "workflow_runs")
-                if state["maintenance_id"] in task.get("display_title", "")]
-            if not matching:
-                raise RuntimeError("collector dispatch outcome unknown; recover journal before restoring producers")
-            state["collector_run_id"] = matching[0]["id"]
-            journal(path, state)
-        if state.get("collector_run_id"):
-            task = api(central, f"actions/runs/{state['collector_run_id']}")
-            if task["status"] != "completed":
-                api(central, f"actions/runs/{task['id']}/cancel", method="POST")
-                deadline = time.monotonic() + 600
-                while api(central, f"actions/runs/{task['id']}")["status"] != "completed":
-                    if time.monotonic() >= deadline:
-                        raise RuntimeError("collector still running; keep producers isolated and recover journal")
-                    time.sleep(10)
-        restore(path)
+        else:
+            if require_callback_commit and state.get('callback_mutation_started') and not state.get('callback_committed'):
+                state['callback_recovery_required'] = True
+                journal(path, state)
+                raise RuntimeError('callback requires recovery; producers remain isolated')
+            if state.get("dispatch_requested") and not state.get("collector_run_id"):
+                matching = [task for task in pages(central,
+                    "actions/workflows/reader-gc-collect.yml/runs", "workflow_runs")
+                    if state["maintenance_id"] in task.get("display_title", "")]
+                if not matching:
+                    raise RuntimeError("collector dispatch outcome unknown; recover journal before restoring producers")
+                state["collector_run_id"] = matching[0]["id"]
+                journal(path, state)
+            if state.get("collector_run_id"):
+                task = api(central, f"actions/runs/{state['collector_run_id']}")
+                if task["status"] != "completed":
+                    api(central, f"actions/runs/{task['id']}/cancel", method="POST")
+                    deadline = time.monotonic() + 600
+                    while api(central, f"actions/runs/{task['id']}")["status"] != "completed":
+                        if time.monotonic() >= deadline:
+                            raise RuntimeError("collector still running; keep producers isolated and recover journal")
+                        time.sleep(10)
+            restore(path)
 
 
 if __name__ == "__main__":
