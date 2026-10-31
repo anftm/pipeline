@@ -3,12 +3,25 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+import ast
 from unittest.mock import patch
 
 from scripts import reader_gc_maintenance as maintenance
 
 
 class MaintenanceTests(unittest.TestCase):
+    def test_cli_maintenance_always_preserves_queued_runs(self):
+        tree = ast.parse(Path(maintenance.__file__).read_text(encoding='utf-8'))
+        entry = next(node for node in tree.body if isinstance(node, ast.If)
+                     and isinstance(node.test, ast.Compare)
+                     and isinstance(node.test.left, ast.Name) and node.test.left.id == '__name__')
+        calls = [node for node in ast.walk(entry) if isinstance(node, ast.Call)
+                 and isinstance(node.func, ast.Name) and node.func.id == 'run']
+        self.assertEqual(len(calls), 1)
+        keywords = {item.arg: item.value for item in calls[0].keywords}
+        self.assertIsInstance(keywords.get('preserve_queued_runs'), ast.Constant)
+        self.assertIs(keywords['preserve_queued_runs'].value, True)
+
     def setUp(self):
         # These are offline fixtures. A production Actions environment may set
         # durable maintenance globally; never let a unit test touch that bucket.

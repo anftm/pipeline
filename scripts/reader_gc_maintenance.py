@@ -528,6 +528,11 @@ if __name__ == "__main__":
                                     "remote_writes": 0})
         print(f"GET-only maintenance preflight passed for {len(inventory)} repositories")
     elif arguments.operation == "run":
-        run(arguments.journal, limit=arguments.limit, apply=not arguments.plan_only, scope=arguments.scope)
+        # Scheduled maintenance must not cancel the user's queued producer runs.
+        # The independent collector fence still rejects any queued run that is
+        # not demonstrably isolated, so preserving work can block collection but
+        # never grants deletion authority.
+        run(arguments.journal, limit=arguments.limit, apply=not arguments.plan_only,
+            scope=arguments.scope, preserve_queued_runs=True)
     else:
         restore(arguments.journal)
