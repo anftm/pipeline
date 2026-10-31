@@ -498,7 +498,9 @@ class S3BucketStore:
                 raw = body.read()
             finally:
                 body.close()
-            if response.get('ContentLength') is not None and len(raw) != response['ContentLength']:
+            if type(response.get('ContentLength')) is not int or response['ContentLength'] < 0:
+                raise ValueError('Reader S3 object has no exact content length')
+            if len(raw) != response['ContentLength']:
                 raise OSError('short Reader S3 object read')
             self._remember_etag(bucket, path, response)
             import hashlib
@@ -534,7 +536,9 @@ class S3BucketStore:
                 result = parser(chunks(), path.endswith(".gz"))
             finally:
                 body.close()
-            if response.get('ContentLength') is not None and length != response['ContentLength']:
+            if type(response.get('ContentLength')) is not int or response['ContentLength'] < 0:
+                raise ValueError('Reader S3 graph object has no exact content length')
+            if length != response['ContentLength']:
                 raise OSError('short Reader S3 graph object read')
             self._remember_etag(bucket, path, response)
             if default_parser:

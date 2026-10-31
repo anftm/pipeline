@@ -204,7 +204,7 @@ class ReaderBucketStoreTests(unittest.TestCase):
     def test_read_closes_the_response_body(self):
         body = io.BytesIO(b"json")
         client = Mock()
-        client.get_object.return_value = {"Body": body}
+        client.get_object.return_value = {"Body": body, "ContentLength": 4}
         self.assertEqual(self.store(client).read_bytes("bucket", "path"), b"json")
         self.assertTrue(body.closed)
 
@@ -215,7 +215,8 @@ class ReaderBucketStoreTests(unittest.TestCase):
             def read(self, size=-1):
                 raise ResponseStreamingError(error="connection reset")
         client = Mock()
-        client.get_object.side_effect = [{"Body": Broken()}, {"Body": io.BytesIO(b'{"files": {}}'), "ETag": '"e"'}]
+        client.get_object.side_effect = [{"Body": Broken()}, {"Body": io.BytesIO(b'{"files": {}}'),
+                                         "ContentLength": len(b'{"files": {}}'), "ETag": '"e"'}]
         store = self.store(client)
         with patch("scripts.reader_bucket_store.time.sleep"):
             payload, _digest = store.read_graph_json("vomebook/reader-assets-v2", "reader-index/root.json")

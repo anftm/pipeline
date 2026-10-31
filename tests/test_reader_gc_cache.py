@@ -81,7 +81,8 @@ class CacheTests(unittest.TestCase):
             store.object_etags = {'bucket': {'reader-index/a.json': 'etag1'}}
             store._location = Mock(return_value=('namespace', 'bucket'))
             client = Mock()
-            client.get_object.return_value = {'Body': io.BytesIO(b'{"kind":"changed"}'), 'ETag': 'etag2'}
+            client.get_object.return_value = {'Body': io.BytesIO(b'{"kind":"changed"}'), 'ETag': 'etag2',
+                                              'ContentLength':len(b'{"kind":"changed"}')}
             store._client = Mock(return_value=client)
             self.assertEqual(store.read_cached_bytes('bucket', 'reader-index/a.json'), raw)
             client.get_object.assert_not_called()
@@ -117,8 +118,10 @@ class CacheTests(unittest.TestCase):
         client=Mock();store._client=Mock(return_value=client)
         for length in (None, -1, True, '2'):
             client.get_object.side_effect=lambda **_: {'Body':io.BytesIO(b'{}'),'ContentLength':length}
-            with self.subTest(length=length), self.assertRaisesRegex(ValueError,'no exact content length'):
-                store.digest('bucket','reader-index/test.json')
+            for method in (store.read_bytes,store.read_graph_json,store.digest):
+                with self.subTest(length=length,method=method.__name__), \
+                     self.assertRaisesRegex(ValueError,'no exact content length'):
+                    method('bucket','reader-index/test.json')
 
     def test_graph_parser_never_reuses_old_cache_with_omitted_nested_references(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -134,7 +137,7 @@ class CacheTests(unittest.TestCase):
             store.object_etags = {'bucket': {path: 'etag1'}}
             store._location = Mock(return_value=('namespace', 'bucket'))
             client = Mock()
-            client.get_object.return_value = {'Body': io.BytesIO(raw), 'ETag': 'etag1'}
+            client.get_object.return_value = {'Body': io.BytesIO(raw), 'ETag': 'etag1', 'ContentLength':len(raw)}
             store._client = Mock(return_value=client)
             parsed, observed = store.read_graph_json('bucket', path)
             self.assertEqual(parsed['files']['book']['text'][0]['path'], 'text/objects/x.txt')
