@@ -1201,6 +1201,11 @@ def delete_exact_epub_batches(store, rows, fence, checkpoint, *, barrier, batche
             # The previous graph may have been scanned hours earlier. Recheck
             # both consumers and every actual root immediately before each POST.
             barrier()
+            # A full closure barrier can itself take hours. Do not delete a
+            # target merely because its bytes matched before that long wait:
+            # independently re-read every remaining exact key after the
+            # barrier. A missing, shortened or changed body stops this batch.
+            verify_exact_epub_targets(store, [by_key[(batch['bucket'], path)] for path in existing])
             fence.check()
             store.delete(chm.ASSETS, existing)
         assert_bucket_available(store)

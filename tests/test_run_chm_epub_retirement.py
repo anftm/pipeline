@@ -300,6 +300,7 @@ class RunChmRetirementTests(unittest.TestCase):
         self.assertIn('tests.test_chm_epub_journal',next(s['run'] for s in job['steps'] if 'Test exact' in s.get('name','')))
         self.assertEqual(next(s['id'] for s in job['steps'] if s.get('name') ==
                               'Verify exact inventory and retire only after actual closure'),'retirement')
+        self.assertEqual(next(s['timeout-minutes'] for s in job['steps'] if s.get('id') == 'retirement'),300)
         self.assertEqual(next(s['if'] for s in job['steps'] if s.get('name') ==
                               'Restore producer isolation when the transaction is safe'),
                          "always() && steps.retirement.outcome != 'success'")
@@ -309,12 +310,16 @@ class RunChmRetirementTests(unittest.TestCase):
             self.assertEqual(child['needs'],predecessor)
             self.assertEqual(child['timeout-minutes'],330)
             self.assertEqual(child['env']['CHM_STAGE'],'continue')
+            self.assertEqual(next(s['timeout-minutes'] for s in child['steps'] if
+                                  s.get('name','').startswith('Rebuild actual graph')),300)
         remaining=workflow['jobs']['continue_remaining']
         self.assertEqual(remaining['needs'],'continue_4')
         self.assertEqual(remaining['strategy']['max-parallel'],1)
         self.assertTrue(remaining['strategy']['fail-fast'])
         self.assertEqual(remaining['strategy']['matrix']['batch'],[5,6,7,8,9,10,11])
         self.assertEqual(remaining['env']['CHM_STAGE'],'continue')
+        self.assertEqual(next(s['timeout-minutes'] for s in remaining['steps'] if
+                              s.get('name','').startswith('Rebuild actual graph')),300)
         self.assertEqual(workflow['jobs']['restore_after_stages']['needs'][-1],'continue_remaining')
         self.assertEqual(workflow['jobs']['restore_after_stages']['if'],
                          "always() && needs.continue_remaining.result == 'success'")

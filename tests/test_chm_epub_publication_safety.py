@@ -743,6 +743,49 @@ class ChmPublicationSafetyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'consumer moved'):
             safety.delete_exact_epub_batches(Store(), [row], Fence(), lambda *_: None, barrier=blocked)
 
+    def test_target_changed_or_missing_during_long_barrier_is_never_deleted(self):
+        row={'bucket':publication.ASSETS,'path':'native/ebook/chm/a/document.epub',
+             'bytes':3,'sha256':safety.chm.digest(b'one')}
+        for replacement in (b'two', b'o', None):
+            with self.subTest(replacement=replacement):
+                objects={row['path']:b'one'}; events=[]
+                class Store:
+                    def assert_chm_bucket_available(self):return True
+                    def read_bytes(self, bucket, path):
+                        if path not in objects:raise FileNotFoundError(path)
+                        return objects[path]
+                    def delete(self, bucket, paths):raise AssertionError('must not delete')
+                class Fence:
+                    def check(self):pass
+                def barrier():
+                    if replacement is None:objects.pop(row['path'])
+                    else:objects[row['path']]=replacement
+                with self.assertRaises((ValueError,FileNotFoundError)):
+                    safety.delete_exact_epub_batches(Store(),[row],Fence(),
+                        lambda phase,batches,status:events.append((phase,copy.deepcopy(batches))),barrier=barrier)
+                self.assertEqual(events[-1][0],'batch-submitted')
+                self.assertEqual(events[-1][1][0]['status'],'submitted')
+
+    def test_successful_batch_rechecks_body_after_barrier_and_before_delete(self):
+        row={'bucket':publication.ASSETS,'path':'native/ebook/chm/a/document.epub',
+             'bytes':3,'sha256':safety.chm.digest(b'one')}
+        objects={row['path']:b'one'};events=[]
+        class Store:
+            def assert_chm_bucket_available(self):return True
+            def read_bytes(self,bucket,path):
+                events.append('read')
+                if path not in objects:raise FileNotFoundError(path)
+                return objects[path]
+            def delete(self,bucket,paths):
+                events.append('delete')
+                for path in paths:objects.pop(path)
+        class Fence:
+            def check(self):pass
+        safety.delete_exact_epub_batches(Store(),[row],Fence(),lambda *_:None,
+                                         barrier=lambda:events.append('barrier'))
+        self.assertLess(events.index('barrier'),events.index('delete'))
+        self.assertIn('read',events[events.index('barrier')+1:events.index('delete')])
+
     def test_bounded_stage_keeps_all_unsubmitted_targets_and_resumes(self):
         rows = [{'bucket': publication.ASSETS, 'path': f'native/ebook/chm/{i}/document.epub',
                  'bytes': 1, 'sha256': safety.chm.digest(b'x')} for i in range(5)]
