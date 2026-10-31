@@ -33,6 +33,40 @@ class CacheTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'disappeared'):
             store.list_exact_versions('bucket',paths)
 
+    def test_exact_version_listing_includes_files_directly_under_root_directory(self):
+        store=S3BucketStore.__new__(S3BucketStore);store.list_workers=2
+        store._location=Mock(return_value=('namespace','bucket'))
+        paths={'reader-index/reader_assets.json.gz','reader-index/reader_catalog.json',
+               'reader-index/processing/owner.json','current.json'}
+        requested=[]
+        class Paginator:
+            def paginate(self,Bucket,Prefix):
+                requested.append(Prefix)
+                return [{'Contents':[{'Key':p,'ETag':'"v"'} for p in paths if p.startswith(Prefix)]}]
+        client=Mock();client.get_paginator.return_value=Paginator();store._client=Mock(return_value=client)
+        self.assertEqual(set(store.list_exact_versions('bucket',paths)),paths)
+        self.assertIn('reader-index/',requested)
+        self.assertNotIn('reader-index/reader_catalog.json/',requested)
+
+    def test_exact_version_listing_rejects_conflicting_duplicate_page_entries(self):
+        store=S3BucketStore.__new__(S3BucketStore);store.list_workers=1
+        store._location=Mock(return_value=('namespace','bucket'))
+        paths={'reader-index/processing/a.json','reader-index/processing/b.json'}
+        class Paginator:
+            def paginate(self,Bucket,Prefix):
+                yield {'Contents':[{'Key':'reader-index/processing/a.json','ETag':'"v1"'}]}
+                yield {'Contents':[{'Key':'reader-index/processing/a.json','ETag':'"v2"'},
+                                   {'Key':'reader-index/processing/b.json','ETag':'"v1"'}]}
+        client=Mock();client.get_paginator.return_value=Paginator();store._client=Mock(return_value=client)
+        with self.assertRaisesRegex(ValueError,'conflicting S3 versions'):
+            store.list_exact_versions('bucket',paths)
+
+    def test_missing_read_time_etag_forgets_an_older_get(self):
+        store=S3BucketStore.__new__(S3BucketStore)
+        store._remember_etag('b','p',{'ETag':'"old"'})
+        store._remember_etag('b','p',{})
+        self.assertNotIn(('b','p'),store.read_etags)
+
     def test_exact_version_listing_shards_ebook_hashes_not_each_source(self):
         store=S3BucketStore.__new__(S3BucketStore);store.list_workers=4
         store._location=Mock(return_value=('namespace','bucket'))

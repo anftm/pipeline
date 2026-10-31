@@ -304,8 +304,13 @@ class S3BucketStore:
 
     def _remember_etag(self, bucket: str, path: str, response) -> None:
         etag = response.get("ETag") if isinstance(response, dict) else None
+        observed = self.__dict__.setdefault("read_etags", {})
         if etag:
-            self.__dict__.setdefault("read_etags", {})[(bucket, path)] = etag
+            observed[(bucket, path)] = etag
+        else:
+            # Never let a prior GET's validator stand in for a newer response
+            # that omitted it. Consumers require the identity of these bytes.
+            observed.pop((bucket, path), None)
 
     def _shards(self, client, name: str, prefix: str, depth: int = 0):
         """Split a prefix by delimiter so large buckets list in parallel."""
@@ -430,6 +435,11 @@ class S3BucketStore:
                 prefix = '/'.join(parts[:3]) + '/' + parts[3][:2]
             elif len(parts) >= 4 and parts[0] == 'objects' and re.fullmatch(r'[0-9a-f]{2}', parts[1]):
                 prefix = '/'.join(parts[:2]) + '/'
+            elif len(parts) == 2:
+                # The second component is the filename, not a directory.
+                # Appending a slash to it silently misses e.g. reader-index/
+                # reader_assets.json.gz and all other top-level controls.
+                prefix = parts[0] + '/'
             elif len(parts) >= 2:
                 prefix = '/'.join(parts[:2]) + '/'
             else:
@@ -448,7 +458,10 @@ class S3BucketStore:
                     for value in page.get('Contents', []):
                         key = value['Key']
                         if key in selected:
-                            found[key] = value.get('ETag')
+                            tag = value.get('ETag')
+                            if key in found and found[key] != tag:
+                                raise ValueError('conflicting S3 versions in exact listing: ' + key)
+                            found[key] = tag
                     if len(found) == len(selected):
                         break
             retry_s3(listing)
@@ -460,7 +473,9 @@ class S3BucketStore:
             for values in pool.map(one, prefixes):
                 found.update(values)
         if set(found) != paths:
-            raise ValueError('exact graph object disappeared from fresh S3 listing')
+            missing = sorted(paths - set(found))
+            raise ValueError('exact graph object disappeared from fresh S3 listing: '
+                             + bucket + f' count={len(missing)} sample={missing[:5]!r}')
         if any(not isinstance(etag, str) or not re.fullmatch(r'"[^"\r\n]+"', etag)
                for etag in found.values()):
             raise ValueError('exact graph object lacks a strong S3 validator')
