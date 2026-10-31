@@ -158,6 +158,22 @@ class EpubTocTests(unittest.TestCase):
             self.assertEqual([(item['title'], item['chapter']) for item in result['toc']],
                              [('第二首', 2), ('第一首', 1)])
 
+    def test_merged_chm_relocation_preserves_same_document_source_anchor(self):
+        # The title may occur far inside a merged file. Rediscovering the same
+        # document must not discard its independently valid page destination.
+        clean=('<html><body><section id="chm-page-4"><h1 title="抗日战争胜利后的新形势">'
+               '</h1><p>正文</p></section></body></html>')
+        records=[{'index':1,'source_path':'merged.xhtml','clean':clean,'title':'合并正文'}]
+        entries=[{'title':'抗日战争胜利后的新形势','source_path':'merged.xhtml',
+                  'fragment':'chm-page-4','depth':0}]
+        # Trigger the relocation branch as for imperfect heading detection,
+        # while still resolving the same physical source document.
+        from unittest.mock import patch
+        with patch.object(epub_chapters,'_label_matches',side_effect=[False,True]):
+            relocated=epub_chapters.relocate_toc_entries(entries,records)
+        self.assertEqual(relocated[0]['fragment'],'chm-page-4')
+        self.assertEqual(epub_chapters.bundle_toc(relocated,records)[0]['fragment'],'chm-page-4')
+
     def test_self_closing_heading_title_is_read(self):
         self.assertEqual(epub_chapters._chapter_headings('<html:body><html:h1 title="第一首" id="a" />'
                                                          '<html:p>正文</html:p></html:body>'), ['第一首'])

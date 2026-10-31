@@ -352,7 +352,10 @@ def relocate_toc_entries(toc_entries: list[dict], records: list[dict]) -> list[d
             continue
         relocated = dict(entry)
         relocated["source_path"] = match["source_path"]
-        relocated["fragment"] = ""
+        # Relocating within the very same merged chapter must not discard its
+        # original page anchor. No other document can safely inherit it.
+        if record is None or match["source_path"] != record["source_path"]:
+            relocated["fragment"] = ""
         located.append(relocated)
     return located
 
@@ -375,7 +378,8 @@ def usable_toc_fragment(root, fragment: str, title: str) -> str:
         value = str(node.get(key) or "").strip()
         if value:
             return value
-    # A heading without an id cannot be targeted; keep the source anchor only if it exists.
+    # A heading without an id cannot improve the source target. Do not let a
+    # generic surrounding text match erase a valid merged-CHM page anchor.
     return fragment if any(node.get("id") == fragment or node.get("name") == fragment
                            for node in root.iter()) else ""
 
