@@ -229,6 +229,19 @@ class ReaderBucketStoreTests(unittest.TestCase):
             store.read_bytes("vomebook/reader-assets-v2", "missing.json")
         client.get_object.assert_called_once()
 
+    def test_missing_bucket_is_never_reported_as_a_missing_key(self):
+        from botocore.exceptions import ClientError
+        error=ClientError({'Error':{'Code':'NoSuchBucket'},
+                           'ResponseMetadata':{'HTTPStatusCode':404}},'GetObject')
+        client=Mock();client.get_object.side_effect=error;client.head_object.side_effect=error
+        store=self.store(client)
+        with self.assertRaises(ClientError):
+            store.read_bytes('bucket','path')
+        with self.assertRaises(ClientError):
+            store.digest('bucket','path')
+        with self.assertRaises(ClientError):
+            store.existing_files('bucket',{'path'})
+
     def test_s3_inventory_shards_prefixes_and_records_root_etags(self):
         pages = {
             ("", "/"): {"Contents": [{"Key": "root.json", "ETag": '"r"', "Size": 2}],

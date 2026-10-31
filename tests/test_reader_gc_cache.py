@@ -111,6 +111,15 @@ class CacheTests(unittest.TestCase):
                 with self.subTest(reader=read), self.assertRaisesRegex(OSError,'short Reader S3'):
                     read()
 
+    def test_s3_sha256_evidence_requires_an_exact_nonnegative_content_length(self):
+        store=S3BucketStore.__new__(S3BucketStore)
+        store._location=Mock(return_value=('namespace','bucket'))
+        client=Mock();store._client=Mock(return_value=client)
+        for length in (None, -1, True, '2'):
+            client.get_object.side_effect=lambda **_: {'Body':io.BytesIO(b'{}'),'ContentLength':length}
+            with self.subTest(length=length), self.assertRaisesRegex(ValueError,'no exact content length'):
+                store.digest('bucket','reader-index/test.json')
+
     def test_graph_parser_never_reuses_old_cache_with_omitted_nested_references(self):
         with tempfile.TemporaryDirectory() as directory:
             cache = ReadCache(Path(directory) / 'cache.sqlite3')

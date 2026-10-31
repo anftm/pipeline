@@ -224,6 +224,8 @@ def retry_s3(operation, attempts: int = 8, sleep=None):
             return operation()
         except ClientError as error:
             code, status = s3_error_code(error)
+            if code == 'NoSuchBucket':
+                raise
             if code in {"404", "NoSuchKey", "NotFound"} or status == 404:
                 raise S3NotFound(str(error)) from error
             if (str(code) not in S3_RETRY_CODES and status not in {408, 429, 500, 502, 503, 504}) \
@@ -502,13 +504,7 @@ class S3BucketStore:
             import hashlib
             self._cache_read(bucket, path, 'raw-v1', raw, hashlib.sha256(raw).hexdigest())
             return raw
-        try:
-            return retry_s3(read)
-        except Exception as error:
-            code, _ = s3_error_code(error)
-            if code == "NoSuchBucket":
-                raise S3NotFound(path) from error
-            raise
+        return retry_s3(read)
 
     def read_graph_json(self, bucket: str, path: str, parser=None):
         try:
@@ -559,7 +555,9 @@ class S3BucketStore:
                     size += len(chunk)
             finally:
                 body.close()
-            if response.get('ContentLength') is not None and size != response['ContentLength']:
+            if type(response.get('ContentLength')) is not int or response['ContentLength'] < 0:
+                raise ValueError('Reader S3 digest object has no exact content length')
+            if size != response['ContentLength']:
                 raise OSError('short Reader S3 digest object read')
             return value.hexdigest()
         return retry_s3(read)
@@ -584,6 +582,8 @@ class S3BucketStore:
                 response = getattr(error, "response", {})
                 code = response.get("Error", {}).get("Code")
                 status = response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+                if code == "NoSuchBucket":
+                    raise
                 if code in {"404", "NoSuchKey", "NotFound"} or status == 404:
                     return None
                 raise

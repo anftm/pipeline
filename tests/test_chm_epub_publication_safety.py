@@ -754,6 +754,7 @@ class ChmPublicationSafetyTests(unittest.TestCase):
         class Store:
             def assert_buckets_available(self):pass
             def list_exact_versions(self,bucket,paths):return {p:versions[(bucket,p)] for p in paths}
+            def digest(self,bucket,path):return digests[(bucket,path)]
         class Fence:
             def check(self):pass
         proof={'mode':'actual','graph_complete':True,'target_count':1,'retained_targets':0,'origins':[],
@@ -764,13 +765,71 @@ class ChmPublicationSafetyTests(unittest.TestCase):
                'retired_roots':[]}
         rows=[{'bucket':bucket,'path':'native/ebook/chm/exact/document.epub'}]
         with patch('scripts.reader_gc_collect.verify_roots') as rootcheck, \
+             patch.object(safety,'recheck_full_root_inventory') as fullroots, \
              patch.object(safety,'observe_planned_projection') as sites:
             self.assertTrue(safety.recheck_actual_graph_by_version(Store(),Traversal(),proof,rows,
                                                                   Fence(),None,{},versions))
-            rootcheck.assert_called_once();sites.assert_called_once()
+            self.assertEqual(rootcheck.call_count,2);fullroots.assert_called_once();sites.assert_called_once()
             versions.pop(nested)
             with self.assertRaisesRegex(ValueError,'complete actual graph closure'):
                 safety.recheck_actual_graph_by_version(Store(),Traversal(),proof,rows,Fence(),None,{},versions)
+
+    def test_versioned_barrier_rejects_changed_bytes_even_with_same_etag(self):
+        from unittest.mock import Mock, patch
+        bucket=publication.ASSETS;root=(bucket,'reader-index/root.json');nested=(bucket,'chapters/a/chapter-manifest.json')
+        digests={root:'a'*64,nested:'b'*64};versions={root:'"same"',nested:'"same"'}
+        class Traversal:
+            loaded_digests=digests
+        class Store:
+            def assert_buckets_available(self):pass
+            def list_exact_versions(self,bucket,paths):return {p:versions[(bucket,p)] for p in paths}
+            def digest(self,bucket,path):return 'c'*64 if (bucket,path)==nested else digests[(bucket,path)]
+        proof={'mode':'actual','graph_complete':True,'target_count':1,'retained_targets':0,'origins':[],
+               'ambiguous_paths':[],'blockers':[],'root_recheck_complete':True,'reader_acceptance_complete':True,
+               'root_members':[{'bucket':root[0],'path':root[1]}],
+               'root_sha256':[{'bucket':root[0],'path':root[1],'sha256':digests[root]}],
+               'closure_sha256':[{'bucket':b,'path':p,'sha256':d} for (b,p),d in digests.items()],
+               'retired_roots':[]}
+        rows=[{'bucket':bucket,'path':'native/ebook/chm/exact/document.epub'}]
+        with patch('scripts.reader_gc_collect.verify_roots'), \
+             patch.object(safety,'observe_planned_projection') as sites:
+            with self.assertRaisesRegex(ValueError,'SHA-256 changed'):
+                safety.recheck_actual_graph_by_version(Store(),Traversal(),proof,rows,Mock(),None,{},versions)
+            sites.assert_not_called()
+
+    def test_versioned_simulation_barrier_rejects_changed_bytes_with_same_etag(self):
+        from unittest.mock import Mock, patch
+        ref=(publication.ASSETS,'chapters/a/chapter-manifest.json')
+        class Graph:
+            store=None
+            loaded_digests={ref:'a'*64}
+        class Store:
+            def assert_buckets_available(self):pass
+            def list_exact_versions(self,bucket,paths):return {p:'"same"' for p in paths}
+            def digest(self,bucket,path):return 'b'*64
+        details={'graph':Graph(),'overlay_paths':set(),'live_control_sha256':{}}
+        with patch('scripts.reader_gc_collect.verify_roots'):
+            with self.assertRaisesRegex(ValueError,'SHA-256 changed'):
+                safety.recheck_simulation_by_version(Store(),details,Mock(),versions={ref:'"same"'})
+
+    def test_full_root_barrier_finds_new_directory_and_planned_missing_overlay(self):
+        from scripts import reader_gc_graph as graph
+        bucket=publication.ASSETS
+        root='chapters/ebook/chm/known/index.json'
+        planned='reader-index/planned.json'
+        class Traversal:
+            files={b:set() for b in graph.BUCKETS}
+        traversal=Traversal();traversal.files[bucket]={root,planned}
+        current={b:set() for b in graph.BUCKETS};current[bucket]={root}
+        class Store:
+            root_predicate=None
+            def list_files(self,b,prefixes):return set(current[b])
+        store=Store()
+        self.assertTrue(safety.recheck_full_root_inventory(store,traversal,expected_absent={(bucket,planned)}))
+        self.assertIsNone(store.root_predicate)
+        current[bucket].add('chapters/ebook/other/new/index.json')
+        with self.assertRaisesRegex(ValueError,'complete root inventory changed'):
+            safety.recheck_full_root_inventory(store,traversal,expected_absent={(bucket,planned)})
 
     def test_progress_checkpoint_cannot_escape_narrow_audit_prefix(self):
         objects = {}

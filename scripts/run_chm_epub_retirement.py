@@ -53,6 +53,14 @@ class ExactStore(CollectionStore):
         retry_s3(lambda: self._client(namespace).head_bucket(Bucket=name))
         return True
 
+    def read_bytes(self, bucket, path):
+        try:
+            return super().read_bytes(bucket, path)
+        except FileNotFoundError:
+            namespace, name = self._location(bucket)
+            retry_s3(lambda: self._client(namespace).head_bucket(Bucket=name))
+            raise
+
     def delete(self, bucket, paths):
         if (not paths or len(paths) > 100 or len(paths) != len(set(paths))
                 or any((bucket, path) not in self.allowed for path in paths)):
@@ -127,9 +135,9 @@ def initial(store, fence, client, rows, maintenance_state):
     if state.get('handoff_complete') is not True or state.get('phase') != 'handoff-complete':
         raise RuntimeError('CHM staged handoff did not durably complete')
     maintenance_state['callback_recovery_required'] = True
-    maintenance_state['callback_handoff_ready'] = True
     maintenance_state['callback_handoff_stage'] = 'references-retired'
     maintenance_state['callback_handoff_owner_run_id'] = maintenance_state['callback_owner_run_id']
+    maintenance_state['callback_handoff_ready'] = True
     maintenance.journal(MAINTENANCE, maintenance_state)
     return state
 
@@ -199,12 +207,12 @@ def resume_isolated(store, fence, client, rows, maintenance_state):
         safety.apply_acknowledged_controls(store,plan,before,staged,client,fence,checkpoint)
         safety.apply_processing_protection_updates(store,rows,fence,client,plan,updates,checkpoint,
                                                    deleted={p for bucket,p in reconciled['missing']})
-        state['handoff_complete']=True
-        persist('handoff-complete')
         safety.verify_live_chm_controls(store,plan)
         safety.verify_live_processing_controls(store,updates)
         safety.verify_predelete_chapter_inventory(store,state,updates)
         safety.verify_retired_rollback_aliases(store,plan)
+        safety.observe_planned_projection(store,client,plan)
+        state['handoff_complete']=True
         state.pop('error',None);state.pop('error_type',None);state.pop('reconciliation_error',None)
         persist('handoff-complete')
         maintenance_state.update(callback_handoff_ready=True,callback_handoff_stage='references-retired',
@@ -223,13 +231,14 @@ def resume_isolated(store, fence, client, rows, maintenance_state):
         raise
 
 
-def continue_staged(store, fence, client, rows, maintenance_state, *, max_batches=3, batch_size=100):
+def continue_staged(store, fence, client, rows, maintenance_state, *, max_batches=1, batch_size=100):
     """Rebuild the actual graph in this job, then retire a bounded exact batch set."""
     plan, before, updates, digest = journal.load_plan(store, rows)
     state = journal.load_progress(store, digest)
     if state.get('complete') is True:
         if (state.get('maintenance_id') != maintenance_state.get('maintenance_id')
-                or maintenance_state.get('callback_plan_sha256') != digest):
+                or maintenance_state.get('callback_plan_sha256') != digest
+                or state.get('barrier_policy') != 'full-closure-sha256-and-four-bucket-root-inventory-per-batch'):
             raise ValueError('completed CHM transaction identity changed')
         counts = safety.reconcile_epub_deletions(store, rows, state.get('batches', []))
         if counts['present_objects'] or counts['confirmed_absent_objects'] != len(rows):
@@ -249,6 +258,9 @@ def continue_staged(store, fence, client, rows, maintenance_state, *, max_batche
             or state.get('handoff_complete') is not True or state.get('retirement_started') is not True
             or state.get('both_surfaces_accepted') is not True):
         raise ValueError('CHM staged continuation does not bind a completed reference handoff')
+    if (state.get('delete_started') and state.get('barrier_policy') !=
+            'full-closure-sha256-and-four-bucket-root-inventory-per-batch'):
+        raise ValueError('partial CHM deletion lacks the required SHA-256 barrier policy')
     journal.verify_initial_chapter_evidence(plan, updates, state)
     safety.validate_publication_order(plan, state)
     counts = safety.reconcile_epub_deletions(store, rows, state.get('batches', []))
@@ -281,8 +293,8 @@ def continue_staged(store, fence, client, rows, maintenance_state, *, max_batche
     state['actual_graph'] = actual
     state['confirmed_deleted_objects'] = counts['confirmed_absent_objects']
     state['confirmed_deleted_bytes'] = counts['confirmed_absent_bytes']
+    state['barrier_policy'] = 'full-closure-sha256-and-four-bucket-root-inventory-per-batch'
     journal.save_progress(store, 'stage-actual-graph-verified', state, OUTPUT)
-    safety.recheck_actual_graph_by_version(store, traversal, actual, rows, fence, client, plan, versions)
     safety.verify_predelete_chapter_inventory(store, state, updates)
     state['delete_started'] = True
     safety.validate_publication_order(plan, state)
@@ -301,8 +313,9 @@ def continue_staged(store, fence, client, rows, maintenance_state, *, max_batche
     state['batches'] = batches
     state['confirmed_deleted_objects'] = final['confirmed_absent_objects']
     state['confirmed_deleted_bytes'] = final['confirmed_absent_bytes']
-    safety.recheck_actual_graph_by_version(store, traversal, actual, rows, fence, client, plan, versions)
+    safety.finish_actual_graph_barrier(store, traversal, actual, rows, fence, client, plan, versions)
     safety.verify_live_chm_controls(store, plan)
+    safety.verify_live_processing_controls(store, updates)
     safety.verify_predelete_chapter_inventory(store, state, updates)
     safety.verify_retired_rollback_aliases(store, plan)
     state.pop('error', None)
@@ -322,7 +335,7 @@ def continue_staged(store, fence, client, rows, maintenance_state, *, max_batche
     return state
 
 
-def require_owned_continuation(current, owner, run_id, stage):
+def require_owned_continuation(current, owner, run_id, stage, *, allow_committed=False):
     """A stage may use only its own active owner or a terminal predecessor."""
     owner_id = str(current.get('callback_owner_run_id') or '')
     if (not str(run_id).isdigit() or not owner_id.isdigit()
@@ -330,14 +343,19 @@ def require_owned_continuation(current, owner, run_id, stage):
             or owner.get('path', '').split('@',1)[0] != WORKFLOW
             or owner.get('head_branch') != 'main' or owner.get('event') != 'workflow_dispatch'
             or current.get('kind') != 'reader-maintenance-journal' or current.get('restored') is True
-            or current.get('callback_mutation_started') is not True or current.get('callback_committed')):
+            or current.get('callback_mutation_started') is not True
+            or current.get('callback_committed') and not allow_committed):
         raise ValueError('CHM recovery does not own an interrupted isolated window')
+    if current.get('callback_committed') and stage == 'continue' and (
+            owner_id != str(run_id) or current.get('callback_recovery_required')):
+        raise ValueError('committed CHM continuation must belong to the current verified owner')
     if owner_id == str(run_id):
         if owner.get('status') != 'in_progress':
             raise ValueError('CHM current owner is not active')
     elif owner.get('status') != 'completed':
         raise ValueError('previous CHM owner is still active')
-    if stage == 'continue' and (owner_id != str(run_id) or current.get('callback_handoff_ready') is not True):
+    if stage == 'continue' and (owner_id != str(run_id) or
+            not (current.get('callback_handoff_ready') is True or current.get('callback_committed') is True)):
         raise ValueError('CHM continuation must share the original staged Actions run')
     return True
 
@@ -356,7 +374,8 @@ def main():
         plan, before, updates, digest = journal.load_plan(store, rows)
         state = journal.load_progress(store, digest)
         if (state.get('maintenance_id') != current.get('maintenance_id') or state.get('complete') is not True
-                or current.get('callback_plan_sha256') != digest):
+                or current.get('callback_plan_sha256') != digest
+                or state.get('barrier_policy') != 'full-closure-sha256-and-four-bucket-root-inventory-per-batch'):
             raise ValueError('CHM final restoration does not bind the completed exact plan')
         counts = safety.reconcile_epub_deletions(store, rows, state.get('batches', []))
         if counts['present_objects'] or counts['confirmed_absent_objects'] != len(rows):
@@ -383,9 +402,16 @@ def main():
         if not str(run_id).isdigit() or not str(owner_id).isdigit():
             raise ValueError('CHM continuation has no valid Actions owner identity')
         owner=fence.single(f'repos/anftm/pipeline/actions/runs/{owner_id}')
-        require_owned_continuation(current,owner,run_id,stage)
+        require_owned_continuation(current,owner,run_id,stage,
+                                   allow_committed=stage == 'continue' or resume and stage == 'initial')
         MAINTENANCE.write_text(json.dumps(current,sort_keys=True,indent=2)+'\n')
         if stage == 'continue':
+            if current.get('callback_committed'):
+                plan, before, updates, digest = journal.load_plan(store, rows)
+                completed = journal.load_progress(store, digest)
+                if (completed.get('complete') is not True or completed.get('maintenance_id') != current.get('maintenance_id')
+                        or current.get('callback_plan_sha256') != digest):
+                    raise ValueError('committed CHM continuation lacks its completed exact transaction')
             return continue_staged(store,fence,client,rows,current)
         if not resume:
             raise ValueError('unexpected CHM retirement stage')
@@ -397,6 +423,8 @@ def main():
                     or current.get('callback_plan_sha256') != digest
                     or state.get('handoff_complete') is not True):
                 raise ValueError('CHM recovery owner cannot adopt a different transaction')
+            if current.get('callback_committed') and state.get('complete') is not True:
+                raise ValueError('committed CHM maintenance lacks a completed transaction')
             safety.validate_publication_order(plan, state)
             safety.reconcile_epub_deletions(store, rows, state.get('batches', []))
             journal.verify_initial_chapter_evidence(plan, updates, state)

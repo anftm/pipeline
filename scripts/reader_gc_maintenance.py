@@ -252,6 +252,9 @@ def recover(path):
             (state.get('callback_recovery_required') or
              state.get('callback_mutation_started') and not state.get('callback_committed'))):
         raise RuntimeError('callback recovery is required before restoring producers')
+    if (not state.get('restored') and state.get('callback_mutation_started')
+            and state.get('callback_plan_sha256') and state.get('callback_handoff_stage') == 'references-retired'):
+        raise RuntimeError('staged callback requires its own verified final restoration')
     if not state.get('restored') and state.get('callback_owner_run_id'):
         owner = api(load_config()['publisher_repository'],
                     f"actions/runs/{state['callback_owner_run_id']}")
@@ -284,6 +287,10 @@ def restore(path):
     if (state.get('callback_recovery_required') or
             state.get('callback_mutation_started') and not state.get('callback_committed')):
         raise RuntimeError('callback recovery is required before restoring producers')
+    if (state.get('callback_plan_sha256') and state.get('callback_handoff_stage') == 'references-retired'
+            and state.get('callback_committed') is True and state.get('restored') is not True
+            and os.environ.get('GITHUB_RUN_ID') != str(state.get('callback_owner_run_id'))):
+        raise RuntimeError('staged callback restoration belongs to its verified Actions owner')
     if state.get("dispatch_requested"):
         central = load_config()["publisher_repository"]
         run_id = state.get("collector_run_id")

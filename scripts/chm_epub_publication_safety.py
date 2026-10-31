@@ -357,8 +357,51 @@ def recheck_graph_versions(store, versions):
     return True
 
 
+def recheck_graph_sha256(store, digests, *, workers=8):
+    """Read and hash every graph document; ETags alone are not content proof."""
+    from concurrent.futures import ThreadPoolExecutor
+    import re
+    if (not isinstance(digests, dict) or not digests or any(
+            not isinstance(ref, tuple) or len(ref) != 2
+            or any(not isinstance(part, str) or not part for part in ref)
+            or not isinstance(digest, str) or not re.fullmatch(r'[0-9a-f]{64}', digest)
+            for ref, digest in digests.items())):
+        raise ValueError('complete CHM graph SHA-256 evidence is required')
+    def check(item):
+        ref, expected = item
+        if store.digest(*ref) != expected:
+            raise ValueError('CHM graph document SHA-256 changed: ' + ':'.join(ref))
+    with ThreadPoolExecutor(max_workers=max(1, min(workers, 16))) as pool:
+        for _ in pool.map(check, sorted(digests.items())):
+            pass
+    return True
+
+
+def recheck_full_root_inventory(store, traversal, *, expected_absent=()):
+    """Find roots even in directories that did not exist during the graph scan."""
+    try:
+        from . import reader_gc_graph as graph
+    except ImportError:
+        import reader_gc_graph as graph
+    if set(traversal.files) != set(graph.BUCKETS):
+        raise ValueError('CHM root inventory does not cover all four buckets')
+    absent = set(expected_absent)
+    predicate = getattr(store, 'root_predicate', None)
+    try:
+        store.root_predicate = graph.is_root
+        for bucket in graph.BUCKETS:
+            expected = {path for path in traversal.files[bucket] if graph.is_root(path, bucket)}
+            expected -= {path for owner, path in absent if owner == bucket}
+            current = {path for path in store.list_files(bucket, ('',)) if graph.is_root(path, bucket)}
+            if current != expected:
+                raise ValueError('CHM complete root inventory changed: ' + bucket)
+    finally:
+        store.root_predicate = predicate
+    return True
+
+
 def recheck_actual_graph_by_version(store, traversal, proof, rows, fence, client, plan, versions):
-    """Per-batch full closure/version, root, producer and two-site barrier."""
+    """Per-batch actual closure SHA-256, version, root, producer and site barrier."""
     try:
         from . import reader_gc_collect as collector
     except ImportError:
@@ -377,7 +420,34 @@ def recheck_actual_graph_by_version(store, traversal, proof, rows, fence, client
     fence.check()
     collector.verify_roots(store, traversal)
     recheck_graph_versions(store, versions)
+    recheck_graph_sha256(store, closure)
+    recheck_full_root_inventory(store, traversal)
     observe_planned_projection(store, client, plan)
+    collector.verify_roots(store, traversal)
+    recheck_graph_versions(store, versions)
+    fence.check()
+    return True
+
+
+def finish_actual_graph_barrier(store, traversal, proof, rows, fence, client, plan, versions):
+    """After a batch, reject root/version/site drift without rehashing for deletion."""
+    try:
+        from . import reader_gc_collect as collector
+    except ImportError:
+        import reader_gc_collect as collector
+    require_actual_zero_graph(proof, rows)
+    closure = {(item['bucket'], item['path']): item['sha256'] for item in proof['closure_sha256']}
+    if (len(closure) != len(proof['closure_sha256']) or closure != traversal.loaded_digests
+            or set(closure) != set(versions)):
+        raise ValueError('CHM post-batch graph closure is incomplete')
+    assert_all_buckets_available(store)
+    fence.check()
+    collector.verify_roots(store, traversal)
+    recheck_graph_versions(store, versions)
+    recheck_full_root_inventory(store, traversal)
+    observe_planned_projection(store, client, plan)
+    collector.verify_roots(store, traversal)
+    recheck_graph_versions(store, versions)
     fence.check()
     return True
 
@@ -423,6 +493,11 @@ def recheck_simulation_by_version(store, details, fence, *, versions, applied=No
             actual = None
         if actual != digest:
             raise ValueError('CHM live input changed after simulation: ' + ':'.join(ref))
+    recheck_graph_versions(store, versions)
+    recheck_graph_sha256(store, {ref: traversal.loaded_digests[ref] for ref in versions})
+    absent = {ref for ref, original in details['live_control_sha256'].items()
+              if original is None and ref[1] not in (applied or {})}
+    recheck_full_root_inventory(store, traversal, expected_absent=absent)
     recheck_graph_versions(store, versions)
     fence.check()
     return True

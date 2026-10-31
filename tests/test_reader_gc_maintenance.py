@@ -117,6 +117,23 @@ class MaintenanceTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError,'still active'):
                 maintenance.recover(Path(directory)/'journal.json')
 
+    def test_other_maintenance_cannot_restore_a_committed_staged_callback(self):
+        state={'version':1,'kind':'reader-maintenance-journal','repositories':{},
+               'callback_owner_run_id':'123','callback_mutation_started':True,
+               'callback_handoff_stage':'references-retired','callback_plan_sha256':'a'*64,
+               'callback_committed':True,'callback_recovery_required':False}
+        class Store:
+            def read_bytes(self,bucket,path):return json.dumps(state).encode()
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(maintenance,'durable_store',return_value=Store()), \
+             patch.object(maintenance,'restore',side_effect=AssertionError('must not restore')):
+            with self.assertRaisesRegex(RuntimeError,'own verified final restoration'):
+                maintenance.recover(Path(directory)/'journal.json')
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ,{'GITHUB_RUN_ID':'other'}):
+            path=Path(directory)/'journal.json';path.write_text(json.dumps(state))
+            with self.assertRaisesRegex(RuntimeError,'verified Actions owner'):
+                maintenance.restore(path)
+
     def test_staged_callback_yields_without_restoring_and_persists_its_owner(self):
         active={'value':True}
         def api(repo,path,*,method='GET',body=None):

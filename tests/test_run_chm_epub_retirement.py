@@ -44,7 +44,7 @@ class RunChmRetirementTests(unittest.TestCase):
             for name in ('validate_publication_order','verify_live_chm_controls','verify_live_processing_controls',
                          'verify_predelete_chapter_inventory','verify_retired_rollback_aliases',
                          'validate_document_reset_identity','verify_document_reset_prerequisites',
-                         'recheck_actual_graph_by_version'):
+                         'recheck_actual_graph_by_version','finish_actual_graph_barrier'):
                 stack.enter_context(patch.object(safety,name))
             stack.enter_context(patch.object(safety,'observe_planned_projection',return_value={}))
             graph=stack.enter_context(patch.object(safety,'actual_graph_evidence',return_value=(proof,object())))
@@ -66,6 +66,7 @@ class RunChmRetirementTests(unittest.TestCase):
              'bytes':1,'sha256':safety.chm.digest(b'x')}
         state={'maintenance_id':'window','complete':False,'handoff_complete':True,
                'retirement_started':True,'both_surfaces_accepted':True,'delete_started':True,'batches':[],
+               'barrier_policy':'full-closure-sha256-and-four-bucket-root-inventory-per-batch',
                'actual_graph':{'mode':'actual','graph_complete':True,'target_count':1,'retained_targets':0,
                                'origins':[],'ambiguous_paths':[],'blockers':[],'root_recheck_complete':True,
                                'reader_acceptance_complete':True,'root_members':['old'],'root_sha256':[],
@@ -110,6 +111,22 @@ class RunChmRetirementTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'share'):
             runner.require_owned_continuation(current,{**owner,'status':'completed'},'124','continue')
 
+    def test_committed_interrupted_transaction_can_only_be_adopted_by_explicit_resume(self):
+        current={'kind':'reader-maintenance-journal','callback_owner_run_id':'123',
+                 'callback_mutation_started':True,'callback_committed':True}
+        owner={'id':123,'path':runner.WORKFLOW,'head_branch':'main','event':'workflow_dispatch',
+               'status':'completed'}
+        with self.assertRaisesRegex(ValueError,'does not own'):
+            runner.require_owned_continuation(current,owner,'124','initial')
+        self.assertTrue(runner.require_owned_continuation(current,owner,'124','initial',allow_committed=True))
+        with self.assertRaisesRegex(ValueError,'verified owner'):
+            runner.require_owned_continuation(current,owner,'124','continue',allow_committed=True)
+        self.assertTrue(runner.require_owned_continuation(current,{**owner,'status':'in_progress'},
+                                                         '123','continue',allow_committed=True))
+        with self.assertRaisesRegex(ValueError,'verified owner'):
+            runner.require_owned_continuation({**current,'callback_recovery_required':True},
+                {**owner,'status':'in_progress'},'123','continue',allow_committed=True)
+
     def test_resume_never_adopts_a_journal_from_another_maintenance_window(self):
         current={'kind':'reader-maintenance-journal','maintenance_id':'protected-window',
                  'callback_owner_run_id':'123','callback_mutation_started':True,
@@ -138,6 +155,79 @@ class RunChmRetirementTests(unittest.TestCase):
                 runner.main()
             saved.assert_not_called()
 
+    def test_resumed_pre_handoff_run_keeps_isolation_and_still_enters_deletion_jobs(self):
+        current={'kind':'reader-maintenance-journal','maintenance_id':'window',
+                 'callback_owner_run_id':'123','callback_mutation_started':True,
+                 'callback_plan_sha256':'digest','callback_recovery_required':True,'repositories':{}}
+        owner={'id':123,'path':runner.WORKFLOW,'head_branch':'main','event':'workflow_dispatch',
+               'status':'completed'}
+        state={'kind':'chm-epub-retirement','handoff_complete':False,'maintenance_id':'window','batches':[]}
+        class Store:
+            def read_bytes(self,bucket,path):
+                return json.dumps(current if path==runner.maintenance.DURABLE_JOURNAL else state).encode()
+        fence=Mock();fence.single.return_value=owner
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(runner,'OUTPUT',Path(directory)), \
+             patch.object(runner,'MAINTENANCE',Path(directory)/'maintenance.json'), \
+             patch.dict('os.environ',{'RESUME':'true','CHM_STAGE':'initial','GITHUB_RUN_ID':'124'}), \
+             patch.object(runner.sys,'argv',['run_chm_epub_retirement.py']), \
+             patch.object(runner,'assert_workflow_context'), \
+             patch.object(runner.chm.preview,'load_inventory',return_value={'targets':[]}), \
+             patch.object(runner,'ExactStore',return_value=Store()), \
+             patch.object(runner,'GitHubProducerFence',return_value=fence), \
+             patch.object(runner.journal,'load_plan',return_value=({}, {}, {}, 'digest')), \
+             patch.object(runner.journal,'load_progress',return_value=state), \
+             patch.object(runner.journal,'verify_initial_chapter_evidence'), \
+             patch.object(safety,'validate_publication_order'), \
+             patch.object(safety,'reconcile_epub_deletions'), \
+             patch.object(runner.maintenance,'journal') as saved, \
+             patch.object(runner,'resume_isolated',return_value={'handoff_complete':True}) as resumed:
+            self.assertTrue(runner.main()['handoff_complete'])
+            adopted=saved.call_args.args[1]
+            self.assertEqual(adopted['callback_owner_run_id'],'124')
+            self.assertTrue(adopted['callback_recovery_required'])
+            saved.assert_called_once();resumed.assert_called_once()
+        workflow=yaml.safe_load((Path(__file__).resolve().parents[1]/
+                                 '.github/workflows/chm-epub-retirement.yml').read_text())
+        self.assertNotIn('resume',workflow['jobs']['continue_1']['if'])
+        self.assertEqual(workflow['jobs']['continue_1']['needs'],'retire')
+
+    def test_resume_adopts_committed_transaction_before_restoration(self):
+        current={'kind':'reader-maintenance-journal','maintenance_id':'window',
+                 'callback_owner_run_id':'123','callback_mutation_started':True,
+                 'callback_plan_sha256':'digest','callback_committed':True,
+                 'callback_recovery_required':False,'repositories':{}}
+        owner={'id':123,'path':runner.WORKFLOW,'head_branch':'main','event':'workflow_dispatch',
+               'status':'completed'}
+        state={'kind':'chm-epub-retirement','handoff_complete':True,'complete':True,
+               'maintenance_id':'window','batches':[]}
+        class Store:
+            def read_bytes(self,bucket,path):
+                return json.dumps(current if path==runner.maintenance.DURABLE_JOURNAL else state).encode()
+        fence=Mock();fence.single.return_value=owner
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(runner,'OUTPUT',Path(directory)), \
+             patch.object(runner,'MAINTENANCE',Path(directory)/'maintenance.json'), \
+             patch.dict('os.environ',{'RESUME':'true','CHM_STAGE':'initial','GITHUB_RUN_ID':'124'}), \
+             patch.object(runner.sys,'argv',['run_chm_epub_retirement.py']), \
+             patch.object(runner,'assert_workflow_context'), \
+             patch.object(runner.chm.preview,'load_inventory',return_value={'targets':[]}), \
+             patch.object(runner,'ExactStore',return_value=Store()), \
+             patch.object(runner,'GitHubProducerFence',return_value=fence), \
+             patch.object(runner.journal,'load_plan',return_value=({}, {}, {}, 'digest')), \
+             patch.object(runner.journal,'load_progress',return_value=state), \
+             patch.object(runner.journal,'verify_initial_chapter_evidence'), \
+             patch.object(safety,'validate_publication_order'), \
+             patch.object(safety,'reconcile_epub_deletions'), \
+             patch.object(runner.maintenance,'journal') as saved, \
+             patch.object(runner,'continue_staged',return_value=state) as continued:
+            self.assertTrue(runner.main()['complete'])
+            adopted=saved.call_args.args[1]
+            self.assertEqual(adopted['callback_owner_run_id'],'124')
+            self.assertTrue(adopted['callback_recovery_required'])
+            self.assertEqual(adopted['callback_owner_history'][0]['run_id'],'123')
+            saved.assert_called_once();continued.assert_called_once()
+
     def test_exact_store_cannot_delete_any_foreign_bucket_or_key(self):
         row={'bucket':'vomebook/reader-assets-v2','path':'native/ebook/chm/reviewed/document.epub'}
         store=runner.ExactStore.__new__(runner.ExactStore);store.allowed={(row['bucket'],row['path'])}
@@ -150,6 +240,18 @@ class RunChmRetirementTests(unittest.TestCase):
             deleted.assert_not_called()
             store.delete(row['bucket'],[row['path']])
             deleted.assert_called_once_with(store,row['bucket'],[row['path']])
+
+    def test_exact_missing_read_rechecks_bucket_availability(self):
+        store=runner.ExactStore.__new__(runner.ExactStore)
+        store._location=Mock(return_value=('namespace','bucket'))
+        client=Mock();store._client=Mock(return_value=client)
+        with patch.object(runner.S3BucketStore,'read_bytes',side_effect=FileNotFoundError('key')):
+            with self.assertRaises(FileNotFoundError):
+                store.read_bytes('namespace/bucket','key')
+            client.head_bucket.assert_called_once_with(Bucket='bucket')
+            client.head_bucket.side_effect=RuntimeError('bucket unavailable')
+            with self.assertRaisesRegex(RuntimeError,'bucket unavailable'):
+                store.read_bytes('namespace/bucket','key')
 
     def test_pages_dispatch_requires_exact_repo_pointer_and_fence(self):
         pointer={'generation':'reviewed'}
@@ -205,7 +307,15 @@ class RunChmRetirementTests(unittest.TestCase):
             self.assertEqual(child['needs'],predecessor)
             self.assertEqual(child['timeout-minutes'],330)
             self.assertEqual(child['env']['CHM_STAGE'],'continue')
-        self.assertEqual(workflow['jobs']['restore_after_stages']['needs'][-1],'continue_4')
+        remaining=workflow['jobs']['continue_remaining']
+        self.assertEqual(remaining['needs'],'continue_4')
+        self.assertEqual(remaining['strategy']['max-parallel'],1)
+        self.assertTrue(remaining['strategy']['fail-fast'])
+        self.assertEqual(remaining['strategy']['matrix']['batch'],[5,6,7,8,9,10,11])
+        self.assertEqual(remaining['env']['CHM_STAGE'],'continue')
+        self.assertEqual(workflow['jobs']['restore_after_stages']['needs'][-1],'continue_remaining')
+        self.assertEqual(workflow['jobs']['restore_after_stages']['if'],
+                         "always() && needs.continue_remaining.result == 'success'")
 
 
 if __name__=='__main__':
