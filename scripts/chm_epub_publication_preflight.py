@@ -916,6 +916,13 @@ def simulate_complete_withdrawal(store, overrides, rows, fence, *, workers=8, de
             self.object_sizes = store.object_sizes
             self.read_etags = {}
             self.root_etags = {}
+        def _record_live_etag(self, bucket, path):
+            ref = (bucket, path)
+            tag = getattr(store, 'read_etags', {}).get(ref)
+            if tag is None:
+                self.read_etags.pop(ref, None)
+            else:
+                self.read_etags[ref] = tag
         def list_files(self, bucket, prefixes):
             files = set(store.list_files(bucket, prefixes))
             files.update(path for owner, path in overlay if owner == bucket and path.startswith(prefixes))
@@ -924,13 +931,20 @@ def simulate_complete_withdrawal(store, overrides, rows, fence, *, workers=8, de
             roots = {path: etag for path, etag in store.list_roots(bucket, parents).items()
                      if graph.is_root(path, bucket)}
             roots.update({path: None for owner, path in overlay if owner == bucket and graph.is_root(path, bucket)})
+            self.root_etags[bucket] = roots
             return roots
         def read_bytes(self, bucket, path):
-            return overlay.get((bucket, path)) if (bucket, path) in overlay else store.read_bytes(bucket, path)
+            if (bucket, path) in overlay:
+                return overlay[(bucket, path)]
+            raw = store.read_bytes(bucket, path)
+            self._record_live_etag(bucket, path)
+            return raw
         def read_graph_json(self, bucket, path, parser=None):
             if (bucket, path) in overlay:
                 return (parser or stream.graph_json)([overlay[(bucket, path)]], path.endswith('.gz'))
-            return store.read_graph_json(bucket, path, parser=parser)
+            result = store.read_graph_json(bucket, path, parser=parser)
+            self._record_live_etag(bucket, path)
+            return result
         def digest(self, bucket, path):
             return digest(overlay[(bucket, path)]) if (bucket, path) in overlay else store.digest(bucket, path)
 

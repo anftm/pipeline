@@ -14,6 +14,40 @@ from scripts import publish_reader_v3 as publication
 
 
 class ChmWithdrawalPreviewTests(unittest.TestCase):
+    def test_simulation_view_preserves_live_get_and_fresh_root_validators(self):
+        from unittest.mock import patch
+        root='reader-index/reader_assets.json.gz'
+        live='reader-index/other.json'
+        overlay='reader-index/planned.json'
+        contents={root:gzip.compress(b'{"v":1,"f":{}}'),live:b'{"files":{}}'}
+        class Store:
+            def __init__(self):self.object_sizes={};self.read_etags={}
+            def list_files(self,bucket,prefixes):
+                return {p for p in contents if bucket==preview.ASSETS and p.startswith(prefixes)}
+            def list_roots(self,bucket,parents):
+                return {p:'"live"' for p in contents if bucket==preview.ASSETS}
+            def read_bytes(self,bucket,path):
+                self.read_etags[(bucket,path)]='"live"'
+                return contents[path]
+            def read_graph_json(self,bucket,path,parser=None):
+                raw=self.read_bytes(bucket,path)
+                return (parser or reader_gc_stream.graph_json)([raw],path.endswith('.gz'))
+            def digest(self,bucket,path):
+                if path not in contents:raise FileNotFoundError(path)
+                return hashlib.sha256(contents[path]).hexdigest()
+        class Fence:
+            def check(self):pass
+        store=Store();details={}
+        with patch('scripts.reader_gc_collect.verify_roots'):
+            result=preflight.simulate_complete_withdrawal(store,{overlay:b'{"files":{}}'},[],Fence(),details=details)
+        self.assertTrue(result['graph_complete'])
+        view=details['graph'].store
+        self.assertEqual(view.read_etags[(preview.ASSETS,live)],'"live"')
+        self.assertEqual(view.root_etags[preview.ASSETS][live],'"live"')
+        self.assertNotIn((preview.ASSETS,overlay),view.read_etags)
+        self.assertIsNone(view.root_etags[preview.ASSETS][overlay])
+        self.assertEqual(view.digest(preview.ASSETS,overlay),hashlib.sha256(b'{"files":{}}').hexdigest())
+
     def test_sidecar_extension_accepts_only_new_non_chm_routes(self):
         old={'v':1,'f':{'source/book.chm':{'p':'chapter','f':'fallback'},'book.pdf':{'p':'pdf'}}}
         raw=gzip.compress(publication.encode(old),mtime=0);inventory={'sidecar_sha256':hashlib.sha256(raw).hexdigest()}
