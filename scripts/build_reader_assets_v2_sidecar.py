@@ -15,11 +15,11 @@ from huggingface_hub import HfFileSystem, batch_bucket_files
 try:
     from . import shared
     from . import reader_lifecycle
-    from .reader_bucket import publish_catalog, publish_json, read_json as read_bucket_json
+    from .reader_bucket import publish_catalog, read_json as read_bucket_json
 except ImportError:
     import shared
     import reader_lifecycle
-    from reader_bucket import publish_catalog, publish_json, read_json as read_bucket_json
+    from reader_bucket import publish_catalog, read_json as read_bucket_json
 
 
 ASSETS_BUCKET = "vomebook/reader-assets-v2"
@@ -76,14 +76,108 @@ def add_pdf_streams(files: dict, payload: dict, bucket: str) -> None:
     return None
 
 
-def release_processing_roots(indexes: list[dict], generation: str, read, publish) -> int:
+def release_processing_roots(indexes: list[dict], generation: str, read, publish, retired=None,
+                             absent=frozenset(), retired_many=None) -> int:
     """Release only newly handed-off roots; retained released roots are read-only."""
     results = [entry for payload in indexes for entry in payload.get("files", [])
                if isinstance(entry, dict)]
-    updates = reader_lifecycle.processing_handoffs(results, generation, read)
+    updates = reader_lifecycle.processing_handoffs(results, generation, read, retired=retired,
+                                                   absent=absent, retired_many=retired_many)
     for path, record in updates.items():
         publish(path, record)
     return sum(path.startswith('reader-index/processing/') for path in updates)
+
+
+def historical_processing_guard(indexes, new_sidecar, store, client):
+    """Prove recorded retirements and both live consumer projections, read-only.
+
+    Fresh listings and old collector evidence classify potential missing records.
+    A path that appears on the handoff recheck must be read normally. Only an
+    exact collector receipt can explain an absence. Nothing is recreated, deleted
+    or changed in the original indexes or historical processing records.
+    """
+    try:
+        from . import publish_reader_v3 as publication, reader_retired_processing as history
+    except ImportError:
+        import publish_reader_v3 as publication
+        import reader_retired_processing as history
+    owners = {}
+    for payload in indexes:
+        for entry in payload.get('files', []):
+            if not isinstance(entry, dict):
+                continue
+            paths = entry.get('processing_roots', [])
+            if not isinstance(paths, list):
+                raise ValueError('invalid processing root list')
+            for path in paths:
+                if (not isinstance(path, str) or not path.startswith('reader-index/processing/')
+                        or any(part in {'', '.', '..'} for part in path.split('/'))):
+                    raise ValueError('invalid processing root path')
+                owners.setdefault(path, []).append(entry)
+    # S3 is the authoritative current-bucket object view used by the collector.
+    # A stale/incomplete listing may never classify a live record as retired.
+    present = store.list_files(ASSETS_BUCKET, ('reader-index/processing/',))
+    missing = set(owners) - present
+    if not missing:
+        return None, {'missing': 0, 'verified_retirements': 0}, set()
+    receipt_raw = store.read_bytes(ASSETS_BUCKET, history.RECEIPT_PATH)
+    receipt = history.load_receipt(receipt_raw)
+    if not missing <= receipt.keys():
+        raise ValueError('missing processing roots lack exact historical retirement evidence')
+    pointer, catalog = publication.current(store)
+    if not pointer or not catalog.get('base_sidecar'):
+        raise ValueError('historical processing proof requires a pinned Reader generation')
+    before = publication.project_sidecar(publication.pinned_base(store, catalog, {}), catalog)
+    reports = {site: publication.observe_consumer(store, site, client) for site in ('hf', 'pages')}
+    if any(report.get('generation') != pointer.get('generation')
+           or report.get('projection_verified') is not True for report in reports.values()):
+        raise ValueError('historical processing proof needs both deployed Reader projections')
+    if publication.current(store)[0] != pointer:
+        raise ValueError('Reader generation changed while checking historical processing')
+    counts = {}
+    overrides = {}
+    for path in sorted(missing):
+        for entry in owners[path]:
+            try:
+                evidence = history.verify_owner(path, entry, receipt[path], before, new_sidecar)
+            except ValueError:
+                # A single producer may have protected more than the resource
+                # visible to the consumer (for example a CHM fallback that was
+                # deliberately removed). If the collector saved the original
+                # bytes, retain that released record as a virtual protection for
+                # this handoff; do not fabricate or remotely recreate anything.
+                import base64
+                row = receipt[path]
+                try:
+                    raw = base64.b64decode(row['supersession']['original_record_base64'], validate=True)
+                    record = json.loads(raw)
+                except (KeyError, TypeError, ValueError):
+                    raise ValueError('missing processing owner has no original record for safe handoff') from None
+                history.validate_archived_record(path, row, record, raw)
+                history.verify_owner_identity(path, entry, row, record['resources'])
+                reader_lifecycle.validate_processing_handoff(record, entry)
+                if path in overrides and overrides[path] != record:
+                    raise ValueError('conflicting historical processing original records')
+                overrides[path] = record
+                evidence = 'archived-protection-preserved'
+            counts[evidence] = counts.get(evidence, 0) + 1
+
+    def verify_retired(path, current_owners):
+        if path not in missing or current_owners != owners[path]:
+            raise FileNotFoundError('unverified or newly missing processing root: ' + path)
+        for entry in current_owners:
+            if path in overrides:
+                history.verify_owner_identity(path, entry, receipt[path], overrides[path]['resources'])
+                reader_lifecycle.validate_processing_handoff(overrides[path], entry)
+            else:
+                history.verify_owner(path, entry, receipt[path], before, new_sidecar)
+
+    def recovered_record(path, current_owners):
+        verify_retired(path, current_owners)
+        return overrides.get(path)
+
+    return recovered_record, {'missing': len(missing), 'verified_retirements': len(missing) - len(overrides),
+                             'evidence': counts, 'v3_generation': pointer['generation']}, missing
 
 
 def ebook_chapter_indexes(assets_bucket: str) -> list[tuple[str, str]]:
@@ -211,25 +305,71 @@ def main() -> int:
     args.output.write_bytes(payload)
     print(f"mappings={len(index['f'])} bytes={len(payload)} output={args.output}")
     if args.apply:
-        batch_bucket_files(args.assets_bucket, add=[(str(args.output), SIDECAR_PATH)], token=token)
-        generation = publish_catalog(index, token)
+        import httpx
+        try:
+            from .reader_bucket_store import S3BucketStore
+            from .reader_processing_cas import ProcessingWriter
+        except ImportError:
+            from reader_bucket_store import S3BucketStore
+            from reader_processing_cas import ProcessingWriter
+        if args.assets_bucket != ASSETS_BUCKET:
+            raise ValueError('historical processing handoff requires the canonical Reader bucket')
         # Conversion workers upload immutable bundles under a processing root
         # before any index can reference them. The canonical sidecar/catalog
         # is the handoff boundary; only then may those roots be released.
         indexes = []
-        for bucket, path in [(args.pdf_bucket, args.derived_manifest),
-                             (args.assets_bucket, "documents/text/index.json"),
-                             *stream_processing_indexes(args.assets_bucket),
-                             *static_pdf_processing_indexes(args.assets_bucket),
-                             *ebook_chapter_indexes(args.assets_bucket)]:
+        index_inputs = {}
+        controls = [(args.pdf_bucket, args.derived_manifest),
+                    (args.assets_bucket, "documents/text/index.json"),
+                    *stream_processing_indexes(args.assets_bucket),
+                    *static_pdf_processing_indexes(args.assets_bucket),
+                    *ebook_chapter_indexes(args.assets_bucket)]
+        for bucket, path in controls:
             try:
                 payload = read_bucket_json(path, token, bucket=bucket)
-            except (FileNotFoundError, OSError, ValueError):
+            except FileNotFoundError:
                 continue
             indexes.append(payload)
+            index_inputs[(bucket, path)] = payload
+        # Bind the release decision to the same canonical indices used to
+        # construct the actual sidecar; never release a newer concurrent row
+        # against an older sidecar snapshot. Per-format finalizers share the
+        # writer lock, but the independent readback still fails closed on drift.
+        rebuilt = build(fs, args.assets_bucket, args.pdf_bucket, args.derived_manifest,
+                        args.render_manifest, args.ocr_manifest)
+        if rebuilt != index:
+            raise RuntimeError('canonical indexes changed while preparing sidecar handoff')
+        for (bucket, path), original in index_inputs.items():
+            if read_bucket_json(path, token, bucket=bucket) != original:
+                raise RuntimeError('processing owner index changed while preparing sidecar handoff')
+        store = S3BucketStore()
+        with httpx.Client(timeout=120, follow_redirects=True) as client:
+            retired, evidence, previously_missing = historical_processing_guard(indexes, index, store, client)
+        print('historical_processing=' + json.dumps(evidence, sort_keys=True), flush=True)
+        batch_bucket_files(args.assets_bucket, add=[(str(args.output), SIDECAR_PATH)], token=token)
+        generation = publish_catalog(index, token)
+        # Workers protect immutable content before publishing a checkpoint. A
+        # fresh authoritative listing means every root recreated since preflight
+        # is read and validated, never mistaken for a historical retirement.
+        present = store.list_files(ASSETS_BUCKET, ('reader-index/processing/',))
+        absent = previously_missing - present
+        writer = ProcessingWriter(store)
+        def recheck_absent(paths, owners):
+            if not paths:
+                return {}
+            current = store.list_files(ASSETS_BUCKET, ('reader-index/processing/',))
+            appeared = paths & current
+            if appeared:
+                raise RuntimeError('historically absent processing root appeared during handoff')
+            recovered = {}
+            for path in sorted(paths):
+                record = retired(path, owners[path])
+                if record is not None:
+                    recovered[path] = record
+            return recovered
         released = release_processing_roots(
-            indexes, generation, lambda path: read_bucket_json(path, token),
-            lambda path, record: publish_json(path, record, token))
+            indexes, generation, writer.read, writer.publish, retired=retired, absent=absent,
+            retired_many=recheck_absent)
         print(f"published={args.assets_bucket}/{SIDECAR_PATH} catalog={generation} released_roots={released}")
     else:
         print("report-only; pass --apply to publish")

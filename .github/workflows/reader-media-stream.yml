@@ -159,6 +159,8 @@ jobs:
       - name: Rebuild canonical Reader sidecar
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
         run: python scripts/build_reader_assets_v2_sidecar.py --apply
       - name: Unify sidecar through the central v3 writer
         env:

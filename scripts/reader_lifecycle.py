@@ -127,8 +127,12 @@ def validate_processing_handoff(record: dict, result: dict) -> None:
             raise ValueError("processing root does not belong to the published result")
 
 
-def processing_handoffs(results, generation, read):
-    """Validate every owner before batching releases; never release foreign roots."""
+def processing_handoffs(results, generation, read, retired=None, absent=frozenset(), retired_many=None):
+    """Validate every owner before batching releases; never release foreign roots.
+
+    ``retired`` may independently verify a missing, historically retired path;
+    missing records still fail closed unless that exact proof is supplied.
+    """
     owners = {}
     for result in results:
         for path in result.get("processing_roots", []):
@@ -138,7 +142,30 @@ def processing_handoffs(results, generation, read):
             owners.setdefault(path, []).append(result)
     paths = sorted(owners)
     updates = {}
-    for path, record in zip(paths, ordered_reads(read, paths)):
+    missing = object()
+    def inspect(path):
+        if path in absent:
+            if retired is None and retired_many is None:
+                raise FileNotFoundError(path)
+            if retired_many is None:
+                recovered = retired(path, owners[path])
+                if recovered is not None:
+                    return recovered
+            return missing
+        try:
+            return read(path)
+        except FileNotFoundError:
+            if retired is None:
+                raise
+            recovered = retired(path, owners[path])
+            return missing if recovered is None else recovered
+    if not set(absent) <= owners.keys():
+        raise ValueError('absent processing root is not owned by these results')
+    for path, record in zip(paths, ordered_reads(inspect, paths)):
+        if record is missing:
+            continue
+        if not isinstance(record, dict):
+            raise ValueError('invalid processing record')
         for result in owners[path]:
             validate_processing_handoff(record, result)
         released = release_processing(record, generation)
@@ -151,6 +178,17 @@ def processing_handoffs(results, generation, read):
             if hint:
                 updates[hint[0]] = hint[1]
             updates[path] = released
+    if retired_many is not None:
+        recovered = retired_many(absent, owners) or {}
+        if not isinstance(recovered, dict) or not recovered.keys() <= absent:
+            raise ValueError('invalid archived processing protections')
+        for path, record in recovered.items():
+            if not isinstance(record, dict) or record.get('status') != 'released':
+                raise ValueError('archived processing protection is not a released record')
+            for result in owners[path]:
+                validate_processing_handoff(record, result)
+            # The source record is virtual and already released. It is never
+            # written back, nor is its original generation rewritten.
     return updates
 
 
