@@ -229,12 +229,13 @@ def _merged_chm_inline_targets(root):
         if _local_name(node) != 'a':
             continue
         href = node.get('href') or ''
-        if not re.fullmatch(r'#chm-page-[0-9]+', href) or ids[href[1:]] != 1:
+        if not re.fullmatch(r'#chm-page-[0-9]+', href):
             continue
         label = _normalized_label(''.join(node.itertext()))
         if label:
             targets.setdefault(label, set()).add(href[1:])
-    return targets
+    return {label: values for label, values in targets.items()
+            if len(values) == 1 and ids[next(iter(values))] == 1}
 
 
 def bundle_toc(entries: list[dict], records: list[dict]) -> list[dict]:
