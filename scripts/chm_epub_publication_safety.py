@@ -452,7 +452,7 @@ def finish_actual_graph_barrier(store, traversal, proof, rows, fence, client, pl
     return True
 
 
-def recheck_simulation_by_version(store, details, fence, *, versions, applied=None):
+def recheck_simulation_by_version(store, details, fence, *, versions, applied=None, pre_ack_only=False):
     """Revalidate a simulated closure without treating its ETags as content hashes."""
     try:
         from . import reader_gc_collect as collector, reader_gc_graph as graph_module
@@ -461,6 +461,8 @@ def recheck_simulation_by_version(store, details, fence, *, versions, applied=No
         import reader_gc_graph as graph_module
     traversal = details['graph']
     omitted = details['overlay_paths']
+    if pre_ack_only and applied is not None:
+        raise ValueError('pre-ack-only CHM check cannot authorize applied controls')
     if set(versions) != set(traversal.loaded_digests) - omitted:
         raise ValueError('versioned CHM simulation does not bind its entire closure')
     assert_all_buckets_available(store)
@@ -494,7 +496,8 @@ def recheck_simulation_by_version(store, details, fence, *, versions, applied=No
         if actual != digest:
             raise ValueError('CHM live input changed after simulation: ' + ':'.join(ref))
     recheck_graph_versions(store, versions)
-    recheck_graph_sha256(store, {ref: traversal.loaded_digests[ref] for ref in versions})
+    if not pre_ack_only:
+        recheck_graph_sha256(store, {ref: traversal.loaded_digests[ref] for ref in versions})
     absent = {ref for ref, original in details['live_control_sha256'].items()
               if original is None and ref[1] not in (applied or {})}
     recheck_full_root_inventory(store, traversal, expected_absent=absent)
@@ -1254,7 +1257,11 @@ def run_guarded_retirement(store, fence, client, plan, rows, *, preflight, persi
     if stop_after_handoff:
         versions = capture_graph_versions(store, simulation_details['graph'],
                                           omitted=simulation_details['overlay_paths'])
-        recheck_simulation_by_version(store, simulation_details, fence, versions=versions)
+        # Pre-ack publication retains the original history. Full content SHA
+        # verification is mandatory again after both sites accept and before
+        # any old reference is retired; this first pass authorizes no deletion.
+        recheck_simulation_by_version(store, simulation_details, fence, versions=versions,
+                                      pre_ack_only=True)
     else:
         recheck_simulation_inputs(store, simulation_details, fence)
     save_plan(plan, before, processing_updates)

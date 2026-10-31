@@ -811,6 +811,9 @@ class ChmPublicationSafetyTests(unittest.TestCase):
         with patch('scripts.reader_gc_collect.verify_roots'):
             with self.assertRaisesRegex(ValueError,'SHA-256 changed'):
                 safety.recheck_simulation_by_version(Store(),details,Mock(),versions={ref:'"same"'})
+        with self.assertRaisesRegex(ValueError,'cannot authorize applied controls'):
+            safety.recheck_simulation_by_version(Store(),details,Mock(),versions={ref:'"same"'},
+                                                 applied={'reader-index/any.json':b'changed'},pre_ack_only=True)
 
     def test_full_root_barrier_finds_new_directory_and_planned_missing_overlay(self):
         from scripts import reader_gc_graph as graph
