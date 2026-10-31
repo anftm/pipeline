@@ -33,6 +33,39 @@ class CacheTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'disappeared'):
             store.list_exact_versions('bucket',paths)
 
+    def test_exact_version_listing_shards_ebook_hashes_not_each_source(self):
+        store=S3BucketStore.__new__(S3BucketStore);store.list_workers=4
+        store._location=Mock(return_value=('namespace','bucket'))
+        paths={f'chapters/ebook/chm/{source}/aaaaaaaaaaaaaaaa/chapter-manifest.json' for source in
+               ('01'+'a'*62,'01'+'b'*62,'1f'+'c'*62,'ff'+'d'*62)}
+        prefixes=[]
+        class Paginator:
+            def paginate(self, Bucket, Prefix):
+                prefixes.append(Prefix)
+                return [{'Contents':[{'Key':path,'ETag':'"v"'} for path in paths if path.startswith(Prefix)]}]
+        client=Mock();client.get_paginator.return_value=Paginator();store._client=Mock(return_value=client)
+        self.assertEqual(set(store.list_exact_versions('bucket',paths)),paths)
+        self.assertEqual(set(prefixes),{'chapters/ebook/chm/01','chapters/ebook/chm/1f','chapters/ebook/chm/ff'})
+
+    def test_exact_version_listing_does_not_combine_pages_across_retries(self):
+        from botocore.exceptions import EndpointConnectionError
+        store=S3BucketStore.__new__(S3BucketStore);store.list_workers=1
+        store._location=Mock(return_value=('namespace','bucket'))
+        paths={'reader-index/processing/a.json','reader-index/processing/b.json'}
+        attempts=[0]
+        class Paginator:
+            def paginate(self, Bucket, Prefix):
+                attempts[0]+=1
+                if attempts[0]==1:
+                    yield {'Contents':[{'Key':'reader-index/processing/a.json','ETag':'"old"'}]}
+                    raise EndpointConnectionError(endpoint_url='https://fixture.invalid')
+                yield {'Contents':[{'Key':'reader-index/processing/b.json','ETag':'"new"'}]}
+        client=Mock();client.get_paginator.return_value=Paginator();store._client=Mock(return_value=client)
+        with patch('scripts.reader_bucket_store.time.sleep'):
+            with self.assertRaisesRegex(ValueError,'disappeared'):
+                store.list_exact_versions('bucket',paths)
+        self.assertEqual(attempts[0],2)
+
     def test_persisted_cache_needs_current_etag_and_regular_reads_stay_fresh(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'cache.sqlite3'
@@ -64,6 +97,19 @@ class CacheTests(unittest.TestCase):
             self.assertEqual(cache.get('b', 'p', 'graph-json-v1', 'e')[1], 'a' * 64)
             cache.db.execute('UPDATE reads SET packed=?', (b'corrupt',))
             self.assertIsNone(cache.get('b', 'p', 'graph-json-v1', 'e'))
+
+    def test_truncated_s3_object_is_never_accepted_as_complete_evidence(self):
+        store=S3BucketStore.__new__(S3BucketStore);store.read_cache=None
+        store._location=Mock(return_value=('namespace','bucket'))
+        client=Mock();client.get_object.side_effect=lambda **_: {
+            'Body':io.BytesIO(b'{}'),'ETag':'"fixture"','ContentLength':4}
+        store._client=Mock(return_value=client)
+        with patch('scripts.reader_bucket_store.time.sleep'):
+            for read in (lambda:store.read_bytes('bucket','reader-index/test.json'),
+                         lambda:store.read_graph_json('bucket','reader-index/test.json'),
+                         lambda:store.digest('bucket','reader-index/test.json')):
+                with self.subTest(reader=read), self.assertRaisesRegex(OSError,'short Reader S3'):
+                    read()
 
     def test_graph_parser_never_reuses_old_cache_with_omitted_nested_references(self):
         with tempfile.TemporaryDirectory() as directory:

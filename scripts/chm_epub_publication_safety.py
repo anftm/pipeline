@@ -689,7 +689,7 @@ def staged_pre_ack_controls(plan, before):
     return staged
 
 
-def apply_pre_ack_publication(store, plan, before, fence, checkpoint):
+def apply_pre_ack_publication(store, plan, before, fence, checkpoint, *, on_pointer_committed=None):
     """Publish replacement Reader pointer while keeping old history live."""
     pointer_path = 'reader-index/v3/current.json'
     planned_pointer = json.loads(plan['overrides'][pointer_path])
@@ -720,8 +720,30 @@ def apply_pre_ack_publication(store, plan, before, fence, checkpoint):
     # an otherwise unreferenced v3 catalog is itself discovered as a GC root.
     apply('reader-index/chm-epub-withdrawal-retention.json')
     store_immutable_replacements(store, plan, fence, checkpoint)
-    for path in (promotion_path, chm.SIDECAR, chm.CATALOG, pointer_path):
+    for path in (promotion_path, chm.SIDECAR, chm.CATALOG):
         apply(path)
+    if on_pointer_committed is not None:
+        # Dispatch immediately after the pointer readback, before the durable
+        # checkpoint PUT can be interrupted. Recovery can then observe both
+        # surfaces and does not have to assume a POST outcome.
+        fence.check()
+        raw = staged[pointer_path]
+        try:
+            current = store.read_bytes(chm.ASSETS, pointer_path)
+        except FileNotFoundError:
+            current = None
+        if current != raw:
+            if current is None and before[pointer_path]['present']:
+                raise ValueError('original CHM control disappeared: ' + pointer_path)
+            if current is not None and chm.digest(current) != before[pointer_path]['sha256']:
+                raise ValueError('CHM control moved during publication: ' + pointer_path)
+            store.put_bytes(chm.ASSETS, pointer_path, raw)
+        if store.read_bytes(chm.ASSETS, pointer_path) != raw or publication.current(store)[0] != planned_pointer:
+            raise ValueError('planned CHM Reader pointer did not publish')
+        on_pointer_committed()
+        checkpoint('pre-ack-control-verified', pointer_path)
+    else:
+        apply(pointer_path)
     if publication.current(store)[0] != planned_pointer:
         raise ValueError('planned CHM Reader pointer did not publish')
     return staged
@@ -1182,8 +1204,8 @@ def run_guarded_retirement(store, fence, client, plan, rows, *, preflight, persi
         persist(phase, state, before)
 
     try:
-        staged = apply_pre_ack_publication(store, plan, before, fence, checkpoint)
-        publish_pages(plan)
+        staged = apply_pre_ack_publication(store, plan, before, fence, checkpoint,
+                                           on_pointer_committed=lambda:publish_pages(plan))
         deadline = time.monotonic() + acknowledge_timeout
         while True:
             try:

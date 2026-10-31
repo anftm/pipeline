@@ -168,6 +168,22 @@ class RunChmRetirementTests(unittest.TestCase):
                 runner.request_pages_deploy(object(),fence,plan)
             post.assert_not_called()
 
+    def test_recovery_never_repeats_ambiguous_pages_dispatch(self):
+        pointer={'generation':'new'}
+        plan={'overrides':{runner.publication.POINTER:json.dumps(pointer).encode()}}
+        with patch.object(safety,'observe_planned_projection',side_effect=ValueError('not yet confirmed')), \
+             patch.object(runner.publication,'current',return_value=(pointer,{})), \
+             patch.object(safety,'apply_pre_ack_publication') as apply, \
+             patch.object(runner,'request_pages_deploy') as dispatch:
+            with self.assertRaisesRegex(RuntimeError,'dispatch outcome is unknown'):
+                runner.recover_pages_handoff(object(),Mock(),None,plan,{},lambda *_:None)
+            apply.assert_not_called();dispatch.assert_not_called()
+        with patch.object(safety,'observe_planned_projection',return_value={'hf':{},'pages':{}}), \
+             patch.object(runner,'request_pages_deploy') as dispatch:
+            self.assertEqual(runner.recover_pages_handoff(object(),Mock(),None,plan,{},lambda *_:None),
+                             {'hf':{},'pages':{}})
+            dispatch.assert_not_called()
+
     def test_workflow_serializes_and_exposes_explicit_resume(self):
         path=Path(__file__).resolve().parents[1]/'.github/workflows/chm-epub-retirement.yml'
         workflow=yaml.safe_load(path.read_text())
@@ -178,6 +194,11 @@ class RunChmRetirementTests(unittest.TestCase):
         trigger=workflow.get('on',workflow.get(True))['workflow_dispatch']['inputs']
         self.assertIn('resume',trigger)
         self.assertIn('tests.test_chm_epub_journal',next(s['run'] for s in job['steps'] if 'Test exact' in s.get('name','')))
+        self.assertEqual(next(s['id'] for s in job['steps'] if s.get('name') ==
+                              'Verify exact inventory and retire only after actual closure'),'retirement')
+        self.assertEqual(next(s['if'] for s in job['steps'] if s.get('name') ==
+                              'Restore producer isolation when the transaction is safe'),
+                         "always() && steps.retirement.outcome != 'success'")
         self.assertEqual(job['timeout-minutes'],330)
         for number, predecessor in ((1,'retire'),(2,'continue_1'),(3,'continue_2'),(4,'continue_3')):
             child=workflow['jobs'][f'continue_{number}']

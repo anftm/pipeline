@@ -55,11 +55,12 @@ jobs:
           READER_GC_DURABLE_MAINTENANCE: 'false'
         run: python -B -m unittest tests.test_run_chm_epub_retirement tests.test_chm_epub_journal tests.test_chm_epub_publication_safety tests.test_chm_epub_withdrawal_preview tests.test_chm_epub_bundle_integrity tests.test_reader_gc_graph tests.test_reader_gc_fence tests.test_reader_gc_maintenance -q
       - name: Verify exact inventory and retire only after actual closure
+        id: retirement
         env:
           CHM_STAGE: initial
         run: python -u -B scripts/run_chm_epub_retirement.py
       - name: Restore producer isolation when the transaction is safe
-        if: always()
+        if: always() && steps.retirement.outcome != 'success'
         run: python -u -B scripts/reader_gc_maintenance.py restore --journal output/chm-epub-retirement/maintenance.json
       - uses: actions/upload-artifact@v7
         if: always()

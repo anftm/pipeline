@@ -247,6 +247,40 @@ class ChmPublicationSafetyTests(unittest.TestCase):
         self.assertEqual(staged_catalog['generations']['new']['acks'], {'hf': False, 'pages': False})
         self.assertEqual(json.loads(staged['reader-index/v3/promotions/new.json'])['acks'], {'hf': False, 'pages': False})
 
+    def test_pages_dispatch_runs_after_pointer_readback_and_before_pointer_checkpoint(self):
+        from unittest.mock import patch
+        old={'current':{'generation':'old'},'generations':{'old':{'generation':'old','status':'current'}}}
+        new={'current':{'generation':'new'},'generations':{
+            'old':{'generation':'old','status':'superseded','superseded_at':'2026-10-30T00:00:00Z'},
+            'new':{'generation':'new','status':'current'}}}
+        pointer_path='reader-index/v3/current.json';pointer={'generation':'new'}
+        plan={'v3_pointer_before':{'generation':'old-v3'},'new_v3_generation':'new','base_generation':'new',
+              'immutable':{},'overrides':{safety.chm.SIDECAR:b'sidecar',safety.chm.CATALOG:publication.encode(new),
+                pointer_path:publication.encode(pointer),
+                'reader-index/v3/promotions/new.json':publication.encode({'acks':{'hf':True,'pages':True}}),
+                'reader-index/chm-epub-withdrawal-retention.json':b'retention'}}
+        objects={safety.chm.CATALOG:publication.encode(old),safety.chm.SIDECAR:b'old',
+                 pointer_path:publication.encode(plan['v3_pointer_before'])}
+        before={path:{'present':path in objects,'sha256':safety.chm.digest(objects[path]) if path in objects else None}
+                for path in plan['overrides']}
+        before[safety.chm.CATALOG]['raw']=publication.encode(old).decode();events=[]
+        class Store:
+            def read_bytes(self,bucket,path):
+                if path not in objects:raise FileNotFoundError(path)
+                if path==pointer_path:events.append('pointer-read')
+                return objects[path]
+            def put_bytes(self,bucket,path,raw):
+                if path==pointer_path:events.append('pointer-write')
+                objects[path]=raw
+        class Fence:
+            def check(self):pass
+        with patch.object(publication,'current',side_effect=lambda _: (json.loads(objects[pointer_path]),{})):
+            safety.apply_pre_ack_publication(Store(),plan,before,Fence(),
+                lambda phase,path:events.append('pointer-checkpoint') if path==pointer_path else None,
+                on_pointer_committed=lambda:events.append('pages-dispatch'))
+        self.assertLess(events.index('pointer-write'),events.index('pages-dispatch'))
+        self.assertLess(events.index('pages-dispatch'),events.index('pointer-checkpoint'))
+
     def test_acknowledgment_writes_are_blocked_until_both_surfaces_accept(self):
         from unittest.mock import patch
         bad = copy.deepcopy(self.reports)

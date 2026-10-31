@@ -76,6 +76,21 @@ def request_pages_deploy(store, fence, plan):
     response.raise_for_status()
 
 
+def recover_pages_handoff(store, fence, client, plan, before, checkpoint):
+    """Never replay a dispatch whose POST may already have been accepted."""
+    try:
+        return safety.observe_planned_projection(store,client,plan)
+    except (ValueError,OSError,httpx.HTTPError):
+        pointer=json.loads(plan['overrides'][publication.POINTER])
+        current,_=publication.current(store)
+        if current == pointer:
+            raise RuntimeError('CHM pointer already moved but both sites are not confirmed; '
+                               'Pages dispatch outcome is unknown and must not be repeated') from None
+        safety.apply_pre_ack_publication(store,plan,before,fence,checkpoint,
+            on_pointer_committed=lambda:request_pages_deploy(store,fence,plan))
+        return None
+
+
 def initial(store, fence, client, rows, maintenance_state):
     if journal.read_optional(store, journal.PLAN) is not None or journal.read_optional(store, journal.PROGRESS) is not None:
         raise ValueError('existing CHM transaction requires its recovery path')
@@ -120,7 +135,7 @@ def initial(store, fence, client, rows, maintenance_state):
 
 
 def resume_isolated(store, fence, client, rows, maintenance_state):
-    """Resume only under the original still-drained maintenance journal."""
+    """Resume reference publication only; later jobs rebuild the actual graph."""
     plan, before, updates, digest = journal.load_plan(store, rows)
     state = journal.load_progress(store, digest)
     if state.get('maintenance_id') != maintenance_state.get('maintenance_id'):
@@ -150,16 +165,17 @@ def resume_isolated(store, fence, client, rows, maintenance_state):
         persist(phase)
     try:
         if not state.get('both_surfaces_accepted'):
-            staged=safety.apply_pre_ack_publication(store,plan,before,fence,checkpoint)
-            request_pages_deploy(store,fence,plan)
-            deadline=time.monotonic()+1200
-            while True:
-                try:
-                    reports=safety.observe_planned_projection(store,client,plan)
-                    break
-                except (ValueError,OSError,httpx.HTTPError):
-                    if time.monotonic()>=deadline:raise
-                    time.sleep(15)
+            staged=safety.staged_pre_ack_controls(plan,before)
+            reports=recover_pages_handoff(store,fence,client,plan,before,checkpoint)
+            if reports is None:
+                deadline=time.monotonic()+1200
+                while True:
+                    try:
+                        reports=safety.observe_planned_projection(store,client,plan)
+                        break
+                    except (ValueError,OSError,httpx.HTTPError):
+                        if time.monotonic()>=deadline:raise
+                        time.sleep(15)
             state['both_surfaces_accepted']=True
             state['consumer_receipts']=reports
             persist('both-readers-accepted')
@@ -173,64 +189,28 @@ def resume_isolated(store, fence, client, rows, maintenance_state):
                                                    immutable=plan['immutable'],details=details)
             if proof.get('graph_complete') is not True or proof.get('retained_targets') != 0:
                 raise ValueError('fresh CHM recovery simulation retains targets')
-            safety.recheck_simulation_inputs(store,details,fence,
-                                              applied={**plan['immutable'],**staged})
+            versions=safety.capture_graph_versions(store,details['graph'],omitted=details['overlay_paths'])
+            safety.recheck_simulation_by_version(store,details,fence,versions=versions,
+                                                 applied={**plan['immutable'],**staged})
             state['retirement_started']=True
             persist('retirement-started')
-        else:
-            # No target was removed before the actual graph gate. A recovery
-            # after partial deletes rebuilds the real graph below instead.
-            if not state.get('delete_started'):
-                overlays={**plan['overrides'],**{p:v['after'] for p,v in updates.items()}}
-                proof=chm.simulate_complete_withdrawal(store,overlays,rows,fence,
-                                                       immutable=plan['immutable'])
-                if proof.get('graph_complete') is not True or proof.get('retained_targets') != 0:
-                    raise ValueError('CHM recovery graph retains targets')
         if state.get('delete_started'):
-            safety.verify_live_chm_controls(store,plan)
-            safety.verify_live_processing_controls(store,updates)
-            safety.observe_planned_projection(store,client,plan)
-            current_graph,_=safety.actual_graph_evidence(store,fence,client,rows,plan)
-            safety.require_actual_zero_graph(current_graph,rows)
+            raise ValueError('partial deletion must resume through the staged actual-graph path')
         safety.apply_acknowledged_controls(store,plan,before,staged,client,fence,checkpoint)
         safety.apply_processing_protection_updates(store,rows,fence,client,plan,updates,checkpoint,
                                                    deleted={p for bucket,p in reconciled['missing']})
-        persist('chm-references-retired')
+        state['handoff_complete']=True
+        persist('handoff-complete')
         safety.verify_live_chm_controls(store,plan)
         safety.verify_live_processing_controls(store,updates)
-        actual,traversal=safety.actual_graph_evidence(store,fence,client,rows,plan)
-        safety.require_actual_zero_graph(actual,rows)
-        if state.get('delete_started') and state.get('actual_graph'):
-            old=state['actual_graph']
-            for field in ('root_members','root_sha256','closure_sha256','retired_roots'):
-                if old.get(field) != actual.get(field):
-                    raise ValueError('CHM reference closure changed after partial deletion: '+field)
-        state['actual_graph_verified']=True
-        state['actual_graph']=actual
-        persist('actual-graph-verified')
-        safety.recheck_actual_graph(store,traversal,actual,rows,fence,client,plan)
-        safety.verify_predelete_chapter_inventory(store,state,updates)
-        state['delete_started']=True
-        persist('deletion-started')
-        def deletion_checkpoint(phase,batches,status):
-            state['batches']=batches
-            state['confirmed_deleted_objects']=status.get('confirmed_absent_objects',0)
-            state['confirmed_deleted_bytes']=status.get('confirmed_absent_bytes',0)
-            persist(phase)
-        state['batches'],final=safety.delete_exact_epub_batches(store,rows,fence,deletion_checkpoint,
-            batches=state.get('batches',[]),
-            barrier=lambda:safety.recheck_actual_graph(store,traversal,actual,rows,fence,client,plan))
-        state['confirmed_deleted_objects']=final['confirmed_absent_objects']
-        state['confirmed_deleted_bytes']=final['confirmed_absent_bytes']
-        safety.recheck_actual_graph(store,traversal,actual,rows,fence,client,plan)
-        safety.verify_live_chm_controls(store,plan)
         safety.verify_predelete_chapter_inventory(store,state,updates)
         safety.verify_retired_rollback_aliases(store,plan)
-        state.update(complete=True,error_type=None,error=None)
-        persist('complete')
-        maintenance_state.update(callback_committed=True,callback_recovery_required=False)
+        state.pop('error',None);state.pop('error_type',None);state.pop('reconciliation_error',None)
+        persist('handoff-complete')
+        maintenance_state.update(callback_handoff_ready=True,callback_handoff_stage='references-retired',
+                                 callback_handoff_owner_run_id=maintenance_state['callback_owner_run_id'],
+                                 callback_recovery_required=True)
         maintenance.journal(MAINTENANCE,maintenance_state)
-        maintenance.restore(MAINTENANCE)
         return state
     except Exception as error:
         state.update(complete=False,error_type=type(error).__name__,error=str(error))
@@ -428,6 +408,21 @@ def main():
                            callback_handoff_ready=True, callback_recovery_required=True)
             maintenance.journal(MAINTENANCE,current)
             return continue_staged(store,fence,client,rows,current)
+        plan, before, updates, digest = journal.load_plan(store, rows)
+        checked = journal.load_progress(store, digest)
+        if checked.get('maintenance_id') != current.get('maintenance_id') or current.get('callback_plan_sha256') != digest:
+            raise ValueError('CHM recovery owner cannot adopt a different transaction')
+        safety.validate_publication_order(plan,checked)
+        safety.reconcile_epub_deletions(store,rows,checked.get('batches',[]))
+        journal.verify_initial_chapter_evidence(plan,updates,checked)
+        fence.check()
+        current.setdefault('callback_owner_history',[]).append({
+            'run_id':str(owner_id),'status':owner.get('status'),'resumed_by':run_id,
+            'at':publication.reader_lifecycle.now_iso()})
+        current.update(callback_owner_run_id=run_id,callback_recovery_required=True)
+        current.pop('callback_handoff_ready',None)
+        current.pop('callback_handoff_owner_run_id',None)
+        maintenance.journal(MAINTENANCE,current)
         return resume_isolated(store,fence,client,rows,current)
 
 

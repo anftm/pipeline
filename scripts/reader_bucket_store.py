@@ -402,7 +402,7 @@ class S3BucketStore:
             (key, item.get('ETag')) for key, item in top.items() if cacheable(key))
         return roots
 
-    def list_exact_versions(self, bucket: str, paths: set[str], *, max_prefixes=32) -> dict[str, str]:
+    def list_exact_versions(self, bucket: str, paths: set[str], *, max_prefixes=1024) -> dict[str, str]:
         """Fresh current ETags for exact keys, using bounded flat S3 listings.
 
         The caller chooses exact keys; sibling objects are ignored. A missing or
@@ -415,32 +415,27 @@ class S3BucketStore:
         namespace, name = self._location(bucket)
         client = self._client(namespace)
 
-        def common_directory(selected):
-            common = os.path.commonprefix(sorted(selected))
-            return common[:common.rfind('/') + 1]
-
-        # Compress through shared directory components before grouping. This
-        # avoids listing the entire bucket for a small, tightly scoped closure.
-        prefixes = [(common_directory(paths), paths)]
-        while True:
-            expansion = None
-            for index, (prefix, selected) in enumerate(prefixes):
-                if len(selected) <= 8192:
-                    continue
-                parts = {}
-                for path in selected:
-                    next_slash = path.find('/', len(prefix))
-                    child = path[:next_slash + 1] if next_slash >= 0 else path
-                    parts.setdefault(child, set()).add(path)
-                if len(parts) <= 1 or len(prefixes) - 1 + len(parts) > max_prefixes:
-                    continue
-                expansion = index, [(common_directory(values) if len(values) > 1 else child, values)
-                                    for child, values in sorted(parts.items())]
-                break
-            if expansion is None:
-                break
-            index, replacement = expansion
-            prefixes[index:index + 1] = replacement
+        if type(max_prefixes) is not int or max_prefixes < 1:
+            raise ValueError('invalid exact version listing prefix limit')
+        groups = {}
+        for path in paths:
+            parts = path.split('/')
+            # Large content-addressed ebook trees contain many chapter files
+            # between manifests. One prefix per two source-hash digits skips
+            # unrelated format namespaces while keeping requests bounded.
+            if (len(parts) >= 5 and parts[0:2] == ['chapters', 'ebook']
+                    and re.fullmatch(r'[0-9a-f]{64}', parts[3])):
+                prefix = '/'.join(parts[:3]) + '/' + parts[3][:2]
+            elif len(parts) >= 4 and parts[0] == 'objects' and re.fullmatch(r'[0-9a-f]{2}', parts[1]):
+                prefix = '/'.join(parts[:2]) + '/'
+            elif len(parts) >= 2:
+                prefix = '/'.join(parts[:2]) + '/'
+            else:
+                prefix = path
+            groups.setdefault(prefix, set()).add(path)
+        prefixes = sorted(groups.items())
+        if len(prefixes) > max_prefixes:
+            prefixes = [(os.path.commonprefix(sorted(paths)), paths)]
 
         def one(item):
             prefix, selected = item
@@ -501,6 +496,8 @@ class S3BucketStore:
                 raw = body.read()
             finally:
                 body.close()
+            if response.get('ContentLength') is not None and len(raw) != response['ContentLength']:
+                raise OSError('short Reader S3 object read')
             self._remember_etag(bucket, path, response)
             import hashlib
             self._cache_read(bucket, path, 'raw-v1', raw, hashlib.sha256(raw).hexdigest())
@@ -531,10 +528,18 @@ class S3BucketStore:
         def read():
             response = self._client(namespace).get_object(Bucket=name, Key=path)
             body = response["Body"]
+            length = 0
+            def chunks():
+                nonlocal length
+                for chunk in iter(lambda: body.read(1024 * 1024), b""):
+                    length += len(chunk)
+                    yield chunk
             try:
-                result = parser(iter(lambda: body.read(1024 * 1024), b""), path.endswith(".gz"))
+                result = parser(chunks(), path.endswith(".gz"))
             finally:
                 body.close()
+            if response.get('ContentLength') is not None and length != response['ContentLength']:
+                raise OSError('short Reader S3 graph object read')
             self._remember_etag(bucket, path, response)
             if default_parser:
                 self._cache_read(bucket, path, GRAPH_JSON_CACHE_FORMAT,
@@ -547,12 +552,15 @@ class S3BucketStore:
         namespace, name = self._location(bucket)
         def read():
             response = self._client(namespace).get_object(Bucket=name, Key=path)
-            body, value = response["Body"], hashlib.sha256()
+            body, value, size = response["Body"], hashlib.sha256(), 0
             try:
                 for chunk in iter(lambda: body.read(1024 * 1024), b""):
                     value.update(chunk)
+                    size += len(chunk)
             finally:
                 body.close()
+            if response.get('ContentLength') is not None and size != response['ContentLength']:
+                raise OSError('short Reader S3 digest object read')
             return value.hexdigest()
         return retry_s3(read)
 
