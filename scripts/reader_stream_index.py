@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import time
 from datetime import datetime, timezone
@@ -199,6 +200,13 @@ def publish_checkpoint(bucket: str, path: str, previous: dict, entries: list[dic
                        failures: list[dict], uploads: dict[str, str], work: Path,
                        token: str | None, *, apply: bool, kind: str) -> dict:
     """Protect/upload content before the index; even all-failed batches persist."""
+    # No chapter producer, including repair jobs, may recreate the retired
+    # CHM full-book EPUB namespace. Check before writing processing roots or
+    # any other remote control. Existing legacy references remain untouched
+    # until the explicitly guarded retirement has handed off both Readers.
+    if any(isinstance(remote, str) and re.fullmatch(
+            r'native/ebook/chm/[0-9a-f]{64}/document\.epub', remote) for remote in uploads):
+        raise ValueError('publishing a full CHM EPUB is prohibited')
     roots = []
     for failure in failures:
         failure.setdefault("checkpointed_at", datetime.now(timezone.utc).isoformat())

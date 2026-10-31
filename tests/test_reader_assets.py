@@ -2540,6 +2540,31 @@ class PublicationTests(unittest.TestCase):
             "objects/dd/native-media-cdn-v1/audio.flac", "objects/ee/native-media-cdn-v1/video.mp4",
         ])
 
+    def test_legacy_chm_epub_bundle_is_rejected_before_any_publication(self):
+        from unittest.mock import Mock, patch
+        import tempfile
+        path='native/ebook/chm/'+'a'*64+'/document.epub'
+        result={'key':'repo\0book.chm','status':'ready','source_extension':'chm',
+                'reader_mode':'epub','path':path}
+        data={'version':1,'results':[result]};api=Mock()
+        with tempfile.TemporaryDirectory() as temporary, \
+             patch.object(publish_reader_assets,'load_bundle_data',return_value=data), \
+             patch.object(publish_reader_assets,'remote_manifest') as manifest, \
+             patch.object(publish_reader_assets,'sync_artifacts') as upload:
+            with self.assertRaisesRegex(ValueError,'full CHM EPUB is prohibited'):
+                publish_reader_assets.publish_bundle(api,'repo',Path(temporary))
+            with self.assertRaisesRegex(ValueError,'full CHM EPUB is prohibited'):
+                publish_reader_assets.publish_bucket_bundle(api,'repo',Path(temporary),data,set(),1)
+            manifest.assert_not_called();upload.assert_not_called();api.upload_file.assert_not_called()
+        # The restriction does not ban ordinary EPUB sources or temporary CHM conversion.
+        with self.assertRaisesRegex(ValueError,'full CHM EPUB is prohibited'):
+            publish_reader_assets.reject_full_chm_epub_publication({'results':[{
+                'status':'ready','source_extension':'chm','reader_mode':'epub',
+                'path':'objects/aa/'+'a'*64+'/profile/document.epub'}]})
+        publish_reader_assets.reject_full_chm_epub_publication({'results':[{
+            'status':'ready','source_extension':'epub','reader_mode':'epub',
+            'path':'native/ebook/epub/'+'a'*64+'/document.epub'}]})
+
     def test_spreadsheet_page_manifest_is_a_bucket_upload_candidate(self):
         data = {"results": [
             {"status": "ready", "reader_mode": "pdf", "path": "objects/aa/page-manifest.json",

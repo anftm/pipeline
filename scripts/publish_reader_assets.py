@@ -7,6 +7,7 @@ import json
 import mimetypes
 import os
 import random
+import re
 import shutil
 import tempfile
 import time
@@ -44,6 +45,19 @@ except ImportError:
 SIDECAR_NAME = "reader_assets.json.gz"
 BUCKET_READER_MODES = {"docx", "html", "text", "markdown", "image", "foliate", "epub", "audio", "video", "swf"}
 EBOOK_CHAPTERS_PREFIX = "ebook-chapters/"
+
+
+def reject_full_chm_epub_publication(data):
+    """Never republish a complete CHM conversion from a legacy bundle."""
+    for result in data.get('results', []):
+        if result.get('status') != 'ready':
+            continue
+        path = result.get('path')
+        extension = str(result.get('source_extension', '')).lower().lstrip('.')
+        if ((extension == 'chm' and result.get('reader_mode') == 'epub')
+                or isinstance(path, str) and re.fullmatch(
+                    r'native/ebook/chm/[0-9a-f]{64}/document\.epub', path)):
+            raise ValueError('publishing a full CHM EPUB is prohibited')
 
 
 class S3UploadSizeMismatch(RuntimeError):
@@ -561,6 +575,7 @@ def build_publish(api: HfApi, repo_id: str, bundle: Path, revision: str | None =
 
 def publish_bundle(api: HfApi, repo_id: str, bundle: Path, *, max_attempts: int = 20) -> tuple[dict, int]:
     data = load_bundle_data(bundle)
+    reject_full_chm_epub_publication(data)
     result_keys = {result.get("key") for result in data.get("results", []) if result.get("key")}
     if type(api) is HfApi:
         return publish_bucket_bundle(api, repo_id, bundle, data, result_keys, max_attempts)
@@ -691,6 +706,7 @@ def publish_bucket_bundle(api: HfApi, repo_id: str, bundle: Path, data: dict,
                           result_keys: set[str], max_attempts: int,
                           artifact_roots: dict[str, Path] | None = None) -> tuple[dict, int]:
     """Publish Reader objects and all indexes atomically in the bucket namespace."""
+    reject_full_chm_epub_publication(data)
     token = os.environ.get("HF_TOKEN")
     if not token:
         raise RuntimeError("HF_TOKEN is required")

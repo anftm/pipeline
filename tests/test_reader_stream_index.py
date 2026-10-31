@@ -94,6 +94,20 @@ class ReaderStreamCheckpointTests(unittest.TestCase):
         self.assertEqual(events[2][0][0], "documents/web/html/index.json")
         self.assertTrue(result["files"][0]["processing_roots"])
 
+    def test_chm_full_epub_upload_is_blocked_before_any_remote_write(self):
+        epub='native/ebook/chm/'+'a'*64+'/document.epub'
+        entry={'key':'repo\0book.chm','source_revision':'rev',
+               'root':'chapters/ebook/chm/'+'a'*64+'/'+'b'*16}
+        with tempfile.TemporaryDirectory() as temporary, \
+             patch.object(index,'batch_bucket_files_with_retry') as upload:
+            for apply in (False,True):
+                with self.subTest(apply=apply), \
+                     self.assertRaisesRegex(ValueError,'full CHM EPUB is prohibited'):
+                    index.publish_checkpoint(BUCKET,'chapters/ebook/chm/index-00.json',{'files':[]},
+                        [dict(entry)],[],{epub:'not-read'},Path(temporary),None,apply=apply,
+                        kind='ebook-chapter-stream-index')
+            upload.assert_not_called()
+
     def test_failure_only_batch_persists_before_strict_exit_and_limit_counts_attempts(self):
         events = []
         source = {"repo": "repo", "revision": "rev", "extension": "html"}
