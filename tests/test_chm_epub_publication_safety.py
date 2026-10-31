@@ -660,7 +660,7 @@ class ChmPublicationSafetyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'chapter bundle inventory changed'):
             safety.verify_predelete_chapter_inventory(Store(),proof,updates)
 
-    def test_chapter_inventory_groups_hash_prefixes_without_skipping_any_bundle(self):
+    def test_chapter_inventory_uses_fresh_full_listing_without_skipping_any_bundle(self):
         roots=['chapters/ebook/chm/'+source+'/'+'f'*16 for source in
                ('01'+'a'*62,'01'+'b'*62,'02'+'c'*62)]
         files={root+'/chapter-manifest.json' for root in roots} | {root+'/chapters/body.xhtml' for root in roots}
@@ -672,7 +672,7 @@ class ChmPublicationSafetyTests(unittest.TestCase):
                 prefixes.extend(values)
                 return {path for path in files if path.startswith(values)}
         self.assertTrue(safety.require_initial_chapter_inventory(Store(),rows))
-        self.assertEqual(set(prefixes),{'chapters/ebook/chm/01','chapters/ebook/chm/02'})
+        self.assertEqual(prefixes,['chapters/ebook/chm/'])
         files.remove(roots[1]+'/chapters/body.xhtml')
         with self.assertRaisesRegex(ValueError,'chapter bundle inventory changed'):
             safety.require_initial_chapter_inventory(Store(),rows)
