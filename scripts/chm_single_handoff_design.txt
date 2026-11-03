@@ -127,3 +127,16 @@ stay unchanged by this limited call. Other real inventories can generate
 retirement hints and other side effects; this is not a complete write inventory.
 No inference is made about remote atomicity, permissions, actual availability,
 independent writer exclusion or whether a production retry would be safe.
+
+Central identity and old journal boundary
+-----------------------------------------
+The prepared v2 producer scope, credential preflight, shadow, and v2 window
+are bound to the former central repository ID 1260985830. The rebuilt central
+repository was observed as ID 1443726000; a same-name replacement is not the
+same producer identity. `tests/test_chm_producer_identity_boundary.py` uses
+synthetic API responses to check that the old identity mismatch stops the old
+shadow and credential preflight before workflow inventory reads. It also
+shows that changing only the v2 window ID is rejected and that an old unbound
+journal cannot establish a newly bound window. These checks do not establish
+the current identity, credential ownership, writer exclusion, absence of jobs,
+or scope activation. Do not edit the pinned IDs or infer safety from a 404.
