@@ -18,6 +18,9 @@ on:
           - all
           - hf-space
 
+permissions:
+  contents: write
+
 concurrency:
   group: daily-sync
   cancel-in-progress: false

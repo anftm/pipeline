@@ -231,6 +231,10 @@ class DirectorySnapshotTests(unittest.TestCase):
     def test_workflows_serialize_and_daily_requires_generation_first(self):
         daily = (ROOT / ".github/workflows/search-daily-sync.yml").read_text()
         directories = (ROOT / ".github/workflows/search-update-directories.yml").read_text()
+        import yaml
+        daily_config = yaml.load(daily, Loader=yaml.BaseLoader)
+        self.assertEqual(daily_config.get('permissions'), {'contents': 'write'})
+        self.assertEqual(daily_config['jobs']['sync']['steps'][0]['uses'], 'actions/checkout@v7')
         self.assertLess(daily.index("- name: Generate and verify source directories"),
                         daily.index("- name: Fetch and parse"))
         self.assertEqual(daily.count("DIRECTORY_REVISIONS_FILE:"), 2)
