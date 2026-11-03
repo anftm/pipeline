@@ -82,6 +82,21 @@ class ReaderProjectionSyncTests(unittest.TestCase):
         self.assertFalse(any('publish_reader_v3.py retire --apply' in step.get('run', '') for step in steps))
         self.assertFalse(any('pdf_progress_report.py' in item.get('run', '') for item in steps))
 
+    def test_unchanged_apply_unify_can_still_publish_acknowledge_and_compact(self):
+        """Document the current side effect; do not call this a no-op or GC permission."""
+        workflow = self.workflow('reader-v3-publish.yml')
+        steps = workflow['jobs']['publish']['steps']
+        operation = next(item for item in steps if item.get('id') == 'operation')
+        publish = next(item for item in steps if item.get('name') == 'Publish the pinned projection to Pages')
+        ack = next(item for item in steps if item.get('id') == 'ack')
+        self.assertIn('echo "changed=true" >> "$GITHUB_OUTPUT"', operation['run'])
+        self.assertTrue(condition(publish['if'], operation='unify', changed='true', apply='true'))
+        self.assertTrue(condition(ack['if'], operation='unify', changed='true', apply='true'))
+        self.assertIn('ack-all --apply', ack['run'])
+        self.assertIn('acknowledge-legacy --apply', ack['run'])
+        self.assertIn('compact-legacy --apply', ack['run'])
+        self.assertLess(ack['run'].index('ack-all --apply'), ack['run'].index('compact-legacy --apply'))
+
     def test_workflow_dispatch_script_preserves_active_arguments_and_rejects_retired(self):
         workflow = self.workflow('reader-v3-publish.yml')
         operation = next(item for item in workflow['jobs']['publish']['steps'] if item.get('id') == 'operation')

@@ -12,7 +12,7 @@
 
 建议先从不写书籍或索引的验证任务入手，再按需要恢复搜索、校订和普通 Reader；写入及部署任务应分别核对权限、secret 和实际调用。仓库默认 `GITHUB_TOKEN` 权限曾只读；`search-daily-sync.yml` 已显式请求 `contents: write` 用于提交 `state/commits.json`，但尚未在 Actions 实跑验证。不能假定已配置的 `GH_PAT` 会自动用于该步骤。`bha-reindex-auth-check.yml` 只调用固定的状态 GET 端点，用于单独确认 `BHA_REINDEX_TOKEN`，不启动重建；应以实际 run 结果为准。搜索同步脚本只提交各自的生成数据路径，Git 操作或 rebase 失败会停止；本地 Git 测试不等于实际 Space／Pages 写入或端到端部署成功。
 
-`reader-maintenance.yml`、`reader-gc-collect.yml`、`reader-gc-ccrd.yml` 和其他定点退役/撤回入口在独立安全审查前不得放行；`reader-v3-publish.yml` 还需评估日程及 `withdraw/reset-documents`，不能因普通 `unify` 调用就视为完全无风险。分批方案不修改旧维护 journal，也不扩大章节扫描或 Reader 限额。
+`reader-maintenance.yml`、`reader-gc-collect.yml`、`reader-gc-ccrd.yml` 和其他定点退役/撤回入口在独立安全审查前不得放行；`reader-v3-publish.yml` 还需评估日程及 `withdraw/reset-documents`，不能因普通 `unify` 调用就视为完全无风险。尤其是该 workflow 当前即使 `unify` 报告 unchanged 也会设置 `changed=true`：若 apply=true，后续仍可能发布 Pages、确认两端并压缩 base catalog。单本 CHM 的旧 document-reset 收据还绑定既有 v3 代与快照；不要把其新代视为已兼容，不能放宽 GC 检查。分批方案不修改旧维护 journal，也不扩大章节扫描或 Reader 限额。
 
 ## 保留：BHA、搜索与校订
 

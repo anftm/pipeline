@@ -49,6 +49,11 @@ such a replacement until a separately reviewed compatibility protocol exists.
 Do not bypass that preflight, edit the receipt, or run document GC. CHM-only
 route acceptance cannot by itself establish document-retirement compatibility.
 
+An unchanged apply=true unify is not necessarily a no-op either: the central
+workflow currently sets changed=true unconditionally, then can publish a Pages
+projection, acknowledge consumers, and compact the base catalog. A read-only
+unify apply=false result therefore does not authorize an apply=true retry.
+
 Requirements to prove before any separately reviewed implementation
 ---------------------------------------------------------------------
 1. Independently establish a current writer inventory and durable exclusion
