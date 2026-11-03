@@ -10,6 +10,8 @@
 
 恢复之前，须再次核验仓库 ID、`main`、完整工作流清单和每个状态、全局开关及各类未完成 run；任何新增、变更或读回不一致都应停止，而不是假定快照仍有效。随后只选择经过审查的入口逐个放行；外层及可复用内层的启停行为和调用链必须先核实，不能只启用外层。禁用期间的事件不能假定会自动重放，尤其需要单独检查校订提交及 issue 评论。
 
+校订提交保护：BHA Space 修补版本 `6705f4f15bee3319a21379a8689e757c78e56fd3` 默认暂停 `/api/proofread` 与 `/api/parse`，返回 503 并提示保留草稿，防止 GitHub dispatch 返回 204 但禁用的工作流未执行时误报已接收。该版已读回 RUNNING，以不存在的测试身份分别确认两个接口均返回预期 503；没有发送真实校订，普通搜索仍可查询。浏览器草稿使用 sessionStorage，并非跨设备或永久保存；无法恢复修补前可能已丢失的事件。`BHA_PIPELINE_SUBMISSIONS_PAUSED=0` 仅是未来显式开关，**不是恢复批准**：先验证中央工作流和总权限、事件可靠投递、接收后处理和用户可查回执，再单独审查开放；不得以一次 dispatch 204 代替端到端成功。
+
 建议先从不写书籍或索引的验证任务入手，再按需要恢复搜索、校订和普通 Reader；写入及部署任务应分别核对权限、secret 和实际调用。仓库默认 `GITHUB_TOKEN` 权限曾只读；`search-daily-sync.yml` 已显式请求 `contents: write` 用于提交 `state/commits.json`，但尚未在 Actions 实跑验证。不能假定已配置的 `GH_PAT` 会自动用于该步骤。`bha-reindex-auth-check.yml` 只调用固定的状态 GET 端点，用于单独确认 `BHA_REINDEX_TOKEN`，不启动重建；应以实际 run 结果为准。搜索同步脚本只提交各自的生成数据路径，Git 操作或 rebase 失败会停止；本地 Git 测试不等于实际 Space／Pages 写入或端到端部署成功。
 
 `reader-maintenance.yml`、`reader-gc-collect.yml`、`reader-gc-ccrd.yml` 和其他定点退役/撤回入口在独立安全审查前不得放行；`reader-v3-publish.yml` 还需评估日程及 `withdraw/reset-documents`，不能因普通 `unify` 调用就视为完全无风险。尤其是该 workflow 当前即使 `unify` 报告 unchanged 也会设置 `changed=true`：若 apply=true，后续仍可能发布 Pages、确认两端并压缩 base catalog。单本 CHM 的旧 document-reset 收据还绑定既有 v3 代与快照；不要把其新代视为已兼容，不能放宽 GC 检查。分批方案不修改旧维护 journal，也不扩大章节扫描或 Reader 限额。
