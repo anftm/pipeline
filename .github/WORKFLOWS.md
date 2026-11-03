@@ -1,16 +1,16 @@
 # 工作流盘点与恢复边界
 
-盘点基准：重建后的 `main`（2026-11-03）。本表覆盖整理前的 69 个工作流；首批移除 9 个，保留 60 个。**保留不等于批准运行**：仓库 Actions 当前全局关闭，已配置部分 secret，但不是所有入口的凭据都已准备；重新启用前必须逐项审查触发器、仓库身份、权限、调用链和最小必要 secret。表中不包含 secret 的值，也不是恢复操作说明。
+盘点基准：重建后的 `main`（2026-11-03）。本表覆盖整理前的 69 个工作流：首批移除 9 个、保留 60 个，并新增 1 个手动只读 BHA 凭据检查。**保留不等于批准运行**：仓库 Actions 暂停时已配置部分 secret，但不是所有入口的凭据都已准备；重新启用前必须逐项审查触发器、仓库身份、权限、调用链和最小必要 secret。表中不包含 secret 的值，也不是恢复操作说明。
 
 计划触发器仍写在部分文件中，包括会写入或删除数据的任务。开启仓库 Actions 可能同时放行所有未单独禁用的定时任务；不要仅凭本表启用 Actions。普通 GC 仍被旧生产者范围、新旧仓库 ID 和历史维护恢复问题阻塞；仓库重建、404 或本地测试都不是隔离证明。
 
 ## 分批恢复前的保护快照
 
-2026-11-03，以中央仓 ID `1443726000`、`main` 的 `23f141f` 为基准，在仓库 Actions 总开关仍关闭时，逐个将当时全部 60 个工作流设为 `disabled_manually`，包括 `workflow_call` 内层，逐项读回确认；当时没有 Actions run。这是一次状态快照，不会自动覆盖以后新增或重新启用的工作流。**关闭单个中央仓工作流不证明外部写者已隔离，也不授权 GC。**
+2026-11-03，以中央仓 ID `1443726000`、`main` 的 `23f141f` 为基准，在仓库 Actions 总开关仍关闭时，逐个将当时全部 60 个工作流设为 `disabled_manually`，包括 `workflow_call` 内层，逐项读回确认；当时没有 Actions run。后来单独放行 Space 健康检查完成一次成功运行，再次关闭总开关并逐项确认 60 个工作流禁用。此后新增的 BHA 手动检查需要单独处理，不在旧快照内。**关闭单个中央仓工作流不证明外部写者已隔离，也不授权 GC。**
 
 恢复之前，须再次核验仓库 ID、`main`、完整工作流清单和每个状态、全局开关及各类未完成 run；任何新增、变更或读回不一致都应停止，而不是假定快照仍有效。随后只选择经过审查的入口逐个放行；外层及可复用内层的启停行为和调用链必须先核实，不能只启用外层。禁用期间的事件不能假定会自动重放，尤其需要单独检查校订提交及 issue 评论。
 
-建议先从不写书籍或索引的验证任务入手，再按需要恢复搜索、校订和普通 Reader；写入及部署任务应分别核对权限、secret 和实际调用。仓库默认 `GITHUB_TOKEN` 权限曾只读；`search-daily-sync.yml` 已显式请求 `contents: write` 用于提交 `state/commits.json`，但尚未在 Actions 实跑验证。不能假定已配置的 `GH_PAT` 会自动用于该步骤。BHA 的 `BHA_REINDEX_TOKEN` 两端已配置，但尚无端到端 Actions 鉴权结果。
+建议先从不写书籍或索引的验证任务入手，再按需要恢复搜索、校订和普通 Reader；写入及部署任务应分别核对权限、secret 和实际调用。仓库默认 `GITHUB_TOKEN` 权限曾只读；`search-daily-sync.yml` 已显式请求 `contents: write` 用于提交 `state/commits.json`，但尚未在 Actions 实跑验证。不能假定已配置的 `GH_PAT` 会自动用于该步骤。`bha-reindex-auth-check.yml` 只调用固定的状态 GET 端点，用于单独确认 `BHA_REINDEX_TOKEN`，不启动重建；应以实际 run 结果为准。
 
 `reader-maintenance.yml`、`reader-gc-collect.yml`、`reader-gc-ccrd.yml` 和其他定点退役/撤回入口在独立安全审查前不得放行；`reader-v3-publish.yml` 还需评估日程及 `withdraw/reset-documents`，不能因普通 `unify` 调用就视为完全无风险。分批方案不修改旧维护 journal，也不扩大章节扫描或 Reader 限额。
 
@@ -19,6 +19,7 @@
 | 文件 | 触发 | 用途与决策 |
 |---|---|---|
 | `bha-fork-archives.yml` | 定时、手动 | 维护 BHA 源仓 fork；保留。 |
+| `bha-reindex-auth-check.yml` | 手动 | 固定 BHA 管理状态端点的只读鉴权检查，不启动索引重建。 |
 | `bha-source-files.yml` | 手动 | 镜像源文件；可选 optimize 会改写镜像，不能当作只读任务。 |
 | `bha-update-index.yml` | 定时、仓库事件、手动 | BHA 索引及校订状态更新；保留。 |
 | `proofread-ocr-conflict-review.yml` | issue 评论 | 处理已有 OCR 补丁冲突的校订命令；不是远端 OCR 生产者。 |

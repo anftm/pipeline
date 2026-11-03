@@ -243,6 +243,11 @@ class DirectorySnapshotTests(unittest.TestCase):
             self.assertIn("cancel-in-progress: false", workflow)
             self.assertIn("queue: max", workflow)
         self.assertNotIn("  schedule:", directories)
+        ci = yaml.load((ROOT / ".github/workflows/search-directory-tests.yml").read_text(),
+                       Loader=yaml.BaseLoader)
+        runs = '\n'.join(step.get('run', '') for step in ci['jobs']['tests']['steps'])
+        self.assertIn('jieba==0.42.1', runs)
+        self.assertIn('PyYAML==6.0.3', runs)
 
     def test_pushed_catalog_readback_mismatch_is_not_accepted(self):
         from types import SimpleNamespace
