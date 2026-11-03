@@ -345,6 +345,56 @@ class ProofreadBundleTests(unittest.TestCase):
             self.assertIn("- 修改：正文段落 1 处", body)
             self.assertNotIn("由 BHA 校订后端提交", body)
 
+    def test_repository_dispatch_proofread_replay_uses_same_review_identity(self):
+        request = {
+            'kind': 'proofread', 'archive_id': 3, 'article_id': 'fixture-article',
+            'publication_id': 'fixture-publication', 'request_id': 'fixture-request',
+            'body': {'patch': {'version': 2, 'parts': {'0': {'diff': '-1\t+新'}},
+                               'comments': {}, 'description': ''}},
+            'changed': [{'kind': 'part', 'index': 1, 'original': '旧', 'edited': '新'}],
+            'fulltext': {'original': '旧', 'edited': '新'},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            event = Path(directory) / 'event.json'
+            event.write_text(json.dumps({'action': 'submit-proofread', 'client_payload': request}), encoding='utf-8')
+            with patch.dict(os.environ, {'GH_PAT': 'fixture-archive', 'TRACKER_TOKEN': 'fixture-tracker',
+                                         'GITHUB_EVENT_PATH': str(event)}), \
+                    patch.object(submit_proofread, 'api_request', side_effect=AssertionError('network forbidden')), \
+                    patch.object(submit_proofread, 'get_file', return_value=('', None)), \
+                    patch.object(submit_proofread, 'submit_file', return_value={'number': 1, 'url': 'fixture/pr'}) as pull, \
+                    patch.object(submit_proofread, 'upsert_tracker_issue', return_value='fixture/issue') as issue, \
+                    patch.object(submit_proofread, 'merge_pull') as merge, \
+                    patch.object(submit_proofread, 'delete_pull_branch') as delete, \
+                    redirect_stdout(io.StringIO()):
+                submit_proofread.main()
+                submit_proofread.main()
+        self.assertEqual(pull.call_count, 2)
+        self.assertEqual(pull.call_args_list[0], pull.call_args_list[1])
+        self.assertEqual(issue.call_count, 2)
+        self.assertEqual(issue.call_args_list[0].args[1], issue.call_args_list[1].args[1])
+        merge.assert_not_called()
+        delete.assert_not_called()
+
+    def test_submit_refuses_tampered_segmented_event_before_any_archive_mutation(self):
+        envelope = {'payload_blobs': ['a' * 40], 'payload_sha256': '0' * 64,
+                    'payload_characters': 2, 'request_id': 'fixture'}
+        blob = {'encoding': 'base64', 'content': base64.b64encode(b'{}').decode()}
+        with tempfile.TemporaryDirectory() as directory:
+            event = Path(directory) / 'event.json'
+            event.write_text(json.dumps({'action': 'submit-proofread', 'client_payload': envelope}), encoding='utf-8')
+            with patch.dict(os.environ, {'GH_PAT': 'fixture-archive', 'TRACKER_TOKEN': 'fixture-tracker',
+                                         'GITHUB_EVENT_PATH': str(event)}), \
+                    patch.object(submit_proofread, 'api_request', side_effect=AssertionError('network forbidden')), \
+                    patch.object(submit_proofread, 'response_or_fail', return_value=blob), \
+                    patch.object(submit_proofread, 'get_file') as get_file, \
+                    patch.object(submit_proofread, 'submit_file') as submit, \
+                    patch.object(submit_proofread, 'merge_pull') as merge:
+                with self.assertRaisesRegex(RuntimeError, 'hash does not match'):
+                    submit_proofread.main()
+        get_file.assert_not_called()
+        submit.assert_not_called()
+        merge.assert_not_called()
+
     def test_all_changed_metadata_fields_get_text_sections(self):
         fields = {
             "title": ("旧标题", "新标题"),
