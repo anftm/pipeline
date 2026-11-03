@@ -113,3 +113,17 @@ Requirements to prove before any separately reviewed implementation
 GC and credential isolation must be reviewed separately. Nothing here permits
 restoration of old remote OCR, expanded scans or limits, extra backup, routing
 withdrawal, source deletion, processing release, retirement hints, or GC.
+
+Additional synthetic interruption characterization
+--------------------------------------------------
+`tests/test_chm_v3_interruption_boundaries.py` calls the existing v3 unify code
+against a dictionary-only test double, not a real bucket. In its specifically
+constructed empty-v3-file fixture (retirement hint mocked absent), the observed
+order is snapshot, catalog, promotion, then pointer. A timeout after the final
+write leaves the synthetic new pointer visible even though the caller receives
+an exception; the old document-reset receipt remains bound to its parent and
+the proposed unify catalog lacks the reset marker. All 52 synthetic pin records
+stay unchanged by this limited call. Other real inventories can generate
+retirement hints and other side effects; this is not a complete write inventory.
+No inference is made about remote atomicity, permissions, actual availability,
+independent writer exclusion or whether a production retry would be safe.
