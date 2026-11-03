@@ -10,14 +10,14 @@ on:
     inputs:
       operation:
         type: choice
-        options: [build-stage, stage, promote, rollback, withdraw, ack, inspect, auto, correct, accept, reject, retry, retire, retire-ocr-progress, unify, repair-gbk, reset-documents]
+        options: [inspect, unify, ack, retire, withdraw, reset-documents]
         default: inspect
       resource_json:
-        description: Pinned build-stage spec (direct_reading preserves existing text) or qualified candidate/rollback JSON
+        description: Options JSON for withdraw, unify or reset-documents; reset-documents changes document routes
         type: string
         default: '{}'
       expected_parent:
-        description: Expected current v3 generation, or none for initial promotion
+        description: Expected current v3 generation for an exact withdrawal, or none
         type: string
         default: none
       surface:
@@ -94,8 +94,8 @@ jobs:
           if [[ -z "$RESOURCE_JSON" ]]; then RESOURCE_JSON='{}'; fi
           args=("$OPERATION" --output output/v3/publication.json)
           case "$OPERATION" in
-            build-stage|stage|promote|rollback|withdraw) args+=(--resource-json "$RESOURCE_JSON" --expected-parent "$EXPECTED_PARENT") ;;
-            auto|correct|accept|reject|retry|repair-gbk|unify|reset-documents) args+=(--resource-json "$RESOURCE_JSON") ;;
+            withdraw) args+=(--resource-json "$RESOURCE_JSON" --expected-parent "$EXPECTED_PARENT") ;;
+            unify|reset-documents) args+=(--resource-json "$RESOURCE_JSON") ;;
             retire) ;;
             ack) args+=(--surface "$SURFACE") ;;
             inspect) ;;
@@ -103,16 +103,12 @@ jobs:
           esac
           if [[ "$APPLY" == true ]]; then args+=(--apply); fi
           python scripts/publish_reader_v3.py "${args[@]}"
-          changed=true
-          if [[ "$OPERATION" == auto ]]; then
-            changed=$(jq -r 'if has("changed") then .changed else (.processed | length > 0) end' output/v3/publication.json)
-          fi
-          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
       - name: Publish the pinned projection to Pages
         if: >-
           steps.operation.outputs.apply == 'true' &&
-          (steps.operation.outputs.operation == 'auto' ||
-            (steps.operation.outputs.changed == 'true' && contains(fromJSON('["correct","accept","promote","rollback","withdraw","repair-gbk","unify","reset-documents"]'), steps.operation.outputs.operation)))
+          steps.operation.outputs.changed == 'true' &&
+          contains(fromJSON('["withdraw","unify","reset-documents"]'), steps.operation.outputs.operation)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           PAGES_TOKEN: ${{ secrets.PAGES_TOKEN }}
@@ -122,10 +118,8 @@ jobs:
         id: ack
         if: >-
           steps.operation.outputs.apply == 'true' &&
-          (
-            steps.operation.outputs.operation == 'auto' ||
-            (steps.operation.outputs.changed == 'true' && contains(fromJSON('["auto","correct","accept","promote","rollback","withdraw","repair-gbk","unify","reset-documents"]'), steps.operation.outputs.operation))
-          )
+          steps.operation.outputs.changed == 'true' &&
+          contains(fromJSON('["withdraw","unify","reset-documents"]'), steps.operation.outputs.operation)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_INPUT_TOKEN: ${{ secrets.HF_INPUT_TOKEN }}

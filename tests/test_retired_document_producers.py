@@ -49,6 +49,12 @@ class RetiredDocumentProducerTests(unittest.TestCase):
         self.assertIn('auto|build-stage|stage|promote|rollback|correct|accept|reject|retry|repair-gbk|retire-ocr-progress)', workflow)
         self.assertIn('Retired document OCR/text operation is disabled', workflow)
         self.assertIn('unify|reset-documents)', workflow)
+        config = yaml.safe_load(workflow)
+        inputs = config.get('on', config.get(True))['workflow_dispatch']['inputs']
+        self.assertEqual(inputs['operation']['options'],
+                         ['inspect', 'unify', 'ack', 'retire', 'withdraw', 'reset-documents'])
+        self.assertEqual(inputs['operation']['default'], 'inspect')
+        self.assertFalse(inputs['apply']['default'])
 
     def test_v3_keeps_only_the_existing_daily_retirement_schedule(self):
         workflow = yaml.safe_load((ROOT / 'reader-v3-publish.yml').read_text())

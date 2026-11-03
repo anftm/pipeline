@@ -333,7 +333,8 @@ class V3PublicationTests(unittest.TestCase):
         self.assertFalse(workflow["concurrency"]["cancel-in-progress"])
         self.assertNotIn("workflow_run", workflow[True])
         self.assertFalse(workflow[True]["workflow_dispatch"]["inputs"]["apply"]["default"])
-        self.assertIn("retire-ocr-progress", workflow[True]["workflow_dispatch"]["inputs"]["operation"]["options"])
+        self.assertEqual(workflow[True]["workflow_dispatch"]["inputs"]["operation"]["options"],
+                         ["inspect", "unify", "ack", "retire", "withdraw", "reset-documents"])
         operation_step = next(step for step in workflow["jobs"]["publish"]["steps"]
                               if step.get("id") == "operation")
         self.assertIn("repair-gbk|retire-ocr-progress)", operation_step["run"])
@@ -348,7 +349,7 @@ class V3PublicationTests(unittest.TestCase):
         self.assertNotIn("cycle", workflow[True]["workflow_dispatch"]["inputs"]["operation"]["options"])
         ack_step = next(step for step in workflow["jobs"]["publish"]["steps"]
                         if step.get("id") == "ack")
-        self.assertIn("operation == 'auto'", ack_step["if"])
+        self.assertNotIn("operation == 'auto'", ack_step["if"])
         self.assertIn("complete=", ack_step["run"])
         self.assertIn("retire", workflow[True]["workflow_dispatch"]["inputs"]["operation"]["options"])
         self.assertIn("retire) ;;", operation_step["run"])

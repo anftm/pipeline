@@ -68,7 +68,7 @@ jobs:
           APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
           KEEP_GENERATIONS: ${{ inputs.keep_generations || '2' }}
           LIMIT: ${{ inputs.limit || '0' }}
-          INCLUDE_STAGING: ${{ github.event_name == 'schedule' && github.event.schedule == '23 9 * * *' || inputs.include_staging || 'false' }}
+          INCLUDE_STAGING: ${{ inputs.include_staging || 'false' }}
         run: |
           [[ "$KEEP_GENERATIONS" =~ ^[1-9][0-9]*$ ]] || exit 1
           [[ "$LIMIT" =~ ^[0-9]+$ ]] || exit 1

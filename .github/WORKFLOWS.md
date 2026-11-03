@@ -1,6 +1,6 @@
 # 工作流盘点与恢复边界
 
-盘点基准：重建后的 `main`（2026-11-03）。本表覆盖整理前的 69 个工作流；首批移除 9 个，保留 60 个。**保留不等于批准运行**：仓库 Actions 当前全局关闭，secret 为空；重新启用前必须逐项审查触发器、仓库身份、权限、调用链和最小必要 secret。表中不包含 secret 的值，也不是恢复操作说明。
+盘点基准：重建后的 `main`（2026-11-03）。本表覆盖整理前的 69 个工作流；首批移除 9 个，保留 60 个。**保留不等于批准运行**：仓库 Actions 当前全局关闭，已配置部分 secret，但不是所有入口的凭据都已准备；重新启用前必须逐项审查触发器、仓库身份、权限、调用链和最小必要 secret。表中不包含 secret 的值，也不是恢复操作说明。
 
 计划触发器仍写在部分文件中，包括会写入或删除数据的任务。开启仓库 Actions 可能同时放行所有未单独禁用的定时任务；不要仅凭本表启用 Actions。普通 GC 仍被旧生产者范围、新旧仓库 ID 和历史维护恢复问题阻塞；仓库重建、404 或本地测试都不是隔离证明。
 
@@ -37,7 +37,7 @@
 | `reader-spreadsheet-stream.yml` | 定时、手动 | 表格阅读流。 |
 | `reader-static-pdf-stream.yml` | 定时、手动 | PPT/PS/TIFF 等非 OCR 静态 PDF 转换，不等同 PDF/OCR 页面流。 |
 | `reader-web-stream.yml` | 定时、手动 | 网页阅读流。 |
-| `reader-v3-publish.yml` | 定时、手动 | 多个普通 Reader 流调用的中央投影；保留 `unify` 等入口和现有退休日志定时器，旧文本/OCR 操作仍明确拒绝。 |
+| `reader-v3-publish.yml` | 定时、手动 | 多个普通 Reader 流调用的中央投影；手动菜单仅保留 `inspect`、`unify`、`ack`、`retire`、`withdraw`、`reset-documents`，其中后两项会撤回路由，不应作为普通整理执行；旧文本/OCR 操作仍明确拒绝，退休日志定时器和暂停条件不变。 |
 | `reader-media-backfill.yml` | 手动 | 现有媒体格式回填，可能写入资源。 |
 | `reader-resource-repair.yml` | 手动 | 根据报告修复缺失的独立图片；不是恢复文档 OCR。 |
 | `reader-ebook-processing-handoff.yml` | 手动 | 固定电子书处理记录的校验/交接；保留到其恢复状态单独确认。 |
@@ -49,7 +49,7 @@
 | `reader-gc.yml` | 定时、手动 | 引用图报告；手动选项可记录观察，不应笼统称为永远只读。 |
 | `reader-maintenance.yml` | 定时、手动 | 普通 GC 隔离与恢复编排；默认排程可能删除，保持关闭。 |
 | `reader-gc-collect.yml` | 手动 | 精确收集器，被维护流程调用；保持关闭。 |
-| `reader-gc-ccrd.yml` | 定时、手动 | 独立 CCRD GC；定时任务会应用 legacy 代际清理，手动可选 OCR，保持关闭。 |
+| `reader-gc-ccrd.yml` | 定时、手动 | 独立 CCRD GC；定时任务会应用 legacy 代际清理但不含 staging，手动可选 OCR 和 staging，保持关闭。 |
 | `producer-migration-audit.yml` | 手动 | 生产者迁移证据审计；可写审计对象，并非隔离证明。 |
 | `producer-v2-credential-preflight.yml` | 手动 | 已准备但未激活的 v2 身份/凭据检查；当前仍绑定旧仓 ID。 |
 | `pdf-account-worker.yml` | 手动 | OCR 计划 job 硬禁用；当前 GC、维护预检、document fence 和 v2 shadow 将此路径作为库存完整性哨兵。不得直接删除或移除对空库存的失败关闭检查。 |

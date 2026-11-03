@@ -13,11 +13,17 @@ class WorkflowContractTests(unittest.TestCase):
         return value, value.get('on', value.get(True))
 
     def test_ocr_schedule_removed_but_legacy_schedule_kept(self):
-        _, triggers = self.workflow('reader-gc-ccrd.yml')
+        workflow, triggers = self.workflow('reader-gc-ccrd.yml')
         self.assertEqual(triggers['schedule'], [{'cron': '23 10 * * *'}])
         self.assertIn('workflow_dispatch', triggers)
         source = (ROOT / '.github/workflows/reader-gc-ccrd.yml').read_text()
         self.assertIn("github.event_name == 'schedule' && 'legacy-generations'", source)
+        self.assertFalse(triggers['workflow_dispatch']['inputs']['include_staging']['default'])
+        self.assertFalse(triggers['workflow_dispatch']['inputs']['apply']['default'])
+        steps = workflow['jobs']['collect']['steps']
+        step = next(item for item in steps if item.get('name') == 'Plan or collect retired index and OCR generations')
+        self.assertEqual(step['env']['INCLUDE_STAGING'], "${{ inputs.include_staging || 'false' }}")
+        self.assertNotIn("23 9 * * *", source)
 
     def test_withdraw_workflow_is_manual_and_uses_ccrd_lock(self):
         workflow, triggers = self.workflow('ccrd-ocr-withdraw-consumer.yml')

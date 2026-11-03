@@ -9,15 +9,20 @@ from scripts.reader_lifecycle import processing_record
 class ReaderSidecarHandoffTests(unittest.TestCase):
     def test_every_sidecar_workflow_supplies_authoritative_s3_credentials(self):
         root = Path(__file__).resolve().parents[1] / '.github' / 'workflows'
-        checked = []
+        checked = set()
         for path in root.glob('*.yml'):
             steps = path.read_text(encoding='utf-8').split('      - name: ')
             for step in steps:
                 if 'python scripts/build_reader_assets_v2_sidecar.py --apply' in step:
                     self.assertIn('HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}', step, str(path))
                     self.assertIn('HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}', step, str(path))
-                    checked.append(path.name)
-        self.assertGreaterEqual(len(checked), 11)
+                    checked.add(path.name)
+        expected = {'reader-chapter-search-repair.yml', 'reader-chm-repair.yml', 'reader-ebook-stream.yml',
+                    'reader-image-stream.yml', 'reader-media-backfill.yml', 'reader-media-stream.yml',
+                    'reader-office-chapters.yml', 'reader-spreadsheet-stream.yml', 'reader-static-pdf-stream.yml',
+                    'reader-web-stream.yml'}
+        self.assertTrue(expected.issubset(checked), sorted(expected - checked))
+        self.assertNotIn('reader-publish-text.yml', checked)
 
     def test_office_producer_releases_writer_lock_before_unify_runs(self):
         root = Path(__file__).resolve().parents[1] / ".github" / "workflows"
