@@ -257,3 +257,62 @@ class PdfPublicationRecoveryTests(unittest.TestCase):
         sleep.assert_not_called()
         with patch.object(pages.subprocess, "run", side_effect=subprocess.TimeoutExpired("git", 180)):
             self.assertEqual(pages.run(["git", "push"])[0], 124)
+
+    def test_pages_add_failure_is_not_reported_as_success_or_pushed(self):
+        calls = []
+
+        def run(args, cwd=None, env=None):
+            calls.append(args)
+            if args[:2] == ['git', 'clone']:
+                (Path(args[-1]) / 'data').mkdir()
+            if args[:2] == ['git', 'add']:
+                return 1, '', 'index write failed'
+            return 0, '', ''
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'sidecar.gz'
+            source.write_bytes(b'fixture')
+            with patch.object(pages, 'run', side_effect=run):
+                with self.assertRaisesRegex(RuntimeError, 'Pages add failed'):
+                    pages.publish_to_pages(source, 'owner/repo', 'token', dry_run=False)
+        self.assertFalse(any(args[:2] in (['git', 'commit'], ['git', 'push']) for args in calls))
+
+    def test_pages_real_git_commit_excludes_other_staged_files(self):
+        def git(cwd, *args):
+            return subprocess.run(['git', *map(str, args)], cwd=cwd, capture_output=True,
+                                  text=True, timeout=30, check=True).stdout.strip()
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            remote, seed, template = root / 'remote.git', root / 'seed', root / 'template'
+            git(root, 'init', '--bare', '--initial-branch=main', remote)
+            git(root, 'clone', remote, seed)
+            git(seed, 'config', 'user.name', 'fixture')
+            git(seed, 'config', 'user.email', 'fixture@example.invalid')
+            (seed / 'data').mkdir()
+            (seed / 'data/reader_assets.json.gz').write_bytes(b'old projection')
+            (seed / 'data/search_data.json.gz').write_bytes(b'keep search')
+            (seed / 'app.js').write_text('original app')
+            git(seed, 'add', '.')
+            git(seed, 'commit', '-m', 'seed')
+            git(seed, 'push', 'origin', 'main')
+            subprocess.run(['cp', '-a', str(seed), str(template)], check=True, timeout=30)
+            (template / 'app.js').write_text('other staged edit')
+            git(template, 'add', 'app.js')
+            source = root / 'candidate.gz'
+            source.write_bytes(b'new projection')
+            original = pages.run
+
+            def run(args, cwd=None, env=None):
+                if args[:2] == ['git', 'clone']:
+                    subprocess.run(['cp', '-a', str(template) + '/.', args[-1]], check=True, timeout=30)
+                    return 0, '', ''
+                return original(args, cwd=cwd, env=env)
+
+            with patch.object(pages, 'run', side_effect=run), patch.object(pages, 'git_auth_env', return_value={}):
+                pages.publish_to_pages(source, 'owner/repo', 'fixture', dry_run=False)
+            changed = git(remote, 'show', '--format=', '--name-only', 'main').splitlines()
+            self.assertEqual(changed, ['data/reader_assets.json.gz'])
+            self.assertEqual(git(remote, 'show', 'main:data/reader_assets.json.gz'), 'new projection')
+            self.assertEqual(git(remote, 'show', 'main:data/search_data.json.gz'), 'keep search')
+            self.assertEqual(git(remote, 'show', 'main:app.js'), 'original app')

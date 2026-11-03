@@ -3219,7 +3219,7 @@ class SearchIndexPublicationTests(unittest.TestCase):
                     source, "vomebook/search", "token", dry_run=False
                 )
         argv = [item[0] for item in commands]
-        self.assertIn(["git", "add", "data/reader_assets.json.gz"], argv)
+        self.assertIn(["git", "add", "--", "data/reader_assets.json.gz"], argv)
         commit = next(args for args in argv if args[:2] == ["git", "commit"])
         self.assertNotIn("skip ci", " ".join(commit).lower())
         self.assertEqual(argv[-1], ["git", "push"])

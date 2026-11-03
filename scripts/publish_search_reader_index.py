@@ -94,13 +94,16 @@ def _publish_to_pages_once(source: Path, pages_repo: str, token: str) -> None:
         shutil.copyfile(source, target)
         run(["git", "config", "user.name", "github-actions[bot]"], cwd=root)
         run(["git", "config", "user.email", "github-actions[bot]@users.noreply.github.com"], cwd=root)
-        run(["git", "add", f"data/{SIDECAR_NAME}"], cwd=root)
-        ret, status, err = run(["git", "status", "--porcelain"], cwd=root)
+        ret, out, err = run(["git", "add", "--", f"data/{SIDECAR_NAME}"], cwd=root)
+        if ret:
+            raise RuntimeError(f"Pages add failed: {err or out}")
+        ret, status, err = run(["git", "status", "--porcelain", "--", f"data/{SIDECAR_NAME}"], cwd=root)
         if ret:
             raise RuntimeError(f"Pages status failed: {err}")
         if not status:
             return
-        ret, out, err = run(["git", "commit", "-m", "chore: update reader assets index"], cwd=root)
+        ret, out, err = run(["git", "commit", "--only", "-m", "chore: update reader assets index",
+                             "--", f"data/{SIDECAR_NAME}"], cwd=root)
         if ret:
             raise RuntimeError(f"Pages commit failed: {err or out}")
         ret, out, err = run(["git", "push"], cwd=root, env=auth)
