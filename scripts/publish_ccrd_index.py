@@ -40,7 +40,7 @@ except ImportError:
     )
 
 
-SOURCE_ARCHIVE_URL = "https://github.com/anftm/pipeline/releases/download/ccrd/ccrd-corpus.tar.gz"
+SOURCE_ARCHIVE_URL = "https://huggingface.co/buckets/vomebook/ccrd-index/resolve/source-archives/ccrd-corpus-a6b1615054303740e892e535e3c9a6d4f4805ac572f7f1577b10685249a862f1.tar.gz"
 SOURCE_ARCHIVE_SHA256 = "a6b1615054303740e892e535e3c9a6d4f4805ac572f7f1577b10685249a862f1"
 BUILDER_URL = "https://huggingface.co/spaces/vomebook/Search/resolve/main/build_fulltext_db.py"
 BUILDER_SHA256 = "ed3cfbb2af5871c8a5d368512e939aa4164aebd71f43e1ff9af6cde3e0a02fac"
