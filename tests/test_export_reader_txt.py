@@ -168,18 +168,8 @@ class ExportReaderTxtTests(unittest.TestCase):
             exporter.export_specs([spec, bad], self.read, target)
         self.assertFalse(target.exists())
 
-    def test_workflow_can_only_stage_an_artifact_outside_the_writer_lock(self):
-        workflow = (Path(__file__).parents[1] / ".github/workflows/stage-ccrd-ocr-text.yml").read_text()
-        self.assertIn("consumer_revision:", workflow)
-        self.assertIn("builder_sha256:", workflow)
-        self.assertIn("contents: read", workflow)
-        self.assertIn("actions/upload-artifact@v7", workflow)
-        self.assertIn("path: output/ccrd-ocr-candidate/", workflow)
-        self.assertIn("--allow-unreviewed", workflow)
-        self.assertNotIn("reader-sidecar", workflow)
-        self.assertNotIn("--apply", workflow)
-        self.assertNotIn("schedule:", workflow)
-        self.assertNotIn("workflow run", workflow)
+    def test_retired_remote_staging_workflow_is_absent(self):
+        self.assertFalse((Path(__file__).parents[1] / ".github/workflows/stage-ccrd-ocr-text.yml").exists())
 
 
 if __name__ == "__main__":

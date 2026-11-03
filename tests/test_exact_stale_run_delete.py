@@ -6,7 +6,6 @@ import unittest
 from unittest.mock import Mock, patch
 
 import httpx
-import yaml
 
 from scripts import exact_stale_run_delete as cleanup
 
@@ -112,19 +111,10 @@ class ExactRunCleanupTests(unittest.TestCase):
                 cleanup.run(self.client, self.root)
         get.assert_not_called()
 
-    def test_manual_workflow_has_no_shared_locks_or_gc(self):
+    def test_old_repository_run_cleanup_has_no_live_workflow(self):
         path = Path(cleanup.__file__).resolve().parents[1] / '.github/workflows/exact-stale-run-delete.yml'
-        workflow = yaml.load(path.read_text(), Loader=yaml.BaseLoader)
-        self.assertEqual(set(workflow['on']), {'workflow_dispatch'})
-        self.assertNotIn('concurrency', workflow)
-        job = workflow['jobs']['delete']
-        self.assertNotIn('concurrency', job)
-        runs = ' '.join(step.get('run', '') for step in job['steps'])
-        self.assertNotIn('reader-gc-collect', runs)
-        self.assertNotIn('reader_gc_maintenance', runs)
-        self.assertEqual(workflow['permissions']['actions'], 'write')
-        step = next(s for s in job['steps'] if s.get('name') == 'Delete only the two fixed stale run records')
-        self.assertEqual(step['env']['EXACT_RUN_GITHUB_TOKEN'], '${{ github.token }}')
+        self.assertFalse(path.exists())
+        self.assertEqual(cleanup.REPO_ID, 1260985830)
 
 
 if __name__ == '__main__':

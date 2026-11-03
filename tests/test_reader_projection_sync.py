@@ -73,7 +73,7 @@ class ReaderProjectionSyncTests(unittest.TestCase):
         self.assertFalse(any('publish_reader_v3.py retire --apply' in step.get('run', '') for step in steps))
         self.assertFalse(any('pdf_progress_report.py' in item.get('run', '') for item in steps))
 
-    def test_pause_blocks_only_auto_admission_and_build_callbacks_not_manual_sync(self):
+    def test_pause_blocks_auto_but_not_manual_sync_and_builder_is_retired(self):
         workflow = self.workflow('reader-v3-publish.yml')
         gate = workflow['jobs']['publish']['if']
         self.assertFalse(condition(gate, operation='auto', paused='true'))
@@ -81,9 +81,9 @@ class ReaderProjectionSyncTests(unittest.TestCase):
         self.assertTrue(condition(gate, operation='unify', paused='true'))
         self.assertTrue(condition(gate, operation='auto', paused='false'))
         self.assertFalse(condition(gate, operation='unify', paused='true', repository='other/repo'))
-        build = self.workflow('reader-v3-build.yml')
-        for job in build['jobs'].values():
-            self.assertEqual(job['if'], '${{ false }}')
+        workflows = Path(__file__).parents[1] / '.github/workflows'
+        self.assertFalse((workflows / 'reader-v3-build.yml').exists())
+        self.assertNotIn('reader-v3-build.yml', (workflows / 'reader-v3-publish.yml').read_text())
 
 
 if __name__ == '__main__':

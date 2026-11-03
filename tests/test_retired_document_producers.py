@@ -6,26 +6,37 @@ import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1] / '.github/workflows'
+RETIRED_WORKFLOWS = {
+    'exact-stale-run-delete.yml', 'force-ocr-book.yml', 'pdf-lane-watchdog.yml',
+    'publish-ccrd-ocr.yml', 'reader-ocr-audit.yml', 'reader-ocr-repin.yml',
+    'reader-publish-text.yml', 'reader-v3-build.yml', 'stage-ccrd-ocr-text.yml',
+}
 
 
 class RetiredDocumentProducerTests(unittest.TestCase):
-    def test_ocr_jobs_are_disabled_even_for_manual_dispatch(self):
-        jobs = {
-            'pdf-lane-watchdog.yml': {'watchdog'},
-            'pdf-account-publish.yml': {'publish'},
-            'force-ocr-book.yml': {'prepare', 'publish'},
-            'stage-ccrd-ocr-text.yml': {'stage'},
-            'reader-ocr-repin.yml': {'repin'},
-            'reader-ocr-audit.yml': {'audit'},
-            'publish-ccrd-ocr.yml': {'publish', 'automatic', 'newspapers'},
-            'reader-v3-build.yml': {'build', 'promote'},
-        }
-        for filename, names in jobs.items():
+    def test_retired_entrypoints_are_absent_and_not_dispatched(self):
+        for filename in RETIRED_WORKFLOWS:
             with self.subTest(filename=filename):
-                workflow = yaml.safe_load((ROOT / filename).read_text())
-                self.assertEqual(set(workflow['jobs']), names)
-                for job in workflow['jobs'].values():
-                    self.assertEqual(job.get('if'), '${{ false }}')
+                self.assertFalse((ROOT / filename).exists())
+                for workflow in ROOT.glob('*.yml'):
+                    self.assertNotIn(filename, workflow.read_text(), workflow.name)
+
+    def test_remaining_account_publisher_is_disabled(self):
+        workflow = yaml.safe_load((ROOT / 'pdf-account-publish.yml').read_text())
+        self.assertEqual(workflow['jobs']['publish']['if'], '${{ false }}')
+
+    def test_no_workflow_runs_retired_standalone_remote_publishers(self):
+        scripts = ('force_ocr_book.py', 'audit_ocr_language.py', 'repin_ocr_pages.py',
+                   'publish_ccrd_ocr.py', 'auto_ccrd_ocr.py', 'export_reader_txt.py',
+                   'build_ccrd_ocr_release.py', 'pilot_text_stream.py', 'exact_stale_run_delete.py')
+        for path in ROOT.glob('*.yml'):
+            workflow = yaml.safe_load(path.read_text())
+            for name, job in workflow['jobs'].items():
+                for step in job.get('steps', []):
+                    run = step.get('run', '')
+                    for script in scripts:
+                        with self.subTest(workflow=path.name, job=name, script=script):
+                            self.assertNotIn('scripts/' + script, run)
 
     def test_worker_plan_cannot_dispatch_ocr_or_publish_artifacts(self):
         workflow = yaml.safe_load((ROOT / 'pdf-account-worker.yml').read_text())
@@ -66,14 +77,11 @@ class RetiredDocumentProducerTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, 'remote OCR/detached-text v3 operation is retired'):
                     publish_reader_v3.main()
 
-    def test_retired_ccrd_audit_and_watchdog_have_no_automatic_triggers(self):
-        for name in ('publish-ccrd-ocr.yml', 'reader-ocr-audit.yml', 'pdf-lane-watchdog.yml'):
-            with self.subTest(workflow=name):
-                workflow = yaml.safe_load((ROOT / name).read_text())
-                triggers = workflow.get('on', workflow.get(True))
-                self.assertEqual(set(triggers), {'workflow_dispatch'})
+    def test_historical_paths_remain_fenced_after_entrypoint_removal(self):
         from scripts.reader_gc_fence import producer_path
-        self.assertTrue(producer_path('.github/workflows/pdf-lane-watchdog.yml'))
+        for name in RETIRED_WORKFLOWS - {'exact-stale-run-delete.yml'}:
+            with self.subTest(workflow=name):
+                self.assertTrue(producer_path('.github/workflows/' + name))
 
     def test_current_and_historical_ocr_audit_names_are_both_fenced(self):
         from scripts.reader_document_reset import DOCUMENT_PRODUCERS
@@ -81,9 +89,7 @@ class RetiredDocumentProducerTests(unittest.TestCase):
         self.assertIn('reader-ocr-language-audit.yml', DOCUMENT_PRODUCERS)
 
     def test_remote_normalized_text_publisher_is_not_scheduled_or_runnable(self):
-        workflow = yaml.safe_load((ROOT / 'reader-publish-text.yml').read_text())
-        self.assertEqual(set(workflow.get('on', workflow.get(True))), {'workflow_dispatch'})
-        self.assertEqual(workflow['jobs']['publish-source-txt']['if'], '${{ false }}')
+        self.assertFalse((ROOT / 'reader-publish-text.yml').exists())
         from scripts.reader_gc_fence import producer_path
         self.assertTrue(producer_path('.github/workflows/reader-publish-text.yml'))
 
@@ -92,6 +98,17 @@ class RetiredDocumentProducerTests(unittest.TestCase):
         static = (ROOT / 'reader-static-pdf-stream.yml').read_text()
         self.assertIn('EPUB is temporary', chm)
         self.assertIn('options: [all, ppt, pptx, pps, wps, ps, tif, tiff]', static)
+
+    def test_normal_reader_publish_calls_still_target_unify(self):
+        callers = ('reader-chm-repair.yml', 'reader-ebook-stream.yml', 'reader-office-chapters.yml',
+                   'reader-web-stream.yml', 'reader-static-pdf-stream.yml', 'reader-spreadsheet-stream.yml',
+                   'reader-image-stream.yml', 'reader-media-stream.yml', 'reader-media-backfill.yml',
+                   'reader-chapter-search-repair.yml')
+        for name in callers:
+            with self.subTest(workflow=name):
+                text = (ROOT / name).read_text()
+                self.assertIn('gh workflow run reader-v3-publish.yml', text)
+                self.assertIn('operation=unify', text)
 
 
 if __name__ == '__main__':

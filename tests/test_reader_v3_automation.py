@@ -490,17 +490,11 @@ class WaveTests(unittest.TestCase):
             with self.assertRaises(publication.PublicationReviewRequired):
                 publication.native_ocr({"source_sha256": "a" * 64}, None, None, "no text")
 
-    def test_build_workflow_limits_shared_resolver_load_outside_the_writer_lock(self):
+    def test_retired_build_workflow_is_absent_and_writer_identity_stays_separate(self):
         import yaml
         from pathlib import Path
         root = Path(__file__).resolve().parents[1]
-        build = yaml.safe_load((root / ".github/workflows/reader-v3-build.yml").read_text())
-        self.assertEqual(build["concurrency"]["group"], "reader-v3-build")
-        self.assertEqual(build["jobs"]["build"]["strategy"]["max-parallel"], 3)
-        self.assertIn("build-task", build["jobs"]["build"]["steps"][-1]["run"])
-        self.assertIn("operation=auto", build["jobs"]["promote"]["steps"][0]["run"])
-        self.assertEqual(build["jobs"]["build"]["if"], '${{ false }}')
-        self.assertEqual(build["jobs"]["promote"]["if"], '${{ false }}')
+        self.assertFalse((root / ".github/workflows/reader-v3-build.yml").exists())
         publish = yaml.safe_load((root / ".github/workflows/reader-v3-publish.yml").read_text())
         operation = next(step for step in publish["jobs"]["publish"]["steps"] if step.get("id") == "operation")
         self.assertEqual(operation["env"]["GH_TOKEN"], "${{ github.token }}")

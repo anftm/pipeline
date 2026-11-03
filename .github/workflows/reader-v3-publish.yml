@@ -108,15 +108,6 @@ jobs:
             changed=$(jq -r 'if has("changed") then .changed else (.processed | length > 0) end' output/v3/publication.json)
           fi
           echo "changed=$changed" >> "$GITHUB_OUTPUT"
-      - name: Dispatch the next parallel build wave outside the writer lock
-        if: steps.operation.outputs.apply == 'true' && steps.operation.outputs.operation == 'auto' && vars.READER_V3_AUTO_PAUSED != 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          wave=$(jq -c '.wave // []' output/v3/publication.json)
-          if [[ "$wave" != "[]" ]]; then
-            gh workflow run reader-v3-build.yml --repo "$GITHUB_REPOSITORY" --ref main -f tasks="$wave"
-          fi
       - name: Publish the pinned projection to Pages
         if: >-
           steps.operation.outputs.apply == 'true' &&

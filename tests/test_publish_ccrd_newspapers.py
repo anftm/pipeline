@@ -403,19 +403,8 @@ class NewspaperPublicationTests(unittest.TestCase):
             ocr.publish(self.store,self.root,'releases/old/manifest.json','a'*64,
                         self.old_sha,self.old_ocr['generation'],apply=False)
 
-    def test_workflow_keeps_one_writer_and_within_dispatch_input_limit(self):
-        import yaml
-        path=Path(__file__).parents[1]/'.github/workflows/publish-ccrd-ocr.yml'
-        value=yaml.safe_load(path.read_text())
-        triggers=value.get('on') or value[True]
-        self.assertLessEqual(len(triggers['workflow_dispatch']['inputs']),10)
-        self.assertEqual(value['concurrency']['group'],'publish-ccrd-index')
-        self.assertEqual(value['concurrency']['queue'],'max')
-        job=value['jobs']['newspapers']
-        self.assertEqual(job['if'], '${{ false }}')
-        names=[step.get('name','') for step in job['steps']]
-        self.assertLess(next(i for i,n in enumerate(names) if n.startswith('Verify the exact production')),
-                        next(i for i,n in enumerate(names) if n.startswith('Pin the accepted')))
+    def test_retired_ocr_and_newspaper_publication_entrypoint_is_absent(self):
+        self.assertFalse((Path(__file__).parents[1]/'.github/workflows/publish-ccrd-ocr.yml').exists())
 
     def test_space_read_retry_covers_429_and_transport_but_never_blindly_repeats_commit(self):
         import httpx

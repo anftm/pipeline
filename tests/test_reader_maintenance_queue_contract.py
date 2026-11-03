@@ -36,11 +36,8 @@ class MaintenanceQueueContractTests(unittest.TestCase):
                     self.assertEqual(concurrency.get('queue'), 'max')
         self.assertGreater(len(checked), 50)
 
-    def test_retired_ocr_audit_is_still_disabled(self):
-        workflow = yaml.load((WORKFLOWS / 'reader-ocr-audit.yml').read_text(), Loader=yaml.BaseLoader)
-        self.assertEqual(workflow['jobs']['audit']['if'], '${{ false }}')
-        triggers = workflow['on']
-        self.assertEqual(set(triggers), {'workflow_dispatch'})
+    def test_retired_ocr_audit_has_no_workflow(self):
+        self.assertFalse((WORKFLOWS / 'reader-ocr-audit.yml').exists())
 
 
 if __name__ == '__main__':

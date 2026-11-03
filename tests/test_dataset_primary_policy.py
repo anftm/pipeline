@@ -32,14 +32,14 @@ def dataset_ref(raw, extension='pdf'):
 
 @patch.dict(os.environ, {'READER_DATASET_PRIMARY_ENABLED': 'true'})
 class DatasetPrimaryPolicyTests(unittest.TestCase):
-    def test_dataset_rollout_flag_is_opt_in_on_both_publisher_and_builder(self):
+    def test_dataset_rollout_flag_is_opt_in_on_publisher_and_builder_is_retired(self):
         workflows=Path(__file__).resolve().parents[1]/'.github/workflows'
-        for name in ('reader-v3-publish.yml','reader-v3-build.yml'):
-            workflow=yaml.safe_load((workflows/name).read_text())
-            steps=[step for job in workflow['jobs'].values() for step in job.get('steps',[])]
-            values=[step.get('env',{}).get('READER_DATASET_PRIMARY_ENABLED') for step in steps
-                    if 'READER_DATASET_PRIMARY_ENABLED' in step.get('env',{})]
-            self.assertEqual(values,["${{ vars.READER_DATASET_PRIMARY_ENABLED || 'false' }}"])
+        self.assertFalse((workflows/'reader-v3-build.yml').exists())
+        workflow=yaml.safe_load((workflows/'reader-v3-publish.yml').read_text())
+        steps=[step for job in workflow['jobs'].values() for step in job.get('steps',[])]
+        values=[step.get('env',{}).get('READER_DATASET_PRIMARY_ENABLED') for step in steps
+                if 'READER_DATASET_PRIMARY_ENABLED' in step.get('env',{})]
+        self.assertEqual(values,["${{ vars.READER_DATASET_PRIMARY_ENABLED || 'false' }}"])
 
     def test_automation_never_creates_a_bucket_primary_for_original_pdf_or_djvu(self):
         for ext in ('pdf', 'djvu'):

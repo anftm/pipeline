@@ -866,23 +866,10 @@ class TextStreamPublicationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as self.directory:
             self.publication(racing=True)
 
-    def test_workflow_reuses_bucket_path_and_is_in_the_gc_producer_fence(self):
+    def test_retired_workflow_is_absent_but_historical_runs_remain_fenced(self):
         from scripts.reader_gc_fence import producer_path
         workflow = Path(__file__).parents[1] / ".github/workflows/reader-publish-text.yml"
-        text = workflow.read_text(encoding="utf-8")
-        self.assertIn("github.event_name == 'schedule' || inputs.apply == true", text)
-        self.assertIn("reader-text-plan-{0}", text)
-        self.assertIn("--plan-only", text)
-        self.assertIn("pilot_text_stream.py", text)
-        self.assertIn("workers:", text)
-        self.assertIn("TEXT_WORKERS: ${{ inputs.workers || '4' }}", text)
-        self.assertIn('--workers "$TEXT_WORKERS"', text)
-        self.assertIn("TEXT_ENCODINGS: ${{ inputs.encoding_overrides_json || '{}' }}", text)
-        self.assertIn("json.loads(os.environ['TEXT_ENCODINGS'])", text)
-        self.assertIn("--encoding-overrides output/text-encoding-overrides.json", text)
-        self.assertNotIn("run: ${{ inputs.encoding_overrides_json", text)
-        self.assertIn("build_reader_assets_v2_sidecar.py --apply", text)
-        self.assertNotIn("run: python scripts/publish_source_txt_once.py", text)
+        self.assertFalse(workflow.exists())
         self.assertTrue(producer_path(".github/workflows/reader-publish-text.yml"))
 
 

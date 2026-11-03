@@ -235,23 +235,11 @@ class ForceOcrBookTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 repair.assert_publisher()
 
-    def test_workflow_separates_build_from_shared_writer_and_gc_fences_both(self):
+    def test_retired_workflow_is_absent_but_historical_runs_remain_fenced(self):
         path = Path(__file__).parents[1] / ".github/workflows/force-ocr-book.yml"
-        workflow = yaml.safe_load(path.read_text())
-        prepare, publish = workflow["jobs"]["prepare"], workflow["jobs"]["publish"]
-        self.assertNotIn("concurrency", prepare)
-        self.assertEqual(publish["concurrency"]["group"], "reader-sidecar")
-        self.assertFalse(publish["concurrency"]["cancel-in-progress"])
-        self.assertIn("actions/upload-artifact@v7", [s.get("uses") for s in prepare["steps"]])
+        self.assertFalse(path.exists())
         self.assertNotIn("promote", repair.main.__code__.co_consts)
         self.assertTrue(producer_path(".github/workflows/force-ocr-book.yml"))
-        trigger = workflow.get("on", workflow.get(True))["workflow_dispatch"]["inputs"]
-        self.assertIn("prepared_run_id", trigger)
-        self.assertEqual(prepare["if"], '${{ false }}')
-        self.assertEqual(publish["if"], '${{ false }}')
-        self.assertEqual(workflow["permissions"]["actions"], "read")
-        downloaded = next(s["with"] for s in publish["steps"] if s.get("uses") == "actions/download-artifact@v8")
-        self.assertIn("inputs.prepared_run_id", downloaded["run-id"])
 
 
 if __name__ == "__main__":

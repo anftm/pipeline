@@ -354,16 +354,7 @@ class AutoCcrdOcrTests(unittest.TestCase):
             publisher.verify_text_upgrade(self.store, protected, replacement)
 
     def test_ocr_publication_workflow_is_retired_for_all_inputs(self):
-        import yaml
-        workflow = (Path(__file__).parents[1] / '.github/workflows/publish-ccrd-ocr.yml').read_text()
-        jobs = yaml.safe_load(workflow)['jobs']
-        self.assertEqual(set(jobs), {'publish','automatic','newspapers'})
-        self.assertTrue(all(job.get('if') == '${{ false }}' for job in jobs.values()))
-
-    def test_automatic_verify_step_has_headroom_over_observed_acceptance_time(self):
-        workflow = (Path(__file__).parents[1] / '.github/workflows/publish-ccrd-ocr.yml').read_text()
-        block = workflow.split('Verify the exact live generation', 1)[1].split('- uses: actions/upload-artifact', 1)[0]
-        self.assertIn('timeout-minutes: 45', block)
+        self.assertFalse((Path(__file__).parents[1] / '.github/workflows/publish-ccrd-ocr.yml').exists())
 
     def test_live_acceptance_reads_every_result_page_and_rejects_duplicate_ids(self):
         first = {'total': 201, 'results': [{'doc_id': f'OCR:{number}'} for number in range(1, 201)]}
