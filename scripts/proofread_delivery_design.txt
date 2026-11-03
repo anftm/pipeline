@@ -58,6 +58,31 @@ Minimum properties for a separately reviewed future implementation
    Follow with explicitly reviewed, reversible production acceptance and prove
    user-visible status before opening submissions.
 
+Offline experiment, not a queue implementation
+----------------------------------------------
+`proofread_delivery_shadow.py` is an in-memory, synthetic parse-only state
+model. It records a proposed plan and distinguishes effect initiation, an
+acknowledgment, uncertain timeout, caller-supplied observation, and conflict.
+It covers two PRs, tracker issue and tracker comments, with a minimal synthetic
+receipt. It does not contact GitHub or the Space; no workflow invokes it.
+
+`tests/test_proofread_delivery_persistence_shadow.py` separately exercises a
+disposable local SQLite fixture with synthetic data. The transaction test can
+serialize competing local writes, but that proves neither GitHub idempotence nor
+a fence against external workers. Its journal and checkpoint are in the same
+database: restoring both to an older consistent snapshot is undetectable unless
+an independent trusted head is retained. Hashes by themselves are not signatures
+and cannot establish authenticity, freshness, completeness or access control.
+
+The model also omits crop uploads, PR comments, optional merges, payload
+persistence, secret receipt issuance, authorization, claim recovery, deletion
+policy and complete real-world side-effect inventory. Its evidence is synthetic
+and caller-supplied, not a remote GET, and it does not revalidate earlier objects
+before subsequent steps. An acknowledged response, an absence observation,
+an exact-looking PR or an `awaiting_review` model result is not production
+proof or permission to retry. Resolve these gaps and test live service semantics
+in isolated repositories before proposing any production adapter.
+
 These requirements are incomplete and confer no permission to enable Actions,
 turn off the Space pause, create PRs, replay real submissions, reindex, run OCR,
 release processing protections, change Reader routing, or collect resources.
