@@ -27,6 +27,12 @@ Gaps in existing implementation
 * Proofreading may affect multiple files and may auto-merge; parsing creates
   multiple PRs, may upload review crops, and updates a tracker. A timeout or
   cancellation can leave a partial outcome and must not be blindly replayed.
+* Legacy `open_pull_request` treats an API error or a malformed 200 response as
+  no matching PR. If a deterministic branch already exists without a visible
+  PR, `submit_file` and `submit_files` may reuse it and write requested files
+  without proving the branch's author, base commit or complete existing tree.
+  Tests characterize this behavior using synthetic mocks only; they are not a
+  reason to retry, and a file-level SHA is not a writer or branch fence.
 * The Space has a credential capable of dispatching; the current central token
   cannot read the Actions global permission. Individual workflow state alone
   does not prove all triggers, access and producer isolation are correct.
