@@ -64,6 +64,30 @@ class ExactEbookHandoffTests(unittest.TestCase):
              patch.object(handoff, 'assert_workflow_context', side_effect=AssertionError('unexpected mutation')):
             self.assertIs(handoff.run(object(), object(), self.plan, apply=False), result)
 
+    def test_changed_reader_generation_stops_before_consumer_or_pin_mutation(self):
+        """A currently readable projection is not the old exact handoff identity."""
+        class ReadOnlyStore:
+            def __init__(self):
+                self.reads = []
+
+            def read_bytes(self, bucket, path):
+                self.reads.append((bucket, path))
+                if path == 'reader-index/gc/maintenance/current.json':
+                    return b'{"restored":true}'
+                if path == handoff.SIDECAR:
+                    return b'changed sidecar'
+                raise AssertionError('unexpected read after identity mismatch')
+
+        store = ReadOnlyStore()
+        current = ({'generation': 'f' * 64}, {'base_sidecar': {'sha256': 'e' * 64}})
+        with patch.object(handoff.publication, 'current', return_value=current), \
+             patch.object(handoff.collector, 'observe_projections', side_effect=AssertionError('unexpected projection')), \
+             patch.object(handoff, 'ProcessingWriter', side_effect=AssertionError('unexpected pin access')):
+            with self.assertRaisesRegex(ValueError, 'ebook sidecar or v3 generation changed'):
+                handoff.prepare(store, object(), self.plan)
+        self.assertEqual([path for _, path in store.reads],
+                         ['reader-index/gc/maintenance/current.json', handoff.SIDECAR])
+
     def test_exact_resume_releases_only_protection_and_checks_controls(self):
         row = self.plan['entries'][0]
         path = row['processing_path']
