@@ -24,7 +24,7 @@ jobs:
           python-version: '3.11'
       - run: pip install -r scripts/requirements.txt
       - name: Verify fail-closed preflight contracts
-        run: python -B -m unittest tests.test_chm_single_interrupted_preflight -v
+        run: python -B -m unittest tests.test_chm_single_interrupted_preflight tests.test_chm_single_handoff_shadow tests.test_chm_single_v3_projection_shadow -v
       - name: Check exact interrupted CHM and both live projections without writing
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}

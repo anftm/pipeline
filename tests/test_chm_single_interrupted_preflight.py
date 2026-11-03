@@ -124,6 +124,9 @@ class ChmSingleInterruptedPreflightTests(unittest.TestCase):
         self.assertEqual(flow['concurrency'], {'group': 'reader-sidecar',
                                                'cancel-in-progress': 'false', 'queue': 'max'})
         steps = flow['jobs']['verify']['steps']
+        contracts = next(step['run'] for step in steps if step.get('name') == 'Verify fail-closed preflight contracts')
+        self.assertIn('tests.test_chm_single_handoff_shadow', contracts)
+        self.assertIn('tests.test_chm_single_v3_projection_shadow', contracts)
         self.assertEqual(steps[-1]['run'], 'python -B scripts/chm_single_interrupted_preflight.py')
         self.assertNotIn('--apply', steps[-1]['run'])
 

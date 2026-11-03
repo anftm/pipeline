@@ -76,7 +76,7 @@
 | `ccrd-ocr-withdraw-consumer.yml` | 手动 | 固定身份的 OCR 消费端撤回；可能写 Space。 |
 | `chm-epub-graph-preview.yml` | 手动 | 固定 CHM 引用图预览和隔离恢复。 |
 | `chm-epub-retirement.yml` | 手动 | 固定 CHM 清单的退役及中断恢复。 |
-| `chm-single-interrupted-preflight.yml` | 手动 | 对本次单本中断交接做只读检查，无写入或恢复入口，不释放处理保护。 |
+| `chm-single-interrupted-preflight.yml` | 手动 | 对本次单本中断交接做只读检查，含纯内存 shadow 回归；无写入或恢复入口，不释放处理保护。 |
 | `chm-final20-execute.yml` | 手动 | 固定最后 20 项的外层入口。 |
 | `chm-final20-execute-inner.yml` | 被调用 | 对应固定最后 20 项的内层执行/恢复。 |
 | `chm-remaining352-after-final20.yml` | 手动 | 固定 352 项续跑外层入口。 |
