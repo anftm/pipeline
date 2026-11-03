@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from scripts import chm_single_interrupted_preflight as fixed
 from scripts import chm_single_v3_projection_shadow as shadow, publish_reader_v3 as publication
+from scripts import reader_document_reset as document_reset, reader_gc_documents as document_gc
 
 
 class SingleV3ProjectionShadowTests(unittest.TestCase):
@@ -166,6 +167,35 @@ class SingleV3ProjectionShadowTests(unittest.TestCase):
                 candidate['projection']['f'][fixed.SOURCE_KEY] = fixed.route(fixed.OLD_ROOT)
             with self.subTest(mutation=mutation), self.assertRaises(ValueError):
                 shadow.evaluate_fixture_receipts(candidate, fixtures)
+
+    def test_current_document_gc_preflight_rejects_new_v3_before_any_write(self):
+        proposed = self.simulate()
+        receipt_raw = publication.encode(self.receipt)
+        expected_reads = {
+            (document_reset.ASSETS, document_reset.RECEIPT): receipt_raw,
+            (document_gc.CCRD, f'reports/ccrd-ocr-reset/{shadow.RESET_ID}/withdrawal.json'):
+                publication.encode({'status': 'withdrawn'}),
+            (document_reset.ASSETS, document_reset.SIDECAR): self.raw,
+        }
+
+        class ReadOnlyStore:
+            def __init__(self):
+                self.reads = []
+
+            def read_bytes(self, bucket, path):
+                self.reads.append((bucket, path))
+                if (bucket, path) == (document_gc.CCRD, 'control/ocr-current.json'):
+                    raise FileNotFoundError(path)
+                if (bucket, path) not in expected_reads:
+                    raise AssertionError('unexpected read after identity check')
+                return expected_reads[bucket, path]
+
+        store = ReadOnlyStore()
+        with patch.object(publication, 'current', return_value=(proposed['pointer'], proposed['catalog'])):
+            with self.assertRaisesRegex(ValueError, 'v3 document withdrawal changed'):
+                document_gc.preflight(store, shadow.RESET_ID, object())
+        self.assertEqual(len(store.reads), 4)
+        self.assertEqual(self.receipt['generation'], self.pointer['generation'])
 
     def test_no_workflow_or_network_writer_can_activate_simulation(self):
         tree = ast.parse(Path(shadow.__file__).read_text())
