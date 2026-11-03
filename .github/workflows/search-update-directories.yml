@@ -1,0 +1,27 @@
+name: 搜索 · Update HF Repository Directories
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: daily-sync
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout pipeline repo
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Update generated directories
+        run: python scripts/update_dirs.py
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}

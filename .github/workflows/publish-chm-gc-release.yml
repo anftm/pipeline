@@ -1,0 +1,24 @@
+name: CHM terminal GC release proof
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: Type VERIFY-CHM-GC-RELEASE to validate and publish only the release marker
+        required: true
+        type: string
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: publish-ccrd-index
+  cancel-in-progress: false
+  queue: max
+jobs:
+  release:
+    if: github.repository == 'anftm/pipeline' && github.ref == 'refs/heads/main' && inputs.confirm == 'VERIFY-CHM-GC-RELEASE'
+    concurrency:
+      group: reader-global-maintenance
+      cancel-in-progress: false
+      queue: max
+    uses: ./.github/workflows/publish-chm-gc-release-inner.yml
+    secrets: inherit

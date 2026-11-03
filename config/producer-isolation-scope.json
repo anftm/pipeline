@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "kind": "reader-producer-isolation-scope",
+  "status": "isolation-only",
+  "publisher_repository": "anftm/pipeline",
+  "repositories": [
+    "alicetran68/pipeline",
+    "ambrossee768/pdf-pipeline",
+    "anftm/pipeline",
+    "brodievsalas/pipeline",
+    "dellamcastillo/pipeline",
+    "devondunn7/pipeline",
+    "rioholland79/pipeline",
+    "vomebook/pdf-pipeline"
+  ]
+}

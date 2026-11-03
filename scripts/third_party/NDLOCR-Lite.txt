@@ -1,0 +1,17 @@
+NDLOCR-Lite models and preprocessing design
+Copyright National Diet Library, Japan.
+Source: https://github.com/ndl-lab/ndlocr-lite
+Pinned revision: d001dad2013ceabb5736ff8d637474e443eb73c2
+License: Creative Commons Attribution 4.0 International
+https://creativecommons.org/licenses/by/4.0/
+Full upstream license:
+https://github.com/ndl-lab/ndlocr-lite/blob/d001dad2013ceabb5736ff8d637474e443eb73c2/LICENCE
+
+The DEIM layout detector uses a backbone distilled from DINOv3.
+Built using DINOv3. Copyright Meta Platforms, Inc. and affiliates.
+DINOv3 license: https://github.com/facebookresearch/dinov3/blob/main/LICENSE.md
+
+The pipeline's adapter adds digest-pinned model downloads, bounded CPU execution,
+strict page-result validation, recognition confidence, folio retention and the
+shared document text/coordinate/quality contracts. It does not redistribute the
+model binaries; workers download the pinned upstream assets and verify SHA-256.

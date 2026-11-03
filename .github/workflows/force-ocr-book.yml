@@ -1,0 +1,143 @@
+name: Reader/桶 · Force OCR Exact Book
+run-name: Approved PS OCR / ${{ inputs.source_sha256 }} / ${{ inputs.apply && 'apply' || 'verify' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_repo:
+        description: Approved source repository
+        required: true
+        default: VoiceOfML/MLMRL-Library
+        type: string
+      source_path:
+        description: Exact approved PS source path
+        required: true
+        type: string
+      source_sha256:
+        description: Approved SHA-256 of the published PDF
+        required: true
+        type: string
+      ocr_language:
+        description: Approved page language
+        default: auto
+        type: choice
+        options: [auto, ch, en]
+      prepared_run_id:
+        description: Reuse a completed trusted prepare job; publish only, never OCR again
+        default: ''
+        type: string
+      apply:
+        description: Prepare immutable OCR objects and serialize their publication
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: force-ocr-${{ inputs.source_sha256 }}
+  cancel-in-progress: false
+  queue: max
+
+env:
+  PDF_OCR_LANG: auto
+  PDF_OCR_BACKEND: rapidocr_onnxruntime
+  SOURCE_REPO: ${{ inputs.source_repo }}
+  SOURCE_PATH: ${{ inputs.source_path }}
+  SOURCE_SHA256: ${{ inputs.source_sha256 }}
+  OCR_LANGUAGE: ${{ inputs.ocr_language }}
+
+jobs:
+  prepare:
+    if: ${{ false }} # retired OCR must not be recreated
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Install render and OCR dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends poppler-utils poppler-data fonts-noto-cjk fonts-liberation tesseract-ocr tesseract-ocr-osd tesseract-ocr-eng tesseract-ocr-chi-sim tesseract-ocr-jpn
+          pip install -r scripts/requirements.txt -r scripts/requirements-pdf-ocr.txt
+      - name: Prepare protected immutable objects only
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_INPUT_TOKEN: ${{ secrets.HF_INPUT_TOKEN }}
+          APPLY: ${{ inputs.apply }}
+        run: |
+          args=(--mode prepare --source-repo "$SOURCE_REPO" --source-path "$SOURCE_PATH"
+                --expected-sha256 "$SOURCE_SHA256" --ocr-language "$OCR_LANGUAGE")
+          if [[ "$APPLY" == true ]]; then args+=(--apply); fi
+          python scripts/force_ocr_book.py "${args[@]}"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: approved-ps-ocr
+          path: output/force-ocr/result.json
+          retention-days: 14
+          if-no-files-found: warn
+
+  publish:
+    needs: prepare
+    if: ${{ false }} # retired OCR must not be republished
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    concurrency:
+      group: reader-sidecar
+      cancel-in-progress: false
+      queue: max
+    env:
+      FORCE_OCR_PUBLICATION_PROTOCOL: explicit-ps-ocr-v1
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - run: pip install -r scripts/requirements.txt
+      - name: Verify an explicitly reused preparation run
+        if: inputs.prepared_run_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREPARED_RUN: ${{ inputs.prepared_run_id }}
+        run: |
+          [[ "$PREPARED_RUN" =~ ^[0-9]+$ ]] || exit 1
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PREPARED_RUN" > prepared-run.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PREPARED_RUN/jobs?filter=latest&per_page=100" > prepared-jobs.json
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          run = json.loads(Path('prepared-run.json').read_text())
+          jobs = json.loads(Path('prepared-jobs.json').read_text())
+          if (str(run['id']) != os.environ['PREPARED_RUN'] or run['status'] != 'completed'
+                  or run['path'] != '.github/workflows/force-ocr-book.yml'
+                  or run['event'] != 'workflow_dispatch' or run['head_branch'] != 'main'
+                  or run['head_repository']['full_name'] != os.environ['GITHUB_REPOSITORY']
+                  or not any(job['name'] == 'prepare' and job['status'] == 'completed'
+                             and job['conclusion'] == 'success' for job in jobs['jobs'])):
+              raise ValueError('recovery requires a successful actual central prepare job')
+          PY
+      - uses: actions/download-artifact@v8
+        with:
+          name: approved-ps-ocr
+          path: output/force-ocr
+          run-id: ${{ inputs.prepared_run_id || github.run_id }}
+          github-token: ${{ github.token }}
+      - name: Verify and publish only the approved OCR entry under the writer lock
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_INPUT_TOKEN: ${{ secrets.HF_INPUT_TOKEN }}
+        run: |
+          python scripts/force_ocr_book.py --mode publish --apply \
+            --source-repo "$SOURCE_REPO" --source-path "$SOURCE_PATH" \
+            --expected-sha256 "$SOURCE_SHA256" --ocr-language "$OCR_LANGUAGE"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: approved-ps-ocr-publication
+          path: output/force-ocr/publication.json
+          retention-days: 14
+          if-no-files-found: warn

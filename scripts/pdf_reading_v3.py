@@ -1,0 +1,775 @@
+#!/usr/bin/env python3
+"""Offline v3 bundle construction; no uploads, pointer changes or model calls."""
+
+from __future__ import annotations
+
+import argparse
+import bisect
+import gzip
+import hashlib
+import json
+import math
+import re
+from xml.etree import ElementTree as ET
+from pathlib import Path, PurePosixPath
+
+try:
+    from . import pdf_ocr, pdf_text_layer as text, shared, djvu_pages, reader_page_codec
+except ImportError:
+    import pdf_ocr
+    import pdf_text_layer as text
+    import shared
+    import djvu_pages
+    import reader_page_codec
+
+BUCKETS = {shared.READER_ASSETS_BUCKET, shared.PDF_PAGES_BUCKET, shared.PDF_OCR_INPUT_BUCKET}
+PARTITION_SIZE = 128
+SEARCH_PARTITION_PAGES = 32
+SEARCH_PARTITION_BYTES = 512 * 1024
+
+
+def validate_vector_svg(raw):
+    """Accept engine-exported, self-contained path SVGs, never active markup."""
+    if len(raw) > 8 * 1024 * 1024 or b"<!" in raw:
+        raise ValueError("invalid vector SVG size or declarations")
+    root = ET.fromstring(raw)
+    namespace = "http://www.w3.org/2000/svg"
+    allowed = {"svg", "defs", "path", "g", "use", "rect", "clipPath"}
+    if root.tag != f"{{{namespace}}}svg":
+        raise ValueError("not a vector SVG")
+    for element in root.iter():
+        if element.tag not in {f"{{{namespace}}}{tag}" for tag in allowed}:
+            raise ValueError("unsupported vector SVG element")
+        for name, value in element.attrib.items():
+            local = name.rsplit("}", 1)[-1].lower()
+            if local.startswith("on") or local == "style":
+                raise ValueError("active SVG attribute")
+            if local == "href" and not value.startswith("#"):
+                raise ValueError("external SVG dependency")
+            for match in re.finditer(r"url\((.*?)\)", value, re.I):
+                if not match[1].strip(" '\"").startswith("#"):
+                    raise ValueError("external SVG paint dependency")
+    dimensions = [float(root.attrib.get(name, "0").removesuffix("pt")) for name in ("width", "height")]
+    if any(not math.isfinite(number) or number <= 0 for number in dimensions):
+        raise ValueError("invalid SVG dimensions")
+    return dimensions
+
+
+def preview_geometry(raw, codec):
+    if codec == "svg":
+        return validate_vector_svg(raw)
+    if codec == 'jxl':
+        return reader_page_codec.geometry(raw)
+    from PIL import Image
+    import io
+    with Image.open(io.BytesIO(raw)) as image:
+        image.load()
+        if image.format.lower() != codec:
+            raise ValueError("preview format mismatch")
+        return list(image.size)
+
+
+def resource(value):
+    if not isinstance(value, dict) or value.get("bucket") not in BUCKETS:
+        raise ValueError("invalid qualified resource bucket")
+    path = value.get("path")
+    if (not isinstance(path, str) or not (path.startswith(("objects/", "derived/")) or
+            re.fullmatch(r"documents/pdf/[a-z0-9_-]+/[0-9a-f]{64}/document\.pdf", path) or
+            re.fullmatch(r"documents/pdf/[a-z0-9_-]+/[0-9a-f]{64}/(?:document-manifest|symbol-conversion)\.json", path))
+            or "\\" in path or any(part in {"", ".", ".."} for part in path.split("/"))
+            or any(ord(c) < 32 for c in path) or "?" in path or "#" in path):
+        raise ValueError("invalid qualified resource path")
+    text.sha(value.get("sha256"))
+    if type(value.get("bytes")) is not int or value["bytes"] < 1:
+        raise ValueError("invalid qualified resource size")
+    if value.get("role") not in {"runtime", "processing", "review", "provenance"}:
+        raise ValueError("invalid qualified resource role")
+    return value
+
+
+def validate_dataset_primary(value, source_key, source_sha256):
+    """A bounded immutable upstream original, never a bucket object reference."""
+    import unicodedata
+    if (not isinstance(value, dict) or set(value) != {
+            'kind', 'repo', 'path', 'revision', 'sha256', 'bytes', 'role'}
+            or value.get('kind') != 'dataset-source' or value.get('role') != 'runtime'):
+        raise ValueError('invalid dataset primary')
+    repo, path = value.get('repo'), value.get('path')
+    if (not isinstance(repo, str) or not re.fullmatch(r'VoiceOfML/[A-Za-z0-9._-]+', repo)
+            or repo.rsplit('/', 1)[-1] in {'.', '..'}
+            or not isinstance(path, str) or not path or path.startswith('/')
+            or any(part in {'', '.', '..'} for part in path.split('/'))
+            or any(char in path for char in ('\\', '%', '?', '#'))
+            or any(ord(char) < 32 or ord(char) == 127 for char in path)
+            or any(unicodedata.category(char) == 'Cs' for char in path)
+            or not path.lower().endswith(('.pdf', '.djvu'))
+            or not isinstance(value.get('revision'), str)
+            or not re.fullmatch(r'[0-9a-f]{40}', value['revision'])
+            or type(value.get('bytes')) is not int or not 1 <= value['bytes'] <= 512 * 1024 * 1024
+            or source_key != repo + '\0' + path
+            or text.sha(value.get('sha256')) != text.sha(source_sha256)):
+        raise ValueError('invalid pinned dataset primary identity')
+    return value
+
+
+def primary_resource(value, source_key, source_sha256):
+    if isinstance(value, dict) and value.get('kind') == 'dataset-source':
+        return validate_dataset_primary(value, source_key, source_sha256)
+    return resource(value)
+
+
+def verified_primary(ref, read, source_key, source_sha256):
+    primary_resource(ref, source_key, source_sha256)
+    raw = read(ref)
+    if len(raw) != ref['bytes'] or hashlib.sha256(raw).hexdigest() != ref['sha256']:
+        raise ValueError('primary resource checksum mismatch')
+    return raw
+
+
+def verified_read(ref, read):
+    resource(ref)
+    raw = read(ref)
+    if len(raw) != ref["bytes"] or hashlib.sha256(raw).hexdigest() != ref["sha256"]:
+        raise ValueError("v3 resource checksum mismatch")
+    return raw
+
+
+def decode(raw):
+    return json.loads(gzip.decompress(raw) if raw.startswith(b"\x1f\x8b") else raw)
+
+
+def stored(path, bundle, payload, *, compressed=False, role="runtime"):
+    writer = pdf_ocr.write_gzip_json if compressed else pdf_ocr.write_json
+    digest, size = writer(path, payload)
+    return {"bucket": shared.PDF_PAGES_BUCKET, "path": path.relative_to(bundle).as_posix(),
+            "sha256": digest, "bytes": size, "role": role}
+
+
+def partition_for(manifest, page):
+    """Locate one demanded page without fetching any preceding partitions."""
+    if type(page) is not int or not 1 <= page <= manifest["page_count"]:
+        raise ValueError("page outside manifest")
+    partitions = manifest["partitions"]
+    index = bisect.bisect_right([p["start"] for p in partitions], page) - 1
+    if index < 0 or page > partitions[index]["end"]:
+        return None
+    return partitions[index]
+
+
+def backfill_text(manifest, read, bundle, options=None):
+    """Upgrade verified existing raw page objects, without rendering or recognition."""
+    try:
+        from . import ocr_layout
+    except ImportError:
+        import ocr_layout
+    source = text.sha(manifest["source_sha256"])
+    count = manifest.get("page_count")
+    pages = manifest.get("pages", [])
+    if (manifest.get("kind") != "pdf-ocr" or manifest.get("complete") is not True
+            or type(count) is not int or count < 1
+            or [p.get("p") for p in pages] != list(range(1, count + 1))):
+        raise ValueError("backfill requires complete OCR page coverage")
+    options = ocr_layout.validate_options(options)
+    if options.get("rotation", 0):
+        raise ValueError("backfill cannot rotate already positioned raw text")
+    layers = []
+    for page in pages:
+        ref = resource({"bucket": shared.PDF_PAGES_BUCKET, "path": page["o"],
+                        "sha256": page["os"], "bytes": page["ob"], "role": "provenance"})
+        payload = decode(verified_read(ref, read))
+        if (payload.get("kind") != "pdf-ocr-page" or payload.get("page") != page["p"]
+                or payload.get("source") != page["source"]):
+            raise ValueError("backfill raw page identity mismatch")
+        config = manifest.get("layout_options", {})
+        page_options = {**config.get("default", {}), **config.get("pages", {}).get(str(page["p"]), {}), **options}
+        # Existing blocks have already been transformed to original coordinates.
+        arrange_options = {k: v for k, v in page_options.items() if k != "rotation"}
+        if (options or "text_spans" not in payload or payload["source"] == "native") and payload["blocks"]:
+            payload.update(ocr_layout.arrange(payload["blocks"], payload["width"], payload["height"], arrange_options,
+                                              include_writing_modes=True))
+        layers.append(text.from_page(payload, source, manifest.get("language", "und"), ref,
+                                     layout_options=page_options))
+    identity = text.digest({"raw_manifest": manifest, "options": options, "text_layer": 2})
+    root = Path("objects") / source[:2] / source / identity[:16]
+    return build_text_bundle(layers, pages, root, bundle)
+
+
+def validate_text_manifest(manifest):
+    if (manifest.get("version") != 1 or manifest.get("kind") != "pdf-text-layer-index"
+            or manifest.get("complete") is not True or manifest.get("revision") not in {"raw", "effective"}):
+        raise ValueError("invalid text layer index")
+    text.sha(manifest["source_sha256"])
+    text.sha(manifest["generation"])
+    count = manifest.get("page_count")
+    if type(count) is not int or count < 1:
+        raise ValueError("invalid text layer page count")
+    cursor = 1
+    for partition in manifest["partitions"]:
+        if (type(partition["start"]) is not int or type(partition["end"]) is not int
+                or partition["start"] != cursor or not cursor <= partition["end"] <= count):
+            raise ValueError("noncontiguous text partitions")
+        resource(partition["resource"])
+        cursor = partition["end"] + 1
+    if cursor != count + 1:
+        raise ValueError("incomplete text partition coverage")
+    resource(manifest["review"])
+    if manifest.get("book_text"):
+        resource(manifest["book_text"])
+    if "search_partitions" in manifest:
+        cursor = 1
+        for part in manifest["search_partitions"]:
+            if (type(part["start"]) is not int or type(part["end"]) is not int
+                    or part["start"] != cursor or not cursor <= part["end"] <= count
+                    or part["end"] - part["start"] >= SEARCH_PARTITION_PAGES):
+                raise ValueError("invalid search partition coverage")
+            resource(part["resource"])
+            cursor = part["end"] + 1
+        if cursor != count + 1:
+            raise ValueError("incomplete search partition coverage")
+    if manifest.get("parent"):
+        resource(manifest["parent"])
+    return manifest
+
+
+def build_text_bundle(layers, raw_pages, root, bundle, *, parent=None, include_search=True):
+    if not layers or [p["page"] for p in layers] != list(range(1, len(layers) + 1)):
+        raise ValueError("text layers must cover every page")
+    if len(raw_pages) != len(layers):
+        raise ValueError("raw page coverage mismatch")
+    source = layers[0]["source_sha256"]
+    entries, tasks = [], []
+    for layer, page in zip(layers, raw_pages):
+        text.validate(layer)
+        if layer["source_sha256"] != source or page["p"] != layer["page"]:
+            raise ValueError("text layer source mismatch")
+        out = bundle / root / "text" / f"page-{layer['page']:06d}.json.gz"
+        ref = stored(out, bundle, layer, compressed=True)
+        entries.append({"page": layer["page"], "page_identity": layer["page_identity"],
+                        "generation": layer["generation"], "resource": ref,
+                        "processing": layer["processing"], "quality": layer["quality"]})
+        if layer["provenance"].get("raw_resource"):
+            entries[-1]["raw_resource"] = resource(layer["provenance"]["raw_resource"])
+        evidence = []
+        if page.get("i"):
+            evidence.append(resource({"bucket": page.get("ibucket", shared.PDF_OCR_INPUT_BUCKET),
+                                      "path": page["i"], "sha256": page["is"], "bytes": page["ib"],
+                                      "role": "review"}))
+        task = text.review_task(layer, ref, evidence)
+        if task:
+            tasks.append(task)
+    generation = text.digest([p["generation"] for p in entries])
+    corrected = any(layer["revision"] == "accepted" for layer in layers)
+    revision = "effective" if corrected else "raw"
+    quality = "partially-reviewed" if corrected else "unreviewed"
+    search_partitions, chunk, chunk_bytes = [], [], 0
+
+    def flush_search():
+        start, end = chunk[0]["page"], chunk[-1]["page"]
+        ref = stored(bundle / root / "text" / f"search-{start:06d}-{end:06d}.json.gz", bundle,
+                     {"version": 1, "kind": "pdf-search-text-partition", "source_sha256": source,
+                      "generation": generation, "offset_unit": "unicode-codepoint",
+                      "start": start, "end": end, "pages": chunk}, compressed=True)
+        search_partitions.append({"start": start, "end": end, "resource": ref})
+
+    for layer in layers if include_search else []:
+        page = {"page": layer["page"], "text": layer["text"], "text_generation": layer["generation"]}
+        size = len(json.dumps(page, ensure_ascii=False).encode("utf-8"))
+        if chunk and (len(chunk) >= SEARCH_PARTITION_PAGES or chunk_bytes + size > SEARCH_PARTITION_BYTES):
+            flush_search()
+            chunk, chunk_bytes = [], 0
+        chunk.append(page)
+        chunk_bytes += size
+    if chunk:
+        flush_search()
+    book_text = stored(bundle / root / "text" / "book-text.json.gz", bundle,
+                       {"version": 2, "kind": "pdf-book-text", "complete": True,
+                        "source_sha256": source, "page_count": len(layers),
+                        "generation": generation, "revision": revision, "quality": quality,
+                        "offset_unit": "unicode-codepoint",
+                        "pages": [{"page": p["page"], "text": p["text"],
+                                    "text_generation": p["generation"], "quality": p["quality"],
+                                    "layout": {"version": "text-layer-v1", "offset_unit": "unicode-codepoint",
+                                               "writing_mode": "auto", "mapping_precision": "block"},
+                                   "text_spans": [{"start": r["start"], "end": r["end"], "box": r["box"],
+                                                   "region_id": r["id"], "precision": r["mapping_precision"]}
+                                                  for r in p["regions"]]} for p in layers]}, compressed=True)
+    review = stored(bundle / root / "text-review-manifest.json", bundle,
+                    {"version": 1, "kind": "pdf-text-review", "source_sha256": source,
+                     "generation": generation, "tasks": tasks}, role="review")
+    partitions = []
+    for offset in range(0, len(entries), PARTITION_SIZE):
+        chunk = entries[offset:offset + PARTITION_SIZE]
+        start, end = chunk[0]["page"], chunk[-1]["page"]
+        ref = stored(bundle / root / "text" / f"partition-{start:06d}-{end:06d}-manifest.json", bundle,
+                     {"version": 1, "kind": "pdf-text-partition", "source_sha256": source,
+                      "generation": generation, "start": start, "end": end, "pages": chunk})
+        partitions.append({"start": start, "end": end, "resource": ref})
+    manifest = {"version": 1, "kind": "pdf-text-layer-index", "complete": True,
+                "source_sha256": source, "generation": generation, "page_count": len(layers),
+                "revision": revision, "quality": quality, "offset_unit": "unicode-codepoint",
+                "partitions": partitions, "review": review, "review_count": len(tasks), "book_text": book_text}
+    if include_search:
+        manifest["search_partitions"] = search_partitions
+    if parent is not None:
+        manifest["parent"] = resource(parent)
+    validate_text_manifest(manifest)
+    return stored(bundle / root / "text-layer-manifest.json", bundle, manifest)
+
+
+def verify_text_bundle(ref, read, source_sha256, page_count, *, verify_evidence=False, page_geometries=None,
+                       read_workers=1, verified_layers=None):
+    manifest = validate_text_manifest(decode(verified_read(ref, read)))
+    if manifest["source_sha256"] != source_sha256 or manifest["page_count"] != page_count:
+        raise ValueError("text layer index source mismatch")
+    generations = []
+    layers = [] if verified_layers is None else verified_layers
+    if len(layers):
+        raise ValueError('verified text page storage must be empty')
+    page_resources = {}
+    for partition in manifest["partitions"]:
+        data = decode(verified_read(partition["resource"], read))
+        if (data.get("version") != 1 or data.get("kind") != "pdf-text-partition"
+                or data.get("source_sha256") != source_sha256 or data.get("generation") != manifest["generation"]
+                or data.get("start") != partition["start"] or data.get("end") != partition["end"]
+                or [p["page"] for p in data["pages"]] != list(range(partition["start"], partition["end"] + 1))):
+            raise ValueError("invalid text partition identity")
+        loaded = shared.ordered_reads(lambda entry: decode(verified_read(entry["resource"], read)),
+                                      data["pages"], read_workers)
+        for entry, payload in zip(data["pages"], loaded):
+            layer = text.validate(payload)
+            if (layer["page"] != entry["page"] or layer["source_sha256"] != source_sha256
+                    or layer["generation"] != entry["generation"] or layer["page_identity"] != entry["page_identity"]
+                    or layer["processing"] != entry["processing"] or layer["quality"] != entry["quality"]):
+                raise ValueError("text page identity mismatch")
+            raw_ref = layer["provenance"].get("raw_resource")
+            if entry.get("raw_resource") != raw_ref:
+                raise ValueError("raw page provenance missing from text partition")
+            if raw_ref:
+                resource(raw_ref)
+            generations.append(layer["generation"])
+            layers.append(layer)
+            page_resources[layer["page"]] = entry["resource"]
+            if page_geometries is not None:
+                geometry = page_geometries[layer["page"] - 1]
+                aspect = layer["geometry"]["width"] / layer["geometry"]["height"]
+                if abs(aspect / (geometry["width"] / geometry["height"]) - 1) > .01:
+                    raise ValueError("text layer/PDF page geometry mismatch")
+    if text.digest(generations) != manifest["generation"]:
+        raise ValueError("text index generation mismatch")
+    for part in manifest.get("search_partitions", []):
+        data = decode(verified_read(part["resource"], read))
+        expected = [{"page": p["page"], "text": p["text"], "text_generation": p["generation"]}
+                    for p in layers[part["start"] - 1:part["end"]]]
+        if (data.get("version") != 1 or data.get("kind") != "pdf-search-text-partition"
+                or data.get("source_sha256") != source_sha256 or data.get("generation") != manifest["generation"]
+                or data.get("offset_unit") != "unicode-codepoint" or data.get("start") != part["start"]
+                or data.get("end") != part["end"] or data.get("pages") != expected):
+            raise ValueError("search partition differs from effective page text")
+    corrected = any(p["revision"] == "accepted" for p in layers)
+    if (manifest["revision"] != ("effective" if corrected else "raw")
+            or manifest["quality"] != ("partially-reviewed" if corrected else "unreviewed")):
+        raise ValueError("text index quality claim mismatch")
+    if manifest.get("book_text"):
+        index = decode(verified_read(manifest["book_text"], read))
+        if (index.get("kind") != "pdf-book-text" or index.get("version") != 2
+                or index.get("complete") is not True or index.get("source_sha256") != source_sha256
+                or index.get("generation") != manifest["generation"]
+                or index.get("page_count") != page_count or index.get("revision") != manifest["revision"]
+                or [p.get("page") for p in index.get("pages", [])] != list(range(1, page_count + 1))
+                or any(p["text"] != layer["text"] or p["text_generation"] != layer["generation"]
+                       or p["quality"] != layer["quality"] or p["text_spans"] != [
+                           {"start": r["start"], "end": r["end"], "box": r["box"],
+                            "region_id": r["id"], "precision": r["mapping_precision"]} for r in layer["regions"]]
+                       for p, layer in zip(index["pages"], layers))):
+            raise ValueError("search index differs from effective page text")
+        del index
+    review = decode(verified_read(manifest["review"], read))
+    if (review.get("kind") != "pdf-text-review" or review.get("version") != 1
+            or review.get("source_sha256") != source_sha256 or review.get("generation") != manifest["generation"]
+            or len(review.get("tasks", [])) != manifest["review_count"]):
+        raise ValueError("invalid review manifest")
+    ids = set()
+    for task in review["tasks"]:
+        number = task.get('page')
+        layer = layers[number - 1] if type(number) is int and 1 <= number <= len(layers) else None
+        if (not layer or task.get("base_generation") != layer["generation"]
+                or task.get("raw_sha256") != layer["raw_sha256"]
+                or task.get("page_identity") != layer["page_identity"]
+                or task.get("id") in ids or text.digest({k: v for k, v in task.items() if k != "id"}) != task.get("id")):
+            raise ValueError("invalid review task identity")
+        if (task.get("source_sha256") != source_sha256 or task.get("issues") != layer["review_flags"]
+                or task.get("region_ids") != [r["id"] for r in layer["regions"]]):
+            raise ValueError("review task scope mismatch")
+        ids.add(task["id"])
+        resource(task["text_layer"])
+        if task["text_layer"] != page_resources[task["page"]]:
+            raise ValueError("review task references a different text page")
+        for evidence in task["evidence"]:
+            resource(evidence)
+            if verify_evidence:
+                verified_read(evidence, read)
+    return manifest
+
+
+def repartition_text_bundle(ref, read, bundle):
+    """Refresh search packaging without changing any raw or accepted page text."""
+    original = decode(verified_read(ref, read))
+    original = verify_text_bundle(ref, read, original["source_sha256"], original["page_count"])
+    review = decode(verified_read(original["review"], read))
+    evidence = {task["page"]: task["evidence"] for task in review["tasks"]}
+    layers, pages = [], []
+    for part in original["partitions"]:
+        for entry in decode(verified_read(part["resource"], read))["pages"]:
+            layer = decode(verified_read(entry["resource"], read))
+            layers.append(layer)
+            page = {"p": layer["page"]}
+            for item in evidence.get(layer["page"], []):
+                if item["bucket"] == shared.PDF_OCR_INPUT_BUCKET and item["path"].endswith(".png"):
+                    page.update(i=item["path"], ibucket=item["bucket"], ib=item["bytes"], **{"is": item["sha256"]})
+                    break
+            pages.append(page)
+    source = original["source_sha256"]
+    identity = text.digest({"parent": ref, "search_packaging": 1})
+    root = Path("objects") / source[:2] / source / identity[:16]
+    return build_text_bundle(layers, pages, root, bundle, parent=ref)
+
+
+def accept_text_bundle(ref, proposals, read, bundle, *, actor):
+    """Offline trusted acceptance producing a new complete text/search generation."""
+    source_manifest = decode(verified_read(ref, read))
+    source = source_manifest["source_sha256"]
+    verified = verify_text_bundle(ref, read, source, source_manifest["page_count"])
+    if not isinstance(proposals, list) or not proposals:
+        raise ValueError("correction proposals required")
+    by_page = {}
+    for proposal in proposals:
+        page = proposal.get("page")
+        if (type(page) is not int or not 1 <= page <= verified["page_count"] or page in by_page):
+            raise ValueError("duplicate or invalid correction page")
+        by_page[page] = proposal
+    review = decode(verified_read(verified["review"], read))
+    evidence_by_page = {t["page"]: t["evidence"] for t in review["tasks"]}
+    layers, pages = [], []
+    for partition in verified["partitions"]:
+        data = decode(verified_read(partition["resource"], read))
+        for entry in data["pages"]:
+            layer = decode(verified_read(entry["resource"], read))
+            if layer["page"] in by_page:
+                layer = text.accept_proposal(layer, by_page[layer["page"]], actor=actor)
+            layers.append(layer)
+            page = {"p": layer["page"]}
+            for evidence in evidence_by_page.get(layer["page"], []):
+                if evidence["bucket"] == shared.PDF_OCR_INPUT_BUCKET and evidence["path"].endswith(".png"):
+                    page.update(i=evidence["path"], ibucket=evidence["bucket"],
+                                ib=evidence["bytes"])
+                    page["is"] = evidence["sha256"]
+                    break
+            pages.append(page)
+    identity = text.digest({"parent": ref, "proposals": proposals, "actor": actor, "acceptance": 2})
+    root = Path("objects") / source[:2] / source / identity[:16]
+    return build_text_bundle(layers, pages, root, bundle, parent=ref)
+
+
+PRIMARY_KINDS = {".pdf": "pdf", ".djvu": "djvu"}
+
+
+def primary_kind(ref):
+    """Reading primary kind from its public path; only PDF and native DjVu."""
+    path = ref["path"]
+    dataset = ref.get('kind') == 'dataset-source'
+    kind = next((value for suffix, value in PRIMARY_KINDS.items()
+                 if (path.lower() if dataset else path).endswith(suffix)), None)
+    if (kind is None or (not dataset and ref["bucket"] == shared.PDF_OCR_INPUT_BUCKET) or ref["role"] != "runtime"
+            or (kind == "djvu" and not dataset and not re.fullmatch(r"objects/[0-9a-f]{2}/[0-9a-f]{64}/[0-9a-f]{16}/document\.djvu", path))):
+        raise ValueError("invalid primary reading document")
+    return kind
+
+
+def primary_page_map(raw, source_sha256, kind):
+    """Geometry from the primary's own format; magic bytes must agree with it."""
+    if kind == "djvu":
+        if djvu_pages.sniff(raw) != "djvu":
+            raise ValueError("DjVu primary lacks DjVu magic bytes")
+        return djvu_pages.page_map(raw, source_sha256)
+    return page_map(raw, source_sha256)
+
+
+def page_map(pdf_bytes, source_sha256):
+    """Use the PDF engine's real page geometry, not an invented crop/rotation."""
+    import pymupdf
+    pages = []
+    with pymupdf.open(stream=pdf_bytes, filetype="pdf") as document:
+        if document.needs_pass or len(document) == 0:
+            raise ValueError("unreadable primary PDF")
+        for index, page in enumerate(document, 1):
+            geometry = {"page": index, "media_box": list(page.mediabox), "crop_box": list(page.cropbox),
+                        "rotation": page.rotation, "width": page.rect.width, "height": page.rect.height}
+            try:
+                images = page.get_image_info()
+                geometry["classification"] = ("bitonal-image" if any(i.get("bpc") == 1 for i in images) else
+                                              "native-vector" if page.get_text().strip() else
+                                              "raster-or-mixed" if images else "vector-or-empty")
+            except Exception:
+                geometry["classification"] = "unknown"
+            geometry["identity"] = text.digest({"source_sha256": source_sha256, **geometry})
+            pages.append(geometry)
+    return {"version": 1, "kind": "pdf-page-map", "source_sha256": source_sha256, "pages": pages}
+
+
+def generate_previews(spec, read, bundle, *, start=1, end=None, dpi=150, max_pixels=50000000):
+    """Both formats use primary bytes; legacy preview objects are never built here.
+
+    This entry point remains for callers that request a primary-only first
+    publication. It must not read, adopt, or generate historical page images.
+    """
+    if type(dpi) is not int or not 72 <= dpi <= 600 or type(max_pixels) is not int or max_pixels < 4096:
+        raise ValueError("invalid preview render budget")
+    text.sha(spec["source_sha256"])
+    primary_kind(primary_resource(spec["primary"], spec["source_key"], spec["source_sha256"]))
+    return {**spec, 'previews': [], 'require_complete_preview': False}
+
+
+def validate_reading_manifest(manifest):
+    if (manifest.get("version") != 3 or manifest.get("kind") != "pdf-reading"
+            or not isinstance(manifest.get("source_key"), str) or not manifest["source_key"]
+            or manifest.get("primary", {}).get("kind") not in set(PRIMARY_KINDS.values())
+            or manifest["primary"].get("status") != "ready"):
+        raise ValueError("invalid reading manifest")
+    text.sha(manifest["source_sha256"])
+    text.sha(manifest["generation"])
+    count = manifest.get("page_count")
+    if type(count) is not int or count < 1:
+        raise ValueError("invalid reading page count")
+    resource(manifest["page_map"])
+    primary = primary_resource(manifest["primary"]["resource"], manifest["source_key"], manifest["source_sha256"])
+    if primary_kind(primary) != manifest["primary"]["kind"]:
+        raise ValueError("invalid primary reading document")
+    if manifest["primary"]["kind"] == "djvu" and primary.get('kind') != 'dataset-source' and (
+            primary["bucket"] != shared.PDF_PAGES_BUCKET
+            or primary["sha256"] != manifest["source_sha256"]
+            or primary["bytes"] > 512 * 1024 * 1024 or count > 10000
+            or not primary["path"].startswith(f"objects/{manifest['source_sha256'][:2]}/{manifest['source_sha256']}/")):
+        raise ValueError("DjVu primary/source identity mismatch")
+    if manifest['primary']['kind'] == 'djvu' and count > 10000:
+        raise ValueError('DjVu primary exceeds browser resource limits')
+    preview = manifest["preview"]
+    if (preview.get("page_count") != count or type(preview.get("complete")) is not bool
+            or type(preview.get("ready_pages")) is not int or not 0 <= preview["ready_pages"] <= count):
+        raise ValueError("invalid preview state")
+    previous = 0
+    covered = 0
+    for partition in preview["partitions"]:
+        start, end = partition["start"], partition["end"]
+        if (type(start) is not int or type(end) is not int or not previous < start <= end <= count
+                or (start - 1) % PARTITION_SIZE or end != min(count, start + PARTITION_SIZE - 1)
+                or type(partition.get("complete")) is not bool):
+            raise ValueError("invalid reading partition")
+        resource(partition["resource"])
+        if preview["complete"] and (start != previous + 1 or not partition["complete"]):
+            raise ValueError("incomplete advertised preview")
+        previous = end
+        covered += end - start + 1
+    if preview["complete"] and (covered != count or preview["ready_pages"] != count):
+        raise ValueError("incomplete advertised preview")
+    if manifest.get("text_layer"):
+        resource(manifest["text_layer"])
+    skipped = preview.get('status') == 'skipped'
+    if 'status' in preview and not skipped:
+        raise ValueError('invalid preview policy')
+    if skipped and (preview['complete'] or preview['ready_pages'] or preview['partitions']):
+        raise ValueError('a direct document cannot have skipped preview images')
+    expected = {"document": "ready", "preview": "skipped" if skipped else "ready" if preview["complete"] else "pending",
+                "text": "ready" if manifest.get("text_layer") else "pending", "searchable_pdf": "skipped"}
+    if any(manifest["components"].get(k) != v for k, v in expected.items()):
+        raise ValueError("invalid reading component state")
+    return manifest
+
+
+def build_reading(spec, read, bundle):
+    """Build primary-PDF or native-DjVu reading without document page images."""
+    source = text.sha(spec["source_sha256"])
+    primary = primary_resource(spec["primary"], spec["source_key"], source)
+    try:
+        kind = primary_kind(primary)
+    except ValueError:
+        raise ValueError("primary must be a reading-bucket PDF or native DjVu") from None
+    if kind == 'djvu' and primary.get('kind') != 'dataset-source' and (primary['bucket'] != shared.PDF_PAGES_BUCKET
+                           or primary['sha256'] != source
+                           or primary['bytes'] > 512 * 1024 * 1024
+                           or not primary['path'].startswith(f'objects/{source[:2]}/{source}/')):
+        raise ValueError('DjVu primary/source identity mismatch')
+    mapping = primary_page_map(verified_primary(primary, read, spec['source_key'], source), source, kind)
+    count = len(mapping["pages"])
+    if kind == 'djvu' and count > 10000:
+        raise ValueError('DjVu primary exceeds browser resource limits')
+    text_ref = spec.get("text_layer")
+    if text_ref:
+        verify_text_bundle(text_ref, read, source, count, page_geometries=mapping["pages"])
+    identity = {"version": 3, "spec": spec, "page_map": mapping}
+    if kind == 'pdf':
+        identity['reading_policy'] = 'pdf-primary-only-v1'
+    else:
+        identity['spec'] = {key: value for key, value in spec.items()
+                            if key not in {'previews', 'require_complete_preview', 'vector_previews', 'render_manifest'}}
+        identity['reading_policy'] = 'djvu-primary-only-v1'
+    recipe = text.digest(identity)
+    root = Path("objects") / source[:2] / source / recipe[:16]
+    map_ref = stored(bundle / root / "page-map.json.gz", bundle, mapping, compressed=True)
+    manifest = {"version": 3, "kind": "pdf-reading", "source_sha256": source,
+                "source_key": spec["source_key"], "generation": recipe,
+                "page_count": count, "page_map": map_ref,
+                "primary": {"kind": kind, "status": "ready", "resource": primary},
+                "preview": {"page_count": count, "complete": False, "ready_pages": 0,
+                            "partitions": [], "status": "skipped"},
+                "text_layer": text_ref,
+                "components": {"document": "ready", "preview": "skipped",
+                               "text": "ready" if text_ref else "pending", "correction": "pending",
+                               "searchable_pdf": "skipped"},
+                "provenance": {"builder": "pdf-reading-v3-v1", "recipe_sha256": recipe}}
+    validate_reading_manifest(manifest)
+    ref = stored(bundle / root / "reading-manifest.json", bundle, manifest)
+    return ref, manifest
+
+
+def verify_reading(ref, read, *, read_workers=4, verify_historical_previews=True):
+    manifest = validate_reading_manifest(decode(verified_read(ref, read)))
+    source = text.sha(manifest["source_sha256"])
+    text.sha(manifest["generation"])
+    primary = primary_resource(manifest["primary"]["resource"], manifest['source_key'], source)
+    kind = primary_kind(primary)
+    if kind != manifest["primary"]["kind"]:
+        raise ValueError("invalid primary reading document")
+    expected = primary_page_map(verified_primary(primary, read, manifest['source_key'], source), source, kind)
+    mapping = decode(verified_read(manifest["page_map"], read))
+    if mapping != expected or len(mapping["pages"]) != manifest["page_count"]:
+        raise ValueError("reading page map differs from primary document")
+    preview = manifest["preview"]
+    count = manifest["page_count"]
+    if type(preview.get("complete")) is not bool or preview.get("page_count") != count:
+        raise ValueError("invalid preview completeness")
+    seen, previous = set(), 0
+    partitions = preview["partitions"] if verify_historical_previews else []
+    for partition in partitions:
+        start, end = partition["start"], partition["end"]
+        if (type(start) is not int or type(end) is not int or not previous < start <= end <= count
+                or (start - 1) % PARTITION_SIZE or end != min(count, start + PARTITION_SIZE - 1)):
+            raise ValueError("invalid preview partition range")
+        previous = end
+        data = decode(verified_read(partition["resource"], read))
+        if (data.get("version") != 3 or data.get("kind") != "pdf-preview-partition"
+                or data.get("source_sha256") != source or data.get("page_map_sha256") != manifest["page_map"]["sha256"]
+                or data.get("start") != start or data.get("end") != end):
+            raise ValueError("preview partition identity mismatch")
+        numbers = [p["page"] for p in data["pages"]]
+        if (numbers != sorted(set(numbers)) or any(type(p) is not int or not start <= p <= end for p in numbers)
+                or type(partition.get("complete")) is not bool
+                or partition["complete"] != (numbers == list(range(start, end + 1)))):
+            raise ValueError("preview partition page coverage mismatch")
+        def verify_preview(page):
+            geometry = mapping["pages"][page["page"] - 1]
+            if page["page_identity"] != geometry["identity"]:
+                raise ValueError("preview/PDF page identity mismatch")
+            media = resource(page["resource"])
+            if media["bucket"] == shared.PDF_OCR_INPUT_BUCKET or media["role"] != "runtime":
+                raise ValueError("invalid runtime preview")
+            if page["codec"] not in {"png", "webp", "jpeg", "svg", "jxl"}:
+                raise ValueError("unsupported preview codec")
+            if geometry["classification"] in {"bitonal-image", "unknown"} and page["codec"] != "png":
+                raise ValueError("protected page has lossy preview")
+            width, height = preview_geometry(verified_read(media, read), page["codec"])
+            if [math.ceil(width), math.ceil(height)] != [page["width"], page["height"]]:
+                raise ValueError("preview format mismatch")
+            if abs((width / height) / (geometry["width"] / geometry["height"]) - 1) > .01:
+                raise ValueError("preview geometry mismatch")
+            return page["page"]
+        seen.update(shared.ordered_reads(verify_preview, data["pages"], read_workers))
+    if verify_historical_previews and (preview["ready_pages"] != len(seen)
+            or preview["complete"] != (seen == set(range(1, count + 1)))):
+        raise ValueError("reading stream completeness mismatch")
+    if manifest.get("text_layer"):
+        verify_text_bundle(manifest["text_layer"], read, source, count, page_geometries=mapping["pages"],
+                           read_workers=read_workers)
+    components = manifest["components"]
+    if (components.get("document") != "ready"
+            or components.get("preview") != ('skipped' if preview.get('status') == 'skipped'
+                                              else "ready" if preview["complete"] else "pending")
+            or components.get("text") != ("ready" if manifest.get("text_layer") else "pending")
+            or components.get("searchable_pdf") != "skipped"):
+        raise ValueError("reading component state mismatch")
+    return manifest
+
+
+def reading_surface_ready(manifest):
+    """Only a primary document with explicitly skipped previews can be published."""
+    return (manifest['primary']['kind'] in {'pdf', 'djvu'}
+            and manifest['preview'].get('status') == 'skipped')
+
+
+def local_reader(directory):
+    directory = directory.resolve()
+    def read(ref):
+        if isinstance(ref, dict) and ref.get('kind') == 'dataset-source':
+            repo, path = ref.get('repo'), ref.get('path')
+            if not isinstance(repo, str) or not isinstance(path, str):
+                raise ValueError('invalid dataset primary identity')
+            validate_dataset_primary(ref, repo+'\0'+path, ref.get('sha256'))
+            # Explicit local fixture, not a remote bucket: deterministic and
+            # bounded by the same digest checks as the published primary.
+            target = (directory / 'dataset-sources' / ref['sha256']).resolve()
+        else:
+            resource(ref)
+            target = (directory / ref["bucket"] / PurePosixPath(ref["path"])).resolve()
+        if not target.is_relative_to(directory):
+            raise ValueError("local resource escapes bucket mirror")
+        return target.read_bytes()
+    return read
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("command", choices=("build", "verify", "backfill-text", "generate-stream", "accept-text"))
+    parser.add_argument("--spec", type=Path)
+    parser.add_argument("--manifest", type=Path, help="OCR manifest or qualified reading resource JSON")
+    parser.add_argument("--mirror", type=Path, required=True,
+                        help="Verified inputs under <mirror>/<bucket>/<path>")
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--start", type=int, default=1)
+    parser.add_argument("--end", type=int)
+    parser.add_argument("--dpi", type=int, default=150)
+    parser.add_argument("--max-pixels", type=int, default=50000000)
+    parser.add_argument("--proposals", type=Path)
+    parser.add_argument("--actor")
+    args = parser.parse_args()
+    read = local_reader(args.mirror)
+    if args.command == "accept-text":
+        if args.manifest is None or args.proposals is None or args.output is None or not args.actor:
+            parser.error("accept-text requires --manifest, --proposals, --output and --actor")
+        ref = accept_text_bundle(json.loads(args.manifest.read_text()), json.loads(args.proposals.read_text()),
+                                 read, args.output, actor=args.actor)
+        print(json.dumps({"text_layer": ref}, sort_keys=True))
+    elif args.command == "generate-stream":
+        if args.spec is None or args.output is None:
+            parser.error("generate-stream requires --spec and --output")
+        spec = generate_previews(json.loads(args.spec.read_text()), read, args.output,
+                                 start=args.start, end=args.end, dpi=args.dpi, max_pixels=args.max_pixels)
+        pdf_ocr.write_json(args.output / "reading-spec.json", spec)
+        print(json.dumps({"spec": str(args.output / "reading-spec.json"), "ready_pages": len(spec["previews"])}))
+    elif args.command == "build":
+        if args.spec is None or args.output is None:
+            parser.error("build requires --spec and --output")
+        ref, manifest = build_reading(json.loads(args.spec.read_text()), read, args.output)
+        print(json.dumps({"resource": ref, "components": manifest["components"]}, sort_keys=True))
+    elif args.command == "backfill-text":
+        if args.manifest is None or args.output is None:
+            parser.error("backfill-text requires --manifest and --output")
+        ref = backfill_text(json.loads(args.manifest.read_text()), read, args.output)
+        print(json.dumps({"text_layer": ref}, sort_keys=True))
+    else:
+        if args.manifest is None:
+            parser.error("verify requires --manifest")
+        manifest = verify_reading(json.loads(args.manifest.read_text()), read)
+        print(json.dumps({"generation": manifest["generation"], "components": manifest["components"]}, sort_keys=True))
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,359 @@
+#!/usr/bin/env python3
+"""
+将 search_data.json.gz 推送到 GitHub Pages 仓库（仅数据文件，不含前端代码）。
+
+用法:
+  python scripts/sync_to_pages.py
+  需要环境变量: PAGES_TOKEN, PAGES_REPO (如 anftm/search)
+"""
+
+import base64
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import re
+import urllib.parse
+from pathlib import Path
+
+# ═══════════════════════════════════════════════════════════
+# 配置
+# ═══════════════════════════════════════════════════════════
+
+SOURCE_JSON = Path("output/search_data.json")
+FOLDER_TREE_JSON = Path("output/folder_tree.json")
+FOLDER_BROWSER_JSON = Path("output/folder_browser.json")
+SEARCH_DATA_VERSION = 2
+INITIAL_PAGE_SIZE = 100
+
+
+def decode_search_payload(data):
+    if isinstance(data, list):
+        return data
+    if not isinstance(data, dict):
+        return []
+    repos = data.get("rp", []) or []
+    folders = data.get("fd", []) or []
+    records = []
+    for item in data.get("rc", []) or []:
+        if not isinstance(item, list) or len(item) < 6:
+            continue
+        repo = repos[item[0]] if isinstance(item[0], int) and 0 <= item[0] < len(repos) else ""
+        folder = folders[item[3]] if isinstance(item[3], int) and 0 <= item[3] < len(folders) else []
+        records.append({
+            "Repo": repo,
+            "File": item[1],
+            "Extension": item[2],
+            "Folder": folder,
+            "Size": item[4],
+            "HasTxt": bool(item[5]),
+        })
+    return records
+
+
+def encode_search_payload(records: list[dict]) -> dict:
+    repo_ids = {}
+    repos = []
+    folder_ids = {}
+    folders = []
+    encoded_records = []
+
+    for record in records:
+        repo = record.get("Repo", "")
+        if repo not in repo_ids:
+            repo_ids[repo] = len(repos)
+            repos.append(repo)
+
+        folder_tuple = tuple(record.get("Folder", []) or [])
+        if folder_tuple not in folder_ids:
+            folder_ids[folder_tuple] = len(folders)
+            folders.append(list(folder_tuple))
+
+        encoded_records.append([
+            repo_ids[repo],
+            record.get("File", ""),
+            record.get("Extension", ""),
+            folder_ids[folder_tuple],
+            record.get("Size", ""),
+            1 if record.get("HasTxt", False) else 0,
+        ])
+
+    return {
+        "v": SEARCH_DATA_VERSION,
+        "rp": repos,
+        "fd": folders,
+        "rc": encoded_records,
+    }
+
+
+def trim_initial_results(records: list[dict]) -> list[dict]:
+    keys = ("Repo", "File", "Extension", "Folder", "Size", "HasTxt")
+    return [
+        {key: record.get(key, [] if key == "Folder" else "") for key in keys}
+        for record in records
+    ]
+
+
+def build_initial_payload(records: list[dict], repo: str | None = None) -> dict:
+    if repo:
+        filtered = [record for record in records if record.get("Repo") == repo]
+        mode = "repo"
+    else:
+        filtered = records
+        mode = "global"
+    return {
+        "version": SEARCH_DATA_VERSION,
+        "mode": mode,
+        "repo": repo,
+        "sort": "relevance",
+        "page": 1,
+        "page_size": INITIAL_PAGE_SIZE,
+        "total": len(filtered),
+        "results": trim_initial_results(filtered[:INITIAL_PAGE_SIZE]),
+    }
+
+
+def write_initial_payloads(data_dir: Path, records: list[dict]) -> list[str]:
+    initial_dir = data_dir / "initial"
+    repos_dir = initial_dir / "repos"
+    if initial_dir.exists():
+        shutil.rmtree(initial_dir)
+    repos_dir.mkdir(parents=True, exist_ok=True)
+
+    urls = ["/search/data/initial/global.json"]
+    (initial_dir / "global.json").write_text(
+        json.dumps(build_initial_payload(records), ensure_ascii=False, separators=(",", ":")),
+        encoding="utf-8",
+    )
+
+    repos = sorted({record.get("Repo", "") for record in records if record.get("Repo")})
+    for repo in repos:
+        short = repo.split("/")[-1]
+        safe_short = urllib.parse.quote(short, safe="")
+        (repos_dir / f"{safe_short}.json").write_text(
+            json.dumps(build_initial_payload(records, repo), ensure_ascii=False, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        urls.append(f"/search/data/initial/repos/{safe_short}.json")
+
+    (initial_dir / "manifest.json").write_text(
+        json.dumps({"version": SEARCH_DATA_VERSION, "urls": urls}, ensure_ascii=False, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    return urls
+
+
+def normalize_browser_entry(entry: dict | None, repo: str, path: str = "") -> dict:
+    entry = entry or {}
+    folders = entry.get("folders") or entry.get("d") or []
+    files = entry.get("files") or entry.get("f") or []
+    return {
+        "repo": repo,
+        "path": path,
+        "folders": folders,
+        "files": files,
+    }
+
+
+def write_sidebar_payloads(data_dir: Path, records: list[dict], browser_data: dict) -> list[str]:
+    sidebar_dir = data_dir / "sidebar"
+    repos_dir = sidebar_dir / "repos"
+    if sidebar_dir.exists():
+        shutil.rmtree(sidebar_dir)
+    repos_dir.mkdir(parents=True, exist_ok=True)
+
+    repo_counts = {}
+    for record in records:
+        repo = record.get("Repo")
+        if repo:
+            repo_counts[repo] = repo_counts.get(repo, 0) + 1
+    repos = [{"name": repo, "count": repo_counts[repo]} for repo in sorted(repo_counts)]
+    urls = ["/search/data/sidebar/global.json"]
+    (sidebar_dir / "global.json").write_text(
+        json.dumps({"repos": repos}, ensure_ascii=False, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    for repo in sorted(repo_counts):
+        short = repo.split("/")[-1]
+        safe_short = urllib.parse.quote(short, safe="")
+        payload = normalize_browser_entry((browser_data.get(repo) or {}).get(""), repo, "")
+        (repos_dir / f"{safe_short}.json").write_text(
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        urls.append(f"/search/data/sidebar/repos/{safe_short}.json")
+    (sidebar_dir / "manifest.json").write_text(
+        json.dumps({"version": SEARCH_DATA_VERSION, "urls": urls}, ensure_ascii=False, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    return urls
+
+
+def clear_legacy_ocr_flags(records: list[dict], browser_data: dict) -> None:
+    """Keep the v2 schema but never republish retired Space-txt OCR links."""
+    for record in records:
+        record["HasTxt"] = False
+    for repo in browser_data.values():
+        for entry in repo.values():
+            for item in entry.get("f", []) or []:
+                item["t"] = False
+
+
+def run(cmd: list[str], cwd: str = None, env: dict = None) -> tuple[int, str, str]:
+    merged_env = os.environ.copy()
+    if env:
+        merged_env.update(env)
+    proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, env=merged_env)
+    return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
+
+
+def git_auth_env(host: str, username: str, token: str) -> dict[str, str]:
+    credentials = base64.b64encode(f"{username}:{token}".encode()).decode()
+    return {
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": f"http.https://{host}/.extraheader",
+        "GIT_CONFIG_VALUE_0": f"Authorization: Basic {credentials}",
+    }
+
+
+def push_with_retry(cwd: str, auth_env: dict[str, str]) -> bool:
+    for attempt in range(2):
+        ret, _out, err = run(["git", "push"], cwd=cwd, env=auth_env)
+        if ret == 0:
+            print("   ✅ 推送成功")
+            return True
+        print(f"   ⚠ 推送失败 (第{attempt + 1}次): {err[:200]}")
+        if attempt == 0:
+            run(["git", "pull", "--rebase"], cwd=cwd, env=auth_env)
+            time.sleep(2)
+    return False
+
+
+def main():
+    token = os.environ.get("PAGES_TOKEN", "")
+    pages_repo = os.environ.get("PAGES_REPO", "")
+    username = "x-access-token"
+
+    if not token:
+        print("❌ 缺少 GITHUB_TOKEN")
+        sys.exit(1)
+    if not pages_repo:
+        print("❌ 缺少 PAGES_REPO（如 anftm/search）")
+        sys.exit(1)
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", pages_repo):
+        print("❌ PAGES_REPO 必须使用 owner/name 格式")
+        sys.exit(1)
+
+    if not SOURCE_JSON.exists():
+        print(f"❌ 源文件不存在: {SOURCE_JSON}")
+        sys.exit(1)
+    if not FOLDER_TREE_JSON.exists() or not FOLDER_BROWSER_JSON.exists():
+        print("❌ 目录元数据不存在，请先运行 fetch_and_parse.py")
+        sys.exit(1)
+
+    print("=" * 60)
+    print("📤 VoiceOfML Search Pipeline — sync_to_pages")
+    print("=" * 60)
+
+    # ── 1. 读取本地 JSON ──────────────────────────────
+    print(f"\n📖 读取 {SOURCE_JSON} ...")
+    records = decode_search_payload(json.loads(SOURCE_JSON.read_text(encoding="utf-8")))
+    print(f"   共 {len(records)} 条记录")
+
+    # ── 2. 退役旧 Space-txt OCR 标记，保留 v2 字段布局 ──
+    browser_data = json.loads(FOLDER_BROWSER_JSON.read_text(encoding="utf-8"))
+    clear_legacy_ocr_flags(records, browser_data)
+
+    # ── 4. 克隆 Pages 仓库 ────────────────────────────
+    print(f"\n📥 克隆 GitHub Pages 仓库: {pages_repo} ...")
+    tmpdir = tempfile.mkdtemp(prefix="pages_sync_")
+    clone_url = f"https://github.com/{pages_repo}.git"
+    auth_env = git_auth_env("github.com", username, token)
+
+    ret, out, err = run(["git", "clone", "--depth", "1", clone_url, tmpdir], env=auth_env)
+    if ret != 0:
+        print(f"   ⚠ 克隆失败: {err[:200]}")
+        # 尝试创建
+        import urllib.request
+        import urllib.error
+        create_url = f"https://api.github.com/repos/{pages_repo}"
+        req = urllib.request.Request(create_url)
+        req.add_header("Authorization", f"Bearer {token}")
+        req.add_header("User-Agent", "VoiceOfML-Pipeline/1.0")
+        req.add_header("Accept", "application/vnd.github+json")
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                print(f"   仓库已存在，重试克隆...")
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                print(f"   仓库不存在，请先在 GitHub 创建 {pages_repo}")
+                print(f"   并启用 GitHub Pages（Settings → Pages → Source: Deploy from a branch）")
+                shutil.rmtree(tmpdir, ignore_errors=True)
+                sys.exit(1)
+
+        time.sleep(2)
+        ret, out, err = run(["git", "clone", clone_url, tmpdir], env=auth_env)
+        if ret != 0:
+            print(f"   ❌ 重试克隆失败: {err[:200]}")
+            shutil.rmtree(tmpdir, ignore_errors=True)
+            sys.exit(1)
+
+    print("   ✅ 克隆成功")
+
+    # ── 5. 生成数据文件 ────────────────────────────────
+    import gzip
+    data_dir = Path(tmpdir) / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    json_text = json.dumps(encode_search_payload(records), ensure_ascii=False, separators=(",", ":"))
+    gz_path = data_dir / "search_data.json.gz"
+    gz_path.write_bytes(gzip.compress(json_text.encode("utf-8"), compresslevel=9, mtime=0))
+    (data_dir / "folder_tree.json.gz").write_bytes(FOLDER_TREE_JSON.with_suffix(".json.gz").read_bytes())
+    browser_text = json.dumps(browser_data, ensure_ascii=False, separators=(",", ":"))
+    (data_dir / "folder_browser.json.gz").write_bytes(gzip.compress(browser_text.encode("utf-8"), compresslevel=9, mtime=0))
+    initial_urls = write_initial_payloads(data_dir, records)
+    sidebar_urls = write_sidebar_payloads(data_dir, records, browser_data)
+
+    file_size_mb = len(json_text.encode("utf-8")) / 1024 / 1024
+    gz_size_mb = gz_path.stat().st_size / 1024 / 1024
+    print(f"\n💾 已写入:")
+    print(f"   原始: {file_size_mb:.1f} MB")
+    print(f"   gzip: {gz_size_mb:.1f} MB")
+    print(f"   initial: {len(initial_urls)} 个首屏文件")
+    print(f"   sidebar: {len(sidebar_urls)} 个侧栏首屏文件")
+
+    # ── 6. Git commit & push ───────────────────────────
+    print(f"\n📤 提交并推送...")
+
+    run(["git", "config", "user.email", "github-actions[bot]@users.noreply.github.com"], cwd=tmpdir)
+    run(["git", "config", "user.name", "github-actions[bot]"], cwd=tmpdir)
+
+    run(["git", "add", "-A"], cwd=tmpdir)
+    ret, out, err = run(["git", "status", "--porcelain"], cwd=tmpdir)
+
+    if not out:
+        print("   ⚠ 无变化，跳过提交")
+    else:
+        ret, out, err = run(
+            ["git", "commit", "-m", "chore: update search data [skip ci]"],
+            cwd=tmpdir,
+        )
+        if ret != 0 and "nothing to commit" not in err:
+            print(f"   ⚠ git commit 失败: {err}")
+
+        if not push_with_retry(tmpdir, auth_env):
+            shutil.rmtree(tmpdir, ignore_errors=True)
+            print("   ❌ 推送失败，未发布生成数据")
+            return 1
+
+    shutil.rmtree(tmpdir, ignore_errors=True)
+    print(f"\n🧹 已清理临时目录")
+    print("\n✅ sync_to_pages 完成！")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

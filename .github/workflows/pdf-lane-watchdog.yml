@@ -1,0 +1,39 @@
+name: Reader/桶 · PDF Lane Watchdog
+
+# Historical lane scheduling reference. It must not wake on a timer or restart
+# the retired worker matrix. The workflow identity remains in producer fences.
+on:
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: Dispatch idle lanes (false = report only)
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pdf-lane-watchdog
+  cancel-in-progress: false
+
+jobs:
+  watchdog:
+    # Document OCR and detached native-text generation are retired. Keep the
+    # workflow definition for audit, but never restart its producer lanes.
+    if: ${{ false }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Re-kick idle PDF lanes
+        env:
+          GH_TOKEN: ${{ secrets.PDF_WORKER_READ_TOKEN }}
+          APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
+        run: |
+          args=(--watchdog --output output/pdf-ocr/watchdog.json)
+          if [[ "$APPLY" == "true" ]]; then args+=(--apply); fi
+          python scripts/pdf_worker_dispatch.py "${args[@]}"

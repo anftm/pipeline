@@ -1,0 +1,143 @@
+name: Reader/桶 · GC Collect Unreferenced Objects
+run-name: Reader GC ${{ inputs.maintenance_id || github.run_id }}
+
+on:
+  # reader-maintenance.yml owns scheduling, isolation and automatic restoration.
+  workflow_dispatch:
+    inputs:
+      maintenance_id:
+        description: Correlation ID for automatic maintenance
+        type: string
+        default: ''
+      apply:
+        description: Collect objects after all Reader producers have been paused and drained
+        type: boolean
+        default: false
+      resume_scan_run:
+        description: Optional completed failed document-control scan to recover unchanged records
+        type: string
+        default: ''
+      resume_run:
+        description: Optional exact full-graph deletion plan; revalidate current references before resuming
+        type: string
+        default: ''
+      auto_resume:
+        description: Resume the last incomplete automatic plan after checking current references
+        type: boolean
+        default: false
+      grace_days:
+        description: Unreferenced object and superseded catalog retention in days
+        type: string
+        default: "0"
+      scope:
+        description: "unreferenced: full sweep; retired-assets: all format retirement receipts; retired-ocr-inputs: released PNGs. All apply scopes require the maintenance fence."
+        type: choice
+        options: [unreferenced, retired-assets, retired-catalog-snapshots, retired-ocr-inputs, document-control, document-pages, ocr-inputs, djvu-pdf, ocr-library]
+        default: unreferenced
+      reader_only:
+        description: Delete only the original Reader buckets and keep the fourth domain intact
+        type: boolean
+        default: true
+      limit:
+        description: Maximum objects in this collection batch; zero means all candidates
+        type: string
+        default: "0"
+      storage:
+        description: Inventory and deletion backend; control documents publish through Hub
+        type: choice
+        options: [s3, hub]
+        default: s3
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: reader-sidecar
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  collect:
+    if: github.repository == 'anftm/pipeline'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    env:
+      READER_GC_CACHE: .cache/reader-gc/reads.sqlite3
+      READER_GC_S3_RATE: '6'
+      READER_S3_LIST_WORKERS: '4'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - run: pip install -r scripts/requirements.txt PyYAML==6.0.3
+      - name: Verify primary-document reference and retirement safety
+        run: python -m unittest tests.test_direct_document_policy tests.test_reader_gc_graph
+      - uses: actions/cache/restore@v4
+        with:
+          path: .cache/reader-gc
+          key: reader-gc-reads-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: reader-gc-reads-v1-
+      - name: Verify maintenance window and collect unreferenced objects
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_INPUT_TOKEN: ${{ secrets.HF_INPUT_TOKEN }}
+          GH_TOKEN: ${{ secrets.PDF_WORKER_READ_TOKEN }}
+          GC_PRODUCER_TOKENS_JSON: ${{ secrets.GC_PRODUCER_TOKENS_JSON }}
+          GC_AMBROSSEE_MAINTENANCE_TOKEN: ${{ secrets.GC_AMBROSSEE_MAINTENANCE_20261102 }}
+          APPLY: ${{ inputs.apply }}
+          GRACE_DAYS: ${{ inputs.grace_days || '0' }}
+          SCOPE: ${{ inputs.scope }}
+          READER_ONLY: ${{ inputs.reader_only }}
+          LIMIT: ${{ inputs.limit || '0' }}
+          STORAGE: ${{ inputs.storage || 's3' }}
+          RESET_ID: ${{ inputs.maintenance_id }}
+          RESUME_SCAN_RUN: ${{ inputs.resume_scan_run }}
+          RESUME_RUN: ${{ inputs.resume_run }}
+          AUTO_RESUME: ${{ inputs.auto_resume }}
+          HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+          HF_S3_NAMESPACE: vomebook
+          HF_S3_INPUT_NAMESPACE: melsm
+          HF_S3_INPUT_ACCESS_KEY_ID: ${{ secrets.HF_S3_INPUT_ACCESS_KEY_ID }}
+          HF_S3_INPUT_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_INPUT_SECRET_ACCESS_KEY }}
+        run: |
+          [[ "$GRACE_DAYS" =~ ^[0-9]+$ ]] || exit 1
+          [[ "$LIMIT" =~ ^[0-9]+$ ]] || exit 1
+          case "$SCOPE" in
+            document-control|document-pages|ocr-inputs|djvu-pdf|ocr-library)
+              args=(--scope "$SCOPE" --reset-id "$RESET_ID" --output output/gc/collection.json)
+              if [[ -n "$RESUME_SCAN_RUN" ]]; then args+=(--resume-scan-run "$RESUME_SCAN_RUN"); fi
+              if [[ "$APPLY" == true ]]; then args+=(--apply); fi
+              python -u scripts/reader_gc_documents.py "${args[@]}"
+              exit 0
+              ;;
+          esac
+          if [[ "$SCOPE" == retired-ocr-inputs ]]; then
+            iargs=(--limit "$LIMIT" --output output/gc/collection.json)
+            if [[ "$APPLY" == true ]]; then iargs+=(--apply); fi
+            python -u scripts/reader_gc_inputs.py "${iargs[@]}"
+            exit 0
+          fi
+          args=(--grace-days "$GRACE_DAYS" --limit "$LIMIT" --storage "$STORAGE"
+                --output output/gc/collection.json)
+          if [[ "$APPLY" == true ]]; then args+=(--apply); fi
+          if [[ "$READER_ONLY" == true ]]; then args+=(--reader-only); fi
+          if [[ -n "$RESUME_RUN" ]]; then args+=(--resume-run "$RESUME_RUN"); fi
+          if [[ "$AUTO_RESUME" == true ]]; then args+=(--auto-resume); fi
+          if [[ "$SCOPE" == retired-assets ]]; then args+=(--retired-assets-only); fi
+          if [[ "$SCOPE" == retired-catalog-snapshots ]]; then args+=(--retired-snapshots-only); fi
+          python -u scripts/reader_gc_collect.py "${args[@]}"
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: .cache/reader-gc
+          key: reader-gc-reads-v1-${{ github.run_id }}-${{ github.run_attempt }}
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: reader-gc-collection
+          path: output/gc/*
+          retention-days: 30
+          if-no-files-found: error

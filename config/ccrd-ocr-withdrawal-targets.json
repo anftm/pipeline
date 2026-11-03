@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "kind": "ccrd-exact-ocr-withdrawal-targets",
+  "bucket": "vomebook/ccrd-index",
+  "generation": "fb1abf531f3a630d65e77ae0167bd049ddf9a6c46b8758ac4ed0672eb992819e",
+  "targets": [
+    {"path":"text/objects/5f/5ffe8b5a8340891834772af90e7ff54c261068cc18bbb59bcf66b91575f9d639.txt","bytes":2071652,"sha256":"5ffe8b5a8340891834772af90e7ff54c261068cc18bbb59bcf66b91575f9d639"},
+    {"path":"text/objects/87/87cc469e0edac6dc8d51ce4ec6f39bc4c92380d0fefc65af51702edae34e34ed.txt","bytes":35436,"sha256":"87cc469e0edac6dc8d51ce4ec6f39bc4c92380d0fefc65af51702edae34e34ed"},
+    {"path":"text/objects/8d/8d1e58e83f07da0b5f1c0c85503f3896b570e6ec6c66a569acc0ffa9779a5387.txt","bytes":225498,"sha256":"8d1e58e83f07da0b5f1c0c85503f3896b570e6ec6c66a569acc0ffa9779a5387"},
+    {"path":"text/objects/bb/bb44bbd6336ab2ace6afa260b5792842e6c81f44a041ad8e0e2b5408be530d27.txt","bytes":17346,"sha256":"bb44bbd6336ab2ace6afa260b5792842e6c81f44a041ad8e0e2b5408be530d27"},
+    {"path":"text/objects/d2/d2164b082c94031e1e4917e1e25d1182e9639579f07f3af67e167967e651d851.txt","bytes":56716,"sha256":"d2164b082c94031e1e4917e1e25d1182e9639579f07f3af67e167967e651d851"},
+    {"path":"text/objects/ee/ee7c259928ede8e8dd837f85b8bdd0d70a281957c69828aea0dc75e9130724ac.txt","bytes":123327,"sha256":"ee7c259928ede8e8dd837f85b8bdd0d70a281957c69828aea0dc75e9130724ac"},
+    {"path":"text/exports/1eaefe69f829ef2ed77a2026a4ffc8df55fc92bc6aaff7a46e732f27e820b70e/179979909253901ce18313466f8fc87d6628c4d25ee5eb3eb45a2c953ad35783/manifest.json","bytes":78683,"sha256":"7708bd681fe382ff1c08f5fed2c4c42bef49e0f603053a8f5ba25b1b3b1d4d99"},
+    {"path":"text/exports/3ceb91ca2c5e050b9be3396fb901b688a3d0c1b6e3ea31c202c5b4187af3861b/fd92cae8285b50a82e3383ad07507650e3f473ea1feb84662bd3061a0715a997/manifest.json","bytes":105940,"sha256":"ef51814e5795f2c4862ae3c53a9c6808b74b139c12e397b1b9fa3f8fd1409f60"},
+    {"path":"text/exports/41dacb6977e7dfd2995bf8c6e9dbbc2f0afc808e74661e35c8878ec9b897f855/f16493b75942fa28e1ec696edc34776d123c36fb64614960162164b16e20cedb/manifest.json","bytes":1606644,"sha256":"80110c008d83af5f7d15663ba80b4b91702242671d96e96d3bf6098c8ff4ebea"},
+    {"path":"text/exports/7578ebabe56a3526e1ec735f25431ea86fef3a7105d8cf105eedb79d12078785/2e0f1f8baacc30e81e3f4482e457173d577b1521dfa6d6f42ebd67ef78be71ae/manifest.json","bytes":17807,"sha256":"4dcb8cce7b0fa02735a309e5c24bbea4a75615560063036c109ac23132dc9629"},
+    {"path":"text/exports/7f3365e1ac41b4ebaaaec5c21e8921912bb86ed405ba8b1a8cdfdafe873bff93/58565453b5dc268e19ebdb6f85a1f26905dee4699a02ec412fa8c2f2bf349770/manifest.json","bytes":27198,"sha256":"8fb5347415bcc1f9a96df00d5d45c312f30d22b0b29584299551a9c6299464c7"},
+    {"path":"text/exports/b82c9c0312477c7a56b959cd3cdd0bc56f01dc51709cc624871db3c44a99237f/c4af79c85f1e7b6cdce08aacefc5d15be4ac7c8413f6a2d557c4cfc76c9afd1a/manifest.json","bytes":43502,"sha256":"bd3c8bfafaeec7ae8c1a7266ff20a313342b90d1547c5ab8587b67777cefdef6"},
+    {"path":"indexes/ocr/fb1abf531f3a630d65e77ae0167bd049ddf9a6c46b8758ac4ed0672eb992819e/OCR.sqlite3","bytes":14725120,"sha256":"dd4502b0ec4d263faa48e314443d3ad6f2b8e9bfd3709cd84e469909108cbfd3"},
+    {"path":"releases/ocr-fb1abf531f3a630d65e77ae0167bd049ddf9a6c46b8758ac4ed0672eb992819e/manifest.json","bytes":2502,"sha256":"c3a1be56eaf6a4d276d6d5cbc2ea06b9ac3f3cde3501b87b5ff2bf14130f7ae7"}
+  ]
+}

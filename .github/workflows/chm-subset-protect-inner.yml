@@ -1,0 +1,46 @@
+name: CHM subset protection inner
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  protect:
+    if: github.repository == 'anftm/pipeline' && github.ref == 'refs/heads/main' && github.event.inputs.confirm == 'PROTECT-20'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    concurrency:
+      group: reader-sidecar
+      cancel-in-progress: false
+      queue: max
+    env:
+      READER_GC_S3_RATE: '4'
+      READER_S3_LIST_WORKERS: '4'
+      HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+      HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+      HF_S3_INPUT_ACCESS_KEY_ID: ${{ secrets.HF_S3_INPUT_ACCESS_KEY_ID }}
+      HF_S3_INPUT_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_INPUT_SECRET_ACCESS_KEY }}
+      GC_PRODUCER_TOKENS_JSON: ${{ secrets.GC_PRODUCER_TOKENS_JSON }}
+      GH_TOKEN: ${{ secrets.PDF_WORKER_READ_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - run: pip install -r scripts/requirements.txt PyYAML==6.0.3
+      - name: Test exact root publication and fail-closed handling
+        run: python -B -m unittest tests.test_chm_subset_publish_protection tests.test_chm_subset_isolated_root -q
+      - name: Recheck and publish only the fixed protection root
+        run: python -u -B scripts/chm_subset_publish_protection.py
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: chm-subset-protection
+          path: output/chm-subset-protect/*
+          retention-days: 90
+          if-no-files-found: warn

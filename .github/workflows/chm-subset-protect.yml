@@ -1,0 +1,28 @@
+name: CHM subset protect 20 retained EPUBs
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: Type PROTECT-20 to publish the fixed protection root
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: publish-ccrd-index
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  protect:
+    if: github.repository == 'anftm/pipeline' && github.ref == 'refs/heads/main' && inputs.confirm == 'PROTECT-20'
+    concurrency:
+      group: reader-global-maintenance
+      cancel-in-progress: false
+      queue: max
+    uses: ./.github/workflows/chm-subset-protect-inner.yml
+    secrets: inherit

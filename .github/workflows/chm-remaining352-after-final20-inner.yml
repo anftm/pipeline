@@ -1,0 +1,41 @@
+name: Resume remaining exact CHM EPUBs inner
+on:
+  workflow_call:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  retire:
+    if: github.repository == 'anftm/pipeline' && github.ref == 'refs/heads/main' && github.event.inputs.confirm == 'RESUME-CHM-352'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    concurrency:
+      group: reader-sidecar
+      cancel-in-progress: false
+      queue: max
+    env:
+      HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+      HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+      HF_S3_INPUT_ACCESS_KEY_ID: ${{ secrets.HF_S3_INPUT_ACCESS_KEY_ID }}
+      HF_S3_INPUT_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_INPUT_SECRET_ACCESS_KEY }}
+      GC_PRODUCER_TOKENS_JSON: ${{ secrets.GC_PRODUCER_TOKENS_JSON }}
+      GH_TOKEN: ${{ secrets.PDF_WORKER_READ_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - run: pip install -r scripts/requirements.txt PyYAML==6.0.3
+      - name: Test exact resume and ambiguous response recovery
+        run: python -B -m unittest tests.test_chm_remaining352_after_final20 tests.test_chm_final20_execute tests.test_chm_subset_journal_backend tests.test_chm_subset_s3_journal -q
+      - name: Finish remaining fixed 352 EPUBs
+        run: python -u -B scripts/chm_remaining352_after_final20.py
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: chm-remaining352-after-final20
+          path: output/chm-remaining352-after-final20/*
+          retention-days: 90
+          if-no-files-found: warn

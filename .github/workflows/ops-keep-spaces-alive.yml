@@ -1,0 +1,24 @@
+name: 运维 · Keep HuggingFace Spaces Alive
+
+on:
+  schedule:
+    # Leave ample margin below a 24-hour idle timeout, away from the hour boundary.
+    - cron: '17 2,8,14,20 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Verify keepalive contracts offline
+        run: python -B -m unittest tests.test_ping_spaces -v
+      - name: Ping all Spaces and wait for BHA readiness
+        run: python -B scripts/ping_spaces.py

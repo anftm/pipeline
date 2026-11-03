@@ -1,0 +1,50 @@
+#!/usr/bin/env python3
+import argparse
+import gzip
+import json
+import os
+from pathlib import Path
+
+from huggingface_hub import hf_hub_download
+from pdf_health import load_report, plan, records_from_sources
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--search-data", type=Path, default=Path("output/search_data.json"))
+    parser.add_argument("--revisions", type=Path, default=Path("state/commits.json"))
+    parser.add_argument("--report", type=Path)
+    parser.add_argument("--assets-repo", default=os.environ.get("READER_ASSETS_REPO", "vomebook/Reader-Assets"))
+    parser.add_argument("--output", type=Path, default=Path("output/pdf-health/queue.json"))
+    parser.add_argument("--keys-output", type=Path, default=Path("output/pdf-health/current-keys.json.gz"))
+    args = parser.parse_args()
+    report = args.report
+    if report is None:
+        try:
+            report = Path(hf_hub_download(args.assets_repo, "pdf_health.json.gz", repo_type="dataset",
+                                          token=os.environ.get("HF_TOKEN")))
+        except Exception as exc:
+            if getattr(getattr(exc, "response", None), "status_code", None) != 404:
+                raise
+    records = records_from_sources(args.search_data, args.revisions)
+    try:
+        pdf_manifest_path = hf_hub_download(args.assets_repo, "pdf_manifest.json", repo_type="dataset",
+                                            token=os.environ.get("HF_TOKEN"))
+        pdf_manifest = json.loads(Path(pdf_manifest_path).read_text(encoding="utf-8"))
+    except Exception as exc:
+        if getattr(getattr(exc, "response", None), "status_code", None) not in (None, 404):
+            raise
+        pdf_manifest = None
+    queue = plan(records, load_report(report), pdf_manifest)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(json.dumps(queue, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    args.keys_output.parent.mkdir(parents=True, exist_ok=True)
+    keys = json.dumps([record["key"] for record in records], ensure_ascii=False, separators=(",", ":")).encode()
+    args.keys_output.write_bytes(gzip.compress(keys, compresslevel=9, mtime=0))
+    print(f"planned {queue['selected_records']} of {queue['pending_records']} pending PDF(s), "
+          f"{queue.get('conversion_ready', 0)} proven by conversion")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

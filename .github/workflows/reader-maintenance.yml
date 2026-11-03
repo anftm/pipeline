@@ -1,0 +1,79 @@
+name: Reader/桶 · GC Automatic Maintenance
+
+on:
+  schedule:
+    - cron: '13 2 * * *'
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: Maximum objects to collect in this window; zero means all candidates
+        required: true
+        default: "0"
+        type: string
+      plan_only:
+        description: Drain and plan without deleting anything
+        required: true
+        default: false
+        type: boolean
+      scope:
+        description: Journaled retired assets, or a full sweep for older unjournaled objects
+        type: choice
+        options: [retired-assets, unreferenced]
+        default: retired-assets
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: reader-global-maintenance
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  maintain:
+    if: github.repository == 'anftm/pipeline'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 500
+    env:
+      READER_GC_DURABLE_MAINTENANCE: 'true'
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+      HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+      GC_AMBROSSEE_MAINTENANCE_TOKEN: ${{ secrets.GC_AMBROSSEE_MAINTENANCE_20261102 }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - run: pip install -r scripts/requirements.txt
+      - name: Verify every producer credential before isolation
+        env:
+          GC_PRODUCER_TOKENS_JSON: ${{ secrets.GC_PRODUCER_TOKENS_JSON }}
+        run: python -u scripts/reader_gc_maintenance.py preflight --journal output/maintenance/preflight.json
+      - name: Pause producers, collect and restore
+        timeout-minutes: 450
+        env:
+          GC_PRODUCER_TOKENS_JSON: ${{ secrets.GC_PRODUCER_TOKENS_JSON }}
+          LIMIT: ${{ inputs.limit || '0' }}
+          PLAN_ONLY: ${{ inputs.plan_only || 'false' }}
+          SCOPE: ${{ inputs.scope || 'retired-assets' }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          [[ "$LIMIT" =~ ^[0-9]+$ ]] || exit 1
+          if [[ "$EVENT_NAME" == schedule && "$(date -u +%u)" == 1 ]]; then SCOPE=unreferenced; fi
+          args=(run --journal output/maintenance/journal.json --limit "$LIMIT" --scope "$SCOPE")
+          if [[ "$PLAN_ONLY" == "true" ]]; then args+=(--plan-only); fi
+          python -u scripts/reader_gc_maintenance.py "${args[@]}"
+      - name: Recover recorded producer state after an interrupted orchestration
+        if: always()
+        env:
+          GC_PRODUCER_TOKENS_JSON: ${{ secrets.GC_PRODUCER_TOKENS_JSON }}
+        run: python -u scripts/reader_gc_maintenance.py restore --journal output/maintenance/journal.json
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: reader-maintenance-journal
+          path: output/maintenance/*.json
+          retention-days: 90
+          if-no-files-found: error

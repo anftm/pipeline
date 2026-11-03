@@ -1,0 +1,55 @@
+name: Reader · Resume Exact Ebook Processing Handoffs
+run-name: Ebook handoff 41172648658 / ${{ inputs.apply && 'apply' || 'verify' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: Release only the 51 already accepted ebook processing records
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reader-sidecar
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  handoff:
+    if: github.repository == 'anftm/pipeline' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      HF_INPUT_TOKEN: ${{ secrets.HF_INPUT_TOKEN }}
+      HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+      HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+      HF_S3_INPUT_ACCESS_KEY_ID: ${{ secrets.HF_S3_INPUT_ACCESS_KEY_ID }}
+      HF_S3_INPUT_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_INPUT_SECRET_ACCESS_KEY }}
+      GH_TOKEN: ${{ github.token }}
+      GC_PRODUCER_TOKENS_JSON: ${{ secrets.GC_PRODUCER_TOKENS_JSON }}
+      APPLY: ${{ inputs.apply }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - run: pip install -r scripts/requirements.txt
+      - name: Test exact scope and compare-before-write recovery
+        run: python -B -m unittest tests.test_reader_ebook_processing_handoff tests.test_reader_processing_cas -q
+      - name: Verify and hand off only the published ebook protections
+        run: |
+          args=(--output output/ebook-processing-handoff)
+          if [[ "$APPLY" == true ]]; then args+=(--apply); fi
+          python -u -B scripts/reader_ebook_processing_handoff.py "${args[@]}"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: reader-exact-ebook-processing-handoff
+          path: output/ebook-processing-handoff/*
+          retention-days: 90
+          if-no-files-found: warn

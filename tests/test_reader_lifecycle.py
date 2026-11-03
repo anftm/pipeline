@@ -1,0 +1,90 @@
+import unittest
+from datetime import datetime, timezone
+
+from scripts import reader_lifecycle
+
+
+class ReaderLifecycleTests(unittest.TestCase):
+    def test_reader_assets_are_final_and_have_no_staging_consumers(self):
+        record = reader_lifecycle.asset_record({
+            "key": "repo\0book.pdf", "path": "objects/aa/document.pdf",
+            "source_bytes": 8 * 1024 * 1024,
+        })
+        self.assertEqual(record["phase"], "final")
+        self.assertEqual(record["consumers"], {})
+
+    def test_orphan_marking_forgets_referenced_paths(self):
+        marked = reader_lifecycle.mark_orphans(
+            {"version": 1, "files": {}, "orphans": {"melsm:objects/a": {"since": "2020-01-01"}}},
+            {"vomebook/pdf-pages:objects/b"}, "2026-09-29",
+        )
+        self.assertEqual(set(marked["orphans"]), {"vomebook/pdf-pages:objects/b"})
+
+    def test_catalog_generation_is_content_addressed_and_old_generation_waits_for_acks(self):
+        sidecar = {"v": 1, "f": {"book": {
+            "p": "objects/a/page-manifest.json", "b": reader_lifecycle.PDF_PAGES_BUCKET,
+        }}}
+        first, first_id = reader_lifecycle.catalog_generation(sidecar, now="2026-10-09T00:00:00+00:00")
+        same, same_id = reader_lifecycle.catalog_generation(sidecar, first,
+                                                            now="2026-10-09T00:01:00+00:00")
+        self.assertEqual(first_id, same_id)
+        self.assertEqual(first, same)
+        newer = {"v": 1, "f": {"book": {
+            "p": "objects/b/page-manifest.json", "b": reader_lifecycle.PDF_PAGES_BUCKET,
+        }}}
+        second, second_id = reader_lifecycle.catalog_generation(newer, first,
+                                                                 now="2026-10-10T00:00:00+00:00")
+        self.assertNotEqual(first_id, second_id)
+        old = second["generations"][first_id]
+        clock = datetime(2026, 11, 10, tzinfo=timezone.utc)
+        self.assertTrue(reader_lifecycle.generation_live(old, second_id, clock))
+        old["replacement_acks"] = {"hf": True, "pages": True}
+        self.assertFalse(reader_lifecycle.generation_live(old, second_id, clock))
+
+    def test_processing_root_requires_qualified_resources_and_releases_idempotently(self):
+        with self.assertRaises(ValueError):
+            reader_lifecycle.processing_record([{"root": "objects/a"}], "upload", {})
+        record = reader_lifecycle.processing_record([{
+            "bucket": reader_lifecycle.PDF_PAGES_BUCKET, "root": "objects/a"}], "upload", {})
+        refreshed = reader_lifecycle.heartbeat_processing(record, "2026-10-09T00:01:00+00:00")
+        self.assertEqual(refreshed["heartbeat_at"], "2026-10-09T00:01:00+00:00")
+        released = reader_lifecycle.release_processing(record, "generation", "2026-10-09T00:00:00+00:00")
+        self.assertEqual(released["status"], "released")
+        self.assertEqual(reader_lifecycle.release_processing(released, "generation"), released)
+
+    def test_conversion_processing_roots_cover_derived_and_chapter_bundles(self):
+        self.assertTrue(reader_lifecycle.valid_processing_root(
+            reader_lifecycle.PDF_PAGES_BUCKET, "derived/weekly-djvu/abc"))
+        self.assertTrue(reader_lifecycle.valid_processing_root(
+            reader_lifecycle.READER_ASSETS_BUCKET, "chapters/ebook/epub/abc/def"))
+        record = reader_lifecycle.processing_record([{
+            "bucket": reader_lifecycle.READER_ASSETS_BUCKET,
+            "root": "chapters/ebook/epub/abc/def"}], "office-chapter-upload", {})
+        reader_lifecycle.validate_processing_handoff(record, {
+            "manifest": "chapters/ebook/epub/abc/def/chapter-manifest.json"})
+
+    def test_reading_png_is_a_processing_handoff_but_not_a_foreign_root(self):
+        root = 'objects/aa/' + 'a' * 64 + '/' + 'b' * 16
+        record = reader_lifecycle.processing_record([{'bucket': reader_lifecycle.PDF_PAGES_BUCKET,
+            'root': root}], 'djvu-reading-upload', {})
+        reader_lifecycle.validate_processing_handoff(record, {'pages': [{'r': root + '/pages/page-000001.png'}]})
+        with self.assertRaisesRegex(ValueError, 'does not belong'):
+            reader_lifecycle.validate_processing_handoff(record, {'pages': [{'r': 'objects/cc/foreign/pages/page-000001.png'}]})
+
+    def test_catalog_compaction_keeps_current_and_unacked_history(self):
+        catalog = {"version": 1, "kind": "reader-catalog", "current": {"generation": "new"},
+                   "generations": {
+                       "new": {"generation": "new", "status": "current"},
+                       "recent": {"generation": "recent", "status": "superseded",
+                                  "superseded_at": "2026-10-01T00:00:00+00:00",
+                                  "replacement_acks": {"hf": True, "pages": True}},
+                       "unacked": {"generation": "unacked", "status": "superseded",
+                                   "superseded_at": "2026-01-01T00:00:00+00:00",
+                                   "replacement_acks": {"hf": True, "pages": False}}}}
+        compacted = reader_lifecycle.compact_catalog(
+            catalog, "new", datetime(2026, 11, 15, tzinfo=timezone.utc), 30)
+        self.assertEqual(set(compacted["generations"]), {"new", "unacked"})
+
+
+if __name__ == "__main__":
+    unittest.main()

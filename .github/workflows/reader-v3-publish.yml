@@ -1,0 +1,172 @@
+name: Reader/桶 · Publish v3 Reading Generation
+run-name: v3 ${{ inputs.operation || github.event_name }} / ${{ (inputs.apply || github.event_name != 'workflow_dispatch') && 'apply' || 'verify' }}
+
+on:
+  schedule:
+    # Keep the existing daily retirement journal; the retired OCR admission
+    # schedule must not restart with normal CHM/Reader publication.
+    - cron: '23 5 * * *'
+  workflow_dispatch:
+    inputs:
+      operation:
+        type: choice
+        options: [build-stage, stage, promote, rollback, withdraw, ack, inspect, auto, correct, accept, reject, retry, retire, retire-ocr-progress, unify, repair-gbk, reset-documents]
+        default: inspect
+      resource_json:
+        description: Pinned build-stage spec (direct_reading preserves existing text) or qualified candidate/rollback JSON
+        type: string
+        default: '{}'
+      expected_parent:
+        description: Expected current v3 generation, or none for initial promotion
+        type: string
+        default: none
+      surface:
+        type: choice
+        options: [hf, pages]
+        default: hf
+      apply:
+        description: Apply after complete validation under the central writer lock
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: reader-sidecar
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  publish:
+    if: >-
+      github.repository == 'anftm/pipeline' &&
+      (vars.READER_V3_AUTO_PAUSED != 'true' ||
+       (github.event_name == 'workflow_dispatch' && inputs.operation != 'auto'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      READER_V3_WRITE_PROTOCOL: central-reader-sidecar-v3-v1
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - run: pip install -r scripts/requirements.txt
+      - name: Guard direct-document and GC contracts before publication
+        run: python -m unittest tests.test_direct_document_policy
+      - name: Verify and execute the central v3 operation
+        id: operation
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_INPUT_TOKEN: ${{ secrets.HF_INPUT_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          GC_PRODUCER_TOKENS_JSON: ${{ secrets.GC_PRODUCER_TOKENS_JSON }}
+          GC_AMBROSSEE_MAINTENANCE_TOKEN: ${{ secrets.GC_AMBROSSEE_MAINTENANCE_20261102 }}
+          READER_V3_PREVIEW_FIRST: ${{ vars.READER_V3_PREVIEW_FIRST || 'false' }}
+          READER_V3_DJVU_MIGRATION: ${{ vars.READER_V3_DJVU_MIGRATION || 'false' }}
+          READER_DATASET_PRIMARY_ENABLED: ${{ vars.READER_DATASET_PRIMARY_ENABLED || 'false' }}
+          OPERATION: ${{ inputs.operation }}
+          RESOURCE_JSON: ${{ inputs.resource_json }}
+          EXPECTED_PARENT: ${{ inputs.expected_parent }}
+          SURFACE: ${{ inputs.surface }}
+          APPLY: ${{ inputs.apply }}
+          EVENT_NAME: ${{ github.event_name }}
+          SCHEDULE: ${{ github.event.schedule }}
+        run: |
+          if [[ "$EVENT_NAME" != workflow_dispatch ]]; then
+            # The only supported scheduled operation is the pre-existing daily
+            # retirement journal. Never schedule remote OCR admission again.
+            [[ "$SCHEDULE" == '23 5 * * *' ]] || exit 1
+            OPERATION=retire
+            APPLY=true
+          fi
+          # Keep non-OCR sidecar maintenance available, but never build, admit,
+          # correct, or republish detached document text through old entrypoints.
+          case "$OPERATION" in
+            auto|build-stage|stage|promote|rollback|correct|accept|reject|retry|repair-gbk|retire-ocr-progress)
+              echo "Retired document OCR/text operation is disabled: $OPERATION" >&2
+              exit 1 ;;
+          esac
+          echo "operation=$OPERATION" >> "$GITHUB_OUTPUT"
+          echo "apply=$APPLY" >> "$GITHUB_OUTPUT"
+          if [[ -z "$RESOURCE_JSON" ]]; then RESOURCE_JSON='{}'; fi
+          args=("$OPERATION" --output output/v3/publication.json)
+          case "$OPERATION" in
+            build-stage|stage|promote|rollback|withdraw) args+=(--resource-json "$RESOURCE_JSON" --expected-parent "$EXPECTED_PARENT") ;;
+            auto|correct|accept|reject|retry|repair-gbk|unify|reset-documents) args+=(--resource-json "$RESOURCE_JSON") ;;
+            retire) ;;
+            ack) args+=(--surface "$SURFACE") ;;
+            inspect) ;;
+            *) exit 1 ;;
+          esac
+          if [[ "$APPLY" == true ]]; then args+=(--apply); fi
+          python scripts/publish_reader_v3.py "${args[@]}"
+          changed=true
+          if [[ "$OPERATION" == auto ]]; then
+            changed=$(jq -r 'if has("changed") then .changed else (.processed | length > 0) end' output/v3/publication.json)
+          fi
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+      - name: Dispatch the next parallel build wave outside the writer lock
+        if: steps.operation.outputs.apply == 'true' && steps.operation.outputs.operation == 'auto' && vars.READER_V3_AUTO_PAUSED != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          wave=$(jq -c '.wave // []' output/v3/publication.json)
+          if [[ "$wave" != "[]" ]]; then
+            gh workflow run reader-v3-build.yml --repo "$GITHUB_REPOSITORY" --ref main -f tasks="$wave"
+          fi
+      - name: Publish the pinned projection to Pages
+        if: >-
+          steps.operation.outputs.apply == 'true' &&
+          (steps.operation.outputs.operation == 'auto' ||
+            (steps.operation.outputs.changed == 'true' && contains(fromJSON('["correct","accept","promote","rollback","withdraw","repair-gbk","unify","reset-documents"]'), steps.operation.outputs.operation)))
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          PAGES_TOKEN: ${{ secrets.PAGES_TOKEN }}
+          PAGES_REPO: ${{ secrets.PAGES_REPO }}
+        run: python scripts/publish_search_reader_index.py
+      - name: Confirm both deployed consumer projections
+        id: ack
+        if: >-
+          steps.operation.outputs.apply == 'true' &&
+          (
+            steps.operation.outputs.operation == 'auto' ||
+            (steps.operation.outputs.changed == 'true' && contains(fromJSON('["auto","correct","accept","promote","rollback","withdraw","repair-gbk","unify","reset-documents"]'), steps.operation.outputs.operation))
+          )
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_INPUT_TOKEN: ${{ secrets.HF_INPUT_TOKEN }}
+        run: |
+          python scripts/publish_reader_v3.py ack-all --apply --output output/v3/consumers.json
+          echo "complete=$(jq -r '.complete // false' output/v3/consumers.json)" >> "$GITHUB_OUTPUT"
+          # Record the base-catalog generation both deployments just confirmed.
+          # The GC collector needs this to compact history; it never relied on
+          # acknowledgments inside the 2 GB canonical catalog itself.
+          if [[ "$(jq -r '.complete // false' output/v3/consumers.json)" == "true" ]]; then
+            python scripts/publish_reader_v3.py acknowledge-legacy --apply \
+              --output output/v3/acknowledgments.json
+            ack_reason=$(jq -r '.reason // "recorded"' output/v3/acknowledgments.json)
+            if [[ "$ack_reason" == "recorded" ]]; then
+              # Shrink the base catalog in the ordinary publish path. The 2 GB
+              # object would otherwise need a drained window just to stay bounded.
+              python scripts/publish_reader_v3.py compact-legacy --apply \
+                --output output/v3/catalog-compaction.json
+              # The compaction rewrites the catalog, so refresh the receipt that
+              # names its digest for the GC collector.
+              python scripts/publish_reader_v3.py acknowledge-legacy --apply \
+                --output output/v3/acknowledgments.json
+            else
+              echo "base acknowledgment deferred: $ack_reason"
+            fi
+          else
+            echo "consumer projections are incomplete; base acknowledgment deferred"
+          fi
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: v3-publication-report
+          path: output/v3/*.json
+          retention-days: 30
+          if-no-files-found: warn

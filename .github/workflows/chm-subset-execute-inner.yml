@@ -1,0 +1,46 @@
+name: CHM exact 352 subset retirement inner
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  retire:
+    if: github.repository == 'anftm/pipeline' && github.ref == 'refs/heads/main' && github.event.inputs.confirm == 'RETIRE-352'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    concurrency:
+      group: reader-sidecar
+      cancel-in-progress: false
+      queue: max
+    env:
+      READER_GC_S3_RATE: '6'
+      READER_S3_LIST_WORKERS: '4'
+      HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+      HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+      HF_S3_INPUT_ACCESS_KEY_ID: ${{ secrets.HF_S3_INPUT_ACCESS_KEY_ID }}
+      HF_S3_INPUT_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_INPUT_SECRET_ACCESS_KEY }}
+      GC_PRODUCER_TOKENS_JSON: ${{ secrets.GC_PRODUCER_TOKENS_JSON }}
+      GH_TOKEN: ${{ secrets.PDF_WORKER_READ_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - run: pip install -r scripts/requirements.txt PyYAML==6.0.3
+      - name: Test exact deletion, barriers and recovery
+        run: python -B -m unittest tests.test_chm_subset_execute tests.test_chm_subset_delete_engine tests.test_chm_subset_s3_journal tests.test_chm_subset_actual_graph tests.test_chm_subset_batch_model tests.test_chm_subset_journal_backend -q
+      - name: Retire fixed 352 subset while holding all three groups
+        run: python -u -B scripts/chm_subset_execute.py
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: chm-subset-execution
+          path: output/chm-subset-execute/*
+          retention-days: 90
+          if-no-files-found: warn

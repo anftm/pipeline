@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "identity": "sha256 of sorted [character-code, sha256(decoded character program)] pairs",
+  "evidence": {
+    "source_sha256": "5d0e89907455cb4dee51fbde975b88b4650e0ea66214f908d1b5d1b6e00cf739",
+    "source_revision": "5cfd020bed4c81a54232efd704bf615c5d7fac44",
+    "source_title": "Common Lisp: The Language, second edition, dvipsk bitmap fonts",
+    "review": "All 28 embedded character sets rendered and compared with OT1/typewriter/OML/OMS/OMX code slots; original page 35 and 1096 hash overstrikes and page 8 header inspected. No whole-book accuracy claim."
+  },
+  "fonts": {
+    "860cc31fa81d859d3246ca5753c207f1b72308efcd2e5c0d758b0602266fc0d8": {"encoding": "OT1"},
+    "f57fa30b08f82f9f000f43da44463299160cd6e706461752080303e3349b3e41": {"encoding": "OT1"},
+    "a5a428fae2e03cab0c4f38f4ed703eb37390d03ae53b1e6cb1a2689f9c47bc4f": {"encoding": "OT1"},
+    "ad14b91f82fd3e5694d4b5a29f0ad128515e3d899046b5ad2d41dd02f877b962": {"encoding": "OT1"},
+    "5dd14318ff755c38a8442fe19fd5cfdf0e6b0f70fe3c409ea5617815eae0f3d8": {"encoding": "OT1"},
+    "cf3cb936449f5e0ac4a206af5c85a950fe22575ec9967fca594feb826a406beb": {"encoding": "OT1"},
+    "1b1d2c43610187a60302c2be7c3211f696215c16e5e515c49aa0c2716c808be8": {"encoding": "OT1"},
+    "e9d971763984d6ce950186f2d3d5ac3c5fadb795a7b3f43da1a1bf1df9a2ea6c": {"encoding": "OT1"},
+    "e18a9676b359fc3b2e5bc789bdb4b2fc73943890921d10526321182ae245a958": {"encoding": "OMS"},
+    "bd65e82ba8ee2f162d20c9a83b23f838adafcabbb5ab0ba0027a8af6a531cc58": {"encoding": "typewriter"},
+    "d9bf7950bcbd2837336b503ba7d86344d0fef5c75877e5b941ba7553ba0b2914": {"encoding": "OT1"},
+    "8bb4bc37dd6c6ba34f0ba5f85cae7e2fc38dfc7c0778504a6a45e769de26c21a": {"encoding": "OT1"},
+    "125803ba253eb0daf41181c752bd002a0a4248f5eff2a597b41ff7072c49a0bc": {"encoding": "OT1"},
+    "63439493ab69e8eadff225139d0b9930b784d7f563ee723c30cba85b09dd88fd": {"encoding": "OT1"},
+    "fc15789b1e21c854e78e3ccbaeb3b593dbcfe39d882afb7cc4c518ec73cd9646": {"encoding": "typewriter"},
+    "221116397a5304357db21cd48fc2226779bc1c225f8f340d8b5784c8c9b671df": {"encoding": "OT1"},
+    "72925d88bed52c454c2fcc46fca29b9db67019cb6a0b18b2e6e6dfc45cc7671e": {"encoding": "OMS"},
+    "93d1c0c330fb61ecddd11f085e97748c72bae1f8f7fa6dbdbe043b9697a540e1": {"encoding": "OT1"},
+    "9c41111928a457363e092937d4d00918af99f27b2aef6cb581478a28dd23e7a0": {"encoding": "typewriter"},
+    "024a1191f239eba836dd6ed0f2490bc1c1502ec75e18106f15eadc74a977dcbe": {"encoding": "OT1"},
+    "06d16a56ece87e91763ddf15ad4d5205436b37572ef33fc58ab91726a1aa14eb": {"encoding": "OML"},
+    "240e3a7aa0d99c56950aed31fbfa1d4deabac8b0f2d319c72e04ea7a1cb5f681": {"encoding": "OML"},
+    "0c1c73cc89f27351a78000bcaa407994668e62cf484d0759c6be79477003fb06": {"encoding": "OMS"},
+    "71ad5f671609f8fb9f15db0c94964473b53457d33cf47938dba19e5fe474786c": {"encoding": "OMX"},
+    "83a64aba5335c429f92fe4099a35da947f80b651f8bddac24ce8be6c1d927dae": {"encoding": "OML"},
+    "5f2f210734f6ecb70c6a728dc9023172791ecdfe0beba702f4874f1a552eef39": {"encoding": "OT1"},
+    "bdd0f1fd1c2d927820bc1cb73f389718ac8600e66b229f13512e5bf60b85c191": {"encoding": "OT1"},
+    "181ea67fd7c728aa1113b6dc6b881010dff869724b8e44324dec0251d97f89b0": {"encoding": "OT1"}
+  }
+}

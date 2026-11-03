@@ -1,0 +1,46 @@
+name: CHM subset locked preflight inner (read only)
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  inspect:
+    if: github.repository == 'anftm/pipeline' && github.ref == 'refs/heads/main' && github.event.inputs.confirm == 'PREFLIGHT-352'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    concurrency:
+      group: reader-sidecar
+      cancel-in-progress: false
+      queue: max
+    env:
+      READER_GC_S3_RATE: '4'
+      READER_S3_LIST_WORKERS: '4'
+      HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+      HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+      HF_S3_INPUT_ACCESS_KEY_ID: ${{ secrets.HF_S3_INPUT_ACCESS_KEY_ID }}
+      HF_S3_INPUT_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_INPUT_SECRET_ACCESS_KEY }}
+      GC_PRODUCER_TOKENS_JSON: ${{ secrets.GC_PRODUCER_TOKENS_JSON }}
+      GH_TOKEN: ${{ secrets.PDF_WORKER_READ_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - run: pip install -r scripts/requirements.txt PyYAML==6.0.3
+      - name: Test exact partition, protection and read-only preflight
+        run: python -B -m unittest tests.test_chm_subset_locked_preflight tests.test_chm_subset_reconcile tests.test_chm_subset_retirement tests.test_chm_subset_isolated_root -q
+      - name: Read-only checks while all three Actions groups are held
+        run: python -u -B scripts/chm_subset_locked_preflight.py
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: chm-subset-locked-preflight
+          path: output/chm-subset-locked-preflight/*
+          retention-days: 90
+          if-no-files-found: warn

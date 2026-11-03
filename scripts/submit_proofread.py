@@ -1,0 +1,2281 @@
+#!/usr/bin/env python3
+"""Submit one proofreading change to an anftm archive fork as a pull request."""
+
+import base64
+import ast
+import hashlib
+import html
+import json
+import os
+import re
+import sys
+import subprocess
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+try:
+    from .review_crops import build_review_crops
+except ImportError:
+    from review_crops import build_review_crops
+
+
+GITHUB_API = "https://api.github.com"
+OWNER = os.environ.get("PROOFREAD_OWNER", "anftm")
+REPOSITORY_PREFIX = os.environ.get(
+    "PROOFREAD_REPOSITORY_PREFIX", "banned-historical-archives"
+)
+TRACKER_REPOSITORY = os.environ.get("PROOFREAD_TRACKER_REPOSITORY") or os.environ.get("GITHUB_REPOSITORY", "anftm/pipeline")
+MAX_SEGMENTED_PAYLOAD_CHARACTERS = 2_000_000
+MAX_SEGMENTED_PAYLOAD_BLOBS = 64
+GITHUB_BODY_LIMIT = 60_000
+
+
+def api_request(token, method, path, payload=None):
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8") if payload is not None else None
+    request = urllib.request.Request(f"{GITHUB_API}{path}", data=body, method=method)
+    request.add_header("Accept", "application/vnd.github+json")
+    request.add_header("X-GitHub-Api-Version", "2022-11-28")
+    request.add_header("User-Agent", "anftm-pipeline-proofread/1.0")
+    request.add_header("Authorization", f"Bearer {token}")
+    if body is not None:
+        request.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            raw = response.read()
+            return response.status, json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", errors="replace")
+        try:
+            detail = json.loads(raw)
+        except json.JSONDecodeError:
+            detail = {"message": raw}
+        return exc.code, detail
+
+
+def repo_path(repo):
+    return f"/repos/{urllib.parse.quote(OWNER)}/{urllib.parse.quote(repo)}"
+
+
+def payload_field(request, key, default=None):
+    body = request.get("body") if isinstance(request.get("body"), dict) else {}
+    if key in body:
+        return body[key]
+    if key in request:
+        return request.get(key)
+    return default
+
+
+def set_payload_field(request, key, value):
+    body = request.get("body") if isinstance(request.get("body"), dict) else None
+    if body is not None:
+        body[key] = value
+    else:
+        request[key] = value
+
+
+def full_repo_path(repository):
+    owner, separator, repo = repository.partition("/")
+    if not separator or not owner or not repo:
+        fail("tracker repository must use owner/name format")
+    return f"/repos/{urllib.parse.quote(owner)}/{urllib.parse.quote(repo)}"
+
+
+def ref_path(repo, branch):
+    return f"{repo_path(repo)}/git/ref/heads/{urllib.parse.quote(branch, safe='')}"
+
+
+def delete_pull_branch(token, repo, pull):
+    head = pull.get("head")
+    branch = head.get("ref") if isinstance(head, dict) else head
+    if isinstance(head, dict):
+        full_name = (head.get("repo") or {}).get("full_name")
+        if full_name and full_name != f"{OWNER}/{repo}":
+            return False
+    if not isinstance(branch, str) or not re.fullmatch(r"proofread/[0-9a-f]{12}-(?:main|config|ocr_config|ocr_patch|origin)", branch):
+        return False
+    status, data = api_request(token, "DELETE", ref_path(repo, branch))
+    if status not in (204, 404):
+        fail(f"cannot delete resolved proofreading branch {repo}/{branch}: {data}")
+    return True
+
+
+def branch_sha(token, repo, branch):
+    status, data = api_request(token, "GET", ref_path(repo, branch))
+    if status == 404:
+        return None
+    if status != 200:
+        fail(f"cannot read {repo}/{branch} ref: {data}")
+    return data.get("object", {}).get("sha")
+
+
+def fail(message):
+    raise RuntimeError(message)
+
+
+def response_or_fail(token, method, path, expected, payload=None):
+    status, data = api_request(token, method, path, payload)
+    if status not in expected:
+        detail = data.get("message", data) if isinstance(data, dict) else data
+        fail(f"GitHub {method} {path} failed ({status}): {detail}")
+    return data
+
+
+def get_file(token, repo, branch, path):
+    content, sha = get_file_bytes(token, repo, branch, path)
+    return content.decode("utf-8"), sha
+
+
+def get_file_bytes(token, repo, branch, path):
+    encoded = urllib.parse.quote(path, safe="")
+    status, data = api_request(
+        token, "GET", f"{repo_path(repo)}/contents/{encoded}?ref={urllib.parse.quote(branch)}"
+    )
+    if status == 404:
+        return b"", None
+    if status == 200 and (data.get("encoding") != "base64" or not data.get("content")) and data.get("sha"):
+        status, data = api_request(token, "GET", f"{repo_path(repo)}/git/blobs/{data['sha']}")
+    if status != 200 or data.get("encoding") != "base64" or not data.get("content"):
+        fail(f"cannot read {repo}/{branch}/{path}: {data}")
+    return base64.b64decode(data["content"]), data.get("sha")
+
+
+def patch_path(archive_id, article_id, publication_id):
+    for value in (article_id, publication_id):
+        if not value or not all(char.isalnum() or char in "._-" for char in value):
+            fail("article_id and publication_id contain invalid characters")
+    return f"[{article_id}][{publication_id}].ts"
+
+
+def append_patch(existing, patch):
+    source = existing or "export default [\n];"
+    index = source.rfind("]")
+    if index < 0:
+        fail("existing OCR patch file is not an array export")
+    encoded_patch = json.dumps(patch, ensure_ascii=False)
+    return source[:index] + "  " + encoded_patch + ",\n" + source[index:]
+
+
+def open_pull_request(token, repo, branch):
+    query = urllib.parse.urlencode({"head": f"{OWNER}:{branch}", "state": "all", "per_page": 100})
+    status, data = api_request(token, "GET", f"{repo_path(repo)}/pulls?{query}")
+    if status == 200 and isinstance(data, list) and data:
+        for pull in data:
+            if pull.get("state") == "closed" and not pull.get("merged"):
+                detail_status, detail = api_request(token, "GET", f"{repo_path(repo)}/pulls/{pull.get('number')}")
+                if detail_status != 200 or not detail.get("merged"):
+                    continue
+                pull = detail
+            if pull.get("state") == "open" or pull.get("merged"):
+                return {
+                    "number": pull.get("number"),
+                    "url": pull.get("html_url"),
+                    "body": pull.get("body") or "",
+                    "sha": pull.get("head", {}).get("sha"),
+                    "base": pull.get("base", {}).get("ref"),
+                    "head": pull.get("head", {}).get("ref") or branch,
+                    "merge_commit_sha": pull.get("merge_commit_sha"),
+                }
+    return None
+
+
+def submit_file(token, repo, base, path, content, title, description, correction_id):
+    branch = f"proofread/{correction_id}-{base}"
+    existing_pull = open_pull_request(token, repo, branch)
+    read_file = get_file_bytes if isinstance(content, bytes) else get_file
+    _base_content, base_file_sha = read_file(token, repo, base, path)
+    if existing_pull:
+        if existing_pull.get("base") != base or existing_pull.get("head") != branch:
+            fail(f"existing proofreading PR has an unexpected branch target: {existing_pull}")
+        branch_content, _branch_file_sha = read_file(token, repo, branch, path)
+        if branch_content != content:
+            fail("existing proofreading PR branch does not contain the requested file content")
+        status, files = api_request(token, "GET", f"{repo_path(repo)}/pulls/{existing_pull['number']}/files?per_page=100")
+        if status != 200 or not isinstance(files, list) or {item.get("filename") for item in files} != {path}:
+            fail("existing proofreading PR contains unexpected files")
+        if existing_pull.get("body") != description:
+            response_or_fail(
+                token, "PATCH", f"{repo_path(repo)}/pulls/{existing_pull['number']}", (200,),
+                {"body": description},
+            )
+        return existing_pull
+    branch_revision = branch_sha(token, repo, branch)
+    if branch_revision is None:
+        base_revision = response_or_fail(token, "GET", ref_path(repo, base), (200,))["object"]["sha"]
+        response_or_fail(
+            token, "POST", f"{repo_path(repo)}/git/refs", (201,),
+            {"ref": f"refs/heads/{branch}", "sha": base_revision},
+        )
+    branch_content, branch_file_sha = read_file(token, repo, branch, path)
+    if branch_content != content:
+        response_or_fail(
+            token,
+            "PUT",
+            f"{repo_path(repo)}/contents/{urllib.parse.quote(path, safe='')}",
+            (200, 201),
+            {
+                "branch": branch,
+                "message": title,
+                "content": base64.b64encode(content if isinstance(content, bytes) else content.encode("utf-8")).decode("ascii"),
+                **({"sha": branch_file_sha or base_file_sha} if branch_file_sha or base_file_sha else {}),
+            },
+        )
+    pull = response_or_fail(
+        token,
+        "POST",
+        f"{repo_path(repo)}/pulls",
+        (201,),
+        {"title": title, "head": branch, "base": base, "body": description},
+    )
+    return {
+        "number": pull.get("number"), "url": pull.get("html_url"),
+        "sha": pull.get("head", {}).get("sha"), "base": base, "head": branch,
+    }
+
+
+def submit_files(token, repo, base, contents, title, description, correction_id):
+    if not contents:
+        fail("batch submission requires at least one file")
+    branch = f"proofread/{correction_id}-{base}"
+    existing_pull = open_pull_request(token, repo, branch)
+    if existing_pull:
+        if existing_pull.get("base") != base or existing_pull.get("head") != branch:
+            fail(f"existing proofreading PR has an unexpected branch target: {existing_pull}")
+        for path, content in contents.items():
+            branch_content, _branch_file_sha = get_file(token, repo, branch, path)
+            if branch_content != content:
+                fail("existing proofreading PR branch does not contain the requested batch content")
+        filenames = set()
+        for page in range(1, 4):
+            status, files = api_request(
+                token, "GET", f"{repo_path(repo)}/pulls/{existing_pull['number']}/files?per_page=100&page={page}",
+            )
+            if status != 200 or not isinstance(files, list):
+                fail("cannot verify existing proofreading PR files")
+            filenames.update(item.get("filename") for item in files)
+            if len(files) < 100:
+                break
+        if filenames != set(contents):
+            fail("existing proofreading PR contains unexpected files")
+        if existing_pull.get("body") != description:
+            response_or_fail(
+                token, "PATCH", f"{repo_path(repo)}/pulls/{existing_pull['number']}", (200,),
+                {"body": description},
+            )
+        return existing_pull
+    if branch_sha(token, repo, branch) is None:
+        base_revision = response_or_fail(token, "GET", ref_path(repo, base), (200,))["object"]["sha"]
+        response_or_fail(
+            token, "POST", f"{repo_path(repo)}/git/refs", (201,),
+            {"ref": f"refs/heads/{branch}", "sha": base_revision},
+        )
+    for path, content in contents.items():
+        _base_content, base_file_sha = get_file(token, repo, base, path)
+        branch_content, branch_file_sha = get_file(token, repo, branch, path)
+        if branch_content == content:
+            continue
+        response_or_fail(
+            token, "PUT", f"{repo_path(repo)}/contents/{urllib.parse.quote(path, safe='')}", (200, 201),
+            {
+                "branch": branch,
+                "message": title,
+                "content": base64.b64encode(content.encode("utf-8")).decode("ascii"),
+                **({"sha": branch_file_sha or base_file_sha} if branch_file_sha or base_file_sha else {}),
+            },
+        )
+    pull = response_or_fail(
+        token, "POST", f"{repo_path(repo)}/pulls", (201,),
+        {"title": title, "head": branch, "base": base, "body": description},
+    )
+    return {
+        "number": pull.get("number"), "url": pull.get("html_url"),
+        "sha": pull.get("head", {}).get("sha"), "base": base, "head": branch,
+    }
+
+
+def merge_pull(token, repo, pull):
+    number = pull.get("number")
+    if not number:
+        return False
+    for _attempt in range(60):
+        data = response_or_fail(token, "GET", f"{repo_path(repo)}/pulls/{number}", (200,))
+        if data.get("merged"):
+            return True
+        if data.get("mergeable") is None:
+            time.sleep(5)
+            continue
+        state = data.get("mergeable_state")
+        if state in {"unknown", "unstable", "has_hooks"}:
+            time.sleep(5)
+            continue
+        if not data.get("mergeable") or state != "clean":
+            return False
+        status, result = api_request(token, "PUT", f"{repo_path(repo)}/pulls/{number}/merge", {
+            "sha": data.get("head", {}).get("sha"),
+            "merge_method": "squash",
+            "commit_title": data.get("title"),
+        })
+        if status == 200 and result.get("merged"):
+            pull["merge_commit_sha"] = result.get("sha")
+            return True
+        if status in (405, 409):
+            return False
+        fail(f"pull request merge failed ({status}): {result.get('message', result)}")
+    return False
+
+
+def ensure_tracker_label(token, name="proofreading-review", color="b54708", description="Proofreading pull requests awaiting manual review"):
+    encoded_name = urllib.parse.quote(name, safe="")
+    path = f"{full_repo_path(TRACKER_REPOSITORY)}/labels/{encoded_name}"
+    status, _data = api_request(token, "GET", path)
+    if status == 200:
+        return
+    if status != 404:
+        fail(f"tracker label lookup failed with HTTP {status}")
+    response_or_fail(token, "POST", f"{full_repo_path(TRACKER_REPOSITORY)}/labels", (201,), {
+        "name": name,
+        "color": color,
+        "description": description,
+    })
+
+
+def find_tracker_issue(token, correction_id):
+    marker = f"<!-- proofreading:{correction_id} -->"
+    for page in range(1, 11):
+        status, issues = api_request(
+            token, "GET",
+            f"{full_repo_path(TRACKER_REPOSITORY)}/issues?state=all&labels=proofreading-review&per_page=100&page={page}",
+        )
+        if status != 200 or not isinstance(issues, list):
+            fail(f"tracker issue listing failed with HTTP {status}")
+        for issue in issues:
+            if marker in str(issue.get("body") or ""):
+                return issue
+        if len(issues) < 100:
+            break
+    return None
+
+
+def change_summary(request):
+    changes = []
+    patch = payload_field(request, "patch") or {}
+    if patch.get("parts"):
+        changes.append(f"正文段落 {len(patch['parts'])} 处")
+    if patch.get("comments") or patch.get("newComments"):
+        changes.append("注释")
+    if patch.get("description"):
+        changes.append("描述")
+    labels = {
+        "title": "标题", "authors": "作者", "dates": "日期", "tags": "标签",
+        "name": "来源名称", "author": "来源作者", "type": "来源类型", "files": "来源文件",
+    }
+    changed_metadata = [
+        item.get("field") for item in request.get("changed") or []
+        if item.get("kind") == "metadata" and item.get("old") != item.get("new")
+    ]
+    if isinstance(request.get("changed"), list):
+        changes.extend(labels.get(key, key) for key in changed_metadata)
+    else:
+        metadata = payload_field(request, "metadata") or {}
+        changes.extend(labels.get(key, key) for key in (metadata.get("article") or {}))
+        changes.extend(labels.get(key, key) for key in (metadata.get("source") or {}))
+    return changes or ["校订"]
+
+
+def validate_patch(patch):
+    if not isinstance(patch, dict) or patch.get("version") != 2:
+        fail("patch must be a PatchV2 object")
+    if set(patch) - {"version", "parts", "comments", "description", "newComments"}:
+        fail("patch contains unsupported fields")
+    if not isinstance(patch.get("parts"), dict) or not isinstance(patch.get("comments"), dict):
+        fail("patch parts and comments must be objects")
+    if not isinstance(patch.get("description", ""), str):
+        fail("patch description must be a string")
+    if "newComments" in patch and (
+        not isinstance(patch["newComments"], list)
+        or any(not isinstance(value, str) for value in patch["newComments"])
+    ):
+        fail("patch newComments must be a string list")
+    for collection, allowed in ((patch["parts"], {"insertBefore", "insertAfter", "delete", "diff", "type"}),
+                                (patch["comments"], {"insertBefore", "insertAfter", "delete", "diff"})):
+        for index, change in collection.items():
+            if not isinstance(index, str) or not index.isdigit() or (len(index) > 1 and index[0] == "0"):
+                fail("patch index is invalid")
+            if not isinstance(change, dict) or not change or set(change) - allowed:
+                fail("patch operation is invalid")
+            if "delete" in change and not isinstance(change["delete"], bool):
+                fail("patch delete must be boolean")
+            if change.get("delete") is False:
+                fail("patch delete must describe a deletion")
+            if collection is patch["parts"] and change.get("delete") and any(key in change for key in ("diff", "type")):
+                fail("deleted part cannot also be changed")
+            if "diff" in change and not isinstance(change["diff"], str):
+                fail("patch diff must be a string")
+            if "type" in change and not isinstance(change["type"], str):
+                fail("patch type must be a string")
+            for key in ("insertBefore", "insertAfter"):
+                if key not in change:
+                    continue
+                if not isinstance(change[key], list) or not change[key]:
+                    fail("patch insert operation must be a non-empty list")
+                for value in change[key]:
+                    allowed_insert = {"text", "type"} if collection is patch["parts"] else {"id", "text"}
+                    if (
+                        not isinstance(value, dict)
+                        or set(value) - allowed_insert
+                        or not isinstance(value.get("text"), str)
+                        or (collection is patch["parts"] and not isinstance(value.get("type"), str))
+                    ):
+                        fail("patch insert item is invalid")
+    if not patch["parts"] and not patch["comments"] and not patch.get("description") and "newComments" not in patch:
+        fail("patch contains no changes")
+
+
+AUTO_MERGE_MAX_DIFF_COST = 500
+AUTO_MERGE_MAX_NET_PARAGRAPH_DELTA = 3
+AUTO_MERGE_POLICY = {
+    "max_diff_cost": AUTO_MERGE_MAX_DIFF_COST,
+    "max_net_paragraph_delta": AUTO_MERGE_MAX_NET_PARAGRAPH_DELTA,
+}
+
+
+def diff_cost(diff):
+    total = 0
+    for token in diff.split("\t"):
+        if not token or token[0] not in {"=", "-", "+"}:
+            return None
+        if token[0] in {"=", "-"}:
+            if not token[1:].isdigit():
+                return None
+            if token[0] == "-":
+                total += int(token[1:])
+        else:
+            try:
+                total += len(urllib.parse.unquote_to_bytes(token[1:].replace("+", "%2B")).decode("utf-8").encode("utf-16-le")) // 2
+            except (UnicodeDecodeError, ValueError):
+                return None
+    return total
+
+
+def utf16_length(value):
+    return len(value.encode("utf-16-le")) // 2
+
+
+def auto_merge_allowed(kind, patch, metadata):
+    if kind != "proofread" or not isinstance(patch, dict) or isinstance(metadata, dict):
+        return False
+    if patch.get("newComments") or patch.get("description"):
+        return False
+    parts = patch.get("parts") or {}
+    comments = patch.get("comments") or {}
+    if not isinstance(parts, dict) or not isinstance(comments, dict):
+        return False
+    if not parts and not comments:
+        return False
+    delta = 0
+    cost = 0
+    for change in parts.values():
+        if not isinstance(change, dict) or not change:
+            return False
+        if set(change) - {"diff", "type", "insertBefore", "insertAfter", "delete"}:
+            return False
+        if "delete" in change and change["delete"] is not True:
+            return False
+        if change.get("delete"):
+            delta -= 1
+        for key in ("insertBefore", "insertAfter"):
+            if key in change:
+                if not isinstance(change[key], list) or not change[key]:
+                    return False
+                delta += len(change[key])
+                for part in change[key]:
+                    if not isinstance(part, dict) or not isinstance(part.get("text"), str):
+                        return False
+                    cost += utf16_length(part["text"])
+        if "diff" in change:
+            if not isinstance(change["diff"], str):
+                return False
+            partial = diff_cost(change["diff"])
+            if partial is None:
+                return False
+            cost += partial
+    for change in comments.values():
+        if not isinstance(change, dict) or set(change) != {"diff"} or not isinstance(change.get("diff"), str):
+            return False
+        partial = diff_cost(change["diff"])
+        if partial is None:
+            return False
+        cost += partial
+    if not -3 <= delta <= 3:
+        return False
+    return cost <= AUTO_MERGE_MAX_DIFF_COST
+
+
+METADATA_FIELD_LABELS = {
+    "title": "标题", "authors": "作者", "dates": "日期", "tags": "标签",
+    "name": "来源名称", "author": "来源作者", "type": "来源类型", "files": "来源文件",
+}
+
+def apply_text_delta(text, delta):
+    source = text.encode("utf-16-le")
+    cursor = 0
+    output = bytearray()
+    for token in delta.split("\t") if delta else []:
+        if not token:
+            continue
+        operation, value = token[0], token[1:]
+        if operation == "=" and value.isdigit():
+            size = int(value) * 2
+            output.extend(source[cursor:cursor + size])
+            cursor += size
+        elif operation == "-" and value.isdigit():
+            cursor += int(value) * 2
+        elif operation == "+":
+            inserted = urllib.parse.unquote_to_bytes(value.replace("+", "%2B")).decode("utf-8")
+            output.extend(inserted.encode("utf-16-le"))
+    if cursor != len(source):
+        fail("delta length does not match source text")
+    return output.decode("utf-16-le")
+
+
+def article_part_text(article, index):
+    parts = article.get("parts") if isinstance(article.get("parts"), list) else []
+    if index < 0 or index >= len(parts) or not isinstance(parts[index], dict):
+        fail("BHA preview contains an invalid part index")
+    values = list(str(parts[index].get("text") or ""))
+    pivots = article.get("comment_pivots") if isinstance(article.get("comment_pivots"), list) else []
+    selected = [item for item in pivots if isinstance(item, dict) and item.get("part_idx") == index]
+    for pivot in sorted(selected, key=lambda item: int(item.get("offset", 0)), reverse=True):
+        offset = int(pivot.get("offset", 0))
+        if offset < 0 or offset > len(values):
+            fail("BHA preview contains an invalid comment offset")
+        values.insert(offset, f"〔{pivot.get('index')}〕")
+    return "".join(values)
+
+
+def fetch_bha_changes(request):
+    supplied_metadata = payload_field(request, "metadata")
+    if request.get("changed") and request.get("fulltext") and not isinstance(supplied_metadata, dict):
+        return
+    doc_id = str(request.get("doc_id") or "")
+    if not doc_id:
+        return
+    bha_url = os.environ.get("BHA_PUBLIC_URL", "https://vomebook-bha-search.hf.space").rstrip("/")
+    preview_url = f"{bha_url}/api/preview/{urllib.parse.quote(doc_id, safe='')}"
+    preview_request = urllib.request.Request(preview_url, headers={"User-Agent": "anftm-pipeline-proofread/1.0"})
+    try:
+        with urllib.request.urlopen(preview_request, timeout=30) as response:
+            preview = json.loads(response.read())
+    except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
+        fail(f"cannot load BHA text for proofreading issue: {exc}")
+    article = preview.get("article") if isinstance(preview.get("article"), dict) else {}
+    source_old = {
+        "name": preview.get("publication_name"),
+        "author": preview.get("publication_author"),
+        "type": preview.get("publication_type"),
+        "files": [item.get("url") for item in preview.get("source_files") or [] if isinstance(item, dict)],
+    }
+    metadata = supplied_metadata if isinstance(supplied_metadata, dict) else {}
+    normalized_metadata = {}
+    for section, current, fields in (
+        ("article", article, {"title", "authors", "dates", "tags"}),
+        ("source", source_old, {"name", "author", "type", "files"}),
+    ):
+        values = metadata.get(section)
+        if not isinstance(values, dict):
+            continue
+        changed_values = {
+            field: value for field, value in values.items()
+            if field not in fields or current.get(field) != value
+        }
+        if changed_values:
+            normalized_metadata[section] = changed_values
+    if isinstance(supplied_metadata, dict):
+        set_payload_field(request, "metadata", normalized_metadata)
+        metadata = normalized_metadata
+    comments = article.get("comments") if isinstance(article.get("comments"), list) else []
+    patch = payload_field(request, "patch") if isinstance(payload_field(request, "patch"), dict) else {}
+    original_parts = [article_part_text(article, index) for index in range(len(article.get("parts") or []))]
+    edited_parts = []
+    for index, original in enumerate(original_parts):
+        part_change = (patch.get("parts") or {}).get(str(index), {})
+        edited_parts.extend(str(part.get("text") or "") for part in part_change.get("insertBefore") or [])
+        if not part_change.get("delete"):
+            edited_parts.append(apply_text_delta(original, part_change["diff"]) if "diff" in part_change else original)
+        edited_parts.extend(str(part.get("text") or "") for part in part_change.get("insertAfter") or [])
+
+    edited_comments = []
+    for index, original_value in enumerate(comments, start=1):
+        original = str(original_value or "")
+        comment_change = (patch.get("comments") or {}).get(str(index), {})
+        edited_comments.extend(str(item.get("text") or "") for item in comment_change.get("insertBefore") or [])
+        if not comment_change.get("delete"):
+            edited_comments.append(apply_text_delta(original, comment_change["diff"]) if "diff" in comment_change else original)
+        edited_comments.extend(str(item.get("text") or "") for item in comment_change.get("insertAfter") or [])
+    edited_comments.extend(str(value) for value in patch.get("newComments") or [])
+
+    def fulltext(parts_text, comments_text):
+        body = "\n".join(parts_text)
+        if comments_text:
+            body += "\n\n" + "\n".join(f"〔{index}〕{text}" for index, text in enumerate(comments_text, start=1))
+        return body
+
+    request["fulltext"] = {
+        "original": fulltext(original_parts, [str(value or "") for value in comments]),
+        "edited": fulltext(edited_parts, edited_comments),
+    }
+    if request.get("changed"):
+        return
+    changes = []
+    for raw_index in sorted((patch.get("parts") or {}), key=int):
+        index = int(raw_index)
+        change = patch["parts"][raw_index]
+        original = article_part_text(article, index)
+        if "diff" in change:
+            edited = apply_text_delta(original, change["diff"])
+            if edited != original:
+                changes.append({"kind": "part", "index": index + 1, "original": original, "edited": edited})
+        if change.get("delete"):
+            changes.append({"kind": "part", "index": index + 1, "delete": True, "original": original})
+        for key in ("insertBefore", "insertAfter"):
+            for part in change.get(key) or []:
+                changes.append({"kind": "part", "index": index + 1, "insert": key == "insertAfter", "text": part.get("text"), "part_type": part.get("type")})
+        if "type" in change:
+            parts = article.get("parts") if isinstance(article.get("parts"), list) else []
+            old_type = parts[index].get("type") if index < len(parts) and isinstance(parts[index], dict) else None
+            if old_type != change["type"]:
+                changes.append({"kind": "part_type", "index": index + 1, "old": old_type, "new": change["type"]})
+    for raw_index in sorted((patch.get("comments") or {}), key=int):
+        index = int(raw_index) - 1
+        change = patch["comments"][raw_index]
+        original = str(comments[index] or "") if 0 <= index < len(comments) else ""
+        if "diff" in change:
+            edited = apply_text_delta(original, change["diff"])
+            if edited != original:
+                changes.append({"kind": "comment", "index": index + 1, "original": original, "edited": edited})
+        if change.get("delete"):
+            changes.append({"kind": "comment", "index": index + 1, "delete": True, "original": original})
+    for offset, text in enumerate(patch.get("newComments") or [], start=1):
+        changes.append({"kind": "new_comment", "index": len(comments) + offset, "text": text})
+    if patch.get("description"):
+        original = str(article.get("description") or "")
+        edited = apply_text_delta(original, patch["description"])
+        if edited != original:
+            changes.append({"kind": "description", "original": original, "edited": edited})
+    metadata = payload_field(request, "metadata") if isinstance(payload_field(request, "metadata"), dict) else {}
+    for field, new_value in (metadata.get("article") or {}).items():
+        if field in ("title", "authors", "dates", "tags") and article.get(field) != new_value:
+            changes.append({"kind": "metadata", "field": field, "old": article.get(field), "new": new_value})
+    for field, new_value in (metadata.get("source") or {}).items():
+        if source_old.get(field) != new_value:
+            changes.append({"kind": "metadata", "field": field, "old": source_old.get(field), "new": new_value})
+    if not changes:
+        fail("BHA preview did not contain the text needed for proofreading issue")
+    request["changed"] = changes
+
+
+def issue_value(value):
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False, indent=2)
+    return str(value if value is not None else "")
+
+
+def markdown_value(value):
+    text = issue_value(value).replace("\\", "\\\\")
+    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    for character in "`*_[]()#+-!|~":
+        text = text.replace(character, f"\\{character}")
+    return text.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "<br>")
+
+
+def metadata_list(value):
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str) and value.strip().startswith("["):
+        for parser in (json.loads, ast.literal_eval):
+            try:
+                parsed = parser(value)
+                if isinstance(parsed, list):
+                    return parsed
+            except (ValueError, SyntaxError, json.JSONDecodeError):
+                pass
+    return None
+
+
+def metadata_item(field, value):
+    if field == "dates" and isinstance(value, dict):
+        parts = []
+        for key, suffix in (("year", "年"), ("month", "月"), ("day", "日")):
+            if value.get(key) is not None:
+                parts.append(f"{value[key]}{suffix}")
+        return "".join(parts) or issue_value(value)
+    if field == "tags" and isinstance(value, dict):
+        name = str(value.get("name") or "")
+        tag_type = str(value.get("type") or "")
+        return f"{name}（{tag_type}）" if tag_type else name
+    return issue_value(value)
+
+
+def metadata_list_details(label, field, old, new):
+    old_values = metadata_list(old)
+    new_values = metadata_list(new)
+    if old_values is None or new_values is None or old_values == new_values:
+        return []
+    key = lambda value: json.dumps(value, ensure_ascii=False, sort_keys=True)
+    old_keys = {key(value) for value in old_values}
+    new_keys = {key(value) for value in new_values}
+    removed = [markdown_value(metadata_item(field, value)) for value in old_values if key(value) not in new_keys]
+    added = [markdown_value(metadata_item(field, value)) for value in new_values if key(value) not in old_keys]
+    if not removed and not added:
+        return []
+    parts = []
+    if removed:
+        parts.append("删除 " + "、".join(f"~~{value}~~" for value in removed))
+    if added:
+        parts.append("新增 " + "、".join(f"**{value}**" for value in added))
+    return [f"- {label}：{'；'.join(parts)}"]
+
+
+def metadata_display(field, value):
+    values = metadata_list(value) if field in {"authors", "dates", "tags", "files"} else None
+    if values is not None:
+        if not values:
+            return "（空）"
+        return "<br>".join(markdown_value(metadata_item(field, item)) for item in values)
+    text = issue_value(value)
+    return markdown_value(text) if text else "（空）"
+
+
+def append_metadata_comparison(lines, request):
+    changes = [
+        item for item in request.get("changed") or []
+        if item.get("kind") == "metadata" and item.get("old") != item.get("new")
+    ]
+    if not changes:
+        return
+    lines.extend(["", "## 元数据对照", "", "| 字段 | 原元数据 | 修改后元数据 |", "| --- | --- | --- |"])
+    for change in changes:
+        field = change.get("field")
+        label = METADATA_FIELD_LABELS.get(field, field)
+        old = metadata_display(field, change.get("old"))
+        new = metadata_display(field, change.get("new"))
+        lines.append(f"| {label} | {old} | {new} |")
+
+
+def change_details(request):
+    lines = []
+    for change in request.get("changed") or []:
+        kind = change.get("kind")
+        if kind in ("part", "comment"):
+            label = f"段落 {change.get('index')}" if kind == "part" else f"注释 {change.get('index')}"
+            if change.get("delete"):
+                lines.append(f"- {label}（删除）：{markdown_value(change.get('original'))}")
+            elif change.get("text") is not None:
+                place = "后" if change.get("insert") else "前"
+                lines.append(f"- {label}{place}插入：{markdown_value(change.get('text'))}")
+            else:
+                lines.append(f"- {label}：{markdown_value(change.get('original'))} → {markdown_value(change.get('edited'))}")
+        elif kind == "part_type":
+            lines.append(f"- 段落 {change.get('index')}：类型 {markdown_value(change.get('old'))} → {markdown_value(change.get('new'))}")
+        elif kind == "new_comment":
+            lines.append(f"- 新增注释 {change.get('index')}：{markdown_value(change.get('text'))}")
+        elif kind == "description":
+            lines.append(f"- 描述：{markdown_value(change.get('original'))} → {markdown_value(change.get('edited'))}")
+        elif kind == "metadata":
+            field = change.get("field")
+            label = METADATA_FIELD_LABELS.get(field, field)
+            if field in {"authors", "dates", "tags", "files"}:
+                lines.extend(metadata_list_details(label, field, change.get("old"), change.get("new")))
+            elif change.get("old") != change.get("new"):
+                lines.append(f"- {label}：{markdown_value(change.get('old'))} → {markdown_value(change.get('new'))}")
+    return lines
+
+
+def fenced_text(value):
+    text = str(value if value is not None else "")
+    longest = max((len(match.group(0)) for match in re.finditer(r"`+", text)), default=0)
+    fence = "`" * max(3, longest + 1)
+    return f"{fence}text\n{text}\n{fence}"
+
+
+def append_fulltext(lines, request):
+    fulltext = request.get("fulltext") if isinstance(request.get("fulltext"), dict) else {}
+    if "original" in fulltext and "edited" in fulltext and fulltext["original"] != fulltext["edited"]:
+        lines.extend([
+            "", "## 原全文", "", fenced_text(fulltext["original"]),
+            "", "## 修改后全文", "", fenced_text(fulltext["edited"]),
+        ])
+
+
+def fulltext_comment_bodies(request, marker_prefix):
+    fulltext = request.get("fulltext") if isinstance(request.get("fulltext"), dict) else {}
+    if "original" not in fulltext or "edited" not in fulltext or fulltext["original"] == fulltext["edited"]:
+        return []
+    bodies = []
+    for key, label in (("original", "原全文"), ("edited", "修改后全文")):
+        text = str(fulltext[key] if fulltext[key] is not None else "")
+        chunks = []
+        cursor = 0
+        if not text:
+            chunks.append("")
+        while cursor < len(text):
+            size = min(55_000, len(text) - cursor)
+            while size > 0 and len(fenced_text(text[cursor:cursor + size])) + 500 > GITHUB_BODY_LIMIT:
+                size //= 2
+            if size <= 0:
+                fail("cannot split proofreading full text for GitHub comments")
+            chunks.append(text[cursor:cursor + size])
+            cursor += size
+        total = len(chunks)
+        for index, chunk in enumerate(chunks, start=1):
+            marker = f"<!-- {marker_prefix}:{key}:{index}:{total} -->"
+            suffix = f"（第 {index}/{total} 部分）" if total > 1 else ""
+            body = f"{marker}\n## {label}{suffix}\n\n{fenced_text(chunk)}"
+            if len(body) > GITHUB_BODY_LIMIT:
+                fail("proofreading full-text comment exceeds GitHub limit")
+            bodies.append((marker, body))
+    return bodies
+
+
+def existing_comment_bodies(token, issue_number):
+    bodies = []
+    for page in range(1, 11):
+        status, comments = api_request(
+            token, "GET",
+            f"{full_repo_path(TRACKER_REPOSITORY)}/issues/{issue_number}/comments?per_page=100&page={page}",
+        )
+        if status != 200 or not isinstance(comments, list):
+            fail(f"tracker comment listing failed with HTTP {status}")
+        bodies.extend(str(comment.get("body") or "") for comment in comments)
+        if len(comments) < 100:
+            break
+    return bodies
+
+
+def comment_marker_exists(token, issue_number, marker):
+    return any(marker in body for body in existing_comment_bodies(token, issue_number))
+
+
+def post_fulltext_comments(token, issue_number, request, marker_prefix):
+    existing = existing_comment_bodies(token, issue_number)
+    for marker, body in fulltext_comment_bodies(request, marker_prefix):
+        if any(marker in current for current in existing):
+            continue
+        response_or_fail(
+            token, "POST", f"{full_repo_path(TRACKER_REPOSITORY)}/issues/{issue_number}/comments", (201,),
+            {"body": body},
+        )
+        existing.append(body)
+
+
+def proofread_pr_body(request, repo, article_id, correction_id):
+    title_text = re.sub(r"^(?:校订审核：|校订\s*)+", "", str(request.get("title") or article_id).strip())[:100]
+    doc_id = str(request.get("doc_id") or "")
+    bha_url = os.environ.get("BHA_PUBLIC_URL", "https://vomebook-bha-search.hf.space").rstrip("/")
+    preview = f"{bha_url}/?preview={urllib.parse.quote(doc_id)}" if doc_id else ""
+    summary = "、".join(change_summary(request))
+    details = change_details(request)
+    description = payload_field(request, "description")
+
+    def compose(include_fulltext):
+        lines = [
+            f"<!-- proofreading:{correction_id} -->",
+            "## 校订",
+            "",
+            f"- Archive：`{repo}`",
+            f"- Article ID：`{article_id}`",
+            f"- 文章：{markdown_value(title_text)}",
+            f"- 修改：{summary}",
+        ]
+        if details:
+            lines.extend(["", "## 修改内容", ""])
+            lines.extend(details)
+        append_metadata_comparison(lines, request)
+        if include_fulltext:
+            append_fulltext(lines, request)
+        if preview:
+            lines.append(f"- BHA 预览：{preview}")
+        if description:
+            lines.append(f"- 说明：{markdown_value(description)}")
+        if not include_fulltext:
+            lines.extend(["", "全文对照较长，请在 tracker issue 或 PR 文件 diff 中查看。"])
+        return "\n".join(lines)
+
+    body = compose(True)
+    if len(body) > GITHUB_BODY_LIMIT:
+        return compose(False)
+    return body
+
+
+def parse_crop_markdown(crop_assets):
+    if not crop_assets:
+        return []
+    lines = ["", "## OCR 裁剪原图", ""]
+    for asset in crop_assets:
+        pages = "、".join(str(page) for page in asset["pages"])
+        title = markdown_value(asset["title"])
+        lines.extend([
+            f"### 文章 {asset['article_index'] + 1}：{title}", "",
+            f"裁剪页：{pages}", "",
+            f"![文章 {asset['article_index'] + 1} OCR 裁剪原图]({asset['url']})", "",
+        ])
+    return lines
+
+
+def parse_article_summary(article, index):
+    article_id = parse_article_id(article)
+    authors = "、".join(markdown_value(value) for value in article.get("authors") or []) or "（空）"
+    dates = "、".join(markdown_value(metadata_item("dates", value)) for value in article.get("dates") or []) or "（空）"
+    page_start = article["page_start"]
+    page_end = article["page_end"]
+    page_range = str(page_start) if page_start == page_end else f"{page_start}–{page_end}"
+    lines = [
+        f"### {index + 1}. {markdown_value(article['title'])}", "",
+        f"- Article ID：`{article_id}`",
+        f"- 作者：{authors}",
+        f"- 日期：{dates}",
+        f"- 页码：{page_range}",
+        f"- OCR 基线：{article['base_part_count']} 段",
+    ]
+    article_crop = (article.get("ocr") or {}).get("content_thresholds")
+    if article_crop and any(article_crop):
+        lines.append(f"- 整篇裁剪：`{json.dumps(article_crop, ensure_ascii=False)}`")
+    for page, options in sorted((article.get("ocr_exceptions") or {}).items(), key=lambda item: int(item[0])):
+        thresholds = options.get("content_thresholds")
+        if thresholds is not None:
+            lines.append(f"- 第 {page} 页裁剪覆盖：`{json.dumps(thresholds, ensure_ascii=False)}`")
+    return lines
+
+
+def parse_review_body(request, repo, publication_id, correction_id, crop_assets, include_fulltext=True):
+    locator = payload_field(request, "locator") or {}
+    articles = payload_field(request, "articles") or []
+    lines = [
+        f"<!-- proofreading:{correction_id} -->",
+        "## 解析",
+        "",
+        f"- Archive：`{repo}`",
+        f"- Publication ID：`{publication_id}`",
+        f"- 原占位文章：{markdown_value(locator.get('title') or '')}",
+        f"- 原页码：{locator.get('page_start')}–{locator.get('page_end')}",
+        f"- 拆分结果：{len(articles)} 篇",
+        "",
+        "## 修改内容",
+        "",
+    ]
+    for index, article in enumerate(articles):
+        lines.extend(parse_article_summary(article, index))
+        lines.append("")
+    lines.extend(parse_crop_markdown(crop_assets))
+    description = payload_field(request, "description")
+    if description:
+        lines.extend(["", f"- 说明：{markdown_value(description)}"])
+    if include_fulltext:
+        lines.extend(["", "## 文章正文", "", "<!-- parse-fulltext:embedded -->"])
+        for index, article in enumerate(articles):
+            lines.extend([
+                "", f"### 文章 {index + 1}：{markdown_value(article['title'])}", "",
+                fenced_text(article.get("content") or ""),
+            ])
+    else:
+        lines.extend(["", "完整正文超过 PR 描述上限，已按文章分段保存在本 PR 评论中。"])
+    body = "\n".join(lines)
+    if len(body) > GITHUB_BODY_LIMIT:
+        if include_fulltext:
+            return parse_review_body(
+                request, repo, publication_id, correction_id, crop_assets, include_fulltext=False,
+            )
+        fail("parse review body exceeds the GitHub limit")
+    return body
+
+
+def parse_article_comment_bodies(request, correction_id, crop_assets):
+    assets = {asset["article_index"]: asset for asset in crop_assets}
+    bodies = []
+    for index, article in enumerate(payload_field(request, "articles") or []):
+        content = str(article.get("content") or "")
+        chunks = [content[offset:offset + 52_000] for offset in range(0, len(content), 52_000)] or [""]
+        for part, chunk in enumerate(chunks, start=1):
+            marker = f"<!-- parse-article:{correction_id}:{index + 1}:{part}:{len(chunks)} -->"
+            suffix = f"（第 {part}/{len(chunks)} 部分）" if len(chunks) > 1 else ""
+            lines = [marker, f"## 文章 {index + 1}：{markdown_value(article['title'])} 正文{suffix}", "", fenced_text(chunk)]
+            asset = assets.get(index)
+            if part == 1 and asset:
+                lines.extend(["", "### OCR 裁剪原图", "", f"![文章 {index + 1} OCR 裁剪原图]({asset['url']})"])
+            body = "\n".join(lines)
+            if len(body) > GITHUB_BODY_LIMIT:
+                fail("parse article review comment exceeds the GitHub limit")
+            bodies.append((marker, body))
+    return bodies
+
+
+def post_parse_pull_comments(token, repo, pull_number, request, correction_id, crop_assets):
+    existing = []
+    for page in range(1, 11):
+        status, comments = api_request(
+            token, "GET", f"{repo_path(repo)}/issues/{pull_number}/comments?per_page=100&page={page}",
+        )
+        if status != 200 or not isinstance(comments, list):
+            fail(f"parse pull comment listing failed with HTTP {status}")
+        existing.extend(str(comment.get("body") or "") for comment in comments)
+        if len(comments) < 100:
+            break
+    for marker, body in parse_article_comment_bodies(request, correction_id, crop_assets):
+        if any(marker in value for value in existing):
+            continue
+        response_or_fail(
+            token, "POST", f"{repo_path(repo)}/issues/{pull_number}/comments", (201,), {"body": body},
+        )
+        existing.append(body)
+
+
+def upsert_parse_tracker_issue(token, correction_id, request, repo, publication_id, pulls, crop_assets):
+    ensure_tracker_label(token)
+    pull_state = [{"repo": repo, "number": pull["number"], "url": pull["url"]} for pull in pulls]
+    marker = json.dumps(pull_state, ensure_ascii=False, separators=(",", ":"))
+    details = parse_review_body(request, repo, publication_id, correction_id, crop_assets)
+    lines = [
+        f"<!-- proofreading-prs:{marker} -->",
+        details,
+        "",
+        "## 审核方式",
+        "",
+        "1. 核对每篇文章的元数据、页码、正文和有裁剪时显示的原图图块",
+        "2. 打开下方两个 Pull Request 检查 config 与 OCR patch 文件 diff",
+        "3. 全部同意：评论 `/approve`，一次合并两个关联 PR",
+        "4. 拒绝：评论 `/reject 原因`，一次关闭两个关联 PR",
+        "5. 两个 PR 均合并或关闭后，本 Issue 自动关闭",
+        "",
+        "## Pull Requests",
+        "",
+    ]
+    lines.extend(f"- [ ] [{repo}#{pull['number']}]({pull['url']})" for pull in pulls)
+    body = "\n".join(lines)
+    if len(body) > GITHUB_BODY_LIMIT:
+        fail("parse tracker issue body exceeds the GitHub limit")
+    existing = find_tracker_issue(token, correction_id)
+    payload = {"title": f"解析审核：{publication_id}", "body": body, "labels": ["proofreading-review"]}
+    if existing:
+        payload["state"] = "open"
+        issue = response_or_fail(token, "PATCH", f"{full_repo_path(TRACKER_REPOSITORY)}/issues/{existing['number']}", (200,), payload)
+    else:
+        issue = response_or_fail(token, "POST", f"{full_repo_path(TRACKER_REPOSITORY)}/issues", (201,), payload)
+    current = existing_comment_bodies(token, issue["number"])
+    for marker, comment in parse_article_comment_bodies(request, correction_id, crop_assets):
+        if any(marker in value for value in current):
+            continue
+        response_or_fail(
+            token, "POST", f"{full_repo_path(TRACKER_REPOSITORY)}/issues/{issue['number']}/comments", (201,), {"body": comment},
+        )
+        current.append(comment)
+    return issue.get("html_url")
+
+
+def upsert_tracker_issue(token, correction_id, request, repo, article_id, pulls):
+    ensure_tracker_label(token)
+    title_text = re.sub(r"^(?:校订审核：|校订\s*)+", "", str(request.get("title") or article_id).strip())[:100]
+    pull_state = [{"repo": repo, "number": pull["number"], "url": pull["url"]} for pull in pulls]
+    marker = json.dumps(pull_state, ensure_ascii=False, separators=(",", ":"))
+    doc_id = str(request.get("doc_id") or "")
+    bha_url = os.environ.get("BHA_PUBLIC_URL", "https://vomebook-bha-search.hf.space").rstrip("/")
+    preview = f"{bha_url}/?preview={urllib.parse.quote(doc_id)}" if doc_id else ""
+    def compose(include_fulltext):
+        lines = [
+            f"<!-- proofreading:{correction_id} -->",
+            f"<!-- proofreading-prs:{marker} -->",
+            "## 校订审核",
+            "",
+            f"- Archive：`{repo}`",
+            f"- Article ID：`{article_id}`",
+            f"- 文章：{markdown_value(title_text)}",
+            f"- 修改：{'、'.join(change_summary(request))}",
+        ]
+        details = change_details(request)
+        if details:
+            lines.extend(["", "## 修改内容", ""])
+            lines.extend(details)
+        append_metadata_comparison(lines, request)
+        if include_fulltext:
+            append_fulltext(lines, request)
+        else:
+            lines.extend(["", "原全文和修改后全文完整保存在本 Issue 的后续评论中。"])
+        if preview:
+            lines.append(f"- BHA 预览：{preview}")
+        if payload_field(request, "description"):
+            lines.append(f"- 说明：{markdown_value(payload_field(request, 'description'))}")
+        lines.extend([
+            "", "## 审核方式", "",
+            "1. 审核上方“修改内容”：正文核对原文与新文；元数据核对新增、删除或原值与新值",
+            "2. 有正文修改时，对照“原全文”与“修改后全文”；需要核对扫描件时再打开 BHA 预览",
+            "3. 如需确认实际提交文件，打开下方 Pull Request 查看 diff；正文与元数据可能对应不同 PR",
+            "4. 全部同意：在本 Issue 评论 `/approve`（合并本 Issue 关联的全部 PR）",
+            "5. 拒绝：评论 `/reject 原因`（关闭本 Issue 关联的全部 PR，并记录原因）",
+            "6. 所有关联 PR 合并或关闭后，本 Issue 会自动关闭",
+            "", "## Pull Requests", "",
+        ])
+        lines.extend(f"- [ ] [{repo}#{pull['number']}]({pull['url']})" for pull in pulls)
+        return "\n".join(lines)
+
+    body = compose(True)
+    fulltext_in_comments = len(body) > GITHUB_BODY_LIMIT
+    if fulltext_in_comments:
+        body = compose(False)
+    if len(body) > GITHUB_BODY_LIMIT:
+        body = body[:GITHUB_BODY_LIMIT - 80] + "\n\n（审核摘要过长，已截断；完整改动请查看关联 PR。）"
+    existing = find_tracker_issue(token, correction_id)
+    payload = {
+        "title": f"校订审核：{title_text}",
+        "body": body,
+        "labels": ["proofreading-review"],
+    }
+    if existing:
+        payload["state"] = "open"
+        issue = response_or_fail(
+            token, "PATCH", f"{full_repo_path(TRACKER_REPOSITORY)}/issues/{existing['number']}", (200,), payload,
+        )
+    else:
+        issue = response_or_fail(
+            token, "POST", f"{full_repo_path(TRACKER_REPOSITORY)}/issues", (201,), payload,
+        )
+    if fulltext_in_comments:
+        post_fulltext_comments(token, issue["number"], request, f"proofreading-fulltext:{correction_id}")
+    return issue.get("html_url")
+
+
+def find_auto_merge_log(token):
+    marker = "<!-- proofreading-auto-merge-log -->"
+    status, issues = api_request(
+        token, "GET",
+        f"{full_repo_path(TRACKER_REPOSITORY)}/issues?state=open&labels=proofreading-auto-merged&per_page=100",
+    )
+    if status != 200 or not isinstance(issues, list):
+        fail(f"auto-merge log lookup failed with HTTP {status}")
+    return next((issue for issue in issues if marker in str(issue.get("body") or "")), None)
+
+
+def ensure_auto_merge_log(token):
+    ensure_tracker_label(
+        token, "proofreading-auto-merged", "1a7f37",
+        "Notifications for proofreading pull requests merged automatically",
+    )
+    issue = find_auto_merge_log(token)
+    if issue:
+        return issue
+    payload = {
+        "title": "校订自动合并记录",
+        "body": "<!-- proofreading-auto-merge-log -->\n自动合并的低风险正文校订会记录在此 Issue 的评论中。",
+        "labels": ["proofreading-auto-merged"],
+    }
+    return response_or_fail(token, "POST", f"{full_repo_path(TRACKER_REPOSITORY)}/issues", (201,), payload)
+
+
+def auto_merge_comment_exists(token, issue_number, correction_id):
+    marker = f"<!-- auto-merged:{correction_id} -->"
+    for page in range(1, 11):
+        status, comments = api_request(
+            token, "GET",
+            f"{full_repo_path(TRACKER_REPOSITORY)}/issues/{issue_number}/comments?per_page=100&page={page}",
+        )
+        if status != 200 or not isinstance(comments, list):
+            fail(f"auto-merge comment listing failed with HTTP {status}")
+        if any(marker in str(comment.get("body") or "") for comment in comments):
+            return True
+        if len(comments) < 100:
+            return False
+    return False
+
+
+def notify_auto_merged(token, correction_id, request, repo, article_id, pulls):
+    issue = ensure_auto_merge_log(token)
+    doc_id = str(request.get("doc_id") or "")
+    bha_url = os.environ.get("BHA_PUBLIC_URL", "https://vomebook-bha-search.hf.space").rstrip("/")
+    preview = f"{bha_url}/?preview={urllib.parse.quote(doc_id)}" if doc_id else ""
+    def compose(include_fulltext):
+        lines = [
+            f"<!-- auto-merged:{correction_id} -->",
+            f"**已自动合并：{'、'.join(change_summary(request))}**",
+            "", f"- Archive：`{repo}`", f"- Article ID：`{article_id}`",
+        ]
+        details = change_details(request)
+        if details:
+            lines.extend(["", "## 修改内容", ""])
+            lines.extend(details)
+        append_metadata_comparison(lines, request)
+        if include_fulltext:
+            append_fulltext(lines, request)
+        else:
+            lines.extend(["", "原全文和修改后全文完整保存在后续评论中。"])
+        if preview:
+            lines.append(f"- BHA 预览：{preview}")
+        for pull in pulls:
+            lines.append(f"- 已合并 PR：[{repo}#{pull['number']}]({pull['url']})")
+            lines.append(f"  - 来源分支：`{pull.get('head', 'proofread')}`；目标分支：`{pull.get('base', 'ocr_patch')}`；合并提交：`{pull.get('merge_commit_sha') or '待查询'}`")
+        lines.extend([
+            "", f"如需撤回，请在本 Issue 评论：`/proofread-revert {correction_id} CONFIRM`。",
+            "撤回命令会创建撤回 PR 并自动合并，直接撤销该次自动合并。",
+        ])
+        return "\n".join(lines)
+
+    body = compose(True)
+    fulltext_in_comments = len(body) > GITHUB_BODY_LIMIT
+    if fulltext_in_comments:
+        body = compose(False)
+    if not auto_merge_comment_exists(token, issue["number"], correction_id):
+        response_or_fail(
+            token, "POST", f"{full_repo_path(TRACKER_REPOSITORY)}/issues/{issue['number']}/comments", (201,),
+            {"body": body},
+        )
+    if fulltext_in_comments:
+        post_fulltext_comments(token, issue["number"], request, f"auto-merged-fulltext:{correction_id}")
+    return issue.get("html_url")
+
+
+def update_config(existing, request):
+    helper = os.path.join(os.path.dirname(__file__), "update_archive_config.mjs")
+    process = subprocess.run(
+        ["node", helper],
+        input=json.dumps({
+            "content": existing,
+            "article_id": request.get("article_id"),
+            "locator": payload_field(request, "locator"),
+            "metadata": payload_field(request, "metadata"),
+        }, ensure_ascii=False),
+        text=True,
+        capture_output=True,
+        check=False,
+        # Config is fetched from a fork and evaluated by the helper. Never expose
+        # the archive-write token to that process or to code executed in its VM.
+        env={"PATH": os.environ.get("PATH", "")},
+    )
+    if process.returncode != 0:
+        fail(f"config update failed: {process.stderr.strip()}")
+    try:
+        result = json.loads(process.stdout)
+    except json.JSONDecodeError as exc:
+        fail(f"config update returned invalid JSON: {exc}")
+    if not isinstance(result.get("content"), str) or not isinstance(result.get("article_id"), str):
+        fail("config update returned an invalid result")
+    return result["content"], result["article_id"]
+
+
+def request_with_metadata(request, metadata):
+    copied = dict(request)
+    body = dict(request.get("body") or {}) if isinstance(request.get("body"), dict) else None
+    if body is not None:
+        body["metadata"] = metadata
+        copied["body"] = body
+    else:
+        copied["metadata"] = metadata
+    return copied
+
+
+SOURCE_PARSERS = {
+    "rmrb", "whb", "jfjb", "maoistlegacy-txt", "result-json", "result-json-v2",
+    "CCRD", "CND", "aisixiang",
+}
+OVERRIDE_PARSERS = {
+    "chuanxinlu", "jimi", "jinghuo", "jqjianghua", "qibenyu", "wanghongwen",
+    "wengeqianqixinianlu1", "wenji", "xuanji", "yaowenyuan", "zhangchunqiao", "zzj1",
+}
+
+
+def config_parser_id(content):
+    match = re.search(r"(?:['\"])?\bparser_id\b(?:['\"])?\s*:\s*(['\"])([^'\"]+)\1", content)
+    return match.group(2) if match else ""
+
+
+def config_source_path(content):
+    match = re.search(r"(?:['\"])?\bpath\b(?:['\"])?\s*:\s*(['\"])([^'\"]+)\1", content)
+    if not match or not match.group(2).strip() or match.group(2).startswith("/") or ".." in match.group(2).split("/"):
+        fail("source parser config has an invalid path")
+    return match.group(2).strip("/")
+
+
+def list_directory(token, repo, branch, path):
+    encoded = urllib.parse.quote(path, safe="")
+    status, data = api_request(
+        token, "GET", f"{repo_path(repo)}/contents/{encoded}?ref={urllib.parse.quote(branch)}"
+    )
+    if status == 404:
+        return []
+    if status != 200 or not isinstance(data, list):
+        fail(f"cannot list {repo}/{branch}/{path}: {data}")
+    return [str(item.get("path") or "") for item in data if item.get("type") == "file" and item.get("path")]
+
+
+def normalized_article_id(article):
+    if not isinstance(article, dict) or not isinstance(article.get("title"), str):
+        fail("source article is missing a title")
+    if not isinstance(article.get("authors") or [], list) or not isinstance(article.get("dates") or [], list):
+        fail("source article has invalid identity metadata")
+    dates = sorted(
+        f"{date.get('year') or '0000'}-{int(date.get('month') or 0):02d}-{int(date.get('day') or 0):02d}"
+        for date in article.get("dates") or [] if isinstance(date, dict)
+    )
+    return hashlib.md5(json.dumps([
+        str(article.get("title") or ""), dates, bool(article.get("is_range_date")),
+        sorted(str(value) for value in article.get("authors") or []), str(article.get("file_id") or ""),
+    ], ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()[:10]
+
+
+def db_source_paths(token, repo, parser_id, locator):
+    dates = locator.get("dates") if isinstance(locator, dict) else None
+    if not isinstance(dates, list) or len(dates) != 1 or not isinstance(dates[0], dict):
+        fail("database article metadata requires one source date")
+    date = dates[0]
+    try:
+        year, month, day = int(date["year"]), int(date["month"]), int(date["day"])
+    except (KeyError, TypeError, ValueError):
+        fail("database article metadata requires a complete source date")
+    paths = {
+        "rmrb": f"json/{year}/{month}",
+        "whb": "json",
+        "jfjb": f"txt/{year}/{year}{month:02d}/{year}{month:02d}{day:02d}",
+    }
+    if parser_id not in paths:
+        fail(f"unsupported database parser: {parser_id}")
+    if parser_id == "jfjb":
+        prefix = f"{year}{month:02d}{day:02d}{int(locator.get('page_start') or 0):02d}"
+        return [
+            path for path in list_directory(token, repo, "origin", paths[parser_id])
+            if path.rsplit("/", 1)[-1].startswith(prefix)
+        ]
+    # These parsers discard the source filename. WHB also splits a displayed
+    # title across three fields, so try selective title fragments until one
+    # yields a bounded candidate set. Article identity verification below is
+    # still authoritative.
+    title = str(locator.get("title") or "")
+    needles = [title]
+    if parser_id == "whb":
+        for width in (16, 12, 8, 4, 2):
+            if len(title) < width:
+                continue
+            for start in (0, max(0, (len(title) - width) // 2), len(title) - width):
+                value = title[start:start + width]
+                if value not in needles:
+                    needles.append(value)
+    for needle in needles:
+        needle = needle.replace("\\", " ").replace('"', " ").strip()
+        if not needle:
+            continue
+        query = urllib.parse.quote(f'repo:{OWNER}/{repo} path:{paths[parser_id]} "{needle}"')
+        status, data = api_request(token, "GET", f"/search/code?q={query}&per_page=100")
+        if status != 200 or not isinstance(data.get("items"), list):
+            fail(f"cannot locate {parser_id} source article: {data}")
+        total = int(data.get("total_count") or 0)
+        if 0 < total <= 100:
+            return [str(item.get("path") or "") for item in data["items"] if item.get("path")]
+    fail(f"{parser_id} source article search did not yield a bounded candidate set")
+
+
+def decode_db_source(parser_id, content):
+    if isinstance(content, bytes):
+        content = content.decode("gb2312") if parser_id == "jfjb" else content.decode("utf-8")
+    if parser_id in {"rmrb", "whb"}:
+        raw = json.loads(content)
+        if parser_id == "rmrb":
+            return raw
+        return {
+            "title": "".join(str(raw.get(key) or "") for key in ("ytitle", "mtitle", "ftitle")),
+            "authors": raw.get("authors") or [], "dates": raw.get("date") or [],
+            "is_range_date": False,
+        }
+    title = re.search(r"〖BT/标题〗(.*?)〖-BT/标题〗", content, re.DOTALL)
+    subtitle = re.search(r"〖FT/副题〗(.*?)〖-FT/副题〗", content, re.DOTALL)
+    authors = re.search(r"〖ZZ/作者〗(.*?)〖-ZZ/作者〗", content, re.DOTALL)
+    date = re.search(r"〖RQ/日期〗(\d{8})〖-RQ/日期〗", content)
+    if not title or not date:
+        fail("jfjb source article is missing required metadata markers")
+    value = date.group(1)
+    return {
+        "title": title.group(1) + (subtitle.group(1) if subtitle else ""),
+        "authors": authors.group(1).split(" ") if authors else [],
+        "dates": [{"year": int(value[:4]), "month": int(value[4:6]), "day": int(value[6:])}],
+        "is_range_date": False,
+    }
+
+
+def update_db_source(parser_id, content, article_patch):
+    if set(article_patch) != {"authors"}:
+        fail("database article metadata currently supports authors only")
+    authors = article_patch["authors"]
+    if not isinstance(authors, list) or any(not isinstance(value, str) or not value.strip() for value in authors):
+        fail("database article authors are invalid")
+    if parser_id in {"rmrb", "whb"}:
+        raw = json.loads(content)
+        raw["authors"] = authors
+        return json.dumps(raw, ensure_ascii=False, separators=(",", ":"))
+    was_bytes = isinstance(content, bytes)
+    if was_bytes:
+        content = content.decode("gb2312")
+    replacement = "〖ZZ/作者〗" + " ".join(authors) + "〖-ZZ/作者〗"
+    pattern = r"〖ZZ/作者〗.*?〖-ZZ/作者〗"
+    if re.search(pattern, content, re.DOTALL):
+        updated = re.sub(pattern, lambda _match: replacement, content, count=1, flags=re.DOTALL)
+        return updated.encode("gb2312") if was_bytes else updated
+    title_end = content.find("〖-BT/标题〗")
+    if title_end < 0:
+        fail("jfjb source article title marker was not found")
+    title_end += len("〖-BT/标题〗")
+    updated = content[:title_end] + "\n" + replacement + content[title_end:]
+    return updated.encode("gb2312") if was_bytes else updated
+
+
+def update_db_metadata_file(token, repo, parser_id, config_path, config_content, request):
+    metadata = payload_field(request, "metadata") or {}
+    article_patch = metadata.get("article") or {}
+    files = []
+    if not article_patch:
+        return [("config", config_path, update_config(config_content, request)[0])], request.get("article_id")
+    locator = payload_field(request, "locator") or {}
+    matches = []
+    for path in db_source_paths(token, repo, parser_id, locator):
+        content, _sha = (get_file_bytes if parser_id == "jfjb" else get_file)(token, repo, "origin", path)
+        if not content:
+            continue
+        article = decode_db_source(parser_id, content)
+        if normalized_article_id(article) == request.get("article_id"):
+            matches.append((path, content, article))
+    if len(matches) != 1:
+        fail(f"expected one database source article, found {len(matches)}")
+    path, content, article = matches[0]
+    article["authors"] = article_patch.get("authors", article.get("authors") or [])
+    files.append(("origin", path, update_db_source(parser_id, content, article_patch)))
+    if metadata.get("source"):
+        source_request = request_with_metadata(request, {"source": metadata["source"]})
+        files.append(("config", config_path, update_config(config_content, source_request)[0]))
+    return files, normalized_article_id(article)
+
+
+def structured_source_paths(token, repo, parser_id, config_content):
+    path = config_source_path(config_content)
+    if parser_id == "maoistlegacy-txt":
+        return [f"{path}/meta.json"]
+    if parser_id == "result-json-v2" or path.lower().endswith(".json"):
+        return [path]
+    return [value for value in list_directory(token, repo, "main", path) if value.lower().endswith(".json")]
+
+
+def searched_source_paths(token, repo, parser_id, config_content, locator):
+    title = str((locator or {}).get("title") or "").replace("\\", " ").replace('"', " ").strip()
+    if not title:
+        fail(f"{parser_id} source article requires a title locator")
+    root = "html/CR" if parser_id == "CND" else config_source_path(config_content)
+    extension = "json" if parser_id == "CCRD" else "html"
+    query = urllib.parse.quote(f'repo:{OWNER}/{repo} path:{root} extension:{extension} "{title}"')
+    status, data = api_request(token, "GET", f"/search/code?q={query}&per_page=100")
+    if status != 200 or not isinstance(data.get("items"), list):
+        fail(f"cannot locate {parser_id} source article: {data}")
+    total = int(data.get("total_count") or 0)
+    if not 0 < total <= 100:
+        fail(f"{parser_id} source article search did not yield a bounded candidate set")
+    return [str(item.get("path") or "") for item in data["items"] if item.get("path")]
+
+
+def html_text(value):
+    return html.unescape(re.sub(r"<[^>]*>", "", value)).strip()
+
+
+def direct_source_article(parser_id, content):
+    if parser_id == "CCRD":
+        try:
+            raw = json.loads(content)
+            values = str(raw.get("date") or "").split("-")
+            date = {"year": int(values[0])}
+            if len(values) > 1 and int(values[1] or 0):
+                date["month"] = int(values[1])
+            if len(values) > 2 and int(values[2] or 0):
+                date["day"] = int(values[2])
+        except (TypeError, ValueError, json.JSONDecodeError, IndexError) as exc:
+            fail(f"CCRD source metadata is invalid: {exc}")
+        return {
+            "title": raw.get("title") or "", "authors": raw.get("authors") or [],
+            "dates": [date], "is_range_date": False,
+        }
+    title = re.search(r"<h3\b[^>]*>(.*?)</h3\s*>", content, re.I | re.DOTALL)
+    author = re.search(r"<strong\b[^>]*>(.*?)</strong\s*>", content, re.I | re.DOTALL)
+    info = re.search(r"<div\b[^>]*class=(['\"])[^'\"]*\binfo\b[^'\"]*\1[^>]*>(.*?)</div\s*>", content, re.I | re.DOTALL)
+    date = re.search(r"\d{4}-\d{2}-\d{2}", info.group(2) if info else "")
+    if not title or not info or not date:
+        fail("aisixiang source article is missing identity metadata")
+    year, month, day = (int(value) for value in date.group().split("-"))
+    return {
+        "title": html_text(title.group(1)), "authors": [html_text(author.group(1)) if author else ""],
+        "dates": [{"year": year, "month": month, "day": day}], "is_range_date": False,
+    }
+
+
+def update_direct_source(parser_id, content, article_patch):
+    if parser_id == "CCRD":
+        if not article_patch or set(article_patch) - {"title", "authors"}:
+            fail("CCRD article metadata supports title and authors only")
+        raw = json.loads(content)
+        raw.update(article_patch)
+        return json.dumps(raw, ensure_ascii=False, separators=(",", ":"))
+    if not article_patch or set(article_patch) - {"title", "authors", "dates"}:
+        fail("aisixiang article metadata supports title, authors, and dates only")
+    updated = content
+    if "title" in article_patch:
+        title = article_patch["title"]
+        if not isinstance(title, str) or not title.strip():
+            fail("aisixiang article title is invalid")
+        updated, count = re.subn(
+            r"(<h3\b[^>]*>).*?(</h3\s*>)", lambda match: match.group(1) + html.escape(title, quote=False) + match.group(2),
+            updated, count=1, flags=re.I | re.DOTALL,
+        )
+        if count != 1:
+            fail("aisixiang source title was not found")
+    if "authors" in article_patch:
+        authors = article_patch["authors"]
+        if not isinstance(authors, list) or len(authors) != 1 or not isinstance(authors[0], str) or not authors[0].strip():
+            fail("aisixiang article requires exactly one author")
+        updated, count = re.subn(
+            r"(<strong\b[^>]*>).*?(</strong\s*>)", lambda match: match.group(1) + html.escape(authors[0], quote=False) + match.group(2),
+            updated, count=1, flags=re.I | re.DOTALL,
+        )
+        if count != 1:
+            fail("aisixiang source author was not found")
+    if "dates" in article_patch:
+        dates = article_patch["dates"]
+        if not isinstance(dates, list) or len(dates) != 1 or not isinstance(dates[0], dict) or set(dates[0]) != {"year", "month", "day"}:
+            fail("aisixiang article requires one complete date")
+        try:
+            date = f"{int(dates[0]['year']):04d}-{int(dates[0]['month']):02d}-{int(dates[0]['day']):02d}"
+        except (TypeError, ValueError):
+            fail("aisixiang article date is invalid")
+        info = re.search(r"<div\b[^>]*class=(['\"])[^'\"]*\binfo\b[^'\"]*\1[^>]*>.*?</div\s*>", updated, re.I | re.DOTALL)
+        if not info or not re.search(r"\d{4}-\d{2}-\d{2}", info.group()):
+            fail("aisixiang source date was not found")
+        replacement = re.sub(r"\d{4}-\d{2}-\d{2}", date, info.group(), count=1)
+        updated = updated[:info.start()] + replacement + updated[info.end():]
+    return updated
+
+
+def update_direct_metadata_file(token, repo, parser_id, config_path, config_content, request):
+    metadata = payload_field(request, "metadata") or {}
+    article_patch = metadata.get("article") or {}
+    if not article_patch:
+        return [("config", config_path, update_config(config_content, request)[0])], request.get("article_id")
+    locator = payload_field(request, "locator") or {}
+    matches = []
+    for path in searched_source_paths(token, repo, parser_id, config_content, locator):
+        content, _sha = get_file(token, repo, "main", path)
+        if content:
+            article = direct_source_article(parser_id, content)
+            if normalized_article_id(article) == request.get("article_id"):
+                matches.append((path, content))
+    if len(matches) != 1:
+        fail(f"expected one {parser_id} source article, found {len(matches)}")
+    path, content = matches[0]
+    updated = update_direct_source(parser_id, content, article_patch)
+    article = direct_source_article(parser_id, updated)
+    files = [("main", path, updated)]
+    if metadata.get("source"):
+        source_request = request_with_metadata(request, {"source": metadata["source"]})
+        files.append(("config", config_path, update_config(config_content, source_request)[0]))
+    return files, normalized_article_id(article)
+
+
+def cnd_source_articles(content):
+    articles = []
+    for index, original in enumerate(content.split("<a name")[1:], start=1):
+        article = original.replace("\r\n", "\n").replace(
+            "back to TOC</a>\n\n", "back to TOC</a>\n",
+        ).replace("　", " ").replace("\t", " ")
+        if article.startswith("=T"):
+            continue
+        article_type = 0
+        if "·~}" not in article:
+            if "back to TOC" in article:
+                end = article.find("\n\n")
+            elif "</a>" not in article:
+                end = article.find("\n\n")
+            else:
+                end = article.find("</a>")
+            tmp = article[:max(0, end)]
+            if re.search(r"\n +·", article):
+                article_type = 1
+        else:
+            tmp = re.split(r"~\{[ 　]*·", article, maxsplit=1)[0]
+        tmp2 = article[len(tmp):]
+        title = ""
+        if article_type == 0:
+            while "~{" in tmp and "~}" in tmp:
+                start, end = tmp.find("~{") + 2, tmp.find("~}")
+                value = tmp[start:end].strip()
+                if not value.startswith(("【", "〖")):
+                    title += value
+                tmp = tmp[end + 2:]
+        else:
+            before_anchor = tmp.split("</a>", 1)[0]
+            title = before_anchor.split(">", 1)[1].strip() if ">" in before_anchor else ""
+        if title.startswith("杂志上连载"):
+            continue
+        if title.startswith("端思潮》一书的电子"):
+            title = "文化大革命和它的异端思潮（连载之一）"
+        if title.startswith("初所撰写的对文革的反思〈"):
+            title = "我心中的文革"
+        if title.startswith("·杨道远·"):
+            title = "武汉地区文革初期的“五十天”（上）——《武汉地区文革纪实》选载"
+            tmp2 = article[article.find("·杨道远·"):]
+        if not title:
+            continue
+        if article_type == 0:
+            author_start, author_end = tmp2.find("·") + 1, tmp2.find("·~}")
+        else:
+            author_start, author_end = tmp2.find("·") + 1, tmp2.find("·\n")
+        if author_start <= 0 or author_end < author_start:
+            authors = []
+        else:
+            authors = [
+                value.replace(" ", "").replace("　", "")
+                for value in tmp2[author_start:author_end].strip().split("·")
+                if value.replace(" ", "").replace("　", "")
+            ]
+        if any(len(value) >= 10 for value in authors) or len(title) > 50:
+            continue
+        articles.append((index, article_type, {
+            "title": title, "authors": authors, "dates": [], "is_range_date": False,
+        }))
+    return articles
+
+
+def update_cnd_source(content, segment_index, article_type, article_patch):
+    if set(article_patch) != {"authors"}:
+        fail("CND article metadata supports authors only")
+    authors = article_patch["authors"]
+    if not isinstance(authors, list) or any(
+        not isinstance(value, str) or not value.strip() or any(char in value for char in "·\r\n")
+        for value in authors
+    ):
+        fail("CND article authors are invalid")
+    segments = content.split("<a name")
+    if not 0 < segment_index < len(segments):
+        fail("CND source segment was not found")
+    segment = segments[segment_index]
+    replacement = "·" + "·".join(authors) + "·"
+    pattern = r"·[^·\r\n]*(?:·[^·\r\n]*)*·(?=~\})" if article_type == 0 else r"·[^\r\n]*·(?=\r?\n)"
+    segment, count = re.subn(pattern, lambda _match: replacement, segment, count=1)
+    if count != 1:
+        fail("CND source author marker was not found")
+    segments[segment_index] = segment
+    return "<a name".join(segments)
+
+
+def update_cnd_metadata_file(token, repo, config_path, config_content, request):
+    metadata = payload_field(request, "metadata") or {}
+    article_patch = metadata.get("article") or {}
+    if not article_patch:
+        return [("config", config_path, update_config(config_content, request)[0])], request.get("article_id")
+    locator = payload_field(request, "locator") or {}
+    matches = []
+    for path in searched_source_paths(token, repo, "CND", config_content, locator):
+        content, _sha = get_file(token, repo, "main", path)
+        for segment_index, article_type, article in cnd_source_articles(content):
+            if normalized_article_id(article) == request.get("article_id"):
+                matches.append((path, content, segment_index, article_type))
+    if len(matches) != 1:
+        fail(f"expected one CND source article, found {len(matches)}")
+    path, content, segment_index, article_type = matches[0]
+    updated = update_cnd_source(content, segment_index, article_type, article_patch)
+    updated_matches = [
+        article for index, _kind, article in cnd_source_articles(updated) if index == segment_index
+    ]
+    if len(updated_matches) != 1:
+        fail("updated CND source article could not be verified")
+    files = [("main", path, updated)]
+    if metadata.get("source"):
+        source_request = request_with_metadata(request, {"source": metadata["source"]})
+        files.append(("config", config_path, update_config(config_content, source_request)[0]))
+    return files, normalized_article_id(updated_matches[0])
+
+
+def structured_source_articles(parser_id, content):
+    try:
+        raw = json.loads(content)
+    except (TypeError, json.JSONDecodeError) as exc:
+        fail(f"{parser_id} source is invalid JSON: {exc}")
+    if parser_id == "maoistlegacy-txt":
+        if not isinstance(raw, dict):
+            fail("maoistlegacy-txt source metadata is not an object")
+        return raw, [{
+            "title": raw.get("title") or "", "authors": raw.get("creator") or [],
+            "dates": raw.get("dates") or [], "is_range_date": False,
+        }]
+    articles = raw if isinstance(raw, list) else [raw]
+    if not articles or any(not isinstance(article, dict) for article in articles):
+        fail(f"{parser_id} source does not contain articles")
+    return raw, articles
+
+
+def update_structured_source(parser_id, content, article_index, article_patch):
+    allowed = {"title", "authors", "dates", "tags"}
+    if not article_patch or set(article_patch) - allowed:
+        fail("structured source article metadata contains unsupported fields")
+    raw, articles = structured_source_articles(parser_id, content)
+    if parser_id == "maoistlegacy-txt":
+        mapping = {"title": "title", "authors": "creator", "dates": "dates"}
+        for key, value in article_patch.items():
+            if key == "tags":
+                if not isinstance(value, list) or any(
+                    not isinstance(tag, dict) or tag.get("type") != "主题/事件" or not isinstance(tag.get("name"), str)
+                    for tag in value
+                ):
+                    fail("maoistlegacy-txt supports subject tags only")
+                raw["tags"] = [tag["name"] for tag in value]
+            else:
+                raw[mapping[key]] = value
+    else:
+        articles[article_index].update(article_patch)
+    return json.dumps(raw, ensure_ascii=False, separators=(",", ":"))
+
+
+def update_structured_metadata_file(token, repo, parser_id, config_path, config_content, request):
+    metadata = payload_field(request, "metadata") or {}
+    article_patch = metadata.get("article") or {}
+    if not article_patch:
+        return [("config", config_path, update_config(config_content, request)[0])], request.get("article_id")
+    matches = []
+    for path in structured_source_paths(token, repo, parser_id, config_content):
+        content, _sha = get_file(token, repo, "main", path)
+        if not content:
+            continue
+        _raw, articles = structured_source_articles(parser_id, content)
+        for index, article in enumerate(articles):
+            if normalized_article_id(article) == request.get("article_id"):
+                matches.append((path, content, index, article))
+    if len(matches) != 1:
+        fail(f"expected one structured source article, found {len(matches)}")
+    path, content, index, article = matches[0]
+    updated_content = update_structured_source(parser_id, content, index, article_patch)
+    _raw, updated_articles = structured_source_articles(parser_id, updated_content)
+    files = [("main", path, updated_content)]
+    if metadata.get("source"):
+        source_request = request_with_metadata(request, {"source": metadata["source"]})
+        files.append(("config", config_path, update_config(config_content, source_request)[0]))
+    return files, normalized_article_id(updated_articles[index])
+
+
+def update_metadata_files(token, repo, publication_id, request):
+    metadata = payload_field(request, "metadata") or {}
+    config_path = f"{publication_id}.ts"
+    config_content, _sha = get_file(token, repo, "config", config_path)
+    if not config_content:
+        fail(f"config file does not exist: {config_path}")
+    parser_id = config_parser_id(config_content)
+    if parser_id in {"rmrb", "whb", "jfjb"}:
+        return update_db_metadata_file(token, repo, parser_id, config_path, config_content, request)
+    if parser_id in {"CCRD", "aisixiang"}:
+        return update_direct_metadata_file(token, repo, parser_id, config_path, config_content, request)
+    if parser_id == "CND":
+        return update_cnd_metadata_file(token, repo, config_path, config_content, request)
+    if parser_id in SOURCE_PARSERS:
+        return update_structured_metadata_file(token, repo, parser_id, config_path, config_content, request)
+    if parser_id in OVERRIDE_PARSERS:
+        article_patch = metadata.get("article") or {}
+        if not article_patch:
+            return [("config", config_path, update_config(config_content, request)[0])], request.get("article_id")
+        if set(article_patch) - {"title", "authors", "dates", "tags"}:
+            fail("article metadata override contains unsupported fields")
+        locator = payload_field(request, "locator") or {}
+        current_article_id = str(request.get("article_id") or "")
+        override_path = f"metadata_overrides/{publication_id}/{current_article_id}.json"
+        existing_override, _sha = get_file(token, repo, "config", override_path)
+        if not existing_override:
+            candidates = []
+            directory = f"metadata_overrides/{publication_id}"
+            for candidate_path in list_directory(token, repo, "config", directory):
+                content, _candidate_sha = get_file(token, repo, "config", candidate_path)
+                try:
+                    value = json.loads(content)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(value, dict) and value.get("new_article_id") == current_article_id:
+                    candidates.append((candidate_path, value))
+            if len(candidates) > 1:
+                fail("multiple article metadata overrides match the current article")
+            if candidates:
+                override_path, previous = candidates[0]
+            else:
+                previous = None
+        else:
+            previous = json.loads(existing_override)
+        article = {
+            "title": locator.get("title"), "authors": locator.get("authors") or [],
+            "dates": locator.get("dates") or [], "is_range_date": bool(locator.get("is_range_date")),
+        }
+        article.update(article_patch)
+        new_article_id = normalized_article_id(article)
+        source_article_id = str(previous.get("article_id")) if isinstance(previous, dict) else current_article_id
+        source_article = previous.get("article") if isinstance(previous, dict) else {
+            "title": locator.get("title"), "authors": locator.get("authors") or [],
+            "dates": locator.get("dates") or [], "is_range_date": bool(locator.get("is_range_date")),
+        }
+        merged_patch = dict(previous.get("metadata") or {}) if isinstance(previous, dict) else {}
+        merged_patch.update(article_patch)
+        override = json.dumps({
+            "version": 1, "publication_id": publication_id,
+            "article_id": source_article_id, "new_article_id": new_article_id,
+            "article": source_article, "metadata": merged_patch,
+        }, ensure_ascii=False, separators=(",", ":"))
+        files = [("config", override_path, override)]
+        if metadata.get("source"):
+            source_request = request_with_metadata(request, {"source": metadata["source"]})
+            files.append(("config", config_path, update_config(config_content, source_request)[0]))
+        return files, new_article_id
+    try:
+        content, article_id = update_config(config_content, request)
+        return [("config", config_path, content)], article_id
+    except RuntimeError as exc:
+        if "config does not contain parser_option.articles" not in str(exc) or not metadata.get("article"):
+            raise
+
+    files = []
+    article_request = request_with_metadata(request, {"article": metadata["article"]})
+    article_content, _sha = get_file(token, repo, "ocr_config", config_path)
+    if not article_content:
+        fail(f"legacy article config file does not exist: {config_path}")
+    updated_article, article_id = update_config(article_content, article_request)
+    files.append(("ocr_config", config_path, updated_article))
+    if metadata.get("source"):
+        source_request = request_with_metadata(request, {"source": metadata["source"]})
+        updated_source, _unchanged_article_id = update_config(config_content, source_request)
+        files.append(("config", config_path, updated_source))
+    return files, article_id
+
+
+def replace_config_articles(existing, request):
+    helper = os.path.join(os.path.dirname(__file__), "update_archive_config.mjs")
+    articles = payload_field(request, "articles") or []
+    config_articles = [
+        {key: value for key, value in article.items() if key not in {"content", "base_part_count"}}
+        for article in articles
+    ]
+    process = subprocess.run(
+        ["node", helper],
+        input=json.dumps({
+            "content": existing,
+            "locator": payload_field(request, "locator"),
+            "replace_articles": config_articles,
+        }, ensure_ascii=False),
+        text=True,
+        capture_output=True,
+        check=False,
+        env={"PATH": os.environ.get("PATH", "")},
+    )
+    if process.returncode != 0:
+        fail(f"config article replacement failed: {process.stderr.strip()}")
+    try:
+        result = json.loads(process.stdout)
+    except json.JSONDecodeError as exc:
+        fail(f"config article replacement returned invalid JSON: {exc}")
+    if not isinstance(result.get("content"), str):
+        fail("config article replacement returned invalid content")
+    return result["content"]
+
+
+def validate_parse_request(request, archive_id):
+    if archive_id != 25:
+        fail("parse is currently limited to archive 25")
+    locator = payload_field(request, "locator")
+    articles = payload_field(request, "articles")
+    if not isinstance(locator, dict) or not isinstance(articles, list) or not 1 <= len(articles) <= 200:
+        fail("parse requires a locator and 1-200 articles")
+    source_files = payload_field(request, "source_files")
+    if (
+        not isinstance(source_files, list) or not 1 <= len(source_files) <= 1000
+        or any(not isinstance(value, str) or not value or len(value) > 4096 for value in source_files)
+    ):
+        fail("parse source files are invalid")
+    try:
+        source_start = int(locator["page_start"])
+        source_end = int(locator["page_end"])
+    except (KeyError, TypeError, ValueError):
+        fail("parse locator has invalid page range")
+    allowed = {"title", "authors", "dates", "is_range_date", "page_start", "page_end", "content", "base_part_count", "ocr", "ocr_exceptions"}
+    covered = set()
+    article_ids = set()
+    for article in articles:
+        if not isinstance(article, dict) or set(article) - allowed:
+            fail("parse article contains unsupported fields")
+        title = article.get("title")
+        if not isinstance(title, str) or not title.strip() or title.startswith("【文章待拆分】"):
+            fail("parse article has an invalid title")
+        content = article.get("content")
+        if not isinstance(content, str) or not content.strip() or len(content) > 200000:
+            fail("parse article has invalid content")
+        base_part_count = article.get("base_part_count")
+        if not isinstance(base_part_count, int) or not 1 <= base_part_count <= 15000:
+            fail("parse article has invalid OCR baseline size")
+        try:
+            start = int(article["page_start"])
+            end = int(article["page_end"])
+        except (KeyError, TypeError, ValueError):
+            fail("parse article has an invalid page range")
+        if start < source_start or end > source_end or start > end:
+            fail("parse article page range is outside the source range")
+        covered.update(range(start, end + 1))
+        authors = article.get("authors", [])
+        if not isinstance(authors, list) or any(not isinstance(value, str) or not value.strip() for value in authors):
+            fail("parse article authors are invalid")
+        dates = article.get("dates", [])
+        if not isinstance(dates, list):
+            fail("parse article dates are invalid")
+        for date in dates:
+            if not isinstance(date, dict) or set(date) - {"year", "month", "day"}:
+                fail("parse article date is invalid")
+            if not any(key in date for key in ("year", "month", "day")):
+                fail("parse article date is empty")
+            if "year" in date and (not isinstance(date["year"], int) or not 1 <= date["year"] <= 9999):
+                fail("parse article year is invalid")
+            if "month" in date and (not isinstance(date["month"], int) or not 1 <= date["month"] <= 12):
+                fail("parse article month is invalid")
+            if "day" in date and (not isinstance(date["day"], int) or not 1 <= date["day"] <= 31):
+                fail("parse article day is invalid")
+        exceptions = article.get("ocr_exceptions") or {}
+        if not isinstance(exceptions, dict):
+            fail("parse OCR exceptions are invalid")
+        ocr_values = [article.get("ocr") or {}, *exceptions.values()]
+        for value in ocr_values:
+            if not isinstance(value, dict) or set(value) - {"content_thresholds", "auto_vsplit", "vsplit"}:
+                fail("parse OCR options contain unsupported fields")
+            thresholds = value.get("content_thresholds")
+            if thresholds is not None and (
+                not isinstance(thresholds, list) or len(thresholds) != 4
+                or any(not isinstance(number, (int, float)) or number < 0 or number > 1 for number in thresholds)
+                or thresholds[0] + thresholds[1] >= 1 or thresholds[2] + thresholds[3] >= 1
+            ):
+                fail("parse OCR crop is invalid")
+            if "auto_vsplit" in value and not isinstance(value["auto_vsplit"], bool):
+                fail("parse OCR auto split is invalid")
+            if "vsplit" in value and (
+                not isinstance(value["vsplit"], (int, float)) or not 0 <= value["vsplit"] <= 1
+            ):
+                fail("parse OCR split is invalid")
+        for key in exceptions:
+            if not re.fullmatch(r"[1-9][0-9]*", str(key)) or not start <= int(key) <= end:
+                fail("parse OCR exception page is invalid")
+        normalized_dates = sorted(
+            f"{date.get('year') or '0000'}-{int(date.get('month') or 0):02d}-{int(date.get('day') or 0):02d}"
+            for date in dates
+        )
+        article_id = hashlib.md5(json.dumps([
+            title.strip(), normalized_dates, bool(article.get("is_range_date")),
+            sorted(value.strip() for value in authors), "",
+        ], ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()[:10]
+        if article_id in article_ids:
+            fail("parse articles would generate duplicate article IDs")
+        article_ids.add(article_id)
+    if covered != set(range(source_start, source_end + 1)):
+        fail("parse article ranges do not cover the source pages")
+
+
+def parse_article_id(article):
+    dates = sorted(
+        f"{date.get('year') or '0000'}-{int(date.get('month') or 0):02d}-{int(date.get('day') or 0):02d}"
+        for date in article.get("dates", [])
+    )
+    return hashlib.md5(json.dumps([
+        article["title"].strip(), dates, bool(article.get("is_range_date")),
+        sorted(value.strip() for value in article.get("authors", [])), "",
+    ], ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()[:10]
+
+
+def manual_content_patch(article):
+    paragraphs = [value for value in article["content"].splitlines() if value.strip()]
+    if not paragraphs:
+        paragraphs = [article["content"]]
+    parts = {str(index): {"delete": True} for index in range(article["base_part_count"])}
+    parts["0"]["insertBefore"] = [
+        {"type": "paragraph", "text": paragraph} for paragraph in paragraphs
+    ]
+    return {"version": 2, "parts": parts, "comments": {}, "description": ""}
+
+
+def segmented_request(request):
+    blobs = request.get("payload_blobs")
+    if blobs is None:
+        return request
+    if set(request) - {"payload_blobs", "payload_sha256", "payload_characters", "request_id"}:
+        fail("segmented workflow payload has unexpected fields")
+    if not isinstance(blobs, list) or not 1 <= len(blobs) <= MAX_SEGMENTED_PAYLOAD_BLOBS:
+        fail("segmented workflow payload has an invalid blob list")
+    expected_hash = request.get("payload_sha256")
+    expected_characters = request.get("payload_characters")
+    if not isinstance(expected_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_hash):
+        fail("segmented workflow payload has an invalid hash")
+    if not isinstance(expected_characters, int) or not 1 <= expected_characters <= MAX_SEGMENTED_PAYLOAD_CHARACTERS:
+        fail("segmented workflow payload has an invalid character count")
+    token = os.environ.get("TRACKER_TOKEN", "")
+    if not token:
+        fail("TRACKER_TOKEN is required for segmented workflow payloads")
+    chunks = []
+    for sha in blobs:
+        if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40,64}", sha):
+            fail("segmented workflow payload has an invalid blob SHA")
+        data = response_or_fail(
+            token, "GET", f"{full_repo_path(TRACKER_REPOSITORY)}/git/blobs/{sha}", (200,),
+        )
+        if data.get("encoding") != "base64" or not isinstance(data.get("content"), str):
+            fail("segmented workflow payload blob is invalid")
+        try:
+            encoded = "".join(data["content"].split())
+            chunks.append(base64.b64decode(encoded, validate=True).decode("utf-8"))
+        except (ValueError, UnicodeDecodeError) as exc:
+            fail(f"segmented workflow payload blob cannot be decoded: {exc}")
+    serialized = "".join(chunks)
+    if len(serialized) != expected_characters:
+        fail("segmented workflow payload character count does not match")
+    if hashlib.sha256(serialized.encode("utf-8")).hexdigest() != expected_hash:
+        fail("segmented workflow payload hash does not match")
+    try:
+        restored = json.loads(serialized)
+    except json.JSONDecodeError as exc:
+        fail(f"segmented workflow payload is invalid JSON: {exc}")
+    if not isinstance(restored, dict):
+        fail("segmented workflow payload must restore an object")
+    if request.get("request_id") != restored.get("request_id"):
+        fail("segmented workflow payload request ID does not match")
+    return restored
+
+
+def load_request():
+    event_path = os.environ.get("GITHUB_EVENT_PATH")
+    if not event_path:
+        fail("GITHUB_EVENT_PATH is required")
+    with open(event_path, encoding="utf-8") as event_file:
+        event = json.load(event_file)
+    request = event.get("inputs") or event.get("client_payload") or {}
+    if not isinstance(request, dict):
+        fail("workflow payload must be an object")
+    return segmented_request(request)
+
+
+def main():
+    token = os.environ.get("GH_PAT", "")
+    if not token:
+        fail("GH_PAT is required")
+    request = load_request()
+    try:
+        archive_id = int(request.get("archive_id"))
+    except (TypeError, ValueError):
+        fail("archive_id must be an integer")
+    if archive_id < 0 or archive_id > 31:
+        fail("archive_id must be between 0 and 31")
+
+    kind = request.get("kind", "ocr_patch")
+    if kind not in ("proofread", "ocr_patch", "config", "parse"):
+        fail("kind must be proofread, ocr_patch, config, or parse")
+    repo = f"{REPOSITORY_PREFIX}{archive_id}"
+    correction_id = hashlib.sha256(
+        json.dumps(request, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:12]
+    if kind == "parse":
+        validate_parse_request(request, archive_id)
+        tracker_token = os.environ.get("TRACKER_TOKEN", "")
+        if not tracker_token:
+            fail("TRACKER_TOKEN is required for parse review")
+        publication_id = str(request.get("publication_id", ""))
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", publication_id):
+            fail("publication_id is invalid")
+        path = f"{publication_id}.ts"
+        existing, _existing_sha = get_file(token, repo, "config", path)
+        if not existing:
+            fail(f"config file does not exist: {path}")
+        content = replace_config_articles(existing, request)
+        title = request.get("title") or f"解析 {publication_id}"
+        crop_assets = build_review_crops(request)
+        description = parse_review_body(request, repo, publication_id, correction_id, crop_assets)
+        config_pull = submit_file(token, repo, "config", path, content, title, description, correction_id)
+        patch_contents = {}
+        for article in payload_field(request, "articles"):
+            article_id = parse_article_id(article)
+            target_path = patch_path(archive_id, article_id, publication_id)
+            existing_patch, _existing_patch_sha = get_file(token, repo, "ocr_patch", target_path)
+            patch_contents[target_path] = append_patch(existing_patch, manual_content_patch(article))
+        patch_pull = submit_files(
+            token, repo, "ocr_patch", patch_contents, title, description, correction_id,
+        )
+        if "<!-- parse-fulltext:embedded -->" not in description:
+            for pull in (config_pull, patch_pull):
+                post_parse_pull_comments(
+                    token, repo, pull["number"], request, correction_id, crop_assets,
+                )
+        tracker_issue = upsert_parse_tracker_issue(
+            tracker_token, correction_id, request, repo, publication_id, [config_pull, patch_pull], crop_assets,
+        )
+        print(json.dumps({
+            "repository": repo,
+            "path": path,
+            "pull_requests": [config_pull["url"], patch_pull["url"]],
+            "tracker_issue": tracker_issue,
+        }, ensure_ascii=False))
+        return
+    if kind == "proofread":
+        article_id = str(request.get("article_id", ""))
+        publication_id = str(request.get("publication_id", ""))
+        patch = payload_field(request, "patch", payload_field(request, "patch_json"))
+        metadata = payload_field(request, "metadata", payload_field(request, "metadata_json"))
+        if isinstance(patch, str):
+            if patch.strip():
+                try:
+                    patch = json.loads(patch)
+                except json.JSONDecodeError as exc:
+                    fail(f"patch_json is invalid JSON: {exc}")
+                set_payload_field(request, "patch", patch)
+            else:
+                patch = None
+        if isinstance(metadata, str):
+            if metadata.strip():
+                try:
+                    metadata = json.loads(metadata)
+                except json.JSONDecodeError as exc:
+                    fail(f"metadata_json is invalid JSON: {exc}")
+                set_payload_field(request, "metadata", metadata)
+            else:
+                metadata = None
+        if patch is None and not isinstance(metadata, dict):
+            fail("proofread requires patch or metadata")
+        if patch is not None:
+            validate_patch(patch)
+        fetch_bha_changes(request)
+        metadata = payload_field(request, "metadata")
+        if patch is None and not metadata:
+            fail("proofread metadata does not change the BHA preview")
+        correction_id = hashlib.sha256(json.dumps({
+            "archive_id": archive_id, "kind": "proofread", "article_id": article_id,
+            "publication_id": publication_id, "patch": patch, "metadata": metadata,
+            "request_id": request.get("request_id"),
+        }, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:12]
+        patch_path(archive_id, article_id, publication_id)
+        title = request.get("title") or f"校订 {article_id}"
+        pull_requests = []
+        new_article_id = article_id
+        if isinstance(metadata, dict) and metadata:
+            metadata_files, new_article_id = update_metadata_files(token, repo, publication_id, request)
+            description = proofread_pr_body(request, repo, new_article_id, correction_id)
+            grouped = {}
+            for base, config_path, updated_config in metadata_files:
+                grouped.setdefault(base, {})[config_path] = updated_config
+            for base, contents in grouped.items():
+                if len(contents) == 1:
+                    config_path, updated_config = next(iter(contents.items()))
+                    pull_requests.append(submit_file(
+                        token, repo, base, config_path, updated_config,
+                        title, description, correction_id,
+                    ))
+                else:
+                    pull_requests.append(submit_files(
+                        token, repo, base, contents, title, description, correction_id,
+                    ))
+        if patch is not None:
+            target_path = patch_path(archive_id, new_article_id, publication_id)
+            target_content, _sha = get_file(token, repo, "ocr_patch", target_path)
+            if not target_content and new_article_id != article_id:
+                old_path = patch_path(archive_id, article_id, publication_id)
+                target_content, _sha = get_file(token, repo, "ocr_patch", old_path)
+            target_content = append_patch(target_content, patch)
+            pull_requests.append(submit_file(
+                token, repo, "ocr_patch", target_path, target_content,
+                title, proofread_pr_body(request, repo, new_article_id, correction_id), correction_id,
+            ))
+        elif new_article_id != article_id:
+            target_path = patch_path(archive_id, new_article_id, publication_id)
+            target_content, _sha = get_file(token, repo, "ocr_patch", target_path)
+            if not target_content:
+                old_path = patch_path(archive_id, article_id, publication_id)
+                old_content, _sha = get_file(token, repo, "ocr_patch", old_path)
+                if old_content:
+                    pull_requests.append(submit_file(
+                        token, repo, "ocr_patch", target_path, old_content,
+                        title, proofread_pr_body(request, repo, new_article_id, correction_id), correction_id,
+                    ))
+        auto_merged = []
+        if (
+            request.get("auto_merge") is True
+            and request.get("auto_merge_policy") == AUTO_MERGE_POLICY
+            and auto_merge_allowed(kind, patch, metadata)
+        ):
+            for pull in pull_requests:
+                if merge_pull(token, repo, pull):
+                    auto_merged.append(pull["url"])
+                    delete_pull_branch(token, repo, pull)
+        auto_merged_urls = set(auto_merged)
+        pending_pulls = [pull for pull in pull_requests if pull["url"] not in auto_merged_urls]
+        tracker_issue = None
+        auto_merge_log = None
+        tracker_token = os.environ.get("TRACKER_TOKEN", "")
+        if pending_pulls and tracker_token:
+            tracker_issue = upsert_tracker_issue(
+                tracker_token, correction_id, request, repo, new_article_id, pending_pulls,
+            )
+        merged_pulls = [pull for pull in pull_requests if pull["url"] in auto_merged_urls]
+        if merged_pulls and tracker_token:
+            auto_merge_log = notify_auto_merged(
+                tracker_token, correction_id, request, repo, new_article_id, merged_pulls,
+            )
+        print(json.dumps({
+            "repository": repo,
+            "article_id": new_article_id,
+            "pull_requests": [pull["url"] for pull in pull_requests],
+            "auto_merged": auto_merged,
+            "tracker_issue": tracker_issue,
+            "auto_merge_log": auto_merge_log,
+        }, ensure_ascii=False))
+        return
+    base = kind
+    if kind == "ocr_patch":
+        path = patch_path(archive_id, request.get("article_id"), request.get("publication_id"))
+        patch_json = payload_field(request, "patch_json", payload_field(request, "patch"))
+        if isinstance(patch_json, str):
+            try:
+                patch = json.loads(patch_json)
+            except json.JSONDecodeError as exc:
+                fail(f"patch_json is invalid JSON: {exc}")
+        else:
+            patch = patch_json
+        if patch is None:
+            fail("patch_json is required")
+    else:
+        publication_id = str(request.get("publication_id", ""))
+        metadata = payload_field(request, "metadata", payload_field(request, "metadata_json"))
+        if isinstance(metadata, str):
+            try:
+                metadata = json.loads(metadata)
+            except json.JSONDecodeError as exc:
+                fail(f"metadata_json is invalid JSON: {exc}")
+            set_payload_field(request, "metadata", metadata)
+        if publication_id and isinstance(metadata, dict):
+            if not all(char.isalnum() or char in "._-" for char in publication_id):
+                fail("publication_id contains invalid characters")
+            path = f"{publication_id}.ts"
+        else:
+            path = str(request.get("path", ""))
+            if not re.fullmatch(r"[A-Za-z0-9_.-]+\.ts", path):
+                fail("config path is invalid")
+            if not isinstance(request.get("content"), str):
+                fail("config content is required")
+
+    existing, _existing_sha = get_file(token, repo, base, path)
+    if kind == "ocr_patch":
+        content = append_patch(existing, patch)
+    elif isinstance(payload_field(request, "metadata"), dict):
+        content, _new_article_id = update_config(existing, request)
+    else:
+        content = request["content"]
+    title = request.get("title") or f"校订 {path}"
+    pull = submit_file(
+        token, repo, base, path, content, title,
+        payload_field(request, "description") or f"自动提交到 {repo}/{base}，合并后由仓库 workflow 生成后续数据。",
+        correction_id,
+    )
+    print(json.dumps({"repository": repo, "path": path, "pull_request": pull["url"]}, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as exc:
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(1)

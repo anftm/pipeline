@@ -1,0 +1,656 @@
+#!/usr/bin/env python3
+"""Journalled producer isolation, collector dispatch and unconditional restoration."""
+
+import argparse
+import copy
+from datetime import datetime, timezone
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import time
+import uuid
+
+try:
+    from .reader_gc_fence import producer_repositories, producer_path
+    from .reader_producer_scope import load_config
+    from .reader_gc_credentials import token_for
+    from .reader_producer_scope_transition import journal_binding, validate_journal_binding
+except ImportError:
+    from reader_gc_fence import producer_repositories, producer_path
+    from reader_producer_scope import load_config
+    from reader_gc_credentials import token_for
+    from reader_producer_scope_transition import journal_binding, validate_journal_binding
+
+
+ACTIVE = ("queued", "pending", "in_progress", "waiting", "requested")
+DURABLE_JOURNAL = 'reader-index/gc/maintenance/current.json'
+DURABLE_HISTORY_PREFIX = 'reader-index/gc/maintenance/history/'
+_STORE = None
+
+
+def durable_store():
+    global _STORE
+    if os.environ.get('READER_GC_DURABLE_MAINTENANCE') != 'true':
+        return None
+    if _STORE is None:
+        try:
+            from .reader_gc_store import CollectionStore
+        except ImportError:
+            from reader_gc_store import CollectionStore
+        _STORE = CollectionStore()
+    return _STORE
+
+
+class MaintenanceAPIError(RuntimeError):
+    def __init__(self, repo, path, method, status):
+        self.status = status
+        super().__init__(f'maintenance API {method} failed: {repo}:{path} '
+                          f'(HTTP {status or "unknown"})')
+
+
+class MaintenanceReadbackError(RuntimeError):
+    """A policy/workflow mutation was not yet confirmed; never an isolation proof."""
+    def __init__(self, repo, path, operation):
+        self.repo, self.path, self.operation = repo, path, operation
+        super().__init__(f'{operation} readback mismatch: {repo}:{path}')
+
+
+def api(repo, path, *, method="GET", body=None):
+    token = token_for(repo)
+    command = ["gh", "api", f"repos/{repo}/{path}", "--method", method]
+    if body is not None:
+        command += ["--input", "-"]
+    for attempt in range(3):
+        try:
+            result = subprocess.run(command, input=json.dumps(body) if body is not None else None,
+                env={**os.environ, "GH_TOKEN": token}, capture_output=True, text=True, timeout=120)
+        except subprocess.TimeoutExpired:
+            error = MaintenanceAPIError(repo, path, method, None)
+        else:
+            if not result.returncode:
+                return json.loads(result.stdout) if result.stdout.strip() else {}
+            match = re.search(r'\bHTTP (\d{3})\b', result.stderr or '')
+            error = MaintenanceAPIError(repo, path, method, int(match[1]) if match else None)
+        # Never blindly retry a mutation: cancellation, dispatch and rerun are not
+        # idempotent. Only a read may be repeated.
+        if method != "GET" or error.status not in {None, 408, 429, 500, 502, 503, 504} \
+                or attempt == 2:
+            raise error
+        time.sleep(2 ** attempt)
+
+
+def state_matches(repo, path, expected):
+    """Bounded GET-only convergence after a mutation, never assume a PUT stuck.
+
+    GitHub can acknowledge a workflow/policy update before the next read sees
+    it. A stale read must not trigger another mutation or count as isolation.
+    """
+    for attempt in range(4):
+        if expected(api(repo, path)):
+            return True
+        if attempt < 3:
+            time.sleep(2 ** attempt)
+    return False
+
+
+def set_state(repo, path, body, expected):
+    """Idempotent PUT: read back an ambiguous outcome before any bounded retry."""
+    for attempt in range(3):
+        if expected(api(repo, path)):
+            return
+        try:
+            api(repo, path, method="PUT", body=body)
+        except MaintenanceAPIError as error:
+            if state_matches(repo, path, expected):
+                return
+            if error.status not in {None, 408, 429, 500, 502, 503, 504} or attempt == 2:
+                raise
+            time.sleep(2 ** attempt)
+            continue
+        if not state_matches(repo, path, expected):
+            raise MaintenanceReadbackError(repo, path, 'maintenance state mutation')
+        return
+
+
+def permissions(repo, desired):
+    # GET may expose read-only or newly added fields that PUT does not accept.
+    body = {key: desired[key] for key in ("enabled", "allowed_actions") if key in desired}
+    # GitHub rejects allowed_actions when Actions is being disabled. Keep the
+    # original policy only for re-enabling; the disabled state ignores it.
+    if body.get("enabled") is False:
+        body.pop("allowed_actions", None)
+    set_state(repo, "actions/permissions", body,
+              lambda value: all(value.get(key) == item for key, item in body.items()))
+
+
+def disable_actions(repo, record):
+    """Best-effort repository isolation; workflow disable is the primary fence.
+
+    A producer token may have Actions write but no Administration write. That is
+    enough to disable every producer workflow and cancel queued runs, which is
+    the normal drain. The collector fence still rejects any residual queued run
+    while repository Actions stays enabled, so a denied PUT cannot authorize a
+    deletion race.
+    """
+    try:
+        permissions(repo, {**record["permission"], "enabled": False})
+    except MaintenanceAPIError as error:
+        if error.status not in {401, 403, 404}:
+            raise
+        record["permission_denied"] = error.status
+        record.pop('permission_changed', None)
+        return False
+    record["permission_changed"] = True
+    return True
+
+
+def workflow_state(repo, workflow, enabled):
+    path = f"actions/workflows/{workflow['id']}"
+    desired = "active" if enabled else "disabled_manually"
+    for attempt in range(3):
+        if api(repo, path)["state"] == desired:
+            return
+        try:
+            api(repo, path + ("/enable" if enabled else "/disable"), method="PUT")
+        except MaintenanceAPIError as error:
+            if state_matches(repo, path, lambda value: value['state'] == desired):
+                return
+            if error.status not in {None, 408, 429, 500, 502, 503, 504} or attempt == 2:
+                raise
+            time.sleep(2 ** attempt)
+            continue
+        if not state_matches(repo, path, lambda value: value['state'] == desired):
+            raise MaintenanceReadbackError(repo, path, 'workflow state')
+        return
+
+
+def preflight():
+    """Check every credential and inventory before disabling the first producer."""
+    central = load_config()["publisher_repository"]
+    result = {}
+    errors = []
+    for repo in producer_repositories():
+        try:
+            inventory = pages(repo, "actions/workflows", "workflows")
+            workflows = [w for w in inventory if producer_path(w["path"])]
+            if not any(w["path"].endswith("/pdf-account-worker.yml") for w in workflows):
+                raise RuntimeError("incomplete producer inventory")
+            # The central repository is never repository-disabled: it hosts the
+            # maintenance run itself and only needs its producer workflows
+            # stopped. Some central worker credentials intentionally cannot read
+            # or write the repository Actions policy.
+            permission = {} if repo == central else api(repo, "actions/permissions")
+            result[repo] = {"permission": permission, "workflows": [
+                {"id": w["id"], "state": w["state"], "path": w["path"]} for w in workflows],
+                "cancelled": []}
+        except (MaintenanceAPIError, RuntimeError) as error:
+            # Keep the GET-only failure readable without exposing any credential.
+            errors.append({"repository": repo, "error": type(error).__name__,
+                           "status": getattr(error, "status", None)})
+    if errors:
+        raise RuntimeError(f"maintenance preflight failed for {len(errors)} repositories: "
+                           + json.dumps(errors, sort_keys=True))
+    return result
+
+
+def pages(repo, path, field):
+    result, page = [], 1
+    while True:
+        data = api(repo, path + ("&" if "?" in path else "?") + f"per_page=100&page={page}")
+        items = data[field]
+        result.extend(items)
+        if len(items) < 100:
+            return result
+        page += 1
+
+
+def archive_journal(store, raw):
+    """Keep exact terminal/recovery evidence beyond the next maintenance window.
+
+    The mutable current journal is a recovery cursor, not permanent history.
+    Content-addressed snapshots retain failures even after recovery succeeds or
+    Actions artifacts expire, and never pin obsolete document content.
+    """
+    target = DURABLE_HISTORY_PREFIX + hashlib.sha256(raw).hexdigest() + '.json'
+    store.put_bytes('vomebook/reader-assets-v2', target, raw)
+    if store.read_bytes('vomebook/reader-assets-v2', target) != raw:
+        raise RuntimeError('maintenance history readback mismatch')
+
+
+def journal(path, state):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".pending")
+    temporary.write_text(json.dumps(state, sort_keys=True, indent=2) + "\n")
+    temporary.replace(path)
+    store = durable_store()
+    if store and not state.get('preflight_only'):
+        raw = path.read_bytes()
+        # Archive before advancing the mutable cursor. Failure to preserve the
+        # evidence must not silently replace the last recoverable journal.
+        if 'restored' in state or state.get('restore_attempt_errors'):
+            archive_journal(store, raw)
+        store.put_bytes('vomebook/reader-assets-v2', DURABLE_JOURNAL, raw)
+        if store.read_bytes('vomebook/reader-assets-v2', DURABLE_JOURNAL) != raw:
+            raise RuntimeError('maintenance journal readback mismatch')
+
+
+def recover(path):
+    """Recover a killed runner before taking a new snapshot of producer state."""
+    store = durable_store()
+    if not store:
+        return
+    try:
+        raw = store.read_bytes('vomebook/reader-assets-v2', DURABLE_JOURNAL)
+    except FileNotFoundError:
+        return
+    state = json.loads(raw)
+    if (state.get('kind') != 'reader-maintenance-journal' or state.get('version') != 1
+            or not isinstance(state.get('repositories'), dict)):
+        raise RuntimeError('invalid durable maintenance journal')
+    # Old v1 journals without a binding retain their original recovery path.
+    # A bound partial snapshot may only contain a subset; restoration uses its
+    # original journal, never the current or proposed v2 repository list.
+    validate_journal_binding(state, require_complete=False)
+    if (not state.get('restored') and
+            (state.get('callback_recovery_required') or
+             state.get('callback_mutation_started') and not state.get('callback_committed'))):
+        raise RuntimeError('callback recovery is required before restoring producers')
+    if (not state.get('restored') and state.get('callback_mutation_started')
+            and state.get('callback_plan_sha256') and state.get('callback_handoff_stage') == 'references-retired'):
+        raise RuntimeError('staged callback requires its own verified final restoration')
+    if not state.get('restored') and state.get('callback_owner_run_id'):
+        owner = api(load_config()['publisher_repository'],
+                    f"actions/runs/{state['callback_owner_run_id']}")
+        if owner.get('status') != 'completed':
+            raise RuntimeError('isolated callback is still active; do not restore producers')
+    if not state.get('restored'):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(raw)
+        restore(path)
+    else:
+        # Upgrade an older completed current journal before a new window can
+        # overwrite it. No producer or dispatch mutation is needed here.
+        archive_journal(store, raw)
+
+
+def kick_restored(path, state):
+    """Restore isolation without restarting the retired OCR producer matrix."""
+    dispatches = state.setdefault('resumption_dispatches', {})
+    for name in ('pdf-lane-watchdog.yml', 'reader-v3-publish.yml'):
+        dispatches.setdefault(name, 'retired')
+    journal(path, state)
+
+
+def restore(path, *, expected_owner=None, expected_maintenance_id=None):
+    if not path.exists():
+        if expected_owner is not None or expected_maintenance_id is not None:
+            raise RuntimeError('guarded restoration requires its local journal')
+        return
+    if expected_maintenance_id is not None and expected_owner is None:
+        raise RuntimeError('expected maintenance window requires its owner identity')
+    state = json.loads(path.read_text())
+    if state.get('preflight_only') and expected_owner is None:
+        return
+    if expected_owner is not None:
+        # An interrupted callback may have persisted newer safety flags to the
+        # durable cursor after the runner's local file was written. Never use
+        # that older local copy to decide whether producers can be resumed.
+        store = durable_store()
+        if store is None or not str(expected_owner).isdigit():
+            raise RuntimeError('guarded restoration requires a durable owner identity')
+        try:
+            raw = store.read_bytes('vomebook/reader-assets-v2', DURABLE_JOURNAL)
+        except FileNotFoundError as error:
+            raise RuntimeError('guarded restoration requires its durable journal') from error
+        try:
+            current = json.loads(raw)
+        except (ValueError, TypeError) as error:
+            raise RuntimeError('guarded restoration requires its readable durable journal') from error
+        if not isinstance(current, dict):
+            raise RuntimeError('guarded restoration requires its readable durable journal')
+        if expected_maintenance_id is not None and (
+                not re.fullmatch(r'[0-9a-f]{32}', str(expected_maintenance_id))
+                or current.get('maintenance_id') != expected_maintenance_id):
+            raise RuntimeError('guarded restoration does not own the expected maintenance window')
+        if (current.get('version') != 1 or current.get('kind') != 'reader-maintenance-journal'
+                or not isinstance(current.get('repositories'), dict)
+                or not state.get('maintenance_id')
+                or state.get('maintenance_id') != current.get('maintenance_id')
+                or str(state.get('callback_owner_run_id')) != str(expected_owner)
+                or str(current.get('callback_owner_run_id')) != str(expected_owner)):
+            raise RuntimeError('guarded restoration does not own the durable journal')
+        state = current
+        if state.get('restored') is True:
+            return
+        path.write_bytes(raw)
+    else:
+        # Most workflow finalizers historically supplied only a local journal.
+        # It can predate a callback's durable recovery flag, or even belong to
+        # a different maintenance window. In durable mode never restore or
+        # overwrite the current cursor using that stale local snapshot.
+        store = durable_store()
+        if store is not None:
+            try:
+                raw = store.read_bytes('vomebook/reader-assets-v2', DURABLE_JOURNAL)
+                current = json.loads(raw)
+            except (FileNotFoundError, ValueError, TypeError) as error:
+                raise RuntimeError('restoration requires the durable maintenance journal') from error
+            if (not isinstance(state, dict) or state.get('version') != 1
+                    or state.get('kind') != 'reader-maintenance-journal'
+                    or not isinstance(state.get('maintenance_id'), str) or not state['maintenance_id']
+                    or not isinstance(current, dict) or current.get('version') != 1
+                    or current.get('kind') != 'reader-maintenance-journal'
+                    or not isinstance(current.get('repositories'), dict)
+                    or current.get('maintenance_id') != state['maintenance_id']):
+                raise RuntimeError('restoration does not match the durable maintenance window')
+            state = current
+            if state.get('restored') is True:
+                return
+            path.write_bytes(raw)
+    if state.get("preflight_only"):
+        return
+    validate_journal_binding(state, require_complete=False)
+    if (state.get('callback_recovery_required') or
+            state.get('callback_mutation_started') and not state.get('callback_committed')):
+        raise RuntimeError('callback recovery is required before restoring producers')
+    if (state.get('callback_plan_sha256') and state.get('callback_handoff_stage') == 'references-retired'
+            and state.get('callback_committed') is True and state.get('restored') is not True
+            and os.environ.get('GITHUB_RUN_ID') != str(state.get('callback_owner_run_id'))):
+        raise RuntimeError('staged callback restoration belongs to its verified Actions owner')
+    if state.get('callback_owner_run_id'):
+        owner_id = str(state['callback_owner_run_id'])
+        if not owner_id.isdigit():
+            raise RuntimeError('isolated callback has no valid Actions owner')
+        if owner_id != os.environ.get('GITHUB_RUN_ID'):
+            owner = api(load_config()['publisher_repository'], f'actions/runs/{owner_id}')
+            if owner.get('id') != int(owner_id) or owner.get('status') != 'completed':
+                raise RuntimeError('isolated callback owner is still active or cannot be verified')
+    if state.get("dispatch_requested"):
+        central = load_config()["publisher_repository"]
+        run_id = state.get("collector_run_id")
+        if not run_id:
+            matching = [run for run in pages(central,
+                "actions/workflows/reader-gc-collect.yml/runs", "workflow_runs")
+                if state["maintenance_id"] in run.get("display_title", "")]
+            if not matching:
+                raise RuntimeError("collector dispatch outcome unknown; do not restore producers yet")
+            run_id = matching[0]["id"]
+            state["collector_run_id"] = run_id
+            journal(path, state)
+        current = api(central, f"actions/runs/{run_id}")
+        if current["status"] != "completed":
+            raise RuntimeError("collector still active; do not restore producers")
+    errors = []
+    for repo, record in state["repositories"].items():
+        for attempt in range(3):
+            stage = 'permissions'
+            try:
+                if record.get("permission_changed"):
+                    permissions(repo, record["permission"])
+                for workflow in record["workflows"]:
+                    if workflow["state"] == "active":
+                        stage = 'workflow:' + str(workflow['id'])
+                        workflow_state(repo, workflow, True)
+                for run in record["cancelled"]:
+                    if run.get("restored"):
+                        continue
+                    stage = 'cancelled-run:' + str(run['id'])
+                    current = api(repo, f"actions/runs/{run['id']}")
+                    if current["status"] == "completed" and current.get("conclusion") == "cancelled":
+                        # Recovery never repeats cancellation/dispatch/rerun.
+                        # Only GET and idempotent policy/workflow PUTs can be
+                        # repeated; the independent collector is already done.
+                        run["rerun_skipped"] = True
+                    run["restored"] = True
+                    journal(path, state)
+                record["restored"] = True
+                stage = 'journal'
+                journal(path, state)
+                break
+            except Exception as error:
+                retryable = (isinstance(error, MaintenanceReadbackError) or
+                    isinstance(error, MaintenanceAPIError) and error.status in {None, 408, 429, 500, 502, 503, 504})
+                failure = {"repository": repo, "error": type(error).__name__,
+                    'stage': stage, 'attempt': attempt + 1,
+                    'at': datetime.now(timezone.utc).isoformat(), 'retryable': retryable}
+                if isinstance(error, MaintenanceAPIError):failure['status'] = error.status
+                # Final recovery success must not erase the original failure.
+                # Keep sanitized, persistent per-attempt evidence without token
+                # material or arbitrary upstream response bodies.
+                state.setdefault('restore_attempt_errors', []).append(failure)
+                record['restored'] = False
+                journal(path, state)
+                if retryable and attempt < 2:
+                    time.sleep(2 ** (attempt + 1))
+                    continue
+                errors.append(failure)
+                break
+    state["restore_errors"] = errors
+    state["restored"] = not errors
+    journal(path, state)
+    if errors:
+        raise RuntimeError("maintenance restoration requires recovery; see journal")
+    kick_restored(path, state)
+
+
+def run(path, *, limit=0, apply=True, scope='unreferenced', isolated_callback=None,
+        suppress_resume_dispatch=False, preserve_queued_runs=False, require_callback_commit=False,
+        allow_staged_handoff=False):
+    if scope not in {'unreferenced', 'retired-assets'}:
+        raise ValueError('invalid automatic collection scope')
+    central = load_config()["publisher_repository"]
+    recover(path)
+    if path.exists() and not json.loads(path.read_text()).get("restored"):
+        raise RuntimeError("unfinished maintenance journal requires restoration first")
+    state = {"version": 1, "kind": "reader-maintenance-journal", "repositories": {},
+             "maintenance_id": uuid.uuid4().hex, "started_at": datetime.now(timezone.utc).isoformat()}
+    if durable_store() is not None:
+        # New durable windows record their exact v1 scope before isolation.
+        # Recovery of journals without this field remains unchanged.
+        state['producer_scope'] = journal_binding(config=load_config())
+    original_scope = copy.deepcopy(state.get('producer_scope'))
+    if require_callback_commit:
+        run_id = os.environ.get('GITHUB_RUN_ID', '')
+        if not run_id.isdigit():
+            raise RuntimeError('fenced callback requires its central Actions run identity')
+        state['callback_owner_run_id'] = run_id
+    if suppress_resume_dispatch:
+        # This isolated operation never paused the user's automation flags;
+        # restore workflow states without starting new OCR admission tasks.
+        state['resumption_dispatches'] = {'pdf-lane-watchdog.yml': 'suppressed',
+                                          'reader-v3-publish.yml': 'suppressed'}
+    journal(path, state)
+    callback_handed_off = False
+    try:
+        # A read-only preflight checks every credential and inventory before the
+        # first disable. A missing worker token must fail here, not mid-isolation.
+        inventory = preflight()
+        if 'producer_scope' in state:
+            # Bind the planned inventory before disabling the first workflow;
+            # incomplete credential preflight must not create a v2 transition.
+            validate_journal_binding({**state, 'repositories': inventory},
+                                     expected=journal_binding(config=load_config()))
+            state['producer_scope_inventory_validated'] = True
+            journal(path, state)
+        for repo, record in inventory.items():
+            state["repositories"][repo] = record
+            journal(path, state)
+            for workflow in record["workflows"]:
+                if workflow["state"] == "active":
+                    workflow_state(repo, workflow, False)
+            # When requested, leave queued work intact. The independent fence
+            # must still prove it cannot execute in this isolation window.
+            for status in (() if preserve_queued_runs else ACTIVE):
+                for task in pages(repo, f"actions/runs?status={status}", "workflow_runs"):
+                    if not producer_path(task["path"]) or task["status"] != "queued":
+                        continue
+                    record["cancelled"].append({"id": task["id"]})
+                    journal(path, state)
+                    try:
+                        api(repo, f"actions/runs/{task['id']}/cancel", method="POST")
+                    except RuntimeError as error:
+                        attempt = api(repo, f"actions/runs/{task['id']}/attempts/{task.get('run_attempt', 1)}")
+                        if attempt.get("status") == "completed":
+                            continue
+                        # GitHub rejects cancellation of a run that its
+                        # scheduler has not admitted yet (409). The fence
+                        # decides whether that old run has any executable job.
+                        if getattr(error, "status", None) == 409:
+                            record["cancelled"][-1]["cancel_deferred"] = True
+                            journal(path, state)
+                            continue
+                        raise
+            if repo != central and record["permission"].get("enabled"):
+                # Record recovery intent before the mutation, including an
+                # ambiguous successful PUT followed by a killed runner.
+                record['permission_changed'] = True
+                journal(path, state)
+                disable_actions(repo, record)
+                journal(path, state)
+        deadline = time.monotonic() + 3600
+        while True:
+            active = []
+            for repo in state["repositories"]:
+                active.extend(task for status in ("in_progress", "waiting", "requested")
+                    for task in pages(repo, f"actions/runs?status={status}", "workflow_runs")
+                    if producer_path(task["path"]))
+            if not active:
+                break
+            if time.monotonic() >= deadline:
+                raise RuntimeError("producer drain deadline exceeded")
+            time.sleep(30)
+        if isolated_callback is not None:
+            # Explicit bounded operations may use the same fully drained
+            # producer window. They own their own preflight/receipts and must
+            # still pass GitHubProducerFence before any destructive operation.
+            try:
+                outcome = isolated_callback(state)
+                if original_scope is not None:
+                    validate_journal_binding(state, expected=original_scope)
+            except Exception:
+                if require_callback_commit and state.get('callback_mutation_started'):
+                    state['callback_recovery_required'] = True
+                    if original_scope is not None:
+                        state['producer_scope'] = copy.deepcopy(original_scope)
+                    journal(path, state)
+                raise
+            if require_callback_commit and state.get('callback_mutation_started'):
+                handed_off = (allow_staged_handoff and state.get('callback_recovery_required') is True
+                              and state.get('callback_handoff_ready') is True
+                              and state.get('callback_handoff_owner_run_id') == state.get('callback_owner_run_id')
+                              and state.get('callback_handoff_stage') == 'references-retired'
+                              and isinstance(outcome, dict) and outcome.get('handoff_complete') is True
+                              and outcome.get('phase') == 'handoff-complete')
+                callback_handed_off = handed_off
+                if not handed_off and (not state.get('callback_committed') or state.get('callback_recovery_required')):
+                    state['callback_recovery_required'] = True
+                    journal(path, state)
+                    raise RuntimeError('callback requires recovery; keep producers isolated')
+            return outcome
+        # The credential preflight alone is not an authorization to schedule a
+        # collector. In particular, the known CHM transaction must have its
+        # separate terminal marker before maintenance can dispatch GC. Keeping
+        # this barrier inside the producer window also prevents scheduled
+        # maintenance racing ahead of a pending marker proof.
+        try:
+            from . import reader_gc_chm_window
+        except ImportError:
+            import reader_gc_chm_window
+        store = durable_store()
+        if store is None:
+            raise RuntimeError('automatic collection requires a durable CHM guard')
+        reader_gc_chm_window.require_clear(store)
+        identifier = state["maintenance_id"]
+        state["dispatch_requested"] = True
+        journal(path, state)
+        api(central, "actions/workflows/reader-gc-collect.yml/dispatches", method="POST", body={
+            "ref": "main", "inputs": {"apply": str(apply).lower(), "grace_days": "0",
+                                      "scope": scope, "reader_only": "true", "auto_resume": "true",
+                                      "limit": str(limit), "maintenance_id": identifier}})
+        deadline = time.monotonic() + 360 * 60
+        while True:
+            runs = pages(central, "actions/workflows/reader-gc-collect.yml/runs", "workflow_runs")
+            matching = [task for task in runs if identifier in task.get("display_title", "")]
+            if matching:
+                task = matching[0]
+                state["collector_run_id"] = task["id"]
+                journal(path, state)
+                if task["status"] == "completed":
+                    if task["conclusion"] != "success":
+                        raise RuntimeError("collector failed; restoring producers")
+                    state["collected"] = True
+                    journal(path, state)
+                    break
+            if time.monotonic() >= deadline:
+                raise RuntimeError("collector deadline exceeded")
+            time.sleep(30)
+    finally:
+        if original_scope is not None:
+            # Preserve the captured identity even if a callback tampers with
+            # the mutable state before failing; never adopt its replacement.
+            state['producer_scope'] = copy.deepcopy(original_scope)
+        if (callback_handed_off and allow_staged_handoff and state.get('callback_mutation_started') and not state.get('callback_committed')
+                and state.get('callback_recovery_required') is True and state.get('callback_handoff_ready') is True
+                and state.get('callback_handoff_owner_run_id') == state.get('callback_owner_run_id')
+                and state.get('callback_handoff_stage') == 'references-retired'):
+            journal(path, state)
+        else:
+            if require_callback_commit and state.get('callback_mutation_started') and not state.get('callback_committed'):
+                state['callback_recovery_required'] = True
+                journal(path, state)
+                raise RuntimeError('callback requires recovery; producers remain isolated')
+            if state.get("dispatch_requested") and not state.get("collector_run_id"):
+                matching = [task for task in pages(central,
+                    "actions/workflows/reader-gc-collect.yml/runs", "workflow_runs")
+                    if state["maintenance_id"] in task.get("display_title", "")]
+                if not matching:
+                    raise RuntimeError("collector dispatch outcome unknown; recover journal before restoring producers")
+                state["collector_run_id"] = matching[0]["id"]
+                journal(path, state)
+            if state.get("collector_run_id"):
+                task = api(central, f"actions/runs/{state['collector_run_id']}")
+                if task["status"] != "completed":
+                    api(central, f"actions/runs/{task['id']}/cancel", method="POST")
+                    deadline = time.monotonic() + 600
+                    while api(central, f"actions/runs/{task['id']}")["status"] != "completed":
+                        if time.monotonic() >= deadline:
+                            raise RuntimeError("collector still running; keep producers isolated and recover journal")
+                        time.sleep(10)
+            restore(path)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("operation", choices=["run", "restore", "preflight"])
+    parser.add_argument("--journal", type=Path, required=True)
+    parser.add_argument('--expected-owner', help='Require this run to own the latest durable journal')
+    parser.add_argument('--expected-maintenance-id', help='Require this exact durable maintenance window')
+    parser.add_argument("--limit", type=int, default=0)
+    parser.add_argument("--plan-only", action="store_true")
+    parser.add_argument('--scope', choices=['unreferenced', 'retired-assets'], default='unreferenced')
+    arguments = parser.parse_args()
+    if arguments.limit < 0:
+        parser.error("limit must be non-negative")
+    if (arguments.expected_owner is not None or arguments.expected_maintenance_id is not None) \
+            and arguments.operation != 'restore':
+        parser.error('guarded owner and maintenance identity are only valid for restore')
+    if arguments.expected_maintenance_id is not None and arguments.expected_owner is None:
+        parser.error('--expected-maintenance-id requires --expected-owner')
+    if arguments.operation == "preflight":
+        inventory = preflight()
+        journal(arguments.journal, {"preflight_only": True, "repositories": inventory,
+                                    "remote_writes": 0})
+        print(f"GET-only maintenance preflight passed for {len(inventory)} repositories")
+    elif arguments.operation == "run":
+        # Scheduled maintenance must not cancel the user's queued producer runs.
+        # The independent collector fence still rejects any queued run that is
+        # not demonstrably isolated, so preserving work can block collection but
+        # never grants deletion authority.
+        run(arguments.journal, limit=arguments.limit, apply=not arguments.plan_only,
+            scope=arguments.scope, preserve_queued_runs=True)
+    else:
+        restore(arguments.journal, expected_owner=arguments.expected_owner,
+                expected_maintenance_id=arguments.expected_maintenance_id)

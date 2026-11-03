@@ -1,0 +1,353 @@
+#!/usr/bin/env python3
+"""Lifecycle records and conservative collection rules for Reader objects."""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+from contextlib import contextmanager
+import hashlib
+import json
+import threading
+try:
+    from .shared import READER_ASSETS_BUCKET, PDF_PAGES_BUCKET, PDF_OCR_INPUT_BUCKET
+    from .shared import ordered_reads
+except ImportError:
+    from shared import READER_ASSETS_BUCKET, PDF_PAGES_BUCKET, PDF_OCR_INPUT_BUCKET
+    from shared import ordered_reads
+
+LIFECYCLE_VERSION = 1
+LIFECYCLE_NAME = "reader_lifecycle.json"
+CATALOG_VERSION = 1
+CATALOG_NAME = "reader_catalog.json"
+PROCESSING_PREFIX = "processing/"
+TERMINAL_SUCCESS = {"done", "skipped"}
+
+
+def valid_processing_root(bucket, root):
+    if not isinstance(root, str):
+        return False
+    if bucket == PDF_PAGES_BUCKET:
+        return root.startswith(("objects/", "derived/"))
+    if bucket == READER_ASSETS_BUCKET:
+        return root.startswith(("objects/", "pages/image/", "chapters/", "documents/", "media/", "native/"))
+    if bucket == PDF_OCR_INPUT_BUCKET:
+        return root.startswith("objects/")
+    return False
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def empty_manifest() -> dict:
+    return {"version": LIFECYCLE_VERSION, "files": {}, "orphans": {}}
+
+
+def processing_record(resources: list[dict], operation: str, run: dict) -> dict:
+    """Durable roots until the publisher explicitly hands off their ownership."""
+    if not resources or any(not isinstance(item, dict)
+                            or item.get("bucket") not in {READER_ASSETS_BUCKET, PDF_PAGES_BUCKET, PDF_OCR_INPUT_BUCKET}
+                            or not isinstance(item.get("root"), str)
+                            or not valid_processing_root(item["bucket"], item["root"])
+                            or any(part in {"", ".", ".."} for part in item["root"].split("/"))
+                            for item in resources):
+        raise ValueError("processing roots require bucket-qualified resources")
+    timestamp = now_iso()
+    return {"version": 1, "kind": "reader-processing-roots", "status": "processing",
+            "operation": operation, "run": dict(run), "resources": resources,
+            "created_at": timestamp, "updated_at": timestamp, "heartbeat_at": timestamp,
+            "release_policy": "explicit-publisher-handoff"}
+
+
+def heartbeat_processing(record: dict, now: str | None = None) -> dict:
+    """Refresh an active protection root without changing its ownership."""
+    if (record.get("kind") != "reader-processing-roots"
+            or record.get("status") not in {"processing", "uploaded", "published"}):
+        raise ValueError("processing record is not heartbeatable")
+    timestamp = now or now_iso()
+    return {**record, "heartbeat_at": timestamp, "updated_at": timestamp}
+
+
+@contextmanager
+def processing_heartbeat(record, persist, interval=900):
+    """Keep long transfers protected and surface failed heartbeat persistence."""
+    stop, errors = threading.Event(), []
+    def tick():
+        while not stop.wait(interval):
+            try:
+                persist(heartbeat_processing(record))
+            except Exception as error:
+                errors.append(error)
+                return
+    worker = threading.Thread(target=tick, name="reader-processing-heartbeat", daemon=True)
+    worker.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        worker.join()
+    if errors:
+        raise RuntimeError("processing heartbeat persistence failed") from errors[0]
+
+
+def release_processing(record: dict, generation: str, now: str | None = None) -> dict:
+    if record.get("status") == "released" and isinstance(record.get("generation"), str) and record["generation"]:
+        return dict(record)
+    if record.get("kind") != "reader-processing-roots" or record.get("status") not in {
+            "processing", "uploaded", "published"}:
+        raise ValueError("processing record is not releasable")
+    timestamp = now or now_iso()
+    return {**record, "status": "released", "generation": generation,
+            "released_at": timestamp, "updated_at": timestamp}
+
+
+def validate_processing_handoff(record: dict, result: dict) -> None:
+    paths = set()
+    def visit(value):
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if key == "processing_roots":
+                    continue
+                if key in {"path", "manifest", "manifest_path", "new_path", "object", "o", "i", "w", "j", "r", "ocr_manifest"} and isinstance(child, str) \
+                        and child.startswith(("objects/", "pages/image/", "derived/", "chapters/", "documents/", "media/", "native/")):
+                    paths.add(child)
+                elif isinstance(child, (dict, list)):
+                    visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+    visit(result)
+    resources = record.get("resources")
+    if not isinstance(resources, list) or not resources:
+        raise ValueError("processing handoff has no resources")
+    for resource in resources:
+        root = resource.get("root", "") if isinstance(resource, dict) else ""
+        if not valid_processing_root(resource.get("bucket"), root) or not any(
+                path.startswith(root + "/") for path in paths):
+            raise ValueError("processing root does not belong to the published result")
+
+
+def processing_handoffs(results, generation, read, retired=None, absent=frozenset(), retired_many=None):
+    """Validate every owner before batching releases; never release foreign roots.
+
+    ``retired`` may independently verify a missing, historically retired path;
+    missing records still fail closed unless that exact proof is supplied.
+    """
+    owners = {}
+    for result in results:
+        for path in result.get("processing_roots", []):
+            if (not isinstance(path, str) or not path.startswith("reader-index/processing/")
+                    or any(part in {"", ".", ".."} for part in path.split("/"))):
+                raise ValueError("invalid processing root path")
+            owners.setdefault(path, []).append(result)
+    paths = sorted(owners)
+    updates = {}
+    missing = object()
+    def inspect(path):
+        if path in absent:
+            if retired is None and retired_many is None:
+                raise FileNotFoundError(path)
+            if retired_many is None:
+                recovered = retired(path, owners[path])
+                if recovered is not None:
+                    return recovered
+            return missing
+        try:
+            return read(path)
+        except FileNotFoundError:
+            if retired is None:
+                raise
+            recovered = retired(path, owners[path])
+            return missing if recovered is None else recovered
+    if not set(absent) <= owners.keys():
+        raise ValueError('absent processing root is not owned by these results')
+    for path, record in zip(paths, ordered_reads(inspect, paths)):
+        if record is missing:
+            continue
+        if not isinstance(record, dict):
+            raise ValueError('invalid processing record')
+        for result in owners[path]:
+            validate_processing_handoff(record, result)
+        released = release_processing(record, generation)
+        if released != record:
+            try:
+                from . import reader_gc_retirement as retirement
+            except ImportError:
+                import reader_gc_retirement as retirement
+            hint = retirement.handoff(record, generation)
+            if hint:
+                updates[hint[0]] = hint[1]
+            updates[path] = released
+    if retired_many is not None:
+        recovered = retired_many(absent, owners) or {}
+        if not isinstance(recovered, dict) or not recovered.keys() <= absent:
+            raise ValueError('invalid archived processing protections')
+        for path, record in recovered.items():
+            if not isinstance(record, dict) or record.get('status') != 'released':
+                raise ValueError('archived processing protection is not a released record')
+            for result in owners[path]:
+                validate_processing_handoff(record, result)
+            # The source record is virtual and already released. It is never
+            # written back, nor is its original generation rewritten.
+    return updates
+
+
+def empty_catalog() -> dict:
+    return {"version": CATALOG_VERSION, "kind": "reader-catalog", "current": None, "generations": {}}
+
+
+def _generation_id(payload: dict, parent: str | None) -> str:
+    material = json.dumps({"payload": payload, "parent": parent},
+                          ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(material.encode()).hexdigest()[:32]
+
+
+def catalog_generation(sidecar: dict, parent: dict | None = None,
+                       references: list[dict] | None = None,
+                       now: str | None = None) -> tuple[dict, str]:
+    if sidecar.get("v") != 1 or not isinstance(sidecar.get("f"), dict):
+        raise ValueError("invalid sidecar for catalog generation")
+    catalog = empty_catalog()
+    if parent:
+        if parent.get("version") != CATALOG_VERSION or not isinstance(parent.get("generations"), dict):
+            raise ValueError("invalid Reader catalog")
+        catalog = {"version": CATALOG_VERSION, "kind": "reader-catalog",
+                   "current": parent.get("current"),
+                   "generations": dict(parent.get("generations") or {})}
+        if parent.get("retired_generations"):
+            catalog["retired_generations"] = dict(parent["retired_generations"])
+    previous = catalog.get("current") or {}
+    parent_id = previous.get("generation") if isinstance(previous, dict) else None
+    catalog = compact_catalog(catalog, parent_id, now, 0)
+    refs = sidecar_references(sidecar) if references is None else references
+    normalized = sorted({(item["bucket"], item["path"]) for item in refs})
+    digest = hashlib.sha256(json.dumps(sidecar, ensure_ascii=False, sort_keys=True,
+                                      separators=(",", ":")).encode()).hexdigest()
+    signature = _generation_id({"sidecar_sha256": digest, "references": normalized}, None)
+    prior = catalog["generations"].get(parent_id, {})
+    if prior.get("signature") == signature:
+        return catalog, parent_id
+    generation = _generation_id({"signature": signature}, parent_id)
+    timestamp = now or now_iso()
+    entry = {"generation": generation, "status": "current", "published_at": timestamp,
+             "signature": signature, "sidecar_sha256": digest,
+             "parent_generation": parent_id,
+             "references": normalized,
+             "acks": {"hf": False, "pages": False}}
+    entry["references"] = [{"bucket": bucket, "path": path} for bucket, path in entry["references"]]
+    if isinstance(previous, dict) and previous.get("generation") in catalog["generations"]:
+        old = dict(catalog["generations"][previous["generation"]])
+        old["status"] = "superseded"
+        old["superseded_at"] = timestamp
+        catalog["generations"][previous["generation"]] = old
+    catalog["generations"][generation] = entry
+    catalog["current"] = {"generation": generation, "published_at": timestamp}
+    return catalog, generation
+
+
+def sidecar_references(sidecar: dict) -> list[dict]:
+    references = []
+    for entry in sidecar.get("f", {}).values():
+        if not isinstance(entry, dict):
+            continue
+        page_bucket = entry.get("b") or READER_ASSETS_BUCKET
+        for field, bucket_field in (("p", "b"), ("o", "ob"), ("pd", "pdb"),
+                                    ("c", "cb"), ("f", "fb")):
+            path = entry.get(field)
+            if isinstance(path, str):
+                bucket = entry.get(bucket_field) or page_bucket
+                if bucket not in {READER_ASSETS_BUCKET, PDF_PAGES_BUCKET, PDF_OCR_INPUT_BUCKET}:
+                    raise ValueError(f"sidecar resource lacks current-bucket identity: {field}")
+                references.append({"bucket": bucket, "path": path})
+    return references
+
+
+def generation_live(entry: dict, current: str | None, now=None, grace_days: int = 0) -> bool:
+    if grace_days < 0:
+        raise ValueError("generation grace cannot be negative")
+    if entry.get("generation") == current or entry.get("status") == "current":
+        return True
+    if not isinstance(entry.get("superseded_at"), str):
+        return True
+    try:
+        superseded = datetime.fromisoformat(entry["superseded_at"].replace("Z", "+00:00"))
+        if superseded.tzinfo is None:
+            return True
+    except (TypeError, ValueError):
+        return True
+    clock = datetime.fromisoformat(now.replace("Z", "+00:00")) if isinstance(now, str) else (
+        now or datetime.now(timezone.utc))
+    if clock - superseded < timedelta(days=grace_days):
+        return True
+    acks = entry.get("replacement_acks")
+    return not (isinstance(acks, dict) and acks.get("hf") is True and acks.get("pages") is True)
+
+
+def compact_catalog(catalog: dict, current: str | None, now=None, grace_days: int = 0) -> dict:
+    """Bound catalog history after supersession and both consumer acknowledgments."""
+    if catalog.get("version") != CATALOG_VERSION or not isinstance(catalog.get("generations"), dict):
+        raise ValueError("invalid Reader catalog")
+    generations = {
+        generation: entry for generation, entry in catalog["generations"].items()
+        if generation == current or generation_live(entry, current, now, grace_days)
+    }
+    retired = dict(catalog.get("retired_generations") or {})
+    for generation, entry in catalog["generations"].items():
+        if generation not in generations:
+            retired[generation] = {
+                "replacement_generation": current,
+                "replacement_acks": dict(entry["replacement_acks"]),
+                "sidecar_sha256": entry.get("sidecar_sha256"),
+                "snapshot": entry.get("snapshot"),
+                "retired_at": now if isinstance(now, str) else (
+                    now.isoformat() if now else now_iso()),
+            }
+    result = {**catalog, "generations": generations}
+    if retired:
+        result["retired_generations"] = retired
+    return result
+
+
+def asset_record(result: dict) -> dict:
+    return {
+        "key": result["key"],
+        "path": result["path"],
+        "paths": list(result.get("bucket_paths") or [result["path"]]),
+        "sha256": result.get("sha256", ""),
+        "bytes": int(result.get("bytes") or 0),
+        "source_sha256": result.get("source_sha256", ""),
+        "source_revision": result.get("source_revision", ""),
+        "profile": result.get("profile", ""),
+        "phase": "final",
+        "consumers": {},
+        "created_at": now_iso(),
+        "updated_at": now_iso(),
+    }
+
+
+def merge(manifest: dict, updates: list[dict]) -> dict:
+    if manifest.get("version") != LIFECYCLE_VERSION or not isinstance(manifest.get("files"), dict):
+        raise ValueError("invalid Reader lifecycle manifest")
+    result = {"version": LIFECYCLE_VERSION, "files": dict(manifest["files"]),
+              "orphans": dict(manifest.get("orphans") or {})}
+    for update in updates:
+        key = update.get("key")
+        if not key:
+            continue
+        previous = dict(result["files"].get(key) or {})
+        merged = {**previous, **update, "updated_at": now_iso()}
+        if previous.get("created_at"):
+            merged["created_at"] = previous["created_at"]
+        result["files"][key] = merged
+    return result
+
+
+def mark_orphans(manifest: dict, paths: set[str], today: str) -> dict:
+    orphans = dict(manifest.get("orphans") or {})
+    for path in paths:
+        if path not in orphans:
+            orphans[path] = {"since": today}
+    for path in list(orphans):
+        if path not in paths:
+            orphans.pop(path, None)
+    return {**manifest, "orphans": dict(sorted(orphans.items()))}

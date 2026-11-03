@@ -1,0 +1,33 @@
+{
+  "version": 2,
+  "kind": "reader-producer-isolation-scope-transition",
+  "status": "prepared-not-active",
+  "publisher_repository": "anftm/pipeline",
+  "publisher_repository_id": 1260985830,
+  "legacy_scope_sha256": "97ff53de64962fe58bcb5867da1ebf6c3467f01293b02a603deb9245b305946d",
+  "legacy_repositories": [
+    "alicetran68/pipeline",
+    "ambrossee768/pdf-pipeline",
+    "anftm/pipeline",
+    "brodievsalas/pipeline",
+    "dellamcastillo/pipeline",
+    "devondunn7/pipeline",
+    "rioholland79/pipeline",
+    "vomebook/pdf-pipeline"
+  ],
+  "retired_repository_ids": {
+    "alicetran68/pipeline": 1412089542,
+    "ambrossee768/pdf-pipeline": 1412104354,
+    "brodievsalas/pipeline": 1412089517,
+    "dellamcastillo/pipeline": 1412089483,
+    "devondunn7/pipeline": 1412088148,
+    "rioholland79/pipeline": 1412088129,
+    "vomebook/pdf-pipeline": 1412104331
+  },
+  "additional_repository_ids": {
+    "ambrossee768/pipeline": 1401656391,
+    "vomebook/pipeline": 1390570183
+  },
+  "future_active_repositories": ["anftm/pipeline"],
+  "activation_receipt": null
+}

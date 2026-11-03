@@ -1,0 +1,249 @@
+from __future__ import annotations
+
+import importlib.util
+import io
+import json
+import os
+import tempfile
+import unittest
+import urllib.error
+import urllib.request
+from pathlib import Path
+from unittest.mock import Mock, patch
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def load_script():
+    path = ROOT / "scripts" / "fetch_and_parse.py"
+    spec = importlib.util.spec_from_file_location("fetch_and_parse", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+class FetchAndParseTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.module = load_script()
+
+    def test_write_action_output_appends_value(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "github-output"
+            with patch.dict(os.environ, {"GITHUB_OUTPUT": str(output)}):
+                self.module.write_action_output("data_changed", "false")
+                self.module.write_action_output("other", "value")
+
+            self.assertEqual(output.read_text(encoding="utf-8"), "data_changed=false\nother=value\n")
+
+    def test_write_action_output_is_optional_outside_actions(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.module.write_action_output("data_changed", "true")
+
+    def test_json_request_retries_transient_http_errors(self):
+        response = Mock()
+        response.__enter__ = lambda value: value
+        response.__exit__ = lambda *args: None
+        response.read.return_value = b'{"sha": "captured"}'
+        error = urllib.error.HTTPError("https://example.test", 503, "busy", {}, None)
+
+        with patch.object(urllib.request, "urlopen", side_effect=[error, response]), \
+             patch.object(self.module.time, "sleep") as sleep:
+            result = self.module.http_get_json("https://example.test")
+
+        self.assertEqual(result, {"sha": "captured"})
+        sleep.assert_called_once_with(1)
+
+    def test_http_429_retry_honors_retry_after_and_caps_wait(self):
+        response = Mock()
+        response.__enter__ = lambda value: value
+        response.__exit__ = lambda *args: None
+        response.read.return_value = b"catalog\n"
+        error = urllib.error.HTTPError(
+            "https://example.test", 429, "rate limited", {"Retry-After": "900"}, None)
+
+        with patch.object(urllib.request, "urlopen", side_effect=[error, response]), \
+                patch.object(self.module.time, "sleep") as sleep:
+            result = self.module.http_get_text("https://example.test")
+
+        self.assertEqual(result, "catalog\n")
+        sleep.assert_called_once_with(self.module.HTTP_RETRY_AFTER_CAP_SECONDS)
+
+    def test_http_429_retry_parses_hf_countdown_from_error_body(self):
+        error = urllib.error.HTTPError(
+            "https://example.test", 429, "rate limited", {},
+            io.BytesIO(b"429 Too Many Requests. Retry after 23 seconds (0/5000 requests remaining)."))
+        response = Mock()
+        response.__enter__ = lambda value: value
+        response.__exit__ = lambda *args: None
+        response.read.return_value = b"catalog\n"
+
+        with patch.object(urllib.request, "urlopen", side_effect=[error, response]), \
+                patch.object(self.module.time, "sleep") as sleep:
+            result = self.module.http_get_text("https://example.test")
+
+        self.assertEqual(result, "catalog\n")
+        sleep.assert_called_once_with(23)
+
+    def test_http_retry_after_date_is_parsed(self):
+        from datetime import datetime, timezone
+        from email.utils import format_datetime
+
+        retry_at = datetime.fromtimestamp(self.module.time.time() + 45, timezone.utc)
+        error = urllib.error.HTTPError(
+            "https://example.test", 429, "rate limited",
+            {"Retry-After": format_datetime(retry_at, usegmt=True)}, None)
+
+        self.assertIn(self.module._retry_delay(0, error), {44, 45})
+
+    def test_text_request_retries_transient_network_errors(self):
+        response = Mock()
+        response.__enter__ = lambda value: value
+        response.__exit__ = lambda *args: None
+        response.read.return_value = "目录\n".encode("utf-8")
+
+        with patch.object(urllib.request, "urlopen", side_effect=[urllib.error.URLError("temporary"), response]), \
+             patch.object(self.module.time, "sleep") as sleep:
+            result = self.module.http_get_text("https://example.test")
+
+        self.assertEqual(result, "目录\n")
+        sleep.assert_called_once_with(1)
+
+    def test_repo_sha_falls_back_to_catalog_revision_header(self):
+        response = Mock()
+        response.__enter__ = lambda value: value
+        response.__exit__ = lambda *args: None
+        response.headers = {"X-Repo-Commit": "fallback-sha"}
+
+        with patch.object(self.module, "http_get_json", return_value={}), \
+             patch.object(urllib.request, "urlopen", return_value=response):
+            result = self.module.get_repo_sha("VoiceOfML/VOMEBOOK", "token")
+
+        self.assertEqual(result, "fallback-sha")
+
+    def test_main_reports_unchanged_without_generating_output(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_path = Path(temporary)
+            state_file = temporary_path / "commits.json"
+            action_output = temporary_path / "github-output"
+            state_file.write_text(json.dumps({repo: "same-sha" for repo in self.module.REPOS}), encoding="utf-8")
+
+            with patch.object(self.module, "STATE_FILE", state_file), \
+                 patch.object(self.module, "OUTPUT_FILE", temporary_path / "missing.json"), \
+                 patch.object(self.module, "get_repo_sha", return_value="same-sha"), \
+                 patch.dict(os.environ, {"GITHUB_OUTPUT": str(action_output), "FORCE_SYNC": "false"}, clear=True):
+                result = self.module.main()
+
+            self.assertEqual(result, 0)
+            self.assertEqual(action_output.read_text(encoding="utf-8"), "data_changed=false\n")
+            self.assertFalse((temporary_path / "missing.json").exists())
+
+    def test_main_stops_when_a_source_revision_is_unavailable(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_path = Path(temporary)
+            state_file = temporary_path / "commits.json"
+            action_output = temporary_path / "github-output"
+            original_state = {repo: "old-sha" for repo in self.module.REPOS}
+            state_file.write_text(json.dumps(original_state), encoding="utf-8")
+
+            def get_sha(repo, _token):
+                return "" if repo == self.module.REPOS[0] else "new-sha"
+
+            with patch.object(self.module, "STATE_FILE", state_file), \
+                 patch.object(self.module, "get_repo_sha", side_effect=get_sha), \
+                 patch.dict(os.environ, {"GITHUB_OUTPUT": str(action_output)}, clear=True):
+                result = self.module.main()
+
+            self.assertEqual(result, 1)
+            self.assertEqual(action_output.read_text(encoding="utf-8"), "data_changed=false\n")
+            self.assertEqual(json.loads(state_file.read_text(encoding="utf-8")), original_state)
+
+    def test_main_stops_when_a_source_catalog_is_unavailable(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_path = Path(temporary)
+            state_file = temporary_path / "commits.json"
+            output_file = temporary_path / "search.json"
+            state_file.write_text(json.dumps({repo: "old-sha" for repo in self.module.REPOS}), encoding="utf-8")
+
+            def get_text(url, _token):
+                return "" if self.module.REPOS[0] in url else "A docx\n"
+
+            with patch.object(self.module, "STATE_FILE", state_file), \
+                 patch.object(self.module, "OUTPUT_FILE", output_file), \
+                 patch.object(self.module, "get_repo_sha", return_value="new-sha"), \
+                 patch.object(self.module, "http_get_text", side_effect=get_text), \
+                 patch.object(self.module, "batch_get_sizes", return_value={}), \
+                 patch.dict(os.environ, {"FORCE_SYNC": "true"}, clear=True):
+                result = self.module.main()
+
+            self.assertEqual(result, 1)
+            self.assertFalse(output_file.exists())
+
+    def test_missing_catalog_falls_back_to_the_repository_tree(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_path = Path(temporary)
+            state_file = temporary_path / "commits.json"
+            output_file = temporary_path / "search.json"
+            state_file.write_text(json.dumps({repo: "old-sha" for repo in self.module.REPOS}), encoding="utf-8")
+            tree = [{"type": "file", "path": "丛书/第一卷.pdf", "size": 10},
+                    {"type": "file", "path": "README.md", "size": 1},
+                    {"type": "directory", "path": "丛书", "size": 0}]
+
+            def get_text(url, _token):
+                # Only the broken catalogue repo 404s; others still use text.
+                return "" if self.module.REPOS[-1] in url else "A docx\n"
+
+            with patch.object(self.module, "STATE_FILE", state_file), \
+                 patch.object(self.module, "OUTPUT_FILE", output_file), \
+                 patch.object(self.module, "get_repo_sha", return_value="new-sha"), \
+                 patch.object(self.module, "http_get_text", side_effect=get_text), \
+                 patch.object(self.module, "http_get_json_page", return_value=(tree, "")), \
+                 patch.object(self.module, "batch_get_sizes", return_value={}), \
+                  patch.object(self.module, "OUTPUT_DIR", temporary_path), \
+                  patch.object(self.module, "FOLDER_TREE_FILE", temporary_path / "folder_tree.json"), \
+                  patch.object(self.module, "FOLDER_BROWSER_FILE", temporary_path / "folder_browser.json"), \
+                  patch.dict(os.environ, {"FORCE_SYNC": "true"}, clear=True):
+                self.assertEqual(self.module.main(), 0)
+
+            payload = json.loads(output_file.read_text())
+            files = [item[1] for item in payload["rc"]]
+            self.assertIn("第一卷", files)
+
+    def test_catalog_and_sizes_are_fetched_from_the_captured_revision(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_path = Path(temporary)
+            state_file = temporary_path / "commits.json"
+            output_file = temporary_path / "search.json"
+            state_file.write_text(json.dumps({repo: "old-sha" for repo in self.module.REPOS}), encoding="utf-8")
+            catalog_urls = []
+            size_calls = []
+
+            def get_text(url, _token):
+                catalog_urls.append(url)
+                return "Book.docx\n"
+
+            def get_sizes(repo, revision, paths, _token):
+                size_calls.append((repo, revision, paths))
+                return {}
+
+            with patch.object(self.module, "STATE_FILE", state_file), \
+                    patch.object(self.module, "OUTPUT_DIR", temporary_path), \
+                    patch.object(self.module, "OUTPUT_FILE", output_file), \
+                    patch.object(self.module, "FOLDER_TREE_FILE", temporary_path / "folder_tree.json"), \
+                    patch.object(self.module, "FOLDER_BROWSER_FILE", temporary_path / "folder_browser.json"), \
+                    patch.object(self.module, "get_repo_sha", return_value="captured-sha"), \
+                    patch.object(self.module, "http_get_text", side_effect=get_text), \
+                    patch.object(self.module, "batch_get_sizes", side_effect=get_sizes), \
+                    patch.object(self.module.time, "sleep"), \
+                    patch.dict(os.environ, {"FORCE_SYNC": "true"}, clear=True):
+                result = self.module.main()
+
+            self.assertEqual(result, 0)
+            self.assertTrue(all("/resolve/captured-sha/" in url for url in catalog_urls))
+            self.assertTrue(all(revision == "captured-sha" for _, revision, _ in size_calls))
+
+
+if __name__ == "__main__":
+    unittest.main()

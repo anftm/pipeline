@@ -1,0 +1,16 @@
+{
+ "version": 1,
+ "kind": "ocr-image-reviews",
+ "sources": {
+  "215c50e18150b558b9d5bbd1f6d27300722dd7333bf4d8203f212be7c9065990": [
+   {"page":74,"input_sha256":"5d071d159f9f9f1d57d815eb5e32b3e131d0b945b383d9bc46c2a985481f0b9a","classification":"scientific-symbols","script_coverage":["Han","Latin"],"basis":"User complete original page shows ionic equations, historical sign-before-number charges, repeated water and gas/precipitate arrows, not English prose. Review concerns script coverage only; characters remain unreviewed."},
+   {"page":75,"input_sha256":"32e3bbe19cb7d57702d4765cd96b6fc4cde2a3af98d6720f5e2c6cbd017fcea3","classification":"scientific-symbols","script_coverage":["Han","Latin"],"basis":"User complete original page shows molecular and ionic equations with compound Latin element tokens, not English prose. Preserve every printed term; no character acceptance from this script review."},
+   {"page":78,"input_sha256":"377e7dd3e8ed4421a2aa1438b88861f6454e8dddc8d1a15d5b576e1cdc408115","classification":"scientific-symbols","script_coverage":["Han","Latin"],"basis":"User complete original final page shows four numbered chemical equations and printed folio, not English prose. CJK/Latin recognizer coverage is reviewed separately from character accuracy."}
+  ],
+  "97211a0c95f226a77c4e21459556a95bc10222b3b856e2cad00d13d1c03b86c8": [
+   {"page":1,"input_sha256":"4ceaa81b5a565a91239c3cf91e314fec4d72d2b9fed266c7a3617138072eb7e2","box":[0.975,0.02,0.997,0.045],"classification":"scan-artifact","basis":"Full original title page plus user enlarged diagonal fragmented edge ink, 2026-10-25; not a printed S"},
+   {"page":1,"input_sha256":"4ceaa81b5a565a91239c3cf91e314fec4d72d2b9fed266c7a3617138072eb7e2","box":[0.970,0.554,0.984,0.580],"classification":"scan-artifact","basis":"Full original title page plus user enlarged ragged isolated edge ink, 2026-10-25; not a printed Chinese character"},
+   {"page":336,"input_sha256":"74b86b1d3959b9b41f87e97dc6e0dbc9b2d922b5ba751351dc6841d0d0a8016a","box":[0.954,0.028,0.999,0.048],"classification":"scan-artifact","basis":"User enlarged ragged horizontal margin ink, 2026-10-25; not a printed body period"}
+  ]
+ }
+}

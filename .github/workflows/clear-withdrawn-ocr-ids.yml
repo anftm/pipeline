@@ -1,0 +1,24 @@
+name: Clear withdrawn OCR ID mappings
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: Type CLEAR-WITHDRAWN-OCR-IDS
+        type: string
+        required: true
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: publish-ccrd-index
+  cancel-in-progress: false
+  queue: max
+jobs:
+  clear:
+    if: github.repository == 'anftm/pipeline' && github.ref == 'refs/heads/main' && inputs.confirm == 'CLEAR-WITHDRAWN-OCR-IDS'
+    concurrency:
+      group: reader-global-maintenance
+      cancel-in-progress: false
+      queue: max
+    uses: ./.github/workflows/clear-withdrawn-ocr-ids-inner.yml
+    secrets: inherit

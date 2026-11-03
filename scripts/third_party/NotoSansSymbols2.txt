@@ -1,0 +1,7 @@
+Noto Sans Symbols2 is licensed under the SIL Open Font License 1.1.
+Source: https://github.com/notofonts/noto-fonts
+Pinned revision: ffebf8c1ee449e544955a7e813c54f9b73848eac
+Font: hinted/ttf/NotoSansSymbols2/NotoSansSymbols2-Regular.ttf
+License: https://github.com/notofonts/noto-fonts/blob/ffebf8c1ee449e544955a7e813c54f9b73848eac/LICENSE
+The font is downloaded and verified for Office conversion, and embedded by the
+PDF exporter. The original Office file and declared symbol mapping are retained.

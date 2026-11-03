@@ -1,0 +1,72 @@
+{
+  "inventory_sha256": "dec3b852cfe46c4c534c105d80b8eba8a57468b2e4550925a714d53d980a6e69",
+  "kind": "chm-epub-processing-protection-inventory",
+  "records": [
+    {
+      "chapter_root": "chapters/ebook/chm/7c4f3ed337f994642ef283c50a70bac6e7dbcd2444601c102d9bd8102c865cbe/4fa566c42ab4091b",
+      "path": "reader-index/processing/stream-upload-07d8e3734a19a4f2ec666d4d2e45cbf3.json",
+      "sha256": "5cb7469bda217f8c21fd24c0aed39b0e35633f4e276dd7cea4d1d7084028132e",
+      "target_root": "native/ebook/chm/c37adc23131ccef66c3d9662bd566f6840fcc804e111cf3caebaff16ae917523"
+    },
+    {
+      "chapter_root": "chapters/ebook/chm/bce1af41345029bd1f05495c9d3802a2fc229a8472c23b59a959abbb0e9fe04e/4bfe55b0cd4941f7",
+      "path": "reader-index/processing/stream-upload-27d08aba248145c1e8371c9d254446c2.json",
+      "sha256": "7e827bc4b8175062417b4524a4cf104fef7ef520ba9f7175d7e0e0a1c0fce24b",
+      "target_root": "native/ebook/chm/ab1637b6e150b23eade232c2430b19285288fab574a7bf3f9bcea0d3cb2d5066"
+    },
+    {
+      "chapter_root": "chapters/ebook/chm/f2e1efcb8df8de5182ea75639672027e99bfcb70dd13431d8716edf003facc45/dc65c194f89b09af",
+      "path": "reader-index/processing/stream-upload-59e313007aec603cca00f8530b1d46e4.json",
+      "sha256": "c097722cfd40bc2d1574909570853af87c4bcc019f2f9009b8cd94d04e84964a",
+      "target_root": "native/ebook/chm/d9fe0663a943d2b560bca8c46748af0a9b8c6f7b20aaa036e9ac3eb2c6e705d0"
+    },
+    {
+      "chapter_root": "chapters/ebook/chm/c416aa80180867daeda28a8cb15b932a204972bd7de1e60ea475090d12c8a226/a77667119d5c778c",
+      "path": "reader-index/processing/stream-upload-5a723f9eedaa9ec5f0c4c976c584c039.json",
+      "sha256": "a3242e69798eb507f9734e43b99e4c83ed0835ea3322eccbbfba1fce5a25484d",
+      "target_root": "native/ebook/chm/ef8704de47b4b4a71645a31cf8120e90dfe5335ec616af1a7a451cb084b9d988"
+    },
+    {
+      "chapter_root": "chapters/ebook/chm/55a47e6497eed9b63d3f559ede4a1c41ab564008cd27003fcb6738551272bcaa/cb02b63d375ba4ea",
+      "path": "reader-index/processing/stream-upload-9992679a4293ad651a96f49e630d343e.json",
+      "sha256": "ecc55911ec50cd93d965e9fa37119bd8966fe6e9aac1c89dd886727a5202fe1c",
+      "target_root": "native/ebook/chm/3c0861170b9911b6674e7d98c835f5a5b0abf5b43f6619b4aa713b22b1d4ce53"
+    },
+    {
+      "chapter_root": "chapters/ebook/chm/5b1cf2efdefd7a8b6446549d9b7a885b845efc9d23aa6711bdc06b476d363c96/ae16c13e2e02905f",
+      "path": "reader-index/processing/stream-upload-a62d8546fbe5084a529898db25cadf32.json",
+      "sha256": "19cd3c99faf4b566a5eac2bcfbb892abe7390ad35def75e82784268e9bc5ad3e",
+      "target_root": "native/ebook/chm/3ce7bb1b99f76f54ce0cc6c77e6666efbe2fc44f75bcda24e9a588bb5bdbdc8c"
+    },
+    {
+      "chapter_root": "chapters/ebook/chm/260cf5ce5fdbc2fc7908ccb8fbe8a3007b5cec730a74adf6701e436150c53248/1db453b7c6c5f5d5",
+      "path": "reader-index/processing/stream-upload-b9f7924f57b3395a81044991712e85b8.json",
+      "sha256": "bf467953832b50c939b8294b12b71e421634bdbbe58b8b6b005ca8a54e40c04a",
+      "target_root": "native/ebook/chm/6e336237e0b7c9e2dc9ff42487dcf92dfcdedab977d8dc3461ff524c1708e0b0"
+    },
+    {
+      "chapter_root": "chapters/ebook/chm/cce06417537275db64e516aba0d936a69169d349d4e3ac9a8b8ac73b14eb3380/d5b344f431c27703",
+      "path": "reader-index/processing/stream-upload-c4dc140bcafb33faf703798599a4c772.json",
+      "sha256": "8e06ef369e88fd6d3356feadf685bae36f9a5f2b7ae80421aa69cf3e98fdff82",
+      "target_root": "native/ebook/chm/634c57deb2aa42ffd77b6d2584a042f97591d040234036768f0ff5db88c51d4a"
+    },
+    {
+      "chapter_root": "chapters/ebook/chm/de9dd445bf0af0e9e586c632f21227378f3efb660842cfcd4e97f2077c1b380e/7d3114f11dbbc92a",
+      "path": "reader-index/processing/stream-upload-c5a2c2d011205074920c93a23bb3e4eb.json",
+      "sha256": "e36b62581af4a77d3608d11fa8f7c643737cbb0eb728ad94ede8562a4a5589ac",
+      "target_root": "native/ebook/chm/7d5d4376567fc10e5b9760bcbf6f13ceb83c76ab67992b8db4f1d35efc27509f"
+    },
+    {
+      "chapter_root": "chapters/ebook/chm/85c775f20a32a954e364bf6bed4a40eada17ac62e2d419beeaa45fe8eab71cc1/391352707442a97d",
+      "path": "reader-index/processing/stream-upload-c63df4c2c8fb160f407915833ed2d5ef.json",
+      "sha256": "18472f9bae065ffc10bfd34843102de2703ea49ec74ad76513b27d9df1f15f49",
+      "target_root": "native/ebook/chm/be71da78b526a60bae23754013fedf57b4a3d367f7b1865cdbbca92b53fdd3ed"
+    }
+  ],
+  "source_conclusion": "failure",
+  "source_repository": "anftm/pipeline",
+  "source_run_attempt": 1,
+  "source_run_id": 39929342496,
+  "source_workflow": ".github/workflows/reader-chm-repair.yml",
+  "version": 1
+}
