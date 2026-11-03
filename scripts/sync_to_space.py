@@ -41,6 +41,10 @@ FOLDER_TREE_JSON = Path("output/folder_tree.json")
 FOLDER_BROWSER_JSON = Path("output/folder_browser.json")
 SPACE_REPO = "VoiceOfML/Search"
 SEARCH_DATA_VERSION = 2
+SEARCH_OUTPUT_PATHS = ("data/search_data.json.gz", "data/folder_tree.json.gz",
+                       "data/folder_browser.json.gz", "data/search_words.bin.gz",
+                       "data/search_ngrams_2.bin.gz", "data/search_ngrams_3.bin.gz",
+                       "data/initial", "data/sidebar")
 INITIAL_PAGE_SIZE = 100
 NGRAM_MAGIC = b"VNG3"
 WORD_INDEX_MAGIC = b"VWI2"
@@ -341,7 +345,10 @@ def push_with_retry(cwd: str, auth_env: dict[str, str]) -> bool:
             return True
         print(f"   ⚠ 推送失败 (第{attempt + 1}次): {err[:200]}")
         if attempt == 0:
-            run(["git", "pull", "--rebase"], cwd=cwd, env=auth_env)
+            ret, _out, err = run(["git", "pull", "--rebase"], cwd=cwd, env=auth_env)
+            if ret != 0:
+                print(f"   ❌ 远端更新无法安全合并，停止推送: {err[:200]}")
+                return False
             time.sleep(2)
     return False
 
@@ -511,24 +518,38 @@ def main():
     print(f"   ngrams: 2={((data_dir / 'search_ngrams_2.bin.gz').stat().st_size / 1024 / 1024):.1f} MB, 3={((data_dir / 'search_ngrams_3.bin.gz').stat().st_size / 1024 / 1024):.1f} MB")
     print(f"   initial: {len(initial_urls)} 个首屏文件")
     print(f"   sidebar: {len(sidebar_urls)} 个侧栏首屏文件")
+    missing = [path for path in SEARCH_OUTPUT_PATHS if not (Path(tmpdir) / path).exists()]
+    if missing:
+        print("   ❌ 搜索输出不完整，停止发布: " + ", ".join(missing))
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        return 1
     # ── 5. Git commit & push ───────────────────────────
     print(f"\n📤 提交并推送...")
     run(["git", "config", "user.email", "github-actions[bot]@users.noreply.github.com"], cwd=tmpdir)
     run(["git", "config", "user.name", "github-actions[bot]"], cwd=tmpdir)
-    ret, out, err = run(["git", "add", "data/search_data.json.gz", "data/folder_tree.json.gz", "data/folder_browser.json.gz", "data/search_words.bin.gz", "data/search_ngrams_2.bin.gz", "data/search_ngrams_3.bin.gz", "data/initial", "data/sidebar"], cwd=tmpdir)
+    ret, out, err = run(["git", "add", "-A", "--", *SEARCH_OUTPUT_PATHS], cwd=tmpdir)
     if ret != 0:
-        print(f"   ⚠ git add 失败: {err}")
+        print(f"   ❌ git add 失败: {err}")
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        return 1
 
-    ret, out, err = run(["git", "status", "--porcelain"], cwd=tmpdir)
+    ret, out, err = run(["git", "status", "--porcelain", "--", *SEARCH_OUTPUT_PATHS], cwd=tmpdir)
+    if ret != 0:
+        print(f"   ❌ git status 失败: {err}")
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        return 1
     if not out:
         print("   ⚠ 文件无变化，跳过提交")
     else:
         ret, out, err = run(
-            ["git", "commit", "-m", "chore: update search data [skip ci]"],
+            ["git", "commit", "--only", "-m", "chore: update search data [skip ci]",
+             "--", *SEARCH_OUTPUT_PATHS],
             cwd=tmpdir,
         )
         if ret != 0:
-            print(f"   ⚠ git commit 失败: {err}")
+            print(f"   ❌ git commit 失败: {err}")
+            shutil.rmtree(tmpdir, ignore_errors=True)
+            return 1
 
         if not push_with_retry(tmpdir, auth_env):
             shutil.rmtree(tmpdir, ignore_errors=True)

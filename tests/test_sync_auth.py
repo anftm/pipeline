@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import base64
+from contextlib import nullcontext
 import copy
 import gzip
 import importlib.util
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -69,6 +71,232 @@ class SyncAuthenticationTests(unittest.TestCase):
                  patch.object(module, "run", side_effect=[(1, "", "denied"), (0, "", ""), (1, "", "denied")]), \
                  patch.object(module.time, "sleep"):
                 self.assertFalse(module.push_with_retry("repo", {"AUTH": "value"}))
+
+    def test_rebase_failure_never_retries_push(self):
+        for module in (self.space, self.pages):
+            with self.subTest(module=module.__name__), \
+                    patch.object(module, 'run', side_effect=[(1, '', 'push rejected'),
+                                                            (1, '', 'rebase conflict')]) as run, \
+                    patch.object(module.time, 'sleep') as sleep:
+                self.assertFalse(module.push_with_retry('repo', {'AUTH': 'value'}))
+                self.assertEqual([call.args[0] for call in run.call_args_list],
+                                 [['git', 'push'], ['git', 'pull', '--rebase']])
+                sleep.assert_not_called()
+
+    def test_staging_status_and_commit_errors_fail_without_push(self):
+        records = [{'Repo': 'VoiceOfML/A', 'File': 'book', 'Extension': 'pdf', 'Folder': [], 'Size': 1}]
+        browser = {'VoiceOfML/A': {'': {'d': [], 'f': []}}}
+        for module in (self.space, self.pages):
+            for failure in ('missing_output', 'add', 'status', 'commit'):
+                with self.subTest(module=module.__name__, failure=failure), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    source, tree, folder = root / 'search_data.json', root / 'folder_tree.json', root / 'folder_browser.json'
+                    source.write_text(json.dumps(records))
+                    tree.write_text('{}')
+                    tree.with_suffix('.json.gz').write_bytes(gzip.compress(b'{}'))
+                    folder.write_text(json.dumps(browser))
+                    clone = root / 'clone'
+                    clone.mkdir()
+                    calls = []
+
+                    def run(cmd, **_kwargs):
+                        calls.append(cmd)
+                        if cmd[:2] == ['git', failure]:
+                            return 1, '', 'simulated failure'
+                        if cmd[:2] == ['git', 'status']:
+                            return 0, 'M  data/search_data.json.gz', ''
+                        return 0, '', ''
+
+                    def write_index(path, *_args):
+                        path.write_bytes(b'fixture')
+
+                    with patch.dict('os.environ', {'HF_TOKEN': 'test', 'PAGES_TOKEN': 'test', 'PAGES_REPO': 'owner/search'}), \
+                            patch.object(module, 'SOURCE_JSON', source), patch.object(module, 'FOLDER_TREE_JSON', tree), \
+                            patch.object(module, 'FOLDER_BROWSER_JSON', folder), \
+                            patch.object(module.tempfile, 'mkdtemp', return_value=str(clone)), \
+                            patch.object(module.shutil, 'rmtree'), patch.object(module, 'run', side_effect=run), \
+                            patch.object(module, 'push_with_retry') as push:
+                        if failure == 'missing_output':
+                            write_sidebar = patch.object(module, 'write_sidebar_payloads', return_value=[])
+                        else:
+                            write_sidebar = nullcontext()
+                        if module is self.space:
+                            with patch.object(module, 'clone_space_repo', return_value=(0, '', '')), \
+                                    patch.object(module, 'write_word_index', side_effect=write_index), \
+                                    patch.object(module, 'write_ngram_index', side_effect=write_index), write_sidebar:
+                                self.assertEqual(module.main(), 1)
+                        else:
+                            with write_sidebar:
+                                self.assertEqual(module.main(), 1)
+                    push.assert_not_called()
+                    self.assertNotIn(['git', 'push'], calls)
+
+    def test_scoped_git_commit_keeps_unrelated_files_and_tracks_generated_deletions(self):
+        def git(cwd, *args):
+            return subprocess.run(['git', *map(str, args)], cwd=cwd, capture_output=True,
+                                  text=True, timeout=30, check=True).stdout.strip()
+
+        for module in (self.space, self.pages):
+            with self.subTest(module=module.__name__), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                git(root, 'init', '--initial-branch=main')
+                git(root, 'config', 'user.name', 'test')
+                git(root, 'config', 'user.email', 'test@example.invalid')
+                for name in module.SEARCH_OUTPUT_PATHS:
+                    path = root / name
+                    if name in ('data/initial', 'data/sidebar'):
+                        path.mkdir(parents=True)
+                        (path / 'old.json').write_text('old')
+                    else:
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        path.write_bytes(b'old')
+                unrelated = root / 'data/reader_assets.json.gz'
+                unrelated.write_bytes(b'protect Reader data')
+                git(root, 'add', '.')
+                git(root, 'commit', '-m', 'original')
+                (root / 'data/search_data.json.gz').write_bytes(b'new')
+                (root / 'data/initial/old.json').unlink()
+                (root / 'data/initial/new.json').write_text('new')
+                unrelated.write_bytes(b'foreign staged change')
+                git(root, 'add', 'data/reader_assets.json.gz')
+                paths = module.SEARCH_OUTPUT_PATHS
+                git(root, 'add', '-A', '--', *paths)
+                git(root, 'commit', '--only', '-m', 'search update', '--', *paths)
+                changes = git(root, 'show', '--format=', '--name-status', 'HEAD')
+                self.assertIn('D\tdata/initial/old.json', changes)
+                self.assertIn('A\tdata/initial/new.json', changes)
+                self.assertIn('M\tdata/search_data.json.gz', changes)
+                self.assertNotIn('reader_assets', changes)
+                self.assertEqual(git(root, 'diff', '--cached', '--name-only'), 'data/reader_assets.json.gz')
+                self.assertEqual(git(root, 'show', 'HEAD:data/reader_assets.json.gz'), 'protect Reader data')
+
+    def test_full_sync_pushes_only_search_paths_in_real_local_git(self):
+        def git(cwd, *args):
+            return subprocess.run(['git', *map(str, args)], cwd=cwd, capture_output=True,
+                                  text=True, timeout=30, check=True).stdout.strip()
+
+        records = [{'Repo': 'VoiceOfML/A', 'File': 'book', 'Extension': 'pdf', 'Folder': [], 'Size': 1}]
+        browser = {'VoiceOfML/A': {'': {'d': [], 'f': []}}}
+        for module in (self.space, self.pages):
+            with self.subTest(module=module.__name__), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                remote, seed, clone = root / 'remote.git', root / 'seed', root / 'clone'
+                git(root, 'init', '--bare', '--initial-branch=main', remote)
+                git(root, 'clone', remote, seed)
+                git(seed, 'config', 'user.name', 'fixture')
+                git(seed, 'config', 'user.email', 'fixture@example.invalid')
+                for name in module.SEARCH_OUTPUT_PATHS:
+                    path = seed / name
+                    if name in ('data/initial', 'data/sidebar'):
+                        path.mkdir(parents=True)
+                        (path / 'stale.json').write_text('stale')
+                    else:
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        path.write_bytes(b'previous')
+                (seed / 'data/reader_assets.json.gz').write_bytes(b'preserve Reader projection')
+                (seed / 'data/reader_v3_receipt.json').write_text('preserve receipt')
+                (seed / 'app.py').write_text('preserve external application')
+                git(seed, 'add', '.')
+                git(seed, 'commit', '-m', 'seed')
+                git(seed, 'push', 'origin', 'main')
+                # Build a genuine local worktree without exercising a clone:
+                # this environment's upload-pack adds a 28-second shutdown
+                # delay per nonempty clone. Production clone/auth remains
+                # covered by separate tests and the successful prior Actions run.
+                subprocess.run(['cp', '-a', str(seed), str(clone)], check=True, timeout=30)
+                source, tree, folder = root / 'search_data.json', root / 'folder_tree.json', root / 'folder_browser.json'
+                source.write_text(json.dumps(records))
+                tree.write_text('{}')
+                tree.with_suffix('.json.gz').write_bytes(gzip.compress(b'{}'))
+                folder.write_text(json.dumps(browser))
+                original_run = module.run
+
+                def run(cmd, cwd=None, env=None):
+                    if cmd[:2] == ['git', 'clone']:
+                        return 0, '', ''
+                    return original_run(cmd, cwd=cwd, env=env)
+
+                def clone_space(_url, target, _env):
+                    self.assertEqual(target, str(clone))
+                    return 0, '', ''
+
+                def write_index(path, *_args):
+                    path.write_bytes(b'fixture index')
+
+                with patch.dict('os.environ', {'HF_TOKEN': 'test', 'PAGES_TOKEN': 'test', 'PAGES_REPO': 'owner/search'}), \
+                        patch.object(module, 'SOURCE_JSON', source), patch.object(module, 'FOLDER_TREE_JSON', tree), \
+                        patch.object(module, 'FOLDER_BROWSER_JSON', folder), \
+                        patch.object(module.tempfile, 'mkdtemp', return_value=str(clone)), \
+                        patch.object(module, 'run', side_effect=run), \
+                        patch.object(module, 'git_auth_env', return_value={}):
+                    if module is self.space:
+                        with patch.object(module, 'clone_space_repo', side_effect=clone_space), \
+                                patch.object(module, 'write_word_index', side_effect=write_index), \
+                                patch.object(module, 'write_ngram_index', side_effect=write_index):
+                            self.assertEqual(module.main(), 0)
+                    else:
+                        self.assertEqual(module.main(), 0)
+                changed = git(remote, 'show', '--format=', '--name-only', 'main').splitlines()
+                self.assertTrue(changed)
+                self.assertTrue(all(path in module.SEARCH_OUTPUT_PATHS or
+                                    path.startswith(('data/initial/', 'data/sidebar/')) for path in changed))
+                self.assertNotIn('data/reader_assets.json.gz', changed)
+                self.assertNotIn('data/reader_v3_receipt.json', changed)
+                self.assertNotIn('app.py', changed)
+                self.assertIn('data/initial/stale.json', changed)
+                self.assertIn('data/sidebar/stale.json', changed)
+                self.assertEqual(git(remote, 'show', 'main:data/reader_assets.json.gz'), 'preserve Reader projection')
+                self.assertEqual(git(remote, 'show', 'main:data/reader_v3_receipt.json'), 'preserve receipt')
+                self.assertEqual(git(remote, 'show', 'main:app.py'), 'preserve external application')
+
+    def test_real_git_concurrent_change_rebases_or_stops_on_conflict(self):
+        def git(cwd, *args):
+            return subprocess.run(['git', *map(str, args)], cwd=cwd, capture_output=True,
+                                  text=True, timeout=90, check=True).stdout.strip()
+
+        for module in (self.space, self.pages):
+            for conflict in (False, True):
+                with self.subTest(module=module.__name__, conflict=conflict), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    remote, seed, ours, other = root / 'remote.git', root / 'seed', root / 'ours', root / 'other'
+                    git(root, 'init', '--bare', '--initial-branch=main', remote)
+                    git(root, 'clone', remote, seed)
+                    git(seed, 'config', 'user.name', 'fixture')
+                    git(seed, 'config', 'user.email', 'fixture@example.invalid')
+                    (seed / 'data').mkdir()
+                    (seed / 'data/search_data.json.gz').write_text('original')
+                    (seed / 'data/reader_assets.json.gz').write_text('preserve reader')
+                    (seed / 'app.py').write_text('original application')
+                    git(seed, 'add', '.')
+                    git(seed, 'commit', '-m', 'seed')
+                    git(seed, 'push', 'origin', 'main')
+                    for target in (ours, other):
+                        subprocess.run(['cp', '-a', str(seed), str(target)], check=True, timeout=30)
+                    (ours / 'data/search_data.json.gz').write_text('our search update')
+                    git(ours, 'add', 'data/search_data.json.gz')
+                    git(ours, 'commit', '-m', 'our search update')
+                    external_path = 'data/search_data.json.gz' if conflict else 'app.py'
+                    (other / external_path).write_text('concurrent external update')
+                    git(other, 'add', external_path)
+                    git(other, 'commit', '-m', 'external update')
+                    git(other, 'push', 'origin', 'main')
+                    commands = []
+                    original = module.run
+
+                    def run(command, cwd=None, env=None):
+                        commands.append(command)
+                        return original(command, cwd=cwd, env=env)
+
+                    with patch.object(module, 'run', side_effect=run), patch.object(module.time, 'sleep'):
+                        self.assertEqual(module.push_with_retry(str(ours), {}), not conflict)
+                    pushes = [command for command in commands if command == ['git', 'push']]
+                    self.assertEqual(len(pushes), 1 if conflict else 2)
+                    self.assertEqual(git(remote, 'show', 'main:data/reader_assets.json.gz'), 'preserve reader')
+                    if conflict:
+                        self.assertEqual(git(remote, 'show', 'main:data/search_data.json.gz'), 'concurrent external update')
+                    else:
+                        self.assertEqual(git(remote, 'show', 'main:data/search_data.json.gz'), 'our search update')
+                        self.assertEqual(git(remote, 'show', 'main:app.py'), 'concurrent external update')
 
     def test_retired_ocr_flags_are_cleared_without_changing_sources(self):
         records = [{"Repo": "VoiceOfML/A", "File": "book", "Extension": "pdf", "Folder": ["docs"], "HasTxt": True},
