@@ -13,6 +13,13 @@ from scripts import fork_repositories, publish_proofread_upstream, report_ocr_pa
 
 
 class ProofreadBundleTests(unittest.TestCase):
+    def setUp(self):
+        # Exercise the dormant implementation with synthetic mocks only. The
+        # separate guard tests verify that the real entry point stays paused.
+        paused_entry = patch.object(submit_proofread, 'require_paused_delivery')
+        paused_entry.start()
+        self.addCleanup(paused_entry.stop)
+
     def test_patch_path_targets_archive_repository_root(self):
         self.assertEqual(submit_proofread.patch_path(0, "article", "book"), "[article][book].ts")
 
@@ -652,38 +659,29 @@ class ProofreadBundleTests(unittest.TestCase):
         self.assertTrue(submit_proofread.auto_merge_allowed("proofread", inserted_at_limit, None))
         self.assertFalse(submit_proofread.auto_merge_allowed("proofread", inserted_over_limit, None))
 
-    def test_existing_pull_must_contain_requested_content(self):
-        existing = {
-            "number": 7, "url": "https://example.test/pr/7", "base": "ocr_patch",
-            "head": "proofread/correction-ocr_patch",
-        }
-        with patch.object(submit_proofread, "open_pull_request", return_value=existing), \
-                patch.object(submit_proofread, "get_file", side_effect=[("base", "sha"), ("unexpected", "branch-sha")]):
-            with self.assertRaisesRegex(RuntimeError, "requested file content"):
+    def test_existing_pull_blocks_single_file_recovery_before_reads_or_writes(self):
+        with patch.object(submit_proofread, "api_request", return_value=(200, [{"number": 7}])), \
+                patch.object(submit_proofread, "get_file") as read_file, \
+                patch.object(submit_proofread, "response_or_fail") as writer:
+            with self.assertRaisesRegex(RuntimeError, "separate recovery review"):
                 submit_proofread.submit_file(
                     "token", "repo", "ocr_patch", "archives0/[a][p].ts", "expected",
                     "title", "description", "correction",
                 )
+        read_file.assert_not_called()
+        writer.assert_not_called()
 
-    def test_existing_batch_pull_must_match_all_requested_files(self):
-        existing = {
-            "number": 8, "url": "https://example.test/pr/8", "base": "ocr_patch",
-            "head": "proofread/correction-ocr_patch",
-        }
+    def test_existing_batch_pull_blocks_recovery_before_reads_or_writes(self):
         contents = {"[a][p].ts": "one", "[b][p].ts": "two"}
-
-        def get_file(_token, _repo, _branch, path):
-            return contents[path], "sha"
-
-        with patch.object(submit_proofread, "open_pull_request", return_value=existing), \
-                patch.object(submit_proofread, "get_file", side_effect=get_file), \
-                patch.object(submit_proofread, "api_request", return_value=(200, [
-                    {"filename": "[a][p].ts"}, {"filename": "[b][p].ts"},
-                ])):
-            result = submit_proofread.submit_files(
-                "token", "repo", "ocr_patch", contents, "title", "description", "correction",
-            )
-        self.assertEqual(result, existing)
+        with patch.object(submit_proofread, "api_request", return_value=(200, [{"number": 8}])), \
+                patch.object(submit_proofread, "get_file") as read_file, \
+                patch.object(submit_proofread, "response_or_fail") as writer:
+            with self.assertRaisesRegex(RuntimeError, "separate recovery review"):
+                submit_proofread.submit_files(
+                    "token", "repo", "ocr_patch", contents, "title", "description", "correction",
+                )
+        read_file.assert_not_called()
+        writer.assert_not_called()
 
     def test_auto_merge_notification_is_idempotent(self):
         issue = {"number": 12, "html_url": "https://example.test/issues/12"}

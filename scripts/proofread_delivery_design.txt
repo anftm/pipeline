@@ -5,8 +5,11 @@ Current status
 --------------
 The central proofreading and parsing workflows are disabled. The BHA Space's
 API intentionally responds 503 to new submissions by default; it does not
-dispatch them. Changing BHA_PIPELINE_SUBMISSIONS_PAUSED to 0 is not approved by
-this document. User drafts live in the browser's session storage and are not a
+dispatch them. The central `submit_proofread.py` entry point independently
+fails closed before loading an event or reading credentials; its pause has no
+environment bypass and changing it requires separate review. Changing the
+Space's BHA_PIPELINE_SUBMISSIONS_PAUSED to 0 is not approved by this document.
+User drafts live in the browser's session storage and are not a
 durable submission queue. A draft may be lost when its tab or session closes.
 
 Before the pause, a GitHub repository_dispatch response of 204 could be shown
@@ -27,12 +30,15 @@ Gaps in existing implementation
 * Proofreading may affect multiple files and may auto-merge; parsing creates
   multiple PRs, may upload review crops, and updates a tracker. A timeout or
   cancellation can leave a partial outcome and must not be blindly replayed.
-* Legacy `open_pull_request` treats an API error or a malformed 200 response as
-  no matching PR. If a deterministic branch already exists without a visible
-  PR, `submit_file` and `submit_files` may reuse it and write requested files
-  without proving the branch's author, base commit or complete existing tree.
-  Tests characterize this behavior using synthetic mocks only; they are not a
-  reason to retry, and a file-level SHA is not a writer or branch fence.
+* Legacy `open_pull_request` previously treated API errors or malformed 200s as
+  no matching PR, then could reuse an unverified branch. A local fail-closed
+  guard now stops on uncertain lookup, any PR returned by the filtered query,
+  or an existing orphan branch. A 200/empty head-filtered list does not prove
+  that no closed PR from a deleted head exists, or that another writer cannot
+  race. This intentionally blocks many partial attempts but does not prove
+  race-free creation, durable delivery or writer isolation.
+  A file-level SHA is not a writer or branch fence. An isolated end-to-end
+  recovery protocol is still required before the Space pause can be lifted.
 * The Space has a credential capable of dispatching; the current central token
   cannot read the Actions global permission. Individual workflow state alone
   does not prove all triggers, access and producer isolation are correct.

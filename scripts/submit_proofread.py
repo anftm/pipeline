@@ -106,8 +106,11 @@ def branch_sha(token, repo, branch):
     if status == 404:
         return None
     if status != 200:
-        fail(f"cannot read {repo}/{branch} ref: {data}")
-    return data.get("object", {}).get("sha")
+        fail(f"cannot read {repo}/{branch} ref (HTTP {status})")
+    sha = data.get("object", {}).get("sha") if isinstance(data, dict) and isinstance(data.get("object"), dict) else None
+    if not isinstance(sha, str) or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", sha):
+        fail(f"cannot verify {repo}/{branch} ref identity")
+    return sha
 
 
 def fail(message):
@@ -158,55 +161,40 @@ def append_patch(existing, patch):
 
 
 def open_pull_request(token, repo, branch):
+    # Query all states: any matching prior PR is a separate recovery problem.
     query = urllib.parse.urlencode({"head": f"{OWNER}:{branch}", "state": "all", "per_page": 100})
     status, data = api_request(token, "GET", f"{repo_path(repo)}/pulls?{query}")
-    if status == 200 and isinstance(data, list) and data:
-        for pull in data:
-            if pull.get("state") == "closed" and not pull.get("merged"):
-                detail_status, detail = api_request(token, "GET", f"{repo_path(repo)}/pulls/{pull.get('number')}")
-                if detail_status != 200 or not detail.get("merged"):
-                    continue
-                pull = detail
-            if pull.get("state") == "open" or pull.get("merged"):
-                return {
-                    "number": pull.get("number"),
-                    "url": pull.get("html_url"),
-                    "body": pull.get("body") or "",
-                    "sha": pull.get("head", {}).get("sha"),
-                    "base": pull.get("base", {}).get("ref"),
-                    "head": pull.get("head", {}).get("ref") or branch,
-                    "merge_commit_sha": pull.get("merge_commit_sha"),
-                }
+    # Head-filtered PR search may not return closed PRs from deleted heads.
+    # A 200/empty response is only an observation; fresh writers must prove
+    # that their request identity was never used elsewhere before proceeding.
+    # An API error, malformed body or a full first page is not proof that a PR
+    # is absent. Do not attempt to create/reuse a branch on partial evidence.
+    if status != 200 or not isinstance(data, list) or len(data) >= 100:
+        fail(f"cannot establish complete proofreading PR lookup for {repo}/{branch}")
+    if data:
+        # A pull list is not a stable snapshot. Once any prior PR is visible,
+        # stop instead of treating its current contents as authority to mutate
+        # metadata, merge it, or create another effect. Reconciliation of a
+        # previous attempt needs a separate reviewed protocol.
+        fail("existing proofreading PR requires separate recovery review")
     return None
 
 
 def submit_file(token, repo, base, path, content, title, description, correction_id):
     branch = f"proofread/{correction_id}-{base}"
-    existing_pull = open_pull_request(token, repo, branch)
+    open_pull_request(token, repo, branch)
     read_file = get_file_bytes if isinstance(content, bytes) else get_file
-    _base_content, base_file_sha = read_file(token, repo, base, path)
-    if existing_pull:
-        if existing_pull.get("base") != base or existing_pull.get("head") != branch:
-            fail(f"existing proofreading PR has an unexpected branch target: {existing_pull}")
-        branch_content, _branch_file_sha = read_file(token, repo, branch, path)
-        if branch_content != content:
-            fail("existing proofreading PR branch does not contain the requested file content")
-        status, files = api_request(token, "GET", f"{repo_path(repo)}/pulls/{existing_pull['number']}/files?per_page=100")
-        if status != 200 or not isinstance(files, list) or {item.get("filename") for item in files} != {path}:
-            fail("existing proofreading PR contains unexpected files")
-        if existing_pull.get("body") != description:
-            response_or_fail(
-                token, "PATCH", f"{repo_path(repo)}/pulls/{existing_pull['number']}", (200,),
-                {"body": description},
-            )
-        return existing_pull
     branch_revision = branch_sha(token, repo, branch)
-    if branch_revision is None:
-        base_revision = response_or_fail(token, "GET", ref_path(repo, base), (200,))["object"]["sha"]
-        response_or_fail(
-            token, "POST", f"{repo_path(repo)}/git/refs", (201,),
-            {"ref": f"refs/heads/{branch}", "sha": base_revision},
-        )
+    if branch_revision is not None:
+        fail("existing proofreading branch has no verified PR; recovery requires separate review")
+    _base_content, base_file_sha = read_file(token, repo, base, path)
+    base_revision = branch_sha(token, repo, base)
+    if base_revision is None:
+        fail("proofreading base branch is missing")
+    response_or_fail(
+        token, "POST", f"{repo_path(repo)}/git/refs", (201,),
+        {"ref": f"refs/heads/{branch}", "sha": base_revision},
+    )
     branch_content, branch_file_sha = read_file(token, repo, branch, path)
     if branch_content != content:
         response_or_fail(
@@ -238,38 +226,16 @@ def submit_files(token, repo, base, contents, title, description, correction_id)
     if not contents:
         fail("batch submission requires at least one file")
     branch = f"proofread/{correction_id}-{base}"
-    existing_pull = open_pull_request(token, repo, branch)
-    if existing_pull:
-        if existing_pull.get("base") != base or existing_pull.get("head") != branch:
-            fail(f"existing proofreading PR has an unexpected branch target: {existing_pull}")
-        for path, content in contents.items():
-            branch_content, _branch_file_sha = get_file(token, repo, branch, path)
-            if branch_content != content:
-                fail("existing proofreading PR branch does not contain the requested batch content")
-        filenames = set()
-        for page in range(1, 4):
-            status, files = api_request(
-                token, "GET", f"{repo_path(repo)}/pulls/{existing_pull['number']}/files?per_page=100&page={page}",
-            )
-            if status != 200 or not isinstance(files, list):
-                fail("cannot verify existing proofreading PR files")
-            filenames.update(item.get("filename") for item in files)
-            if len(files) < 100:
-                break
-        if filenames != set(contents):
-            fail("existing proofreading PR contains unexpected files")
-        if existing_pull.get("body") != description:
-            response_or_fail(
-                token, "PATCH", f"{repo_path(repo)}/pulls/{existing_pull['number']}", (200,),
-                {"body": description},
-            )
-        return existing_pull
-    if branch_sha(token, repo, branch) is None:
-        base_revision = response_or_fail(token, "GET", ref_path(repo, base), (200,))["object"]["sha"]
-        response_or_fail(
-            token, "POST", f"{repo_path(repo)}/git/refs", (201,),
-            {"ref": f"refs/heads/{branch}", "sha": base_revision},
-        )
+    open_pull_request(token, repo, branch)
+    if branch_sha(token, repo, branch) is not None:
+        fail("existing proofreading branch has no verified PR; recovery requires separate review")
+    base_revision = branch_sha(token, repo, base)
+    if base_revision is None:
+        fail("proofreading base branch is missing")
+    response_or_fail(
+        token, "POST", f"{repo_path(repo)}/git/refs", (201,),
+        {"ref": f"refs/heads/{branch}", "sha": base_revision},
+    )
     for path, content in contents.items():
         _base_content, base_file_sha = get_file(token, repo, base, path)
         branch_content, branch_file_sha = get_file(token, repo, branch, path)
@@ -2040,6 +2006,16 @@ def segmented_request(request):
     return restored
 
 
+def require_paused_delivery():
+    """Stop every live submission until durable delivery is independently ready.
+
+    GitHub accepting a dispatch is not proof that a disabled workflow ran. This
+    check deliberately has no environment bypass: changing it requires a code
+    review and must not be confused with the Space's separate pause switch.
+    """
+    fail("proofreading delivery is paused pending durable recovery and receipts")
+
+
 def load_request():
     event_path = os.environ.get("GITHUB_EVENT_PATH")
     if not event_path:
@@ -2053,6 +2029,7 @@ def load_request():
 
 
 def main():
+    require_paused_delivery()
     token = os.environ.get("GH_PAT", "")
     if not token:
         fail("GH_PAT is required")
