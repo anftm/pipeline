@@ -197,6 +197,134 @@ class SingleV3ProjectionShadowTests(unittest.TestCase):
         self.assertEqual(len(store.reads), 4)
         self.assertEqual(self.receipt['generation'], self.pointer['generation'])
 
+    def document_gc_fixture(self):
+        """Synthetic preflight inputs only; creating these objects writes nothing."""
+        from tests.test_reader_gc_ccrd import build_store
+        proposed = self.simulate()
+        # This made-up receipt is deliberately NOT a compatibility protocol.
+        rebound = {**self.receipt, 'generation': proposed['pointer']['generation'],
+                   'base_snapshot': proposed['catalog']['base_sidecar']}
+        old_ccrd, _ = build_store()
+        ccrd = document_reset.decode(old_ccrd.objects['current.json'])
+        for value in ccrd['databases'].values():
+            value['path'] = value['path'].replace('legacy-a', 'ccrd-active')
+        objects = {
+            (document_reset.ASSETS, document_reset.RECEIPT): publication.encode(rebound),
+            (document_gc.CCRD, f'reports/ccrd-ocr-reset/{shadow.RESET_ID}/withdrawal.json'):
+                publication.encode({'status': 'withdrawn'}),
+            (document_reset.ASSETS, document_reset.SIDECAR): publication.encode(self.base),
+            (document_reset.ASSETS, publication.POINTER): publication.encode(proposed['pointer']),
+            (document_reset.PAGES, document_reset.DERIVED): publication.encode({'files': []}),
+            (document_gc.CCRD, 'current.json'): publication.encode(ccrd),
+        }
+        for name in document_reset.REGISTRIES:
+            objects[document_reset.ASSETS, 'reader-index/' + name] = publication.encode({'files': {}})
+
+        class ReadOnlyStore:
+            def __init__(self):
+                self.objects = copy.deepcopy(objects)
+                self.reads = []
+
+            def read_bytes(self, bucket, path):
+                self.reads.append((bucket, path))
+                try:
+                    return self.objects[bucket, path]
+                except KeyError as error:
+                    raise FileNotFoundError(path) from error
+
+            def list_files(self, bucket, prefixes):
+                return {path for target, path in self.objects if target == bucket and path.startswith(prefixes)}
+
+        class Response:
+            def __init__(self, content=None, data=None):
+                self.content, self.data = content, data
+
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return self.data
+
+        class SyntheticConsumers:
+            def __init__(self, hf, pages):
+                self.hf, self.pages = hf, pages
+                self.requests = []
+
+            def get(self, url, **_kwargs):
+                self.requests.append(url)
+                if url == 'https://voiceofml-search.hf.space/api/reader-assets':
+                    return Response(content=publication.encode(self.hf))
+                if url == 'https://vomebook.github.io/search/data/reader_assets.json.gz':
+                    return Response(content=publication.encode(self.pages))
+                if url == 'https://vomebook-search.hf.space/api/index-status':
+                    return Response(data={'ready': True, 'ocr_release': None,
+                                          'loaded_sources': ['CCRD', 'CW', 'PLA', 'RMRB']})
+                raise AssertionError('unexpected synthetic consumer request')
+
+        return proposed, rebound, ReadOnlyStore(), SyntheticConsumers
+
+    def test_hypothetical_receipt_rebind_does_not_prove_both_consumers_accepted_new_route(self):
+        proposed, rebound, store, consumers = self.document_gc_fixture()
+        before = copy.deepcopy(store.objects)
+        # The document collector intentionally accepts either the canonical
+        # sidecar OR the pinned baseline for each surface. A fabricated rebound
+        # receipt plus mixed old/new synthetic projections can therefore pass
+        # that narrow check without proving the CHM handoff or dual acceptance.
+        client = consumers(self.base, self.after)
+        with patch.object(publication, 'current', return_value=(proposed['pointer'], proposed['catalog'])), \
+                patch.object(publication, 'pinned_base', return_value=copy.deepcopy(self.after)):
+            receipt, _pins, _pointer, _catalog = document_gc.preflight(store, shadow.RESET_ID, client)
+        self.assertEqual(receipt, rebound)
+        self.assertEqual(store.objects, before)
+        self.assertEqual(len(client.requests), 3)
+        self.assertNotEqual(client.hf['f'][fixed.SOURCE_KEY], client.pages['f'][fixed.SOURCE_KEY])
+        self.assertFalse(proposed['consumer_acceptance_proved'])
+        self.assertFalse(proposed['recovery_authorized'])
+        self.assertFalse(proposed['gc_authorized'])
+        fixtures = self.fixtures(proposed)
+        fixtures['hf']['projection'] = copy.deepcopy(self.base)
+        with self.assertRaisesRegex(ValueError, 'complete projection differs'):
+            shadow.evaluate_fixture_receipts(proposed, fixtures)
+
+    def test_synthetic_rebound_receipt_does_not_bypass_remaining_document_guards(self):
+        for mode in ('reset_id', 'catalog_files', 'catalog_reset', 'base_snapshot', 'registry',
+                     'derived_djvu', 'republished_document', 'consumer_foreign', 'ccrd_live'):
+            proposed, rebound, store, consumers = self.document_gc_fixture()
+            client = consumers(self.after, self.after)
+            catalog = copy.deepcopy(proposed['catalog'])
+            if mode == 'reset_id':
+                store.objects[document_reset.ASSETS, document_reset.RECEIPT] = publication.encode(
+                    {**rebound, 'reset_id': 'wrong-reset'})
+            elif mode == 'catalog_files':
+                catalog['files'] = {'foreign': {}}
+            elif mode == 'catalog_reset':
+                catalog['document_reset'] = 'wrong-reset'
+            elif mode == 'base_snapshot':
+                catalog['base_sidecar'] = {}
+            elif mode == 'registry':
+                store.objects[document_reset.ASSETS, 'reader-index/' + document_reset.REGISTRIES[0]] = \
+                    publication.encode({'files': {'foreign': {}}})
+            elif mode == 'derived_djvu':
+                store.objects[document_reset.PAGES, document_reset.DERIVED] = publication.encode(
+                    {'files': [{'source_extension': 'djvu', 'key': 'repo\0book.djvu'}]})
+            elif mode == 'republished_document':
+                new = copy.deepcopy(self.base)
+                new['f']['repo\0scan.pdf'] = {'b': document_reset.PAGES, 'p': 'objects/old/page-manifest.json'}
+                store.objects[document_reset.ASSETS, document_reset.SIDECAR] = publication.encode(new)
+            elif mode == 'consumer_foreign':
+                client.hf = copy.deepcopy(self.after)
+                client.hf['f']['repo\0audio.aac'] = {'s': 1}
+            else:
+                store.objects[document_gc.CCRD, 'control/ocr-current.json'] = b'{}'
+            before = copy.deepcopy(store.objects)
+            with self.subTest(mode=mode), \
+                    patch.object(publication, 'current', return_value=(proposed['pointer'], catalog)), \
+                    patch.object(publication, 'pinned_base', return_value=copy.deepcopy(self.after)), \
+                    self.assertRaises(ValueError):
+                document_gc.preflight(store, shadow.RESET_ID, client)
+            self.assertEqual(store.objects, before)
+            self.assertFalse(proposed['gc_authorized'])
+
     def test_no_workflow_or_network_writer_can_activate_simulation(self):
         tree = ast.parse(Path(shadow.__file__).read_text())
         imports = {alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names}

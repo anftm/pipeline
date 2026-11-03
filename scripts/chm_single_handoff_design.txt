@@ -49,6 +49,17 @@ such a replacement until a separately reviewed compatibility protocol exists.
 Do not bypass that preflight, edit the receipt, or run document GC. CHM-only
 route acceptance cannot by itself establish document-retirement compatibility.
 
+The converse also fails: merely changing the receipt to name a hypothetical new
+generation and base does not prove a safe CHM handoff. The current document GC
+preflight intentionally permits each deployed document-withdrawn projection to
+equal either the canonical sidecar or its pinned baseline. In a synthetic test
+where those differ, one consumer with the old route and another with the new
+route pass that narrow projection condition. Document withdrawal checks and CHM
+two-consumer acceptance answer different questions; neither replaces the other.
+The test fabricates a receipt in memory solely to show this counterexample; it
+does not validate a migration or recommend updating any real receipt. Multiple
+remaining GC preflight checks, fences and the 52 processing pins still apply.
+
 An unchanged apply=true unify is not necessarily a no-op either: the central
 workflow currently sets changed=true unconditionally, then can publish a Pages
 projection, acknowledge consumers, and compact the base catalog. A read-only
