@@ -10,6 +10,7 @@ on:
 
 permissions:
   contents: read
+  actions: write
 
 jobs:
   delete:
@@ -28,7 +29,7 @@ jobs:
         run: python -B -m unittest tests.test_exact_stale_run_delete -q
       - name: Delete only the two fixed stale run records
         env:
-          GC_PRODUCER_TOKENS_JSON: ${{ secrets.GC_PRODUCER_TOKENS_JSON }}
+          EXACT_RUN_GITHUB_TOKEN: ${{ github.token }}
         run: python -u -B scripts/exact_stale_run_delete.py
       - uses: actions/upload-artifact@v7
         if: always()

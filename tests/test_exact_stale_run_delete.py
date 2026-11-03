@@ -20,10 +20,6 @@ class FakeClient:
         self.wrong_repo = False
 
     def get(self, url, params=None):
-        if url == 'https://api.github.com/user':
-            response = Mock(status_code=200, headers={'x-oauth-scopes': 'repo, workflow'})
-            response.json.return_value = {'login': 'synthetic-owner'}
-            return response
         path = url.removeprefix(cleanup.BASE)
         if not path:
             value = {'id': cleanup.REPO_ID, 'full_name': cleanup.CENTRAL}
@@ -55,7 +51,9 @@ class FakeClient:
         status = self.responses.pop(0)
         if status == 204:
             self.deleted.append(run_id)
-        return Mock(status_code=status)
+        response = Mock(status_code=status)
+        response.json.return_value = {'message': 'Resource not accessible by integration'}
+        return response
 
 
 class ExactRunCleanupTests(unittest.TestCase):
@@ -124,6 +122,9 @@ class ExactRunCleanupTests(unittest.TestCase):
         runs = ' '.join(step.get('run', '') for step in job['steps'])
         self.assertNotIn('reader-gc-collect', runs)
         self.assertNotIn('reader_gc_maintenance', runs)
+        self.assertEqual(workflow['permissions']['actions'], 'write')
+        step = next(s for s in job['steps'] if s.get('name') == 'Delete only the two fixed stale run records')
+        self.assertEqual(step['env']['EXACT_RUN_GITHUB_TOKEN'], '${{ github.token }}')
 
 
 if __name__ == '__main__':

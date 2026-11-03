@@ -14,11 +14,6 @@ import re
 
 import httpx
 
-try:
-    from . import reader_gc_credentials as credentials
-except ImportError:
-    import reader_gc_credentials as credentials
-
 
 CENTRAL = 'anftm/pipeline'
 REPO_ID = 1260985830
@@ -62,17 +57,6 @@ def fetch(client, path, params=None):
     return response.json()
 
 
-def cleanup_credential_allows_run_deletion(client):
-    """Distinguish an authenticated Actions-write credential from a read token."""
-    response = client.get('https://api.github.com/user')
-    if response.status_code != 200:
-        raise RuntimeError('central cleanup credential could not authenticate')
-    scopes = {scope.strip() for scope in response.headers.get('x-oauth-scopes', '').split(',')}
-    if 'repo' not in scopes:
-        raise RuntimeError('central cleanup credential lacks visible repo scope')
-    return response.json().get('login')
-
-
 def snapshot(client, run_id, expected_sha, *, now=None):
     path = f'/actions/runs/{run_id}'
     run = fetch(client, path)
@@ -107,13 +91,12 @@ def run(client, directory=OUTPUT):
     identity = fetch(client, '')
     if identity.get('id') != REPO_ID or identity.get('full_name') != CENTRAL:
         raise RuntimeError('central repository identity differs')
-    credential_login = cleanup_credential_allows_run_deletion(client)
     before = {str(run_id): snapshot(client, run_id, sha) for run_id, sha in TARGETS.items()}
     snapshot_sha = persist(directory, 'before.json', {'repository': CENTRAL, 'repository_id': REPO_ID,
                                                        'runs': before})
     persist(directory, 'intent.json', {'kind': 'exact-stale-run-delete', 'target_run_ids': list(TARGETS),
                                        'repository_id': REPO_ID, 'snapshot_sha256': snapshot_sha,
-                                       'credential_login': credential_login,
+                                       'credential_type': 'workflow-github-token',
                                        'gc_authorized': False})
     for run_id, sha in TARGETS.items():
         snapshot(client, run_id, sha)
@@ -123,7 +106,18 @@ def run(client, directory=OUTPUT):
             persist(directory, f'{run_id}-delete.json', {'run_id': run_id, 'outcome': 'ambiguous',
                                                         'error': type(error).__name__})
             raise RuntimeError('run delete outcome ambiguous; inspect before retry') from error
-        persist(directory, f'{run_id}-delete.json', {'run_id': run_id, 'http_status': response.status_code})
+        # Log only a tightly constrained GitHub diagnostic, never response
+        # bodies that could contain credential or unrelated private material.
+        diagnostic = None
+        if response.status_code != 204:
+            try:
+                candidate = response.json().get('message')
+            except (ValueError, AttributeError):
+                candidate = None
+            if isinstance(candidate, str) and re.fullmatch(r'[A-Za-z0-9 .,;:()/_-]{1,200}', candidate):
+                diagnostic = candidate
+        persist(directory, f'{run_id}-delete.json', {'run_id': run_id, 'http_status': response.status_code,
+                                                      'diagnostic': diagnostic})
         if response.status_code != 204:
             raise RuntimeError('run delete not accepted: HTTP ' + str(response.status_code))
         readback = client.get(BASE + f'/actions/runs/{run_id}')
@@ -138,7 +132,9 @@ def run(client, directory=OUTPUT):
 
 def main():
     require_context()
-    token = credentials.token_for(CENTRAL)
+    token = os.environ.get('EXACT_RUN_GITHUB_TOKEN')
+    if not token:
+        raise RuntimeError('workflow GitHub Actions token unavailable')
     headers = {'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json',
                'User-Agent': 'exact-stale-queued-run-removal'}
     with httpx.Client(headers=headers, timeout=45, follow_redirects=False) as client:
