@@ -116,16 +116,31 @@ class WriterTests(unittest.TestCase):
             writer.put(cleanup.IDS, b'{}', if_match='etag')
         writer.client.put_object.assert_not_called()
 
-    def test_workflow_holds_all_three_groups(self):
+    def test_retired_entrypoints_are_absent_and_historical_identity_remains(self):
         from pathlib import Path
-        import yaml
         folder = Path(__file__).resolve().parents[1] / '.github/workflows'
-        outer = yaml.load((folder / 'clear-withdrawn-ocr-ids.yml').read_text(), Loader=yaml.BaseLoader)
-        inner = yaml.load((folder / 'clear-withdrawn-ocr-ids-inner.yml').read_text(), Loader=yaml.BaseLoader)
-        groups = (outer['concurrency'], outer['jobs']['clear']['concurrency'], inner['jobs']['clear']['concurrency'])
-        self.assertEqual([item['group'] for item in groups],
-                         ['publish-ccrd-index', 'reader-global-maintenance', 'reader-sidecar'])
-        self.assertTrue(all(item['cancel-in-progress'] == 'false' and item['queue'] == 'max' for item in groups))
+        outer, inner = 'clear-withdrawn-ocr-ids.yml', 'clear-withdrawn-ocr-ids-inner.yml'
+        self.assertFalse((folder / outer).exists())
+        self.assertFalse((folder / inner).exists())
+        self.assertEqual(cleanup.WORKFLOW_REF, f'anftm/pipeline/.github/workflows/{outer}@refs/heads/main')
+        for workflow in folder.iterdir():
+            if workflow.suffix not in {'.yml', '.yaml'}:
+                continue
+            with self.subTest(workflow=workflow.name):
+                content = workflow.read_text(encoding='utf-8')
+                self.assertNotIn(outer, content)
+                self.assertNotIn(inner, content)
+                self.assertNotIn('clear_withdrawn_ocr_ids.py', content)
+
+    def test_retired_script_still_rejects_untrusted_workflow_context(self):
+        for ref in ('', 'anftm/pipeline/.github/workflows/other.yml@refs/heads/main'):
+            env = {'GITHUB_ACTIONS': 'true', 'GITHUB_REPOSITORY': 'anftm/pipeline',
+                   'GITHUB_WORKFLOW_REF': ref, 'GITHUB_RUN_ID': '123'}
+            with self.subTest(ref=ref), patch.dict('os.environ', env, clear=True), \
+                    patch.object(cleanup, 'Writer') as writer:
+                with self.assertRaisesRegex(RuntimeError, 'requires its central workflow'):
+                    cleanup.main()
+                writer.assert_not_called()
 
 
 if __name__ == '__main__':

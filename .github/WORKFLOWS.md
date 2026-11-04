@@ -93,8 +93,6 @@
 | `chm-terminal-release-inner.yml` | 被调用 | 对应终态及维护交接内层。 |
 | `publish-chm-gc-release.yml` | 手动 | 历史 CHM GC 放行证据外层；本表不构成放行。 |
 | `publish-chm-gc-release-inner.yml` | 被调用 | 对应放行证据内层。 |
-| `clear-withdrawn-ocr-ids.yml` | 手动 | OCR ID 映射清理外层；映射已清空，不重新执行。 |
-| `clear-withdrawn-ocr-ids-inner.yml` | 被调用 | 对应映射清理内层。 |
 | `expanded-ocr-graph-preview.yml` | 手动 | 固定 OCR/PS 图预览及隔离恢复。 |
 | `expanded-ocr-retirement.yml` | 手动 | 固定 OCR/PS 对象清单，可能删除；本次不执行。 |
 
@@ -115,5 +113,6 @@
 | `stage-ccrd-ocr-text.yml` | 旧 OCR staging job 已硬禁用；其调用方也已移除。 |
 | `search-update-directories.yml` | 重复的手动目录入口并入 `search-daily-sync.yml` 的 `target=directories`；原更新脚本保留，目标模式不能发布两站搜索或提交状态。 |
 | `bha-reindex-auth-check.yml` | 只读 BHA 鉴权入口并入 `ops-keep-spaces-alive.yml` 的手动 `target=bha-auth`；定时保活不读取该凭据。 |
+| `clear-withdrawn-ocr-ids.yml` / `clear-withdrawn-ocr-ids-inner.yml` | 固定的一次性 OCR ID 清理已完成并有收据；外层和内层一起退役。保留原脚本、历史 workflow 身份、计划、快照、意图和收据，不重新执行清理。 |
 
 在用源文件、原生内嵌文字、PDF/DjVu/PS 原件、章节、媒体和用户阅读数据均不在本批清理范围。未来如迁移 `pdf-account-worker.yml` 哨兵或清理历史恢复入口，应先设计独立的失败关闭协议、旧 journal 兼容和相关回归测试。
