@@ -6,7 +6,6 @@ on:
     paths:
       - .github/workflows/search-directory-tests.yml
       - .github/workflows/search-daily-sync.yml
-      - .github/workflows/search-update-directories.yml
       - scripts/fetch_and_parse.py
       - scripts/sync_to_space.py
       - scripts/sync_to_pages.py

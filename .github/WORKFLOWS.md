@@ -1,6 +1,6 @@
 # 工作流盘点与恢复边界
 
-盘点基准：重建后的 `main`（2026-11-03）。本表覆盖整理前的 69 个工作流：首批移除 9 个、保留 60 个，另新增 2 个手动只读检查。**保留不等于批准运行**：仓库 Actions 暂停时已配置部分 secret，但不是所有入口的凭据都已准备；重新启用前必须逐项审查触发器、仓库身份、权限、调用链和最小必要 secret。表中不包含 secret 的值，也不是恢复操作说明。
+盘点基准：重建后的 `main`（2026-11-03）。早期盘点覆盖整理前的 69 个工作流：首批移除 9 个、保留 60 个，另新增 2 个手动只读检查。此后将 `search-update-directories.yml` 合并至 `search-daily-sync.yml` 的手动 `directories` 模式，将 `bha-reindex-auth-check.yml` 合并至 `ops-keep-spaces-alive.yml` 的手动 `bha-auth` 模式；文件减少不代表已批准运行。**保留不等于批准运行**：仓库 Actions 暂停时已配置部分 secret，但不是所有入口的凭据都已准备；重新启用前必须逐项审查触发器、仓库身份、权限、调用链和最小必要 secret。表中不包含 secret 的值，也不是恢复操作说明。
 
 计划触发器仍写在部分文件中，包括会写入或删除数据的任务。开启仓库 Actions 可能同时放行所有未单独禁用的定时任务；不要仅凭本表启用 Actions。普通 GC 仍被旧生产者范围、新旧仓库 ID 和历史维护恢复问题阻塞；仓库重建、404 或本地测试都不是隔离证明。
 
@@ -12,7 +12,7 @@
 
 校订提交保护：BHA Space 修补版本 `6705f4f15bee3319a21379a8689e757c78e56fd3` 默认暂停 `/api/proofread` 与 `/api/parse`，返回 503 并提示保留草稿，防止 GitHub dispatch 返回 204 但禁用的工作流未执行时误报已接收。该版已读回 RUNNING，以不存在的测试身份分别确认两个接口均返回预期 503；没有发送真实校订，普通搜索仍可查询。浏览器草稿使用 sessionStorage，并非跨设备或永久保存；无法恢复修补前可能已丢失的事件。中央 `scripts/submit_proofread.py` 自身也在读取事件或凭据前失败关闭，没有环境变量可绕过；本地后端测试仅在纯模拟中替换该保护。`BHA_PIPELINE_SUBMISSIONS_PAUSED=0` 仅是未来显式开关，**不是恢复批准**：先验证中央工作流和总权限、事件可靠投递、接收后处理和用户可查回执，再单独审查开放；不得以一次 dispatch 204 代替端到端成功，也不能以 Space 的开关关闭中央保护。
 
-建议先从不写书籍或索引的验证任务入手，再按需要恢复搜索、校订和普通 Reader；写入及部署任务应分别核对权限、secret 和实际调用。仓库默认 `GITHUB_TOKEN` 权限曾只读；`search-daily-sync.yml` 已显式请求 `contents: write` 用于提交 `state/commits.json`，但尚未在 Actions 实跑验证。不能假定已配置的 `GH_PAT` 会自动用于该步骤。`bha-reindex-auth-check.yml` 只调用固定的状态 GET 端点，用于单独确认 `BHA_REINDEX_TOKEN`，不启动重建；应以实际 run 结果为准。搜索同步脚本只提交各自的生成数据路径，Git 操作或 rebase 失败会停止；本地 Git 测试不等于实际 Space／Pages 写入或端到端部署成功。
+建议先从不写书籍或索引的验证任务入手，再按需要恢复搜索、校订和普通 Reader；写入及部署任务应分别核对权限、secret 和实际调用。仓库默认 `GITHUB_TOKEN` 权限曾只读；`search-daily-sync.yml` 已显式请求 `contents: write` 用于提交 `state/commits.json`，但尚未在 Actions 实跑验证。不能假定已配置的 `GH_PAT` 会自动用于该步骤。`ops-keep-spaces-alive.yml` 的手动 `bha-auth` 模式只调用固定的状态 GET 端点，用于单独确认 `BHA_REINDEX_TOKEN`，不启动重建，也不会执行定时保活；应以实际 run 结果为准。搜索同步脚本只提交各自的生成数据路径，Git 操作或 rebase 失败会停止；本地 Git 测试不等于实际 Space／Pages 写入或端到端部署成功。
 
 `reader-maintenance.yml`、`reader-gc-collect.yml`、`reader-gc-ccrd.yml` 和其他定点退役/撤回入口在独立安全审查前不得放行；`reader-v3-publish.yml` 还需评估日程及 `withdraw/reset-documents`，不能因普通 `unify` 调用就视为完全无风险。尤其是该 workflow 当前即使 `unify` 报告 unchanged 也会设置 `changed=true`：若 apply=true，后续仍可能发布 Pages、确认两端并压缩 base catalog。单本 CHM 的旧 document-reset 收据还绑定既有 v3 代与快照；不要把其新代视为已兼容，不能放宽 GC 检查。分批方案不修改旧维护 journal，也不扩大章节扫描或 Reader 限额。
 
@@ -21,7 +21,6 @@
 | 文件 | 触发 | 用途与决策 |
 |---|---|---|
 | `bha-fork-archives.yml` | 定时、手动 | 维护 BHA 源仓 fork；保留。 |
-| `bha-reindex-auth-check.yml` | 手动 | 固定 BHA 管理状态端点的只读鉴权检查，不启动索引重建。 |
 | `bha-source-files.yml` | 手动 | 镜像源文件；可选 optimize 会改写镜像，不能当作只读任务。 |
 | `bha-update-index.yml` | 定时、仓库事件、手动 | BHA 索引及校订状态更新；保留。 |
 | `proofread-ocr-conflict-review.yml` | issue 评论 | 处理已有 OCR 补丁冲突的校订命令；不是远端 OCR 生产者。 |
@@ -30,11 +29,10 @@
 | `proofread-review-commands.yml` | issue 评论 | 校订审核命令。 |
 | `proofread-submit-parse.yml` | 仓库事件 | 校订提交的解析入口。 |
 | `proofread-submit.yml` | 手动、仓库事件 | 校订提交入口。 |
-| `search-daily-sync.yml` | 定时、手动 | 搜索数据同步至 Space/Pages。 |
+| `search-daily-sync.yml` | 定时、手动 | 搜索数据同步至 Space/Pages；手动 `target=directories` 只更新 HF 目录，不发布搜索或中央状态。 |
 | `search-directory-tests.yml` | 指定路径 push、手动 | 本地搜索目录同步回归测试。 |
 | `search-spaces-ci.yml` | 定时、仓库事件、手动 | Search Spaces 前端契约测试。 |
-| `search-update-directories.yml` | 手动 | 更新 HF 仓库目录。 |
-| `ops-keep-spaces-alive.yml` | 定时、手动 | 保活指定 Spaces。 |
+| `ops-keep-spaces-alive.yml` | 定时、手动 | 保活指定 Spaces；手动 `target=bha-auth` 单独检查 BHA 管理状态的只读鉴权。 |
 
 ## 保留：普通 Reader 和 CCRD 发布
 
@@ -115,5 +113,7 @@
 | `reader-publish-text.yml` | 远端标准化文本发布 job 已硬禁用，不涉及现有原生文字。 |
 | `reader-v3-build.yml` | 旧候选构建/回调均已硬禁用；中央发布器中不可达的调度步骤同步删除。 |
 | `stage-ccrd-ocr-text.yml` | 旧 OCR staging job 已硬禁用；其调用方也已移除。 |
+| `search-update-directories.yml` | 重复的手动目录入口并入 `search-daily-sync.yml` 的 `target=directories`；原更新脚本保留，目标模式不能发布两站搜索或提交状态。 |
+| `bha-reindex-auth-check.yml` | 只读 BHA 鉴权入口并入 `ops-keep-spaces-alive.yml` 的手动 `target=bha-auth`；定时保活不读取该凭据。 |
 
 在用源文件、原生内嵌文字、PDF/DjVu/PS 原件、章节、媒体和用户阅读数据均不在本批清理范围。未来如迁移 `pdf-account-worker.yml` 哨兵或清理历史恢复入口，应先设计独立的失败关闭协议、旧 journal 兼容和相关回归测试。

@@ -5,12 +5,19 @@ on:
     # Leave ample margin below a 24-hour idle timeout, away from the hour boundary.
     - cron: '17 2,8,14,20 * * *'
   workflow_dispatch:
+    inputs:
+      target:
+        description: "spaces: ping all Spaces; bha-auth: verify BHA index status access only"
+        type: choice
+        default: spaces
+        options: [spaces, bha-auth]
 
 permissions:
   contents: read
 
 jobs:
   ping:
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (inputs.target || 'spaces') == 'spaces')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -22,3 +29,23 @@ jobs:
         run: python -B -m unittest tests.test_ping_spaces -v
       - name: Ping all Spaces and wait for BHA readiness
         run: python -B scripts/ping_spaces.py
+
+  bha-auth:
+    # Never use the administrative token in the scheduled keepalive job.
+    if: >-
+      github.event_name == 'workflow_dispatch' && inputs.target == 'bha-auth' &&
+      github.repository == 'anftm/pipeline' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - run: python -m pip install PyYAML==6.0.3
+      - name: Test read-only access check
+        run: python -B -m unittest tests.test_bha_reindex_access -v
+      - name: Verify BHA status authentication without triggering reindex
+        env:
+          BHA_REINDEX_TOKEN: ${{ secrets.BHA_REINDEX_TOKEN }}
+        run: python -B scripts/check_bha_reindex_access.py

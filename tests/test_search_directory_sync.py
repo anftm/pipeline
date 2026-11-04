@@ -228,9 +228,8 @@ class DirectorySnapshotTests(unittest.TestCase):
                 patch.object(self.update.subprocess, "run", side_effect=generate):
             self.assertIsNone(self.update.process_repo("datasets/test/book", clone_url="test://remote"))
 
-    def test_workflows_serialize_and_daily_requires_generation_first(self):
+    def test_daily_workflow_serializes_and_requires_generation_first(self):
         daily = (ROOT / ".github/workflows/search-daily-sync.yml").read_text()
-        directories = (ROOT / ".github/workflows/search-update-directories.yml").read_text()
         import yaml
         daily_config = yaml.load(daily, Loader=yaml.BaseLoader)
         self.assertEqual(daily_config.get('permissions'), {'contents': 'write'})
@@ -238,16 +237,55 @@ class DirectorySnapshotTests(unittest.TestCase):
         self.assertLess(daily.index("- name: Generate and verify source directories"),
                         daily.index("- name: Fetch and parse"))
         self.assertEqual(daily.count("DIRECTORY_REVISIONS_FILE:"), 2)
-        for workflow in (daily, directories):
-            self.assertIn("group: daily-sync", workflow)
-            self.assertIn("cancel-in-progress: false", workflow)
-            self.assertIn("queue: max", workflow)
-        self.assertNotIn("  schedule:", directories)
+        self.assertIn("group: daily-sync", daily)
+        self.assertIn("cancel-in-progress: false", daily)
+        self.assertIn("queue: max", daily)
         ci = yaml.load((ROOT / ".github/workflows/search-directory-tests.yml").read_text(),
                        Loader=yaml.BaseLoader)
         runs = '\n'.join(step.get('run', '') for step in ci['jobs']['tests']['steps'])
         self.assertIn('jieba==0.42.1', runs)
         self.assertIn('PyYAML==6.0.3', runs)
+
+    def test_manual_directory_only_mode_cannot_publish_search_or_central_state(self):
+        """Validate actual YAML steps; this test never runs the directory producer."""
+        import yaml
+        workflow = yaml.load((ROOT / '.github/workflows/search-daily-sync.yml').read_text(),
+                             Loader=yaml.BaseLoader)
+        self.assertFalse((ROOT / '.github/workflows/search-update-directories.yml').exists())
+        inputs = workflow['on']['workflow_dispatch']['inputs']
+        self.assertEqual(inputs['target']['default'], 'all')
+        self.assertEqual(inputs['target']['options'], ['all', 'hf-space', 'directories'])
+        self.assertEqual(workflow['on']['schedule'], [{'cron': '0 0 * * *'}])
+        self.assertEqual(workflow['concurrency'], {'group': 'daily-sync', 'cancel-in-progress': 'false',
+                                                    'queue': 'max'})
+        self.assertEqual(set(workflow['jobs']), {'directories', 'sync'})
+        manual = workflow['jobs']['directories']
+        self.assertEqual(manual['if'], "github.event_name == 'workflow_dispatch' && inputs.target == 'directories'")
+        self.assertEqual(manual['permissions'], {'contents': 'read'})
+        self.assertEqual(manual['timeout-minutes'], '60')
+        self.assertEqual([step.get('uses') for step in manual['steps'][:2]],
+                         ['actions/checkout@v7', 'actions/setup-python@v7'])
+        self.assertEqual(manual['steps'][1]['with']['python-version'], '3.11')
+        self.assertEqual(manual['steps'][2]['run'], 'python scripts/update_dirs.py')
+        self.assertEqual(manual['steps'][2]['env'], {'HF_TOKEN': '${{ secrets.HF_TOKEN }}'})
+        self.assertEqual(len(manual['steps']), 3)
+        self.assertFalse(any('if' in step or 'continue-on-error' in step for step in manual['steps']))
+        job = workflow['jobs']['sync']
+        self.assertEqual(job['if'], "inputs.target != 'directories'")
+        self.assertEqual(job['env']['TARGET'], "${{ inputs.target || 'all' }}")
+        steps = {step.get('name'): step for step in job['steps'] if step.get('name')}
+        directory = steps['Generate and verify source directories']
+        self.assertEqual(directory['run'], 'python -u scripts/update_dirs.py')
+        self.assertNotIn('if', directory)
+        self.assertIn('DIRECTORY_REVISIONS_FILE', directory['env'])
+        self.assertNotIn('if', steps['Fetch and parse'])
+        self.assertEqual(steps['Sync to HF Space']['if'], "steps.fetch.outputs.data_changed == 'true'")
+        for name in ('Sync to GitHub Pages', 'Deploy GitHub Pages', 'Commit updated state'):
+            self.assertIn("env.TARGET == 'all'", steps[name]['if'], name)
+        # The entire sync job is skipped in directory-only mode; no consumer
+        # can treat an absent output as proof of synchronization.
+        self.assertEqual(steps['Fetch and parse']['id'], 'fetch')
+        self.assertEqual(sum('scripts/update_dirs.py' in step.get('run', '') for step in job['steps']), 1)
 
     def test_pushed_catalog_readback_mismatch_is_not_accepted(self):
         from types import SimpleNamespace

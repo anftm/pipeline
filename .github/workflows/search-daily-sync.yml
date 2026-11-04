@@ -11,12 +11,13 @@ on:
         type: boolean
         default: false
       target:
-        description: "all: HF Space + Pages + state; hf-space: force-publish only the HF Search index (replaces Publish HF Search Index)"
+        description: "all: HF Space + Pages + state; hf-space: HF Search only; directories: source directories only"
         type: choice
         default: all
         options:
           - all
           - hf-space
+          - directories
 
 permissions:
   contents: write
@@ -27,7 +28,25 @@ concurrency:
   queue: max
 
 jobs:
+  directories:
+    # The directory-only manual action must never publish search or state.
+    if: github.event_name == 'workflow_dispatch' && inputs.target == 'directories'
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Update generated directories
+        run: python scripts/update_dirs.py
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+
   sync:
+    if: inputs.target != 'directories'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:

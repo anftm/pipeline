@@ -174,6 +174,7 @@ class FetchAndParseTests(unittest.TestCase):
                  patch.object(self.module, "OUTPUT_FILE", output_file), \
                  patch.object(self.module, "get_repo_sha", return_value="new-sha"), \
                  patch.object(self.module, "http_get_text", side_effect=get_text), \
+                 patch.object(self.module, "tree_records", return_value=[]), \
                  patch.object(self.module, "batch_get_sizes", return_value={}), \
                  patch.dict(os.environ, {"FORCE_SYNC": "true"}, clear=True):
                 result = self.module.main()

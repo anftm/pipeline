@@ -67,17 +67,56 @@ class BhaReindexAccessTests(unittest.TestCase):
                         check.check('fixture-token', open_url=check.urlopen)
                 self.assertNotIn('fixture-token', str(context.exception))
 
-    def test_workflow_is_manual_read_only_and_uses_only_the_expected_secret(self):
-        path = Path(__file__).resolve().parents[1] / '.github/workflows/bha-reindex-auth-check.yml'
-        workflow = yaml.load(path.read_text(), Loader=yaml.BaseLoader)
-        self.assertEqual(set(workflow['on']), {'workflow_dispatch'})
+    def test_manual_auth_mode_is_separate_from_scheduled_keepalive(self):
+        root = Path(__file__).resolve().parents[1] / '.github/workflows'
+        self.assertFalse((root / 'bha-reindex-auth-check.yml').exists())
+        workflow = yaml.load((root / 'ops-keep-spaces-alive.yml').read_text(), Loader=yaml.BaseLoader)
+        self.assertEqual(set(workflow['on']), {'schedule', 'workflow_dispatch'})
+        target = workflow['on']['workflow_dispatch']['inputs']['target']
+        self.assertEqual(target['default'], 'spaces')
+        self.assertEqual(target['options'], ['spaces', 'bha-auth'])
+        self.assertEqual(workflow['on']['schedule'], [{'cron': '17 2,8,14,20 * * *'}])
         self.assertEqual(workflow['permissions'], {'contents': 'read'})
-        steps = workflow['jobs']['verify']['steps']
+        self.assertEqual(set(workflow['jobs']), {'ping', 'bha-auth'})
+        ping = workflow['jobs']['ping']
+        self.assertEqual(ping['if'], "github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (inputs.target || 'spaces') == 'spaces')")
+        self.assertNotIn('env', ping)
+        self.assertFalse(any('BHA_REINDEX_TOKEN' in str(step) or 'check_bha_reindex_access.py' in step.get('run', '')
+                             for step in ping['steps']))
+        auth = workflow['jobs']['bha-auth']
+        self.assertEqual(auth['if'].strip(),
+                         "github.event_name == 'workflow_dispatch' && inputs.target == 'bha-auth' && "
+                         "github.repository == 'anftm/pipeline' && github.ref == 'refs/heads/main'")
+        self.assertEqual(auth['runs-on'], 'ubuntu-24.04')
+        self.assertEqual(auth['timeout-minutes'], '5')
+        self.assertNotIn('env', auth)
+        self.assertNotIn('continue-on-error', auth)
+        steps = auth['steps']
+        self.assertEqual([step.get('uses') for step in steps[:2]], ['actions/checkout@v7', 'actions/setup-python@v7'])
+        self.assertEqual(steps[1]['with']['python-version'], '3.11')
         self.assertTrue(any('PyYAML==6.0.3' in step.get('run', '') for step in steps))
+        self.assertTrue(any('tests.test_bha_reindex_access' in step.get('run', '') for step in steps))
         target = next(step for step in steps if step.get('name', '').startswith('Verify BHA status'))
         self.assertEqual(target['env'], {'BHA_REINDEX_TOKEN': '${{ secrets.BHA_REINDEX_TOKEN }}'})
         self.assertEqual(target['run'], 'python -B scripts/check_bha_reindex_access.py')
         self.assertFalse(any('gh workflow run' in step.get('run', '') for step in steps))
+        self.assertEqual(len(steps), 5)
+        self.assertFalse(any('if' in step or 'continue-on-error' in step for step in steps))
+
+    def test_auth_job_keeps_original_isolated_contract(self):
+        root = Path(__file__).resolve().parents[1] / '.github/workflows'
+        workflow = yaml.load((root / 'ops-keep-spaces-alive.yml').read_text(), Loader=yaml.BaseLoader)
+        auth = workflow['jobs']['bha-auth']
+        expected = [
+            {'uses': 'actions/checkout@v7'},
+            {'uses': 'actions/setup-python@v7', 'with': {'python-version': '3.11'}},
+            {'run': 'python -m pip install PyYAML==6.0.3'},
+            {'run': 'python -B -m unittest tests.test_bha_reindex_access -v'},
+            {'run': 'python -B scripts/check_bha_reindex_access.py',
+             'env': {'BHA_REINDEX_TOKEN': '${{ secrets.BHA_REINDEX_TOKEN }}'}},
+        ]
+        self.assertEqual([{key: value for key, value in step.items() if key != 'name'} for step in auth['steps']],
+                         expected)
 
 
 if __name__ == '__main__':
