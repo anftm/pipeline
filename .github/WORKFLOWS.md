@@ -72,8 +72,6 @@
 
 | 文件 | 触发 | 用途与决策 |
 |---|---|---|
-| `ccrd-ocr-exact-remove.yml` | 手动 | 固定 OCR 退役清单及续跑；可能删除，暂留待历史核对。 |
-| `ccrd-ocr-withdraw-consumer.yml` | 手动 | 固定身份的 OCR 消费端撤回；可能写 Space。 |
 | `chm-epub-graph-preview.yml` | 手动 | 固定 CHM 引用图预览和隔离恢复。 |
 | `chm-epub-retirement.yml` | 手动 | 固定 CHM 清单的退役及中断恢复。 |
 | `chm-single-interrupted-preflight.yml` | 手动 | 对本次单本中断交接做只读检查，含纯内存 shadow 回归；无写入或恢复入口，不释放处理保护。 |
@@ -93,8 +91,6 @@
 | `chm-terminal-release-inner.yml` | 被调用 | 对应终态及维护交接内层。 |
 | `publish-chm-gc-release.yml` | 手动 | 历史 CHM GC 放行证据外层；本表不构成放行。 |
 | `publish-chm-gc-release-inner.yml` | 被调用 | 对应放行证据内层。 |
-| `expanded-ocr-graph-preview.yml` | 手动 | 固定 OCR/PS 图预览及隔离恢复。 |
-| `expanded-ocr-retirement.yml` | 手动 | 固定 OCR/PS 对象清单，可能删除；本次不执行。 |
 
 ## 本批已移除：不再提供 Actions 入口
 
@@ -114,5 +110,7 @@
 | `search-update-directories.yml` | 重复的手动目录入口并入 `search-daily-sync.yml` 的 `target=directories`；原更新脚本保留，目标模式不能发布两站搜索或提交状态。 |
 | `bha-reindex-auth-check.yml` | 只读 BHA 鉴权入口并入 `ops-keep-spaces-alive.yml` 的手动 `target=bha-auth`；定时保活不读取该凭据。 |
 | `clear-withdrawn-ocr-ids.yml` / `clear-withdrawn-ocr-ids-inner.yml` | 固定的一次性 OCR ID 清理已完成并有收据；外层和内层一起退役。保留原脚本、历史 workflow 身份、计划、快照、意图和收据，不重新执行清理。 |
+| `ccrd-ocr-exact-remove.yml` / `ccrd-ocr-withdraw-consumer.yml` | 旧远端 OCR 退出；退役专用执行入口，不再续跑或改写 Space。独立旧 exact 进度仍非终态，保留原代码、固定身份、计划、进度和维护历史；入口删除不是事务闭合或恢复证明。 |
+| `expanded-ocr-graph-preview.yml` / `expanded-ocr-retirement.yml` | 退役旧 OCR/PS 专用预览及删除入口，不再重新执行；保留原代码、计划、进度和所有维护历史，避免误将历史完成标记当作当前 GC 授权。 |
 
 在用源文件、原生内嵌文字、PDF/DjVu/PS 原件、章节、媒体和用户阅读数据均不在本批清理范围。未来如迁移 `pdf-account-worker.yml` 哨兵或清理历史恢复入口，应先设计独立的失败关闭协议、旧 journal 兼容和相关回归测试。
