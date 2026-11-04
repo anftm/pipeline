@@ -247,10 +247,10 @@ class PdfWorkerLaneTests(unittest.TestCase):
         legacy_run = {**run, "repository": {"full_name": legacy_repo}}
         validate_run(self.config, legacy_repo, legacy_run)
 
-    def test_worker_cannot_publish_registries_and_publisher_keeps_shared_lock(self):
+    def test_retired_worker_cannot_dispatch_the_removed_publisher(self):
         root = Path(__file__).resolve().parents[1]
         worker = yaml.safe_load((root / ".github/workflows/pdf-account-worker.yml").read_text())
-        publisher = yaml.safe_load((root / ".github/workflows/pdf-account-publish.yml").read_text())
+        self.assertFalse((root / ".github/workflows/pdf-account-publish.yml").exists())
         worker_commands = "\n".join(step.get("run", "") for job in worker["jobs"].values() for step in job["steps"])
         self.assertNotIn("publish-render", worker_commands)
         self.assertNotIn("publish-ocr", worker_commands)
@@ -262,16 +262,10 @@ class PdfWorkerLaneTests(unittest.TestCase):
         plan_script = next(step["run"] for step in worker["jobs"]["plan"]["steps"]
                            if step.get("id") == "plan")
         self.assertIn("--retry-failed-only", plan_script)
-        self.assertEqual(publisher["concurrency"]["group"], "reader-sidecar")
-        self.assertIn("Admit at most one next OCR batch for this account",
-                      "\n".join(step.get("name", "") for step in publisher["jobs"]["publish"]["steps"]))
-        self.assertIn("steps.queue.outputs.shard_count != '0'",
-                      "\n".join(step.get("if", "") for step in publisher["jobs"]["publish"]["steps"]))
-        publisher_commands = "\n".join(step.get("run", "") for job in publisher["jobs"].values() for step in job["steps"])
-        self.assertIn("python scripts/pdf_worker_dispatch.py", publisher_commands)
-        self.assertNotIn("gh workflow run pdf-account-worker.yml", publisher_commands)
-        for workflow in (worker, publisher):
-            for job in workflow["jobs"].values():
-                for step in job["steps"]:
-                    if "run" in step:
-                        subprocess.run(["bash", "-n"], input=step["run"], text=True, check=True)
+        self.assertEqual(worker['jobs']['plan']['if'], '${{ false }}')
+        self.assertNotIn('pdf-account-publish.yml', worker_commands)
+        self.assertIn('exit 1', worker['jobs']['notify']['steps'][0]['run'])
+        for job in worker["jobs"].values():
+            for step in job["steps"]:
+                if "run" in step:
+                    subprocess.run(["bash", "-n"], input=step["run"], text=True, check=True)

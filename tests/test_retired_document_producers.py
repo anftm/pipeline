@@ -10,6 +10,7 @@ RETIRED_WORKFLOWS = {
     'exact-stale-run-delete.yml', 'force-ocr-book.yml', 'pdf-lane-watchdog.yml',
     'publish-ccrd-ocr.yml', 'reader-ocr-audit.yml', 'reader-ocr-repin.yml',
     'reader-publish-text.yml', 'reader-v3-build.yml', 'stage-ccrd-ocr-text.yml',
+    'pdf-account-publish.yml',
 }
 
 
@@ -21,9 +22,11 @@ class RetiredDocumentProducerTests(unittest.TestCase):
                 for workflow in ROOT.glob('*.yml'):
                     self.assertNotIn(filename, workflow.read_text(), workflow.name)
 
-    def test_remaining_account_publisher_is_disabled(self):
-        workflow = yaml.safe_load((ROOT / 'pdf-account-publish.yml').read_text())
-        self.assertEqual(workflow['jobs']['publish']['if'], '${{ false }}')
+    def test_historical_account_publisher_remains_a_fenced_document_producer(self):
+        from scripts.reader_document_reset import DOCUMENT_PRODUCERS
+        from scripts.reader_gc_fence import producer_path
+        self.assertIn('pdf-account-publish.yml', DOCUMENT_PRODUCERS)
+        self.assertTrue(producer_path('.github/workflows/pdf-account-publish.yml'))
 
     def test_no_workflow_runs_retired_standalone_remote_publishers(self):
         scripts = ('force_ocr_book.py', 'audit_ocr_language.py', 'repin_ocr_pages.py',
@@ -43,6 +46,10 @@ class RetiredDocumentProducerTests(unittest.TestCase):
         self.assertEqual(workflow['jobs']['plan']['if'], '${{ false }}')
         self.assertIn('plan', workflow['jobs']['build']['needs'])
         self.assertIn('plan', workflow['jobs']['notify']['needs'])
+        steps = workflow['jobs']['notify']['steps']
+        self.assertEqual(len(steps), 1)
+        self.assertIn('exit 1', steps[0]['run'])
+        self.assertNotIn('env', steps[0])
 
     def test_v3_unify_and_status_remain_available_but_old_text_operations_stop(self):
         workflow = (ROOT / 'reader-v3-publish.yml').read_text()

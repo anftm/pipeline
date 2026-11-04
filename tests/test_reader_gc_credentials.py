@@ -105,6 +105,26 @@ class TokenSelectionTests(unittest.TestCase):
         self.assertEqual([entry['repository'] for entry in report], [target, other])
         self.assertEqual(run.call_count, 12)
 
+    def test_removed_publisher_run_still_blocks_the_document_fence(self):
+        from scripts import reader_document_reset
+        path = '.github/workflows/pdf-account-publish.yml'
+        for status in ('in_progress', 'queued', 'pending'):
+            with self.subTest(status=status):
+                def api(endpoint):
+                    if '/actions/workflows?' in endpoint:
+                        return [{'workflows': [{'path': '.github/workflows/pdf-account-worker.yml',
+                                                'state': 'disabled_manually'}]}]
+                    if f'/actions/runs?status={status}&' in endpoint:
+                        return [{'workflow_runs': [{'id': 7, 'status': status, 'path': path}]}]
+                    if '/actions/runs?status=' in endpoint:
+                        return [{'workflow_runs': []}]
+                    raise AssertionError('unexpected document fence endpoint')
+                with patch.object(fence, 'producer_repositories', return_value=['owner/repo']), \
+                        patch.object(fence.GitHubProducerFence, 'isolated_residual',
+                                     side_effect=RuntimeError('residual is executable')):
+                    with self.assertRaisesRegex(RuntimeError, 'still active|residual is executable'):
+                        reader_document_reset.DocumentProducerFence(api).check()
+
 
 if __name__ == '__main__':
     unittest.main()

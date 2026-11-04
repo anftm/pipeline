@@ -1089,9 +1089,10 @@ class PdfOcrStagesTests(unittest.TestCase):
         self.assertEqual(queue["books"][0]["key"], result["key"])
         self.assertEqual(sum(len(task["pages"]) for task in queue["shards"]), 0)
 
-    def test_worker_and_publisher_admit_zero_shard_native_text_assembly(self):
+    def test_retired_worker_keeps_native_text_plan_but_cannot_dispatch_assembly(self):
         root = Path(__file__).resolve().parents[1] / ".github/workflows"
         worker = yaml.safe_load((root / "pdf-account-worker.yml").read_text())
+        self.assertEqual(worker['jobs']['plan']['if'], '${{ false }}')
         self.assertIn("book_count", worker["jobs"]["plan"]["outputs"])
         plan_commands = "\n".join(step.get("run", "") for step in worker["jobs"]["plan"]["steps"])
         self.assertIn("book_count=$(jq -r '(.books // []) | length'", plan_commands)
@@ -1101,14 +1102,10 @@ class PdfOcrStagesTests(unittest.TestCase):
         notify = worker["jobs"]["notify"]["if"]
         self.assertIn("needs.plan.outputs.shard_count != '0'", notify)
         self.assertIn("needs.plan.outputs.book_count != '0'", notify)
-        if not (root / 'pdf-account-publish.yml').exists():
-            # Account repositories intentionally carry only the worker. Their
-            # notify step delegates assembly to the central publisher.
-            self.assertIn('pdf-account-publish.yml', worker['jobs']['notify']['steps'][0]['run'])
-            return
-        publisher = yaml.safe_load((root / "pdf-account-publish.yml").read_text())
-        conditions = "\n".join(step.get("if", "") for step in publisher["jobs"]["publish"]["steps"])
-        self.assertIn("inputs.stage == 'render' || inputs.stage == 'ocr'", conditions)
+        self.assertFalse((root / 'pdf-account-publish.yml').exists())
+        notify_command = worker['jobs']['notify']['steps'][0]['run']
+        self.assertIn('exit 1', notify_command)
+        self.assertNotIn('gh workflow run', notify_command)
 
     def test_native_djvu_renders_before_other_converted_formats(self):
         native = {"key": "repo\0z.djvu", "repo": "repo", "path": "z.djvu", "source_format": "djvu",

@@ -185,13 +185,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - name: Request serialized publication in the central repository
-        env:
-          GH_TOKEN: ${{ secrets.PDF_PUBLISH_TOKEN }}
-          PUBLISHER: ${{ needs.plan.outputs.publisher }}
-          WORKER_REPOSITORY: ${{ github.repository }}
-          WORKER_RUN_ID: ${{ github.run_id }}
-          STAGE: ${{ needs.plan.outputs.stage }}
+      - name: Stop retired publisher dispatch
         run: |
-          gh workflow run pdf-account-publish.yml --repo "$PUBLISHER" --ref main \
-            -f worker_repository="$WORKER_REPOSITORY" -f worker_run_id="$WORKER_RUN_ID" -f stage="$STAGE"
+          echo 'The remote PDF/OCR publisher is retired; no publication is requested.'
+          exit 1

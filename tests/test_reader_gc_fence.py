@@ -67,6 +67,29 @@ class ResidualRunFenceTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, 'not drained|latest execution job'):
                     self.check(api)
 
+    def test_deleted_pdf_publisher_still_blocks_for_residual_executable_runs(self):
+        path = '.github/workflows/pdf-account-publish.yml'
+        for status in ('in_progress', 'queued', 'pending'):
+            with self.subTest(status=status):
+                def api(endpoint):
+                    if f'/actions/runs?status={status}&' in endpoint:
+                        return [{'workflow_runs': [{'id': 7, 'status': status, 'path': path}]}]
+                    if '/actions/runs?status=' in endpoint:
+                        return [{'workflow_runs': []}]
+                    if '/jobs?filter=latest' in endpoint:
+                        return [{'total_count': 1, 'jobs': [{'status': 'queued'}]}]
+                    return self.api(endpoint)
+                with self.assertRaisesRegex(RuntimeError, 'not drained|latest execution job'):
+                    self.check(api)
+
+    def test_removed_worker_sentinel_fails_closed_even_if_publisher_is_gone(self):
+        def api(endpoint):
+            if '/actions/workflows?' in endpoint:
+                return [{'workflows': []}]
+            return self.api(endpoint)
+        with self.assertRaisesRegex(RuntimeError, 'producer workflow inventory is incomplete'):
+            self.check(api)
+
     def test_cancelled_before_job_assignment_requires_the_same_isolation(self):
         def api(endpoint):
             if '/jobs?filter=all' in endpoint:

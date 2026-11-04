@@ -64,7 +64,6 @@
 | `producer-migration-audit.yml` | 手动 | 生产者迁移证据审计；可写审计对象，并非隔离证明。 |
 | `producer-v2-credential-preflight.yml` | 手动 | 已准备但未激活的 v2 身份/凭据检查；当前仍绑定旧仓 ID。 |
 | `pdf-account-worker.yml` | 手动 | OCR 计划 job 硬禁用；当前 GC、维护预检、document fence 和 v2 shadow 将此路径作为库存完整性哨兵。不得直接删除或移除对空库存的失败关闭检查。 |
-| `pdf-account-publish.yml` | 手动 | job 硬禁用；上述保留的 worker 文件仍有静态通知引用，本批一并保留。 |
 
 ## 保留：定点维护、预览和历史恢复
 
@@ -112,5 +111,6 @@
 | `clear-withdrawn-ocr-ids.yml` / `clear-withdrawn-ocr-ids-inner.yml` | 固定的一次性 OCR ID 清理已完成并有收据；外层和内层一起退役。保留原脚本、历史 workflow 身份、计划、快照、意图和收据，不重新执行清理。 |
 | `ccrd-ocr-exact-remove.yml` / `ccrd-ocr-withdraw-consumer.yml` | 旧远端 OCR 退出；退役专用执行入口，不再续跑或改写 Space。独立旧 exact 进度仍非终态，保留原代码、固定身份、计划、进度和维护历史；入口删除不是事务闭合或恢复证明。 |
 | `expanded-ocr-graph-preview.yml` / `expanded-ocr-retirement.yml` | 退役旧 OCR/PS 专用预览及删除入口，不再重新执行；保留原代码、计划、进度和所有维护历史，避免误将历史完成标记当作当前 GC 授权。 |
+| `pdf-account-publish.yml` | 旧 OCR 账户发布器的 job 已硬禁用，入口退役；保留固定历史名称、调度和发布源码及生产者 fence。保留的 worker 库存哨兵不再向它派发。 |
 
 在用源文件、原生内嵌文字、PDF/DjVu/PS 原件、章节、媒体和用户阅读数据均不在本批清理范围。未来如迁移 `pdf-account-worker.yml` 哨兵或清理历史恢复入口，应先设计独立的失败关闭协议、旧 journal 兼容和相关回归测试。

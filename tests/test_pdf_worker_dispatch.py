@@ -6,8 +6,6 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-import yaml
-
 from scripts import pdf_worker_dispatch as dispatch, pdf_worker_lanes
 from tests.legacy_pdf_worker_fixture import legacy_worker_fixture
 
@@ -184,20 +182,15 @@ class WorkerDispatchTests(unittest.TestCase):
                 dispatch.handoff(self.config, REPO, 100, 200, apply=True, api=self.api, sleep=Mock())
         self.assertEqual(len(self.api.posts), 1)
 
-    def test_workflow_has_one_guarded_handoff_and_retains_the_report(self):
+    def test_retired_publisher_cannot_dispatch_before_any_api_call(self):
         root = Path(__file__).parents[1]
-        workflow = yaml.safe_load((root / ".github/workflows/pdf-account-publish.yml").read_text())
-        steps = workflow["jobs"]["publish"]["steps"]
-        handoffs = [s for s in steps if "pdf_worker_dispatch.py" in s.get("run", "")]
-        self.assertEqual(len(handoffs), 1)
-        self.assertIn("inputs.stage == 'render'", handoffs[0]["if"])
-        self.assertIn("inputs.stage == 'render' || inputs.stage == 'ocr'", handoffs[0]["if"])
-        self.assertLess(next(i for i, s in enumerate(steps) if s.get("name") == "Publish Reader sidecar to Pages"),
-                        steps.index(handoffs[0]))
-        self.assertEqual(workflow["concurrency"]["group"], "reader-sidecar")
-        artifact = next(s for s in steps if s.get("uses", "").startswith("actions/upload-artifact"))
-        self.assertIn("output/pdf-ocr/dispatch.json", artifact["with"]["path"])
-        self.assertGreater(steps.index(artifact), steps.index(handoffs[0]))
+        self.assertFalse((root / ".github/workflows/pdf-account-publish.yml").exists())
+        self.assertEqual(dispatch.PUBLISHER, 'pdf-account-publish.yml')
+        api = Mock(side_effect=AssertionError('retired dispatch must not call GitHub'))
+        with patch.dict(os.environ, self.env, clear=True), \
+                self.assertRaisesRegex(RuntimeError, 'document OCR dispatch is retired'):
+            dispatch.handoff(self.config, REPO, 100, 200, apply=True, api=api)
+        api.assert_not_called()
 
 
 class WatchdogTests(unittest.TestCase):
