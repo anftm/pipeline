@@ -101,7 +101,9 @@ class LegacyRecoveryRiskTests(unittest.TestCase):
                 def send(_token, method, path, _expected, payload=None):
                     calls.append((method, path, payload))
                     if method == 'POST' and path.endswith('/pulls'):
-                        return {'number': 1, 'html_url': 'https://example.invalid/pr/1', 'head': {'sha': 'b' * 40}}
+                        return {'number': 1, 'html_url': 'https://example.invalid/pr/1',
+                                'head': {'sha': 'b' * 40, 'ref': 'proofread/fixture-config'},
+                                'base': {'ref': 'config'}}
                     return {}
 
                 with patch.object(legacy, 'api_request', side_effect=[(200, []), (404, {}),

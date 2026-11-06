@@ -4,6 +4,7 @@
 import base64
 import ast
 import hashlib
+import hmac
 import html
 import json
 import os
@@ -30,6 +31,7 @@ TRACKER_REPOSITORY = os.environ.get("PROOFREAD_TRACKER_REPOSITORY") or os.enviro
 MAX_SEGMENTED_PAYLOAD_CHARACTERS = 2_000_000
 MAX_SEGMENTED_PAYLOAD_BLOBS = 64
 GITHUB_BODY_LIMIT = 60_000
+PROOFREAD_BASE_BRANCHES = ("main", "config", "ocr_config", "ocr_patch")
 
 
 def api_request(token, method, path, payload=None):
@@ -113,6 +115,26 @@ def branch_sha(token, repo, branch):
     return sha
 
 
+def capture_submission_bases(token, repo, kind):
+    """Record relevant refs before preparing a new BHA submission."""
+    branches = ("config", "ocr_patch") if kind == "parse" else PROOFREAD_BASE_BRANCHES
+    result = {branch: branch_sha(token, repo, branch) for branch in branches}
+    # Some archives do not have the legacy ocr_config branch. Its absence is
+    # still recorded and must remain unchanged while the request is prepared.
+    if any(result[branch] is None for branch in branches if branch != "ocr_config"):
+        fail("a BHA submission base branch is missing")
+    return result
+
+
+def verify_submission_bases(token, repo, expected):
+    """Detect base changes before one effect; this is not an external lock."""
+    if expected is None:
+        return
+    for branch, revision in expected.items():
+        if branch_sha(token, repo, branch) != revision:
+            fail(f"BHA submission base branch changed: {repo}/{branch}")
+
+
 def fail(message):
     raise RuntimeError(message)
 
@@ -180,7 +202,24 @@ def open_pull_request(token, repo, branch):
     return None
 
 
-def submit_file(token, repo, base, path, content, title, description, correction_id):
+def created_pull_or_fail(pull, base, branch):
+    # A successful HTTP response can still be incomplete. The PR may already
+    # exist, so never create a tracker or proceed to another effect without
+    # usable returned identity. This does not verify the PR independently.
+    head = pull.get("head") if isinstance(pull, dict) else None
+    number = pull.get("number") if isinstance(pull, dict) else None
+    url = pull.get("html_url") if isinstance(pull, dict) else None
+    sha = head.get("sha") if isinstance(head, dict) else None
+    returned_base = pull.get("base") if isinstance(pull, dict) else None
+    if (type(number) is not int or number < 1 or not isinstance(url, str) or not url.strip()
+            or not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40,64}", sha)
+            or head.get("ref") != branch or not isinstance(returned_base, dict)
+            or returned_base.get("ref") != base):
+        fail("proofreading PR creation response is unconfirmed; recovery review required")
+    return {"number": number, "url": url, "sha": sha, "base": base, "head": branch}
+
+
+def submit_file(token, repo, base, path, content, title, description, correction_id, *, expected_bases=None):
     branch = f"proofread/{correction_id}-{base}"
     open_pull_request(token, repo, branch)
     read_file = get_file_bytes if isinstance(content, bytes) else get_file
@@ -188,9 +227,12 @@ def submit_file(token, repo, base, path, content, title, description, correction
     if branch_revision is not None:
         fail("existing proofreading branch has no verified PR; recovery requires separate review")
     _base_content, base_file_sha = read_file(token, repo, base, path)
+    verify_submission_bases(token, repo, expected_bases)
     base_revision = branch_sha(token, repo, base)
     if base_revision is None:
         fail("proofreading base branch is missing")
+    if expected_bases is not None and base_revision != expected_bases.get(base):
+        fail(f"BHA submission base branch changed: {repo}/{base}")
     response_or_fail(
         token, "POST", f"{repo_path(repo)}/git/refs", (201,),
         {"ref": f"refs/heads/{branch}", "sha": base_revision},
@@ -209,6 +251,7 @@ def submit_file(token, repo, base, path, content, title, description, correction
                 **({"sha": branch_file_sha or base_file_sha} if branch_file_sha or base_file_sha else {}),
             },
         )
+    verify_submission_bases(token, repo, expected_bases)
     pull = response_or_fail(
         token,
         "POST",
@@ -216,22 +259,22 @@ def submit_file(token, repo, base, path, content, title, description, correction
         (201,),
         {"title": title, "head": branch, "base": base, "body": description},
     )
-    return {
-        "number": pull.get("number"), "url": pull.get("html_url"),
-        "sha": pull.get("head", {}).get("sha"), "base": base, "head": branch,
-    }
+    return created_pull_or_fail(pull, base, branch)
 
 
-def submit_files(token, repo, base, contents, title, description, correction_id):
+def submit_files(token, repo, base, contents, title, description, correction_id, *, expected_bases=None):
     if not contents:
         fail("batch submission requires at least one file")
     branch = f"proofread/{correction_id}-{base}"
     open_pull_request(token, repo, branch)
     if branch_sha(token, repo, branch) is not None:
         fail("existing proofreading branch has no verified PR; recovery requires separate review")
+    verify_submission_bases(token, repo, expected_bases)
     base_revision = branch_sha(token, repo, base)
     if base_revision is None:
         fail("proofreading base branch is missing")
+    if expected_bases is not None and base_revision != expected_bases.get(base):
+        fail(f"BHA submission base branch changed: {repo}/{base}")
     response_or_fail(
         token, "POST", f"{repo_path(repo)}/git/refs", (201,),
         {"ref": f"refs/heads/{branch}", "sha": base_revision},
@@ -250,14 +293,12 @@ def submit_files(token, repo, base, contents, title, description, correction_id)
                 **({"sha": branch_file_sha or base_file_sha} if branch_file_sha or base_file_sha else {}),
             },
         )
+    verify_submission_bases(token, repo, expected_bases)
     pull = response_or_fail(
         token, "POST", f"{repo_path(repo)}/pulls", (201,),
         {"title": title, "head": branch, "base": base, "body": description},
     )
-    return {
-        "number": pull.get("number"), "url": pull.get("html_url"),
-        "sha": pull.get("head", {}).get("sha"), "base": base, "head": branch,
-    }
+    return created_pull_or_fail(pull, base, branch)
 
 
 def merge_pull(token, repo, pull):
@@ -308,19 +349,24 @@ def ensure_tracker_label(token, name="proofreading-review", color="b54708", desc
 
 def find_tracker_issue(token, correction_id):
     marker = f"<!-- proofreading:{correction_id} -->"
+    matches = []
     for page in range(1, 11):
         status, issues = api_request(
             token, "GET",
             f"{full_repo_path(TRACKER_REPOSITORY)}/issues?state=all&labels=proofreading-review&per_page=100&page={page}",
         )
-        if status != 200 or not isinstance(issues, list):
-            fail(f"tracker issue listing failed with HTTP {status}")
+        if (status != 200 or not isinstance(issues, list) or len(issues) > 100
+                or any(not isinstance(issue, dict) or "body" not in issue
+                       or (issue["body"] is not None and not isinstance(issue["body"], str)) for issue in issues)):
+            fail(f"tracker issue listing unavailable or malformed (HTTP {status})")
         for issue in issues:
-            if marker in str(issue.get("body") or ""):
-                return issue
+            if marker in (issue["body"] or ""):
+                matches.append(issue)
         if len(issues) < 100:
-            break
-    return None
+            if len(matches) > 1:
+                fail("multiple tracker issues share the marker; recovery review required")
+            return matches[0] if matches else None
+    fail("tracker issue listing incomplete; recovery review required")
 
 
 def change_summary(request):
@@ -520,21 +566,72 @@ def article_part_text(article, index):
     return "".join(values)
 
 
-def fetch_bha_changes(request):
+def validate_bha_baseline(request):
+    """Check a Space submission's current preview before external effects.
+
+    This observation is not a lock on the archive or the serving index. The
+    entry point remains paused until delivery and recovery are reviewed.
+    """
+    doc_id = request.get("doc_id")
+    expected = request.get("base_content_hash")
+    archive = request.get("archive_id")
+    publication = request.get("publication_id")
+    kind = request.get("kind")
+    if (not isinstance(doc_id, str) or not doc_id or len(doc_id) > 512
+            or not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected)
+            or type(archive) is not int or not 0 <= archive <= 31
+            or not isinstance(publication, str) or not publication
+            or kind not in ("proofread", "parse")):
+        fail("BHA submission baseline identity is invalid")
+    if kind == "proofread" and (not isinstance(request.get("article_id"), str) or not request["article_id"]):
+        fail("BHA submission article identity is invalid")
+    if kind == "parse" and archive != 25:
+        fail("BHA parse submission archive is invalid")
+    base_url = os.environ.get("BHA_PUBLIC_URL", "https://vomebook-bha-search.hf.space").rstrip("/")
+    url = f"{base_url}/api/preview/{urllib.parse.quote(doc_id, safe='')}"
+    preview_request = urllib.request.Request(url, headers={
+        "User-Agent": "anftm-pipeline-proofread/1.0", "Cache-Control": "no-cache",
+        "Accept": "application/json",
+    })
+    try:
+        with urllib.request.urlopen(preview_request, timeout=30) as response:
+            raw = response.read(MAX_SEGMENTED_PAYLOAD_CHARACTERS * 4 + 1)
+        if len(raw) > MAX_SEGMENTED_PAYLOAD_CHARACTERS * 4:
+            fail("BHA preview exceeds the baseline verification limit")
+        preview = json.loads(raw)
+    except (OSError, urllib.error.URLError, ValueError, UnicodeError) as exc:
+        raise RuntimeError("cannot verify BHA submission baseline") from exc
+    if (not isinstance(preview, dict) or preview.get("doc_id") != doc_id
+            or type(preview.get("archive_id")) is not int or preview.get("archive_id") != archive
+            or preview.get("publication_id") != publication
+            or (kind == "proofread" and preview.get("article_id") != request["article_id"])):
+        fail("BHA preview identity changed before submission")
+    actual = preview.get("content_hash")
+    if not isinstance(actual, str) or not re.fullmatch(r"[0-9a-f]{64}", actual):
+        fail("BHA preview baseline is unavailable")
+    if not hmac.compare_digest(expected, actual):
+        fail("BHA preview changed after submission; manual review is required")
+    return preview
+
+
+def fetch_bha_changes(request, validated_preview=None):
     supplied_metadata = payload_field(request, "metadata")
-    if request.get("changed") and request.get("fulltext") and not isinstance(supplied_metadata, dict):
+    if validated_preview is None and request.get("changed") and request.get("fulltext") and not isinstance(supplied_metadata, dict):
         return
     doc_id = str(request.get("doc_id") or "")
     if not doc_id:
         return
-    bha_url = os.environ.get("BHA_PUBLIC_URL", "https://vomebook-bha-search.hf.space").rstrip("/")
-    preview_url = f"{bha_url}/api/preview/{urllib.parse.quote(doc_id, safe='')}"
-    preview_request = urllib.request.Request(preview_url, headers={"User-Agent": "anftm-pipeline-proofread/1.0"})
-    try:
-        with urllib.request.urlopen(preview_request, timeout=30) as response:
-            preview = json.loads(response.read())
-    except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
-        fail(f"cannot load BHA text for proofreading issue: {exc}")
+    if validated_preview is not None:
+        preview = validated_preview
+    else:
+        bha_url = os.environ.get("BHA_PUBLIC_URL", "https://vomebook-bha-search.hf.space").rstrip("/")
+        preview_url = f"{bha_url}/api/preview/{urllib.parse.quote(doc_id, safe='')}"
+        preview_request = urllib.request.Request(preview_url, headers={"User-Agent": "anftm-pipeline-proofread/1.0"})
+        try:
+            with urllib.request.urlopen(preview_request, timeout=30) as response:
+                preview = json.loads(response.read())
+        except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
+            fail(f"cannot load BHA text for proofreading issue: {exc}")
     article = preview.get("article") if isinstance(preview.get("article"), dict) else {}
     source_old = {
         "name": preview.get("publication_name"),
@@ -804,19 +901,47 @@ def fulltext_comment_bodies(request, marker_prefix):
     return bodies
 
 
-def existing_comment_bodies(token, issue_number):
+def _comment_bodies(token, path, label):
     bodies = []
     for page in range(1, 11):
         status, comments = api_request(
-            token, "GET",
-            f"{full_repo_path(TRACKER_REPOSITORY)}/issues/{issue_number}/comments?per_page=100&page={page}",
+            token, "GET", f"{path}?per_page=100&page={page}",
         )
-        if status != 200 or not isinstance(comments, list):
-            fail(f"tracker comment listing failed with HTTP {status}")
-        bodies.extend(str(comment.get("body") or "") for comment in comments)
+        if (status != 200 or not isinstance(comments, list) or len(comments) > 100
+                or any(not isinstance(comment, dict) or "body" not in comment
+                       or (comment["body"] is not None and not isinstance(comment["body"], str)) for comment in comments)):
+            fail(f"{label} comment listing unavailable or malformed (HTTP {status})")
+        bodies.extend(comment["body"] or "" for comment in comments)
         if len(comments) < 100:
-            break
-    return bodies
+            return bodies
+    fail(f"{label} comment listing incomplete; recovery review required")
+
+
+def existing_comment_bodies(token, issue_number):
+    return _comment_bodies(token, f"{full_repo_path(TRACKER_REPOSITORY)}/issues/{issue_number}/comments", "tracker")
+
+
+def exact_comment_present(existing, marker, expected):
+    """Do not accept a colliding marker as evidence for the expected body."""
+    matches = [body for body in existing if marker in body]
+    if not matches:
+        return False
+    if len(matches) != 1 or matches[0] != expected:
+        fail("existing comment differs or is duplicated; recovery review required")
+    return True
+
+
+def pending_comment_bodies(existing, expected):
+    """Check every intended marker before making the first comment write."""
+    pending = []
+    seen = set()
+    for marker, body in expected:
+        if marker in seen:
+            fail("duplicate expected comment marker; recovery review required")
+        seen.add(marker)
+        if not exact_comment_present(existing, marker, body):
+            pending.append(body)
+    return pending
 
 
 def comment_marker_exists(token, issue_number, marker):
@@ -825,14 +950,11 @@ def comment_marker_exists(token, issue_number, marker):
 
 def post_fulltext_comments(token, issue_number, request, marker_prefix):
     existing = existing_comment_bodies(token, issue_number)
-    for marker, body in fulltext_comment_bodies(request, marker_prefix):
-        if any(marker in current for current in existing):
-            continue
+    for body in pending_comment_bodies(existing, fulltext_comment_bodies(request, marker_prefix)):
         response_or_fail(
             token, "POST", f"{full_repo_path(TRACKER_REPOSITORY)}/issues/{issue_number}/comments", (201,),
             {"body": body},
         )
-        existing.append(body)
 
 
 def proofread_pr_body(request, repo, article_id, correction_id):
@@ -977,23 +1099,21 @@ def parse_article_comment_bodies(request, correction_id, crop_assets):
 
 
 def post_parse_pull_comments(token, repo, pull_number, request, correction_id, crop_assets):
-    existing = []
-    for page in range(1, 11):
-        status, comments = api_request(
-            token, "GET", f"{repo_path(repo)}/issues/{pull_number}/comments?per_page=100&page={page}",
-        )
-        if status != 200 or not isinstance(comments, list):
-            fail(f"parse pull comment listing failed with HTTP {status}")
-        existing.extend(str(comment.get("body") or "") for comment in comments)
-        if len(comments) < 100:
-            break
-    for marker, body in parse_article_comment_bodies(request, correction_id, crop_assets):
-        if any(marker in value for value in existing):
-            continue
+    existing = _comment_bodies(token, f"{repo_path(repo)}/issues/{pull_number}/comments", "parse pull")
+    for body in pending_comment_bodies(existing, parse_article_comment_bodies(request, correction_id, crop_assets)):
         response_or_fail(
             token, "POST", f"{repo_path(repo)}/issues/{pull_number}/comments", (201,), {"body": body},
         )
-        existing.append(body)
+
+
+def created_tracker_or_fail(issue):
+    # Creation can succeed even if its returned identity is incomplete. Stop
+    # before posting comments or claiming a confirmed tracker in that case.
+    number = issue.get("number") if isinstance(issue, dict) else None
+    url = issue.get("html_url") if isinstance(issue, dict) else None
+    if type(number) is not int or number < 1 or not isinstance(url, str) or not url.strip():
+        fail("proofreading tracker creation response is unconfirmed; recovery review required")
+    return issue
 
 
 def upsert_parse_tracker_issue(token, correction_id, request, repo, publication_id, pulls, crop_assets):
@@ -1021,20 +1141,17 @@ def upsert_parse_tracker_issue(token, correction_id, request, repo, publication_
     if len(body) > GITHUB_BODY_LIMIT:
         fail("parse tracker issue body exceeds the GitHub limit")
     existing = find_tracker_issue(token, correction_id)
-    payload = {"title": f"解析审核：{publication_id}", "body": body, "labels": ["proofreading-review"]}
     if existing:
-        payload["state"] = "open"
-        issue = response_or_fail(token, "PATCH", f"{full_repo_path(TRACKER_REPOSITORY)}/issues/{existing['number']}", (200,), payload)
-    else:
-        issue = response_or_fail(token, "POST", f"{full_repo_path(TRACKER_REPOSITORY)}/issues", (201,), payload)
+        fail("existing parse tracker issue requires separate recovery review")
+    payload = {"title": f"解析审核：{publication_id}", "body": body, "labels": ["proofreading-review"]}
+    issue = created_tracker_or_fail(
+        response_or_fail(token, "POST", f"{full_repo_path(TRACKER_REPOSITORY)}/issues", (201,), payload)
+    )
     current = existing_comment_bodies(token, issue["number"])
-    for marker, comment in parse_article_comment_bodies(request, correction_id, crop_assets):
-        if any(marker in value for value in current):
-            continue
+    for comment in pending_comment_bodies(current, parse_article_comment_bodies(request, correction_id, crop_assets)):
         response_or_fail(
             token, "POST", f"{full_repo_path(TRACKER_REPOSITORY)}/issues/{issue['number']}/comments", (201,), {"body": comment},
         )
-        current.append(comment)
     return issue.get("html_url")
 
 
@@ -1090,20 +1207,16 @@ def upsert_tracker_issue(token, correction_id, request, repo, article_id, pulls)
     if len(body) > GITHUB_BODY_LIMIT:
         body = body[:GITHUB_BODY_LIMIT - 80] + "\n\n（审核摘要过长，已截断；完整改动请查看关联 PR。）"
     existing = find_tracker_issue(token, correction_id)
+    if existing:
+        fail("existing proofreading tracker issue requires separate recovery review")
     payload = {
         "title": f"校订审核：{title_text}",
         "body": body,
         "labels": ["proofreading-review"],
     }
-    if existing:
-        payload["state"] = "open"
-        issue = response_or_fail(
-            token, "PATCH", f"{full_repo_path(TRACKER_REPOSITORY)}/issues/{existing['number']}", (200,), payload,
-        )
-    else:
-        issue = response_or_fail(
-            token, "POST", f"{full_repo_path(TRACKER_REPOSITORY)}/issues", (201,), payload,
-        )
+    issue = created_tracker_or_fail(response_or_fail(
+        token, "POST", f"{full_repo_path(TRACKER_REPOSITORY)}/issues", (201,), payload,
+    ))
     if fulltext_in_comments:
         post_fulltext_comments(token, issue["number"], request, f"proofreading-fulltext:{correction_id}")
     return issue.get("html_url")
@@ -2044,7 +2157,16 @@ def main():
     kind = request.get("kind", "ocr_patch")
     if kind not in ("proofread", "ocr_patch", "config", "parse"):
         fail("kind must be proofread, ocr_patch, config, or parse")
+    validated_preview = None
+    if kind in ("proofread", "parse") and os.environ.get("GITHUB_EVENT_NAME") == "repository_dispatch":
+        validated_preview = validate_bha_baseline(request)
+    # BHA dispatches require a review tracker before any archive effects. This
+    # is only a configuration check, not proof of delivery or token authority.
+    if kind == "proofread" and os.environ.get("GITHUB_EVENT_NAME") == "repository_dispatch":
+        if not os.environ.get("TRACKER_TOKEN", "").strip():
+            fail("TRACKER_TOKEN is required for BHA proofreading review")
     repo = f"{REPOSITORY_PREFIX}{archive_id}"
+    expected_bases = capture_submission_bases(token, repo, kind) if validated_preview is not None else None
     correction_id = hashlib.sha256(
         json.dumps(request, ensure_ascii=False, sort_keys=True).encode("utf-8")
     ).hexdigest()[:12]
@@ -2062,9 +2184,11 @@ def main():
             fail(f"config file does not exist: {path}")
         content = replace_config_articles(existing, request)
         title = request.get("title") or f"解析 {publication_id}"
+        verify_submission_bases(token, repo, expected_bases)
         crop_assets = build_review_crops(request)
         description = parse_review_body(request, repo, publication_id, correction_id, crop_assets)
-        config_pull = submit_file(token, repo, "config", path, content, title, description, correction_id)
+        config_pull = submit_file(token, repo, "config", path, content, title, description, correction_id,
+                                  expected_bases=expected_bases)
         patch_contents = {}
         for article in payload_field(request, "articles"):
             article_id = parse_article_id(article)
@@ -2073,6 +2197,7 @@ def main():
             patch_contents[target_path] = append_patch(existing_patch, manual_content_patch(article))
         patch_pull = submit_files(
             token, repo, "ocr_patch", patch_contents, title, description, correction_id,
+            expected_bases=expected_bases,
         )
         if "<!-- parse-fulltext:embedded -->" not in description:
             for pull in (config_pull, patch_pull):
@@ -2116,7 +2241,7 @@ def main():
             fail("proofread requires patch or metadata")
         if patch is not None:
             validate_patch(patch)
-        fetch_bha_changes(request)
+        fetch_bha_changes(request, validated_preview=validated_preview)
         metadata = payload_field(request, "metadata")
         if patch is None and not metadata:
             fail("proofread metadata does not change the BHA preview")
@@ -2140,11 +2265,12 @@ def main():
                     config_path, updated_config = next(iter(contents.items()))
                     pull_requests.append(submit_file(
                         token, repo, base, config_path, updated_config,
-                        title, description, correction_id,
+                        title, description, correction_id, expected_bases=expected_bases,
                     ))
                 else:
                     pull_requests.append(submit_files(
                         token, repo, base, contents, title, description, correction_id,
+                        expected_bases=expected_bases,
                     ))
         if patch is not None:
             target_path = patch_path(archive_id, new_article_id, publication_id)
@@ -2156,6 +2282,7 @@ def main():
             pull_requests.append(submit_file(
                 token, repo, "ocr_patch", target_path, target_content,
                 title, proofread_pr_body(request, repo, new_article_id, correction_id), correction_id,
+                expected_bases=expected_bases,
             ))
         elif new_article_id != article_id:
             target_path = patch_path(archive_id, new_article_id, publication_id)
@@ -2167,31 +2294,21 @@ def main():
                     pull_requests.append(submit_file(
                         token, repo, "ocr_patch", target_path, old_content,
                         title, proofread_pr_body(request, repo, new_article_id, correction_id), correction_id,
+                        expected_bases=expected_bases,
                     ))
+        # Submission never merges or deletes branches, even if a queued or
+        # older payload asks for auto-merge. Preserve the separate, existing
+        # review-command functions and output fields for compatibility.
         auto_merged = []
-        if (
-            request.get("auto_merge") is True
-            and request.get("auto_merge_policy") == AUTO_MERGE_POLICY
-            and auto_merge_allowed(kind, patch, metadata)
-        ):
-            for pull in pull_requests:
-                if merge_pull(token, repo, pull):
-                    auto_merged.append(pull["url"])
-                    delete_pull_branch(token, repo, pull)
-        auto_merged_urls = set(auto_merged)
-        pending_pulls = [pull for pull in pull_requests if pull["url"] not in auto_merged_urls]
         tracker_issue = None
         auto_merge_log = None
         tracker_token = os.environ.get("TRACKER_TOKEN", "")
-        if pending_pulls and tracker_token:
+        if pull_requests and tracker_token:
             tracker_issue = upsert_tracker_issue(
-                tracker_token, correction_id, request, repo, new_article_id, pending_pulls,
+                tracker_token, correction_id, request, repo, new_article_id, pull_requests,
             )
-        merged_pulls = [pull for pull in pull_requests if pull["url"] in auto_merged_urls]
-        if merged_pulls and tracker_token:
-            auto_merge_log = notify_auto_merged(
-                tracker_token, correction_id, request, repo, new_article_id, merged_pulls,
-            )
+            if not isinstance(tracker_issue, str) or not tracker_issue.strip():
+                fail("proofreading tracker response is unconfirmed; recovery review required")
         print(json.dumps({
             "repository": repo,
             "article_id": new_article_id,

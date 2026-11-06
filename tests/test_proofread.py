@@ -19,6 +19,9 @@ class ProofreadBundleTests(unittest.TestCase):
         paused_entry = patch.object(submit_proofread, 'require_paused_delivery')
         paused_entry.start()
         self.addCleanup(paused_entry.stop)
+        baseline = patch.object(submit_proofread, 'validate_bha_baseline', return_value=None)
+        baseline.start()
+        self.addCleanup(baseline.stop)
 
     def test_patch_path_targets_archive_repository_root(self):
         self.assertEqual(submit_proofread.patch_path(0, "article", "book"), "[article][book].ts")
@@ -332,7 +335,7 @@ class ProofreadBundleTests(unittest.TestCase):
                 return "export default {};", "config-sha"
             return "", None
 
-        def submit_file(_token, _repo, base, path, content, title, body, _correction_id):
+        def submit_file(_token, _repo, base, path, content, title, body, _correction_id, **_kwargs):
             bodies.append(body)
             return {"number": len(bodies), "url": f"https://example.test/{base}", "sha": "a" * 40}
 
@@ -1467,7 +1470,7 @@ class ProofreadBundleTests(unittest.TestCase):
                 return "export default [\n  {\"version\":1},\n];", "old-patch-sha"
             raise AssertionError((branch, path))
 
-        def submit_file(_token, _repo, base, path, content, *_args):
+        def submit_file(_token, _repo, base, path, content, *_args, **_kwargs):
             submitted.append((base, path, content))
             return {"number": len(submitted), "url": f"https://example.test/{base}", "sha": "a" * 40}
 
@@ -1497,7 +1500,7 @@ class ProofreadBundleTests(unittest.TestCase):
             self.assertEqual(branch, "ocr_patch")
             return "", None
 
-        def submit_file(_token, _repo, base, path, content, *_args):
+        def submit_file(_token, _repo, base, path, content, *_args, **_kwargs):
             submitted.append((base, path, content))
             return {"number": len(submitted), "url": f"https://example.test/{base}", "sha": "a" * 40}
 
