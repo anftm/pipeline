@@ -63,17 +63,34 @@ class ReaderProjectionSyncTests(unittest.TestCase):
         publish = next(item for item in steps if item.get('name') == 'Publish the pinned projection to Pages')
         ack = next(item for item in steps if item.get('id') == 'ack')
         for step in (publish, ack):
-            for operation in ('unify', 'withdraw', 'reset-documents'):
+            for operation in ('unify', 'withdraw', 'reset-documents', 'migrate-derived', 'resume-derived'):
                 self.assertTrue(condition(step['if'], operation=operation, changed='true'))
                 self.assertFalse(condition(step['if'], operation=operation, changed='true', apply='false'))
                 self.assertFalse(condition(step['if'], operation=operation, changed='false'))
             for operation in ('auto', 'correct', 'accept', 'promote', 'rollback',
-                              'repair-gbk', 'retire', 'ack', 'inspect'):
+                              'repair-gbk', 'retire', 'ack', 'inspect', 'verify-generation'):
                 self.assertFalse(condition(step['if'], operation=operation, changed='true'))
         self.assertLess(steps.index(publish), steps.index(ack))
         self.assertEqual(workflow['concurrency']['group'], 'reader-sidecar')
         self.assertFalse(workflow['concurrency']['cancel-in-progress'])
         self.assertEqual(workflow['concurrency']['queue'], 'max')
+
+    def test_page_migration_uses_pinned_generation_and_no_gc_acknowledgment(self):
+        workflow = self.workflow('reader-v3-publish.yml')
+        steps = workflow['jobs']['publish']['steps']
+        publish = next(step for step in steps if step.get('name') == 'Publish the pinned projection to Pages')
+        ack = next(step for step in steps if step.get('id') == 'ack')
+        self.assertIn('--pinned-only', publish['run'])
+        self.assertIn('check-page-window --resource-json "$RESOURCE_JSON"', publish['run'])
+        self.assertLess(publish['run'].index('check-page-window'),
+                        publish['run'].index('publish_search_reader_index.py --pinned-only'))
+        self.assertIn('GC_PRODUCER_TOKENS_JSON', publish['env'])
+        branch = ack['run'].split('python scripts/publish_reader_v3.py ack-all', 1)[0]
+        self.assertIn('verify-generation', branch)
+        self.assertIn('--wait-seconds 1200', branch)
+        self.assertIn('exit 0', branch)
+        self.assertNotIn('acknowledge-legacy', branch)
+        self.assertNotIn('compact-legacy', branch)
 
     def test_unify_and_retirement_have_no_remote_ocr_progress_scan(self):
         workflow = self.workflow('reader-v3-publish.yml')
@@ -110,6 +127,9 @@ class ReaderProjectionSyncTests(unittest.TestCase):
             'withdraw': ['--resource-json', '{"key":"fixture"}', '--expected-parent', 'parent'],
             'unify': ['--resource-json', '{"key":"fixture"}'],
             'reset-documents': ['--resource-json', '{"key":"fixture"}'],
+            'migrate-derived': ['--resource-json', '{"key":"fixture"}'],
+            'resume-derived': ['--resource-json', '{"key":"fixture"}'],
+            'verify-generation': ['--expected-parent', 'parent', '--wait-seconds', '1200'],
         }
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -149,6 +169,8 @@ class ReaderProjectionSyncTests(unittest.TestCase):
         gate = workflow['jobs']['publish']['if']
         self.assertFalse(condition(gate, operation='auto', paused='true'))
         self.assertFalse(condition(gate, paused='true', event='schedule'))
+        operation = next(step for step in workflow['jobs']['publish']['steps'] if step.get('id') == 'operation')
+        self.assertIn('Scheduled v3 retirement is disabled', operation['run'])
         self.assertTrue(condition(gate, operation='unify', paused='true'))
         self.assertTrue(condition(gate, operation='auto', paused='false'))
         self.assertFalse(condition(gate, operation='unify', paused='true', repository='other/repo'))

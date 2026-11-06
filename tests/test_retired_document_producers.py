@@ -59,14 +59,15 @@ class RetiredDocumentProducerTests(unittest.TestCase):
         config = yaml.safe_load(workflow)
         inputs = config.get('on', config.get(True))['workflow_dispatch']['inputs']
         self.assertEqual(inputs['operation']['options'],
-                         ['inspect', 'unify', 'ack', 'retire', 'withdraw', 'reset-documents'])
+                         ['inspect', 'unify', 'ack', 'retire', 'withdraw', 'reset-documents',
+                          'migrate-derived', 'resume-derived', 'verify-generation'])
         self.assertEqual(inputs['operation']['default'], 'inspect')
         self.assertFalse(inputs['apply']['default'])
 
-    def test_v3_keeps_only_the_existing_daily_retirement_schedule(self):
+    def test_v3_does_not_automatically_run_retirement_on_schedule(self):
         workflow = yaml.safe_load((ROOT / 'reader-v3-publish.yml').read_text())
         triggers = workflow.get('on', workflow.get(True))
-        self.assertEqual(triggers['schedule'], [{'cron': '23 5 * * *'}])
+        self.assertNotIn('schedule', triggers)
         self.assertIn('workflow_dispatch', triggers)
         self.assertIn('unify', triggers['workflow_dispatch']['inputs']['operation']['options'])
 

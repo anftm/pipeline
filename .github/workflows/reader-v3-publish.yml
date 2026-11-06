@@ -2,18 +2,16 @@ name: Reader/桶 · Publish v3 Reading Generation
 run-name: v3 ${{ inputs.operation || github.event_name }} / ${{ (inputs.apply || github.event_name != 'workflow_dispatch') && 'apply' || 'verify' }}
 
 on:
-  schedule:
-    # Keep the existing daily retirement journal; the retired OCR admission
-    # schedule must not restart with normal CHM/Reader publication.
-    - cron: '23 5 * * *'
+  # Retirement is an explicit operation: restoring the publisher must not
+  # automatically advance old GC/retirement journals on a schedule.
   workflow_dispatch:
     inputs:
       operation:
         type: choice
-        options: [inspect, unify, ack, retire, withdraw, reset-documents]
+        options: [inspect, unify, ack, retire, withdraw, reset-documents, migrate-derived, resume-derived, verify-generation]
         default: inspect
       resource_json:
-        description: Options JSON for withdraw, unify or reset-documents; reset-documents changes document routes
+        description: 'Migration roots or resume transaction; apply also requires external_writers_stopped=true'
         type: string
         default: '{}'
       expected_parent:
@@ -56,6 +54,9 @@ jobs:
       - run: pip install -r scripts/requirements.txt
       - name: Guard direct-document and GC contracts before publication
         run: python -m unittest tests.test_direct_document_policy
+      - name: Test page migration and recovery
+        if: inputs.operation == 'migrate-derived' || inputs.operation == 'resume-derived'
+        run: python -m unittest tests.test_reader_page_audit tests.test_reader_page_migrate tests.test_reader_page_migration_fence
       - name: Verify and execute the central v3 operation
         id: operation
         env:
@@ -75,12 +76,11 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           SCHEDULE: ${{ github.event.schedule }}
         run: |
+          # Old scheduled or queued runs must not resume retirement after the
+          # publisher is re-enabled. Manual dispatch is the only live entry.
           if [[ "$EVENT_NAME" != workflow_dispatch ]]; then
-            # The only supported scheduled operation is the pre-existing daily
-            # retirement journal. Never schedule remote OCR admission again.
-            [[ "$SCHEDULE" == '23 5 * * *' ]] || exit 1
-            OPERATION=retire
-            APPLY=true
+            echo "Scheduled v3 retirement is disabled" >&2
+            exit 1
           fi
           # Keep non-OCR sidecar maintenance available, but never build, admit,
           # correct, or republish detached document text through old entrypoints.
@@ -95,6 +95,8 @@ jobs:
           args=("$OPERATION" --output output/v3/publication.json)
           case "$OPERATION" in
             withdraw) args+=(--resource-json "$RESOURCE_JSON" --expected-parent "$EXPECTED_PARENT") ;;
+            migrate-derived|resume-derived) args+=(--resource-json "$RESOURCE_JSON") ;;
+            verify-generation) args+=(--expected-parent "$EXPECTED_PARENT" --wait-seconds 1200) ;;
             unify|reset-documents) args+=(--resource-json "$RESOURCE_JSON") ;;
             retire) ;;
             ack) args+=(--surface "$SURFACE") ;;
@@ -108,22 +110,39 @@ jobs:
         if: >-
           steps.operation.outputs.apply == 'true' &&
           steps.operation.outputs.changed == 'true' &&
-          contains(fromJSON('["withdraw","unify","reset-documents"]'), steps.operation.outputs.operation)
+          contains(fromJSON('["withdraw","unify","reset-documents","migrate-derived","resume-derived"]'), steps.operation.outputs.operation)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           PAGES_TOKEN: ${{ secrets.PAGES_TOKEN }}
           PAGES_REPO: ${{ secrets.PAGES_REPO }}
-        run: python scripts/publish_search_reader_index.py
+          GH_TOKEN: ${{ github.token }}
+          GC_PRODUCER_TOKENS_JSON: ${{ secrets.GC_PRODUCER_TOKENS_JSON }}
+          GC_AMBROSSEE_MAINTENANCE_TOKEN: ${{ secrets.GC_AMBROSSEE_MAINTENANCE_20261102 }}
+          RESOURCE_JSON: ${{ inputs.resource_json }}
+          OPERATION: ${{ steps.operation.outputs.operation }}
+        run: |
+          if [[ "$OPERATION" == migrate-derived || "$OPERATION" == resume-derived ]]; then
+            python scripts/publish_reader_v3.py check-page-window --resource-json "$RESOURCE_JSON"
+          fi
+          python scripts/publish_search_reader_index.py --pinned-only
       - name: Confirm both deployed consumer projections
         id: ack
         if: >-
           steps.operation.outputs.apply == 'true' &&
           steps.operation.outputs.changed == 'true' &&
-          contains(fromJSON('["withdraw","unify","reset-documents"]'), steps.operation.outputs.operation)
+          contains(fromJSON('["withdraw","unify","reset-documents","migrate-derived","resume-derived"]'), steps.operation.outputs.operation)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_INPUT_TOKEN: ${{ secrets.HF_INPUT_TOKEN }}
+          OPERATION: ${{ steps.operation.outputs.operation }}
         run: |
+          if [[ "$OPERATION" == migrate-derived || "$OPERATION" == resume-derived ]]; then
+            generation=$(jq -r '.generation' output/v3/publication.json)
+            python scripts/publish_reader_v3.py verify-generation --expected-parent "$generation" \
+              --wait-seconds 1200 --output output/v3/migration-verification.json
+            echo "complete=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           python scripts/publish_reader_v3.py ack-all --apply --output output/v3/consumers.json
           echo "complete=$(jq -r '.complete // false' output/v3/consumers.json)" >> "$GITHUB_OUTPUT"
           # Record the base-catalog generation both deployments just confirmed.

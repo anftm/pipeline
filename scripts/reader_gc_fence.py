@@ -90,6 +90,8 @@ class GitHubProducerFence:
             if not central:
                 raise
             permission = {}
+        # A repository-wide switch alone must not stand in for its workflow
+        # inventory and drained runs. Require both for historical repositories.
         if not central and permission.get("enabled") is not False:
             raise RuntimeError(f"producers have not drained: {repo}: {[run['id']]}")
         endpoint = f"repos/{repo}/actions/runs/{run['id']}"
@@ -129,29 +131,74 @@ class GitHubProducerFence:
                 "repository_actions_enabled": permission.get("enabled"),
                 "updated_at": after.get("updated_at")}
 
-    def check(self):
+    def check(self, *, allow_current_workflow=None, all_workflows=False):
+        """Check the full configured scope, optionally exempting this exact run.
+
+        The exemption permits a central publishing workflow to perform a fenced
+        mutation. It never excludes another run of that workflow, and proves
+        GitHub state only—not revocation of independent bucket credentials.
+        """
         checked = []
         central = load_config()["publisher_repository"]
-        for repo in producer_repositories():
+        current_id = None
+        if allow_current_workflow is not None:
+            if (allow_current_workflow != '.github/workflows/reader-v3-publish.yml'
+                    or not all_workflows):
+                raise ValueError('unsupported producer fence exemption')
+            assert_workflow_context(allow_current_workflow)
+            current_id = os.environ.get('GITHUB_RUN_ID')
+            if not current_id or not current_id.isascii() or not current_id.isdigit():
+                raise RuntimeError('publisher run identity is invalid')
+        selected = (lambda path: path.startswith('.github/workflows/')) if all_workflows else producer_path
+        repositories = producer_repositories()
+        if all_workflows:
+            try:
+                from .reader_producer_scope_transition import ADDITIONAL
+            except ImportError:
+                from reader_producer_scope_transition import ADDITIONAL
+            # Prepared-only transition records identify further historical
+            # repositories; add them conservatively, never treat preparation as
+            # evidence that any of them is retired or inaccessible.
+            repositories = sorted(set(repositories) | set(ADDITIONAL))
+        for repo in repositories:
             residuals = []
             workflows = [w for page in self.api(f"repos/{repo}/actions/workflows?per_page=100")
-                         for w in page["workflows"] if producer_path(w["path"])]
+                         for w in page["workflows"] if selected(w["path"])]
             if not any(w["path"].endswith("/pdf-account-worker.yml") for w in workflows):
                 raise RuntimeError(f"producer workflow inventory is incomplete: {repo}")
-            enabled = [w["path"] for w in workflows if w["state"] == "active"]
+            if all_workflows and any(w['state'] not in {'active', 'disabled_manually', 'disabled_inactivity'}
+                                     for w in workflows):
+                raise RuntimeError(f'workflow state is unknown: {repo}')
+            if all_workflows and repo != central:
+                if self.single(f'repos/{repo}/actions/permissions').get('enabled') is not False:
+                    raise RuntimeError(f'producer repository execution is not disabled: {repo}')
+            if repo == central and current_id is not None:
+                own = [w for w in workflows if w["path"] == allow_current_workflow]
+                if len(own) != 1 or own[0]["state"] != 'active':
+                    raise RuntimeError('current publisher workflow is not active in the central inventory')
+            enabled = [w["path"] for w in workflows if w["state"] == "active"
+                       and not (repo == central and current_id is not None
+                                and w["path"] == allow_current_workflow)]
             if enabled:
                 raise RuntimeError(f"producers are not paused: {repo}: {enabled}")
             for status in ("in_progress", "queued", "pending", "waiting", "requested"):
                 pages = self.api(f"repos/{repo}/actions/runs?status={status}&per_page=100")
                 active = [r for page in pages for r in page["workflow_runs"]
-                          if producer_path(r["path"]) and r["status"] != "completed"]
+                          if selected(r["path"].split('@', 1)[0]) and r["status"] != "completed"]
                 for run in active:
+                    if (repo == central and current_id is not None and str(run['id']) == current_id
+                            and run['path'].split('@', 1)[0] == allow_current_workflow):
+                        continue
+                    if (repo == central and current_id is not None
+                            and run['path'].split('@', 1)[0] == allow_current_workflow):
+                        raise RuntimeError(f"another publisher run has not drained: {repo}: {[run['id']]}")
                     if run["status"] not in {"queued", "pending"}:
                         raise RuntimeError(f"producers have not drained: {repo}: {[run['id']]}")
                     residuals.append(self.isolated_residual(repo, run, central=(repo == central)))
-            checked.append({"repository": repo, "disabled_workflows": [w["path"] for w in workflows],
-                            "isolated_residual_runs": residuals})
-        return {"kind": "reader-gc-producer-fence", "repositories": checked}
+            checked.append({"repository": repo, "disabled_workflows": [w["path"] for w in workflows
+                            if w['state'] != 'active'], "isolated_residual_runs": residuals})
+        return {"kind": "reader-gc-producer-fence", "repositories": checked,
+                "external_bucket_credentials_verified": False}
 
 
 def assert_workflow_context(workflow):

@@ -18,7 +18,7 @@ on:
         type: string
         default: ''
       resume_run:
-        description: Optional exact full-graph deletion plan; revalidate current references before resuming
+        description: Saved full-graph run, or JSON configuration for page-plan/page-apply
         type: string
         default: ''
       auto_resume:
@@ -32,7 +32,7 @@ on:
       scope:
         description: "unreferenced: full sweep; retired-assets: all format retirement receipts; retired-ocr-inputs: released PNGs. All apply scopes require the maintenance fence."
         type: choice
-        options: [unreferenced, retired-assets, retired-catalog-snapshots, retired-ocr-inputs, document-control, document-pages, ocr-inputs, djvu-pdf, ocr-library]
+        options: [unreferenced, retired-assets, retired-catalog-snapshots, retired-ocr-inputs, document-control, document-pages, ocr-inputs, djvu-pdf, ocr-library, page-plan, page-apply]
         default: unreferenced
       reader_only:
         description: Delete only the original Reader buckets and keep the fourth domain intact
@@ -73,17 +73,26 @@ jobs:
           python-version: "3.11"
       - run: pip install -r scripts/requirements.txt PyYAML==6.0.3
       - name: Verify primary-document reference and retirement safety
-        run: python -m unittest tests.test_direct_document_policy tests.test_reader_gc_graph
+        run: python -m unittest tests.test_direct_document_policy tests.test_reader_gc_graph tests.test_reader_page_delete
       - uses: actions/cache/restore@v4
         with:
           path: .cache/reader-gc
           key: reader-gc-reads-v1-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: reader-gc-reads-v1-
+      - name: Download reviewed page deletion plan
+        if: inputs.scope == 'page-apply' && inputs.apply == true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PAGE_CONFIG_JSON: ${{ inputs.resume_run }}
+        run: |
+          PLAN_RUN=$(python -c 'import json,os; v=json.loads(os.environ["PAGE_CONFIG_JSON"]); print(v.get("plan_run", ""))')
+          [[ "$PLAN_RUN" =~ ^[1-9][0-9]*$ ]] || exit 1
+          gh run download "$PLAN_RUN" --repo "$GITHUB_REPOSITORY" --name page-exact-plan --dir output/gc/reviewed
       - name: Verify maintenance window and collect unreferenced objects
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_INPUT_TOKEN: ${{ secrets.HF_INPUT_TOKEN }}
-          GH_TOKEN: ${{ secrets.PDF_WORKER_READ_TOKEN }}
+          GH_TOKEN: ${{ secrets.PDF_WORKER_READ_TOKEN || github.token }}
           GC_PRODUCER_TOKENS_JSON: ${{ secrets.GC_PRODUCER_TOKENS_JSON }}
           GC_AMBROSSEE_MAINTENANCE_TOKEN: ${{ secrets.GC_AMBROSSEE_MAINTENANCE_20261102 }}
           APPLY: ${{ inputs.apply }}
@@ -105,6 +114,20 @@ jobs:
         run: |
           [[ "$GRACE_DAYS" =~ ^[0-9]+$ ]] || exit 1
           [[ "$LIMIT" =~ ^[0-9]+$ ]] || exit 1
+          if [[ "$SCOPE" == page-plan ]]; then
+            mkdir -p output/gc/page-plan
+            python -c 'import json,os,pathlib; v=json.loads(os.environ["RESUME_RUN"]); assert set(v)=={"paths"}; pathlib.Path("output/gc/page-plan/paths.json").write_text(json.dumps(v["paths"]))'
+            python -u scripts/reader_page_delete.py plan --paths output/gc/page-plan/paths.json \
+              --plan output/gc/page-plan/plan.json --storage "$STORAGE"
+            exit 0
+          fi
+          if [[ "$SCOPE" == page-apply ]]; then
+            [[ "$APPLY" == true ]] || { echo 'page-apply requires apply=true' >&2; exit 1; }
+            PLAN_SHA256=$(python -c 'import json,os; v=json.loads(os.environ["RESUME_RUN"]); assert set(v)=={"plan_run","plan_sha256","external_writers_stopped"} and v["external_writers_stopped"] is True; print(v["plan_sha256"])')
+            python -u scripts/reader_page_delete.py apply --plan output/gc/reviewed/plan.json \
+              --expected-sha256 "$PLAN_SHA256" --confirm-external-writers-stopped --storage "$STORAGE"
+            exit 0
+          fi
           case "$SCOPE" in
             document-control|document-pages|ocr-inputs|djvu-pdf|ocr-library)
               args=(--scope "$SCOPE" --reset-id "$RESET_ID" --output output/gc/collection.json)
@@ -129,6 +152,13 @@ jobs:
           if [[ "$SCOPE" == retired-assets ]]; then args+=(--retired-assets-only); fi
           if [[ "$SCOPE" == retired-catalog-snapshots ]]; then args+=(--retired-snapshots-only); fi
           python -u scripts/reader_gc_collect.py "${args[@]}"
+      - uses: actions/upload-artifact@v7
+        if: always() && inputs.scope == 'page-plan'
+        with:
+          name: page-exact-plan
+          path: output/gc/page-plan/plan.json
+          retention-days: 1
+          if-no-files-found: warn
       - uses: actions/cache/save@v4
         if: always()
         with:
@@ -140,4 +170,4 @@ jobs:
           name: reader-gc-collection
           path: output/gc/*
           retention-days: 30
-          if-no-files-found: error
+          if-no-files-found: warn

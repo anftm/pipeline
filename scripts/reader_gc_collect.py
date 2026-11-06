@@ -327,6 +327,11 @@ def collect_retired_snapshots(store, fence, catalog, *, apply=False, checkpoint=
 def verify_roots(store, reference_graph, collected_roots=frozenset()):
     present_roots = set()
     for bucket, files in reference_graph.files.items():
+        # A fresh root listing does not revalidate nested manifests traversed
+        # by the graph. Never reuse versions from its earlier inventory as if
+        # they were current pre-delete evidence.
+        if hasattr(store, 'root_etags'):
+            store.root_etags.pop(bucket, None)
         roots = (reference_graph.list_roots(bucket) if hasattr(reference_graph, "list_roots") else
                  {p for p in store.list_files(bucket, ("",)) if graph.is_root(p, bucket)})
         present_roots.update((bucket, path) for path in roots)
@@ -350,6 +355,33 @@ def verify_roots(store, reference_graph, collected_roots=frozenset()):
 
     with ThreadPoolExecutor(max_workers=8) as pool:
         list(pool.map(recheck_root, sorted(reference_graph.root_hashes.items())))
+
+
+def verify_graph_documents(store, reference_graph):
+    """Freshly verify every read nested dependency, not just named roots."""
+    digests = getattr(reference_graph, 'loaded_digests', None)
+    if not isinstance(digests, dict):
+        raise RuntimeError('graph document identities are unavailable')
+    nested = {ref: digest for ref, digest in digests.items() if ref not in reference_graph.root_hashes}
+    by_bucket = {}
+    for bucket, path in nested:
+        by_bucket.setdefault(bucket, set()).add(path)
+    for bucket, paths in by_bucket.items():
+        if hasattr(store, 'list_exact_versions'):
+            latest = store.list_exact_versions(bucket, paths)
+            if set(latest) != paths:
+                raise RuntimeError('nested graph document inventory changed before deletion')
+            for path in paths:
+                recorded = reference_graph.fingerprints.get((bucket, path))
+                if (recorded != ('etag', latest[path]) or not isinstance(latest[path], str)
+                        or not re.fullmatch(r'"[^"\r\n]+"', latest[path])):
+                    raise RuntimeError('nested graph document version changed before deletion')
+        else:
+            def verify(path):
+                if snapshot_digest(store, bucket, path) != nested[(bucket, path)]:
+                    raise RuntimeError('nested graph document changed before deletion')
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                list(pool.map(verify, sorted(paths)))
 
 
 def collect(store, fence, reference_graph, report, catalog, *, grace_days=0, limit=0,

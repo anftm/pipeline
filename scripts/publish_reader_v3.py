@@ -934,10 +934,13 @@ def observe_consumer(store, surface, client):
     if catalog.get("base_sidecar"):
         projected = project_sidecar(pinned_base(store, catalog, {}), catalog)
         routing = ("s", "m", "p", "b", "pd", "pdb", "c", "cb", "f", "o", "ob", "om")
-        expected = {key: {field: entry[field] for field in routing if field in entry}
-                    for key, entry in projected["f"].items()}
-        actual = {key: {field: entry[field] for field in routing if field in entry}
-                  for key, entry in sidecar["f"].items()}
+        def normalized(entry):
+            # The HF decoder intentionally drops failure diagnostics.
+            if entry.get('s') == 4:
+                return {'s': 4}
+            return {field: entry[field] for field in routing if field in entry}
+        expected = {key: normalized(entry) for key, entry in projected["f"].items()}
+        actual = {key: normalized(entry) for key, entry in sidecar["f"].items()}
         if expected != actual:
             raise ValueError("deployed full-format sidecar differs from pinned generation")
     for key, entry in catalog["files"].items():
@@ -1102,6 +1105,35 @@ def acknowledge_all(store, client, *, apply=False, timeout_seconds=1200,
     return report
 
 
+def verify_generation(store, client, expected, *, timeout_seconds=0, sleep_fn=time.sleep, clock=time.monotonic):
+    """Observe both deployed projections without writing GC acknowledgments."""
+    import httpx
+    pointer, _ = current(store)
+    if not pointer or pointer['generation'] != text.sha(expected):
+        raise ValueError('v3 generation changed before verification')
+    pending, receipts, errors = {'hf', 'pages'}, {}, {}
+    deadline = clock() + max(0, timeout_seconds)
+    while pending:
+        for surface in sorted(pending):
+            try:
+                receipt = observe_consumer(store, surface, client)
+                if receipt.get('generation') != expected or receipt.get('projection_verified') is not True:
+                    raise ValueError('unexpected consumer generation')
+                receipts[surface] = receipt
+                pending.remove(surface)
+                errors.pop(surface, None)
+            except (ValueError, httpx.HTTPError, OSError) as error:
+                errors[surface] = type(error).__name__
+        if current(store)[0] != pointer:
+            raise ValueError('v3 generation changed during verification')
+        if pending:
+            remaining = deadline - clock()
+            if remaining <= 0:
+                raise RuntimeError(f'consumer verification incomplete: {errors}')
+            sleep_fn(min(20, remaining))
+    return {'generation': expected, 'complete': True, 'consumers': receipts, 'objects_deleted': False}
+
+
 def project_sidecar(sidecar, catalog):
     validate_catalog(catalog)
     if sidecar.get("v") != 1 or not isinstance(sidecar.get("f"), dict):
@@ -1150,7 +1182,7 @@ class CentralHubStore(HubBucketStore):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("build-stage", "stage", "promote", "rollback", "withdraw", "ack", "ack-all", "acknowledge-legacy", "compact-legacy", "inspect", "project", "auto", "build-task", "correct", "accept", "reject", "retry", "retire", "retire-ocr-progress", "unify", "repair-gbk", "reset-documents"))
+    parser.add_argument("command", choices=("build-stage", "stage", "promote", "rollback", "withdraw", "ack", "ack-all", "acknowledge-legacy", "compact-legacy", "inspect", "project", "auto", "build-task", "correct", "accept", "reject", "retry", "retire", "retire-ocr-progress", "unify", "repair-gbk", "reset-documents", "migrate-derived", "resume-derived", "verify-generation", "check-page-window"))
     parser.add_argument("--resource", type=Path)
     parser.add_argument("--resource-json")
     parser.add_argument("--bundle", type=Path)
@@ -1158,6 +1190,7 @@ def main():
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--surface", choices=("hf", "pages"))
+    parser.add_argument("--wait-seconds", type=int, default=0)
     args = parser.parse_args()
     # A historical queued Actions run can retain an older workflow definition
     # even after main's workflow blocks these commands. When it checks out this
@@ -1169,7 +1202,64 @@ def main():
     if args.command in retired_commands:
         raise RuntimeError('remote OCR/detached-text v3 operation is retired: ' + args.command)
     store = CentralHubStore()
-    if args.command == "reset-documents":
+    if args.command == 'verify-generation':
+        import httpx
+        if args.expected_parent == 'none' or not 0 <= args.wait_seconds <= 1200:
+            parser.error('verify-generation requires --expected-parent and 0..1200 wait seconds')
+        with httpx.Client(timeout=30, follow_redirects=True) as client:
+            report = verify_generation(store, client, args.expected_parent, timeout_seconds=args.wait_seconds)
+    elif args.command == 'check-page-window':
+        try:
+            from . import reader_page_migrate as migrate
+        except ImportError:
+            import reader_page_migrate as migrate
+        options = json.loads(args.resource_json or '{}')
+        if not isinstance(options, dict) or options.get('external_writers_stopped') is not True:
+            raise ValueError('page publication requires external-writer confirmation')
+        os.environ['READER_PAGE_EXTERNAL_WRITERS_STOPPED'] = 'true'
+        migrate.require_writer_window(store)
+        report = {'github_producers_drained': True, 'external_bucket_credentials_verified': False}
+    elif args.command == 'resume-derived':
+        try:
+            from . import reader_page_migrate as migrate
+        except ImportError:
+            import reader_page_migrate as migrate
+        from huggingface_hub import HfApi
+        options = json.loads(args.resource_json or '{}')
+        if (not args.apply or not isinstance(options, dict)
+                or set(options) != {'transaction_id', 'external_writers_stopped'}
+                or options['external_writers_stopped'] is not True):
+            raise ValueError('resume-derived requires an exact transaction and external-writer confirmation')
+        os.environ['READER_PAGE_EXTERNAL_WRITERS_STOPPED'] = 'true'
+        report = migrate.resume(store, HfApi(token=os.environ.get('HF_TOKEN')), options['transaction_id'])
+    elif args.command == 'migrate-derived':
+        try:
+            from . import reader_page_migrate as migrate
+        except ImportError:
+            import reader_page_migrate as migrate
+        from huggingface_hub import HfApi
+        options = json.loads(args.resource_json or '{}')
+        expected = {'index_sha256', 'sidecar_sha256', 'v3_generation'}
+        if args.apply:
+            expected.add('external_writers_stopped')
+        if (not isinstance(options, dict) or set(options) != expected
+                or args.apply and options['external_writers_stopped'] is not True):
+            raise ValueError('migrate-derived requires exact root identities and, for apply, external-writer confirmation')
+        if args.apply:
+            os.environ['READER_PAGE_EXTERNAL_WRITERS_STOPPED'] = 'true'
+            migrate.require_writer_window(store)
+        api = HfApi(token=os.environ.get('HF_TOKEN'))
+        plan = migrate.prepare(store, api, expected_index=options['index_sha256'],
+                               expected_sidecar=options['sidecar_sha256'], expected_v3=options['v3_generation'])
+        if args.apply:
+            report = migrate.apply(store, api, plan)
+        else:
+            report = {'applied': False, 'migrated_entries': len(plan['audit']['planned']),
+                      'changed_routes': plan['changed_routes'], 'base_generation': plan['generation'],
+                      'previous_v3_generation': plan['pointer']['generation'], 'objects_deleted': False,
+                      'unindexed_legacy_pdfs': len(plan['audit']['unindexed_legacy_pdfs']),
+                      'unclassified_object_pdfs': len(plan['audit']['unclassified_object_pdfs'])}
+    elif args.command == "reset-documents":
         try:
             from .reader_document_reset import withdraw as reset_documents, DocumentProducerFence
         except ImportError:

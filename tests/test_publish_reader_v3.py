@@ -334,17 +334,18 @@ class V3PublicationTests(unittest.TestCase):
         self.assertNotIn("workflow_run", workflow[True])
         self.assertFalse(workflow[True]["workflow_dispatch"]["inputs"]["apply"]["default"])
         self.assertEqual(workflow[True]["workflow_dispatch"]["inputs"]["operation"]["options"],
-                         ["inspect", "unify", "ack", "retire", "withdraw", "reset-documents"])
+                         ["inspect", "unify", "ack", "retire", "withdraw", "reset-documents",
+                          "migrate-derived", "resume-derived", "verify-generation"])
         operation_step = next(step for step in workflow["jobs"]["publish"]["steps"]
                               if step.get("id") == "operation")
         self.assertIn("repair-gbk|retire-ocr-progress)", operation_step["run"])
-        # Detached OCR admission and correction are retired. Only the existing
-        # daily retention journal remains scheduled.
+        # Detached OCR admission and correction are retired; retention remains
+        # explicit rather than restarting a daily mutating journal.
         script = next(step["run"] for step in workflow["jobs"]["publish"]["steps"]
                       if step.get("id") == "operation")
         self.assertNotIn("OPERATION=auto\n", script)
-        self.assertIn("OPERATION=retire\n", script)
-        self.assertEqual(workflow[True]["schedule"], [{"cron": "23 5 * * *"}])
+        self.assertIn("Scheduled v3 retirement is disabled", script)
+        self.assertNotIn("schedule", workflow[True])
         self.assertNotIn("OPERATION=correct", script)
         self.assertNotIn("cycle", workflow[True]["workflow_dispatch"]["inputs"]["operation"]["options"])
         ack_step = next(step for step in workflow["jobs"]["publish"]["steps"]

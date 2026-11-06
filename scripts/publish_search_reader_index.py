@@ -116,6 +116,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--assets-repo", default=os.environ.get("READER_ASSETS_REPO", READER_ASSETS_REPO))
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--pinned-only", action="store_true", help="publish the current pinned generation without unifying")
     return parser.parse_args()
 
 
@@ -130,8 +131,11 @@ def main() -> int:
     if type(api) is HfApi:
         raw = read_bucket_bytes(INDEX_FILES["sidecar"], hf_token)
         store = HubBucketStore()
-        synchronize_pinned_base(dry_run=args.dry_run)
+        if not args.pinned_only:
+            synchronize_pinned_base(dry_run=args.dry_run)
         pointer, catalog = current_v3(store)
+        if args.pinned_only and not pointer:
+            raise RuntimeError("cannot publish a missing pinned Reader generation")
         if pointer:
             base = pinned_base(store, catalog, json.loads(gzip.decompress(raw)))
             raw = gzip.compress(json.dumps(project_sidecar(base, catalog), ensure_ascii=False,

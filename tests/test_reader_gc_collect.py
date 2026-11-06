@@ -51,6 +51,40 @@ class ReaderGcCollectTests(unittest.TestCase):
         self.chm_guard.start()
         self.addCleanup(self.chm_guard.stop)
 
+    def test_nested_graph_documents_require_fresh_exact_versions(self):
+        from types import SimpleNamespace
+        key = (PDF, 'objects/source/reading-manifest.json')
+        reference = SimpleNamespace(root_hashes={}, loaded_digests={key: 'a' * 64},
+                                    fingerprints={key: ('etag', '"old"')})
+        store = Mock(spec=['list_exact_versions'])
+        store.list_exact_versions.return_value = {key[1]: '"old"'}
+        collector.verify_graph_documents(store, reference)
+        store.list_exact_versions.assert_called_with(PDF, {key[1]})
+        for latest in ({}, {key[1]: '"new"'}, {key[1]: 'old'}, {key[1]: None}):
+            with self.subTest(latest=latest):
+                store.list_exact_versions.return_value = latest
+                with self.assertRaisesRegex(RuntimeError, 'nested graph document'):
+                    collector.verify_graph_documents(store, reference)
+        reference.fingerprints[key] = ('sha256', 'a' * 64)
+        store.list_exact_versions.return_value = {key[1]: '"old"'}
+        with self.assertRaisesRegex(RuntimeError, 'nested graph document'):
+            collector.verify_graph_documents(store, reference)
+
+    def test_root_recheck_discards_stale_nested_listing_versions(self):
+        store = Store()
+        root = 'reader-index/fixture.json'
+        ref = graph.ReferenceGraph(store)
+        ref.files = {PDF: {root}}
+        raw = b'{"version":1}'
+        ref.root_hashes = {(PDF, root): hashlib.sha256(raw).hexdigest()}
+        ref.fingerprints = {(PDF, root): ('etag', '"old"')}
+        store.root_etags = {PDF: {root: '"old"'}}
+        store.digest = Mock(return_value=hashlib.sha256(b'{"version":2}').hexdigest())
+        ref.list_roots = lambda bucket: {root}
+        with self.assertRaisesRegex(RuntimeError, 'root changed before deletion'):
+            collector.verify_roots(store, ref)
+        store.digest.assert_called_once_with(PDF, root)
+
     def test_complete_deployed_projection_is_required_before_catalog_retirement(self):
         store = Store()
         sidecar = {'v': 1, 'f': {'book': {'p': 'objects/live/document.pdf', 'b': PDF}}}

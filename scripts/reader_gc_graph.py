@@ -170,10 +170,10 @@ class ReferenceGraph:
         with self.lock:
             self.unreadable.pop(ref, None)
             self.loaded_digests[ref] = digest
+            etag = getattr(self.store, "read_etags", {}).get(ref)
+            self.fingerprints[ref] = ("etag", etag) if etag else ("sha256", digest)
             if is_root(ref[1], ref[0]):
                 self.root_hashes[ref] = digest
-                etag = getattr(self.store, "read_etags", {}).get(ref)
-                self.fingerprints[ref] = ("etag", etag) if etag else ("sha256", digest)
         return payload
 
     def note_checksum(self, ref, expected) -> bool:
