@@ -2,13 +2,15 @@
 
 > **此分支是未启用的恢复候选，不是已恢复的生产服务。** 用户希望尽快恢复 BHA 校订/拆分投稿、随后恢复索引自动更新；这份交接供后续 agent 接手。不要把模拟结果或 GitHub 接受 dispatch 当作真实完成回执。
 
+**并行更新：**本分支首个候选提交推送期间，其他会话已将中央 main 从 `5abc978...` 推进到 `0a3b479ff6720c28c97f8e6127c1598bae1fdd30`，该提交只新增 `CCRD-AUTOMATION-HANDOFF-20261106.txt`，未改本候选文件。不要把本分支旧父提交当成当前 main，也不要以本分支强推覆盖它；下一次操作应再次核对 main 和其他会话。
+
 ## 当前线上与权限
 
-- 中央仓库为 `anftm/pipeline`（仓库 ID `1443726000`），已观察到的 main 为 `5abc978f45f3bc4717e0ef460f800a81e069564a`；本分支从该提交开始，只包含 BHA 候选和本说明。推送分支不改变 main、workflow 状态或旧任务。
+- 中央仓库为 `anftm/pipeline`（仓库 ID `1443726000`）；本分支从旧 main `5abc978f45f3bc4717e0ef460f800a81e069564a` 开始，只包含 BHA 候选和本说明；新的并行 main 见上。推送分支不改变 main、workflow 状态或旧任务。
 - BHA Space `vomebook/bha-Search` 当前部署 `decd6c30a1fe768ccbce2710b03c4160f442fbb4`，runtime RUNNING；健康索引 ready、377513 文档，搜索与预览通过。其前端保护草稿，不把通用202视为可靠回执；快照恢复失败时不会在启动时自动重建；旧快照 generation 和临时清单被保留。
 - 校订/拆分接口在当前配置默认暂停，随机不存在的合成文档测试均返回503及保留草稿。Space 没有设置解除暂停的 variable/secret。不要用真实用户稿或重放旧请求验收。
 - 中央53个 workflow 全部 `disabled_manually`，8个 run 全终态。当前可用 GitHub 账号仓库 `push=true`、`admin=false`，查看 Actions 仓库策略返回403，**不能据此判断当前总开关开启或关闭**。Secret 名称存在不证明值、权限或有效性。此前管理员凭据不在当前环境，不在本文件记录或复述。
-- Reader 维护会话的既有保护检查依赖中央 main 固定 `5abc978...` 且所有 workflow 禁用；PDF 245 项复制/只读预检已完成，但路由交接仍未完成。任何合并主分支或启用 workflow 前须与该会话协调；不能覆盖其改动、旧路由、收据或 processing pin。不得启动旧远程 OCR 或 GC，不扩大章节扫描/Reader 限额。
+- Reader 维护会话的既有部分保护检查曾依赖中央 main 固定 `5abc978...` 且所有 workflow 禁用；并行 CCRD 文档提交已改变 main，必须由维护方核对自己的新基线。PDF 245 项复制/只读预检已完成，但路由交接仍未完成。任何合并主分支或启用 workflow 前须与该会话协调；不能覆盖其改动、旧路由、收据或 processing pin。不得启动旧远程 OCR 或 GC，不扩大章节扫描/Reader 限额。
 
 ## 本分支内容与明确暂停
 
