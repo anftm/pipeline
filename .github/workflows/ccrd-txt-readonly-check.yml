@@ -1,0 +1,24 @@
+name: CCRD · Check Single TXT (Read Only)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    if: github.repository == 'anftm/pipeline' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Install workflow contract test dependency
+        run: python -m pip install PyYAML==6.0.3
+      - name: Verify read-only checker contracts
+        run: python -B -m unittest tests.test_check_ccrd_txt_only -v
+      - name: Compare upstream TXT with running CCRD Space and active manifest
+        run: python -B scripts/check_ccrd_txt_only.py
