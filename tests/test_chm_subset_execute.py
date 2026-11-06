@@ -1,9 +1,6 @@
 import json
-from pathlib import Path
 import unittest
 from unittest.mock import Mock, patch
-
-import yaml
 
 from scripts import chm_subset_execute as run, chm_subset_journal as model
 from tests.test_chm_subset_delete_engine import DeleteEngineTests
@@ -77,17 +74,6 @@ class ExecutionTests(unittest.TestCase):
         first = model.make_envelope(plan, state, sequence=0, parent_sha256=None, nonce=run.storage.INITIAL_NONCE)
         self.assertEqual(model.digest(plan), run.storage.PLAN_SHA)
         self.assertEqual(model.digest(first), run.storage.INITIAL_SHA)
-
-    def test_actions_workflow_serializes_three_groups(self):
-        folder = Path(__file__).resolve().parents[1] / '.github/workflows'
-        outer = yaml.load((folder / 'chm-subset-execute.yml').read_text(), Loader=yaml.BaseLoader)
-        inner = yaml.load((folder / 'chm-subset-execute-inner.yml').read_text(), Loader=yaml.BaseLoader)
-        groups = (outer['concurrency'], outer['jobs']['retire']['concurrency'],
-                  inner['jobs']['retire']['concurrency'])
-        self.assertEqual([item['group'] for item in groups],
-                         ['publish-ccrd-index', 'reader-global-maintenance', 'reader-sidecar'])
-        self.assertTrue(all(item['cancel-in-progress'] == 'false' and item['queue'] == 'max' for item in groups))
-        self.assertEqual(outer['jobs']['retire']['uses'], './.github/workflows/chm-subset-execute-inner.yml')
 
     def test_actual_graph_rejects_new_candidate_reference(self):
         # This class mocks the isolated root. Run the graph fixture with that

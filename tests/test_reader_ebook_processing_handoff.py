@@ -132,12 +132,9 @@ class ExactEbookHandoffTests(unittest.TestCase):
         self.assertTrue(final['complete'])
         self.assertEqual(final['verified'], 1)
 
-    def test_exact_workflow_uses_shared_lock_and_does_not_cancel(self):
-        source = (Path(__file__).resolve().parents[1] / '.github/workflows/reader-ebook-processing-handoff.yml').read_text()
-        self.assertIn('group: reader-sidecar', source)
-        self.assertIn('cancel-in-progress: false', source)
-        self.assertNotIn('gh run cancel', source)
-        self.assertNotIn('reader-gc-collect', source)
+    def test_exact_historical_handoff_has_no_actions_entrypoint(self):
+        path = Path(__file__).resolve().parents[1] / '.github/workflows/reader-ebook-processing-handoff.yml'
+        self.assertFalse(path.exists())
 
     def test_active_producer_blocks_without_touching_queued_runs(self):
         fence = unittest.mock.Mock()

@@ -18,7 +18,7 @@ class ReaderSidecarHandoffTests(unittest.TestCase):
                     self.assertIn('HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}', step, str(path))
                     checked.add(path.name)
         expected = {'reader-chapter-search-repair.yml', 'reader-chm-repair.yml', 'reader-ebook-stream.yml',
-                    'reader-image-stream.yml', 'reader-media-backfill.yml', 'reader-media-stream.yml',
+                    'reader-image-stream.yml', 'reader-media-stream.yml',
                     'reader-office-chapters.yml', 'reader-spreadsheet-stream.yml', 'reader-static-pdf-stream.yml',
                     'reader-web-stream.yml'}
         self.assertTrue(expected.issubset(checked), sorted(expected - checked))

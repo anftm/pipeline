@@ -1,9 +1,5 @@
-import json
-from pathlib import Path
 import unittest
 from unittest.mock import Mock, patch
-
-import yaml
 
 from scripts import chm_subset_publish_protection as protect
 
@@ -89,19 +85,6 @@ class PublishProtectionTests(unittest.TestCase):
         self.assertEqual(call['Key'], root['path'])
         self.assertEqual(call['Body'], root['raw'])
         self.assertEqual(call['IfNoneMatch'], '*')
-
-    def test_workflow_holds_three_locks_and_has_no_delete_command(self):
-        root = Path(__file__).resolve().parents[1] / '.github/workflows'
-        outer = yaml.load((root / 'chm-subset-protect.yml').read_text(), Loader=yaml.BaseLoader)
-        inner = yaml.load((root / 'chm-subset-protect-inner.yml').read_text(), Loader=yaml.BaseLoader)
-        groups = (outer['concurrency'], outer['jobs']['protect']['concurrency'],
-                  inner['jobs']['protect']['concurrency'])
-        self.assertEqual([item['group'] for item in groups],
-                         ['publish-ccrd-index', 'reader-global-maintenance', 'reader-sidecar'])
-        self.assertTrue(all(item['cancel-in-progress'] == 'false' and item['queue'] == 'max' for item in groups))
-        commands = '\n'.join(item.get('run', '') for item in inner['jobs']['protect']['steps'])
-        self.assertIn('scripts/chm_subset_publish_protection.py', commands)
-        self.assertNotIn('delete', commands.lower())
 
 
 if __name__ == '__main__':

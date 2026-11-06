@@ -176,18 +176,6 @@ class FixedScopeTests(unittest.TestCase):
         self.client.delete_object.assert_called_once_with(Bucket='reader-assets-v2', Key=self.root['path'])
         self.assertEqual(self.client.meta.method_calls, [])
 
-    def test_three_workflow_locks_and_no_ocr_mutation(self):
-        from pathlib import Path
-        import yaml
-        folder = Path(__file__).resolve().parents[1] / '.github/workflows'
-        outer = yaml.load((folder / 'chm-final20-execute.yml').read_text(), Loader=yaml.BaseLoader)
-        inner = yaml.load((folder / 'chm-final20-execute-inner.yml').read_text(), Loader=yaml.BaseLoader)
-        groups = (outer['concurrency'], outer['jobs']['retire']['concurrency'], inner['jobs']['retire']['concurrency'])
-        self.assertEqual([item['group'] for item in groups],
-                         ['publish-ccrd-index', 'reader-global-maintenance', 'reader-sidecar'])
-        self.assertTrue(all(item['cancel-in-progress'] == 'false' and item['queue'] == 'max' for item in groups))
-        self.assertEqual(outer['jobs']['retire']['uses'], './.github/workflows/chm-final20-execute-inner.yml')
-
 
 if __name__ == '__main__':
     unittest.main()

@@ -254,10 +254,15 @@ def withdraw(store, options, *, apply=False):
         except FileNotFoundError:
             pass
     cleaned, changed = clean_sidecar(decode(raw), derived, static)
+    pointer, catalog = publication.current(store)
+    try:
+        from .reader_route_control import filter_sidecar, validated_sources
+    except ImportError:
+        from reader_route_control import filter_sidecar, validated_sources
+    cleaned = filter_sidecar(cleaned, validated_sources(catalog))
     packed = gzip.compress(encode(cleaned), mtime=0)
     filtered = {**derived, 'files': [entry for entry in derived['files'] if not is_djvu(entry)]}
     removed = [entry for entry in derived['files'] if is_djvu(entry)]
-    pointer, catalog = publication.current(store)
     before, catalog_sha = current_base_catalog(store)
     legacy, generation = lifecycle.catalog_generation(cleaned, before)
     # This reset explicitly retires all prior document routes. The current
@@ -369,7 +374,9 @@ def apply_withdrawal(store, plan):
     store.put_bytes(ASSETS, 'reader-index/reader_catalog.json', encode(plan['legacy']))
     if catalog.get('document_reset') != report['reset_id']:
         result = publication.commit_catalog(store, {'version': 3, 'kind': 'reader-reading-catalog',
-            'files': {}, 'base_sidecar': snapshot, 'parent_generation': pointer['generation'] if pointer else None,
+            'files': {}, 'base_sidecar': snapshot,
+            **({'suppressed_sources': catalog['suppressed_sources']} if 'suppressed_sources' in catalog else {}),
+            'parent_generation': pointer['generation'] if pointer else None,
             'document_reset': report['reset_id']}, pointer, apply=True)
         generation = result['generation']
     else:
@@ -413,7 +420,9 @@ def normalize_withdrawn(store, receipt, *, apply=False):
     store.put_bytes(ASSETS, SIDECAR, packed)
     store.put_bytes(ASSETS, 'reader-index/reader_catalog.json', encode(legacy))
     result = publication.commit_catalog(store, {'version': 3, 'kind': 'reader-reading-catalog',
-        'files': {}, 'base_sidecar': snapshot, 'parent_generation': pointer['generation'],
+        'files': {}, 'base_sidecar': snapshot,
+        **({'suppressed_sources': catalog['suppressed_sources']} if 'suppressed_sources' in catalog else {}),
+        'parent_generation': pointer['generation'],
         'document_reset': receipt['reset_id']}, pointer, apply=True)
     report = {**receipt, 'generation': result['generation'], 'base_generation': generation,
               'base_snapshot': snapshot, 'sidecar_sha256': digest(packed)}

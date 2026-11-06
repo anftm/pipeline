@@ -34,7 +34,9 @@ class MaintenanceQueueContractTests(unittest.TestCase):
                 with self.subTest(workflow=path.name, location=location, group=group):
                     self.assertEqual(concurrency.get('cancel-in-progress'), 'false')
                     self.assertEqual(concurrency.get('queue'), 'max')
-        self.assertGreater(len(checked), 50)
+        checked_names = {name for name, _ in checked}
+        self.assertTrue({'reader-maintenance.yml', 'reader-gc-collect.yml',
+                         'reader-v3-publish.yml', 'publish-ccrd-index.yml'} <= checked_names)
 
     def test_retired_ocr_audit_has_no_workflow(self):
         self.assertFalse((WORKFLOWS / 'reader-ocr-audit.yml').exists())

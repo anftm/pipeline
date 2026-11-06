@@ -73,7 +73,7 @@ jobs:
           python-version: "3.11"
       - run: pip install -r scripts/requirements.txt PyYAML==6.0.3
       - name: Verify primary-document reference and retirement safety
-        run: python -m unittest tests.test_direct_document_policy tests.test_reader_gc_graph tests.test_reader_page_delete
+        run: python -m unittest tests.test_direct_document_policy tests.test_reader_storage_contract tests.test_reader_gc_graph tests.test_reader_page_delete
       - uses: actions/cache/restore@v4
         with:
           path: .cache/reader-gc
@@ -157,7 +157,7 @@ jobs:
         with:
           name: page-exact-plan
           path: output/gc/page-plan/plan.json
-          retention-days: 1
+          retention-days: 2
           if-no-files-found: warn
       - uses: actions/cache/save@v4
         if: always()

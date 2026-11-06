@@ -1,68 +1,34 @@
 #!/usr/bin/env python3
-"""Native DjVu page source: probe, page map, lossless renders and hidden text.
+"""Read native DjVu geometry and embedded text without generating page streams.
 
-Rendering uses DjVuLibre (``ddjvu``/``djvutxt``) directly on the original DjVu
-bytes, never an intermediate PDF. Page geometry is read from the IFF ``INFO``
-chunks without external tools so v3 verification is deterministic. Identity is
-always the original DjVu SHA-256; render profiles use a separate ``djvu-native``
-namespace so they cannot collide with PDF renders of a derived document.
+Geometry comes from the original DjVu IFF ``INFO`` chunks. ``djvutxt`` reads
+embedded native text when explicitly requested; neither operation renders or
+publishes pages, converts the original document, or invokes an OCR model.
 """
 
 from __future__ import annotations
 
-import os
-import json
 import re
 import struct
 import subprocess
-import tempfile
-import warnings
-from functools import lru_cache
 from pathlib import Path
 
 try:
-    from . import pdf_ocr, pdf_text_layer as text
+    from . import reader_native_text as native, pdf_text_layer as text
 except ImportError:
-    import pdf_ocr
+    import reader_native_text as native
     import pdf_text_layer as text
 
 
-PROFILE_VERSION = "djvu-native-v1"
-BITONAL_READER_PROFILE = "djvu-bitonal-reader-png-v1"
-DIRECT_READER_PROFILE = "djvu-primary-ocr-only-v1"
 MAGIC = b"AT&TFORM"
 PDF_MAGIC = b"%PDF-"
-COMMAND_TIMEOUT = int(os.environ.get("PDF_DJVU_COMMAND_TIMEOUT", "600"))
+COMMAND_TIMEOUT = 600
 # Rotation flags from the INFO chunk mapped to clockwise display rotation, as
 # applied by ddjvu (verified against DjVuLibre 3.5.28).
 ROTATION_DEGREES = {1: 0, 6: 270, 2: 180, 5: 90}
 COLOR_CHUNKS = frozenset({b"BG44", b"BGjp", b"BG2k", b"FG44", b"FGjp", b"FG2k", b"FGbz"})
 MASK_CHUNKS = frozenset({b"Sjbz", b"Smmr"})
 TEXT_CHUNKS = frozenset({b"TXTa", b"TXTz"})
-
-
-def native_enabled(item: dict | None = None) -> bool:
-    """``PDF_DJVU_NATIVE``: off (default), ``true``/``all`` or ``pilot``.
-
-    Pilot mode admits only exact ``repo\\0path`` keys listed (newline or ``|``
-    separated) in ``PDF_DJVU_NATIVE_KEYS`` so a rollout can start with 1-3 books.
-    """
-    mode = os.environ.get("PDF_DJVU_NATIVE", "false").strip().lower()
-    if mode in {"", "0", "false", "no", "off"}:
-        return False
-    if mode in {"1", "true", "yes", "all"}:
-        return True
-    if mode == "pilot":
-        if item is None:
-            return True
-        keys = {value.strip() for value in re.split(r"[|\n]", os.environ.get("PDF_DJVU_NATIVE_KEYS", ""))
-                if value.strip()}
-        return item.get("key") in keys or f"{item.get('repo')}/{item.get('path')}" in keys
-    raise ValueError("PDF_DJVU_NATIVE must be false, true/all or pilot")
-
-
-def use_text_layer() -> bool:
-    return os.environ.get("PDF_DJVU_TEXT_LAYER", "true").strip().lower() not in {"0", "false", "no", "off"}
 
 
 def sniff(path_or_bytes) -> str:
@@ -77,48 +43,6 @@ def sniff(path_or_bytes) -> str:
     if head.startswith(PDF_MAGIC):
         return "pdf"
     return "unknown"
-
-
-def is_native_item(item: dict) -> bool:
-    return item.get("source_format") == "djvu"
-
-
-EXCEPTIONS = Path(__file__).resolve().parents[1] / "config/djvu-source-integrity-notes.json"
-
-
-def native_exceptions() -> dict[str, dict]:
-    """Historical DjVu decode failures, retained for audit, not routing."""
-    return _native_exceptions()
-
-
-@lru_cache(maxsize=1)
-def _native_exceptions() -> dict[str, dict]:
-    try:
-        value = json.loads(EXCEPTIONS.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return {}
-    if value.get("version") != 1 or value.get("kind") != "djvu-native-exceptions":
-        raise ValueError("invalid native DjVu exception list")
-    books = value.get("books")
-    if not isinstance(books, list):
-        raise ValueError("invalid native DjVu exception list")
-    result = {}
-    for entry in books:
-        key = entry.get("key")
-        if not isinstance(key, str) or "\0" not in key:
-            raise ValueError("native DjVu exception lacks an exact key")
-        result[key] = entry
-    return result
-
-
-def native_exception(item: dict | None) -> dict | None:
-    return native_exceptions().get(str((item or {}).get("key") or ""))
-
-
-def render_profile(base: str) -> str:
-    """Distinct namespace on top of the PDF profile's shared delivery settings."""
-    return (f"{base}-{PROFILE_VERSION}-native-dpi-maxpix-{pdf_ocr.MAX_PAGE_PIXELS}"
-             f"-textlayer-{int(use_text_layer())}-{DIRECT_READER_PROFILE}")
 
 
 def _chunks(raw: bytes, start: int, end: int):
@@ -242,69 +166,9 @@ def _run(command, *, timeout=COMMAND_TIMEOUT, binary=False):
     return result.stdout if binary else result.stdout.decode("utf-8", "replace")
 
 
-def page_count(path: Path) -> int:
-    value = int(_run(["djvused", str(path), "-e", "n"]).split()[-1])
-    if value < 1:
-        raise RuntimeError("DjVu page count unavailable")
-    return value
-
-
 def displayed_pixels(info: dict) -> tuple[int, int]:
     width, height = info["width"], info["height"]
     return (height, width) if info["rotation"] in {90, 270} else (width, height)
-
-
-def render(path: Path, page: int, destination: Path, *, info: dict, dpi: int | None = None,
-           max_pixels: int | None = None):
-    """Render one page at native (or capped) resolution into a lossless PNG.
-
-    A native-resolution bitonal page is the exact JB2 bitmap (``mode=1``);
-    other pages are 8-bit gray/RGB as produced by ddjvu. No resample happens
-    unless the dpi or pixel cap requires one.
-    """
-    from PIL import Image
-    max_pixels = max_pixels or pdf_ocr.MAX_PAGE_PIXELS
-    width, height = displayed_pixels(info)
-    scale = min(1.0, (max_pixels / (width * height)) ** 0.5)
-    if dpi is not None:
-        scale = min(scale, dpi / info["dpi"])
-    command = ["ddjvu", "-format=pnm", f"-page={page}"]
-    if scale < 1:
-        target = (max(1, int(width * scale)), max(1, int(height * scale)))
-        command.append(f"-size={target[0]}x{target[1]}")
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(dir=destination.parent) as temp:
-        pnm = Path(temp) / "page.pnm"
-        _run([*command, str(path), str(pnm)])
-        previous = Image.MAX_IMAGE_PIXELS
-        try:
-            Image.MAX_IMAGE_PIXELS = None
-            with warnings.catch_warnings(), Image.open(pnm) as image:
-                warnings.simplefilter("ignore", Image.DecompressionBombWarning)
-                image.load()
-                if image.width * image.height > max_pixels:
-                    raise RuntimeError("DjVu render exceeds the pixel budget")
-                mode = image.mode if image.mode in {"1", "L", "RGB"} else "RGB"
-                converted = image if mode == image.mode else image.convert(mode)
-                converted.save(destination, "PNG", optimize=mode == "1")
-                return destination, converted.width, converted.height, mode, scale
-        finally:
-            Image.MAX_IMAGE_PIXELS = previous
-
-
-def render_page(path: Path, page: int, directory: Path, *, info: dict,
-                reader_jxl: bool = False, reader_images: bool = False):
-    """Produce a lossless, bounded OCR input; never produce reading images."""
-    if reader_jxl or reader_images:
-        raise ValueError('DjVu document reading images are retired')
-    from PIL import Image
-    prefix = directory / f"page-{page:06d}"
-    png = prefix.with_suffix(".png")
-    _, width, height, mode, _ = render(path, page, png, info=info)
-    if mode == "1":
-        with Image.open(png) as image:
-            image.convert("L").save(png, "PNG")
-    return png, width, height
 
 
 _TOKEN = re.compile(rb'\s*(?:(\()|(\))|"((?:[^"\\]|\\.)*)"|([^\s()"]+))', re.S)
@@ -382,13 +246,13 @@ def _rotate_box(box, rotation):
 
 
 def page_text(expression, info: dict) -> dict:
-    """Native-text payload (``pdf_ocr.native_pages`` shape) in displayed pixels."""
+    """Native-text payload in displayed pixels."""
     width, height = info["width"], info["height"]
     shown_width, shown_height = displayed_pixels(info)
     blocks, lines = [], []
     if isinstance(expression, list) and expression and expression[0] == "page":
         for zone in _line_zones(expression):
-            value = pdf_ocr.clean_text(_zone_text(zone))
+            value = native.clean_text(_zone_text(zone))
             if not value:
                 continue
             x0, y0, x1, y1 = (int(v) for v in zone[1:5])
@@ -400,15 +264,11 @@ def page_text(expression, info: dict) -> dict:
                            "x1": rx1 * shown_width, "y1": ry1 * shown_height,
                            "confidence": 1.0, "source": "native"})
     return {"text": "\n".join(lines).strip(), "width": shown_width, "height": shown_height,
-            "blocks": pdf_ocr.normalize_blocks(blocks, shown_width, shown_height)}
+            "blocks": native.normalize_blocks(blocks, shown_width, shown_height)}
 
 
 def text_pages(path: Path, infos: list[dict]) -> dict[int, dict]:
     """Hidden text for every page; empty pages yield empty payloads."""
-    if not use_text_layer():
-        return {number: {"text": "", "width": displayed_pixels(info)[0],
-                         "height": displayed_pixels(info)[1], "blocks": []}
-                for number, info in enumerate(infos, 1)}
     expressions = parse_sexprs(_run(["djvutxt", "--detail=line", str(path)], binary=True))
     if len(expressions) != len(infos):
         expressions = []
@@ -417,24 +277,3 @@ def text_pages(path: Path, infos: list[dict]) -> dict[int, dict]:
             expressions.append(values[0] if values else [])
     return {number: page_text(expression, info)
             for number, (expression, info) in enumerate(zip(expressions, infos), 1)}
-
-
-def probe(path: Path) -> dict:
-    """``pdf_ocr.probe_pdf`` equivalent; hidden text counts as native text."""
-    infos = inspect(Path(path).read_bytes())
-    count = page_count(path)
-    if count != len(infos):
-        raise ValueError("DjVu page count differs from the document directory")
-    texts = text_pages(path, infos)
-    page_chars = [len(re.sub(r"\s+", "", texts[number]["text"])) for number in range(1, count + 1)]
-    native = sum(chars >= pdf_ocr.MIN_NATIVE_PAGE_CHARS for chars in page_chars)
-    return {"page_count": count, "page_chars": page_chars, "native_pages": native,
-            "native_page_ratio": native / count, "source_format": "djvu",
-            "classification": "native-text" if native == count else "scan" if native == 0 else "mixed",
-            "pages": [{key: info[key] for key in ("width", "height", "dpi", "rotation", "layers")}
-                      for info in infos]}
-
-
-def reader_presentation(_path: Path | None = None) -> dict:
-    return {"strategy": "preserve-djvu", "reason": "djvu-primary-browser-decoding", "complete": True,
-            "source_format": "djvu"}

@@ -1,6 +1,7 @@
 import gzip
 import hashlib
 import json
+import shutil
 import tempfile
 import unittest
 from datetime import date, timedelta
@@ -10,10 +11,8 @@ from unittest.mock import Mock, patch
 from huggingface_hub import HfApi
 import yaml
 
-from scripts import publish_pdf_ocr_assets as publication
 from scripts import reader_gc_graph as gc
 from scripts import reader_bucket
-from scripts import pdf_ocr_stages as stages
 
 
 ASSETS, PDF, INPUT = gc.READER_BUCKETS
@@ -262,7 +261,8 @@ class ReaderGcGraphTests(unittest.TestCase):
         import hashlib, shutil, tempfile
         from pathlib import Path
         from scripts import pdf_reading_v3 as v3
-        from tests.test_djvu_pages import TOOLS, build_djvu
+        from tests.djvu_fixture import build_djvu
+        TOOLS = all(shutil.which(name) for name in ("cjb2", "c44", "djvm", "djvused", "ddjvu", "djvutxt"))
         if not TOOLS:
             self.skipTest("djvulibre command-line tools are not installed")
         store = MemoryStore()
@@ -342,6 +342,24 @@ class ReaderGcGraphTests(unittest.TestCase):
         report = gc.ReferenceGraph(store).build()
         self.assertTrue(report["graph_complete"], report["blockers"])
         self.assertTrue(all(not b["candidates"] for b in report["buckets"].values()))
+
+    def test_historical_pdf_page_manifest_still_protects_its_pages(self):
+        store = MemoryStore()
+        root = 'objects/aa/old-book/stream'
+        manifest, first, second = (root + '/page-manifest.json',
+                                   root + '/pages/page-000001.webp', root + '/pages/page-000002.webp')
+        store.put(ASSETS, SIDECAR, {'v': 1, 'f': {'book': {'s': 2, 'm': 'p', 'p': manifest, 'b': PDF}}})
+        store.put(PDF, manifest, {'version': 2, 'kind': 'pdf-pages', 'page_count': 2})
+        store.put(PDF, first, b'historical page one')
+        store.put(PDF, second, b'historical page two')
+        report = gc.ReferenceGraph(store).build()
+        self.assertTrue(report['graph_complete'], report['blockers'])
+        self.assertNotIn(first, report['buckets'][PDF]['candidates'])
+        self.assertNotIn(second, report['buckets'][PDF]['candidates'])
+        store.objects[PDF].pop(second)
+        report = gc.ReferenceGraph(store).build()
+        self.assertFalse(report['graph_complete'])
+        self.assertEqual(report['buckets'][PDF]['candidates'], [])
 
     def test_pdf_range_only_reference_protects_png_jxl_and_native_text(self):
         store = MemoryStore()
@@ -832,67 +850,6 @@ class ReaderGcGraphTests(unittest.TestCase):
         artifacts = [step for step in workflow["jobs"]["gc"]["steps"] if "upload-artifact" in step.get("uses", "")]
         self.assertEqual(artifacts[0]["if"], "always()")
 
-    def test_upload_protection_precedes_objects_and_failure_retains_roots(self):
-        store = MemoryStore()
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory) / "objects/aa/book/render"
-            root.mkdir(parents=True)
-            (root / "ocr-input").mkdir()
-            (root / "ocr-input" / "page-000001.png").write_bytes(b"partial")
-            events = []
-            def protect(records, token):
-                for path, record in records.items():
-                    events.append("protect:" + record["status"])
-                    store.put(ASSETS, path, record)
-            def upload(*args, **kwargs):
-                events.append("upload")
-                raise ValueError("failed transfer")
-            with patch.object(stages, "publish_json_batch", side_effect=protect), \
-                    patch.object(stages, "remote_sizes", return_value={}), \
-                    patch.object(stages.shared, "batch_bucket_files_with_retry", side_effect=upload):
-                with self.assertRaises(ValueError):
-                    stages.upload_objects(Path(directory))
-            self.assertEqual(events, ["protect:processing", "upload"])
-            store.put(INPUT, "objects/aa/book/render/ocr-input/page-000001.png", b"partial")
-            report = gc.ReferenceGraph(store).build()
-            self.assertTrue(report["graph_complete"], report["blockers"])
-            self.assertEqual(report["buckets"][INPUT]["candidates"], [])
-
-    def test_partial_worker_handoff_keeps_progress_owned_objects(self):
-        store = MemoryStore()
-        root = "objects/aa/book/render"
-        path = "reader-index/processing/worker.json"
-        descriptor = root + "/render-range-000001-000001.json"
-        result = {"key": "book", "status": "range", "descriptor": {"path": descriptor},
-                  "processing_roots": [path]}
-        store.put(ASSETS, path, {"kind": "reader-processing-roots", "status": "uploaded",
-                                "resources": [{"bucket": PDF, "root": root}]})
-        store.put(ASSETS, "reader-index/pdf_render_progress.json", {
-            "files": {"book": {"ranges": {"1-1": {"path": descriptor}}}}})
-        store.put(PDF, descriptor, {"kind": "pdf-render-range", "pages": []})
-        catalog, generation = gc.reader_lifecycle.catalog_generation({"v": 1, "f": {}})
-        store.put(ASSETS, "reader-index/reader_catalog.json", catalog)
-        with patch.object(stages.publication, "load_sidecar", return_value={"v": 1, "f": {}}), \
-                patch.object(stages, "publish_catalog", return_value=generation), \
-                patch.object(publication, "read_bucket_json", side_effect=lambda p, token: json.loads(store.read_bytes(ASSETS, p))), \
-                patch.object(publication, "publish_json_batch", side_effect=lambda values, token: [store.put(ASSETS, p, v) for p, v in values.items()]):
-            stages.handoff_worker_results(HfApi(), "unused", [result])
-        self.assertEqual(json.loads(store.read_bytes(ASSETS, path))["status"], "released")
-        report = gc.ReferenceGraph(store).build()
-        self.assertTrue(report["graph_complete"], report["blockers"])
-        self.assertEqual(report["buckets"][PDF]["candidates"], [])
-
-    def test_foreign_processing_root_cannot_be_released(self):
-        with patch.object(publication, "read_bucket_json", return_value={
-                "kind": "reader-processing-roots", "status": "uploaded",
-                "resources": [{"bucket": PDF, "root": "objects/foreign/book/profile"}]}), \
-                patch.object(publication, "publish_json_batch") as write:
-            with self.assertRaises(ValueError):
-                publication.release_processing_roots([{
-                    "ocr_manifest": "objects/own/book/profile/ocr-manifest.json",
-                    "processing_roots": ["reader-index/processing/foreign.json"]}], "generation", None)
-            write.assert_not_called()
-
     def test_conversion_processing_roots_are_valid_retirement_roots(self):
         import re
         pattern = re.compile(
@@ -905,38 +862,6 @@ class ReaderGcGraphTests(unittest.TestCase):
 
 
 class CanonicalOcrPublicationTests(unittest.TestCase):
-    def test_ready_publication_verifies_manifest_text_checksums_and_page_order(self):
-        from scripts import ocr_quality
-        root = "objects/aa/" + "a" * 64 + "/" + "b" * 16
-        check = ocr_quality.book_report([{"page": n, "issues": []} for n in (1, 2)], 2)
-        pages = []
-        raw_pages = []
-        for n in (1, 2):
-            raw = gzip.compress(json.dumps({"kind": "pdf-ocr-page", "page": n, "source": "native"}).encode())
-            raw_pages.append(raw)
-            pages.append({"p": n, "source": "native", "o": root + f"/ocr/page-{n:06d}.json.gz",
-                          "os": hashlib.sha256(raw).hexdigest(), "ob": len(raw)})
-        text_path = root + "/ocr/book-text.json.gz"
-        text = gzip.compress(json.dumps({"kind": "pdf-book-text", "version": 2,
-            "complete": True, "page_count": 2, "quality_check": check, "pages": [{"page": 1}, {"page": 2}]}).encode())
-        manifest = json.dumps({"kind": "pdf-ocr", "complete": True, "page_count": 2,
-            "source_sha256": "a" * 64, "quality_check": check, "pages": pages, "book_text": {
-                "path": text_path, "bytes": len(text), "sha256": hashlib.sha256(text).hexdigest()}}).encode()
-        result = {"ocr_manifest": root + "/ocr-manifest.json", "page_count": 2,
-            "source_sha256": "a" * 64, "quality_check": check, "ocr_manifest_bytes": len(manifest),
-            "ocr_manifest_sha256": hashlib.sha256(manifest).hexdigest()}
-        objects = {result["ocr_manifest"]: manifest, text_path: text, **dict(zip([p["o"] for p in pages], raw_pages))}
-        with patch.object(publication, "read_bucket_bytes", side_effect=lambda path, token, bucket: objects[path]) as read:
-            publication.verify_ready_objects(result)
-        self.assertTrue(all(call.kwargs["bucket"] == PDF for call in read.call_args_list))
-        malformed = json.loads(manifest)
-        malformed["pages"] = [{"p": 2}, {"p": 1}]
-        raw = json.dumps(malformed).encode()
-        with patch.object(publication, "read_bucket_bytes", return_value=raw):
-            with self.assertRaises(ValueError):
-                publication.verify_ready_objects({**result, "ocr_manifest_bytes": len(raw),
-                    "ocr_manifest_sha256": hashlib.sha256(raw).hexdigest()})
-
     def test_catalog_snapshot_precedes_pointer_and_does_not_claim_consumer_acceptance(self):
         sidecar = {"v": 1, "f": {"book": {"p": "objects/book/document.pdf", "b": PDF}}}
         writes = []
@@ -961,56 +886,6 @@ class CanonicalOcrPublicationTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     reader_bucket.acknowledge_catalog("pages", expected, digest)
             write.assert_not_called()
-
-    def test_real_api_publishes_only_canonical_bucket_and_repairs_sidecar(self):
-        api = HfApi()
-        result = {"key": "book", "status": "ready", "profile": "test", "source_sha256": "a" * 64,
-                  "classification": "scan", "ocr_manifest": "objects/text/ocr-manifest.json"}
-        existing = {"version": 1, "files": {"book": result}}
-        with patch.object(publication, "read_bucket_json", return_value=existing), \
-                patch.object(publication, "read_bucket_bytes", return_value=publication.encode_sidecar({"v": 1, "f": {}})), \
-                patch.object(publication, "verify_ready_objects"), \
-                patch.object(publication, "publish_indexes") as upload, \
-                patch.object(publication, "publish_catalog", return_value="gen"), \
-                patch.object(api, "repo_info") as repo_info, patch.object(api, "create_commit") as commit:
-            publication.publish(api, "unused", [result])
-        repo_info.assert_not_called()
-        commit.assert_not_called()
-        payloads = upload.call_args.args[0]
-        self.assertEqual(set(payloads), {reader_bucket.INDEX_FILES["ocr"], reader_bucket.INDEX_FILES["sidecar"]})
-        sidecar = json.loads(gzip.decompress(payloads[reader_bucket.INDEX_FILES["sidecar"]]))
-        self.assertEqual(sidecar["f"]["book"]["o"], result["ocr_manifest"])
-
-    def test_unreadable_ready_manifest_blocks_registry_publication(self):
-        with patch.object(publication, "read_bucket_bytes", side_effect=FileNotFoundError), \
-                patch.object(publication, "publish_indexes") as write:
-            with self.assertRaises(FileNotFoundError):
-                publication.publish(HfApi(), "unused", [{
-                    "status": "ready", "ocr_manifest": "objects/aa/" + "a" * 64 + "/" + "b" * 16 + "/ocr-manifest.json"}])
-            write.assert_not_called()
-
-    def test_corrupt_or_unavailable_bucket_never_falls_back_to_dataset(self):
-        api = HfApi()
-        for error in (PermissionError("denied"), ValueError("corrupt"), OSError("network")):
-            with self.subTest(error=error), patch.object(publication, "read_bucket_json", side_effect=error), \
-                    patch.object(api, "hf_hub_download") as download:
-                with self.assertRaises(type(error)):
-                    publication.load_remote(api, "unused", publication.OCR_MANIFEST_NAME, {})
-                download.assert_not_called()
-        with patch.object(publication, "read_bucket_bytes", return_value=b"not gzip"), \
-                patch.object(api, "hf_hub_download") as download:
-            with self.assertRaises(OSError):
-                publication.load_sidecar(api, "unused")
-            download.assert_not_called()
-
-    def test_staged_registry_does_not_turn_corruption_into_empty_state(self):
-        api = HfApi()
-        with patch.object(stages, "read_bucket_json", return_value={"version": 1, "files": []}):
-            with self.assertRaises(ValueError):
-                stages.load_registry(api, "unused", stages.RENDER_REGISTRY)
-        with patch.object(stages, "read_bucket_json", side_effect=OSError("network")):
-            with self.assertRaises(OSError):
-                stages.load_registry(api, "unused", stages.RENDER_REGISTRY)
 
     def test_index_batch_uses_only_current_bucket(self):
         observed = []

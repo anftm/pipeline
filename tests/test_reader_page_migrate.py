@@ -13,7 +13,7 @@ from scripts import reader_page_migrate as migration, reader_page_audit as audit
 from scripts import publish_reader_v3 as publication, reader_lifecycle as lifecycle
 from tests.test_reader_page_audit import fixture, KEY, OLD, NEW
 from tests.test_publish_reader_v3 import Store
-from tests.fixture_page_consumers import Consumers
+from tests.test_reader_route_control import Consumers
 
 
 class MemoryApi:

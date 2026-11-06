@@ -63,8 +63,10 @@ class DeleteTests(unittest.TestCase):
             deletion.candidate_plan(self.ref, self.report, self.api, PATHS)
 
     def test_plan_expiry_tamper_and_invalid_paths_stop(self):
+        self.assertEqual(deletion.check_plan(self.plan, deletion.plan_id(self.plan),
+                                             now=self.now + timedelta(hours=6)), sorted(PATHS))
         with self.assertRaisesRegex(ValueError, 'expired'):
-            deletion.check_plan(self.plan, deletion.plan_id(self.plan), now=self.now + timedelta(hours=2))
+            deletion.check_plan(self.plan, deletion.plan_id(self.plan), now=self.now + timedelta(hours=25))
         for paths in ([], ['../etc'], ['objects/../x'], ['derived/x/', 'objects/a'], PATHS * 2):
             with self.subTest(paths=paths), self.assertRaises(ValueError): deletion.validate_paths(paths)
         with self.assertRaisesRegex(ValueError, 'digest'):
@@ -85,6 +87,15 @@ class DeleteTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'newly referenced'):
                 self.apply()
             session.assert_not_called()
+
+    def test_reviewed_plan_remains_subject_to_fresh_reference_check_hours_later(self):
+        old = {**self.plan, 'created_at': (self.now - timedelta(hours=6)).isoformat()}
+        self.ref.references.add((deletion.BUCKET, PATHS[0]))
+        with patch('huggingface_hub.utils.get_session') as session:
+            with self.assertRaisesRegex(RuntimeError, 'newly referenced'):
+                self.apply(plan=old)
+            session.assert_not_called()
+        self.intent.assert_not_called()
 
     def test_candidate_with_referenced_sibling_is_never_deleted(self):
         sibling = PATHS[0].rsplit('/', 1)[0] + '/derived-manifest.json'

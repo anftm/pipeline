@@ -31,7 +31,10 @@ class RetiredDocumentProducerTests(unittest.TestCase):
     def test_no_workflow_runs_retired_standalone_remote_publishers(self):
         scripts = ('force_ocr_book.py', 'audit_ocr_language.py', 'repin_ocr_pages.py',
                    'publish_ccrd_ocr.py', 'auto_ccrd_ocr.py', 'export_reader_txt.py',
-                   'build_ccrd_ocr_release.py', 'pilot_text_stream.py', 'exact_stale_run_delete.py')
+                   'build_ccrd_ocr_release.py', 'pilot_text_stream.py', 'exact_stale_run_delete.py',
+                   'pdf_ocr.py', 'pdf_ocr_stages.py', 'plan_pdf_ocr.py', 'run_pdf_ocr.py',
+                   'publish_pdf_ocr_assets.py', 'publish_lin_native_text.py',
+                   'report_ocr_patch_conflicts.py', 'review_ocr_patch_conflicts.py')
         for path in ROOT.glob('*.yml'):
             workflow = yaml.safe_load(path.read_text())
             for name, job in workflow['jobs'].items():
@@ -41,26 +44,64 @@ class RetiredDocumentProducerTests(unittest.TestCase):
                         with self.subTest(workflow=path.name, job=name, script=script):
                             self.assertNotIn('scripts/' + script, run)
 
-    def test_worker_plan_cannot_dispatch_ocr_or_publish_artifacts(self):
+    def test_worker_is_an_inert_inventory_sentinel(self):
         workflow = yaml.safe_load((ROOT / 'pdf-account-worker.yml').read_text())
-        self.assertEqual(workflow['jobs']['plan']['if'], '${{ false }}')
-        self.assertIn('plan', workflow['jobs']['build']['needs'])
-        self.assertIn('plan', workflow['jobs']['notify']['needs'])
-        steps = workflow['jobs']['notify']['steps']
-        self.assertEqual(len(steps), 1)
-        self.assertIn('exit 1', steps[0]['run'])
-        self.assertNotIn('env', steps[0])
+        triggers = workflow.get('on', workflow.get(True))
+        self.assertEqual(set(triggers), {'workflow_dispatch'})
+        self.assertEqual(workflow['permissions'], {})
+        self.assertEqual(set(workflow['jobs']), {'retired'})
+        job = workflow['jobs']['retired']
+        self.assertEqual(job['if'], '${{ false }}')
+        self.assertEqual(job['steps'], [{'name': 'Retired', 'run': 'exit 1'}])
+        self.assertNotIn('env', workflow)
+        self.assertNotIn('env', job)
+
+    def test_ocr_review_and_its_dispatch_are_removed(self):
+        self.assertFalse((ROOT / 'proofread-ocr-conflict-review.yml').exists())
+        workflow = yaml.safe_load((ROOT / 'bha-update-index.yml').read_text())
+        triggers = workflow.get('on', workflow.get(True))
+        self.assertNotIn('repository_dispatch', triggers)
+        self.assertNotIn('allow_ocr_patch_rebase', triggers['workflow_dispatch']['inputs'])
+        self.assertNotIn('ALLOW_OCR_PATCH_REBASE', (ROOT / 'bha-update-index.yml').read_text())
+        requirements = ROOT.parents[1] / 'scripts/requirements-pdf-ocr.txt'
+        self.assertFalse(requirements.exists())
+
+    def test_recognition_implementations_and_model_dependencies_are_removed(self):
+        scripts = ROOT.parents[1] / 'scripts'
+        for name in ('pdf_ocr.py', 'pdf_ocr_stages.py', 'plan_pdf_ocr.py', 'run_pdf_ocr.py',
+                     'publish_pdf_ocr_assets.py', 'publish_ccrd_ocr.py', 'ocr_quality.py',
+                     'ndl_ocr.py', 'auto_ccrd_ocr.py', 'repin_ocr_pages.py'):
+            with self.subTest(script=name):
+                self.assertFalse((scripts / name).exists())
+        converter = (scripts / 'convert_reader_assets.py').read_text()
+        self.assertNotIn('tesseract', converter.lower())
+        self.assertNotIn('rapidocr', converter.lower())
+        self.assertIn('page_content_ratio', converter)
+
+    def test_pdf_djvu_page_stream_builders_and_publisher_are_removed(self):
+        scripts = ROOT.parents[1] / 'scripts'
+        for name in ('pdf_assets.py', 'migrate_pdf_page_manifests.py'):
+            with self.subTest(script=name):
+                self.assertFalse((scripts / name).exists())
+        from scripts import djvu_pages, reader_page_codec
+        for name in ('render', 'render_page', 'render_profile'):
+            with self.subTest(entry=name):
+                self.assertFalse(hasattr(djvu_pages, name))
+        for name in ('encode_png', 'encode_image', '_encode'):
+            with self.subTest(entry=name):
+                self.assertFalse(hasattr(reader_page_codec, name))
+        for workflow in ROOT.glob('*.yml'):
+            self.assertNotIn('scripts/pdf_assets.py', workflow.read_text(), workflow.name)
+            self.assertNotIn('scripts/migrate_pdf_page_manifests.py', workflow.read_text(), workflow.name)
 
     def test_v3_unify_and_status_remain_available_but_old_text_operations_stop(self):
         workflow = (ROOT / 'reader-v3-publish.yml').read_text()
-        self.assertIn('auto|build-stage|stage|promote|rollback|correct|accept|reject|retry|repair-gbk|retire-ocr-progress)', workflow)
-        self.assertIn('Retired document OCR/text operation is disabled', workflow)
         self.assertIn('unify|reset-documents)', workflow)
         config = yaml.safe_load(workflow)
         inputs = config.get('on', config.get(True))['workflow_dispatch']['inputs']
         self.assertEqual(inputs['operation']['options'],
                          ['inspect', 'unify', 'ack', 'retire', 'withdraw', 'reset-documents',
-                          'migrate-derived', 'resume-derived', 'verify-generation'])
+                          'remove-route', 'restore-route', 'verify-route', 'migrate-derived', 'resume-derived', 'verify-generation'])
         self.assertEqual(inputs['operation']['default'], 'inspect')
         self.assertFalse(inputs['apply']['default'])
 
@@ -88,7 +129,7 @@ class RetiredDocumentProducerTests(unittest.TestCase):
             with self.subTest(operation=operation), \
                  patch('sys.argv', ['publish_reader_v3.py', operation, '--apply']), \
                  patch.object(publish_reader_v3, 'CentralHubStore', side_effect=AssertionError('no remote access')):
-                with self.assertRaisesRegex(RuntimeError, 'remote OCR/detached-text v3 operation is retired'):
+                with self.assertRaises(SystemExit):
                     publish_reader_v3.main()
 
     def test_historical_paths_remain_fenced_after_entrypoint_removal(self):
@@ -116,7 +157,7 @@ class RetiredDocumentProducerTests(unittest.TestCase):
     def test_normal_reader_publish_calls_still_target_unify(self):
         callers = ('reader-chm-repair.yml', 'reader-ebook-stream.yml', 'reader-office-chapters.yml',
                    'reader-web-stream.yml', 'reader-static-pdf-stream.yml', 'reader-spreadsheet-stream.yml',
-                   'reader-image-stream.yml', 'reader-media-stream.yml', 'reader-media-backfill.yml',
+                   'reader-image-stream.yml', 'reader-media-stream.yml',
                    'reader-chapter-search-repair.yml')
         for name in callers:
             with self.subTest(workflow=name):

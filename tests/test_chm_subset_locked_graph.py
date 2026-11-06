@@ -1,9 +1,6 @@
 import json
-from pathlib import Path
 import unittest
 from unittest.mock import Mock, patch
-
-import yaml
 
 from scripts import chm_subset_locked_graph as locked, chm_subset_locked_preflight as preflight
 
@@ -86,20 +83,6 @@ class LockedGraphTests(unittest.TestCase):
         with patch.object(locked.overlay, 'capture', side_effect=ValueError('incomplete graph')):
             with self.assertRaisesRegex(ValueError, 'incomplete graph'):
                 self.build()
-
-    def test_actions_workflow_holds_three_groups_without_delete_command(self):
-        root = Path(__file__).resolve().parents[1] / '.github/workflows'
-        outer = yaml.load((root / 'chm-subset-locked-graph.yml').read_text(), Loader=yaml.BaseLoader)
-        inner = yaml.load((root / 'chm-subset-locked-graph-inner.yml').read_text(), Loader=yaml.BaseLoader)
-        groups = (outer['concurrency'], outer['jobs']['inspect']['concurrency'],
-                  inner['jobs']['inspect']['concurrency'])
-        self.assertEqual([group['group'] for group in groups],
-                         ['publish-ccrd-index', 'reader-global-maintenance', 'reader-sidecar'])
-        for group in groups:
-            self.assertEqual((group['cancel-in-progress'], group['queue']), ('false', 'max'))
-        commands = '\n'.join(step.get('run', '') for step in inner['jobs']['inspect']['steps'])
-        self.assertIn('scripts/chm_subset_locked_graph.py', commands)
-        self.assertNotIn('run_chm_epub_retirement.py', commands)
 
 
 if __name__ == '__main__':

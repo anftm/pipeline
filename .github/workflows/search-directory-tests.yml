@@ -10,7 +10,6 @@ on:
       - scripts/sync_to_space.py
       - scripts/sync_to_pages.py
       - scripts/text_encoding.py
-      - scripts/publish_source_txt_once.py
       - scripts/mul.py
       - scripts/update_dirs.py
       - tests/test_fetch_and_parse.py

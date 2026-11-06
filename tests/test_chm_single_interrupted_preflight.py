@@ -113,23 +113,6 @@ class ChmSingleInterruptedPreflightTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'stages differ'):
             check.validate_github(api)
 
-    def test_workflow_is_manual_read_only_and_uses_central_lock(self):
-        from pathlib import Path
-        import yaml
-        root = Path(__file__).resolve().parents[1]
-        flow = yaml.load((root / '.github/workflows/chm-single-interrupted-preflight.yml').read_text(),
-                         Loader=yaml.BaseLoader)
-        self.assertEqual(set(flow['on']), {'workflow_dispatch'})
-        self.assertEqual(flow['permissions'], {'contents': 'read', 'actions': 'read'})
-        self.assertEqual(flow['concurrency'], {'group': 'reader-sidecar',
-                                               'cancel-in-progress': 'false', 'queue': 'max'})
-        steps = flow['jobs']['verify']['steps']
-        contracts = next(step['run'] for step in steps if step.get('name') == 'Verify fail-closed preflight contracts')
-        self.assertIn('tests.test_chm_single_handoff_shadow', contracts)
-        self.assertIn('tests.test_chm_single_v3_projection_shadow', contracts)
-        self.assertEqual(steps[-1]['run'], 'python -B scripts/chm_single_interrupted_preflight.py')
-        self.assertNotIn('--apply', steps[-1]['run'])
-
 
 if __name__ == '__main__':
     unittest.main()

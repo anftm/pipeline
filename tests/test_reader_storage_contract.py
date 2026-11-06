@@ -3,7 +3,7 @@ import hashlib
 import unittest
 from unittest.mock import Mock
 
-from scripts import reader_gc_collect as collector, reader_gc_graph as graph, reader_v3_automation
+from scripts import reader_gc_collect as collector, reader_gc_graph as graph, pdf_reading_v3
 from tests.test_reader_gc_collect import Store
 
 
@@ -13,16 +13,16 @@ class StorageContractTests(unittest.TestCase):
         for ext in ('pdf', 'djvu'):
             with self.subTest(extension=ext):
                 key = f'VoiceOfML/Test\0folder/book.{ext}'
-                entry = {'status': 'ready', 'repo': 'VoiceOfML/Test',
-                         'path': f'folder/book.{ext}', 'source_revision': 'a' * 40,
-                         'source_kind': 'upstream', 'source_format': ext,
-                         'source_sha256': hashlib.sha256(raw).hexdigest(),
-                         'source_bytes': len(raw), 'page_count': 1}
-                spec, count = reader_v3_automation.primary_spec(key, entry)
-                self.assertEqual(count, 1)
-                self.assertEqual(spec['primary']['kind'], 'dataset-source')
-                self.assertEqual(spec['primary']['revision'], 'a' * 40)
-                self.assertNotIn('bucket', spec['primary'])
+                primary = {'kind': 'dataset-source', 'repo': 'VoiceOfML/Test',
+                           'path': f'folder/book.{ext}', 'revision': 'a' * 40,
+                           'sha256': hashlib.sha256(raw).hexdigest(),
+                           'bytes': len(raw), 'role': 'runtime'}
+                self.assertEqual(pdf_reading_v3.validate_dataset_primary(primary, key, primary['sha256']), primary)
+                self.assertEqual(pdf_reading_v3.primary_kind(primary), ext)
+                self.assertEqual(pdf_reading_v3.verified_primary(primary, lambda _: raw, key, primary['sha256']), raw)
+                self.assertNotIn('bucket', primary)
+                with self.assertRaises(ValueError):
+                    pdf_reading_v3.validate_dataset_primary({**primary, 'revision': 'main'}, key, primary['sha256'])
 
     def test_historical_chm_fallback_is_retained_in_the_reference_graph(self):
         store = Store()

@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Restore missing Reader image/text bundles under the central writer lock."""
+"""Restore missing original-image bundles under the central writer lock."""
 from __future__ import annotations
 
 import argparse
-from concurrent.futures import ThreadPoolExecutor
 import gzip
 import hashlib
 import json
@@ -14,15 +13,10 @@ import tempfile
 import uuid
 
 try:
-    from . import pdf_reading_v3 as v3, pdf_text_layer as text, pdf_ocr, ocr_layout
     from . import pilot_image_page_stream as images, reader_lifecycle as lifecycle
     from .reader_bucket_store import HubBucketStore, retry_read
     from .reader_producer_scope import load_config
 except ImportError:
-    import pdf_reading_v3 as v3
-    import pdf_text_layer as text
-    import pdf_ocr
-    import ocr_layout
     import pilot_image_page_stream as images
     import reader_lifecycle as lifecycle
     from reader_bucket_store import HubBucketStore, retry_read
@@ -31,7 +25,6 @@ except ImportError:
 ASSETS, PDF = lifecycle.READER_ASSETS_BUCKET, lifecycle.PDF_PAGES_BUCKET
 SIDECAR = "reader-index/reader_assets.json.gz"
 IMAGE_MANIFEST = re.compile(r"pages/image/(jpg|jpeg|png|bmp|webp|tif|tiff)/([0-9a-f]{64})/page-manifest\.json")
-TEXT_MANIFEST = re.compile(r"objects/([0-9a-f]{2})/([0-9a-f]{64})/([0-9a-f]{16})/text-layer-manifest\.json")
 
 
 def assert_writer():
@@ -65,7 +58,7 @@ def missing_references(report):
         if not isinstance(value, str) or ":" not in value:
             raise ValueError("invalid missing resource")
         bucket, path = value.split(":", 1)
-        if bucket == ASSETS and IMAGE_MANIFEST.fullmatch(path) or bucket == PDF and TEXT_MANIFEST.fullmatch(path):
+        if bucket == ASSETS and IMAGE_MANIFEST.fullmatch(path):
             refs.add((bucket, path))
     return refs
 
@@ -120,58 +113,6 @@ def pin_image_sources(api, plan):
                     raise ValueError("current original image differs from referenced source checksum")
                 pinned[item["key"]] = {**item, "revision": revision, "bytes": info.size}
     return pinned
-
-
-def restore_text_bundle(store, path, bundle):
-    match = TEXT_MANIFEST.fullmatch(path)
-    if not match or match[1] != match[2][:2]:
-        raise ValueError("invalid companion restoration path")
-    root = Path(path).parent
-    raw = retry_read(lambda: store.read_bytes(PDF, (root / "ocr-manifest.json").as_posix()))
-    manifest = json.loads(raw)
-    ref = manifest.get("text_layer")
-    v3.resource(ref)
-    if (ref["bucket"] != PDF or ref["path"] != path or manifest.get("source_sha256") != match[2]
-            or manifest.get("kind") != "pdf-ocr" or manifest.get("complete") is not True
-            or [page.get("p") for page in manifest.get("pages", [])] != list(range(1, manifest["page_count"] + 1))):
-        raise ValueError("OCR manifest does not bind the missing companion")
-    def read(resource):
-        return retry_read(lambda: store.read_bytes(resource["bucket"], resource["path"]))
-    book = v3.decode(v3.verified_read({"bucket": PDF, **manifest["book_text"], "role": "provenance"}, read))
-    if (book.get("complete") is not True or book.get("text_layer") != ref
-            or [page.get("page") for page in book["pages"]] != list(range(1, manifest["page_count"] + 1))):
-        raise ValueError("published text does not bind a complete missing companion")
-    def restore_page(page):
-        resource = v3.resource({"bucket": PDF, "path": page["o"], "sha256": page["os"],
-                                "bytes": page["ob"], "role": "provenance"})
-        payload = v3.decode(v3.verified_read(resource, read))
-        if (payload.get("kind") != "pdf-ocr-page" or payload.get("page") != page["p"]
-                or payload.get("source") != page["source"]):
-            raise ValueError("raw OCR page identity mismatch")
-        config = manifest.get("layout_options", {})
-        options = {**config.get("default", {}), **config.get("pages", {}).get(str(page["p"]), {})}
-        if payload["source"] == "native":
-            options.pop("rotation", None)
-            if payload["blocks"]:
-                payload.update(ocr_layout.arrange(payload["blocks"], payload["width"], payload["height"], options,
-                                                  include_writing_modes=True))
-        layer = text.from_page(payload, match[2], manifest.get("language", "und"), resource,
-                               layout_options=options)
-        published = book["pages"][page["p"] - 1]
-        if layer["text"] != published["text"] or layer["generation"] != published["text_generation"]:
-            raise ValueError("restored companion differs from published page text/generation")
-        return layer
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        layers = list(pool.map(restore_page, manifest["pages"]))
-    actual = v3.build_text_bundle(layers, manifest["pages"], root, bundle, include_search=False)
-    if actual != ref:
-        raise ValueError("restored legacy companion checksum differs from immutable reference")
-    def local_read(resource):
-        local = bundle / resource["path"]
-        return local.read_bytes() if local.is_file() else read(resource)
-    v3.verify_text_bundle(ref, local_read, match[2], manifest["page_count"])
-    return ref, {target.relative_to(bundle).as_posix(): target for target in (bundle / root).rglob("*")
-                 if target.is_file()}
 
 
 def publish_bundle(store, bucket, files, ref, *, apply):
@@ -249,19 +190,15 @@ def run(store, report, output, *, apply=False, limit=0, mode="all"):
                 continue
             with tempfile.TemporaryDirectory(prefix="reader-resource-repair-") as directory:
                 bundle = Path(directory)
-                if kind == "image":
-                    item = pinned[plan[(bucket, path)][0]["key"]]
-                    entry, files = images.build_one(item, bundle, store.token(ASSETS), ASSETS)
-                    if entry["manifest"] != path:
-                        raise ValueError("rebuilt image changed source-addressed path")
-                    manifest_raw = Path(files[path]).read_bytes()
-                    ref = {"bucket": bucket, "path": path, "bytes": len(manifest_raw),
-                           "sha256": hashlib.sha256(manifest_raw).hexdigest(), "role": "runtime"}
-                    files = {key: Path(local) for key, local in files.items()}
-                    pages = entry["page_count"]
-                else:
-                    ref, files = restore_text_bundle(store, path, bundle)
-                    pages = json.loads((bundle / path).read_text())["page_count"]
+                item = pinned[plan[(bucket, path)][0]["key"]]
+                entry, files = images.build_one(item, bundle, store.token(ASSETS), ASSETS)
+                if entry["manifest"] != path:
+                    raise ValueError("rebuilt image changed source-addressed path")
+                manifest_raw = Path(files[path]).read_bytes()
+                ref = {"bucket": bucket, "path": path, "bytes": len(manifest_raw),
+                       "sha256": hashlib.sha256(manifest_raw).hexdigest(), "role": "runtime"}
+                files = {key: Path(local) for key, local in files.items()}
+                pages = entry["page_count"]
                 publication = publish_bundle(store, bucket, files, ref, apply=apply)
                 result["restored"].append({"kind": kind, "resource": ref, "pages": pages, **publication})
                 print(f"restored {kind}: {len(result['restored'])}/{len(selected)}; {pages} pages", flush=True)

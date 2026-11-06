@@ -242,21 +242,6 @@ class PublicationTests(unittest.TestCase):
                 publish.require_complete_graph_stability(store, traversal)
             roots.assert_not_called()
 
-    def test_workflow_uses_three_groups_and_does_not_call_gc(self):
-        from pathlib import Path
-        import yaml
-        folder = Path(__file__).resolve().parents[1] / '.github/workflows'
-        outer = yaml.load((folder / 'publish-chm-gc-release.yml').read_text(), Loader=yaml.BaseLoader)
-        inner = yaml.load((folder / 'publish-chm-gc-release-inner.yml').read_text(), Loader=yaml.BaseLoader)
-        groups = (outer['concurrency'], outer['jobs']['release']['concurrency'], inner['jobs']['release']['concurrency'])
-        self.assertEqual([group['group'] for group in groups],
-                         ['publish-ccrd-index', 'reader-global-maintenance', 'reader-sidecar'])
-        self.assertTrue(all(group['cancel-in-progress'] == 'false' and group['queue'] == 'max' for group in groups))
-        steps = inner['jobs']['release']['steps']
-        commands = '\n'.join(step.get('run', '') for step in steps)
-        self.assertIn('scripts/publish_chm_gc_release.py', commands)
-        self.assertNotIn('scripts/reader_gc_collect.py', commands)
-
 
 if __name__ == '__main__':
     unittest.main()

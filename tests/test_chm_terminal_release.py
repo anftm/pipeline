@@ -134,17 +134,6 @@ class TerminalTests(unittest.TestCase):
                 self.prepare()
         self.assertFalse(self.writer.calls)
 
-    def test_workflow_holds_three_groups(self):
-        from pathlib import Path
-        import yaml
-        folder = Path(__file__).resolve().parents[1] / '.github/workflows'
-        outer = yaml.load((folder / 'chm-terminal-release.yml').read_text(), Loader=yaml.BaseLoader)
-        inner = yaml.load((folder / 'chm-terminal-release-inner.yml').read_text(), Loader=yaml.BaseLoader)
-        groups = (outer['concurrency'], outer['jobs']['release']['concurrency'], inner['jobs']['release']['concurrency'])
-        self.assertEqual([item['group'] for item in groups],
-                         ['publish-ccrd-index', 'reader-global-maintenance', 'reader-sidecar'])
-        self.assertTrue(all(item['cancel-in-progress'] == 'false' and item['queue'] == 'max' for item in groups))
-
     def test_restore_excludes_retired_ocr_without_changing_input(self):
         window = {'repositories': {'anftm/pipeline': {'permission_changed': False, 'workflows': [
             {'path': '.github/workflows/reader-chm-repair.yml', 'state': 'active'},

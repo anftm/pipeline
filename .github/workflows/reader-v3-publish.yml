@@ -8,14 +8,14 @@ on:
     inputs:
       operation:
         type: choice
-        options: [inspect, unify, ack, retire, withdraw, reset-documents, migrate-derived, resume-derived, verify-generation]
+        options: [inspect, unify, ack, retire, withdraw, reset-documents, remove-route, restore-route, verify-route, migrate-derived, resume-derived, verify-generation]
         default: inspect
       resource_json:
-        description: 'Migration roots or resume transaction; apply also requires external_writers_stopped=true'
+        description: 'Migration requires root identities; apply/resume also require external_writers_stopped=true'
         type: string
         default: '{}'
       expected_parent:
-        description: Expected current v3 generation for an exact withdrawal, or none
+        description: Expected current v3 generation for withdrawal or route operation
         type: string
         default: none
       surface:
@@ -52,9 +52,9 @@ jobs:
         with:
           python-version: '3.11'
       - run: pip install -r scripts/requirements.txt
-      - name: Guard direct-document and GC contracts before publication
-        run: python -m unittest tests.test_direct_document_policy
-      - name: Test page migration and recovery
+      - name: Guard original document and legacy reference contracts
+        run: python -m unittest tests.test_direct_document_policy tests.test_reader_storage_contract
+      - name: Test page migration and fence
         if: inputs.operation == 'migrate-derived' || inputs.operation == 'resume-derived'
         run: python -m unittest tests.test_reader_page_audit tests.test_reader_page_migrate tests.test_reader_page_migration_fence
       - name: Verify and execute the central v3 operation
@@ -82,19 +82,12 @@ jobs:
             echo "Scheduled v3 retirement is disabled" >&2
             exit 1
           fi
-          # Keep non-OCR sidecar maintenance available, but never build, admit,
-          # correct, or republish detached document text through old entrypoints.
-          case "$OPERATION" in
-            auto|build-stage|stage|promote|rollback|correct|accept|reject|retry|repair-gbk|retire-ocr-progress)
-              echo "Retired document OCR/text operation is disabled: $OPERATION" >&2
-              exit 1 ;;
-          esac
           echo "operation=$OPERATION" >> "$GITHUB_OUTPUT"
           echo "apply=$APPLY" >> "$GITHUB_OUTPUT"
           if [[ -z "$RESOURCE_JSON" ]]; then RESOURCE_JSON='{}'; fi
           args=("$OPERATION" --output output/v3/publication.json)
           case "$OPERATION" in
-            withdraw) args+=(--resource-json "$RESOURCE_JSON" --expected-parent "$EXPECTED_PARENT") ;;
+            withdraw|remove-route|restore-route|verify-route) args+=(--resource-json "$RESOURCE_JSON" --expected-parent "$EXPECTED_PARENT") ;;
             migrate-derived|resume-derived) args+=(--resource-json "$RESOURCE_JSON") ;;
             verify-generation) args+=(--expected-parent "$EXPECTED_PARENT" --wait-seconds 1200) ;;
             unify|reset-documents) args+=(--resource-json "$RESOURCE_JSON") ;;
@@ -110,7 +103,7 @@ jobs:
         if: >-
           steps.operation.outputs.apply == 'true' &&
           steps.operation.outputs.changed == 'true' &&
-          contains(fromJSON('["withdraw","unify","reset-documents","migrate-derived","resume-derived"]'), steps.operation.outputs.operation)
+          contains(fromJSON('["withdraw","unify","reset-documents","remove-route","restore-route","migrate-derived","resume-derived"]'), steps.operation.outputs.operation)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           PAGES_TOKEN: ${{ secrets.PAGES_TOKEN }}
@@ -130,16 +123,26 @@ jobs:
         if: >-
           steps.operation.outputs.apply == 'true' &&
           steps.operation.outputs.changed == 'true' &&
-          contains(fromJSON('["withdraw","unify","reset-documents","migrate-derived","resume-derived"]'), steps.operation.outputs.operation)
+          contains(fromJSON('["withdraw","unify","reset-documents","remove-route","restore-route","migrate-derived","resume-derived"]'), steps.operation.outputs.operation)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_INPUT_TOKEN: ${{ secrets.HF_INPUT_TOKEN }}
           OPERATION: ${{ steps.operation.outputs.operation }}
+          RESOURCE_JSON: ${{ inputs.resource_json }}
         run: |
           if [[ "$OPERATION" == migrate-derived || "$OPERATION" == resume-derived ]]; then
             generation=$(jq -r '.generation' output/v3/publication.json)
             python scripts/publish_reader_v3.py verify-generation --expected-parent "$generation" \
               --wait-seconds 1200 --output output/v3/migration-verification.json
+            echo "complete=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [[ "$OPERATION" == remove-route || "$OPERATION" == restore-route ]]; then
+            # Verify the deployed projection without writing GC acknowledgments.
+            generation=$(jq -r '.generation' output/v3/publication.json)
+            python scripts/publish_reader_v3.py verify-route --resource-json "$RESOURCE_JSON" \
+              --expected-parent "$generation" --route-action "$OPERATION" --wait-seconds 1200 \
+              --output output/v3/route-verification.json
             echo "complete=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi

@@ -267,10 +267,10 @@ def from_page(payload, source_sha256, language="und", raw_resource=None, *, layo
     options = dict(layout_options or {})
     if options:
         try:
-            from . import ocr_layout
+            from . import reader_text_layout
         except ImportError:
-            import ocr_layout
-        options = ocr_layout.validate_options(options)
+            import reader_text_layout
+        options = reader_text_layout.validate_options(options)
     regions = []
     blocks = {b.get("id", index): b for index, b in enumerate(payload.get("blocks", []))}
     spans = payload.get("text_spans", [])
@@ -319,7 +319,7 @@ def from_page(payload, source_sha256, language="und", raw_resource=None, *, layo
             region_mode = mode if region_mode == "auto" else region_mode
             center_x, center_y = (bounds[0] + bounds[2]) / 2, (bounds[1] + bounds[3]) / 2
             for override in options.get("regions", []):
-                original_box = ocr_layout.map_box_back(override["box"], options.get("rotation", 0))
+                original_box = reader_text_layout.map_box_back(override["box"], options.get("rotation", 0))
                 if original_box[0] <= center_x <= original_box[2] and original_box[1] <= center_y <= original_box[3]:
                     region_mode = override.get("writing_mode", region_mode)
                     if region_mode == "auto":

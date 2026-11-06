@@ -63,11 +63,9 @@ class TokenSelectionTests(unittest.TestCase):
         import yaml
         root = Path(__file__).resolve().parents[1] / '.github/workflows'
         maintenance_flow = yaml.load((root / 'reader-maintenance.yml').read_text(), Loader=yaml.BaseLoader)
-        release_flow = yaml.load((root / 'publish-chm-gc-release-inner.yml').read_text(), Loader=yaml.BaseLoader)
         collect_flow = yaml.load((root / 'reader-gc-collect.yml').read_text(), Loader=yaml.BaseLoader)
         secret = '${{ secrets.GC_AMBROSSEE_MAINTENANCE_20261102 }}'
         self.assertEqual(maintenance_flow['jobs']['maintain']['env'][credentials.OVERRIDE_VARIABLE], secret)
-        self.assertEqual(release_flow['jobs']['release']['env'][credentials.OVERRIDE_VARIABLE], secret)
         target = next(step for step in collect_flow['jobs']['collect']['steps']
                       if step.get('name') == 'Verify maintenance window and collect unreferenced objects')
         self.assertEqual(target['env'][credentials.OVERRIDE_VARIABLE], secret)

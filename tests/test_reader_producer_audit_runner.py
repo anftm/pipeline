@@ -55,18 +55,9 @@ class AuditRunnerTests(unittest.TestCase):
         self.assertFalse(result['scope_activated'])
         self.assertFalse(result['gc_authorized'])
 
-    def test_workflow_is_manual_locked_and_pins_checkout(self):
-        workflow = yaml.safe_load((runner.ROOT / '.github/workflows/producer-migration-audit.yml').read_text())
-        triggers = workflow.get('on', workflow.get(True))
-        self.assertEqual(set(triggers), {'workflow_dispatch'})
-        self.assertEqual(workflow['concurrency']['group'], 'reader-global-maintenance')
-        self.assertFalse(workflow['concurrency']['cancel-in-progress'])
-        job = workflow['jobs']['archive']
-        self.assertEqual(job['concurrency']['group'], 'reader-sidecar')
-        self.assertFalse(job['concurrency']['cancel-in-progress'])
-        checkout = next(step for step in job['steps'] if step.get('uses') == 'actions/checkout@v7')
-        self.assertEqual(checkout['with']['ref'], '${{ github.sha }}')
-        self.assertTrue(any('scripts/reader_producer_audit_runner.py' in step.get('run', '') for step in job['steps']))
+    def test_old_one_time_audit_has_no_actions_entrypoint(self):
+        self.assertFalse((runner.ROOT / '.github/workflows/producer-migration-audit.yml').exists())
+        self.assertFalse((runner.ROOT / '.github/workflows/producer-v2-credential-preflight.yml').exists())
 
 
 if __name__ == '__main__':

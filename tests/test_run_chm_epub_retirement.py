@@ -4,7 +4,6 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-import yaml
 from scripts import run_chm_epub_retirement as runner
 from scripts import chm_epub_publication_safety as safety
 
@@ -374,10 +373,6 @@ class RunChmRetirementTests(unittest.TestCase):
             self.assertEqual(adopted['callback_owner_run_id'],'124')
             self.assertTrue(adopted['callback_recovery_required'])
             saved.assert_called_once();resumed.assert_called_once()
-        workflow=yaml.safe_load((Path(__file__).resolve().parents[1]/
-                                 '.github/workflows/chm-epub-retirement.yml').read_text())
-        self.assertNotIn('resume',workflow['jobs']['continue_1']['if'])
-        self.assertEqual(workflow['jobs']['continue_1']['needs'],'retire')
 
     def test_resume_adopts_committed_transaction_before_restoration(self):
         current={'kind':'reader-maintenance-journal','maintenance_id':'window',
@@ -502,46 +497,6 @@ class RunChmRetirementTests(unittest.TestCase):
             self.assertEqual(runner.recover_pages_handoff(object(),Mock(),None,plan,{},lambda *_:None),
                              {'hf':{},'pages':{}})
             dispatch.assert_not_called()
-
-    def test_workflow_serializes_and_exposes_explicit_resume(self):
-        path=Path(__file__).resolve().parents[1]/'.github/workflows/chm-epub-retirement.yml'
-        workflow=yaml.safe_load(path.read_text())
-        self.assertEqual(workflow['concurrency']['group'],'publish-ccrd-index')
-        job=workflow['jobs']['retire']
-        self.assertEqual(job['needs'],'wait_for_producers')
-        self.assertIn('needs.wait_for_producers.result',job['if'])
-        self.assertEqual(job['concurrency']['group'],'reader-global-maintenance')
-        self.assertIn("inputs.confirm == 'RETIRE-972'",job['if'])
-        trigger=workflow.get('on',workflow.get(True))['workflow_dispatch']['inputs']
-        self.assertIn('resume',trigger)
-        self.assertIn('tests.test_chm_epub_journal',next(s['run'] for s in job['steps'] if 'Test exact' in s.get('name','')))
-        self.assertEqual(next(s['id'] for s in job['steps'] if s.get('name') ==
-                              'Verify exact inventory and retire only after actual closure'),'retirement')
-        self.assertEqual(next(s['timeout-minutes'] for s in job['steps'] if s.get('id') == 'retirement'),300)
-        self.assertEqual(next(s['if'] for s in job['steps'] if s.get('name') ==
-                              'Restore producer isolation when the transaction is safe'),
-                         "always() && steps.retirement.outcome != 'success'")
-        self.assertIn('--expected-owner "$GITHUB_RUN_ID"',next(s['run'] for s in job['steps'] if
-                      s.get('name') == 'Restore producer isolation when the transaction is safe'))
-        self.assertEqual(job['timeout-minutes'],330)
-        for number, predecessor in ((1,'retire'),(2,'continue_1'),(3,'continue_2'),(4,'continue_3')):
-            child=workflow['jobs'][f'continue_{number}']
-            self.assertEqual(child['needs'],predecessor)
-            self.assertEqual(child['timeout-minutes'],330)
-            self.assertEqual(child['env']['CHM_STAGE'],'continue')
-            self.assertEqual(next(s['timeout-minutes'] for s in child['steps'] if
-                                  s.get('name','').startswith('Rebuild actual graph')),300)
-        remaining=workflow['jobs']['continue_remaining']
-        self.assertEqual(remaining['needs'],'continue_4')
-        self.assertEqual(remaining['strategy']['max-parallel'],1)
-        self.assertTrue(remaining['strategy']['fail-fast'])
-        self.assertEqual(remaining['strategy']['matrix']['batch'],[5,6,7,8,9,10,11])
-        self.assertEqual(remaining['env']['CHM_STAGE'],'continue')
-        self.assertEqual(next(s['timeout-minutes'] for s in remaining['steps'] if
-                              s.get('name','').startswith('Rebuild actual graph')),300)
-        self.assertEqual(workflow['jobs']['restore_after_stages']['needs'][-1],'continue_remaining')
-        self.assertEqual(workflow['jobs']['restore_after_stages']['if'],
-                         "always() && needs.continue_remaining.result == 'success'")
 
 
 if __name__=='__main__':

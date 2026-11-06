@@ -14,9 +14,9 @@ from xml.etree import ElementTree as ET
 from pathlib import Path, PurePosixPath
 
 try:
-    from . import pdf_ocr, pdf_text_layer as text, shared, djvu_pages, reader_page_codec
+    from . import reader_native_text as native, pdf_text_layer as text, shared, djvu_pages, reader_page_codec
 except ImportError:
-    import pdf_ocr
+    import reader_native_text as native
     import pdf_text_layer as text
     import shared
     import djvu_pages
@@ -26,6 +26,7 @@ BUCKETS = {shared.READER_ASSETS_BUCKET, shared.PDF_PAGES_BUCKET, shared.PDF_OCR_
 PARTITION_SIZE = 128
 SEARCH_PARTITION_PAGES = 32
 SEARCH_PARTITION_BYTES = 512 * 1024
+PRIMARY_KINDS = {".pdf": "pdf", ".djvu": "djvu"}
 
 
 def validate_vector_svg(raw):
@@ -139,8 +140,7 @@ def decode(raw):
 
 
 def stored(path, bundle, payload, *, compressed=False, role="runtime"):
-    writer = pdf_ocr.write_gzip_json if compressed else pdf_ocr.write_json
-    digest, size = writer(path, payload)
+    digest, size = native.write_json(path, payload, compressed=compressed)
     return {"bucket": shared.PDF_PAGES_BUCKET, "path": path.relative_to(bundle).as_posix(),
             "sha256": digest, "bytes": size, "role": role}
 
@@ -154,44 +154,6 @@ def partition_for(manifest, page):
     if index < 0 or page > partitions[index]["end"]:
         return None
     return partitions[index]
-
-
-def backfill_text(manifest, read, bundle, options=None):
-    """Upgrade verified existing raw page objects, without rendering or recognition."""
-    try:
-        from . import ocr_layout
-    except ImportError:
-        import ocr_layout
-    source = text.sha(manifest["source_sha256"])
-    count = manifest.get("page_count")
-    pages = manifest.get("pages", [])
-    if (manifest.get("kind") != "pdf-ocr" or manifest.get("complete") is not True
-            or type(count) is not int or count < 1
-            or [p.get("p") for p in pages] != list(range(1, count + 1))):
-        raise ValueError("backfill requires complete OCR page coverage")
-    options = ocr_layout.validate_options(options)
-    if options.get("rotation", 0):
-        raise ValueError("backfill cannot rotate already positioned raw text")
-    layers = []
-    for page in pages:
-        ref = resource({"bucket": shared.PDF_PAGES_BUCKET, "path": page["o"],
-                        "sha256": page["os"], "bytes": page["ob"], "role": "provenance"})
-        payload = decode(verified_read(ref, read))
-        if (payload.get("kind") != "pdf-ocr-page" or payload.get("page") != page["p"]
-                or payload.get("source") != page["source"]):
-            raise ValueError("backfill raw page identity mismatch")
-        config = manifest.get("layout_options", {})
-        page_options = {**config.get("default", {}), **config.get("pages", {}).get(str(page["p"]), {}), **options}
-        # Existing blocks have already been transformed to original coordinates.
-        arrange_options = {k: v for k, v in page_options.items() if k != "rotation"}
-        if (options or "text_spans" not in payload or payload["source"] == "native") and payload["blocks"]:
-            payload.update(ocr_layout.arrange(payload["blocks"], payload["width"], payload["height"], arrange_options,
-                                              include_writing_modes=True))
-        layers.append(text.from_page(payload, source, manifest.get("language", "und"), ref,
-                                     layout_options=page_options))
-    identity = text.digest({"raw_manifest": manifest, "options": options, "text_layer": 2})
-    root = Path("objects") / source[:2] / source / identity[:16]
-    return build_text_bundle(layers, pages, root, bundle)
 
 
 def validate_text_manifest(manifest):
@@ -409,68 +371,6 @@ def verify_text_bundle(ref, read, source_sha256, page_count, *, verify_evidence=
             if verify_evidence:
                 verified_read(evidence, read)
     return manifest
-
-
-def repartition_text_bundle(ref, read, bundle):
-    """Refresh search packaging without changing any raw or accepted page text."""
-    original = decode(verified_read(ref, read))
-    original = verify_text_bundle(ref, read, original["source_sha256"], original["page_count"])
-    review = decode(verified_read(original["review"], read))
-    evidence = {task["page"]: task["evidence"] for task in review["tasks"]}
-    layers, pages = [], []
-    for part in original["partitions"]:
-        for entry in decode(verified_read(part["resource"], read))["pages"]:
-            layer = decode(verified_read(entry["resource"], read))
-            layers.append(layer)
-            page = {"p": layer["page"]}
-            for item in evidence.get(layer["page"], []):
-                if item["bucket"] == shared.PDF_OCR_INPUT_BUCKET and item["path"].endswith(".png"):
-                    page.update(i=item["path"], ibucket=item["bucket"], ib=item["bytes"], **{"is": item["sha256"]})
-                    break
-            pages.append(page)
-    source = original["source_sha256"]
-    identity = text.digest({"parent": ref, "search_packaging": 1})
-    root = Path("objects") / source[:2] / source / identity[:16]
-    return build_text_bundle(layers, pages, root, bundle, parent=ref)
-
-
-def accept_text_bundle(ref, proposals, read, bundle, *, actor):
-    """Offline trusted acceptance producing a new complete text/search generation."""
-    source_manifest = decode(verified_read(ref, read))
-    source = source_manifest["source_sha256"]
-    verified = verify_text_bundle(ref, read, source, source_manifest["page_count"])
-    if not isinstance(proposals, list) or not proposals:
-        raise ValueError("correction proposals required")
-    by_page = {}
-    for proposal in proposals:
-        page = proposal.get("page")
-        if (type(page) is not int or not 1 <= page <= verified["page_count"] or page in by_page):
-            raise ValueError("duplicate or invalid correction page")
-        by_page[page] = proposal
-    review = decode(verified_read(verified["review"], read))
-    evidence_by_page = {t["page"]: t["evidence"] for t in review["tasks"]}
-    layers, pages = [], []
-    for partition in verified["partitions"]:
-        data = decode(verified_read(partition["resource"], read))
-        for entry in data["pages"]:
-            layer = decode(verified_read(entry["resource"], read))
-            if layer["page"] in by_page:
-                layer = text.accept_proposal(layer, by_page[layer["page"]], actor=actor)
-            layers.append(layer)
-            page = {"p": layer["page"]}
-            for evidence in evidence_by_page.get(layer["page"], []):
-                if evidence["bucket"] == shared.PDF_OCR_INPUT_BUCKET and evidence["path"].endswith(".png"):
-                    page.update(i=evidence["path"], ibucket=evidence["bucket"],
-                                ib=evidence["bytes"])
-                    page["is"] = evidence["sha256"]
-                    break
-            pages.append(page)
-    identity = text.digest({"parent": ref, "proposals": proposals, "actor": actor, "acceptance": 2})
-    root = Path("objects") / source[:2] / source / identity[:16]
-    return build_text_bundle(layers, pages, root, bundle, parent=ref)
-
-
-PRIMARY_KINDS = {".pdf": "pdf", ".djvu": "djvu"}
 
 
 def primary_kind(ref):
@@ -727,9 +627,9 @@ def local_reader(directory):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("build", "verify", "backfill-text", "generate-stream", "accept-text"))
+    parser.add_argument("command", choices=("build", "verify", "generate-stream"))
     parser.add_argument("--spec", type=Path)
-    parser.add_argument("--manifest", type=Path, help="OCR manifest or qualified reading resource JSON")
+    parser.add_argument("--manifest", type=Path, help="qualified reading resource JSON")
     parser.add_argument("--mirror", type=Path, required=True,
                         help="Verified inputs under <mirror>/<bucket>/<path>")
     parser.add_argument("--output", type=Path)
@@ -737,33 +637,20 @@ def main():
     parser.add_argument("--end", type=int)
     parser.add_argument("--dpi", type=int, default=150)
     parser.add_argument("--max-pixels", type=int, default=50000000)
-    parser.add_argument("--proposals", type=Path)
-    parser.add_argument("--actor")
     args = parser.parse_args()
     read = local_reader(args.mirror)
-    if args.command == "accept-text":
-        if args.manifest is None or args.proposals is None or args.output is None or not args.actor:
-            parser.error("accept-text requires --manifest, --proposals, --output and --actor")
-        ref = accept_text_bundle(json.loads(args.manifest.read_text()), json.loads(args.proposals.read_text()),
-                                 read, args.output, actor=args.actor)
-        print(json.dumps({"text_layer": ref}, sort_keys=True))
-    elif args.command == "generate-stream":
+    if args.command == "generate-stream":
         if args.spec is None or args.output is None:
             parser.error("generate-stream requires --spec and --output")
         spec = generate_previews(json.loads(args.spec.read_text()), read, args.output,
                                  start=args.start, end=args.end, dpi=args.dpi, max_pixels=args.max_pixels)
-        pdf_ocr.write_json(args.output / "reading-spec.json", spec)
+        native.write_json(args.output / "reading-spec.json", spec)
         print(json.dumps({"spec": str(args.output / "reading-spec.json"), "ready_pages": len(spec["previews"])}))
     elif args.command == "build":
         if args.spec is None or args.output is None:
             parser.error("build requires --spec and --output")
         ref, manifest = build_reading(json.loads(args.spec.read_text()), read, args.output)
         print(json.dumps({"resource": ref, "components": manifest["components"]}, sort_keys=True))
-    elif args.command == "backfill-text":
-        if args.manifest is None or args.output is None:
-            parser.error("backfill-text requires --manifest and --output")
-        ref = backfill_text(json.loads(args.manifest.read_text()), read, args.output)
-        print(json.dumps({"text_layer": ref}, sort_keys=True))
     else:
         if args.manifest is None:
             parser.error("verify requires --manifest")

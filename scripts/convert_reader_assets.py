@@ -1351,10 +1351,11 @@ def rasterize_pdf(path: Path, work: Path) -> None:
     images = sorted(pages.glob("page-*.png"), key=lambda item: int(item.stem.rsplit("-", 1)[-1]))
     if not images:
         raise RuntimeError("PDF rasterization produced no pages")
-    sample = "".join(command_output(["tesseract", str(image), "stdout", "-l", "chi_sim"]) for image in images[:3])
-    if not CJK_RE.search(sample):
-        raise RuntimeError("rasterized office PDF has no recognizable CJK text")
+    # Raster conversion must not run a recognition model. Check for visible
+    # page content instead; this does not claim text is searchable or correct.
     content = [page_content_ratio(image) >= MIN_PAGE_CONTENT_RATIO for image in images]
+    if not any(content):
+        raise RuntimeError("rasterized office PDF has no visible page content")
     for index in range(1, len(images) - 1):
         if content[index] or not any(content[:index]) or not any(content[index + 1:]):
             continue

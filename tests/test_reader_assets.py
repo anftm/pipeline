@@ -20,7 +20,7 @@ import requests
 from huggingface_hub import CommitOperationAdd
 from huggingface_hub.errors import HfHubHTTPError, RepositoryNotFoundError
 
-from scripts import build_reader_assets_index, convert_reader_assets, pdf_assets, publish_reader_assets
+from scripts import build_reader_assets_index, convert_reader_assets, publish_reader_assets
 from scripts import publish_search_reader_index
 from scripts import epub_chapters, reader_assets, render_spreadsheet_html, scan_reader_assets
 
@@ -3147,8 +3147,8 @@ class PublicationTests(unittest.TestCase):
         }}
         pdf_manifest = {"version": 1, "files": {
             "scan": {"status": "ready", "strategy": "sampled-jxl",
-                     "render_profile": pdf_assets.PDF_PROFILE,
-                     "decision_profile": pdf_assets.PDF_DECISION_PROFILE,
+                     "render_profile": "historical-pdf-page-profile",
+                     "decision_profile": "historical-pdf-decision-profile",
                      "path": "", "page_manifest": {
                 "path": "objects/bb/" + "b" * 64 + "/page-manifest.json",
             }},
@@ -3181,8 +3181,8 @@ class PublicationTests(unittest.TestCase):
             "legacy": {"status": "ready", "strategy": "sampled-webp",
                        "page_manifest": {"path": "objects/aa/" + "a" * 64 + "/page-manifest.json"}},
             "current": {"status": "ready", "strategy": "sampled-jxl", "source_extension": "caj",
-                        "render_profile": pdf_assets.PDF_PROFILE,
-                        "decision_profile": pdf_assets.PDF_DECISION_PROFILE,
+                        "render_profile": "historical-pdf-page-profile",
+                        "decision_profile": "historical-pdf-decision-profile",
                         "page_manifest": {"path": "objects/bb/" + "b" * 64 + "/page-manifest.json"}},
             "linear": {"status": "ready", "strategy": "linearized-pdf", "source_extension": "pdf",
                        "path": "objects/cc/" + "c" * 64 + "/linearized.pdf"},
@@ -3193,8 +3193,8 @@ class PublicationTests(unittest.TestCase):
         self.assertNotIn("linear", files)
 
     def test_media_workflow_has_explicit_empty_matrix_guard(self):
-        workflow = (Path(__file__).parents[1] / ".github/workflows/reader-media-backfill.yml").read_text(encoding="utf-8")
-        self.assertIn("if: fromJSON(needs.plan.outputs.matrix).include[0] != null", workflow)
+        workflow = (Path(__file__).parents[1] / ".github/workflows/reader-media-stream.yml").read_text(encoding="utf-8")
+        self.assertIn("fromJSON(needs.plan.outputs.matrix).include[0] != null", workflow)
         self.assertIn("python scripts/finalize_media_indexes.py", workflow)
 
 

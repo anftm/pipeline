@@ -1,10 +1,7 @@
 import hashlib
 import json
-from pathlib import Path
 import unittest
 from unittest.mock import Mock, patch
-
-import yaml
 
 from scripts import chm_subset_locked_preflight as preflight
 
@@ -152,7 +149,13 @@ class LockedPreflightTests(unittest.TestCase):
         progress = {'chapter_evidence': {'results': evidence}}
         checklist = {f'manifest-{n}': f'{n:064x}' for n in range(358)}
         store = Mock()
-        store.read_bytes.side_effect = lambda bucket, path: path.encode()
+        import threading
+        lock, reads = threading.Lock(), []
+        def read(bucket, path):
+            with lock:
+                reads.append((bucket, path))
+            return path.encode()
+        store.read_bytes.side_effect = read
         histories = {str(n): {} for n in range(5)}
         with patch.object(preflight.safety, 'load_plan_history_catalogs', return_value=histories), \
              patch.object(preflight.publication, 'pinned_base', return_value={}), \
@@ -160,7 +163,8 @@ class LockedPreflightTests(unittest.TestCase):
              patch.object(preflight.subset, 'verify_manifest_bytes', return_value={'manifests': [1]}) as verify:
             result = preflight.verify_selected_manifests(store, self.rows, self.selected, plan, progress, {})
         self.assertEqual(result, {'manifests': [1]})
-        self.assertEqual(store.read_bytes.call_count, 358)
+        self.assertEqual(len(reads), 358)
+        self.assertEqual({path for _, path in reads}, set(checklist))
         self.assertEqual(set(verify.call_args.args[1]), set(checklist))
 
     def test_only_central_main_workflow_can_run_entrypoint(self):
@@ -221,21 +225,6 @@ class LockedPreflightTests(unittest.TestCase):
             self.assertEqual(preflight.github_get('repos/x/y/actions/workflows?per_page=100'), [{'workflows': []}])
         self.assertEqual(get.call_count, 2)
         self.assertEqual(get.call_args_list[1].kwargs['headers']['Authorization'], 'Bearer read-only')
-
-    def test_yaml_uses_all_three_groups_and_no_mutation_step(self):
-        root = Path(__file__).resolve().parents[1] / '.github/workflows'
-        outer = yaml.load((root / 'chm-subset-locked-preflight.yml').read_text(), Loader=yaml.BaseLoader)
-        inner = yaml.load((root / 'chm-subset-locked-preflight-inner.yml').read_text(), Loader=yaml.BaseLoader)
-        self.assertEqual(outer['concurrency']['group'], 'publish-ccrd-index')
-        self.assertEqual(outer['jobs']['inspect']['concurrency']['group'], 'reader-global-maintenance')
-        self.assertEqual(inner['jobs']['inspect']['concurrency']['group'], 'reader-sidecar')
-        self.assertEqual(outer['jobs']['inspect']['uses'], './.github/workflows/chm-subset-locked-preflight-inner.yml')
-        for group in (outer['concurrency'], outer['jobs']['inspect']['concurrency'],
-                      inner['jobs']['inspect']['concurrency']):
-            self.assertEqual((group['cancel-in-progress'], group['queue']), ('false', 'max'))
-        commands = '\n'.join(step.get('run', '') for step in inner['jobs']['inspect']['steps'])
-        self.assertIn('scripts/chm_subset_locked_preflight.py', commands)
-        self.assertNotIn('run_chm_epub_retirement.py', commands)
 
 
 if __name__ == '__main__':

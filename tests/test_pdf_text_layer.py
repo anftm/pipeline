@@ -3,7 +3,7 @@
 import copy
 import unittest
 
-from scripts import ocr_layout, pdf_text_layer as layer
+from scripts import reader_text_layout as ocr_layout, pdf_text_layer as layer
 
 
 def raw_page(text="English", confidence=.99, mode="horizontal-ltr"):

@@ -4,8 +4,9 @@
 This CLI has two phases. `plan` reads a freshly converged four-bucket graph and
 current deployed projections under the existing collector fence, then writes an
 exact immutable plan and digest without deleting. `apply` requires that digest,
-a fresh plan, no producers, a fresh complete graph, matching deployed projections,
-unchanged object versions and an additional external-writer confirmation.
+a plan at most 24 hours old, no producers, a freshly built complete graph,
+matching deployed projections, unchanged object versions and an additional
+external-writer confirmation. Plan age is never treated as fresh reference proof.
 
 A Hub batch is non-atomic and outcomes may be unknown. Never blindly retry: the
 operator must re-plan after an interruption. Historical references and objects
@@ -39,6 +40,9 @@ except ImportError:
 BUCKET = shared.PDF_PAGES_BUCKET
 WORKFLOW = '.github/workflows/reader-gc-collect.yml'
 MAX_TARGETS = 1000
+# Review identity may remain valid while a full graph is rebuilt. A fresh graph,
+# consumer checks, exact versions and writer fence remain mandatory at apply.
+MAX_PLAN_AGE_SECONDS = 24 * 60 * 60
 
 
 def encode(value):
@@ -85,7 +89,7 @@ def candidate_plan(reference, graph_report, api, paths, *, clock=None):
             'total_bytes': sum(item['bytes'] for item in targets), 'deletion_authorized': False}
 
 
-def check_plan(plan, expected_hash, *, now=None, max_age_seconds=3600):
+def check_plan(plan, expected_hash, *, now=None, max_age_seconds=MAX_PLAN_AGE_SECONDS):
     if (not isinstance(expected_hash, str) or not re.fullmatch(r'[a-f0-9]{64}', expected_hash)
             or plan_id(plan) != expected_hash or not isinstance(plan, dict)
             or plan.get('version') != 1 or plan.get('kind') != 'pdf-page-exact-delete-plan'

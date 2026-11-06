@@ -1,14 +1,39 @@
 """Qualified OCR-library roots shared by publication and four-bucket GC reports."""
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 
 try:
-    from .ccrd_ocr_release import BUCKET, TOKENIZER, canonical, digest, safe_path, sha
     from .shared import READER_ASSETS_BUCKET, PDF_PAGES_BUCKET, PDF_OCR_INPUT_BUCKET
 except ImportError:
-    from ccrd_ocr_release import BUCKET, TOKENIZER, canonical, digest, safe_path, sha
     from shared import READER_ASSETS_BUCKET, PDF_PAGES_BUCKET, PDF_OCR_INPUT_BUCKET
+
+BUCKET = 'vomebook/ccrd-index'
+TOKENIZER = 'cjk-bigram-boundary-fts5-v6-snippet-anchors'
+
+
+def canonical(value) -> bytes:
+    return (json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False) + '\n').encode()
+
+
+def digest(value) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def sha(value) -> str:
+    if not isinstance(value, str) or not re.fullmatch(r'[0-9a-f]{64}', value):
+        raise ValueError('invalid release SHA-256')
+    return value
+
+
+def safe_path(value: str) -> str:
+    if (not isinstance(value, str) or not value or value.startswith('/') or '\\' in value
+            or any(part in {'', '.', '..'} for part in value.split('/'))
+            or any(ord(char) < 32 for char in value)):
+        raise ValueError('invalid release relative path')
+    return value
 
 
 BUCKETS = (READER_ASSETS_BUCKET, PDF_PAGES_BUCKET, PDF_OCR_INPUT_BUCKET, BUCKET)

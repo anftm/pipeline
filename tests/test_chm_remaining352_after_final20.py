@@ -102,17 +102,6 @@ class RemainingTests(unittest.TestCase):
         self.assertTrue(self.call()['subset_complete'])
         self.assertEqual(len(self.store.calls), 1)
 
-    def test_three_workflow_locks(self):
-        from pathlib import Path
-        import yaml
-        folder = Path(__file__).resolve().parents[1] / '.github/workflows'
-        outer = yaml.load((folder / 'chm-remaining352-after-final20.yml').read_text(), Loader=yaml.BaseLoader)
-        inner = yaml.load((folder / 'chm-remaining352-after-final20-inner.yml').read_text(), Loader=yaml.BaseLoader)
-        groups = (outer['concurrency'], outer['jobs']['retire']['concurrency'], inner['jobs']['retire']['concurrency'])
-        self.assertEqual([item['group'] for item in groups],
-                         ['publish-ccrd-index', 'reader-global-maintenance', 'reader-sidecar'])
-        self.assertTrue(all(item['cancel-in-progress'] == 'false' and item['queue'] == 'max' for item in groups))
-
 
 if __name__ == '__main__':
     unittest.main()

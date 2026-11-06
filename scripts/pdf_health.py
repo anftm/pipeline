@@ -9,14 +9,14 @@ import subprocess
 import time
 from pathlib import Path
 
-from huggingface_hub import CommitOperationAdd, HfApi
+from huggingface_hub import CommitOperationAdd, HfApi, hf_hub_download
 from huggingface_hub.errors import HfHubHTTPError
 
 try:
-    from . import pdf_assets
+    from .reader_assets import decode_search_payload, relative_path, source_url
     from . import shared
 except ImportError:
-    import pdf_assets
+    from reader_assets import decode_search_payload, relative_path, source_url
     import shared
 
 REPORT_NAME = "pdf_health.json.gz"
@@ -50,7 +50,7 @@ def _run(args: list[str], timeout: int = COMMAND_TIMEOUT) -> tuple[int, str]:
 
 
 def records_from_sources(search_data: Path, revisions: Path) -> list[dict]:
-    records = pdf_assets.decode_search_payload(json.loads(search_data.read_text(encoding="utf-8")))
+    records = decode_search_payload(json.loads(search_data.read_text(encoding="utf-8")))
     revision_map = json.loads(revisions.read_text(encoding="utf-8"))
     selected = []
     keys = set()
@@ -64,7 +64,7 @@ def records_from_sources(search_data: Path, revisions: Path) -> list[dict]:
         if not revision:
             missing_revisions.add(repo)
             continue
-        path = pdf_assets.relative_path(record)
+        path = relative_path(record)
         key = f"{repo}\0{path}"
         if key in keys:
             raise ValueError(f"duplicate upstream PDF: {key}")
@@ -72,7 +72,7 @@ def records_from_sources(search_data: Path, revisions: Path) -> list[dict]:
         selected.append({
             "key": key, "repo": repo, "path": path,
             "source_revision": revision, "declared_bytes": int(record.get("Size") or 0),
-            "source_url": pdf_assets.source_url(repo, revision, path),
+            "source_url": source_url(repo, revision, path),
         })
     if missing_revisions:
         raise ValueError(f"missing pinned revision for PDF repositories: {', '.join(sorted(missing_revisions))}")
@@ -94,38 +94,15 @@ def encode_report(report: dict) -> bytes:
     return gzip.compress(payload, compresslevel=9, mtime=0)
 
 
-def conversion_ready_entry(record: dict, pdf_manifest: dict | None,
-                           current: dict | None = None) -> dict | None:
-    """Proof that the conversion workflow fully rendered this exact source revision.
-
-    A current-profile ready entry means every page was rasterized to WebP, which
-    is a stronger readability signal than re-downloading the file for qpdf.
-    """
-    if not isinstance(pdf_manifest, dict):
-        return None
-    entry = pdf_manifest.get("files", {}).get(record["key"])
-    if not pdf_assets.is_current_ready(entry):
-        return None
-    same_revision = entry.get("source_revision") == record.get("source_revision")
-    same_content = (isinstance(current, dict)
-                    and current.get("sha256") == entry.get("source_sha256")
-                    and current.get("declared_bytes") == entry.get("source_bytes"))
-    if not same_revision and not same_content:
-        return None
-    return {"key": record["key"], "status": "healthy", "reason": "conversion-ready",
-            "source_revision": record.get("source_revision"),
-            "render_profile": pdf_assets.PDF_PROFILE,
-            "decision_profile": pdf_assets.PDF_DECISION_PROFILE}
-
-
-def pending_records(records: list[dict], report: dict, pdf_manifest: dict | None = None) -> list[dict]:
+def pending_records(records: list[dict], report: dict) -> list[dict]:
     files = report.get("files", {})
     pending = []
     for record in records:
         current = files.get(record["key"])
-        if conversion_ready_entry(record, pdf_manifest, current) is not None:
-            continue
-        if not isinstance(current, dict) or current.get("status") in {"download-failed", "tool-error"}:
+        if (not isinstance(current, dict) or current.get("status") in {"download-failed", "tool-error"}
+                or current.get("reason") == "conversion-ready"):
+            # A retired page-render entry is no longer an audit of the source.
+            # Recheck it even if the historical report labelled it healthy.
             pending.append(record)
             continue
         same_revision = current.get("source_revision") == record["source_revision"]
@@ -145,23 +122,17 @@ def weighted_shards(records: list[dict], count: int = SHARD_COUNT) -> list[list[
         order=lambda item: (-int(item.get("declared_bytes") or 0), item["key"]))
 
 
-def plan(records: list[dict], report: dict, pdf_manifest: dict | None = None) -> dict:
-    files = report.get("files", {})
-    pending = pending_records(records, report, pdf_manifest)
+def plan(records: list[dict], report: dict) -> dict:
+    pending = pending_records(records, report)
     selected = pending[:BATCH_SIZE]
     shards = weighted_shards(selected) if selected else [[]]
-    conversion_ready = [entry for record in records
-                        if (entry := conversion_ready_entry(record, pdf_manifest,
-                                                            files.get(record["key"]))) is not None]
     return {"version": REPORT_VERSION, "kind": "pdf-health-queue",
             "batch_size": BATCH_SIZE, "shard_count": SHARD_COUNT,
             "total_records": len(records), "pending_records": len(pending),
             "selected_records": len(selected), "remaining_after_batch": max(0, len(pending) - len(selected)),
-            "conversion_ready": len(conversion_ready),
             "shard_ids": list(range(SHARD_COUNT)) if selected else [0],
             "shards": [{"index": i, "declared_bytes": sum(int(r.get("declared_bytes") or 0) for r in shard),
-                        "records": shard} for i, shard in enumerate(shards)],
-            "_conversion_ready_entries": conversion_ready}
+                        "records": shard} for i, shard in enumerate(shards)]}
 
 
 def inspect_pdf(path: Path, declared_bytes: int, timeout: int = COMMAND_TIMEOUT) -> dict:
@@ -171,7 +142,7 @@ def inspect_pdf(path: Path, declared_bytes: int, timeout: int = COMMAND_TIMEOUT)
     actual_bytes = 0
     sha256 = ""
     try:
-        sha256, actual_bytes = pdf_assets.digest(path)
+        sha256, actual_bytes = shared.hash_file(path)
         with path.open("rb") as stream:
             header = stream.read(1024)
             stream.seek(max(0, actual_bytes - 65536))
@@ -287,19 +258,14 @@ def remote_report(api: HfApi, repo: str) -> dict:
 
 
 def publish(api: HfApi, repo: str, results: list[dict], current_keys: set[str] | None = None,
-            ready_entries: list[dict] | None = None, max_attempts: int = 8) -> dict:
-    if not results and current_keys is None and not ready_entries:
+            max_attempts: int = 8) -> dict:
+    if not results and current_keys is None:
         return remote_report(api, repo)
     for attempt in range(max_attempts):
         try:
             info = api.repo_info(repo_id=repo, repo_type="dataset")
             remote = remote_report(api, repo)
             merged = merge_report(remote, results, current_keys)
-            if ready_entries:
-                files = merged["files"]
-                for entry in ready_entries:
-                    files[entry["key"]] = {k: v for k, v in entry.items() if k != "key"}
-                merged = {"version": REPORT_VERSION, "files": dict(sorted(files.items()))}
             if merged == remote:
                 return remote
             api.create_commit(repo_id=repo, repo_type="dataset", parent_commit=info.sha,
@@ -351,7 +317,8 @@ def main() -> int:
     for record in records:
         try:
             source = (args.source_dir / record["repo"] / record["path"] if args.source_dir else
-                      pdf_assets.download_hf_source(record["repo"], record["path"], record["source_revision"], os.environ.get("HF_TOKEN")))
+                      hf_hub_download(record["repo"], record["path"], repo_type="dataset",
+                                      revision=record["source_revision"], token=os.environ.get("HF_TOKEN")))
             results.append(audit_record(record, Path(source), args.timeout))
         except Exception as exc:
             results.append({**record, "status": "download-failed", "reason": "download-failed",

@@ -63,32 +63,63 @@ class ReaderProjectionSyncTests(unittest.TestCase):
         publish = next(item for item in steps if item.get('name') == 'Publish the pinned projection to Pages')
         ack = next(item for item in steps if item.get('id') == 'ack')
         for step in (publish, ack):
-            for operation in ('unify', 'withdraw', 'reset-documents', 'migrate-derived', 'resume-derived'):
+            for operation in ('unify', 'withdraw', 'reset-documents', 'remove-route', 'restore-route', 'migrate-derived', 'resume-derived'):
                 self.assertTrue(condition(step['if'], operation=operation, changed='true'))
                 self.assertFalse(condition(step['if'], operation=operation, changed='true', apply='false'))
                 self.assertFalse(condition(step['if'], operation=operation, changed='false'))
             for operation in ('auto', 'correct', 'accept', 'promote', 'rollback',
-                              'repair-gbk', 'retire', 'ack', 'inspect', 'verify-generation'):
+                              'repair-gbk', 'retire', 'ack', 'inspect', 'verify-route', 'verify-generation'):
                 self.assertFalse(condition(step['if'], operation=operation, changed='true'))
         self.assertLess(steps.index(publish), steps.index(ack))
         self.assertEqual(workflow['concurrency']['group'], 'reader-sidecar')
         self.assertFalse(workflow['concurrency']['cancel-in-progress'])
         self.assertEqual(workflow['concurrency']['queue'], 'max')
 
-    def test_page_migration_uses_pinned_generation_and_no_gc_acknowledgment(self):
+    def test_pinned_only_pages_publication_does_not_advance_generation(self):
+        class Api:
+            def __init__(self, **_kwargs):
+                pass
+        store = Mock()
+        pointer = {'generation': 'a' * 64}
+        catalog = {'files': {}}
+        base = {'v': 1, 'f': {}}
+        args = Mock(dry_run=True, pinned_only=True, assets_repo='fixture')
+        import gzip
+        with patch.object(publication, 'parse_args', return_value=args), \
+             patch.dict(os.environ, {'HF_TOKEN': 'fixture'}), \
+             patch.object(publication, 'HfApi', Api), \
+             patch.object(publication, 'HubBucketStore', return_value=store), \
+             patch.object(publication, 'read_bucket_bytes', return_value=gzip.compress(b'{"v":1,"f":{}}')), \
+             patch.object(publication, 'synchronize_pinned_base') as unify, \
+             patch.object(publication, 'current_v3', return_value=(pointer, catalog)), \
+             patch.object(publication, 'pinned_base', return_value=base), \
+             patch.object(publication, 'project_sidecar', return_value=base), \
+             patch.object(publication, 'publish_to_pages') as publish:
+            self.assertEqual(publication.main(), 0)
+        unify.assert_not_called()
+        self.assertTrue(publish.call_args.kwargs['dry_run'])
+
+    def test_page_migration_fence_is_checked_again_before_pages_push(self):
+        workflow = self.workflow('reader-v3-publish.yml')
+        publish = next(step for step in workflow['jobs']['publish']['steps']
+                       if step.get('name') == 'Publish the pinned projection to Pages')
+        self.assertIn('check-page-window --resource-json "$RESOURCE_JSON"', publish['run'])
+        self.assertLess(publish['run'].index('check-page-window'),
+                        publish['run'].index('publish_search_reader_index.py --pinned-only'))
+        self.assertIn('GC_PRODUCER_TOKENS_JSON', publish['env'])
+
+    def test_route_changes_verify_before_and_without_gc_acknowledgments(self):
         workflow = self.workflow('reader-v3-publish.yml')
         steps = workflow['jobs']['publish']['steps']
         publish = next(step for step in steps if step.get('name') == 'Publish the pinned projection to Pages')
         ack = next(step for step in steps if step.get('id') == 'ack')
         self.assertIn('--pinned-only', publish['run'])
-        self.assertIn('check-page-window --resource-json "$RESOURCE_JSON"', publish['run'])
-        self.assertLess(publish['run'].index('check-page-window'),
-                        publish['run'].index('publish_search_reader_index.py --pinned-only'))
-        self.assertIn('GC_PRODUCER_TOKENS_JSON', publish['env'])
         branch = ack['run'].split('python scripts/publish_reader_v3.py ack-all', 1)[0]
-        self.assertIn('verify-generation', branch)
+        self.assertIn('verify-route', branch)
+        self.assertIn('--route-action "$OPERATION"', branch)
         self.assertIn('--wait-seconds 1200', branch)
         self.assertIn('exit 0', branch)
+        self.assertNotIn('ack-all', branch)
         self.assertNotIn('acknowledge-legacy', branch)
         self.assertNotIn('compact-legacy', branch)
 
@@ -127,6 +158,9 @@ class ReaderProjectionSyncTests(unittest.TestCase):
             'withdraw': ['--resource-json', '{"key":"fixture"}', '--expected-parent', 'parent'],
             'unify': ['--resource-json', '{"key":"fixture"}'],
             'reset-documents': ['--resource-json', '{"key":"fixture"}'],
+            'remove-route': ['--resource-json', '{"key":"fixture"}', '--expected-parent', 'parent'],
+            'restore-route': ['--resource-json', '{"key":"fixture"}', '--expected-parent', 'parent'],
+            'verify-route': ['--resource-json', '{"key":"fixture"}', '--expected-parent', 'parent'],
             'migrate-derived': ['--resource-json', '{"key":"fixture"}'],
             'resume-derived': ['--resource-json', '{"key":"fixture"}'],
             'verify-generation': ['--expected-parent', 'parent', '--wait-seconds', '1200'],

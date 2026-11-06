@@ -2,8 +2,6 @@
 
 from datetime import datetime, timedelta, timezone
 import json
-import hashlib
-import re
 
 try:
     from . import publish_reader_v3 as publication
@@ -82,45 +80,3 @@ def run(store, *, apply=False, now=None):
             "released_input_objects": len(inputs), "released_input_roots": len(roots),
             "released_input_pages": sum(item["pages"] for item in roots.values()),
             "skipped_input_books": {}}
-
-
-INPUT_ROOT = re.compile(r"objects/[0-9a-f]{2}/([0-9a-f]{64})/[0-9a-f]{16}/ocr-input")
-
-
-def _releasable_roots(store, active, ocr, generation):
-    """Return {root: journal item} for one book, or a short skip reason."""
-    def read(ref):
-        return store.read_bytes(ref["bucket"], ref["path"])
-    reading = publication.v3.decode(publication.v3.verified_read(active["resource"], read))
-    if not reading.get("text_layer"):
-        return "no-published-text"
-    try:
-        raw = store.read_bytes(publication.v3.shared.PDF_PAGES_BUCKET, ocr["ocr_manifest"])
-    except (FileNotFoundError, KeyError):
-        return "ocr-manifest-missing"
-    if len(raw) != ocr.get("ocr_manifest_bytes") or hashlib.sha256(raw).hexdigest() != ocr.get("ocr_manifest_sha256"):
-        return "ocr-manifest-checksum"
-    manifest = json.loads(raw)
-    source = active["source_sha256"]
-    if (manifest.get("complete") is not True or manifest.get("page_count") != reading["page_count"]
-            or manifest.get("source_sha256") != source
-            or [page.get("p") for page in manifest.get("pages", [])] != list(range(1, reading["page_count"] + 1))):
-        return "ocr-incomplete"
-    roots = {}
-    for page in manifest["pages"]:
-        path = page.get("i")
-        if not path or "/ocr-input/" not in path:
-            continue
-        if page.get("ibucket", publication.v3.shared.PDF_OCR_INPUT_BUCKET) != publication.v3.shared.PDF_OCR_INPUT_BUCKET:
-            return "input-bucket"
-        root = path.rsplit("/", 1)[0]
-        match = INPUT_ROOT.fullmatch(root)
-        if not match or match[1] != source:
-            return "input-root-identity"
-        item = roots.setdefault(root, {"bucket": publication.v3.shared.PDF_OCR_INPUT_BUCKET, "root": root,
-                                       "source_sha256": source, "ocr_manifest_sha256": ocr["ocr_manifest_sha256"],
-                                       "released_after_generation": generation, "pages": 0,
-                                       "released_at": datetime.now(timezone.utc)
-                                                       .replace(microsecond=0).isoformat()})
-        item["pages"] += 1
-    return roots or "no-ocr-inputs"
