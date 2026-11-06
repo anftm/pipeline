@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="bha-tts-client-version" content="__BHA_TTS_CLIENT_VERSION__">
+  <title>BHA Search Lite</title>
+  <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
+  <link rel="dns-prefetch" href="//cdnjs.cloudflare.com">
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+  <link rel="dns-prefetch" href="//cdn.jsdelivr.net">
+  <link rel="preconnect" href="https://huggingface.co" crossorigin>
+  <link rel="dns-prefetch" href="//huggingface.co">
+  <script>
+    fetch("/api/ping", { cache: "no-store" }).catch(() => {});
+    if (!location.search && !location.hash) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 25000);
+      window.__bhaBootstrapPromise = fetch("/api/bootstrap", { signal: controller.signal })
+        .then((response) => response.ok ? response.json() : null)
+        .catch(() => null)
+        .finally(() => clearTimeout(timer));
+    }
+  </script>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="force-desktop">
+
+<header id="header">
+  <div class="header-left">
+    <button id="left-toggle" class="icon-btn" aria-label="打开搜索过滤" aria-controls="left-sidebar" aria-expanded="true"><span class="ui-icon ui-icon-menu" aria-hidden="true"></span></button>
+    <a class="header-logo" href="/" title="BHA Search"><span>BHA Search</span></a>
+  </div>
+  <div class="header-center">
+    <form id="search-form" class="search-box">
+      <span class="search-icon"><span class="ui-icon ui-icon-search" aria-hidden="true"></span></span>
+      <input id="search-input" class="search-input" type="search" aria-label="搜索档案全文" placeholder="搜索档案全文..." autocomplete="off" spellcheck="false">
+      <kbd class="search-kbd">/</kbd>
+    </form>
+  </div>
+  <div class="header-right">
+    <button id="parse-btn" class="icon-btn" type="button" aria-label="打开待解析队列" aria-controls="left-sidebar" aria-pressed="false" title="待解析"><svg class="parse-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"></path><path d="m15 5 4 4"></path></svg></button>
+    <button id="mobile-toggle-btn" class="icon-btn" aria-label="切换手机或电脑模式" aria-pressed="false" title="手机/电脑模式切换"><span id="mobile-toggle-icon" class="ui-icon ui-icon-desktop" aria-hidden="true"></span></button>
+    <button id="theme-btn" class="icon-btn" aria-label="切换到白天模式" title="白天模式"><svg class="theme-icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M20 15.5A8 8 0 1 1 8.5 4 6.5 6.5 0 0 0 20 15.5Z"/></svg></button>
+  </div>
+
+</header>
+<div id="app-body" class="app-body">
+
+  <aside id="left-sidebar" class="sidebar left-sidebar" aria-labelledby="sidebar-title">
+    <div class="sidebar-header"><span id="sidebar-title">搜索过滤</span><button id="sidebar-expand" class="icon-btn-sm sidebar-expand-btn" aria-label="展开过滤栏" aria-expanded="false" title="展开/还原过滤栏"><span class="sidebar-expand-icon" aria-hidden="true"></span></button></div>
+    <div class="sidebar-content">
+      <div class="filter-section" id="exact-search-section">
+        <label class="toggle-row">
+          <span class="toggle-label">精准搜索</span>
+          <input id="exact-toggle" type="checkbox" checked>
+          <span class="toggle-switch"></span>
+        </label>
+      </div>
+      <div class="filter-section" id="preview-highlight-section">
+        <label class="toggle-row">
+          <span class="toggle-label">预览高亮</span>
+          <input id="preview-highlight-toggle" type="checkbox" checked>
+          <span class="toggle-switch"></span>
+        </label>
+      </div>
+      <div class="filter-section" id="fulltext-toggle-section">
+        <label class="toggle-row">
+          <span class="toggle-label">全文搜索</span>
+          <input id="fulltext-toggle" type="checkbox" checked>
+          <span class="toggle-switch"></span>
+        </label>
+      </div>
+      <div class="filter-section" id="parse-page-size-section">
+        <div class="filter-section-title">每页数量</div>
+        <select id="page-size" class="sort-select"><option value="10">10</option><option value="20" selected>20</option><option value="50">50</option><option value="100" id="parse-page-size-option" hidden>100</option></select>
+      </div>
+      <div class="filter-section">
+        <div class="filter-section-title">排序</div>
+        <select id="sort-filter" class="sort-select"><option value="relevance">相关度</option><option value="date_desc">日期新到旧</option><option value="date_asc">日期旧到新</option><option value="source">来源</option><option value="title">标题</option></select>
+      </div>
+      <div class="filter-section">
+        <button class="filter-section-toggle" data-filter-toggle="source" aria-controls="filter-body-source" aria-expanded="true"><span>来源过滤</span><span class="filter-toggle-glyph" aria-hidden="true">▾</span></button>
+        <div id="filter-body-source" class="filter-section-body" data-filter-body="source">
+          <input id="source-search" class="size-input" aria-label="搜索来源" placeholder="搜索来源">
+          <div id="source-filter" class="filter-choice-list"><div class="sidebar-loading">加载中...</div></div>
+        </div>
+      </div>
+      <div class="filter-section">
+        <button class="filter-section-toggle" data-filter-toggle="author" aria-controls="filter-body-author" aria-expanded="true"><span>作者过滤</span><span class="filter-toggle-glyph" aria-hidden="true">▾</span></button>
+        <div id="filter-body-author" class="filter-section-body" data-filter-body="author">
+          <input id="author-search" class="size-input" aria-label="搜索作者" placeholder="搜索作者">
+          <div id="author-filter" class="filter-choice-list"></div>
+        </div>
+      </div>
+      <div class="filter-section">
+        <button class="filter-section-toggle" data-filter-toggle="tag" aria-controls="filter-body-tag" aria-expanded="true"><span>标签过滤</span><span class="filter-toggle-glyph" aria-hidden="true">▾</span></button>
+        <div id="filter-body-tag" class="filter-section-body" data-filter-body="tag">
+          <input id="tag-search" class="size-input" aria-label="搜索标签" placeholder="搜索标签">
+          <div id="tag-filter" class="filter-choice-list"></div>
+        </div>
+      </div>
+      <div class="filter-section">
+        <div class="filter-section-title">档案库</div>
+        <select id="archive-filter" class="sort-select"><option value="">全部</option></select>
+      </div>
+      <div class="filter-section">
+        <div class="filter-section-title">出版物类型</div>
+        <select id="type-filter" class="sort-select"><option value="">全部</option></select>
+      </div>
+      <div class="filter-section">
+        <div class="filter-section-title"><span>日期</span><button id="date-clear" class="text-btn-sm" type="button" hidden>清除日期</button></div>
+        <div id="period-presets" class="period-presets"></div>
+        <div class="date-range-picker">
+          <div class="date-subtitle">日期范围</div>
+          <div class="date-range-row">
+            <span class="date-range-label">开始</span>
+            <input id="date-from-year" class="date-select year-input" aria-label="开始年份" inputmode="numeric" placeholder="年" autocomplete="off">
+            <select id="date-from-month" class="date-select" aria-label="开始月份"></select>
+            <select id="date-from-day" class="date-select" aria-label="开始日期"></select>
+          </div>
+          <div class="date-range-row">
+            <span class="date-range-label">结束</span>
+            <input id="date-to-year" class="date-select year-input" aria-label="结束年份" inputmode="numeric" placeholder="年" autocomplete="off">
+            <select id="date-to-month" class="date-select" aria-label="结束月份"></select>
+            <select id="date-to-day" class="date-select" aria-label="结束日期"></select>
+          </div>
+          <div id="date-error" class="date-error" hidden></div>
+        </div>
+        <div class="date-term-section">
+          <div class="date-term-header"><span class="date-subtitle">包含日期</span><button id="date-term-add" class="text-btn-sm" type="button">添加</button></div>
+          <div id="date-terms" class="date-terms"></div>
+        </div>
+      </div>
+    </div>
+
+  </aside>
+
+  <main id="main-content" class="main-content">
+    <div id="status-bar" class="status-bar">
+      <div class="status-left">
+        <span id="result-count" class="result-count" role="status"></span>
+        <button id="clear-filters" class="text-btn" hidden>清空筛选</button>
+        <span id="status-text" class="did-you-mean" role="status" aria-live="polite"></span>
+        <span id="index-progress" class="did-you-mean" role="status" aria-live="polite"></span>
+      </div>
+    </div>
+    <div id="results-container" class="results-container" role="region" aria-label="搜索结果" aria-busy="false">
+      <div id="preview-panel" class="preview-panel" role="dialog" aria-modal="true" aria-label="文章预览" tabindex="-1" hidden></div>
+      <div id="results" class="results-list" role="list"></div>
+      <div id="empty-state" class="empty-state" style="display:none">
+        <div class="empty-title">没有找到结果</div>
+        <div class="empty-desc">试试其他关键词</div>
+        <button id="empty-random-btn" class="random-big-btn" type="button">随机来一篇</button>
+      </div>
+    </div>
+
+  </main>
+
+</div>
+<div id="load-info" class="load-info" role="group" aria-label="分页和随机文章">
+  <button id="prev-page" class="text-btn-sm">上一页</button>
+  <span class="page-jump">第 <input id="page-input" class="page-input" type="number" aria-label="页码" min="1" value="1"> / <span id="page-total">1</span> 页</span>
+  <button id="next-page" class="text-btn-sm">下一页</button>
+  <button id="random-book-btn" class="random-book-btn" type="button">随机来一篇</button>
+</div>
+<div id="overlay" class="overlay" style="display:none"></div>
+<div id="year-picker" class="year-picker" hidden></div>
+<div id="toast" class="toast" role="status" aria-live="polite" aria-atomic="true" hidden></div>
+<section id="speech-panel" class="speech-panel" aria-label="朗读设置" hidden>
+  <div class="speech-heading"><span id="speech-title">朗读</span><button type="button" id="speech-collapse" class="icon-btn-sm" aria-label="收起设置，继续播放" title="收起，继续播放"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M5 12h14"/></svg></button><button type="button" id="speech-stop" class="icon-btn-sm" aria-label="停止朗读" title="停止朗读">×</button></div>
+  <p id="speech-status" class="speech-note" role="status">从当前阅读位置开始</p>
+  <label class="speech-setting" for="speech-pitch"><span>音高</span><input id="speech-pitch" type="range" min="-3" max="3" step="1" value="0"><output id="speech-pitch-value">0</output></label>
+  <label class="speech-setting" for="speech-speed"><span>语速</span><input id="speech-speed" type="range" min="0.5" max="2" step="0.05" value="1"><output id="speech-speed-value">1.0×</output></label>
+  <label class="speech-setting" for="speech-timer"><span>睡眠定时</span><select id="speech-timer"><option value="off">关闭</option><option value="clip">读完当前句</option><option value="5">5 分钟</option><option value="15">15 分钟</option><option value="30">30 分钟</option><option value="60">60 分钟</option></select></label>
+  <div class="speech-transport"><button type="button" id="speech-previous" class="text-btn" aria-label="上一句">上一句</button><button type="button" id="speech-play" class="speech-play">暂停</button><button type="button" id="speech-next" class="text-btn" aria-label="下一句">下一句</button></div>
+  <div class="speech-links"><button type="button" id="speech-visible" class="text-btn">从当前阅读位置开始</button><button type="button" id="speech-locate" class="text-btn">回到播放位置</button></div>
+</section>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

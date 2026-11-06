@@ -17,7 +17,7 @@
 - `scripts/submit_proofread.py` 及两个投稿 workflow：校订/拆分校验预览身份与基线、检查 archive 分支变化，对新旧 auto-merge 标记一律保留 PR 并创建人工审核 issue；PR/issue 不完整响应及部分效果停止；workflow 使用 `queue: max`。**`main()` 入口仍由 `require_paused_delivery()` 无条件拒绝，未恢复后台接收。**
 - `.github/workflows/bha-update-index.yml` 与 `scripts/bha_reindex_result.py`：增加 job、目标版本和 snapshot 状态确认；workflow 目前禁用，且其15分钟定时任务启用后可能真正写 parsed、tracker、索引和 snapshot，不是只读。生产 reindex secret 的值及鉴权有效性未知。
 - `tests/test_bha_minimal_recovery.py`、`tests/test_bha_reindex_result.py` 等是本地模拟验证；2026-11-06 相关189项测试通过。不能推断真实 Actions、PR、回执或生产 reindex 已验收。
-- Space 的配套完整候选目前在本机 `/root/opencode-chm-scratch-20261102/bha-minimal-recovery-20261104/`，不是本分支或线上 Space 的当前实现。该目录包含 `app/document_identity.py`、`app/proofread_api.py`、`app/parse_api.py`、`app/parse_core.py`、`app/reindex_api.py`、`app/bucket_snapshot.py` 和测试。**不可直接覆盖线上当前 `app/main.py`、`scripts/start.sh` 或 snapshot 清理保护**。原候选基于更旧 Space 版本，合并须按当前 `decd6c...` 基线逐文件审查。
+- Space 配套离线候选及测试已保存到本分支 `bha-recovery-candidate/`；它**不是**线上 Space 的当前实现，也不含此前本地独立实验/桥文件。完整本地候选另在 `/root/opencode-chm-scratch-20261102/bha-minimal-recovery-20261104/`。**不可直接覆盖线上当前 `app/main.py`、`scripts/start.sh` 或 snapshot 清理保护**；候选基于更旧 Space 版本，合并须按当前 `decd6c...` 基线逐文件审查。先读候选目录 README。
 - 新版 `content_hash` 会改变所有文档预览基线；即使先前已发布草稿保护，**已经打开的旧页面**仍可能在 hash 不匹配时删除其拆分草稿，或收到普通202时清稿。新页面只能保留/复制部分旧稿；旧页面退出时机无法证明。当前候选 hash 不应无提示部署。
 - 同一 Space 进程的不确定状态只在内存中，重启/多副本后消失；通用202不是持久接收或真实结果，前端同表单防重也不跨刷新或设备。真实持久接收、独立可查回执、跨运行去重、外部写者隔离及 PR/issue/crop 部分成功的恢复均未完成。BHA 索引桶 `vomebook/bha-data` 为公开桶，**不要存投稿正文、capability 或凭据**。
 

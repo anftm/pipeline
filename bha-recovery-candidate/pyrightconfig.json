@@ -1,0 +1,29 @@
+{
+  "include": [
+    "app/bootstrap_api.py",
+    "app/bucket_probe.py",
+    "app/bucket_snapshot.py",
+    "app/config.py",
+    "app/data_loader.py",
+    "app/document_identity.py",
+    "app/doc_store.py",
+    "app/facet_store.py",
+    "app/indexer.py",
+    "app/main.py",
+    "app/parse_api.py",
+    "app/parse_core.py",
+    "app/pipeline_dispatch.py",
+    "app/preview_api.py",
+    "app/proofread_api.py",
+    "app/proofread_core.py",
+    "app/reindex_api.py",
+    "app/runtime.py",
+    "app/search_logic.py",
+    "app/search_api.py",
+    "app/search_store.py",
+    "app/source_files.py",
+    "app/storage_lock.py"
+  ],
+  "pythonVersion": "3.11",
+  "typeCheckingMode": "strict"
+}

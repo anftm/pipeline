@@ -1,0 +1,27 @@
+"use strict";
+// Exercise the actual, marked source section rather than a copied planner.
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
+const vm = require("node:vm");
+const source = fs.readFileSync(path.join(__dirname, "../static/tts-client.js"), "utf8");
+const start = "// BEGIN STRICT SPEECH PLANNER", end = "// END STRICT SPEECH PLANNER";
+assert.equal(source.split(start).length, 2);
+assert.equal(source.split(end).length, 2);
+const planner = source.slice(source.indexOf(start), source.indexOf(end) + end.length);
+const sandbox = {};
+vm.runInNewContext(planner, sandbox);
+const plan = sandbox.CCRDSpeechPlan;
+assert.ok(plan);
+const text = "第一句含😀和编号123。第二句继续，最后结束。";
+assert.equal(plan.safe(text, text.indexOf("😀") + 1), text.indexOf("😀"));
+const batch = plan.batch(text, 0, true);
+assert.equal(batch.text, text);
+assert.equal(batch.segment_ends.at(-1), batch.text.length);
+assert.ok(batch.segment_ends.every((end, i, ends) => end > (i ? ends[i - 1] : 0)));
+assert.equal(plan.partIndex(batch, batch.start), 0);
+assert.equal(plan.partIndex(batch, batch.end + 1), -1);
+assert.equal(plan.sentence(text, text.indexOf("第二句")).start, text.indexOf("第二句"));
+assert.equal(plan.previousSentence(text, text.indexOf("第二句")), 0);
+assert.equal(plan.batch("", 0), null);
+console.log("speech planner UTF-16, segmentation and navigation passed");

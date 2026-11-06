@@ -1,0 +1,8 @@
+[tool.mutmut]
+# Start with the entire real parse validator, not a handful of seeded edits.
+# The result is scoped to this module and must not be presented as whole-app mutation coverage.
+source_paths = ["app/"]
+only_mutate = ["app/parse_core.py"]
+pytest_add_cli_args_test_selection = ["tests/test_parse_core.py"]
+use_setproctitle = false
+use_git_change_detection = false
