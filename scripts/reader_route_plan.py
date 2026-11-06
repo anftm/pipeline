@@ -63,7 +63,9 @@ def index_kind(path: str) -> str:
         return 'static-pdf-stream-index'
     if path.startswith('chapters/ebook/'):
         return 'ebook-chapter-stream-index'
-    if path.startswith('pages/image/'):
+    if path == 'pages/image/index.json':
+        return 'image-page-stream-index'
+    if path == 'pages/image/index-v2.json':
         return 'image-stream-index'
     if path.startswith('media/'):
         return 'media-stream-index'
@@ -115,6 +117,8 @@ def inspect_source_indexes(store, key: str) -> dict:
             continue
         try:
             payload = json.loads(raw)
+            # Both image index versions remain sidecar inputs, including
+            # historical TIFF fallbacks, but they have different kind values.
             if (not isinstance(payload, dict) or payload.get('version') != 1
                     or payload.get('kind') != index_kind(path) or not isinstance(payload.get('files'), list)):
                 raise ValueError('invalid source index')

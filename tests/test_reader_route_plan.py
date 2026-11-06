@@ -153,6 +153,24 @@ class RoutePreviewTests(unittest.TestCase):
         self.assertFalse(incomplete['complete'])
         self.assertEqual({e['error'] for e in incomplete['errors']}, {'missing', 'invalid-index'})
 
+    def test_historical_image_index_and_v2_are_both_scanned(self):
+        store, _ = setup_store()
+        for bucket, path, required in plan.INDEXES:
+            if required or path in {'pages/image/index.json', 'pages/image/index-v2.json'}:
+                kind = 'image-page-stream-index' if path == 'pages/image/index.json' else plan.index_kind(path)
+                files = [{'key': KEY, 'manifest': 'historical-image'}] if path == 'pages/image/index.json' else []
+                store.objects[bucket, path] = publication.encode({'version': 1, 'kind': kind, 'files': files})
+        with patch.object(store, 'list_files', side_effect=AssertionError('unexpected bucket listing'), create=True):
+            result = plan.inspect_source_indexes(store, KEY)
+        self.assertTrue(result['complete'], result['errors'])
+        self.assertEqual([row['path'] for row in result['matched_indexes']], ['pages/image/index.json'])
+        self.assertEqual(store.writes, [])
+        store.objects[ASSETS, 'pages/image/index.json'] = publication.encode(
+            {'version': 1, 'kind': 'unknown-image-kind', 'files': []})
+        result = plan.inspect_source_indexes(store, KEY)
+        self.assertFalse(result['complete'])
+        self.assertIn({'bucket': ASSETS, 'path': 'pages/image/index.json', 'error': 'invalid-index'}, result['errors'])
+
     def test_sidecar_requires_valid_data_and_limited_decompression(self):
         for raw in (b'bad', gzip.compress(b'[]'), gzip.compress(b'{"v": 2, "f": {}}')):
             with self.subTest(raw=raw), self.assertRaises((ValueError, OSError)):
