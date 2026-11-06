@@ -6,7 +6,7 @@
 
 - `search-daily-sync.yml`：生成搜索数据并同步两站；目前仍将生成数据提交到站点 Git，尚未解耦。
 - `bha-*`、`proofread-*`：BHA 数据和校订处理。OCR 生产和冲突审核入口已移除，但 BHA 历史文本输入仍在使用。
-- `reader-*-stream.yml`、`reader-chm-repair.yml`、`reader-office-chapters.yml`、`reader-v3-publish.yml`：Reader 资源转换和发布。`reader-static-pdf-stream.yml` 把 PPT/WPS/PS 等源文件转成供直接阅读的完整 PDF，不是已退场的 PDF/DjVu 逐页渲染链。`migrate-derived` 已部署，用于将匹配的 PDF 索引切换到现有 objects，不删除桶对象；真实切换仍被写者隔离阻塞。`remove-route` 撤回单条派生 Reader 路由的功能仍仅在本地，未部署。故障、中断和外部写者风险见 `README.md`。
+- `reader-*-stream.yml`、`reader-chm-repair.yml`、`reader-office-chapters.yml`、`reader-v3-publish.yml`：Reader 资源转换和发布。`reader-static-pdf-stream.yml` 把 PPT/WPS/PS 等源文件转成供直接阅读的完整 PDF，不是已退场的 PDF/DjVu 逐页渲染链。`migrate-derived` 已部署，用于将匹配的 PDF 索引切换到现有 objects，不删除桶对象；真实切换仍被写者隔离阻塞。`remove-route` 撤回单条派生 Reader 路由的功能已部署，但尚未执行实际撤回。故障、中断和外部写者风险见 `README.md`。
 - 精确桶文件查询留作本地 `scripts/bucket_file.py` 命令，不再单设工作流。`scripts/reader_route_plan.py` 可预览单书路由，但不授权删除。
 - `reader-gc.yml`、`reader-maintenance.yml`、`reader-gc-collect.yml`、`reader-gc-ccrd.yml`：原有全桶分析和 GC 路径。精确 page 文件计划/应用已部署到现有 collector 菜单，但 collector 仍禁用；仍须维护隔离、四桶图、两站、版本、CHM 检查与外部停写。部分定时任务可写入或删除。
 
@@ -14,6 +14,6 @@
 
 固定 CHM 退役、预检、特定批次、终态和 GC 放行工作流均从 Actions 入口删除，包括它们的外层与 `-inner`。普通 `reader-chm-repair.yml` 不在其中。旧 CHM 脚本、测试、维护 journal 和桶对象暂未删除：某些旧 GC 路径仍依赖它们；**删除入口不表示旧事务完成、隔离已恢复或资源可被自动 GC**。如确需恢复历史事务，须先核对线上状态并从 Git 历史恢复相应入口。
 
-PDF/DjVu 的 OCR 前置页面流生产器及其旧 manifest 写入迁移命令已在本地移除，历史 page manifest 的只读引用解析保留；这些新移除尚未部署。`pdf-account-worker.yml` 暂为旧 GC 护栏所依赖的无执行库存哨兵，不代表外部写者已隔离。此次同时移除固定电子书交接、两个一次性 producer 审计及重复 media backfill 的 Actions 入口；脚本、计划和历史记录仍在。日常 media 工作流手动 `apply=true, limit=0` 覆盖 backfill 目的，但其 codec 检查与空矩阵行为不同；旧交接不能再从 Actions 续跑。
+PDF/DjVu 的 OCR 前置页面流生产器及其旧 manifest 写入迁移命令已移除并部署，历史 page manifest 的只读引用解析保留。`pdf-account-worker.yml` 暂为旧 GC 护栏所依赖的无执行库存哨兵，不代表外部写者已隔离。此次同时移除固定电子书交接、两个一次性 producer 审计及重复 media backfill 的 Actions 入口；脚本、计划和历史记录仍在。日常 media 工作流手动 `apply=true, limit=0` 覆盖 backfill 目的，但其 codec 检查与空矩阵行为不同；旧交接不能再从 Actions 续跑。
 
-截至 2026-11-06，中央仓 Actions 已启用，`search-daily-sync.yml`、`search-directory-tests.yml`、`ops-keep-spaces-alive.yml`、`search-spaces-ci.yml` 和 `reader-v3-publish.yml` 已启用并完成基本运行；其余工作流仍禁用。Reader 发布器现为手动入口，不再定时执行退役 journal。此状态不是其他仓库或桶凭据已隔离的证明；本次候选提交后仍需线上工作流与消费者核验。
+截至 2026-11-06，中央仓 Actions 已启用，`search-daily-sync.yml`、`search-directory-tests.yml`、`ops-keep-spaces-alive.yml`、`search-spaces-ci.yml` 和 `reader-v3-publish.yml` 已启用并完成基本运行；其余工作流仍禁用。Reader 发布器现为手动入口，不再定时执行退役 journal。此状态不是其他仓库或桶凭据已隔离的证明；真实迁移和清理仍需单独核验。

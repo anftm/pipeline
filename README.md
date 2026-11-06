@@ -4,7 +4,7 @@
 
 ## 当前状态
 
-- 本地已移除本项目的文档 OCR 生产、校订、OCR 搜索发布，以及其前置 PDF/DjVu 转页面流和页面流写入入口；旧 page manifest 只作为历史引用读取。BHA 上游仍提供名为 `ocr_cache` / `ocr_patch` 的历史文本分支，解析现有 BHA 数据仍使用它们；该上游解析依赖尚未替换。浏览器直接阅读 PDF/DjVu 原件、已有派生 PDF，以及不渲染图片的文件健康检查不属于 OCR 页面流。
+- Pipeline 已移除本项目的文档 OCR 生产、校订、OCR 搜索发布，以及其前置 PDF/DjVu 转页面流和页面流写入入口；旧 page manifest 只作为历史引用读取。BHA 上游仍提供名为 `ocr_cache` / `ocr_patch` 的历史文本分支，解析现有 BHA 数据仍使用它们；该上游解析依赖尚未替换。浏览器直接阅读 PDF/DjVu 原件、已有派生 PDF，以及不渲染图片的文件健康检查不属于 OCR 页面流。
 - 旧 OCR 数据、桶对象、部分元数据及两个搜索站的历史阅读代码仍存在，本次没有撤下线上 OCR 数据或完成全站下线。Reader/GC 对旧引用的读取用于避免误把其他资源判为可删；已移除的转换代码可从 Git 历史查阅。
 - 原先用于 BHA OCR 补丁的冲突审核和阻塞检查已删除；后续解析以所选来源版本及补丁为准，不再阻塞等待旧审核流程，结果可能与过去的冲突处理不同。
 - `pdf-account-worker.yml` 仅是现有桶维护检查识别历史工作流库存的无执行哨兵；不得把文件存在当作外部写者已隔离。
@@ -45,9 +45,9 @@ python3 scripts/reader_route_plan.py --repo 'VoiceOfML/SomeRepo' --path '目录/
 
 `python3 scripts/reader_page_cleanup.py --graph-report output/gc/reader-gc-report.json --output output/page-cleanup.json` 可以从现有跨桶图的完整报告中分出 page 桶的 `derived/` 和 `objects/` 候选；缺桶或图不完整不输出候选。输出仍只是待审核报告，不能直接删除。
 
-原手动 `reader-gc-collect.yml` 提供 `scope=page-plan` / `scope=page-apply` 两步，在现有锁内直接执行：在已隔离并排空生产者的维护窗口，以 `resume_run={"paths":["derived/精确路径"]}` 生成计划，审阅 `page-exact-plan` artifact 和日志 SHA；随后设置 `apply=true`，并通过 `resume_run={"plan_run":"运行ID","plan_sha256":"计划SHA","external_writers_stopped":true}` 应用。应用会重新构建四桶图、核验两站及对象版本、重新验证所遍历的嵌套清单版本、要求额外确认外部写者已停，再记录 intent 并发送一次精确批次；部分成功或响应丢失时只可重新盘点，不会自动重试。本地计划有效期改为 24 小时、artifact 保留两天，一次最多 1000 个键；这只延长审核期限，不延长引用、消费者或对象版本证明，应用时仍须重新扫描和复核。长时间扫描超过期限仍会失败，尚未实测真实桶上的耗时。它仍复用旧 CHM 事务检查及生产者 fence；若任何证明不足便停止，不能仅靠勾选外部确认绕过。旧 GC 尚未整体简化。
+原手动 `reader-gc-collect.yml` 提供 `scope=page-plan` / `scope=page-apply` 两步，在现有锁内直接执行：在已隔离并排空生产者的维护窗口，以 `resume_run={"paths":["derived/精确路径"]}` 生成计划，审阅 `page-exact-plan` artifact 和日志 SHA；随后设置 `apply=true`，并通过 `resume_run={"plan_run":"运行ID","plan_sha256":"计划SHA","external_writers_stopped":true}` 应用。应用会重新构建四桶图、核验两站及对象版本、重新验证所遍历的嵌套清单版本、要求额外确认外部写者已停，再记录 intent 并发送一次精确批次；部分成功或响应丢失时只可重新盘点，不会自动重试。计划有效期为 24 小时、artifact 保留两天，一次最多 1000 个键；这只延长审核期限，不延长引用、消费者或对象版本证明，应用时仍须重新扫描和复核。长时间扫描超过期限仍会失败，尚未实测真实桶上的耗时。它仍复用旧 CHM 事务检查及生产者 fence；若任何证明不足便停止，不能仅靠勾选外部确认绕过。旧 GC 尚未整体简化。
 
-page 迁移和精确删除代码已部署；Reader 发布器已启用并完成只读 `inspect`，迁移 apply 仍被未核实的外部写者与历史仓库权限阻塞，page 精确删除所在 collector 仍禁用。单条路由下线、PDF/DjVu 页面流生产代码移除和其他大规模 OCR 清理变更仍只在本地。历史 CHM 固定批次的 19 个工作流入口在本地已移除，但尚未部署，旧全桶 GC 及其阻塞也未整体重写；详见 `.github/WORKFLOWS.md`。
+page 迁移和精确删除代码已部署；Reader 发布器已启用并完成只读 `inspect` 和迁移预演，迁移 apply 仍被未核实的外部写者与历史仓库权限阻塞，page 精确删除所在 collector 仍禁用。单条路由下线入口、Pipeline 内 PDF/DjVu 页面流生产和 OCR 生产代码移除也已部署；尚未执行路由撤回、索引迁移或物理删除。历史 CHM 固定批次的 19 个工作流入口已移除，但旧全桶 GC 及其阻塞尚未整体重写；详见 `.github/WORKFLOWS.md`。
 
 ## 本地检查
 
