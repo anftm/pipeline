@@ -1,0 +1,103 @@
+CCRD single-TXT automation handoff — 2026-11-06
+================================================
+
+Status: NOT DEPLOYED. This document is not a publisher or an authorization to
+enable one. GitHub Actions and ordinary GC must not be started from this note.
+
+Goal
+----
+Detect changes to the upstream text "毛主席1975-1976年部分指示补遗"; when
+changed, use one captured byte snapshot to update only its existing CW:0 TXT,
+the affected CW full-text index and necessary server-side metadata, preserving
+CCRD, CW, RMRB and PLA and all other routes and resources. If unchanged, skip.
+The user accepts temporarily stale browser caches: do not clear user storage,
+bookmarks or reading progress merely to force immediate display.
+
+Current production and local state
+----------------------------------
+* At the 2026-11-06 read-only check, central anftm/pipeline main was
+  5abc978f45f3bc4717e0ef460f800a81e069564a. All 53 listed workflows were
+  disabled_manually; 8 existing runs were completed. Actions global policy GET
+  returned 403; it is UNKNOWN, not proven enabled or disabled. Recheck at the
+  time of any action. Concurrent authors are updating central/HF/Pages.
+* CCRD Space vomebook/Search repository and running revision were
+  229978dd7523456e3db85dbcd31a9a5f81743474. At that observation the four-source
+  activation was ready, and the upstream text matched the Space file, API
+  download, preview and manifest override. Its SHA-256 was
+  d791cfec21127e18548c5276e879421f09d0815eb2833b344925c83d1d90608b.
+  This is a time-limited observation, not a guarantee about future upstream.
+* The actual CW database's entire 796155904 bytes were streamed read-only on
+  2026-11-04 and its SHA-256 matched manifest
+  ebbca8f556f09f6d8db44fa2a94b3d3d6a159f40abe83a3e4ed8b57cfac4d945.
+  No production database copy was saved. This does not prove all SQLite
+  semantics, external writer isolation or non-target postings correctness.
+* The latest combined local-only candidate is commit
+  ca537983655954e4edf0edb54ebf7efd4334f860 in the worktree
+  /root/opencode-chm-scratch-20261102/pipeline-ccrd-single-source-20261103.
+  It has NOT been pushed. It is based on an older central tree and must NOT be
+  pushed wholesale: doing so would restore retired OCR workflows and overwrite
+  later central cleanup. Local models intentionally say publication_ready=false.
+* The local minimal manual read-only checker is commit
+  a0ec4880f4b71bc32d36b081f2c50dcf8c058306 in
+  /root/opencode-chm-scratch-20261102/pipeline-ccrd-readonly-ready-20261104.
+  It is NOT deployed and it does NOT automatically update TXT or indexes.
+  Neither candidate should be mistaken for a running automation.
+* Local detailed handoff, when this filesystem is available:
+  /root/opencode-chm-scratch-20261102/reader-store-deployment-handoff-20261103.md
+  and workflow-cleanup-historical-dependencies-20261103.md in that directory.
+  Local paths/commits may be unavailable to a new machine; the only published
+  artifact in this handoff is this text document, not the candidate code.
+
+Why not enable the existing workflow
+------------------------------------
+.github/workflows/publish-ccrd-index.yml remains disabled. Its legacy writer is
+for two sources; update_ccrd_source_txt.py also calls migrate_space(), can move
+or delete legacy CW subdirectories and stages all CW. Current four-source guards
+are designed to reject legacy publication, not to provide the requested updater.
+Do not enable/retry it, do not invoke publish_ccrd_newspapers.py as a substitute,
+and do not reactivate old remote OCR.
+
+Work remaining before production activation
+--------------------------------------------
+1. Implement a real bounded updater/writer based on a fresh single TXT snapshot;
+   preserve other source bytes, metadata, paths and source URL provenance.
+   Existing local code is a model, not a complete operational implementation.
+2. Reconcile the four-source manifest and garbage collection. The current v2
+   lifecycle contract requires metadata and 52 newspaper archives under the
+   new generation. The one-hop archive reuse shadow is only a synthetic test;
+   production GC currently rejects those cross-generation references. Verify
+   every preserved reference and design either safe reuse or safe relocation.
+3. Prove real-scale CW candidate construction and bounded resource use. The
+   in-memory prototype repeatedly reconstructs SQLite and has not been run on
+   the real 796 MB database. A checksum of the old database is not a successful
+   candidate build or a complete non-target semantic validation.
+4. Establish writer isolation, coordinated Space/index activation, durable
+   receipts and explicit recovery for timeouts/partial failures. An ETag is not
+   a monotonic version or proof against ABA; no VersionId was observed. A
+   response timeout does not authorize blind retry. Consumer status/counts alone
+   are not an exact loaded-byte receipt. Validate new TXT and four-source search
+   against the running consumer after publication.
+5. Re-read live main, workflows, run states, HF/Pages commits and other sessions'
+   ownership immediately before any push or activation. The parallel PDF route
+   migration had required central workflows to remain stopped; coordinate with
+   its owner rather than changing that invariant. Enable only a reviewed entry
+   after all other protections and permissions are verified.
+
+Protection boundaries
+---------------------
+Do not delete/migrate unrelated CW material or source files. Preserve original
+CHM, PDF, DjVu, PS, AAC, native text, chapters, bookmarks, old routes and
+historical journals. Preserve the 52 previously identified ebook/CHM processing
+pins; concurrent PDF work has additional pins. Do not re-run the failed CHM
+workflow, old handoff or ordinary sidecar apply. Do not resume old remote OCR,
+BHA submission or GC as a side effect. Avoid overwriting other authors' changes.
+The shared pipeline-subset worktree contains significant uncommitted work; do
+not reset, clean or replace it. Do not create additional backups.
+
+Earlier test evidence
+---------------------
+For local ca53798: Python 3.11 synthetic CCRD tests 93 passed; system Python
+CCRD/BHA/GC 308 ran with 29 skipped for missing SQLite serialization, those
+capabilities were covered under 3.11; Reader/GC/CHM 274 passed. A few live
+read-only search queries found CW:0. Tests are not an end-to-end production
+deployment, durable recovery, or permission to enable Actions or GC.
