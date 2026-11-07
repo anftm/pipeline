@@ -96,6 +96,8 @@ class SidecarReconciliationTests(unittest.TestCase):
         value = self.prepare()
         self.store.objects[audit.ASSETS, value['snapshot_path']] = b'foreign'
         before = copy.deepcopy(self.store.objects)
+        with self.assertRaisesRegex(ValueError, 'snapshot conflicts'):
+            self.prepare()
         with self.assertRaisesRegex(ValueError, 'immutable object conflict'):
             sidecar_reconcile.apply(self.store, self.api, value)
         self.assertEqual(self.store.objects[audit.ASSETS, value['snapshot_path']], b'foreign')

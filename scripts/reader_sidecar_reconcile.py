@@ -93,6 +93,13 @@ def prepare(store, api, *, expected_index, expected_sidecar, expected_catalog, e
     updated['generations'][current].update(status='superseded', superseded_at=now)
     packed = gzip.compress(audit.encode(revised), mtime=0)
     snapshot_path = f'reader-index/generations/{generation}/reader_assets.json.gz'
+    try:
+        prior_snapshot = store.read_bytes(audit.ASSETS, snapshot_path)
+    except FileNotFoundError:
+        pass
+    else:
+        if prior_snapshot != packed:
+            raise ValueError('existing legacy generation snapshot conflicts with candidate')
     updated['generations'][generation] = {
         'generation': generation, 'status': 'current', 'published_at': now, 'signature': signature,
         'sidecar_sha256': sidecar_sha, 'parent_generation': current,
