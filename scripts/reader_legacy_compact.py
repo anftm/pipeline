@@ -47,8 +47,11 @@ def refs_of(entry):
     return {(ref['bucket'], ref['path']) for ref in refs}
 
 
-def check_transition(before, after, mapping):
-    """Prove the compacted catalog only retires history; mapping=None skips the pin check."""
+def check_transition(before, after, mapping, keep_snapshots=False):
+    """Prove the compacted catalog only retires history; mapping=None skips the pin check.
+
+    keep_snapshots refuses plans whose tombstones would lose a snapshot identity. It is used
+    only when planning, so journals persisted before this guard stay valid."""
     if (not isinstance(before, dict) or not isinstance(after, dict)
             or any(doc.get('version') != 1 or doc.get('kind') != 'reader-catalog'
                    or 'redirect_sidecar_pending' in doc for doc in (before, after))):
@@ -74,6 +77,12 @@ def check_transition(before, after, mapping):
         if (not isinstance(tombstone, dict) or tombstone.get('replacement_generation') != current
                 or tombstone.get('replacement_acks') != {'hf': True, 'pages': True}):
             raise ValueError('invalid compaction tombstone')
+    if keep_snapshots:
+        lost = [name for name in dropped if isinstance(old[name].get('snapshot'), dict)
+                and new_retired[name].get('snapshot') != old[name]['snapshot']]
+        if lost:
+            raise ValueError('compaction would drop the snapshot identity of %d generation(s) whose snapshot is outside the legacy snapshot path, e.g. %s'
+                             % (len(lost), lost[:3]))
     kept_refs = set()
     for entry in new.values():
         kept_refs |= refs_of(entry)
@@ -151,7 +160,7 @@ def prepare(store, *, expected_generation, expected_catalog):
     current = (before.get('current') or {}).get('generation')
     encoded, _digest, _stats = compact_catalog_stream([raw], False, current=current, acknowledged=True,
                                                       grace_days=0, now=lifecycle.now_iso())
-    plan = check_transition(before, json.loads(encoded), mapping)
+    plan = check_transition(before, json.loads(encoded), mapping, keep_snapshots=True)
     if not plan['dropped']:
         raise ValueError('legacy catalog has no superseded generation to compact')
     index_raw = store.read_bytes(audit.BUCKET, audit.INDEX)

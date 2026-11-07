@@ -88,6 +88,18 @@ class LegacyCompactionTests(unittest.TestCase):
             self.prepare()
         self.assertEqual(self.store.writes, [])
 
+    def test_refuses_a_plan_that_would_drop_a_snapshot_identity(self):
+        catalog = self.catalog()
+        stale = next(name for name in catalog['generations'] if name != catalog['current']['generation'])
+        catalog['generations'][stale]['snapshot'] = {
+            'bucket': audit.ASSETS, 'bytes': 1, 'sha256': 'a' * 64,
+            'path': 'reader-index/snapshots/' + 'a' * 64 + '/reader_assets.json.gz'}
+        self.store.objects[audit.ASSETS, migration.CATALOG] = audit.encode(catalog)
+        self.store.writes.clear()
+        with self.assertRaisesRegex(ValueError, 'snapshot identity'):
+            self.prepare()
+        self.assertEqual(self.store.writes, [])
+
     def test_stale_identities_and_unready_catalog_stop_before_any_write(self):
         good = self.prepare()['catalog_before_sha256']
         generation = self.pointer['generation']
