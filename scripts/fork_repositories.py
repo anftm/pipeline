@@ -6,6 +6,7 @@ branches. Existing forks are fast-forwarded on the data branches when
 possible; divergent branches are reported instead of being overwritten.
 """
 
+import argparse
 import json
 import os
 import re
@@ -236,11 +237,66 @@ def clean_resolved_temporary_branches(token: str, repo: str, upstream: set[str],
             delete_branch(token, repo, branch)
 
 
-def main() -> int:
+def inspect_fork(token: str, number: int) -> dict:
+    """Compare one existing fork without creating, updating, or deleting refs."""
+    if not 0 <= number <= 31:
+        raise ValueError('archive number must be between 0 and 31')
+    repo = f'banned-historical-archives{number}'
+    repositories = {}
+    for owner in (UPSTREAM_OWNER, MIRROR_OWNER):
+        status, data = api_request(token, 'GET', repo_path(owner, repo))
+        if status != 200 or not isinstance(data, dict) or data.get('full_name') != f'{owner}/{repo}':
+            raise RuntimeError(f'[{repo}] {owner} repository lookup failed ({status})')
+        repositories[owner] = data
+    upstream, mirror = repositories[UPSTREAM_OWNER], repositories[MIRROR_OWNER]
+    parent = mirror.get('parent')
+    if (mirror.get('fork') is not True or not isinstance(parent, dict)
+            or parent.get('full_name') != upstream['full_name']):
+        raise ValueError('mirror is not the expected upstream fork')
+    default = upstream.get('default_branch')
+    if not isinstance(default, str) or not default:
+        raise ValueError('upstream default branch is missing')
+    upstream_branches = set(list_branches(token, UPSTREAM_OWNER, repo))
+    mirror_branches = set(list_branches(token, MIRROR_OWNER, repo))
+    names = sorted((upstream_branches | mirror_branches) & (MANAGED_BRANCHES | {default}))
+    differences = []
+    for name in names:
+        a = branch_sha(token, UPSTREAM_OWNER, repo, name) if name in upstream_branches else None
+        b = branch_sha(token, MIRROR_OWNER, repo, name) if name in mirror_branches else None
+        if ((name in upstream_branches and not re.fullmatch(r'[0-9a-f]{40}', str(a or '')))
+                or (name in mirror_branches and not re.fullmatch(r'[0-9a-f]{40}', str(b or '')))):
+            raise RuntimeError('branch listing changed or contains an invalid revision during read-only inspection')
+        differences.append({'branch': name, 'upstream': a, 'mirror': b,
+                            'equal': a == b if a is not None and b is not None else False})
+    return {'version': 1, 'kind': 'bha-fork-readonly-report', 'archive': number,
+            'upstream': upstream['full_name'], 'mirror': mirror['full_name'],
+            'default_branch': default, 'managed_branches': differences,
+            'unmanaged_upstream_count': len(upstream_branches - (MANAGED_BRANCHES | {default})),
+            'unmanaged_mirror_count': len(mirror_branches - (MANAGED_BRANCHES | {default})),
+            'remote_writes': 0, 'synchronization_applied': False}
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--inspect', type=int, help='read-only comparison for one archive (0-31)')
+    parser.add_argument('--output', help='local JSON report for --inspect')
+    args = parser.parse_args([] if argv is None else argv)
+    if args.output and args.inspect is None:
+        parser.error('--output requires --inspect')
     token = os.environ.get("GH_PAT") or os.environ.get("GITHUB_TOKEN", "")
     if not token:
         print("GH_PAT is required", file=sys.stderr)
         return 2
+    if args.inspect is not None:
+        report = inspect_fork(token, args.inspect)
+        body = json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2) + '\n'
+        if args.output:
+            from pathlib import Path
+            target = Path(args.output)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(body, encoding='utf-8')
+        print(body, end='')
+        return 0
 
     failed = []
     for number in range(REPO_START, REPO_END + 1):
@@ -267,4 +323,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv[1:]))

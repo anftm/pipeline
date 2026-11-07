@@ -5,6 +5,57 @@ from scripts import fork_repositories
 
 
 class ForkRepositoriesTests(unittest.TestCase):
+    def test_inspect_reports_one_existing_fork_using_only_get_requests(self):
+        repo = 'banned-historical-archives0'
+        upstream = {'full_name': f'{fork_repositories.UPSTREAM_OWNER}/{repo}', 'default_branch': 'main'}
+        mirror = {'full_name': f'{fork_repositories.MIRROR_OWNER}/{repo}', 'fork': True,
+                  'parent': {'full_name': upstream['full_name']}}
+        methods = []
+        def request(_token, method, path, payload=None):
+            methods.append(method)
+            if path == fork_repositories.repo_path(fork_repositories.UPSTREAM_OWNER, repo): return 200, upstream
+            if path == fork_repositories.repo_path(fork_repositories.MIRROR_OWNER, repo): return 200, mirror
+            raise AssertionError(path)
+        def sha(_token, owner, _repo, branch):
+            return ('a' if owner == fork_repositories.UPSTREAM_OWNER else 'b') * 40
+        with patch.object(fork_repositories, 'api_request', side_effect=request), \
+                patch.object(fork_repositories, 'list_branches', side_effect=[['main', 'ocr_cache', 'extra'], ['main', 'parsed']]), \
+                patch.object(fork_repositories, 'branch_sha', side_effect=sha), \
+                patch.object(fork_repositories, 'ensure_fork') as ensure, \
+                patch.object(fork_repositories, 'delete_branch') as delete, \
+                patch.object(fork_repositories, 'sync_branch') as sync:
+            report = fork_repositories.inspect_fork('token', 0)
+        self.assertEqual(methods, ['GET', 'GET'])
+        self.assertEqual([row['branch'] for row in report['managed_branches']], ['main', 'ocr_cache', 'parsed'])
+        self.assertEqual(report['unmanaged_upstream_count'], 1)
+        self.assertEqual(report['remote_writes'], 0)
+        self.assertFalse(report['synchronization_applied'])
+        ensure.assert_not_called(); delete.assert_not_called(); sync.assert_not_called()
+
+    def test_inspect_fails_closed_for_unexpected_fork_or_disappearing_branch(self):
+        repo = 'banned-historical-archives0'
+        upstream = {'full_name': f'{fork_repositories.UPSTREAM_OWNER}/{repo}', 'default_branch': 'main'}
+        mirror = {'full_name': f'{fork_repositories.MIRROR_OWNER}/{repo}', 'fork': True,
+                  'parent': {'full_name': upstream['full_name']}}
+        for modified in ({**mirror, 'fork': False}, {**mirror, 'parent': {'full_name': 'other/repo'}}):
+            with patch.object(fork_repositories, 'api_request', side_effect=[(200, upstream), (200, modified)]):
+                with self.assertRaises(ValueError): fork_repositories.inspect_fork('token', 0)
+        with patch.object(fork_repositories, 'api_request', side_effect=[(200, upstream), (200, mirror)]), \
+                patch.object(fork_repositories, 'list_branches', side_effect=[['main'], ['main']]), \
+                patch.object(fork_repositories, 'branch_sha', return_value=None):
+            with self.assertRaisesRegex(RuntimeError, 'changed'): fork_repositories.inspect_fork('token', 0)
+        with self.assertRaises(ValueError): fork_repositories.inspect_fork('token', 32)
+
+    def test_restored_fork_workflow_can_only_run_manual_readonly_inspection(self):
+        from pathlib import Path
+        import yaml
+        flow = yaml.safe_load((Path(__file__).resolve().parents[1] / '.github/workflows/bha-fork-archives.yml').read_text())
+        self.assertEqual(set(flow.get('on', flow.get(True))), {'workflow_dispatch'})
+        self.assertEqual(flow['permissions'], {'contents': 'read'})
+        commands = '\n'.join(step.get('run', '') for job in flow['jobs'].values() for step in job['steps'])
+        self.assertIn('scripts/fork_repositories.py --inspect', commands)
+        self.assertNotIn('python3 scripts/fork_repositories.py\n', commands)
+
     def test_main_syncs_only_managed_upstream_data_branches(self):
         with patch.dict(fork_repositories.os.environ, {"GH_PAT": "token"}), \
                 patch.object(fork_repositories, "REPO_START", 0), \
