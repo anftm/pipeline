@@ -470,6 +470,32 @@ class FormatProducerRegressionTests(unittest.TestCase):
             self.assertIn('^([1-9]|10)$', stream)
             self.assertNotIn('${{ inputs.limit', stream)
 
+    def test_office_manual_stream_is_bounded_and_serializes_shared_epub_index(self):
+        import subprocess
+        root = Path(__file__).resolve().parents[1] / '.github/workflows'
+        workflow = yaml.safe_load((root / 'reader-office-chapters.yml').read_text())
+        triggers = workflow.get('on', workflow.get(True))
+        self.assertEqual(set(triggers), {'workflow_dispatch'})
+        inputs = triggers['workflow_dispatch']['inputs']
+        self.assertEqual(set(inputs['extension']['options']), {'all', 'doc', 'docx', 'odt', 'rtf'})
+        self.assertEqual(inputs['limit']['default'], '1')
+        self.assertFalse(inputs['apply']['default'])
+        for name in ('build', 'finalize'):
+            self.assertEqual(workflow['jobs'][name]['concurrency']['group'], 'reader-sidecar')
+        command = next(step['run'] for step in workflow['jobs']['plan']['steps'] if step.get('id') == 'matrix')
+        guard = command.split('retry_args=()', 1)[0]
+        for limit, apply, valid in [('0', 'false', True), ('1', 'true', True), ('5', 'true', True),
+                                    ('0', 'true', False), ('6', 'true', False), ('-1', 'false', False),
+                                    ('1;echo injected', 'true', False)]:
+            with self.subTest(limit=limit, apply=apply):
+                result = subprocess.run(['bash', '-e', '-c', guard],
+                    env={'LIMIT': limit, 'APPLY': apply, 'EXTENSION': 'docx'}, capture_output=True, text=True)
+                self.assertEqual(result.returncode == 0, valid, result.stderr)
+        commands = '\n'.join(s.get('run', '') for s in workflow['jobs']['build']['steps'])
+        self.assertIn('^[1-5]$', commands)
+        self.assertIn('--apply --strict', commands)
+        self.assertNotIn('${{ inputs.limit', commands)
+
     def test_ebook_manual_stream_is_bounded_and_uses_shared_writer_lock(self):
         import subprocess
         root = Path(__file__).resolve().parents[1] / '.github/workflows'
