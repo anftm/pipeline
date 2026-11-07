@@ -243,6 +243,29 @@ class StaticPdfCheckpointTests(unittest.TestCase):
             self.assertEqual(next(value for path,value in writes if path.startswith('reader-index/gc/retirements/'))['roots'],
                              [{'bucket':stream.BUCKET,'root':root}])
 
+    def test_limit_counts_failed_attempts_and_checkpoints_only_that_batch(self):
+        sources = [{'repo': 'repo', 'path': f'{n}.ps', 'extension': 'ps', 'revision': 'new'}
+                   for n in range(4)]
+        saved = []
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            revisions = root / 'commits.json'
+            revisions.write_text('{}')
+            args = SimpleNamespace(limit=1, extension='ps', bucket=stream.BUCKET, apply=True,
+                                   retry_failures=False, strict=True, revisions=revisions,
+                                   search_data=root / 'search.json')
+            def checkpoint(bucket, path, previous, entries, failures, uploads, work, token, *, apply, kind):
+                saved.extend(failures)
+                return {'files': entries, 'failures': failures}
+            with patch.object(stream, 'parse_args', return_value=args), \
+                    patch.object(stream, 'records', return_value=sources), \
+                    patch.object(stream, 'existing_index', return_value={'files': [], 'failures': []}), \
+                    patch.object(stream, 'build', side_effect=RuntimeError('conversion failed')) as build, \
+                    patch.object(stream, 'publish_checkpoint', side_effect=checkpoint):
+                self.assertEqual(stream.main(), 1)
+        self.assertEqual(build.call_count, 1)
+        self.assertEqual([row['path'] for row in saved], ['0.ps'])
+
     def test_strict_failure_checkpoints_successes_and_failures_before_exiting(self):
         source = {"repo": "repo", "extension": "ps", "revision": "revision"}
         old_entry = {"key": "repo\0old.ps", "source_revision": "revision", "extension": "ps"}

@@ -182,12 +182,20 @@ def main() -> int:
                               "unchanged_sha": len(unchanged), "checkpoint_failures": len(combined.get("failures", []))})
         else:
             index = read_json(fs, a.bucket, f"{root_for(a.kind, extension)}/index.json")
-            completed = completed_entries(index, a.retry_failures, expected)
-            if any(completed.get(x["key"]) != x["revision"] for x in candidates):
+            if a.kind == 'static-pdf':
+                try:
+                    from .pilot_static_pdf_stream import handled as static_handled
+                except ImportError:
+                    from pilot_static_pdf_stream import handled as static_handled
+                pending_count = sum(not static_handled(index, x['key'], x['revision'], extension,
+                                    retry_failures=a.retry_failures) for x in candidates)
+            else:
+                completed = completed_entries(index, a.retry_failures, expected)
+                pending_count = sum(completed.get(x['key']) != x['revision'] for x in candidates)
+            if pending_count:
                 include.append({"extension": extension})
             summaries.append({"extension": extension, "sources": len(candidates),
-                              "pending": sum(completed.get(x["key"]) != x["revision"] for x in candidates),
-                              "checkpoint_failures": len(index.get("failures", []))})
+                              "pending": pending_count, "checkpoint_failures": len(index.get("failures", []))})
     a.output.parent.mkdir(parents=True, exist_ok=True)
     a.output.write_text(json.dumps({"include": include}, separators=(",", ":")) + "\n", encoding="utf-8")
     print(json.dumps({"include": include}, ensure_ascii=False))

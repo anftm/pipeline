@@ -92,6 +92,16 @@ def existing_index(bucket: str, token: str | None, root: str) -> dict:
     return read_index(bucket, f"{root}/index.json", token, "static-pdf-stream-index")
 
 
+def handled(index: dict, key: str, revision: str, extension: str, *, retry_failures: bool) -> bool:
+    """Keep scheduling and conversion aligned, including PPTX profile upgrades."""
+    entries = list(index.get('files', []))
+    if not retry_failures:
+        entries += list(index.get('failures', []))
+    return any(entry.get('key') == key and entry.get('source_revision') == revision
+               and (extension != 'pptx' or entry.get('conversion_profile') == office_symbol_fonts.PROFILE)
+               for entry in entries if isinstance(entry, dict))
+
+
 def records(path: Path, revisions: dict, extension: str) -> list[dict]:
     result = []
     for record in decode_search_payload(json.loads(path.read_text(encoding="utf-8"))):
@@ -174,19 +184,20 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="reader-static-pdf-") as directory:
         root = Path(directory)
         by_category, category_uploads, planned = {}, {}, {}
+        attempted = 0
         for number, item in enumerate(selected):
             category = f"documents/pdf/{item['extension']}"
             if category not in planned:
                 planned[category] = existing_index(args.bucket, token, category)
             old = planned[category]
             key = f"{item['repo']}\0{item['path']}"
-            handled = list(old.get("files", []))
-            if not args.retry_failures:
-                handled += list(old.get("failures", []))
-            if any(e.get("key") == key and e.get("source_revision") == item["revision"]
-                    and (item['extension'] != 'pptx' or e.get('conversion_profile') == office_symbol_fonts.PROFILE)
-                   for e in handled if isinstance(e, dict)):
+            if handled(old, key, item['revision'], item['extension'], retry_failures=args.retry_failures):
                 continue
+            # Count attempts, not just successes: repeated failures must not
+            # turn a bounded workflow dispatch into an unlimited batch.
+            if args.limit and attempted >= args.limit:
+                break
+            attempted += 1
             attempted_at = datetime.now(timezone.utc).isoformat()
             try:
                 entry, files = build(item, root / str(number), token)
@@ -205,8 +216,6 @@ def main() -> int:
                 if remote in owned and stream_file_hash(Path(owned[remote])) != stream_file_hash(Path(local)):
                     raise ValueError(f"conflicting static PDF outputs at one immutable path: {remote}")
                 owned[remote] = local
-            if args.limit and len(entries) >= args.limit:
-                break
         for failure in failures.values():
             by_category.setdefault(f"documents/pdf/{failure['extension']}", [])
         if not entries and not failures:
@@ -243,7 +252,7 @@ def main() -> int:
                 work.mkdir(parents=True, exist_ok=True)
                 publish_checkpoint(args.bucket, f"{category}/index.json", old, [], category_failures,
                                    {}, work, token, apply=args.apply, kind="static-pdf-stream-index")
-        print(f"processed={len(entries)} failures={len(failures)} "
+        print(f"attempted={attempted} processed={len(entries)} failures={len(failures)} "
               f"objects={sum(len(files) for files in category_uploads.values())} apply={args.apply}")
         if args.strict and failures:
             print(f"strict static PDF conversion failed for {len(failures)} source(s)")

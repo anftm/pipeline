@@ -53,6 +53,8 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           FORCE_SYNC: "true"
+          # Static PDF selection does not use source sizes.
+          SKIP_SIZES: "true"
         run: python scripts/fetch_and_parse.py
       - name: Plan pending static PDF workers
         id: matrix
@@ -67,11 +69,12 @@ jobs:
           if [[ "$APPLY" == 'true' && ! "$LIMIT" =~ ^([1-9]|10)$ ]]; then
             echo 'apply requires 1-10 sources per extension' >&2; exit 1
           fi
-          args=(--kind static-pdf --extension "$EXTENSION" --output output/static-pdf-matrix.json)
+          args=(--kind static-pdf --extension "$EXTENSION" --output output/static-pdf-matrix.json
+                --report output/static-pdf-report.json)
           if [[ "$RETRY_FAILURES" == "true" ]]; then args+=(--retry-failures); fi
           python scripts/plan_reader_stream_matrix.py "${args[@]}"
           echo "matrix=$(cat output/static-pdf-matrix.json)" >> "$GITHUB_OUTPUT"
-      - run: tar -czf output/static-pdf-plan.tgz output/search_data.json state/commits.json output/static-pdf-matrix.json
+      - run: tar -czf output/static-pdf-plan.tgz output/search_data.json state/commits.json output/static-pdf-matrix.json output/static-pdf-report.json
       - uses: actions/upload-artifact@v7
         with:
           name: reader-static-pdf-plan

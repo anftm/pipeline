@@ -3,8 +3,10 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
+from types import SimpleNamespace
 
+from scripts import plan_reader_stream_matrix as matrix, office_symbol_fonts
 from scripts.plan_reader_stream_matrix import completed_entries, read_json, selected_records
 from scripts.pilot_media_stream import select_records as select_media_records
 
@@ -33,6 +35,36 @@ class ReaderStreamMatrixIndexTests(unittest.TestCase):
                  "failures": [{"key": "bad", "source_revision": "r2"}]}
         self.assertEqual(completed_entries(index), {"good": "r1", "bad": "r2"})
         self.assertEqual(completed_entries(index, retry_failures=True), {"good": "r1"})
+
+    def test_static_pdf_planning_matches_converter_profile_and_failure_rules(self):
+        key = 'VoiceOfML/Test\0book.pptx'
+        candidate = {'key': key, 'extension': 'pptx', 'revision': 'rev'}
+        cases = [
+            ({'files': [], 'failures': []}, False, 1),
+            ({'files': [{'key': key, 'source_revision': 'rev'}], 'failures': []}, False, 1),
+            ({'files': [{'key': key, 'source_revision': 'rev',
+                         'conversion_profile': office_symbol_fonts.PROFILE}], 'failures': []}, False, 0),
+            ({'files': [], 'failures': [{'key': key, 'source_revision': 'rev'}]}, False, 1),
+            ({'files': [], 'failures': [{'key': key, 'source_revision': 'rev',
+                                        'conversion_profile': office_symbol_fonts.PROFILE}]}, False, 0),
+            ({'files': [], 'failures': [{'key': key, 'source_revision': 'rev',
+                                        'conversion_profile': office_symbol_fonts.PROFILE}]}, True, 1),
+        ]
+        for index, retry, expected in cases:
+            with self.subTest(index=index, retry=retry), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / 'revisions.json').write_text('{}')
+                args = SimpleNamespace(kind='static-pdf', extensions=['pptx'], search_data=root / 'search.json',
+                    revisions=root / 'revisions.json', bucket='bucket', shard_count=8,
+                    output=root / 'matrix.json', retry_failures=retry, verify_source_sha=False,
+                    report=root / 'report.json')
+                with patch.object(matrix, 'args', return_value=args), \
+                        patch.object(matrix, 'HfFileSystem'), \
+                        patch.object(matrix, 'selected_records', return_value=[candidate]), \
+                        patch.object(matrix, 'read_json', return_value=index):
+                    self.assertEqual(matrix.main(), 0)
+                self.assertEqual(len(json.loads(args.output.read_text())['include']), expected)
+                self.assertEqual(json.loads(args.report.read_text())['extensions'][0]['pending'], expected)
 
     def test_office_workflow_exposes_and_passes_explicit_failure_retry(self):
         workflow = (Path(__file__).resolve().parents[1] / ".github" / "workflows" /
