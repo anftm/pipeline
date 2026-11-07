@@ -176,7 +176,7 @@ class V3PublicationTests(unittest.TestCase):
         self.assertFalse(workflow[True]["workflow_dispatch"]["inputs"]["apply"]["default"])
         self.assertEqual(workflow[True]["workflow_dispatch"]["inputs"]["operation"]["options"],
                          ["inspect", "unify", "ack", "retire", "withdraw", "reset-documents",
-                          "remove-route", "restore-route", "verify-route", "migrate-derived", "resume-derived", "verify-generation"])
+                          "remove-route", "restore-route", "verify-route", "migrate-derived", "resume-derived", "redirect-derived", "publish-generation", "verify-generation"])
         operation_step = next(step for step in workflow["jobs"]["publish"]["steps"]
                               if step.get("id") == "operation")
         # Detached OCR admission and correction are retired; retention remains
@@ -196,8 +196,9 @@ class V3PublicationTests(unittest.TestCase):
         self.assertIn("retire) ;;", operation_step["run"])
         for name in ('HF_S3_ACCESS_KEY_ID', 'HF_S3_SECRET_ACCESS_KEY'):
             value = operation_step['env'][name]
-            self.assertIn("inputs.operation == 'migrate-derived'", value)
-            self.assertIn("inputs.operation == 'resume-derived'", value)
+            self.assertIn('"migrate-derived"', value)
+            self.assertIn('"resume-derived"', value)
+            self.assertIn('"redirect-derived"', value)
             self.assertIn('secrets.' + name, value)
             self.assertNotIn('inputs.apply', value)
         self.assertFalse(any(step.get("name", "").startswith("Retire acknowledged")

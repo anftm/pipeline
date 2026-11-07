@@ -101,7 +101,8 @@ class RetiredDocumentProducerTests(unittest.TestCase):
         inputs = config.get('on', config.get(True))['workflow_dispatch']['inputs']
         self.assertEqual(inputs['operation']['options'],
                          ['inspect', 'unify', 'ack', 'retire', 'withdraw', 'reset-documents',
-                          'remove-route', 'restore-route', 'verify-route', 'migrate-derived', 'resume-derived', 'verify-generation'])
+                          'remove-route', 'restore-route', 'verify-route', 'migrate-derived', 'resume-derived',
+                          'redirect-derived', 'publish-generation', 'verify-generation'])
         self.assertEqual(inputs['operation']['default'], 'inspect')
         self.assertFalse(inputs['apply']['default'])
 

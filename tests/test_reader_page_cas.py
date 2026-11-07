@@ -1,4 +1,6 @@
 import io
+import json
+import hashlib
 import unittest
 from unittest.mock import Mock, patch
 
@@ -60,6 +62,47 @@ class PageCASTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'differs between S3 and Hub'):
             self.store.preflight()
         self.client.put_object.assert_not_called()
+
+    def test_immutable_create_checks_content_identity_and_does_not_retry_unknown_result(self):
+        from botocore.exceptions import ClientError
+        raw = b'compressed snapshot'
+        path = 'reader-index/snapshots/' + hashlib.sha256(raw).hexdigest() + '/reader_assets.json.gz'
+        missing = ClientError({'Error': {'Code': 'NoSuchKey'}, 'ResponseMetadata': {'HTTPStatusCode': 404}}, 'GetObject')
+        self.client.get_object.side_effect = [missing, {'Body': io.BytesIO(raw), 'ContentLength': len(raw), 'ETag': '"v"'}]
+        self.store.immutable_put(ASSETS, path, raw)
+        self.client.put_object.assert_called_once_with(Bucket='reader-assets-v2', Key=path, Body=raw,
+            ContentType='application/gzip', IfNoneMatch='*')
+        self.client.put_object.reset_mock()
+        with self.assertRaisesRegex(ValueError, 'content addressed'):
+            self.store.immutable_put(ASSETS, path, b'foreign')
+        with self.assertRaisesRegex(ValueError, 'content addressed'):
+            self.store.immutable_put(ASSETS, 'reader-index/other.json', raw)
+        self.client.put_object.assert_not_called()
+        self.client.get_object.side_effect = missing
+        self.client.put_object.side_effect = OSError('response lost')
+        with self.assertRaisesRegex(OSError, 'response lost'):
+            self.store.immutable_put(ASSETS, path, raw)
+        self.client.put_object.assert_called_once()
+
+    def test_immutable_catalog_and_promotion_require_matching_identity(self):
+        body = {'version': 3, 'kind': 'reader-reading-catalog', 'files': {}}
+        identity = hashlib.sha256(json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        raw = json.dumps({**body, 'generation': identity}, sort_keys=True, separators=(',', ':')).encode()
+        path = f'reader-index/v3/generations/{identity}/catalog.json'
+        self.client.get_object.return_value = {'Body': io.BytesIO(raw), 'ContentLength': len(raw), 'ETag': '"v"'}
+        self.store.immutable_put(ASSETS, path, raw)
+        self.client.put_object.assert_not_called()
+        with self.assertRaisesRegex(ValueError, 'content addressed'):
+            self.store.immutable_put(ASSETS, path.replace(identity, 'a' * 64), raw)
+        promotion = {'version': 1, 'kind': 'reader-reading-promotion', 'generation': identity,
+                     'acks': {'hf': False, 'pages': False}, 'retention_days': 30}
+        p_raw = json.dumps(promotion).encode()
+        p_path = f'reader-index/v3/promotions/{identity}.json'
+        self.client.get_object.return_value = {'Body': io.BytesIO(p_raw), 'ContentLength': len(p_raw), 'ETag': '"p"'}
+        self.store.immutable_put(ASSETS, p_path, p_raw)
+        promotion['acks']['hf'] = True
+        with self.assertRaisesRegex(ValueError, 'content addressed'):
+            self.store.immutable_put(ASSETS, p_path, json.dumps(promotion).encode())
 
     def test_precondition_failure_and_transport_uncertainty_are_not_retried(self):
         for code, status in [('PreconditionFailed', 412), ('ConditionalRequestConflict', 409)]:

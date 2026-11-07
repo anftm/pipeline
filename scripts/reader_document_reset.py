@@ -255,6 +255,8 @@ def withdraw(store, options, *, apply=False):
             pass
     cleaned, changed = clean_sidecar(decode(raw), derived, static)
     pointer, catalog = publication.current(store)
+    if catalog.get('derived_pdf_redirects'):
+        raise ValueError('document reset does not support active derived PDF redirects')
     try:
         from .reader_route_control import filter_sidecar, validated_sources
     except ImportError:
@@ -352,6 +354,8 @@ def apply_withdrawal(store, plan):
     report = dict(plan['report'])
     packed = gzip.compress(encode(plan['sidecar']), mtime=0)
     pointer, catalog = publication.current(store)
+    if catalog.get('derived_pdf_redirects'):
+        raise ValueError('document reset does not support active derived PDF redirects')
     expected = plan['previous_pointer']
     if pointer != expected and catalog.get('document_reset') != report['reset_id']:
         raise ValueError('v3 pointer moved outside the reset')
@@ -406,6 +410,8 @@ def normalize_withdrawn(store, receipt, *, apply=False):
         return {**receipt, 'normalization_pending': True}
     publication.assert_writer(store)
     pointer, catalog = publication.current(store)
+    if catalog.get('derived_pdf_redirects'):
+        raise ValueError('document reset does not support active derived PDF redirects')
     if catalog['files'] or catalog.get('document_reset') != receipt['reset_id']:
         raise ValueError('withdrawn catalog moved')
     packed = gzip.compress(encode(sidecar), mtime=0)

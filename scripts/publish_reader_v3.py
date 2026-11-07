@@ -90,6 +90,13 @@ def validate_catalog(catalog):
         raise ValueError("reading catalog generation mismatch")
     if catalog.get("base_sidecar"):
         base_sidecar_ref(catalog["base_sidecar"])
+    if 'derived_pdf_redirects' in catalog:
+        try:
+            from .reader_page_redirects import validated as validate_redirects
+        except ImportError:
+            from reader_page_redirects import validated as validate_redirects
+        if validate_redirects(catalog) and not catalog.get('base_sidecar'):
+            raise ValueError('derived PDF redirects require a pinned base')
     if "suppressed_sources" in catalog:
         try:
             from .reader_route_control import validated_sources
@@ -149,6 +156,8 @@ def unify(store, *, apply=False, conditional_pointer=False, expected_canonical=N
     except ImportError:
         from reader_route_control import prepare_base
     pointer, catalog = current(store)
+    if catalog.get('derived_pdf_redirects'):
+        raise ValueError('active derived PDF redirects require an audited base refresh')
     canonical = store.read_bytes(ASSETS, "reader-index/reader_assets.json.gz")
     if expected_pointer is not None and pointer != expected_pointer:
         raise ValueError('reading pointer changed before unification')
@@ -164,6 +173,7 @@ def unify(store, *, apply=False, conditional_pointer=False, expected_canonical=N
         immutable_put(store, ASSETS, ref["path"], raw)
     result = {"version": 3, "kind": "reader-reading-catalog", "files": catalog["files"],
               **({"suppressed_sources": catalog["suppressed_sources"]} if "suppressed_sources" in catalog else {}),
+              **({"derived_pdf_redirects": catalog["derived_pdf_redirects"]} if "derived_pdf_redirects" in catalog else {}),
               "base_sidecar": ref, "parent_generation": pointer["generation"] if pointer else None}
     return commit_catalog(store, result, pointer, apply=apply, conditional_pointer=conditional_pointer)
 
@@ -398,6 +408,11 @@ def commit_catalog(store, catalog, pointer, *, apply=False, restored_source=None
     latest, prior_catalog = current(store)
     if latest != pointer:
         raise ValueError("reading pointer changed during verification")
+    try:
+        from .reader_page_redirects import preserve as preserve_redirects
+    except ImportError:
+        from reader_page_redirects import preserve as preserve_redirects
+    preserve_redirects(prior_catalog, catalog)
     before = set(prior_catalog.get('suppressed_sources', []))
     after = set(catalog.get('suppressed_sources', []))
     if before - after and before - after != {restored_source}:
@@ -464,6 +479,7 @@ def withdraw(store, options, expected_parent, *, apply=False):
         files = {k: entry for k, entry in catalog["files"].items() if k != key}
         report = commit_catalog(store, {"version": 3, "kind": "reader-reading-catalog", "files": files,
             **({"suppressed_sources": catalog["suppressed_sources"]} if "suppressed_sources" in catalog else {}),
+            **({"derived_pdf_redirects": catalog["derived_pdf_redirects"]} if "derived_pdf_redirects" in catalog else {}),
             **({"base_sidecar": catalog["base_sidecar"]} if catalog.get("base_sidecar") else {}),
             "parent_generation": expected_parent, "withdrawal": {"source_key": key,
             "reading_generation": generation, "resource": active["resource"], "actor": actor,
@@ -480,6 +496,8 @@ def acknowledge(store, surface, receipt, *, apply=False):
             or receipt.get("catalog_sha256") != pointer["catalog"]["sha256"]
             or receipt.get("files") != len(catalog["files"])):
         raise ValueError("consumer did not observe current reading generation")
+    if not apply:
+        return {"generation": pointer["generation"], "surface": surface, "applied": False}
     path = f"reader-index/v3/promotions/{pointer['generation']}.json"
     history = json.loads(store.read_bytes(ASSETS, path))
     if history.get("generation") != pointer["generation"]:
@@ -785,7 +803,7 @@ def main():
     parser.add_argument("command", choices=("withdraw", "ack", "ack-all", "acknowledge-legacy",
                                             "compact-legacy", "inspect", "project", "retire",
                                             "unify", "reset-documents", "remove-route", "restore-route", "verify-route",
-                                            "migrate-derived", "resume-derived", "verify-generation", "check-page-window"))
+                                            "migrate-derived", "resume-derived", "redirect-derived", "publish-generation", "verify-generation", "check-page-window"))
     parser.add_argument("--resource-json")
     parser.add_argument("--expected-parent", default="none")
     parser.add_argument("--apply", action="store_true")
@@ -795,7 +813,15 @@ def main():
     parser.add_argument("--wait-seconds", type=int, default=0, help="maximum time to wait for route propagation")
     args = parser.parse_args()
     store = CentralHubStore()
-    if args.command == 'verify-generation':
+    if args.command == 'publish-generation':
+        if not args.apply or args.expected_parent == 'none':
+            parser.error('publish-generation requires --apply and --expected-parent')
+        assert_writer(store)
+        pointer, _ = current(store)
+        if not pointer or pointer['generation'] != text.sha(args.expected_parent):
+            raise ValueError('v3 generation changed before republication')
+        report = {'applied': True, 'generation': pointer['generation'], 'objects_deleted': False}
+    elif args.command == 'verify-generation':
         import httpx
         if args.expected_parent == 'none':
             parser.error('verify-generation requires --expected-parent')
@@ -835,6 +861,26 @@ def main():
         store = ConditionalPageStore(store)
         store.preflight()
         report = migrate.resume(store, HfApi(token=os.environ.get('HF_TOKEN')), options['transaction_id'])
+    elif args.command == 'redirect-derived':
+        try:
+            from . import reader_page_atomic as redirect
+            from .reader_page_cas import ConditionalPageStore
+        except ImportError:
+            import reader_page_atomic as redirect
+            from reader_page_cas import ConditionalPageStore
+        from huggingface_hub import HfApi
+        options = json.loads(args.resource_json or '{}')
+        expected = {'index_sha256', 'sidecar_sha256', 'v3_generation'}
+        if not isinstance(options, dict) or set(options) != expected:
+            raise ValueError('redirect-derived requires exact index, sidecar and v3 identities')
+        if args.apply:
+            assert_writer(store)
+            store = ConditionalPageStore(store)
+            store.preflight()
+        api = HfApi(token=os.environ.get('HF_TOKEN'))
+        plan = redirect.prepare(store, api, expected_index=options['index_sha256'],
+                                expected_sidecar=options['sidecar_sha256'], expected_v3=options['v3_generation'])
+        report = redirect.apply(store, api, plan) if args.apply else redirect.report(plan, applied=False)
     elif args.command == 'migrate-derived':
         try:
             from . import reader_page_migrate as migrate
@@ -901,6 +947,10 @@ def main():
             DocumentProducerFence().check()
         report = reset_documents(store, json.loads(args.resource_json or '{}'), apply=args.apply)
     elif args.command == "unify":
+        # Existing redirects require a fresh audit, not an ordinary refresh.
+        _, current_catalog = current(store)
+        if current_catalog.get('derived_pdf_redirects'):
+            raise ValueError('active derived PDF redirects require an audited base refresh')
         report = unify(store, apply=args.apply)
     elif args.command == "withdraw":
         report = withdraw(store, json.loads(args.resource_json or "{}"),

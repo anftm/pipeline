@@ -70,6 +70,54 @@ class ConditionalPageStore:
             if raw != self.primary.read_bytes(bucket, path):
                 raise ValueError('page root differs between S3 and Hub: ' + path)
 
+    def immutable_put(self, bucket, path, raw):
+        """Create only content-addressed v3 snapshots/catalogs, without retries."""
+        import hashlib
+        import json
+        if bucket != shared.READER_ASSETS_BUCKET or not isinstance(raw, bytes):
+            raise ValueError('invalid immutable page publication')
+        snapshot = re.fullmatch(r'reader-index/snapshots/([0-9a-f]{64})/reader_assets\.json\.gz', path)
+        catalog = re.fullmatch(r'reader-index/v3/generations/([0-9a-f]{64})/catalog\.json', path)
+        promotion = re.fullmatch(r'reader-index/v3/promotions/([0-9a-f]{64})\.json', path)
+        if snapshot:
+            valid = hashlib.sha256(raw).hexdigest() == snapshot.group(1)
+        elif catalog:
+            try:
+                value = json.loads(raw)
+                body = {k: v for k, v in value.items() if k != 'generation'}
+                encoded = json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()
+                valid = value.get('generation') == catalog.group(1) == hashlib.sha256(encoded).hexdigest()
+            except (AttributeError, TypeError, ValueError):
+                valid = False
+        elif promotion:
+            try:
+                value = json.loads(raw)
+                valid = (value.get('version') == 1 and value.get('kind') == 'reader-reading-promotion'
+                         and value.get('generation') == promotion.group(1)
+                         and value.get('acks') == {'hf': False, 'pages': False}
+                         and type(value.get('retention_days')) is int and value['retention_days'] >= 30)
+            except (AttributeError, TypeError, ValueError):
+                valid = False
+        else:
+            valid = False
+        if not valid:
+            raise ValueError('immutable page object is not content addressed')
+        try:
+            observed = self.s3.read_bytes(bucket, path)
+        except FileNotFoundError:
+            namespace, name = self.s3._location(bucket)
+            content_type = 'application/gzip' if snapshot else 'application/json'
+            try:
+                self.s3._client(namespace).put_object(Bucket=name, Key=path, Body=raw,
+                    ContentType=content_type, IfNoneMatch='*')
+            except Exception as error:
+                code, status = s3_error_code(error)
+                if status not in {409, 412} and str(code) not in {'409', '412', 'ConditionalRequestConflict', 'PreconditionFailed'}:
+                    raise
+            observed = self.s3.read_bytes(bucket, path)
+        if observed != raw:
+            raise ValueError('immutable page object conflict: ' + path)
+
     def put_if_match(self, bucket, path, raw, etag):
         self._require_root(bucket, path)
         strong_etag(etag)

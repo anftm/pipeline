@@ -37,19 +37,23 @@ python3 scripts/reader_route_plan.py --repo 'VoiceOfML/SomeRepo' --path '目录/
 
 `python3 scripts/reader_page_audit.py --output output/page-audit.json` 只读扫描 `vomebook/pdf-pages-v2` 的 `derived/` 和 `objects/`，按源 SHA、Xet 内容 hash、长度及目标 manifest 的精确书籍身份匹配；同内容不同书名必须分别匹配，无法唯一匹配的条目不会迁移。报告含 `index_sha256`、`canonical_sidecar_sha256`、`v3_generation`、逐条映射、未解决项，以及未被当前索引分类的文件；报告**不授权删除**。快照不是原子的，不能作为外部写者已停的证据。
 
-已部署的 `reader-v3-publish.yml` 提供 `migrate-derived`：需要在 `resource_json` 中填写上述三个身份，字段名分别为 `index_sha256`、`sidecar_sha256`、`v3_generation`。先 `apply=false`；复核后 `apply=true` 还必须提供 `"external_writers_stopped":true`。每次重新扫描并检查对象、manifest、旧索引及 v3 代。该操作只把当前 canonical 派生 PDF 索引和 sidecar 路由改到已存在的精确 `objects/` 副本，保留旧对象和旧代；之后在发布前再次核实隔离，再发布新投影并等待两站确认。不能混同旧 `withdraw` 或将报告当成删除清单。
+优先使用 `reader-v3-publish.yml` 的 `redirect-derived`：在 `resource_json` 填写只读审计取得的 `index_sha256`、`sidecar_sha256`、`v3_generation`，先 `apply=false` 检查，再以同一身份 `apply=true`。它重新扫描并核对目标文件及 manifest，把全部已匹配路由组成新的内容寻址 v3 快照，仅通过 S3 条件写推进**一个 v3 指针**；不改 canonical 派生 PDF 索引、canonical sidecar、旧 catalog，也不删对象或旧代。随后发布 Pages 投影并核对两站；报告不是删除清单。
 
-迁移首次改索引前会将内容寻址的续跑计划保存在 `reader-index/gc/page-migration/`，日志打印 `transaction_id`；完成后也写入工作流报告。若中断，使用 `resume-derived`、`apply=true` 和 `{"transaction_id":"日志中的值","external_writers_stopped":true}`：每个索引只能处于该计划的精确旧值或新值，偏离则停止。若事务计划写入尚未返回，先在桶中只读核对其 SHA，勿猜测。完成后仍须核对两站。
+已知中央 Reader 发布器使用 `reader-sidecar` 并发组；搜索同步写搜索数据，不写 Reader 桶索引。单指针路径避免了依赖旧 OCR 仓库 fence 的多对象索引事务，但不证明其他 HF/S3 凭据已失效，也不保证未来无外部写者。发布前后复核副本和指针，保留全部旧数据；并发者或目标文件异常仍会造成冲突或发布后失败，需要停止并检查。当前 `unify`、`remove-route` 和 `restore-route` 在 redirect 活跃时会明确拒绝未经审计的基础快照刷新，`reset-documents` 也先阻止，避免悄悄覆盖重映射或破坏 canonical 事务；这是待完成的后续能力，不能将其当作已支持。
+
+`redirect-derived` 先创建内容寻址快照、catalog 和 promotion，再打印 staged generation，最后只发一次指针 `If-Match`；条件冲突或响应丢失不可盲目重试。查看 `inspect` 确认指针：若仍是旧代，可重新只读审计和预演；若已是 staged generation，用 `publish-generation`、`apply=true`、`expected_parent=该代` 仅重新投影并核对两站；若是其他代则停止调查。此恢复入口不会修改桶索引或写 GC 回执。
+
+旧 `migrate-derived` / `resume-derived` 保留用于之后真正改 canonical 索引的多对象事务。该事务首次改索引前会保存内容寻址续跑计划并打印 `transaction_id`；续跑必须检查每个索引的精确旧值或新值。它仍受旧 fence 和外部写者隔离阻塞，不能把 redirect 成功误当 canonical 索引已迁移。
 
 实际写入及续跑在各写入边界重新检查原有全部配置仓库、以及历史盘点中额外记录仓库的 GitHub 工作流：除当前发布工作流的当前 run 外均须停用并排空，外部仓库还须停用 Actions；检查失败、不可访问、404 或缺少凭据均停止。这是当前部署版本的旧维护 fence，**不代表已退场的 OCR 生产者在新架构中仍应运行，也不应要求用户重新创建旧账户**。后续应在确认实际活跃写者、撤销或收口旧桶写凭据之后，用面向真实写者的隔离替换它；在此之前旧 fence 仍会阻止 apply。仅 Actions 状态或 `external_writers_stopped=true` **不能证明**其他桶凭据已失效；必须在整个迁移和恢复期间协调其他写者停写。站点及对象的旧 URL 缓存、历史代、其他域引用不由迁移解决。
 
-迁移的三个可变索引和 v3 指针使用 S3 `PutObject If-Match`，要求运行环境提供可访问 `vomebook` 桶的 `HF_S3_ACCESS_KEY_ID` / `HF_S3_SECRET_ACCESS_KEY`。只读预演可在三个身份之外额外传入 `"check_s3":true`，用 Actions 同名 Secret 对四个现有索引执行 S3/Hub 字节一致性检查；这不尝试写入，也不能证明写权限或外部隔离。2026-11-07 在 `pdf-pages-v2` 和 `reader-assets-v2` 的随机临时键上验证了条件创建、条件更新、过期 ETag 拒绝、Hub/S3 跨接口更新可见性，以及条件删除；临时对象均已确认移除。实际四个索引经 S3 和 Hub 读取的字节相同，实测没有改生产索引。这只是该时间点和该凭据的验证，不代表 Actions 中的同名 Secret 有效。条件写只保护单个对象，**不代替上述 fence、真实写者隔离或跨对象事务**。无版本机制时 ETag 不能防止 ABA；条件写冲突及响应丢失时不要盲目重试，应检查事务再续跑。计划、不可变快照和发布投影仍有独立写入，旧对象仍保留。
+旧多对象迁移的三个可变索引和 v3 指针以及新单指针发布都使用 S3 `PutObject If-Match`，要求运行环境提供可访问 `vomebook` 桶的 `HF_S3_ACCESS_KEY_ID` / `HF_S3_SECRET_ACCESS_KEY`。`migrate-derived` 只读预演可在三个身份之外额外传入 `"check_s3":true`，用 Actions 同名 Secret 对四个现有索引执行 S3/Hub 字节一致性检查；这不尝试写入，也不能证明写权限或外部隔离。2026-11-07 在 `pdf-pages-v2` 和 `reader-assets-v2` 的随机临时键上验证了条件创建、条件更新、过期 ETag 拒绝、Hub/S3 跨接口更新可见性，以及条件删除；临时对象均已确认移除。实际四个索引经 S3 和 Hub 读取的字节相同，实测没有改生产索引。这只是该时间点和该凭据的验证，不代表 Actions 中的同名 Secret 有效。条件写只保护单个对象，**不代替上述 fence、真实写者隔离或跨对象事务**。无版本机制时 ETag 不能防止 ABA；条件写冲突及响应丢失时不要盲目重试，应检查事务再续跑。计划、不可变快照和发布投影仍有独立写入，旧对象仍保留。
 
 `python3 scripts/reader_page_cleanup.py --graph-report output/gc/reader-gc-report.json --output output/page-cleanup.json` 可以从现有跨桶图的完整报告中分出 page 桶的 `derived/` 和 `objects/` 候选；缺桶或图不完整不输出候选。输出仍只是待审核报告，不能直接删除。
 
 原手动 `reader-gc-collect.yml` 提供 `scope=page-plan` / `scope=page-apply` 两步，在现有锁内直接执行：在已隔离并排空生产者的维护窗口，以 `resume_run={"paths":["derived/精确路径"]}` 生成计划，审阅 `page-exact-plan` artifact 和日志 SHA；随后设置 `apply=true`，并通过 `resume_run={"plan_run":"运行ID","plan_sha256":"计划SHA","external_writers_stopped":true}` 应用。应用会重新构建四桶图、核验两站及对象版本、重新验证所遍历的嵌套清单版本、要求额外确认外部写者已停，再记录 intent 并发送一次精确批次；部分成功或响应丢失时只可重新盘点，不会自动重试。计划有效期为 24 小时、artifact 保留两天，一次最多 1000 个键；这只延长审核期限，不延长引用、消费者或对象版本证明，应用时仍须重新扫描和复核。长时间扫描超过期限仍会失败，尚未实测真实桶上的耗时。它仍复用旧 CHM 事务检查及生产者 fence；若任何证明不足便停止，不能仅靠勾选外部确认绕过。旧 GC 尚未整体简化。
 
-page 迁移和精确删除代码已部署；Reader 发布器已启用并完成只读 `inspect` 和迁移预演，迁移 apply 仍被未核实的外部写者与历史仓库权限阻塞，page 精确删除所在 collector 仍禁用。单条路由下线入口、Pipeline 内 PDF/DjVu 页面流生产和 OCR 生产代码移除也已部署；尚未执行路由撤回、索引迁移或物理删除。历史 CHM 固定批次的 19 个工作流入口已移除，但旧全桶 GC 及其阻塞尚未整体重写；详见 `.github/WORKFLOWS.md`。
+旧 page canonical 索引迁移和精确删除代码已部署，但多对象迁移 apply 仍受旧 fence 阻塞，page 精确删除所在 collector 仍禁用。单指针 redirect 先独立解决当前两站路由，不改变这些旧限制。单条路由下线入口、Pipeline 内 PDF/DjVu 页面流生产和 OCR 生产代码移除也已部署；尚未执行路由撤回、索引迁移或物理删除。历史 CHM 固定批次的 19 个工作流入口已移除，但旧全桶 GC 及其阻塞尚未整体重写；详见 `.github/WORKFLOWS.md`。
 
 ## 本地检查
 

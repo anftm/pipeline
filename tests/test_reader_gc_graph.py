@@ -44,6 +44,23 @@ class MemoryStore:
 
 
 class ReaderGcGraphTests(unittest.TestCase):
+    def test_derived_pdf_redirect_catalog_pins_both_old_and_new_paths(self):
+        old = 'derived/legacy/' + 'b' * 32 + '/document.pdf'
+        new = 'objects/aa/' + 'a' * 64 + '/' + 'c' * 16 + '/document.pdf'
+        store = MemoryStore()
+        store.put(PDF, old, b'old'); store.put(PDF, new, b'new')
+        path = 'reader-index/v3/generations/' + 'd' * 64 + '/catalog.json'
+        store.put(ASSETS, path, {'version': 3, 'kind': 'reader-reading-catalog', 'files': {},
+                                 'derived_pdf_redirects': {old: new}})
+        graph = gc.ReferenceGraph(store)
+        for bucket in gc.BUCKETS:
+            graph.set_inventory(bucket, set(store.objects[bucket]))
+        graph.walk(json.loads(store.read_bytes(ASSETS, path)), ASSETS, path)
+        self.assertIn((PDF, old), graph.references)
+        self.assertIn((PDF, new), graph.references)
+        graph.walk({'kind': 'reader-reading-catalog', 'derived_pdf_redirects': {'bad': new}}, ASSETS, path)
+        self.assertTrue(any('invalid derived PDF redirects' in x for x in graph.blockers))
+
     def test_external_pin_while_document_is_inflight_does_not_reread_or_lose_pin(self):
         from concurrent.futures import ThreadPoolExecutor
         from threading import Event

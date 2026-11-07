@@ -63,7 +63,7 @@ class ReaderProjectionSyncTests(unittest.TestCase):
         publish = next(item for item in steps if item.get('name') == 'Publish the pinned projection to Pages')
         ack = next(item for item in steps if item.get('id') == 'ack')
         for step in (publish, ack):
-            for operation in ('unify', 'withdraw', 'reset-documents', 'remove-route', 'restore-route', 'migrate-derived', 'resume-derived'):
+            for operation in ('unify', 'withdraw', 'reset-documents', 'remove-route', 'restore-route', 'migrate-derived', 'resume-derived', 'redirect-derived', 'publish-generation'):
                 self.assertTrue(condition(step['if'], operation=operation, changed='true'))
                 self.assertFalse(condition(step['if'], operation=operation, changed='true', apply='false'))
                 self.assertFalse(condition(step['if'], operation=operation, changed='false'))
@@ -163,6 +163,8 @@ class ReaderProjectionSyncTests(unittest.TestCase):
             'verify-route': ['--resource-json', '{"key":"fixture"}', '--expected-parent', 'parent'],
             'migrate-derived': ['--resource-json', '{"key":"fixture"}'],
             'resume-derived': ['--resource-json', '{"key":"fixture"}'],
+            'redirect-derived': ['--resource-json', '{"key":"fixture"}'],
+            'publish-generation': ['--expected-parent', 'parent', '--wait-seconds', '1200'],
             'verify-generation': ['--expected-parent', 'parent', '--wait-seconds', '1200'],
         }
         with tempfile.TemporaryDirectory() as directory:

@@ -14,10 +14,11 @@ import re
 import time
 
 try:
-    from . import publish_reader_v3 as publication, reader_route_plan as plan
+    from . import publish_reader_v3 as publication, reader_route_plan as plan, reader_page_redirects as redirects
 except ImportError:
     import publish_reader_v3 as publication
     import reader_route_plan as plan
+    import reader_page_redirects as redirects
 
 
 FIELD = 'suppressed_sources'
@@ -51,8 +52,10 @@ def prepare_base(catalog: dict, raw: bytes) -> tuple[bytes, dict]:
     """Filter authoritative current base and return an immutable v3 snapshot."""
     base = plan.decode_sidecar(raw)
     keys = validated_sources(catalog)
-    if keys and any(key in base['f'] for key in keys):
-        raw = gzip.compress(publication.encode(filter_sidecar(base, keys)), mtime=0)
+    filtered = filter_sidecar(base, keys)
+    rewritten, _ = redirects.rewrite(filtered, redirects.validated(catalog))
+    if rewritten != base:
+        raw = gzip.compress(publication.encode(rewritten), mtime=0)
     digest = hashlib.sha256(raw).hexdigest()
     ref = publication.metadata(publication.ASSETS,
         f'reader-index/snapshots/{digest}/reader_assets.json.gz', raw)
@@ -71,6 +74,8 @@ def change(store, options: dict, expected_parent: str | None, *, action: str, ap
     pointer, catalog = publication.current(store)
     if not pointer or pointer['generation'] != expected_parent:
         raise ValueError('v3 generation changed; inspect and use the current generation')
+    if redirects.validated(catalog):
+        raise ValueError('route changes require an audited base refresh while derived PDF redirects are active')
     keys = validated_sources(catalog)
     if not catalog.get('base_sidecar'):
         raise ValueError('a pinned base is required before changing a Reader route')
@@ -102,7 +107,8 @@ def change(store, options: dict, expected_parent: str | None, *, action: str, ap
     revised = {**catalog, 'files': files, FIELD: keys}
     packed, ref = prepare_base(revised, canonical)
     new_catalog = {'version': 3, 'kind': 'reader-reading-catalog', 'files': files,
-                   'base_sidecar': ref, FIELD: keys, 'parent_generation': pointer['generation']}
+                   'base_sidecar': ref, FIELD: keys, 'parent_generation': pointer['generation'],
+                   **({redirects.FIELD: catalog[redirects.FIELD]} if redirects.FIELD in catalog else {})}
     same = catalog.get('base_sidecar') == ref and catalog.get('files') == files and validated_sources(catalog) == keys
     if same:
         if publication.current(store)[0] != pointer or store.read_bytes(publication.ASSETS, plan.SIDECAR) != canonical:

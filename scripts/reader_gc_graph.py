@@ -419,6 +419,19 @@ class ReferenceGraph:
                     # the collection fence, this scan is never deletion authority.
                     self.blockers.add(f'dataset primary availability not verified: {fingerprint}')
                 return
+            if value.get('kind') == 'reader-reading-catalog' and 'derived_pdf_redirects' in value:
+                try:
+                    try:
+                        from .reader_page_redirects import validated as validate_redirects
+                    except ImportError:
+                        from reader_page_redirects import validated as validate_redirects
+                    mappings = validate_redirects(value)
+                except ValueError:
+                    self.blockers.add(f'invalid derived PDF redirects: {bucket}:{origin}')
+                    return
+                for old, new in mappings.items():
+                    self.path(old, PDF_PAGES_BUCKET, origin, True, 'path')
+                    self.path(new, PDF_PAGES_BUCKET, origin, True, 'path')
             if value.get("kind") == "reader-v3-retirement":
                 self.walk(value.get("resources", []), bucket, origin, explicit, "resources")
                 return

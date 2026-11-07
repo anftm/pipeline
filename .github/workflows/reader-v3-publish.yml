@@ -8,7 +8,7 @@ on:
     inputs:
       operation:
         type: choice
-        options: [inspect, unify, ack, retire, withdraw, reset-documents, remove-route, restore-route, verify-route, migrate-derived, resume-derived, verify-generation]
+        options: [inspect, unify, ack, retire, withdraw, reset-documents, remove-route, restore-route, verify-route, migrate-derived, resume-derived, redirect-derived, publish-generation, verify-generation]
         default: inspect
       resource_json:
         description: 'Migration requires root identities; optional read-only check_s3=true; apply/resume require external_writers_stopped=true'
@@ -55,15 +55,15 @@ jobs:
       - name: Guard original document and legacy reference contracts
         run: python -m unittest tests.test_direct_document_policy tests.test_reader_storage_contract
       - name: Test page migration and fence
-        if: inputs.operation == 'migrate-derived' || inputs.operation == 'resume-derived'
-        run: python -m unittest tests.test_reader_page_audit tests.test_reader_page_cas tests.test_reader_page_s3_preview tests.test_reader_page_migrate tests.test_reader_page_migration_fence
+        if: inputs.operation == 'migrate-derived' || inputs.operation == 'resume-derived' || inputs.operation == 'redirect-derived'
+        run: python -m unittest tests.test_reader_page_audit tests.test_reader_page_cas tests.test_reader_page_s3_preview tests.test_reader_page_migrate tests.test_reader_page_migration_fence tests.test_reader_page_atomic
       - name: Verify and execute the central v3 operation
         id: operation
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_INPUT_TOKEN: ${{ secrets.HF_INPUT_TOKEN }}
-          HF_S3_ACCESS_KEY_ID: ${{ (inputs.operation == 'migrate-derived' || inputs.operation == 'resume-derived') && secrets.HF_S3_ACCESS_KEY_ID || '' }}
-          HF_S3_SECRET_ACCESS_KEY: ${{ (inputs.operation == 'migrate-derived' || inputs.operation == 'resume-derived') && secrets.HF_S3_SECRET_ACCESS_KEY || '' }}
+          HF_S3_ACCESS_KEY_ID: ${{ contains(fromJSON('["migrate-derived","resume-derived","redirect-derived"]'), inputs.operation) && secrets.HF_S3_ACCESS_KEY_ID || '' }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ contains(fromJSON('["migrate-derived","resume-derived","redirect-derived"]'), inputs.operation) && secrets.HF_S3_SECRET_ACCESS_KEY || '' }}
           GH_TOKEN: ${{ github.token }}
           GC_PRODUCER_TOKENS_JSON: ${{ secrets.GC_PRODUCER_TOKENS_JSON }}
           GC_AMBROSSEE_MAINTENANCE_TOKEN: ${{ secrets.GC_AMBROSSEE_MAINTENANCE_20261102 }}
@@ -90,8 +90,8 @@ jobs:
           args=("$OPERATION" --output output/v3/publication.json)
           case "$OPERATION" in
             withdraw|remove-route|restore-route|verify-route) args+=(--resource-json "$RESOURCE_JSON" --expected-parent "$EXPECTED_PARENT") ;;
-            migrate-derived|resume-derived) args+=(--resource-json "$RESOURCE_JSON") ;;
-            verify-generation) args+=(--expected-parent "$EXPECTED_PARENT" --wait-seconds 1200) ;;
+            migrate-derived|resume-derived|redirect-derived) args+=(--resource-json "$RESOURCE_JSON") ;;
+            publish-generation|verify-generation) args+=(--expected-parent "$EXPECTED_PARENT" --wait-seconds 1200) ;;
             unify|reset-documents) args+=(--resource-json "$RESOURCE_JSON") ;;
             retire) ;;
             ack) args+=(--surface "$SURFACE") ;;
@@ -105,7 +105,7 @@ jobs:
         if: >-
           steps.operation.outputs.apply == 'true' &&
           steps.operation.outputs.changed == 'true' &&
-          contains(fromJSON('["withdraw","unify","reset-documents","remove-route","restore-route","migrate-derived","resume-derived"]'), steps.operation.outputs.operation)
+          contains(fromJSON('["withdraw","unify","reset-documents","remove-route","restore-route","migrate-derived","resume-derived","redirect-derived","publish-generation"]'), steps.operation.outputs.operation)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           PAGES_TOKEN: ${{ secrets.PAGES_TOKEN }}
@@ -115,7 +115,12 @@ jobs:
           GC_AMBROSSEE_MAINTENANCE_TOKEN: ${{ secrets.GC_AMBROSSEE_MAINTENANCE_20261102 }}
           RESOURCE_JSON: ${{ inputs.resource_json }}
           OPERATION: ${{ steps.operation.outputs.operation }}
+          EXPECTED_PARENT: ${{ inputs.expected_parent }}
         run: |
+          if [[ "$OPERATION" == publish-generation ]]; then
+            actual=$(python scripts/publish_reader_v3.py inspect | jq -r '.pointer.generation')
+            [[ "$actual" == "$EXPECTED_PARENT" ]] || { echo 'generation changed before Pages publication' >&2; exit 1; }
+          fi
           if [[ "$OPERATION" == migrate-derived || "$OPERATION" == resume-derived ]]; then
             python scripts/publish_reader_v3.py check-page-window --resource-json "$RESOURCE_JSON"
           fi
@@ -125,14 +130,21 @@ jobs:
         if: >-
           steps.operation.outputs.apply == 'true' &&
           steps.operation.outputs.changed == 'true' &&
-          contains(fromJSON('["withdraw","unify","reset-documents","remove-route","restore-route","migrate-derived","resume-derived"]'), steps.operation.outputs.operation)
+          contains(fromJSON('["withdraw","unify","reset-documents","remove-route","restore-route","migrate-derived","resume-derived","redirect-derived","publish-generation"]'), steps.operation.outputs.operation)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_INPUT_TOKEN: ${{ secrets.HF_INPUT_TOKEN }}
           OPERATION: ${{ steps.operation.outputs.operation }}
           RESOURCE_JSON: ${{ inputs.resource_json }}
+          EXPECTED_PARENT: ${{ inputs.expected_parent }}
         run: |
-          if [[ "$OPERATION" == migrate-derived || "$OPERATION" == resume-derived ]]; then
+          if [[ "$OPERATION" == publish-generation ]]; then
+            python scripts/publish_reader_v3.py verify-generation --expected-parent "$EXPECTED_PARENT" \
+              --wait-seconds 1200 --output output/v3/migration-verification.json
+            echo "complete=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [[ "$OPERATION" == migrate-derived || "$OPERATION" == resume-derived || "$OPERATION" == redirect-derived ]]; then
             generation=$(jq -r '.generation' output/v3/publication.json)
             python scripts/publish_reader_v3.py verify-generation --expected-parent "$generation" \
               --wait-seconds 1200 --output output/v3/migration-verification.json
