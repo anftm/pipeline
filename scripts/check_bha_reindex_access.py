@@ -11,7 +11,7 @@ URL = 'https://vomebook-bha-search.hf.space/api/reindex/status'
 MAX_BYTES = 1024 * 1024
 
 
-def check(token, *, open_url=urlopen):
+def read_status(token, *, open_url=urlopen):
     if not token:
         raise RuntimeError('BHA_REINDEX_TOKEN is not configured')
     request = Request(URL, headers={
@@ -40,6 +40,11 @@ def check(token, *, open_url=urlopen):
         raise RuntimeError('BHA status response has an invalid schema')
     if data.get('index_status') != 'ready' or data.get('switch_pending') is not False:
         raise RuntimeError('BHA index is not ready or is switching')
+    return data
+
+
+def check(token, *, open_url=urlopen):
+    data = read_status(token, open_url=open_url)
     return {'authenticated': True, 'index_status': 'ready', 'switch_pending': False,
             'archive_count': len(data['archive_revisions'])}
 

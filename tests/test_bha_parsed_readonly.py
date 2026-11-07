@@ -41,6 +41,40 @@ class BhaParsedReadOnlyTests(unittest.TestCase):
             with self.assertRaises(PermissionError):
                 check.inspect('test', 0, state, lambda *_: (_ for _ in ()).throw(PermissionError('denied')))
 
+    def test_all_archives_compare_ready_consumer_twice_without_writes(self):
+        trees = {str(i): format(i, '040x') for i in range(32)}
+        live = dict(trees); live['1'] = 'f' * 40
+        def status(_token):
+            return {'index_status': 'ready', 'switch_pending': False, 'archive_revisions': live}
+        def lookup(_token, number):
+            return str(number), format(number + 100, '040x'), trees[str(number)]
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / 'baseline.json'; state.write_text(json.dumps(trees))
+            result = check.inspect_all('github', 'bha', state, lookup, status)
+            self.assertEqual(result['changed_from_baseline'], [])
+            self.assertEqual(result['consumer_differences'], [1])
+            self.assertEqual(len(result['archives']), 32)
+            self.assertTrue(result['consumer_ready_observed_twice'])
+            self.assertEqual(result['remote_writes'], 0)
+            self.assertFalse(result['reindex_requested'])
+            self.assertEqual(json.loads(state.read_text()), trees)
+
+    def test_all_archives_reject_moving_unready_or_incomplete_consumer(self):
+        trees = {str(i): format(i, '040x') for i in range(32)}
+        def lookup(_token, number): return str(number), format(number + 100, '040x'), trees[str(number)]
+        ready = {'index_status': 'ready', 'switch_pending': False, 'archive_revisions': trees}
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / 'baseline.json'; state.write_text(json.dumps(trees))
+            for status in ({**ready, 'index_status': 'starting'}, {**ready, 'switch_pending': True},
+                           {**ready, 'archive_revisions': {'0': trees['0']}}):
+                with self.subTest(status=status), self.assertRaises(ValueError):
+                    check.inspect_all('github', 'bha', state, lookup, lambda _: status)
+            moved = {**ready, 'archive_revisions': {**trees, '0': 'f' * 40}}
+            observations = iter([ready, moved])
+            with self.assertRaisesRegex(RuntimeError, 'changed during'):
+                check.inspect_all('github', 'bha', state, lookup, lambda _: next(observations))
+            with self.assertRaises(RuntimeError): check.inspect_all('github', '', state, lookup, lambda _: ready)
+
     def test_report_cannot_overwrite_baseline(self):
         with tempfile.TemporaryDirectory() as directory:
             state = Path(directory) / 'baseline.json'; state.write_text('{}')

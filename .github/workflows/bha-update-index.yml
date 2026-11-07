@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       archive_id:
-        description: One archive number from 0 through 31
+        description: One archive number (0-31), or all to compare the BHA consumer
         type: string
         default: '0'
         required: true
@@ -28,9 +28,10 @@ jobs:
       - name: Compare parsed tree to recorded baseline
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
+          BHA_REINDEX_TOKEN: ${{ secrets.BHA_REINDEX_TOKEN }}
           ARCHIVE_ID: ${{ inputs.archive_id }}
         run: |
-          [[ "$ARCHIVE_ID" =~ ^([0-9]|[12][0-9]|3[01])$ ]] || exit 1
+          [[ "$ARCHIVE_ID" == 'all' || "$ARCHIVE_ID" =~ ^([0-9]|[12][0-9]|3[01])$ ]] || exit 1
           python3 scripts/check_bha_parsed_readonly.py --archive "$ARCHIVE_ID" --output output/bha/parsed-report.json
       - uses: actions/upload-artifact@v7
         with:
