@@ -433,7 +433,7 @@ class FormatProducerRegressionTests(unittest.TestCase):
                 commands = "\n".join(s.get("run", "") for s in workflow["jobs"][job]["steps"])
                 self.assertIn("--apply --strict", commands)
                 self.assertIn("--retry-failures", commands)
-                if name in {'web', 'spreadsheet'}:
+                if name in {'web', 'spreadsheet', 'media'}:
                     self.assertNotIn('schedule', workflow.get('on', workflow.get(True)))
                 else:
                     self.assertIn('== "schedule" ||', commands)
@@ -470,16 +470,33 @@ class FormatProducerRegressionTests(unittest.TestCase):
             self.assertIn('^([1-9]|10)$', stream)
             self.assertNotIn('${{ inputs.limit', stream)
 
-    def test_media_manual_stream_covers_backfill_under_the_same_locks(self):
-        root = Path(__file__).resolve().parents[1] / ".github/workflows"
-        self.assertFalse((root / "reader-media-backfill.yml").exists())
-        workflow = yaml.safe_load((root / "reader-media-stream.yml").read_text())
-        self.assertEqual(workflow["concurrency"]["group"], "reader-media")
-        self.assertEqual(workflow["jobs"]["finalize"]["concurrency"]["group"], "reader-sidecar")
-        self.assertIn('apply', workflow[True]['workflow_dispatch']['inputs'])
-        commands = "\n".join(s.get("run", "") for s in workflow["jobs"]["media"]["steps"])
-        self.assertIn("--apply --strict", commands)
-        self.assertNotIn("!= 'cancelled'", workflow["jobs"]["finalize"]["if"])
+    def test_media_manual_stream_is_bounded_and_uses_shared_writer_lock(self):
+        import subprocess
+        root = Path(__file__).resolve().parents[1] / '.github/workflows'
+        self.assertFalse((root / 'reader-media-backfill.yml').exists())
+        workflow = yaml.safe_load((root / 'reader-media-stream.yml').read_text())
+        triggers = workflow.get('on', workflow.get(True))
+        self.assertEqual(set(triggers), {'workflow_dispatch'})
+        inputs = triggers['workflow_dispatch']['inputs']
+        self.assertEqual(inputs['limit']['default'], '1')
+        self.assertFalse(inputs['apply']['default'])
+        self.assertEqual(workflow['concurrency']['group'], 'reader-media')
+        for name in ('media', 'finalize'):
+            self.assertEqual(workflow['jobs'][name]['concurrency']['group'], 'reader-sidecar')
+        command = next(step['run'] for step in workflow['jobs']['plan']['steps'] if step.get('id') == 'matrix')
+        guard = command.split('args=(', 1)[0]
+        for limit, apply, valid in [('0', 'false', True), ('1', 'true', True), ('3', 'true', True),
+                                    ('0', 'true', False), ('4', 'true', False), ('-1', 'false', False),
+                                    ('1;echo injected', 'true', False)]:
+            with self.subTest(limit=limit, apply=apply):
+                result = subprocess.run(['bash', '-e', '-c', guard],
+                    env={'LIMIT': limit, 'APPLY': apply}, capture_output=True, text=True)
+                self.assertEqual(result.returncode == 0, valid, result.stderr)
+        commands = '\n'.join(s.get('run', '') for s in workflow['jobs']['media']['steps'])
+        self.assertIn('--apply --strict', commands)
+        self.assertIn('^[1-3]$', commands)
+        self.assertNotIn('${{ inputs.limit', commands)
+        self.assertNotIn("!= 'cancelled'", workflow['jobs']['finalize']['if'])
 
 
 if __name__ == "__main__":

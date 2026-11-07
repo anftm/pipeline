@@ -1,11 +1,8 @@
 name: Reader/桶 · Build Media Streams
-run-name: Media streams ${{ (github.event_name == 'schedule' || inputs.apply == true) && 'apply' || 'plan' }} (${{ inputs.kind || 'all' }})
+run-name: Media streams ${{ inputs.apply == true && 'apply' || 'plan' }} (${{ inputs.kind || 'all' }})
 
 on:
-  schedule:
-    # Audio/video daily; the native-codec probe decides whether a source is
-    # published as-is or transcoded to MP3/MP4 H.264/AAC.
-    - cron: "17 6 * * *"
+  # Resume by reviewed manual batches; do not restart the unlimited daily run.
   workflow_dispatch:
     inputs:
       kind:
@@ -15,9 +12,9 @@ on:
         type: choice
         options: [all, audio, video, swf]
       limit:
-        description: Maximum sources per shard; 0 means all pending
+        description: Maximum attempts per shard; apply requires 1-3, plan allows 0
         required: true
-        default: "0"
+        default: "1"
         type: string
       apply:
         description: Convert and publish media streams
@@ -41,7 +38,7 @@ concurrency:
 
 jobs:
   codecs:
-    if: github.event_name == 'schedule' || inputs.apply == true
+    if: inputs.apply == true
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -81,9 +78,17 @@ jobs:
         id: matrix
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          KIND: ${{ inputs.kind || 'all' }}
+          LIMIT: ${{ inputs.limit || '1' }}
+          APPLY: ${{ inputs.apply }}
+          RETRY_FAILURES: ${{ inputs.retry_failures }}
         run: |
-          args=(--kind media --extension "${{ inputs.kind || 'all' }}" --output output/media-matrix.json --verify-source-sha --report output/media-report.json)
-          if [[ "${{ github.event_name }}" == "schedule" || "${{ inputs.retry_failures }}" == "true" ]]; then args+=(--retry-failures); fi
+          [[ "$LIMIT" =~ ^[0-9]+$ ]] || { echo 'limit must be non-negative' >&2; exit 1; }
+          if [[ "$APPLY" == 'true' && ! "$LIMIT" =~ ^[1-3]$ ]]; then
+            echo 'apply requires 1-3 attempts per shard' >&2; exit 1
+          fi
+          args=(--kind media --extension "$KIND" --output output/media-matrix.json --verify-source-sha --report output/media-report.json)
+          if [[ "$RETRY_FAILURES" == "true" ]]; then args+=(--retry-failures); fi
           python scripts/plan_reader_stream_matrix.py "${args[@]}"
           echo "matrix=$(cat output/media-matrix.json)" >> "$GITHUB_OUTPUT"
       - run: tar -czf output/media-plan.tgz output/search_data.json state/commits.json output/media-matrix.json output/media-report.json
@@ -96,10 +101,15 @@ jobs:
   media:
     needs: plan
     if: >-
-      (github.event_name == 'schedule' || inputs.apply == true) &&
+      inputs.apply == true &&
       fromJSON(needs.plan.outputs.matrix).include[0] != null
     runs-on: ubuntu-24.04
     timeout-minutes: 360
+    # Sharded uploads and checkpoints must not race the canonical handoff.
+    concurrency:
+      group: reader-sidecar
+      cancel-in-progress: false
+      queue: max
     strategy:
       fail-fast: false
       max-parallel: 2
@@ -124,11 +134,16 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
           HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+          KIND: ${{ matrix.extension }}
+          SHARD: ${{ matrix.shard }}
+          LIMIT: ${{ inputs.limit || '1' }}
+          RETRY_FAILURES: ${{ inputs.retry_failures }}
         run: |
-          [[ "${{ inputs.limit || '0' }}" =~ ^[0-9]+$ ]] || exit 1
-          args=(--kind "${{ matrix.extension }}" --limit "${{ inputs.limit || '0' }}"
-                --shard-count 8 --shard-index "${{ matrix.shard }}" --apply --strict)
-          if [[ "${{ github.event_name }}" == "schedule" || "${{ inputs.retry_failures }}" == "true" ]]; then args+=(--retry-failures); fi
+          [[ "$LIMIT" =~ ^[1-3]$ ]] || { echo 'apply requires 1-3 attempts per shard' >&2; exit 1; }
+          [[ "$SHARD" =~ ^[0-7]$ ]] || exit 1
+          args=(--kind "$KIND" --limit "$LIMIT"
+                --shard-count 8 --shard-index "$SHARD" --apply --strict)
+          if [[ "$RETRY_FAILURES" == "true" ]]; then args+=(--retry-failures); fi
           python scripts/pilot_media_stream.py "${args[@]}"
 
   finalize:
@@ -136,8 +151,7 @@ jobs:
     if: >-
       always() && needs.plan.result == 'success' &&
       needs.codecs.result == 'success' &&
-      (github.event_name == 'schedule' || inputs.apply == true) &&
-      needs.media.result == 'success'
+      inputs.apply == true && needs.media.result == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     concurrency:
