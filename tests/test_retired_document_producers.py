@@ -102,7 +102,7 @@ class RetiredDocumentProducerTests(unittest.TestCase):
         self.assertEqual(inputs['operation']['options'],
                          ['inspect', 'unify', 'ack', 'retire', 'withdraw', 'reset-documents',
                           'remove-route', 'restore-route', 'verify-route', 'migrate-derived', 'resume-derived',
-                          'redirect-derived', 'reconcile-derived-index', 'publish-generation', 'verify-generation'])
+                          'redirect-derived', 'reconcile-derived-index', 'reconcile-sidecar', 'publish-generation', 'verify-generation'])
         self.assertEqual(inputs['operation']['default'], 'inspect')
         self.assertFalse(inputs['apply']['default'])
 

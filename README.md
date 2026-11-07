@@ -46,7 +46,7 @@ python3 scripts/reader_route_plan.py --repo 'VoiceOfML/SomeRepo' --path '目录/
 
 `reconcile-derived-index` 在 active redirect 已经发布后，用 `resource_json={"index_sha256":"当前PDF索引SHA-256","v3_generation":"当前代"}` 先预演再执行。它重新核对全部 redirect 的旧/新对象、manifest、两站投影和当前索引，仅以单个 `If-Match` 更新 `derived_pdf_manifest.json` 中已验证的路径和 manifest，不改 sidecar、历史 catalog、v3 指针或文件。响应丢失时先读取该索引并比较预演报告里的前后 SHA，不盲目重试；若其他身份变化则重新审计。后续 redirect 审计同时识别 canonical 索引的旧路径和已迁移新路径。成功不授权删除；历史 sidecar、catalog、redirect 及其他引用依然保护旧对象。
 
-`reader_sidecar_reconcile.py` 是后续对齐 canonical sidecar 与 legacy catalog 的受保护事务实现：先保存内容寻址计划和快照，先写带 pending 标记的新 catalog，再写 sidecar，最后条件清除标记。中途失败保留旧代，可按事务 ID 在同一隔离条件下恢复；pending 期间 GC、ack、压缩及普通 sidecar handoff 停止。它仍要求旧 writer fence 和独立写者隔离，当前没有公开 apply 入口，不能用 404 或调用参数代替凭据收口。
+`reader_sidecar_reconcile.py` 是后续对齐 canonical sidecar 与 legacy catalog 的受保护事务实现：先保存内容寻址计划和快照，先写带 pending 标记的新 catalog，再写 sidecar，最后条件清除标记。中途失败保留旧代，可按事务 ID 在同一隔离条件下恢复；pending 期间 GC、ack、压缩及普通 sidecar handoff 停止。工作流入口 `reconcile-sidecar` 的 `resource_json` 填 `index_sha256`、`sidecar_sha256`、`catalog_sha256`、`v3_generation`，先 `apply=false` 预演；`apply=true` 须加 `owner_declared_single_writer=true`，它只记录所有者声明不存在其他桶写者，**不是凭据已收口的证明**，结果恒报告 `external_credentials_verified=false`。该入口不再检查已退场的历史仓库，只要求中央串行工作流和这项声明；apply 会重新计划并在首次写入前持久化 journal、打印 `transaction_id`，中断或响应丢失时用 `{"transaction_id":"…","owner_declared_single_writer":true}` 和 `apply=true` 续跑，不盲目重试。条件写不提供跨对象原子性，成功不授权删除。
 
 旧 `migrate-derived` / `resume-derived` 保留用于之后真正改 canonical 索引的多对象事务。该事务首次改索引前会保存内容寻址续跑计划并打印 `transaction_id`；续跑必须检查每个索引的精确旧值或新值。它仍受旧 fence 和外部写者隔离阻塞，不能把 redirect 成功误当 canonical 索引已迁移。
 

@@ -2,7 +2,9 @@ import base64
 import copy
 import gzip
 import hashlib
+import inspect
 import json
+import os
 import unittest
 from unittest.mock import patch
 
@@ -14,6 +16,8 @@ from tests.test_reader_page_audit import fixture, KEY, OLD, NEW
 from tests.test_reader_page_atomic import AtomicStore
 from tests.test_reader_page_migrate import MemoryApi
 from tests.test_reader_route_control import Consumers
+
+REAL_WINDOW = sidecar_reconcile.require_writer_window
 
 
 class SidecarReconciliationTests(unittest.TestCase):
@@ -46,7 +50,7 @@ class SidecarReconciliationTests(unittest.TestCase):
         self.store.stat = lambda bucket, path: len(self.store.read_bytes(bucket, path))
         self.verifier = patch.object(publication, 'verify_generation', return_value={'complete': True})
         self.verifier.start(); self.addCleanup(self.verifier.stop)
-        self.fence = patch.object(migration, 'require_writer_window')
+        self.fence = patch.object(sidecar_reconcile, 'require_writer_window')
         self.check = self.fence.start(); self.addCleanup(self.fence.stop)
         self.store.writes.clear()
 
@@ -149,6 +153,30 @@ class SidecarReconciliationTests(unittest.TestCase):
         # Catalog is still before, while sidecar is after: impossible order.
         with self.assertRaisesRegex(ValueError, 'impossible order'):
             sidecar_reconcile.run(self.store, self.api, value)
+
+    def test_writer_window_needs_central_workflow_and_owner_declaration_not_legacy_fence(self):
+        class Writer:
+            def __init__(self):
+                self.calls, self.error = [], None
+
+            def assert_serialized_writer(self, protocol):
+                self.calls.append(protocol)
+                if self.error:
+                    raise self.error
+        store = Writer()
+        with patch.dict(os.environ):
+            os.environ.pop('READER_OWNER_DECLARED_SINGLE_WRITER', None)
+            with self.assertRaisesRegex(RuntimeError, 'owner declaration'):
+                REAL_WINDOW(store)
+        self.assertEqual(store.calls, [publication.PROTOCOL])
+        with patch.dict(os.environ, {'READER_OWNER_DECLARED_SINGLE_WRITER': 'true'}):
+            with patch.object(migration, 'GitHubProducerFence') as legacy:
+                REAL_WINDOW(store)
+            legacy.assert_not_called()
+            store.error = RuntimeError('central workflow required')
+            with self.assertRaisesRegex(RuntimeError, 'central workflow'):
+                REAL_WINDOW(store)
+        self.assertNotIn('migration.require_writer_window', inspect.getsource(sidecar_reconcile))
 
     def test_forged_journal_content_or_hash_is_rejected(self):
         value = self.prepare()

@@ -807,7 +807,7 @@ def main():
     parser.add_argument("command", choices=("withdraw", "ack", "ack-all", "acknowledge-legacy",
                                             "compact-legacy", "inspect", "project", "retire",
                                             "unify", "reset-documents", "remove-route", "restore-route", "verify-route",
-                                            "migrate-derived", "resume-derived", "redirect-derived", "reconcile-derived-index", "publish-generation", "verify-generation", "check-page-window"))
+                                            "migrate-derived", "resume-derived", "redirect-derived", "reconcile-derived-index", "reconcile-sidecar", "publish-generation", "verify-generation", "check-page-window"))
     parser.add_argument("--resource-json")
     parser.add_argument("--expected-parent", default="none")
     parser.add_argument("--apply", action="store_true")
@@ -904,6 +904,41 @@ def main():
         plan = reconcile.prepare(store, api, expected_index=options['index_sha256'],
                                  expected_generation=options['v3_generation'])
         report = reconcile.apply(store, api, plan) if args.apply else reconcile.result(plan, applied=False)
+    elif args.command == 'reconcile-sidecar':
+        try:
+            from . import reader_sidecar_reconcile as sidecar
+            from .reader_page_cas import ConditionalPageStore
+        except ImportError:
+            import reader_sidecar_reconcile as sidecar
+            from reader_page_cas import ConditionalPageStore
+        from huggingface_hub import HfApi
+        options = json.loads(args.resource_json or '{}')
+        identities = {'index_sha256', 'sidecar_sha256', 'catalog_sha256', 'v3_generation'}
+        declared = 'owner_declared_single_writer'
+        keys = set(options) if isinstance(options, dict) else set()
+        resuming = keys == {'transaction_id', declared}
+        if not (keys == identities or keys == identities | {declared} or resuming):
+            raise ValueError('reconcile-sidecar requires exact root identities, or a transaction_id to resume')
+        if (args.apply or resuming) and options.get(declared) is not True:
+            raise ValueError('writing requires the owner declaration owner_declared_single_writer=true')
+        if resuming and not args.apply:
+            raise ValueError('resuming a sidecar transaction requires --apply')
+        if args.apply:
+            os.environ['READER_OWNER_DECLARED_SINGLE_WRITER'] = 'true'
+            assert_writer(store)
+            store = ConditionalPageStore(store)
+            store.preflight()
+        api = HfApi(token=os.environ.get('HF_TOKEN'))
+        if resuming:
+            report = sidecar.resume(store, api, options['transaction_id'])
+        else:
+            value = sidecar.prepare(store, api, expected_index=options['index_sha256'],
+                                    expected_sidecar=options['sidecar_sha256'],
+                                    expected_catalog=options['catalog_sha256'],
+                                    expected_generation=options['v3_generation'])
+            report = sidecar.apply(store, api, value) if args.apply else sidecar.preview(value)
+        if args.apply:
+            report = {**report, 'owner_declared_single_writer': True, 'external_credentials_verified': False}
     elif args.command == 'migrate-derived':
         try:
             from . import reader_page_migrate as migrate

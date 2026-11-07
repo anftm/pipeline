@@ -2,14 +2,17 @@
 
 The two mutable roots cannot be committed atomically. A content-addressed
 journal and legacy snapshot are persisted first; exact root states make a
-stopped transaction inspectable and resumable. Actual writes require the
-existing full writer fence and verified independent-writer isolation.
+stopped transaction inspectable and resumable. Writes require the central
+serialized Reader workflow and the owner's recorded declaration that no other
+bucket writer exists; that declaration is a precondition, not proof that any
+external credential is revoked.
 """
 import base64
 import copy
 import gzip
 import hashlib
 import json
+import os
 import re
 import io
 
@@ -26,6 +29,17 @@ except ImportError:
     import publish_reader_v3 as publication
 
 PREFIX = 'reader-index/gc/sidecar-reconcile/'
+
+
+def require_writer_window(store):
+    """Require the central serialized workflow and the owner's declaration.
+
+    The declaration is recorded, never evidence that external bucket
+    credentials are revoked. It replaces the legacy per-repository fence.
+    """
+    publication.assert_writer(store)
+    if os.environ.get('READER_OWNER_DECLARED_SINGLE_WRITER') != 'true':
+        raise RuntimeError('the owner declaration that no other bucket writer exists is required')
 
 
 def sha(raw):
@@ -222,7 +236,7 @@ def persist(store, value):
 
 
 def run(store, api, value):
-    migration.require_writer_window(store)
+    require_writer_window(store)
     validate(value)
     pointer, current_catalog = publication.current(store)
     if pointer != value['pointer']:
@@ -297,7 +311,7 @@ def run(store, api, value):
         sidecar = base64.b64decode(value['sidecar_after_base64'], validate=True)
         store.immutable_put(audit.ASSETS, value['snapshot_path'], sidecar)
     for (path, name), state in zip(items, states):
-        migration.require_writer_window(store)
+        require_writer_window(store)
         current, etag = store.read_for_update(audit.ASSETS, path)
         expected = value[name + ('_before_sha256' if state == 'before' else '_after_sha256')]
         if sha(current) != expected:
@@ -314,7 +328,7 @@ def run(store, api, value):
             or sha(store.read_bytes(audit.ASSETS, migration.CATALOG)) != value['catalog_after_sha256']):
         raise ValueError('Reader roots changed after sidecar reconciliation')
     migration.verify_copies(store, api, value['rows'])
-    migration.require_writer_window(store)
+    require_writer_window(store)
     current, etag = store.read_for_update(audit.ASSETS, migration.CATALOG)
     if sha(current) != value['catalog_after_sha256']:
         raise ValueError('pending legacy catalog changed before finalization')
@@ -331,7 +345,7 @@ def run(store, api, value):
 
 
 def apply(store, api, value):
-    migration.require_writer_window(store)
+    require_writer_window(store)
     validate(value)
     for path, name in ((audit.SIDECAR, 'sidecar'), (migration.CATALOG, 'catalog')):
         if sha(store.read_bytes(audit.ASSETS, path)) != value[name + '_before_sha256']:
