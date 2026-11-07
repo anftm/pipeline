@@ -433,13 +433,41 @@ class FormatProducerRegressionTests(unittest.TestCase):
                 commands = "\n".join(s.get("run", "") for s in workflow["jobs"][job]["steps"])
                 self.assertIn("--apply --strict", commands)
                 self.assertIn("--retry-failures", commands)
-                self.assertIn('== "schedule" ||', commands)
+                if name == 'web':
+                    self.assertNotIn('schedule', workflow.get('on', workflow.get(True)))
+                else:
+                    self.assertIn('== "schedule" ||', commands)
                 self.assertIn(f"needs.{job}.result == 'success'", workflow["jobs"]["finalize"]["if"])
                 # An empty plan must not rebuild the sidecar or dispatch unify:
                 # `skipped` is deliberately not accepted any more.
                 self.assertNotIn(f"needs.{job}.result == 'skipped'", workflow["jobs"]["finalize"]["if"])
                 self.assertNotIn("!= 'cancelled'", workflow["jobs"]["finalize"]["if"])
                 self.assertEqual(workflow["jobs"]["finalize"]["concurrency"]["group"], "reader-sidecar")
+
+    def test_web_workflow_is_manual_bounded_and_serializes_checkpoints(self):
+        import subprocess
+        root = Path(__file__).resolve().parents[1] / '.github/workflows'
+        workflow = yaml.safe_load((root / 'reader-web-stream.yml').read_text())
+        triggers = workflow.get('on', workflow.get(True))
+        self.assertEqual(set(triggers), {'workflow_dispatch'})
+        inputs = triggers['workflow_dispatch']['inputs']
+        self.assertEqual(set(inputs['extension']['options']), {'all'} | web.SUPPORTED_EXTENSIONS)
+        self.assertEqual(inputs['limit']['default'], '1')
+        self.assertFalse(inputs['apply']['default'])
+        for name in ('web-stream', 'finalize'):
+            self.assertEqual(workflow['jobs'][name]['concurrency']['group'], 'reader-sidecar')
+        command = next(step['run'] for step in workflow['jobs']['plan']['steps'] if step.get('id') == 'matrix')
+        guard = command.split('args=(', 1)[0]
+        for limit, apply, valid in [('0', 'false', True), ('1', 'true', True), ('10', 'true', True),
+                                    ('0', 'true', False), ('11', 'true', False), ('-1', 'false', False),
+                                    ('1;echo injected', 'true', False)]:
+            with self.subTest(limit=limit, apply=apply):
+                result = subprocess.run(['bash', '-e', '-c', guard],
+                    env={'LIMIT': limit, 'APPLY': apply}, capture_output=True, text=True)
+                self.assertEqual(result.returncode == 0, valid, result.stderr)
+        stream = '\n'.join(step.get('run', '') for step in workflow['jobs']['web-stream']['steps'])
+        self.assertIn('^([1-9]|10)$', stream)
+        self.assertNotIn('${{ inputs.limit', stream)
 
     def test_media_manual_stream_covers_backfill_under_the_same_locks(self):
         root = Path(__file__).resolve().parents[1] / ".github/workflows"

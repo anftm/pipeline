@@ -1,10 +1,8 @@
 name: Reader/桶 · Build Web Streams
-run-name: Web streams ${{ (github.event_name == 'schedule' || inputs.apply == true) && 'apply' || 'plan' }} (${{ inputs.extension || 'all' }})
+run-name: Web streams ${{ inputs.apply == true && 'apply' || 'plan' }} (${{ inputs.extension || 'all' }})
 
 on:
-  schedule:
-    # HTML-family sources change slowly; run after the weekly text pass.
-    - cron: "7 3 * * 1"
+  # Restart with explicit, bounded manual batches; no automatic backlog run.
   workflow_dispatch:
     inputs:
       extension:
@@ -14,9 +12,9 @@ on:
         type: choice
         options: [all, html, htm, mht, mhtml]
       limit:
-        description: Maximum sources; 0 means all pending
+        description: Maximum attempts per extension; apply requires 1-10, plan allows 0
         required: true
-        default: "0"
+        default: "1"
         type: string
       apply:
         description: Convert and publish web streams
@@ -60,9 +58,17 @@ jobs:
         id: matrix
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          EXTENSION: ${{ inputs.extension || 'all' }}
+          LIMIT: ${{ inputs.limit || '1' }}
+          APPLY: ${{ inputs.apply }}
+          RETRY_FAILURES: ${{ inputs.retry_failures }}
         run: |
-          args=(--kind web --extension "${{ inputs.extension || 'all' }}" --output output/web-matrix.json --report output/web-report.json)
-          if [[ "${{ github.event_name }}" == "schedule" || "${{ inputs.retry_failures }}" == "true" ]]; then args+=(--retry-failures); fi
+          [[ "$LIMIT" =~ ^[0-9]+$ ]] || { echo 'limit must be non-negative' >&2; exit 1; }
+          if [[ "$APPLY" == 'true' && ! "$LIMIT" =~ ^([1-9]|10)$ ]]; then
+            echo 'apply requires 1-10 attempts per extension' >&2; exit 1
+          fi
+          args=(--kind web --extension "$EXTENSION" --output output/web-matrix.json --report output/web-report.json)
+          if [[ "$RETRY_FAILURES" == "true" ]]; then args+=(--retry-failures); fi
           python scripts/plan_reader_stream_matrix.py "${args[@]}"
           echo "matrix=$(cat output/web-matrix.json)" >> "$GITHUB_OUTPUT"
       - run: tar -czf output/web-plan.tgz output/search_data.json state/commits.json output/web-matrix.json output/web-report.json
@@ -75,10 +81,15 @@ jobs:
   web-stream:
     needs: plan
     if: >-
-      (github.event_name == 'schedule' || inputs.apply == true) &&
+      inputs.apply == true &&
       fromJSON(needs.plan.outputs.matrix).include[0] != null
     runs-on: ubuntu-24.04
     timeout-minutes: 360
+    # Keep format indexes, processing roots and sidecar rebuilds serialized.
+    concurrency:
+      group: reader-sidecar
+      cancel-in-progress: false
+      queue: max
     strategy:
       fail-fast: false
       max-parallel: 2
@@ -100,18 +111,20 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
           HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+          EXTENSION: ${{ matrix.extension }}
+          LIMIT: ${{ inputs.limit || '1' }}
+          RETRY_FAILURES: ${{ inputs.retry_failures }}
         run: |
-          [[ "${{ inputs.limit || '0' }}" =~ ^[0-9]+$ ]] || exit 1
-          args=(--extension "${{ matrix.extension }}" --limit "${{ inputs.limit || '0' }}" --apply --strict)
-          if [[ "${{ github.event_name }}" == "schedule" || "${{ inputs.retry_failures }}" == "true" ]]; then args+=(--retry-failures); fi
+          [[ "$LIMIT" =~ ^([1-9]|10)$ ]] || { echo 'apply requires 1-10 attempts per extension' >&2; exit 1; }
+          args=(--extension "$EXTENSION" --limit "$LIMIT" --apply --strict)
+          if [[ "$RETRY_FAILURES" == "true" ]]; then args+=(--retry-failures); fi
           python scripts/pilot_web_stream.py "${args[@]}"
 
   finalize:
     needs: [plan, web-stream]
     if: >-
       always() && needs.plan.result == 'success' &&
-      (github.event_name == 'schedule' || inputs.apply == true) &&
-      needs.web-stream.result == 'success'
+      inputs.apply == true && needs.web-stream.result == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     concurrency:
