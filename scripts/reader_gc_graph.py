@@ -725,7 +725,9 @@ class ReferenceGraph:
                     future.cancel()
                 self.pending.update(inflight.values())
                 raise TimeoutError("GC scan deadline reached")
-            done, _ = wait(inflight, timeout=30, return_when=FIRST_COMPLETED)
+            remaining = None if self.deadline is None else max(0, self.deadline - time.monotonic())
+            done, _ = wait(inflight, timeout=min(30, remaining) if remaining is not None else 30,
+                           return_when=FIRST_COMPLETED)
             for future in done:
                 ref = inflight.pop(future)
                 active_refs.remove(ref)
@@ -901,6 +903,7 @@ class ReferenceGraph:
     def build(self) -> dict:
         if not self.include_input:
             self.blockers.add("input bucket inventory was explicitly skipped")
+        timed_out = False
         try:
             self.store.root_predicate = is_root
         except AttributeError:
@@ -908,16 +911,24 @@ class ReferenceGraph:
         for bucket in BUCKETS:
             if bucket == PDF_OCR_INPUT_BUCKET and not self.include_input:
                 continue
+            if self.deadline is not None and time.monotonic() >= self.deadline:
+                self.blockers.add(f"GC scan deadline reached before {bucket} inventory")
+                break
             try:
                 self.set_inventory(bucket, self.inventory(bucket))
                 print(f"GC graph: inventory {bucket} objects={len(self.files[bucket])}; "
                       f"{time.monotonic() - self.started:.0f}s", flush=True)
             except Exception as error:
                 self.blockers.add(f"inventory unavailable: {bucket} ({type(error).__name__})")
+        if self.deadline is not None and time.monotonic() >= self.deadline:
+            self.blockers.add("GC scan deadline reached before root traversal")
         required = (READER_ASSETS_BUCKET, "reader-index/reader_assets.json.gz")
         if required[1] not in self.files.get(required[0], set()):
             self.blockers.add("canonical Reader sidecar is missing")
-        with ThreadPoolExecutor(max_workers=self.workers) as pool:
+        pool = ThreadPoolExecutor(max_workers=self.workers)
+        try:
+            if self.deadline is not None and time.monotonic() >= self.deadline:
+                raise TimeoutError('GC scan deadline reached')
             # The catalog and retirement journal decide handoffs and retired
             # roots, so read them before the processing roots.
             for ref in (CATALOG_REF, RETIREMENT_REF):
@@ -933,12 +944,22 @@ class ReferenceGraph:
                     if ref not in self.retired_roots and ref not in self.seen:
                         self.references.add(ref)
                         self.pending.add(ref)
-            try:
-                if not self.converge(pool):
-                    self.blockers.add(f"root inventory did not stabilize after {self.max_rounds} rounds")
-            except TimeoutError:
-                self.blockers.add(f"GC scan deadline reached with {len(self.pending)} unread roots/manifests")
-                pool.shutdown(wait=False, cancel_futures=True)
+            if not self.converge(pool):
+                self.blockers.add(f"root inventory did not stabilize after {self.max_rounds} rounds")
+        except TimeoutError:
+            timed_out = True
+            self.blockers.add(f"GC scan deadline reached with {len(self.pending)} unread roots/manifests")
+        finally:
+            # A context-manager __exit__ would call shutdown(wait=True),
+            # silently waiting for slow S3 requests after our deadline.
+            pool.shutdown(wait=not timed_out, cancel_futures=timed_out)
+        # A timed-out worker may still finish a network call and mutate graph
+        # bookkeeping. Do not touch shared graph state until it has stopped.
+        if timed_out:
+            return {'version': 1, 'mode': 'report-only', 'graph_complete': False,
+                    'blockers': ['GC scan deadline reached; partial inventory discarded'],
+                    'buckets': {}, 'deletion_authorized': False, 'workers_may_still_be_running': True,
+                    'consistency': 'deadline reached; partial inventory discarded'}
         self.finalize()
         if self.missing:
             self.blockers.add("referenced objects are missing")
@@ -1070,7 +1091,8 @@ def main() -> int:
     for attempt in range(args.snapshot_retries + 1):
         report = ReferenceGraph(store, not args.skip_input_bucket, args.generation_grace_days,
                                 workers=args.workers, max_rounds=args.max_rounds, deadline=deadline).build()
-        if any("deadline reached" in blocker for blocker in report.get("blockers", [])):
+        if report.get('workers_may_still_be_running') or any(
+                "deadline reached" in blocker for blocker in report.get("blockers", [])):
             break
         if report["graph_complete"] or not any(
                 any(marker in blocker for marker in transient_markers)

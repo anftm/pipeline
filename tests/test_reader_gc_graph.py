@@ -70,6 +70,41 @@ class ReaderGcGraphTests(unittest.TestCase):
         self.assertFalse(report['graph_complete'])
         self.assertTrue(any('sidecar reconciliation is pending' in b for b in report['blockers']))
 
+    def test_deadline_returns_incomplete_report_without_waiting_for_inflight_reads(self):
+        import time
+        from threading import Event
+        started, release = Event(), Event()
+        store = MemoryStore()
+        store.put(ASSETS, 'reader-index/slow.json', {'version': 1, 'files': {}})
+        real = store.read_bytes
+        def slow(bucket, path):
+            if path.endswith('/slow.json'):
+                started.set()
+                release.wait(3)
+            return real(bucket, path)
+        store.read_bytes = slow
+        graph = gc.ReferenceGraph(store, workers=1, deadline=time.monotonic() + 0.25)
+        start = time.monotonic()
+        try:
+            report = graph.build()
+            elapsed = time.monotonic() - start
+            self.assertTrue(started.is_set())
+            self.assertLess(elapsed, 1.5)
+            self.assertFalse(report['graph_complete'])
+            self.assertFalse(report['deletion_authorized'])
+            self.assertTrue(report['workers_may_still_be_running'])
+            self.assertEqual(report['buckets'], {})
+            self.assertTrue(any('deadline reached' in x for x in report['blockers']))
+        finally:
+            release.set()
+
+    def test_deadline_before_inventory_never_treats_missing_buckets_as_complete(self):
+        import time
+        report = gc.ReferenceGraph(MemoryStore(), deadline=time.monotonic() - 1).build()
+        self.assertFalse(report['graph_complete'])
+        self.assertFalse(report['deletion_authorized'])
+        self.assertEqual(report['buckets'], {})
+
     def test_external_pin_while_document_is_inflight_does_not_reread_or_lose_pin(self):
         from concurrent.futures import ThreadPoolExecutor
         from threading import Event
