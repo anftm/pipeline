@@ -51,6 +51,14 @@ class GbkRepairPublicationTests(unittest.TestCase):
         return repair.run(self.store, options or {"sources": [self.spec]}, self.workspace / "run",
                           apply=apply, download=self.download)
 
+    def test_active_redirects_stop_before_any_repair_write(self):
+        pointer, catalog = publication.current(self.store)
+        with patch.object(publication, 'current', return_value=(pointer, {**catalog, 'derived_pdf_redirects': {'x': 'y'}})):
+            with self.assertRaisesRegex(ValueError, 'audited base refresh'):
+                self.run_repair(apply=True)
+        self.assertEqual(self.store.writes, [])
+        self.publisher.assert_not_called()
+
     def test_dry_run_builds_verified_candidate_without_writes(self):
         result = self.run_repair()
         self.assertFalse(result["applied"])

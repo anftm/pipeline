@@ -305,6 +305,18 @@ def main() -> int:
     args.output.write_bytes(payload)
     print(f"mappings={len(index['f'])} bytes={len(payload)} output={args.output}")
     if args.apply:
+        # An atomic redirect pins a reviewed base while canonical indexes still
+        # point at historical PDFs. Do not update the sidecar or release any
+        # processing roots until a separately audited refresh is available.
+        try:
+            from . import publish_reader_v3 as publication
+            from .reader_bucket_store import HubBucketStore
+        except ImportError:
+            import publish_reader_v3 as publication
+            from reader_bucket_store import HubBucketStore
+        _, current_catalog = publication.current(HubBucketStore())
+        if current_catalog.get('derived_pdf_redirects'):
+            raise RuntimeError('active derived PDF redirects require an audited base refresh')
         import httpx
         try:
             from .reader_bucket_store import S3BucketStore

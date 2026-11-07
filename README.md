@@ -39,7 +39,7 @@ python3 scripts/reader_route_plan.py --repo 'VoiceOfML/SomeRepo' --path '目录/
 
 优先使用 `reader-v3-publish.yml` 的 `redirect-derived`：在 `resource_json` 填写只读审计取得的 `index_sha256`、`sidecar_sha256`、`v3_generation`，先 `apply=false` 检查，再以同一身份 `apply=true`。它重新扫描并核对目标文件及 manifest，把全部已匹配路由组成新的内容寻址 v3 快照，仅通过 S3 条件写推进**一个 v3 指针**；不改 canonical 派生 PDF 索引、canonical sidecar、旧 catalog，也不删对象或旧代。随后发布 Pages 投影并核对两站；报告不是删除清单。
 
-已知中央 Reader 发布器使用 `reader-sidecar` 并发组；搜索同步写搜索数据，不写 Reader 桶索引。单指针路径避免了依赖旧 OCR 仓库 fence 的多对象索引事务，但不证明其他 HF/S3 凭据已失效，也不保证未来无外部写者。发布前后复核副本和指针，保留全部旧数据；并发者或目标文件异常仍会造成冲突或发布后失败，需要停止并检查。当前 `unify`、`remove-route` 和 `restore-route` 在 redirect 活跃时会明确拒绝未经审计的基础快照刷新，`reset-documents` 也先阻止，避免悄悄覆盖重映射或破坏 canonical 事务；这是待完成的后续能力，不能将其当作已支持。
+已知中央 Reader 发布器使用 `reader-sidecar` 并发组；搜索同步写搜索数据，不写 Reader 桶索引。单指针路径避免了依赖旧 OCR 仓库 fence 的多对象索引事务，但不证明其他 HF/S3 凭据已失效，也不保证未来无外部写者。发布前后复核副本和指针，保留全部旧数据；并发者或目标文件异常仍会造成冲突或发布后失败，需要停止并检查。当前 `unify`、`remove-route` 和 `restore-route` 在 redirect 活跃时会明确拒绝未经审计的基础快照刷新，`reset-documents`、canonical sidecar handoff 和 GBK 修复也会在写入前阻止，避免悄悄覆盖重映射或破坏 canonical 事务；这是待完成的后续能力，不能将其当作已支持。
 
 `redirect-derived` 先创建内容寻址快照、catalog 和 promotion，再打印 staged generation，最后只发一次指针 `If-Match`；条件冲突或响应丢失不可盲目重试。查看 `inspect` 确认指针：若仍是旧代，可重新只读审计和预演；若已是 staged generation，用 `publish-generation`、`apply=true`、`expected_parent=该代` 仅重新投影并核对两站；若是其他代则停止调查。此恢复入口不会修改桶索引或写 GC 回执。
 

@@ -126,6 +126,8 @@ def run(store, options, workspace, *, apply=False, download=None):
     if apply:
         publication.assert_writer(store)
     pointer, catalog = publication.current(store)
+    if catalog.get('derived_pdf_redirects'):
+        raise ValueError('PDF repair requires an audited base refresh while derived PDF redirects are active')
     derived_raw = store.read_bytes(shared.PDF_PAGES_BUCKET, DERIVED)
     derived = json.loads(derived_raw)
     if (derived.get("version") != 1 or derived.get("kind") != "pdf-derived-source-index"
