@@ -36,7 +36,7 @@ python3 scripts/reader_route_plan.py --repo 'VoiceOfML/SomeRepo' --path '目录/
 
 ## PDF 页面桶：derived → objects
 
-`python3 scripts/reader_page_audit.py --output output/page-audit.json` 只读扫描 `vomebook/pdf-pages-v2` 的 `derived/` 和 `objects/`，按源 SHA、Xet 内容 hash、长度及目标 manifest 的精确书籍身份匹配；同内容不同书名必须分别匹配，无法唯一匹配的条目不会迁移。报告含 `index_sha256`、`canonical_sidecar_sha256`、`v3_generation`、逐条映射、未解决项，以及未被当前索引分类的文件；报告**不授权删除**。快照不是原子的，不能作为外部写者已停的证据。
+`python3 scripts/reader_page_audit.py --respect-active-redirects --output output/page-audit.json` 只读扫描 `vomebook/pdf-pages-v2` 的 `derived/` 和 `objects/`，按源 SHA、Xet 内容 hash、长度及目标 manifest 的精确书籍身份匹配；同内容不同书名必须分别匹配，无法唯一匹配的条目不会迁移。该选项会把当前 v3 redirect 中的旧文件单独计入 `legacy_pdfs_in_active_redirects`；不加此选项时，“未被当前 PDF 索引使用”并不代表没有 redirect 或其他引用。报告含 `index_sha256`、`canonical_sidecar_sha256`、`v3_generation`、逐条映射、未解决项，以及未被当前索引分类的文件；报告**不授权删除**。快照不是原子的，不能作为外部写者已停的证据。
 
 优先使用 `reader-v3-publish.yml` 的 `redirect-derived`：在 `resource_json` 填写只读审计取得的 `index_sha256`、`sidecar_sha256`、`v3_generation`，先 `apply=false` 检查，再以同一身份 `apply=true`。它重新扫描并核对目标文件及 manifest，把全部已匹配路由组成新的内容寻址 v3 快照，仅通过 S3 条件写推进**一个 v3 指针**；不改 canonical 派生 PDF 索引、canonical sidecar、旧 catalog，也不删对象或旧代。随后发布 Pages 投影并核对两站；报告不是删除清单。
 

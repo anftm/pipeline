@@ -176,6 +176,7 @@ def build_plan(index, derived, objects, read_manifest, *, sidecar=None, active_r
                                                     and route.get('b', ASSETS) == BUCKET)})
     indexed = {item['new_path'] for item in entries if isinstance(item.get('new_path'), str)}
     indexed.update(row['old_path'] for row in rows if row['index_location'] == 'objects')
+    indexed.update(active_redirects)
     old_pdfs = {path for path in derived if path.endswith('/document.pdf')}
     matched_targets = {row['new_path'] for row in rows}
     canonical_objects = {path for path in indexed if path.startswith('objects/')}
@@ -183,6 +184,7 @@ def build_plan(index, derived, objects, read_manifest, *, sidecar=None, active_r
                                   and path not in matched_targets and path not in canonical_objects)
     return {'planned': rows, 'unresolved': unresolved,
             'unindexed_legacy_pdfs': sorted(old_pdfs - indexed),
+            'legacy_pdfs_in_active_redirects': len(old_pdfs & set(active_redirects)),
             'unclassified_object_pdfs': unclassified_objects,
             'derived': summarize(derived), 'objects': summarize(objects),
             'deletion_authorized': False}
@@ -282,15 +284,34 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', required=True, type=Path)
     parser.add_argument('--workers', type=int, default=4)
+    parser.add_argument('--respect-active-redirects', action='store_true',
+                        help='audit legacy copies retained by the current v3 redirect catalog')
     args = parser.parse_args()
     if not 1 <= args.workers <= 8:
         parser.error('--workers must be 1..8')
     try:
-        result = audit(HubBucketStore(), HfApi(token=os.environ.get('HF_TOKEN')), workers=args.workers)
+        store = HubBucketStore()
+        mapping = None
+        before = None
+        if args.respect_active_redirects:
+            try:
+                from . import publish_reader_v3 as publication, reader_page_redirects as redirects
+            except ImportError:
+                import publish_reader_v3 as publication
+                import reader_page_redirects as redirects
+            before, catalog = publication.current(store)
+            if not before:
+                raise ValueError('active redirect audit requires a v3 pointer')
+            mapping = redirects.validated(catalog)
+        result = audit(store, HfApi(token=os.environ.get('HF_TOKEN')), workers=args.workers, active_redirects=mapping)
+        if args.respect_active_redirects and (publication.current(store)[0] != before
+                or result['v3_generation'] != before['generation']):
+            raise ValueError('v3 pointer changed during active redirect audit')
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_bytes(encode(result) + b'\n')
         print(json.dumps({'planned': len(result['planned']), 'unresolved': len(result['unresolved']),
                           'unindexed_legacy_pdfs': len(result['unindexed_legacy_pdfs']),
+                          'legacy_pdfs_in_active_redirects': result['legacy_pdfs_in_active_redirects'],
                           'unclassified_object_pdfs': len(result['unclassified_object_pdfs']),
                           'derived': result['derived'], 'objects': result['objects'],
                           'deletion_authorized': False, 'output': str(args.output)}, ensure_ascii=False))

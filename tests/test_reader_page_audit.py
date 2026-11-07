@@ -137,6 +137,7 @@ class AuditTests(unittest.TestCase):
         self.assertEqual(report['planned'][0]['old_path'], OLD)
         self.assertEqual(report['planned'][0]['new_path'], NEW)
         self.assertEqual(report['unindexed_legacy_pdfs'], [])
+        self.assertEqual(report['legacy_pdfs_in_active_redirects'], 1)
         self.assertEqual(report['unresolved'], [])
         altered = copy.deepcopy(index)
         altered['files'][0]['source_revision'] = '3' * 40
