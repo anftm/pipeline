@@ -52,6 +52,17 @@ class ReaderStreamCheckpointTests(unittest.TestCase):
         recovered = {**recovered, "source_revision": "newer", "checkpointed_at": "2026-10-22T15:00:00+00:00"}
         self.assertEqual(index.merge_indexes({"files": [recovered]}, [], [failure], "fixture")["failures"], [])
 
+    def test_later_failure_at_same_revision_is_not_hidden_by_previous_success(self):
+        key = 'repo\0image.png'
+        success = {'key': key, 'source_revision': 'same', 'checkpointed_at': '2026-11-07T10:00:00+00:00'}
+        failure = {'key': key, 'source_revision': 'same', 'checkpointed_at': '2026-11-07T11:00:00+00:00'}
+        result = index.merge_indexes({'files': [success]}, [], [failure], 'image-stream-index')
+        self.assertEqual(result['files'], [success])
+        self.assertEqual(result['failures'], [failure])
+        repaired = {**success, 'checkpointed_at': '2026-11-07T12:00:00+00:00'}
+        self.assertEqual(index.merge_indexes(result, [repaired], [], 'image-stream-index')['failures'], [])
+        self.assertEqual(index.merge_indexes({'files': [repaired]}, [], [failure], 'image-stream-index')['failures'], [])
+
     def test_new_chm_profile_failure_is_not_hidden_by_old_same_revision_success(self):
         good = {"key": "repo\0book.chm", "source_revision": "same", "profile": "old"}
         failure = {**good, "profile": "new", "error": "bad"}

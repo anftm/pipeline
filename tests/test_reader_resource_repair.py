@@ -50,6 +50,32 @@ class ReaderResourceRepairTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             repair.image_plan(sidecar, missing)
 
+    def test_rebuilds_both_historical_and_content_addressed_image_manifests_exactly(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / 'book.tif'
+            frames = [Image.new('RGB', (20, 20), color) for color in ('red', 'blue')]
+            frames[0].save(source, format='TIFF', save_all=True, append_images=frames[1:])
+            digest = hashlib.sha256(source.read_bytes()).hexdigest()
+            item = {'repo': 'VoiceOfML/test', 'path': 'book.tif', 'revision': 'a' * 40,
+                    'extension': 'tif', 'source_sha256': digest, 'bytes': source.stat().st_size}
+            with patch.object(repair.images, 'download', side_effect=lambda _url, target, _token: target.write_bytes(source.read_bytes())):
+                old, _ = repair.images.build_one(item, root / 'old', None, repair.ASSETS, legacy_source_addressed=True)
+                new, _ = repair.images.build_one(item, root / 'new', None, repair.ASSETS)
+                self.assertEqual(old['manifest'], f'pages/image/tif/{digest}/page-manifest.json')
+                self.assertNotEqual(new['manifest'], old['manifest'])
+                index = {'files': [new]}
+                for expected, legacy in ((old, True), (new, False)):
+                    path = expected['manifest']
+                    sidecar = {'f': {expected['key']: {'s': 2, 'm': 'i', 'p': path, 'b': repair.ASSETS}}}
+                    plan = repair.image_plan(sidecar, {(repair.ASSETS, path)}, index)
+                    planned = plan[(repair.ASSETS, path)][0]
+                    self.assertEqual(planned['source_sha256'], digest)
+                    self.assertEqual(planned['legacy_source_addressed'], legacy)
+                    rebuilt, _ = repair.images.build_one(item, root / ('retry-' + str(legacy)), None, repair.ASSETS,
+                                                         legacy_source_addressed=legacy)
+                    self.assertEqual(rebuilt['manifest'], path)
+
     def test_immutable_conflict_stops_publication_and_image_processing_root_is_valid(self):
         store = Store()
         path = 'pages/image/png/' + 'a' * 64 + '/page-manifest.json'

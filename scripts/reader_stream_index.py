@@ -80,11 +80,17 @@ def merge_indexes(previous: dict, entries: list[dict], failures: list[dict], kin
     for failure in failures:
         key = failure["key"]
         current = files.get(key, {})
-        if (reusable_entry(current) and (current.get("source_revision") == failure.get("source_revision")
-                or (current.get("checkpointed_at") and failure.get("checkpointed_at", "") <= current["checkpointed_at"]))
+        failure_time, current_time = failure.get('checkpointed_at', ''), current.get('checkpointed_at', '')
+        # For image checkpoints, record a failed explicit retry even when an
+        # older route for that same source remains usable. Other stream types
+        # retain their established same-revision completion semantics.
+        success_is_newer = bool(current_time) and failure_time <= current_time
+        same_success = (current.get('source_revision') == failure.get('source_revision')
+                        and (kind != 'image-stream-index' or not failure_time))
+        if (reusable_entry(current) and (success_is_newer or same_success)
                 and (not failure.get("profile") or current.get("profile") == failure["profile"])):
             continue
-        if errors.get(key, {}).get("checkpointed_at", "") <= failure.get("checkpointed_at", ""):
+        if errors.get(key, {}).get("checkpointed_at", "") <= failure_time:
             errors[key] = failure
     return {"version": 1, "kind": kind,
             "files": [files[key] for key in sorted(files)],
@@ -216,6 +222,8 @@ def publish_checkpoint(bucket: str, path: str, previous: dict, entries: list[dic
         for field in ("object", "manifest", "fallback"):
             if entry.get(field):
                 resources.add(str(Path(entry[field]).parent))
+        if kind == 'image-stream-index' and entry.get('path'):
+            resources.add(str(Path(entry['path']).parent))
         resources = {root for root in resources if not any(root.startswith(other + "/")
                                                          for other in resources if other != root)}
         identity = hashlib.sha256((entry["key"] + "\0" + "\0".join(sorted(resources))).encode()).hexdigest()[:32]

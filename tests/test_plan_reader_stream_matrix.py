@@ -11,6 +11,14 @@ from scripts.plan_reader_stream_matrix import completed_entries, read_json, sele
 from scripts.pilot_media_stream import select_records as select_media_records
 
 
+def selected_records_fixture_image():
+    rows = [{'Repo': 'VoiceOfML/Test', 'Folder': [], 'File': 'book', 'Extension': 'png', 'Size': 0}]
+    with tempfile.TemporaryDirectory() as directory:
+        source = Path(directory) / 'search.json'
+        source.write_text(json.dumps(rows))
+        return selected_records(source, {'VoiceOfML/Test': 'a' * 40}, 'image', {'png'})
+
+
 class ReaderStreamMatrixIndexTests(unittest.TestCase):
     def test_only_a_missing_index_is_treated_as_empty(self):
         fs = Mock()
@@ -109,6 +117,55 @@ class ReaderStreamMatrixIndexTests(unittest.TestCase):
                 self.assertEqual(matrix.main(), 0)
             self.assertEqual(reuse.call_args.args[1]['files'], [])
             self.assertEqual(json.loads(args.output.read_text())['include'], [{'extension': 'audio', 'shard': 0}])
+
+    def test_image_planner_uses_v2_index_and_never_treats_missing_size_as_convertible(self):
+        self.assertEqual(selected_records_fixture_image(), [])
+        key = 'VoiceOfML/Test\0book.png'
+        candidate = {'key': key, 'extension': 'png', 'revision': 'new'}
+        canonical = {'files': [{'key': key, 'source_revision': 'old', 'source_sha256': 'a' * 64}]}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'revisions.json').write_text('{}')
+            args = SimpleNamespace(kind='image', extensions=['png'], search_data=root / 'search.json',
+                revisions=root / 'revisions.json', bucket='bucket', shard_count=1,
+                output=root / 'matrix.json', retry_failures=False, verify_source_sha=True, report=root / 'report.json')
+            seen = []
+            def read(_fs, _bucket, path):
+                seen.append(path)
+                return canonical if path.endswith('index-v2.json') else {}
+            with patch.object(matrix, 'args', return_value=args), patch.object(matrix, 'HfFileSystem'), \
+                    patch.object(matrix, 'selected_records', return_value=[candidate]), \
+                    patch.object(matrix, 'read_json', side_effect=read), \
+                    patch.object(matrix, 'unchanged_sources', return_value={key}):
+                self.assertEqual(matrix.main(), 0)
+            self.assertEqual(seen, ['pages/image/index-v2.json', 'pages/image/index-v2-00.json'])
+            self.assertEqual(json.loads(args.output.read_text())['include'], [])
+
+    def test_image_planner_limits_matrix_to_requested_shard(self):
+        from scripts.reader_stream_index import shard_for
+        candidates = [{'key': f'VoiceOfML/Test\0{i}.png', 'extension': 'png', 'revision': 'new'} for i in range(40)]
+        canonical = {'files': [{'key': 'VoiceOfML/Test\0old.png', 'source_revision': 'old'}]}
+        wanted = 3
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); (root / 'revisions.json').write_text('{}')
+            args = SimpleNamespace(kind='image', extensions=['png'], search_data=root / 'search.json',
+                revisions=root / 'revisions.json', bucket='bucket', shard_count=8, shard_index=wanted,
+                output=root / 'matrix.json', retry_failures=False, verify_source_sha=False, report=root / 'report.json')
+            def read(_fs, _bucket, path):
+                return canonical if path.endswith('index-v2.json') else {}
+            with patch.object(matrix, 'args', return_value=args), patch.object(matrix, 'HfFileSystem'), \
+                    patch.object(matrix, 'selected_records', return_value=candidates), \
+                    patch.object(matrix, 'read_json', side_effect=read):
+                self.assertEqual(matrix.main(), 0)
+            self.assertEqual(json.loads(args.output.read_text())['include'], [{'extension': 'png', 'shard': wanted}])
+            self.assertEqual(json.loads(args.report.read_text())['extensions'][0]['pending'],
+                             sum(shard_for(item['key'], 8) == wanted for item in candidates))
+
+    def test_retry_failure_overrides_same_revision_success_in_planner(self):
+        source = {'key': 'repo\0image.png', 'source_revision': 'same'}
+        index = {'files': [source], 'failures': [dict(source)]}
+        self.assertEqual(matrix.completed_entries(index, retry_failures=True), {})
+        self.assertEqual(matrix.completed_entries(index, retry_failures=False), {source['key']: 'same'})
 
     def test_office_workflow_exposes_and_passes_explicit_failure_retry(self):
         workflow = (Path(__file__).resolve().parents[1] / ".github" / "workflows" /

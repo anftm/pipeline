@@ -1,8 +1,7 @@
 name: Reader/桶 · Build Image WebP Assets
 
 on:
-  schedule:
-    - cron: "17 2 * * 6"
+  # Manual bounded batches; no index reset and no automatic backlog run.
   workflow_dispatch:
     inputs:
       extension:
@@ -12,12 +11,18 @@ on:
         type: choice
         options: [all, jpg, jpeg, png, bmp, webp, gif, tif, tiff]
       limit:
-        description: Maximum sources per shard; 0 means all
+        description: Maximum attempts per shard; apply requires 1-3, plan allows 0
         required: true
-        default: "0"
+        default: "1"
         type: string
-      rebuild:
-        description: Delete v2 indexes and rebuild every selected image
+      shard:
+        description: Shard 0-7, or all (each shard has its own limit)
+        required: true
+        default: all
+        type: choice
+        options: [all, "0", "1", "2", "3", "4", "5", "6", "7"]
+      retry_failures:
+        description: Retry recorded image conversion failures
         required: true
         default: false
         type: boolean
@@ -40,6 +45,8 @@ jobs:
   plan:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -51,12 +58,28 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           FORCE_SYNC: "true"
         run: python scripts/fetch_and_parse.py
-      - name: Reset v2 image indexes for a full rebuild
-        if: inputs.rebuild == true && inputs.apply == true
+      - name: Plan pending ordinary image workers
+        id: matrix
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: python scripts/reset_image_index.py --apply
-      - run: tar -czf output/image-plan.tgz output/search_data.json state/commits.json
+          EXTENSION: ${{ inputs.extension || 'all' }}
+          SHARD: ${{ inputs.shard || 'all' }}
+          LIMIT: ${{ inputs.limit || '1' }}
+          APPLY: ${{ inputs.apply }}
+          RETRY_FAILURES: ${{ inputs.retry_failures }}
+        run: |
+          [[ "$LIMIT" =~ ^[0-9]+$ ]] || { echo 'limit must be non-negative' >&2; exit 1; }
+          [[ "$SHARD" == 'all' || "$SHARD" =~ ^[0-7]$ ]] || { echo 'invalid shard' >&2; exit 1; }
+          if [[ "$APPLY" == 'true' && ! "$LIMIT" =~ ^[1-3]$ ]]; then
+            echo 'apply requires 1-3 attempts per shard' >&2; exit 1
+          fi
+          args=(--kind image --extension "$EXTENSION" --output output/image-matrix.json
+                --verify-source-sha --report output/image-report.json)
+          if [[ "$SHARD" != 'all' ]]; then args+=(--shard-index "$SHARD"); fi
+          if [[ "$RETRY_FAILURES" == 'true' ]]; then args+=(--retry-failures); fi
+          python scripts/plan_reader_stream_matrix.py "${args[@]}"
+          echo "matrix=$(cat output/image-matrix.json)" >> "$GITHUB_OUTPUT"
+      - run: tar -czf output/image-plan.tgz output/search_data.json state/commits.json output/image-matrix.json output/image-report.json
       - uses: actions/upload-artifact@v7
         with:
           name: reader-image-plan
@@ -65,14 +88,20 @@ jobs:
 
   build:
     needs: plan
-    if: github.event_name == 'schedule' || inputs.apply == true
+    if: >-
+      inputs.apply == true &&
+      fromJSON(needs.plan.outputs.matrix).include[0] != null
     runs-on: ubuntu-24.04
     timeout-minutes: 360
+    concurrency:
+      group: reader-sidecar
+      cancel-in-progress: false
+      queue: max
     strategy:
       fail-fast: false
       max-parallel: 2
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+        include: ${{ fromJSON(needs.plan.outputs.matrix).include }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -87,21 +116,23 @@ jobs:
       - name: Build single-image WebP assets
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          EXTENSION: ${{ inputs.extension || 'all' }}
-          LIMIT: ${{ inputs.limit || '0' }}
-          REBUILD: ${{ inputs.rebuild || 'false' }}
+          HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+          EXTENSION: ${{ matrix.extension }}
+          SHARD: ${{ matrix.shard }}
+          LIMIT: ${{ inputs.limit || '1' }}
+          RETRY_FAILURES: ${{ inputs.retry_failures }}
         run: |
-          [[ "$LIMIT" =~ ^[0-9]+$ ]] || exit 1
-          args=(--extension "$EXTENSION" --limit "$LIMIT" --shard-count 8 --shard-index "${{ matrix.shard }}" --apply --strict)
-          if [[ "$REBUILD" == "true" ]]; then args+=(--rebuild); fi
+          [[ "$LIMIT" =~ ^[1-3]$ && "$SHARD" =~ ^[0-7]$ ]] || exit 1
+          args=(--extension "$EXTENSION" --limit "$LIMIT" --shard-count 8 --shard-index "$SHARD" --apply --strict)
+          if [[ "$RETRY_FAILURES" == 'true' ]]; then args+=(--retry-failures); fi
           python scripts/pilot_image_page_stream.py "${args[@]}"
 
   finalize:
     needs: [plan, build]
     if: >-
       always() && needs.plan.result == 'success' &&
-      (github.event_name == 'schedule' || inputs.apply == true) &&
-      needs.build.result == 'success'
+      inputs.apply == true && needs.build.result == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     concurrency:
@@ -119,7 +150,7 @@ jobs:
           HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
           HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
           HF_S3_BUCKET: vomebook/reader-assets-v2
-        run: python scripts/finalize_image_index.py
+        run: python scripts/finalize_image_index.py --apply
       - name: Rebuild canonical Reader sidecar
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}

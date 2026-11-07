@@ -71,7 +71,7 @@ def absent(store, bucket, path):
     return False
 
 
-def image_plan(sidecar, missing):
+def image_plan(sidecar, missing, image_index=None):
     result = {}
     for key, entry in sidecar["f"].items():
         ref = (entry.get("b"), entry.get("p"))
@@ -86,8 +86,22 @@ def image_plan(sidecar, missing):
                 or "\\" in path or any(ord(char) < 32 for char in path)
                 or path.rsplit(".", 1)[-1].lower() != match[1]):
             raise ValueError("image repair source does not match sidecar")
+        # Legacy roots were named by source SHA; new immutable roots also bind
+        # rendered bytes. Never mistake the latter's root digest for source SHA.
+        digest = None
+        if image_index is not None:
+            rows = [row for row in image_index.get('files', [])
+                    if isinstance(row, dict) and row.get('key') == key and row.get('manifest') == ref[1]]
+            if len(rows) > 1:
+                raise ValueError('duplicate image index owner')
+            if rows:
+                digest = rows[0].get('source_sha256')
+        digest = digest or match[2]
+        if not isinstance(digest, str) or not re.fullmatch(r'[0-9a-f]{64}', digest):
+            raise ValueError('invalid image source checksum')
         result.setdefault(ref, []).append({"key": key, "repo": repo, "path": path,
-                                         "extension": match[1], "source_sha256": match[2]})
+                                         "extension": match[1], "source_sha256": digest,
+                                         "legacy_source_addressed": digest == match[2]})
     return result
 
 
@@ -166,11 +180,22 @@ def run(store, report, output, *, apply=False, limit=0, mode="all"):
         assert_writer()
     missing = missing_references(report)
     sidecar = json.loads(gzip.decompress(retry_read(lambda: store.read_bytes(ASSETS, SIDECAR))))
-    plan = image_plan(sidecar, missing)
-    pinned = pin_image_sources(store.api, plan) if plan else {}
+    if missing:
+        try:
+            image_index = json.loads(retry_read(lambda: store.read_bytes(ASSETS, 'pages/image/index-v2.json')))
+        except FileNotFoundError:
+            image_index = None  # historical source-addressed routes only
+        if image_index is not None and (not isinstance(image_index, dict)
+                                        or not isinstance(image_index.get('files'), list)):
+            raise ValueError('invalid canonical image index')
+    else:
+        image_index = None
+    plan = image_plan(sidecar, missing, image_index)
     selected = [("image", bucket, path) for bucket, path in sorted(plan)]
     if limit:
         selected = selected[:limit]
+    selected_plan = {(bucket, path): plan[(bucket, path)] for _, bucket, path in selected}
+    pinned = pin_image_sources(store.api, selected_plan) if selected else {}
     result = {"version": 1, "applied": apply, "selected": len(selected), "restored": [],
               "already_present": [], "failed": [], "started_at": lifecycle.now_iso()}
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -191,9 +216,10 @@ def run(store, report, output, *, apply=False, limit=0, mode="all"):
             with tempfile.TemporaryDirectory(prefix="reader-resource-repair-") as directory:
                 bundle = Path(directory)
                 item = pinned[plan[(bucket, path)][0]["key"]]
-                entry, files = images.build_one(item, bundle, store.token(ASSETS), ASSETS)
-                if entry["manifest"] != path:
-                    raise ValueError("rebuilt image changed source-addressed path")
+                entry, files = images.build_one(item, bundle, store.token(ASSETS), ASSETS,
+                                                legacy_source_addressed=item['legacy_source_addressed'])
+                if entry.get("manifest") != path:
+                    raise ValueError("rebuilt image changed immutable path")
                 manifest_raw = Path(files[path]).read_bytes()
                 ref = {"bucket": bucket, "path": path, "bytes": len(manifest_raw),
                        "sha256": hashlib.sha256(manifest_raw).hexdigest(), "role": "runtime"}

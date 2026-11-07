@@ -61,9 +61,28 @@ class ReaderSidecarHandoffTests(unittest.TestCase):
 
     def test_stream_upload_roots_are_included_in_catalog_handoff(self):
         indexes = sidecar.stream_processing_indexes("vomebook/reader-assets-v2")
-        self.assertEqual(len(indexes), 11)
-        for path in ("documents/web/html/index.json", "documents/spreadsheet/csv/index.json", "media/audio/index.json"):
+        self.assertEqual(len(indexes), 12)
+        for path in ("documents/web/html/index.json", "documents/spreadsheet/csv/index.json", "media/audio/index.json",
+                     "pages/image/index-v2.json"):
             self.assertIn(("vomebook/reader-assets-v2", path), indexes)
+
+    def test_image_upload_protection_is_released_only_after_canonical_handoff(self):
+        from scripts import reader_lifecycle, reader_stream_index
+        bucket = 'vomebook/reader-assets-v2'
+        root = 'pages/image/png/' + 'a' * 64
+        entry = {'key': 'VoiceOfML/Test\0book.png', 'path': root + '/document.webp',
+                 'root': root, 'source_revision': 'rev'}
+        with tempfile.TemporaryDirectory() as directory:
+            payload = reader_stream_index.publish_checkpoint(bucket, 'pages/image/index-v2-00.json',
+                {'files': [], 'failures': []}, [entry], [], {}, Path(directory), None,
+                apply=False, kind='image-stream-index')
+            path = payload['files'][0]['processing_roots'][0]
+            record = reader_lifecycle.processing_record([{'bucket': bucket, 'root': root}], 'reader-stream-upload', {})
+            saved = []
+            self.assertEqual(sidecar.release_processing_roots([payload], 'b' * 32,
+                lambda _: record, lambda name, value: saved.append((name, value))), 1)
+            self.assertEqual(next(value for name, value in saved if name == path)['status'], 'released')
+            self.assertTrue(any(name.startswith('reader-index/gc/retirements/') for name, _ in saved))
 
     def test_static_pdf_conversion_indexes_are_included_in_handoff(self):
         indexes=sidecar.static_pdf_processing_indexes('vomebook/reader-assets-v2')

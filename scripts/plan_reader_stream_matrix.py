@@ -43,6 +43,7 @@ def args() -> argparse.Namespace:
     p.add_argument("--revisions", type=Path, default=Path("state/commits.json"))
     p.add_argument("--bucket", default="vomebook/reader-assets-v2")
     p.add_argument("--shard-count", type=int, default=8)
+    p.add_argument("--shard-index", type=int, help="plan a single shard only")
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--retry-failures", action="store_true")
     p.add_argument("--verify-source-sha", action="store_true")
@@ -76,6 +77,9 @@ def selected_records(path: Path, revisions: dict, kind: str, wanted: set[str]) -
         rel = relative_path(record)
         revision = str(revisions.get(repo) or "")
         if not repo or not revision:
+            continue
+        if kind == 'image' and int(record.get('Size') or 0) <= 0:
+            # The image worker verifies the pinned source length before upload.
             continue
         if kind == "media":
             contract = bucket_conversion_contract(repo, rel, ext, int(record.get("Size") or 0))
@@ -122,6 +126,10 @@ def completed_entries(index: dict, retry_failures: bool = False,
                 if profile is not None and entry.get("profile") != profile:
                     continue
                 completed[entry["key"]] = entry.get("source_revision")
+    if retry_failures:
+        for failure in index.get('failures', []):
+            if profile is None or failure.get('profile') in (None, profile):
+                completed.pop(failure['key'], None)
     return completed
 
 
@@ -129,6 +137,9 @@ def main() -> int:
     a = args()
     if a.shard_count < 1:
         raise ValueError("shard-count must be positive")
+    shard_index = getattr(a, 'shard_index', None)
+    if shard_index is not None and (not KINDS[a.kind]['sharded'] or not 0 <= shard_index < a.shard_count):
+        raise ValueError('shard-index requires a valid sharded format and shard number')
     config = KINDS[a.kind]
     requested = set(a.extensions or config["extensions"])
     wanted = set(config["extensions"]) if "all" in requested else requested
@@ -151,14 +162,30 @@ def main() -> int:
         candidates = [item for item in records if item["extension"] == extension]
         expected = chapter_profile(extension) if chapter_profile else None
         if config["sharded"]:
-            canonical = read_json(fs, a.bucket, f"{root_for(a.kind, extension)}/index.json")
-            indexes = [read_json(fs, a.bucket, f"{root_for(a.kind, extension)}/index-{shard:02d}.json")
-                       for shard in range(a.shard_count)]
-            source_extensions = {extension}
-            if a.kind == "media":
-                source_extensions = {str(x["key"].rsplit(".", 1)[-1]).lower() for x in candidates}
-            combined = merge_shards(canonical, [(number, index) for number, index in enumerate(indexes) if index],
-                                    "stream-index", source_extensions, a.shard_count)
+            root = root_for(a.kind, extension)
+            if a.kind == 'image':
+                try:
+                    from .pilot_image_page_stream import shard_baseline
+                except ImportError:
+                    from pilot_image_page_stream import shard_baseline
+                canonical = read_json(fs, a.bucket, f'{root}/index-v2.json')
+                if not canonical:
+                    raise ValueError('canonical image index is missing')
+                indexes = [read_json(fs, a.bucket, f'{root}/index-v2-{shard:02d}.json')
+                           for shard in range(a.shard_count)]
+                baselines = [shard_baseline(index or {'files': []}, canonical, number, a.shard_count)
+                             for number, index in enumerate(indexes)]
+                combined = {'files': [entry for index in baselines for entry in index['files']],
+                            'failures': [entry for index in baselines for entry in index.get('failures', [])]}
+            else:
+                canonical = read_json(fs, a.bucket, f'{root}/index.json')
+                indexes = [read_json(fs, a.bucket, f'{root}/index-{shard:02d}.json')
+                           for shard in range(a.shard_count)]
+                source_extensions = {extension}
+                if a.kind == "media":
+                    source_extensions = {str(x["key"].rsplit(".", 1)[-1]).lower() for x in candidates}
+                combined = merge_shards(canonical, [(number, index) for number, index in enumerate(indexes) if index],
+                                        "stream-index", source_extensions, a.shard_count)
             if a.verify_source_sha:
                 # Reuse must obey the same profile gate as completion: a bundle
                 # from another profile is stale even when its bytes match.
@@ -173,9 +200,12 @@ def main() -> int:
                 unchanged = set()
             pending_count = 0
             for shard in range(a.shard_count):
-                index = indexes[shard]
+                if shard_index is not None and shard != shard_index:
+                    continue
+                index = baselines[shard] if a.kind == 'image' else indexes[shard]
                 completed = completed_entries(index, a.retry_failures, expected)
-                completed.update(completed_entries(combined, a.retry_failures, expected))
+                if a.kind != 'image':
+                    completed.update(completed_entries(combined, a.retry_failures, expected))
                 pending = [x for x in candidates if completed.get(x["key"]) != x["revision"] and
                             x["key"] not in unchanged and
                             int.from_bytes(hashlib.sha256(x["key"].encode()).digest()[:8], "big") % a.shard_count == shard]

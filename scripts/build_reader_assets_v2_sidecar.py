@@ -191,7 +191,8 @@ def stream_processing_indexes(assets_bucket: str) -> list[tuple[str, str]]:
             for family, extensions in (("web", ("html", "htm", "mht", "mhtml")),
                                        ("spreadsheet", ("xls", "xlsx", "csv", "ods")))
             for extension in extensions] + [(assets_bucket, f"media/{kind}/index.json")
-                                           for kind in ("audio", "video", "swf")]
+                                           for kind in ("audio", "video", "swf")] + [
+                                               (assets_bucket, 'pages/image/index-v2.json')]
 
 
 def static_pdf_processing_indexes(assets_bucket: str) -> list[tuple[str, str]]:

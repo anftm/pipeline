@@ -4,10 +4,9 @@
 Single-frame sources become one WebP (``mode: image``). Multi-page TIFFs keep
 their pages as an ``image-page-stream`` page manifest instead of being wrapped
 in a PDF. Animated GIFs are reduced to their first frame and published as one
-static WebP. The canonical index is
-``pages/image/index-v2.json`` so a full rebuild never merges old page-stream
-entries; old ``pages/image/index.json`` remains untouched until the v2 index is
-complete and the Reader sidecar is switched.
+static WebP. The canonical index is ``pages/image/index-v2.json``. Uploads
+are content-addressed and protected before checkpointing; the old image index
+and its objects remain untouched.
 """
 
 from __future__ import annotations
@@ -21,7 +20,6 @@ import time
 import urllib.request
 from pathlib import Path
 
-from huggingface_hub import HfFileSystem
 from huggingface_hub.errors import HfHubHTTPError
 from PIL import Image, ImageFile
 
@@ -30,12 +28,12 @@ Image.MAX_IMAGE_PIXELS = 300_000_000
 
 try:
     from .reader_assets import decode_search_payload, relative_path, source_url
-    from .reader_stream_index import unchanged_sources
-    from .shared import batch_bucket_files_with_retry
+    from .reader_stream_index import (read_index, validate_index, unchanged_sources, publish_checkpoint,
+                                      shard_for, source_failure)
 except ImportError:
     from reader_assets import decode_search_payload, relative_path, source_url
-    from reader_stream_index import unchanged_sources
-    from shared import batch_bucket_files_with_retry
+    from reader_stream_index import (read_index, validate_index, unchanged_sources, publish_checkpoint,
+                                     shard_for, source_failure)
 
 
 TARGET_BUCKET = "vomebook/reader-assets-v2"
@@ -60,8 +58,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--extension", default="all")
     parser.add_argument("--bucket", default=TARGET_BUCKET)
     parser.add_argument("--apply", action="store_true")
-    parser.add_argument("--rebuild", action="store_true",
-                        help="ignore the existing v2 shard index (full rebuild)")
+    parser.add_argument("--retry-failures", action="store_true",
+                        help="retry recorded conversion failures")
     parser.add_argument("--strict", action="store_true",
                         help="fail the shard if any selected image fails")
     parser.add_argument("--shard-count", type=int, default=1)
@@ -135,7 +133,8 @@ def source_records(path: Path, revisions: dict, max_bytes: int, extension_filter
     return selected
 
 
-def build_one(item: dict, work: Path, token: str | None, bucket: str) -> tuple[dict, dict[str, str]]:
+def build_one(item: dict, work: Path, token: str | None, bucket: str, *,
+              legacy_source_addressed: bool = False) -> tuple[dict, dict[str, str]]:
     work.mkdir(parents=True, exist_ok=True)
     source = work / "source"
     download(source_url(item["repo"], item["revision"], item["path"]), source, token)
@@ -145,12 +144,12 @@ def build_one(item: dict, work: Path, token: str | None, bucket: str) -> tuple[d
     if item.get("bytes") and source.stat().st_size != item["bytes"]:
         raise ValueError("image source byte count differs from pinned metadata")
     extension = item["extension"]
-    root = f"{IMAGE_ROOT}/{extension}/{source_digest}"
     with Image.open(source) as image:
         if image.width < 1 or image.height < 1:
             raise ValueError("image has invalid dimensions")
         if extension in {"tif", "tiff"} and int(getattr(image, "n_frames", 1) or 1) > 1:
-            return build_pages(item, source, image, root, work, extension, source_digest, bucket)
+            return build_pages(item, source, image, work, extension, source_digest, bucket,
+                               legacy_source_addressed=legacy_source_addressed)
         # GIF (and any other animated image) is represented by its first frame.
         try:
             image.seek(0)
@@ -170,6 +169,8 @@ def build_one(item: dict, work: Path, token: str | None, bucket: str) -> tuple[d
         converted.close()
     output = work / "document.webp"
     data = output.read_bytes()
+    root = (f'{IMAGE_ROOT}/{extension}/{source_digest}' if legacy_source_addressed else
+            image_root(extension, source_digest, {'document.webp': hashlib.sha256(data).hexdigest()}))
     remote = f"{root}/document.webp"
     return {
         "key": f"{item['repo']}\0{item['path']}",
@@ -181,6 +182,7 @@ def build_one(item: dict, work: Path, token: str | None, bucket: str) -> tuple[d
         "source_sha256": source_digest,
         "mode": "image",
         "bucket": bucket,
+        "root": root,
         "path": remote,
         "bytes": len(data),
         "sha256": hashlib.sha256(data).hexdigest(),
@@ -188,11 +190,18 @@ def build_one(item: dict, work: Path, token: str | None, bucket: str) -> tuple[d
     }, {remote: str(output)}
 
 
-def build_pages(item, source, image, root, work, extension, source_digest, bucket):
+def image_root(extension, source_digest, files):
+    """Keep the existing Reader URL shape while binding it to output bytes."""
+    identity = json.dumps({'version': 1, 'source_sha256': source_digest, 'files': files},
+                          sort_keys=True, separators=(',', ':')).encode()
+    return f"{IMAGE_ROOT}/{extension}/{hashlib.sha256(identity).hexdigest()}"
+
+
+def build_pages(item, source, image, work, extension, source_digest, bucket, *, legacy_source_addressed=False):
     """Publish every TIFF frame as an image page stream, never a PDF wrapper."""
     pages = work / "pages"
     pages.mkdir(parents=True, exist_ok=True)
-    entries, uploads = [], {}
+    entries, local_pages = [], {}
     for number in range(1, int(image.n_frames) + 1):
         image.seek(number - 1)
         converted = image.convert("RGB")
@@ -210,35 +219,68 @@ def build_pages(item, source, image, root, work, extension, source_digest, bucke
         relative = f"pages/page-{number:06d}.webp"
         entries.append({"path": relative, "bytes": len(payload),
                         "sha256": hashlib.sha256(payload).hexdigest()})
-        uploads[f"{root}/{relative}"] = str(target)
+        local_pages[relative] = str(target)
     manifest = {"kind": "image-page-stream", "version": 1, "source_extension": extension,
                 "source_sha256": source_digest, "page_count": len(entries), "pages": entries}
     manifest_file = work / "page-manifest.json"
     manifest_file.write_text(json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
                              encoding="utf-8")
+    identities = {entry['path']: entry['sha256'] for entry in entries}
+    identities['page-manifest.json'] = hashlib.sha256(manifest_file.read_bytes()).hexdigest()
+    root = (f'{IMAGE_ROOT}/{extension}/{source_digest}' if legacy_source_addressed else
+            image_root(extension, source_digest, identities))
     remote = f"{root}/page-manifest.json"
+    uploads = {f'{root}/{path}': local for path, local in local_pages.items()}
     uploads[remote] = str(manifest_file)
     return {
         "key": f"{item['repo']}\0{item['path']}", "repo": item["repo"],
         "source_path": item["path"], "extension": extension,
         "source_revision": item["revision"], "source_bytes": source.stat().st_size,
         "source_sha256": source_digest, "mode": "page-stream", "bucket": bucket,
-        "manifest": remote, "page_count": len(entries),
+        "root": root, "manifest": remote, "page_count": len(entries),
         "bytes": sum(entry["bytes"] for entry in entries),
     }, uploads
 
 
 def existing_index(bucket: str, token: str | None, name: str) -> dict:
-    path = f"hf://buckets/{bucket}/{IMAGE_ROOT}/{name}"
-    try:
-        fs = HfFileSystem(token=token)
-        with fs.open(path, "rb") as stream:
-            payload = json.loads(stream.read().decode("utf-8"))
-        if isinstance(payload, dict) and isinstance(payload.get("files"), list):
-            return payload
-    except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError):
-        pass
-    return {"version": 1, "kind": "image-stream-index", "files": []}
+    payload = read_index(bucket, f'{IMAGE_ROOT}/{name}', token, 'image-stream-index')
+    if name == INDEX_NAME and not payload['files']:
+        raise ValueError('canonical image index is missing or empty')
+    return payload
+
+
+def shard_baseline(shard, canonical, number, count):
+    """Keep canonical routes; never let an unversioned stale shard replace one."""
+    validate_index(shard, 'image shard')
+    validate_index(canonical, 'canonical image index')
+    if len({entry['key'] for entry in canonical['files']}) != len(canonical['files']):
+        raise ValueError('duplicate canonical image key')
+    if count == 1:
+        return canonical
+    current = {e['key']: e for e in canonical['files'] if shard_for(e['key'], count) == number}
+    seen = set()
+    for entry in shard['files']:
+        key = entry['key']
+        if key in seen or shard_for(key, count) != number:
+            raise ValueError('image shard contains a duplicate or foreign key')
+        seen.add(key)
+        old = current.get(key)
+        if old is not None and old != entry:
+            a, b = old.get('checkpointed_at', ''), entry.get('checkpointed_at', '')
+            if not b:
+                if not a:
+                    raise ValueError('ambiguous image shard and canonical mapping')
+                continue
+            if a and a == b:
+                raise ValueError('ambiguous image shard and canonical mapping')
+            if a and b < a:
+                continue
+        current[key] = entry
+    failures = [e for e in shard.get('failures', []) if shard_for(e['key'], count) == number]
+    if len(failures) != len(shard.get('failures', [])):
+        raise ValueError('image shard contains a foreign failure')
+    return {'version': 1, 'kind': 'image-stream-index',
+            'files': [current[k] for k in sorted(current)], 'failures': failures}
 
 
 def main() -> int:
@@ -254,12 +296,19 @@ def main() -> int:
         raise ValueError(f"unsupported image extension: {extension}")
     selected = source_records(args.search_data, revisions, args.max_source_bytes, extension)
     index_name = INDEX_NAME if args.shard_count == 1 else f"{INDEX_PREFIX}-{args.shard_index:02d}.json"
-    previous = ({"version": 1, "kind": "image-stream-index", "files": []}
-                if args.rebuild else existing_index(args.bucket, token, index_name))
-    completed = {
-        entry.get("key"): entry.get("source_revision")
-        for entry in previous.get("files", []) if isinstance(entry, dict)
-    }
+    shard = existing_index(args.bucket, token, index_name)
+    canonical = shard if args.shard_count == 1 else existing_index(args.bucket, token, INDEX_NAME)
+    previous = shard_baseline(shard, canonical, args.shard_index, args.shard_count)
+    retry_failures = getattr(args, 'retry_failures', False)
+    completed = {entry['key']: entry.get('source_revision') for entry in previous['files']}
+    if not retry_failures:
+        completed.update({entry['key']: entry.get('source_revision') for entry in previous.get('failures', [])})
+    else:
+        # A failed retry may coexist with a previous success at the same source
+        # revision. Explicit retry must override that success, in both planner
+        # and worker, rather than silently turning into a no-op.
+        for failure in previous.get('failures', []):
+            completed.pop(failure['key'], None)
     selected = [item for item in selected
                 if int.from_bytes(hashlib.sha256(
                     f"{item['repo']}\0{item['path']}".encode()).digest()[:8], "big") % args.shard_count == args.shard_index
@@ -267,7 +316,9 @@ def main() -> int:
     # Dataset commits often advance because unrelated files changed. Reuse an
     # existing image only when the source's pinned LFS SHA-256 still matches;
     # absent/unknown hashes continue through normal download and conversion.
-    unchanged = set() if args.rebuild else unchanged_sources(selected, previous, token)
+    failed_keys = {entry['key'] for entry in previous.get('failures', [])}
+    reuse = {**previous, 'files': [e for e in previous['files'] if e['key'] not in failed_keys]}
+    unchanged = unchanged_sources(selected, reuse, token)
     selected = [item for item in selected if f"{item['repo']}\0{item['path']}" not in unchanged]
     print(f"unchanged_by_source_sha={len(unchanged)} pending={len(selected)}", flush=True)
     if args.limit:
@@ -275,42 +326,25 @@ def main() -> int:
     if not selected:
         print("no matching image sources")
         return 0
-    uploads: dict[str, str] = {}
-    entries = []
-    failures = 0
+    converted = failed = 0
     with tempfile.TemporaryDirectory(prefix="reader-image-v2-") as directory:
         work_root = Path(directory)
-        for index, item in enumerate(selected):
+        for number, item in enumerate(selected):
+            folder = work_root / str(number)
+            folder.mkdir()
             try:
-                result, files = build_one(item, work_root / str(index), token, args.bucket)
+                result, files = build_one(item, folder / 'bundle', token, args.bucket)
+                entries, failures = [result], []
+                converted += 1
             except Exception as error:
-                failures += 1
+                entries, failures, files = [], [source_failure(item, error)], {}
+                failed += 1
                 print(f"failed: {item['repo']}/{item['path']}: {type(error).__name__}: {error}")
-                continue
-            entries.append(result)
-            uploads.update(files)
-        if not entries:
-            print("no image source converted successfully")
-            return 1
-        previous_files = {} if args.rebuild else {
-            entry.get("key"): entry for entry in previous.get("files", []) if isinstance(entry, dict)}
-        previous_files.update({entry["key"]: entry for entry in entries})
-        index_payload = {"version": 1, "kind": "image-stream-index", "files": [
-            previous_files[key] for key in sorted(previous_files)
-        ]}
-        index_file = work_root / index_name
-        index_file.write_text(json.dumps(index_payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
-        uploads[f"{IMAGE_ROOT}/{index_name}"] = str(index_file)
-        print(f"planned {len(entries)} image asset(s), {len(uploads)} object(s), failures={failures}")
-        if args.apply:
-            batch_bucket_files_with_retry(args.bucket, [(local, remote) for remote, local in sorted(uploads.items())], token)
-            print(f"published {len(uploads)} object(s) to {args.bucket}")
-        else:
-            print("report-only; pass --apply to publish")
-        if args.strict and failures:
-            print(f"strict image rebuild failed for {failures} source(s)")
-            return 1
-    return 0
+            previous = publish_checkpoint(args.bucket, f'{IMAGE_ROOT}/{index_name}', previous,
+                                          entries, failures, files, folder, token,
+                                          apply=args.apply, kind='image-stream-index')
+        print(f'attempted={len(selected)} converted={converted} failures={failed} apply={args.apply}')
+    return 1 if args.strict and failed else 0
 
 
 if __name__ == "__main__":
