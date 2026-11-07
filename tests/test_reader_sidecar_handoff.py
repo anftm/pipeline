@@ -9,9 +9,8 @@ from scripts.reader_lifecycle import processing_record
 
 
 class ReaderSidecarHandoffTests(unittest.TestCase):
-    def test_active_redirects_block_sidecar_write_before_handoff(self):
-        from scripts import publish_reader_v3 as publication
-        from scripts.reader_bucket_store import HubBucketStore
+    def test_active_redirects_audit_before_any_sidecar_handoff(self):
+        from scripts import publish_reader_v3 as publication, reader_page_refresh as refresh
         with tempfile.TemporaryDirectory() as directory:
             args = Mock(apply=True, assets_bucket=sidecar.ASSETS_BUCKET, pdf_bucket='vomebook/pdf-pages-v2',
                         derived_manifest='derived', render_manifest='render', ocr_manifest='ocr',
@@ -20,10 +19,11 @@ class ReaderSidecarHandoffTests(unittest.TestCase):
                     patch.object(sidecar, 'HfFileSystem'), patch.object(sidecar, 'build', return_value={'v': 1, 'f': {}}), \
                     patch.object(publication, 'current', return_value=({'generation': 'a' * 64}, {'derived_pdf_redirects': {'x': 'y'}})), \
                     patch('scripts.reader_bucket_store.HubBucketStore', autospec=True), \
+                    patch.object(refresh, 'prepare', side_effect=ValueError('audit failed')) as audit, \
                     patch.object(sidecar, 'batch_bucket_files') as upload, patch.object(sidecar, 'publish_catalog') as catalog:
-                with self.assertRaisesRegex(RuntimeError, 'audited base refresh'):
+                with self.assertRaisesRegex(ValueError, 'audit failed'):
                     sidecar.main()
-                upload.assert_not_called(); catalog.assert_not_called()
+                audit.assert_called_once(); upload.assert_not_called(); catalog.assert_not_called()
 
     def test_every_sidecar_workflow_supplies_authoritative_s3_credentials(self):
         root = Path(__file__).resolve().parents[1] / '.github' / 'workflows'

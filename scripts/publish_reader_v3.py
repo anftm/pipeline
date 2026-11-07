@@ -935,8 +935,24 @@ def main():
                 report = verify_consumers(store, client, options, expected, timeout_seconds=args.wait_seconds,
                                           action='remove' if args.route_action == 'remove-route' else 'restore')
         else:
-            report = change(store, options, expected,
-                            action='remove' if args.command == 'remove-route' else 'restore', apply=args.apply)
+            _, catalog = current(store)
+            action = 'remove' if args.command == 'remove-route' else 'restore'
+            if catalog.get('derived_pdf_redirects'):
+                try:
+                    from . import reader_page_refresh as refresh
+                    from .reader_page_cas import ConditionalPageStore
+                except ImportError:
+                    import reader_page_refresh as refresh
+                    from reader_page_cas import ConditionalPageStore
+                from huggingface_hub import HfApi
+                if args.apply:
+                    assert_writer(store)
+                    store = ConditionalPageStore(store)
+                    store.preflight()
+                report = refresh.run(store, HfApi(token=os.environ.get('HF_TOKEN')),
+                                     expected_parent=expected, action=action, options=options, apply=args.apply)
+            else:
+                report = change(store, options, expected, action=action, apply=args.apply)
     elif args.command == "reset-documents":
         try:
             from .reader_document_reset import withdraw as reset_documents, DocumentProducerFence
@@ -947,11 +963,22 @@ def main():
             DocumentProducerFence().check()
         report = reset_documents(store, json.loads(args.resource_json or '{}'), apply=args.apply)
     elif args.command == "unify":
-        # Existing redirects require a fresh audit, not an ordinary refresh.
         _, current_catalog = current(store)
         if current_catalog.get('derived_pdf_redirects'):
-            raise ValueError('active derived PDF redirects require an audited base refresh')
-        report = unify(store, apply=args.apply)
+            try:
+                from . import reader_page_refresh as refresh
+                from .reader_page_cas import ConditionalPageStore
+            except ImportError:
+                import reader_page_refresh as refresh
+                from reader_page_cas import ConditionalPageStore
+            from huggingface_hub import HfApi
+            if args.apply:
+                assert_writer(store)
+                store = ConditionalPageStore(store)
+                store.preflight()
+            report = refresh.run(store, HfApi(token=os.environ.get('HF_TOKEN')), apply=args.apply)
+        else:
+            report = unify(store, apply=args.apply)
     elif args.command == "withdraw":
         report = withdraw(store, json.loads(args.resource_json or "{}"),
                           None if args.expected_parent == "none" else text.sha(args.expected_parent), apply=args.apply)

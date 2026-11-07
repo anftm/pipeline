@@ -63,6 +63,9 @@ def verify_plan(store, api, plan):
         raise ValueError('derived index changed before redirect promotion')
     if hashlib.sha256(store.read_bytes(audit.ASSETS, audit.SIDECAR)).hexdigest() != snapshot['canonical_sidecar_sha256']:
         raise ValueError('canonical sidecar changed before redirect promotion')
+    if (snapshot.get('legacy_catalog_sha256') is not None
+            and hashlib.sha256(store.read_bytes(audit.ASSETS, migration.CATALOG)).hexdigest() != snapshot['legacy_catalog_sha256']):
+        raise ValueError('legacy catalog changed before redirect promotion')
     if publication.current(store)[0] != plan['old_pointer']:
         raise ValueError('v3 pointer changed before redirect promotion')
 

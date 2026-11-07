@@ -39,7 +39,7 @@ python3 scripts/reader_route_plan.py --repo 'VoiceOfML/SomeRepo' --path '目录/
 
 优先使用 `reader-v3-publish.yml` 的 `redirect-derived`：在 `resource_json` 填写只读审计取得的 `index_sha256`、`sidecar_sha256`、`v3_generation`，先 `apply=false` 检查，再以同一身份 `apply=true`。它重新扫描并核对目标文件及 manifest，把全部已匹配路由组成新的内容寻址 v3 快照，仅通过 S3 条件写推进**一个 v3 指针**；不改 canonical 派生 PDF 索引、canonical sidecar、旧 catalog，也不删对象或旧代。随后发布 Pages 投影并核对两站；报告不是删除清单。
 
-已知中央 Reader 发布器使用 `reader-sidecar` 并发组；搜索同步写搜索数据，不写 Reader 桶索引。单指针路径避免了依赖旧 OCR 仓库 fence 的多对象索引事务，但不证明其他 HF/S3 凭据已失效，也不保证未来无外部写者。发布前后复核副本和指针，保留全部旧数据；并发者或目标文件异常仍会造成冲突或发布后失败，需要停止并检查。当前 `unify`、`remove-route` 和 `restore-route` 在 redirect 活跃时会明确拒绝未经审计的基础快照刷新，`reset-documents`、canonical sidecar handoff 和 GBK 修复也会在写入前阻止，避免悄悄覆盖重映射或破坏 canonical 事务；这是待完成的后续能力，不能将其当作已支持。
+已知中央 Reader 发布器使用 `reader-sidecar` 并发组；搜索同步写搜索数据，不写 Reader 桶索引。单指针路径避免了依赖旧 OCR 仓库 fence 的多对象索引事务，但不证明其他 HF/S3 凭据已失效，也不保证未来无外部写者。发布前后复核副本和指针，保留全部旧数据；并发者或目标文件异常仍会造成冲突或发布后失败，需要停止并检查。redirect 活跃时，工作流的 `unify`、`remove-route`、`restore-route` 会重新审计原索引、副本、manifest 和 legacy catalog，再以单个条件指针发布；未经审计的内部 `unify` 仍拒绝。canonical sidecar handoff 在任何写入前先做相同的 redirect 审计，再交由中央发布器重新审计并刷新。`reset-documents` 与 GBK 修复仍在写入前阻止，直到分别实现兼容流程。
 
 `redirect-derived` 先创建内容寻址快照、catalog 和 promotion，再打印 staged generation，最后只发一次指针 `If-Match`；条件冲突或响应丢失不可盲目重试。查看 `inspect` 确认指针：若仍是旧代，可重新只读审计和预演；若已是 staged generation，用 `publish-generation`、`apply=true`、`expected_parent=该代` 仅重新投影并核对两站；若是其他代则停止调查。此恢复入口不会修改桶索引或写 GC 回执。
 
@@ -53,7 +53,7 @@ python3 scripts/reader_route_plan.py --repo 'VoiceOfML/SomeRepo' --path '目录/
 
 原手动 `reader-gc-collect.yml` 提供 `scope=page-plan` / `scope=page-apply` 两步，在现有锁内直接执行：在已隔离并排空生产者的维护窗口，以 `resume_run={"paths":["derived/精确路径"]}` 生成计划，审阅 `page-exact-plan` artifact 和日志 SHA；随后设置 `apply=true`，并通过 `resume_run={"plan_run":"运行ID","plan_sha256":"计划SHA","external_writers_stopped":true}` 应用。应用会重新构建四桶图、核验两站及对象版本、重新验证所遍历的嵌套清单版本、要求额外确认外部写者已停，再记录 intent 并发送一次精确批次；部分成功或响应丢失时只可重新盘点，不会自动重试。计划有效期为 24 小时、artifact 保留两天，一次最多 1000 个键；这只延长审核期限，不延长引用、消费者或对象版本证明，应用时仍须重新扫描和复核。长时间扫描超过期限仍会失败，尚未实测真实桶上的耗时。它仍复用旧 CHM 事务检查及生产者 fence；若任何证明不足便停止，不能仅靠勾选外部确认绕过。旧 GC 尚未整体简化。
 
-旧 page canonical 索引迁移和精确删除代码已部署，但多对象迁移 apply 仍受旧 fence 阻塞，page 精确删除所在 collector 仍禁用。单指针 redirect 先独立解决当前两站路由，不改变这些旧限制。单条路由下线入口、Pipeline 内 PDF/DjVu 页面流生产和 OCR 生产代码移除也已部署；尚未执行路由撤回、索引迁移或物理删除。历史 CHM 固定批次的 19 个工作流入口已移除，但旧全桶 GC 及其阻塞尚未整体重写；详见 `.github/WORKFLOWS.md`。
+2026-11-07 已通过单指针 redirect 将 238 条当前路由切到 `objects/`，两站确认同一代，PDF/CAJ/KDH 的 Range 冒烟和 CAJ 两站浏览器翻页通过；canonical 索引、旧对象与历史代均未删除。旧 page canonical 索引迁移和精确删除代码已部署，但多对象迁移 apply 仍受旧 fence 阻塞，page 精确删除所在 collector 仍禁用。单指针 redirect 不改变这些旧限制。单条路由下线入口、Pipeline 内 PDF/DjVu 页面流生产和 OCR 生产代码移除也已部署；尚未执行路由撤回、索引迁移或物理删除。历史 CHM 固定批次的 19 个工作流入口已移除，但旧全桶 GC 及其阻塞尚未整体重写；详见 `.github/WORKFLOWS.md`。
 
 ## 本地检查
 

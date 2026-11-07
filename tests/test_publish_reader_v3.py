@@ -199,6 +199,8 @@ class V3PublicationTests(unittest.TestCase):
             self.assertIn('"migrate-derived"', value)
             self.assertIn('"resume-derived"', value)
             self.assertIn('"redirect-derived"', value)
+            for operation in ('unify', 'remove-route', 'restore-route'):
+                self.assertIn('"' + operation + '"', value)
             self.assertIn('secrets.' + name, value)
             self.assertNotIn('inputs.apply', value)
         self.assertFalse(any(step.get("name", "").startswith("Retire acknowledged")

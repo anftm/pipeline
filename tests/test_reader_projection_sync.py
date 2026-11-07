@@ -108,6 +108,18 @@ class ReaderProjectionSyncTests(unittest.TestCase):
                         publish['run'].index('publish_search_reader_index.py --pinned-only'))
         self.assertIn('GC_PRODUCER_TOKENS_JSON', publish['env'])
 
+    def test_redirect_audited_unify_verifies_without_compaction_or_ack(self):
+        workflow = self.workflow('reader-v3-publish.yml')
+        steps = workflow['jobs']['publish']['steps']
+        ack = next(step for step in steps if step.get('id') == 'ack')
+        self.assertIn('REDIRECT_AUDITED', ack['env'])
+        before_ack = ack['run'].split('python scripts/publish_reader_v3.py ack-all', 1)[0]
+        branch = before_ack.split('if [[ "$OPERATION" == unify && "$REDIRECT_AUDITED" == true ]]; then', 1)[1].split('\nfi', 1)[0]
+        self.assertIn('verify-generation', branch)
+        self.assertIn('exit 0', branch)
+        self.assertNotIn('compact-legacy', branch)
+        self.assertNotIn('acknowledge-legacy', branch)
+
     def test_route_changes_verify_before_and_without_gc_acknowledgments(self):
         workflow = self.workflow('reader-v3-publish.yml')
         steps = workflow['jobs']['publish']['steps']
