@@ -10,7 +10,7 @@ import json
 
 try:
     from . import reader_page_atomic as atomic, reader_page_audit as audit
-    from . import reader_page_migrate as migration, reader_page_redirects as redirects
+    from . import reader_page_migrate as migration, reader_page_redirects as redirects, reader_page_reconcile as reconcile
     from . import reader_route_control as control, reader_route_plan as routes
     from . import publish_reader_v3 as publication
 except ImportError:
@@ -18,6 +18,7 @@ except ImportError:
     import reader_page_audit as audit
     import reader_page_migrate as migration
     import reader_page_redirects as redirects
+    import reader_page_reconcile as reconcile
     import reader_route_control as control
     import reader_route_plan as routes
     import publish_reader_v3 as publication
@@ -30,15 +31,11 @@ def prepare(store, api, *, expected_parent=None, action='unify', options=None, w
     mapping = redirects.validated(catalog)
     if not mapping or not catalog.get('base_sidecar'):
         raise ValueError('audited base refresh requires active redirects and a pinned base')
-    snapshot = audit.audit(store, api, workers=workers)
+    snapshot = audit.audit(store, api, workers=workers, active_redirects=mapping)
     if (snapshot['v3_generation'] != pointer['generation'] or snapshot['unresolved']
             or publication.current(store)[0] != pointer):
         raise ValueError('redirect audit is stale or has unresolved PDF copies')
-    by_old = {row['old_path']: row for row in snapshot['planned']}
-    if len(by_old) != len(snapshot['planned']):
-        raise ValueError('duplicate PDF source in redirect audit')
-    if any(old not in by_old or by_old[old]['new_path'] != new for old, new in mapping.items()):
-        raise ValueError('active PDF redirect no longer matches canonical source and exact copy')
+    reconcile.validate_snapshot(snapshot, mapping)
     canonical = store.read_bytes(audit.ASSETS, audit.SIDECAR)
     if hashlib.sha256(canonical).hexdigest() != snapshot['canonical_sidecar_sha256']:
         raise ValueError('canonical sidecar changed during redirect audit')

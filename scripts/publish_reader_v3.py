@@ -803,7 +803,7 @@ def main():
     parser.add_argument("command", choices=("withdraw", "ack", "ack-all", "acknowledge-legacy",
                                             "compact-legacy", "inspect", "project", "retire",
                                             "unify", "reset-documents", "remove-route", "restore-route", "verify-route",
-                                            "migrate-derived", "resume-derived", "redirect-derived", "publish-generation", "verify-generation", "check-page-window"))
+                                            "migrate-derived", "resume-derived", "redirect-derived", "reconcile-derived-index", "publish-generation", "verify-generation", "check-page-window"))
     parser.add_argument("--resource-json")
     parser.add_argument("--expected-parent", default="none")
     parser.add_argument("--apply", action="store_true")
@@ -881,6 +881,25 @@ def main():
         plan = redirect.prepare(store, api, expected_index=options['index_sha256'],
                                 expected_sidecar=options['sidecar_sha256'], expected_v3=options['v3_generation'])
         report = redirect.apply(store, api, plan) if args.apply else redirect.report(plan, applied=False)
+    elif args.command == 'reconcile-derived-index':
+        try:
+            from . import reader_page_reconcile as reconcile
+            from .reader_page_cas import ConditionalPageStore
+        except ImportError:
+            import reader_page_reconcile as reconcile
+            from reader_page_cas import ConditionalPageStore
+        from huggingface_hub import HfApi
+        options = json.loads(args.resource_json or '{}')
+        if not isinstance(options, dict) or set(options) != {'index_sha256', 'v3_generation'}:
+            raise ValueError('reconcile-derived-index requires exact PDF index and v3 identities')
+        if args.apply:
+            assert_writer(store)
+            store = ConditionalPageStore(store)
+            store.preflight()
+        api = HfApi(token=os.environ.get('HF_TOKEN'))
+        plan = reconcile.prepare(store, api, expected_index=options['index_sha256'],
+                                 expected_generation=options['v3_generation'])
+        report = reconcile.apply(store, api, plan) if args.apply else reconcile.result(plan, applied=False)
     elif args.command == 'migrate-derived':
         try:
             from . import reader_page_migrate as migrate

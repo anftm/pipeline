@@ -91,7 +91,7 @@ def object_manifest_matches(entry, candidate, manifest):
             manifest.get('manifest_path') == candidate.rsplit('/', 1)[0] + '/derived-manifest.json')
 
 
-def build_plan(index, derived, objects, read_manifest, *, sidecar=None):
+def build_plan(index, derived, objects, read_manifest, *, sidecar=None, active_redirects=None):
     """Map each indexed legacy entry only to an exact same-key/content copy."""
     if (not isinstance(index, dict) or index.get('version') != 1 or index.get('kind') != 'pdf-derived-source-index'
             or not isinstance(index.get('files'), list)):
@@ -106,18 +106,42 @@ def build_plan(index, derived, objects, read_manifest, *, sidecar=None):
         match = NEW.fullmatch(path)
         if match and match.group(1) == match.group(2)[:2]:
             by_content[(match.group(2), item['xet_hash'], item['size'])].append(path)
+    active_redirects = active_redirects or {}
+    if active_redirects:
+        try:
+            from .reader_page_redirects import validated
+        except ImportError:
+            from reader_page_redirects import validated
+        validated({'derived_pdf_redirects': active_redirects})
+    old_by_new = {new: old for old, new in active_redirects.items()}
     cache = {}
     rows, unresolved = [], []
     for entry in entries:
-        old_path = entry.get('new_path', '')
-        if not isinstance(old_path, str) or not old_path.startswith('derived/'):
-            continue
-        validate_entry(entry)
+        current_path = entry.get('new_path', '')
+        reconciled = isinstance(current_path, str) and current_path in old_by_new
+        if reconciled:
+            old_path = old_by_new[current_path]
+            old_manifest = old_path.rsplit('/', 1)[0] + '/derived-manifest.json'
+            legacy_entry = {**entry, 'new_path': old_path, 'manifest_path': old_manifest}
+            validate_entry(legacy_entry)
+            if entry.get('manifest_path') != current_path.rsplit('/', 1)[0] + '/derived-manifest.json':
+                raise ValueError('reconciled PDF manifest path differs')
+            if entry.get('path') == old_path:
+                raise ValueError('reconciled PDF index still uses an old path')
+        else:
+            old_path = current_path
+            if not isinstance(old_path, str) or not old_path.startswith('derived/'):
+                continue
+            validate_entry(entry)
+            old_manifest = entry['manifest_path']
         old = derived.get(old_path)
         if old is None or old['size'] != entry['derived_bytes'] or not old.get('xet_hash'):
             unresolved.append({'key': entry['key'], 'old_path': old_path, 'reason': 'legacy-object-missing-or-mismatched'})
             continue
-        candidates = by_content.get((entry['source_sha256'], old['xet_hash'], old['size']), [])
+        candidates = ([current_path] if reconciled and current_path in objects
+                      and objects[current_path]['xet_hash'] == old['xet_hash']
+                      and objects[current_path]['size'] == old['size'] else [] if reconciled
+                      else by_content.get((entry['source_sha256'], old['xet_hash'], old['size']), []))
         matches, errors = [], []
         for path in sorted(candidates):
             manifest_path = path.rsplit('/', 1)[0] + '/derived-manifest.json'
@@ -145,11 +169,13 @@ def build_plan(index, derived, objects, read_manifest, *, sidecar=None):
         route = sidecar.get('f', {}).get(entry['key']) if sidecar is not None else None
         rows.append({'key': entry['key'], 'source_sha256': entry['source_sha256'],
                      'derived_sha256': entry['derived_sha256'], 'bytes': old['size'],
-                     'old_path': old_path, 'old_manifest': entry['manifest_path'], 'old_xet_hash': old['xet_hash'],
+                     'old_path': old_path, 'old_manifest': old_manifest, 'old_xet_hash': old['xet_hash'],
                      'new_path': path, 'new_manifest': manifest_path, 'new_manifest_sha256': manifest_sha,
+                     'index_location': 'objects' if reconciled else 'derived',
                      'currently_direct_route': bool(isinstance(route, dict) and route.get('p') == old_path
                                                     and route.get('b', ASSETS) == BUCKET)})
     indexed = {item['new_path'] for item in entries if isinstance(item.get('new_path'), str)}
+    indexed.update(row['old_path'] for row in rows if row['index_location'] == 'objects')
     old_pdfs = {path for path in derived if path.endswith('/document.pdf')}
     matched_targets = {row['new_path'] for row in rows}
     canonical_objects = {path for path in indexed if path.startswith('objects/')}
@@ -162,21 +188,27 @@ def build_plan(index, derived, objects, read_manifest, *, sidecar=None):
             'deletion_authorized': False}
 
 
-def candidate_manifest_paths(index, derived, objects):
+def candidate_manifest_paths(index, derived, objects, active_redirects=None):
     """Only inspect object manifests that could match an indexed legacy PDF."""
     if not isinstance(index, dict) or not isinstance(index.get('files'), list):
         raise ValueError('invalid canonical derived index')
     targets = set()
+    paths = set()
+    new_to_old = {new: old for old, new in (active_redirects or {}).items()}
     for entry in index['files']:
         if not isinstance(entry, dict) or not isinstance(entry.get('new_path'), str):
             raise ValueError('invalid canonical index entry')
+        if entry['new_path'] in new_to_old:
+            manifest = entry['new_path'].rsplit('/', 1)[0] + '/derived-manifest.json'
+            if manifest in objects:
+                paths.add(manifest)
+            continue
         if not entry['new_path'].startswith('derived/'):
             continue
         validate_entry(entry)
         old = derived.get(entry['new_path'])
         if old:
             targets.add((entry['source_sha256'], old['xet_hash'], old['size']))
-    paths = set()
     for path, item in objects.items():
         match = NEW.fullmatch(path)
         if (match and match.group(1) == match.group(2)[:2]
@@ -200,7 +232,7 @@ def hub_inventory(api, prefix):
     return result
 
 
-def audit(store, api, *, workers=4):
+def audit(store, api, *, workers=4, active_redirects=None):
     raw = store.read_bytes(BUCKET, INDEX)
     index = json.loads(raw)
     sidecar_raw = store.read_bytes(ASSETS, SIDECAR)
@@ -213,7 +245,7 @@ def audit(store, api, *, workers=4):
     derived = hub_inventory(api, 'derived/')
     objects = hub_inventory(api, 'objects/')
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        manifest_paths = candidate_manifest_paths(index, derived, objects)
+        manifest_paths = candidate_manifest_paths(index, derived, objects, active_redirects=active_redirects)
         def fetch(path):
             try:
                 return path, store.read_bytes(BUCKET, path), None
@@ -225,7 +257,7 @@ def audit(store, api, *, workers=4):
         if error:
             raise RuntimeError(error)
         return raw
-    report = build_plan(index, derived, objects, manifest, sidecar=sidecar)
+    report = build_plan(index, derived, objects, manifest, sidecar=sidecar, active_redirects=active_redirects)
     # Re-read exact mutable roots; this does not make bucket inventories atomic.
     if store.read_bytes(BUCKET, INDEX) != raw or store.read_bytes(ASSETS, SIDECAR) != sidecar_raw:
         raise RuntimeError('canonical indexes changed while planning')

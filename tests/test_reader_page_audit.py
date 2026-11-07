@@ -123,6 +123,30 @@ class AuditTests(unittest.TestCase):
             audit.audit(store, api)
         self.assertEqual(store.writes, [])
 
+    def test_reconciled_index_still_audits_exact_old_and_new_identity(self):
+        index, derived, objects, manifests, sidecar = fixture()
+        index['files'][0]['new_path'] = NEW
+        index['files'][0]['manifest_path'] = NEW.rsplit('/', 1)[0] + '/derived-manifest.json'
+        mapping = {OLD: NEW}
+        paths = audit.candidate_manifest_paths(index, derived, objects, active_redirects=mapping)
+        self.assertEqual(paths, [index['files'][0]['manifest_path']])
+        report = audit.build_plan(index, derived, objects, manifests.__getitem__, sidecar=sidecar,
+                                  active_redirects=mapping)
+        self.assertEqual(len(report['planned']), 1)
+        self.assertEqual(report['planned'][0]['index_location'], 'objects')
+        self.assertEqual(report['planned'][0]['old_path'], OLD)
+        self.assertEqual(report['planned'][0]['new_path'], NEW)
+        self.assertEqual(report['unindexed_legacy_pdfs'], [])
+        self.assertEqual(report['unresolved'], [])
+        altered = copy.deepcopy(index)
+        altered['files'][0]['source_revision'] = '3' * 40
+        report = audit.build_plan(altered, derived, objects, manifests.__getitem__, active_redirects=mapping)
+        self.assertEqual(report['unresolved'][0]['reason'], 'no-unique-matching-manifest')
+        altered = copy.deepcopy(index)
+        altered['files'][0]['manifest_path'] = 'wrong'
+        with self.assertRaisesRegex(ValueError, 'manifest path'):
+            audit.build_plan(altered, derived, objects, manifests.__getitem__, active_redirects=mapping)
+
     def test_bad_identity_and_inventory_are_rejected(self):
         index, derived, objects, manifests, _ = fixture()
         for field, value in [('source_sha256', '../bad'), ('manifest_path', 'other'), ('key', 'bad')]:

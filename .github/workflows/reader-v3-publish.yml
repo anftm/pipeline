@@ -8,7 +8,7 @@ on:
     inputs:
       operation:
         type: choice
-        options: [inspect, unify, ack, retire, withdraw, reset-documents, remove-route, restore-route, verify-route, migrate-derived, resume-derived, redirect-derived, publish-generation, verify-generation]
+        options: [inspect, unify, ack, retire, withdraw, reset-documents, remove-route, restore-route, verify-route, migrate-derived, resume-derived, redirect-derived, reconcile-derived-index, publish-generation, verify-generation]
         default: inspect
       resource_json:
         description: 'Migration requires root identities; optional read-only check_s3=true; apply/resume require external_writers_stopped=true'
@@ -55,15 +55,15 @@ jobs:
       - name: Guard original document and legacy reference contracts
         run: python -m unittest tests.test_direct_document_policy tests.test_reader_storage_contract
       - name: Test page migration and fence
-        if: contains(fromJSON('["migrate-derived","resume-derived","redirect-derived","unify","remove-route","restore-route"]'), inputs.operation)
-        run: python -m unittest tests.test_reader_page_audit tests.test_reader_page_cas tests.test_reader_page_s3_preview tests.test_reader_page_migrate tests.test_reader_page_migration_fence tests.test_reader_page_atomic tests.test_reader_page_refresh
+        if: contains(fromJSON('["migrate-derived","resume-derived","redirect-derived","reconcile-derived-index","unify","remove-route","restore-route"]'), inputs.operation)
+        run: python -m unittest tests.test_reader_page_audit tests.test_reader_page_cas tests.test_reader_page_s3_preview tests.test_reader_page_migrate tests.test_reader_page_migration_fence tests.test_reader_page_atomic tests.test_reader_page_refresh tests.test_reader_page_reconcile
       - name: Verify and execute the central v3 operation
         id: operation
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_INPUT_TOKEN: ${{ secrets.HF_INPUT_TOKEN }}
-          HF_S3_ACCESS_KEY_ID: ${{ contains(fromJSON('["migrate-derived","resume-derived","redirect-derived","unify","remove-route","restore-route"]'), inputs.operation) && secrets.HF_S3_ACCESS_KEY_ID || '' }}
-          HF_S3_SECRET_ACCESS_KEY: ${{ contains(fromJSON('["migrate-derived","resume-derived","redirect-derived","unify","remove-route","restore-route"]'), inputs.operation) && secrets.HF_S3_SECRET_ACCESS_KEY || '' }}
+          HF_S3_ACCESS_KEY_ID: ${{ contains(fromJSON('["migrate-derived","resume-derived","redirect-derived","reconcile-derived-index","unify","remove-route","restore-route"]'), inputs.operation) && secrets.HF_S3_ACCESS_KEY_ID || '' }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ contains(fromJSON('["migrate-derived","resume-derived","redirect-derived","reconcile-derived-index","unify","remove-route","restore-route"]'), inputs.operation) && secrets.HF_S3_SECRET_ACCESS_KEY || '' }}
           GH_TOKEN: ${{ github.token }}
           GC_PRODUCER_TOKENS_JSON: ${{ secrets.GC_PRODUCER_TOKENS_JSON }}
           GC_AMBROSSEE_MAINTENANCE_TOKEN: ${{ secrets.GC_AMBROSSEE_MAINTENANCE_20261102 }}
@@ -90,7 +90,7 @@ jobs:
           args=("$OPERATION" --output output/v3/publication.json)
           case "$OPERATION" in
             withdraw|remove-route|restore-route|verify-route) args+=(--resource-json "$RESOURCE_JSON" --expected-parent "$EXPECTED_PARENT") ;;
-            migrate-derived|resume-derived|redirect-derived) args+=(--resource-json "$RESOURCE_JSON") ;;
+            migrate-derived|resume-derived|redirect-derived|reconcile-derived-index) args+=(--resource-json "$RESOURCE_JSON") ;;
             publish-generation|verify-generation) args+=(--expected-parent "$EXPECTED_PARENT" --wait-seconds 1200) ;;
             unify|reset-documents) args+=(--resource-json "$RESOURCE_JSON") ;;
             retire) ;;
@@ -193,6 +193,14 @@ jobs:
           else
             echo "consumer projections are incomplete; base acknowledgment deferred"
           fi
+      - name: Verify both consumers after PDF index reconciliation
+        if: steps.operation.outputs.apply == 'true' && steps.operation.outputs.operation == 'reconcile-derived-index'
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          generation=$(jq -r '.generation' output/v3/publication.json)
+          python scripts/publish_reader_v3.py verify-generation --expected-parent "$generation" \
+            --wait-seconds 1200 --output output/v3/reconciliation-verification.json
       - uses: actions/upload-artifact@v7
         if: always()
         with:

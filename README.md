@@ -44,6 +44,8 @@ python3 scripts/reader_route_plan.py --repo 'VoiceOfML/SomeRepo' --path '目录/
 
 `redirect-derived` 先创建内容寻址快照、catalog 和 promotion，再打印 staged generation，最后只发一次指针 `If-Match`；条件冲突或响应丢失不可盲目重试。查看 `inspect` 确认指针：若仍是旧代，可重新只读审计和预演；若已是 staged generation，用 `publish-generation`、`apply=true`、`expected_parent=该代` 仅重新投影并核对两站；若是其他代则停止调查。此恢复入口不会修改桶索引或写 GC 回执。
 
+`reconcile-derived-index` 在 active redirect 已经发布后，用 `resource_json={"index_sha256":"当前PDF索引SHA-256","v3_generation":"当前代"}` 先预演再执行。它重新核对全部 redirect 的旧/新对象、manifest、两站投影和当前索引，仅以单个 `If-Match` 更新 `derived_pdf_manifest.json` 中已验证的路径和 manifest，不改 sidecar、历史 catalog、v3 指针或文件。响应丢失时先读取该索引并比较预演报告里的前后 SHA，不盲目重试；若其他身份变化则重新审计。后续 redirect 审计同时识别 canonical 索引的旧路径和已迁移新路径。成功不授权删除；历史 sidecar、catalog、redirect 及其他引用依然保护旧对象。
+
 旧 `migrate-derived` / `resume-derived` 保留用于之后真正改 canonical 索引的多对象事务。该事务首次改索引前会保存内容寻址续跑计划并打印 `transaction_id`；续跑必须检查每个索引的精确旧值或新值。它仍受旧 fence 和外部写者隔离阻塞，不能把 redirect 成功误当 canonical 索引已迁移。
 
 实际写入及续跑在各写入边界重新检查原有全部配置仓库、以及历史盘点中额外记录仓库的 GitHub 工作流：除当前发布工作流的当前 run 外均须停用并排空，外部仓库还须停用 Actions；检查失败、不可访问、404 或缺少凭据均停止。这是当前部署版本的旧维护 fence，**不代表已退场的 OCR 生产者在新架构中仍应运行，也不应要求用户重新创建旧账户**。后续应在确认实际活跃写者、撤销或收口旧桶写凭据之后，用面向真实写者的隔离替换它；在此之前旧 fence 仍会阻止 apply。仅 Actions 状态或 `external_writers_stopped=true` **不能证明**其他桶凭据已失效；必须在整个迁移和恢复期间协调其他写者停写。站点及对象的旧 URL 缓存、历史代、其他域引用不由迁移解决。
@@ -54,7 +56,7 @@ python3 scripts/reader_route_plan.py --repo 'VoiceOfML/SomeRepo' --path '目录/
 
 原手动 `reader-gc-collect.yml` 提供 `scope=page-plan` / `scope=page-apply` 两步，在现有锁内直接执行：在已隔离并排空生产者的维护窗口，以 `resume_run={"paths":["derived/精确路径"]}` 生成计划，审阅 `page-exact-plan` artifact 和日志 SHA；随后设置 `apply=true`，并通过 `resume_run={"plan_run":"运行ID","plan_sha256":"计划SHA","external_writers_stopped":true}` 应用。应用会重新构建四桶图、核验两站及对象版本、重新验证所遍历的嵌套清单版本、要求额外确认外部写者已停，再记录 intent 并发送一次精确批次；部分成功或响应丢失时只可重新盘点，不会自动重试。计划有效期为 24 小时、artifact 保留两天，一次最多 1000 个键；这只延长审核期限，不延长引用、消费者或对象版本证明，应用时仍须重新扫描和复核。长时间扫描超过期限仍会失败，尚未实测真实桶上的耗时。它仍复用旧 CHM 事务检查及生产者 fence；若任何证明不足便停止，不能仅靠勾选外部确认绕过。旧 GC 尚未整体简化。
 
-2026-11-07 已通过单指针 redirect 将 238 条当前路由切到 `objects/`，两站确认同一代，PDF/CAJ/KDH 的 Range 冒烟和 CAJ 两站浏览器翻页通过；canonical 索引、旧对象与历史代均未删除。旧 page canonical 索引迁移和精确删除代码已部署，但多对象迁移 apply 仍受旧 fence 阻塞，page 精确删除所在 collector 仍禁用。单指针 redirect 不改变这些旧限制。单条路由下线入口、Pipeline 内 PDF/DjVu 页面流生产和 OCR 生产代码移除也已部署；尚未执行路由撤回、索引迁移或物理删除。历史 CHM 固定批次的 19 个工作流入口已移除，但旧全桶 GC 及其阻塞尚未整体重写；详见 `.github/WORKFLOWS.md`。
+2026-11-07 已通过单指针 redirect 将 238 条当前路由切到 `objects/`，两站确认同一代，PDF/CAJ/KDH 的 Range 冒烟和 CAJ 两站浏览器翻页通过；旧对象与历史代均未删除。可单独执行 `reconcile-derived-index` 更新 PDF canonical 索引；旧的多对象 `migrate-derived` 仍受旧 fence 阻塞，page 精确删除所在 collector 仍禁用。单指针 redirect 和 PDF 索引对齐都不改变删除限制。单条路由下线入口、Pipeline 内 PDF/DjVu 页面流生产和 OCR 生产代码移除也已部署；尚未执行路由撤回、索引迁移或物理删除。历史 CHM 固定批次的 19 个工作流入口已移除，但旧全桶 GC 及其阻塞尚未整体重写；详见 `.github/WORKFLOWS.md`。
 
 ## 本地检查
 
