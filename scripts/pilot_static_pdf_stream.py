@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import subprocess
 import tempfile
 import time
@@ -116,6 +117,21 @@ def pending_sources(records: list[dict], index: dict, extension: str, token: str
             and (extension != 'pptx' or item.get('conversion_profile') == office_symbol_fonts.PROFILE))]}
     unchanged = unchanged_sources(pending, reuse, token)
     return [item for item in pending if item['key'] not in unchanged], unchanged
+
+
+def checkpoint_owner(category: str, entry: dict) -> str:
+    """Bind each canonical format index to its own immutable output namespace."""
+    obj, manifest = entry.get('object'), entry.get('manifest')
+    if not isinstance(obj, str) or not isinstance(manifest, str):
+        raise ValueError('static PDF entry lacks object and manifest')
+    owner = str(Path(obj).parent)
+    prefixes = {category}
+    if category == 'documents/pdf/pptx' and entry.get('conversion_profile') == office_symbol_fonts.PROFILE:
+        prefixes.add('documents/pdf/pptx-symbols-v2')
+    if (obj != owner + '/document.pdf' or manifest != owner + '/document-manifest.json'
+            or not any(re.fullmatch(re.escape(prefix) + r'/[0-9a-f]{64}', owner) for prefix in prefixes)):
+        raise ValueError('static PDF manifest does not share its permitted source root')
+    return owner
 
 
 def records(path: Path, revisions: dict, extension: str) -> list[dict]:
@@ -262,11 +278,7 @@ def main() -> int:
                     print(f"skipped stale static PDF result: {entry['key']}")
                     continue
                 object_path, manifest_path = entry.get('object'), entry.get('manifest')
-                if not isinstance(object_path, str) or not isinstance(manifest_path, str):
-                    raise ValueError('static PDF entry lacks object and manifest')
-                owner = str(Path(object_path).parent)
-                if str(Path(manifest_path).parent) != owner or not owner.startswith(category + '/'):
-                    raise ValueError('static PDF manifest does not share its source root')
+                owner = checkpoint_owner(category, entry)
                 uploads = {remote: local for remote, local in category_uploads.get(category, {}).items()
                            if str(Path(remote).parent) == owner}
                 if object_path not in uploads or manifest_path not in uploads:

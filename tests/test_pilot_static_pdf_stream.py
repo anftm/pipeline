@@ -225,6 +225,41 @@ class StaticPdfCheckpointTests(unittest.TestCase):
         self.assertEqual(workflow['jobs']['finalize']['concurrency']['group'],'reader-sidecar')
         self.assertFalse(workflow['jobs']['stream']['concurrency']['cancel-in-progress'])
 
+    def test_pptx_profile_upgrade_checkpoints_in_its_versioned_namespace(self):
+        root = 'documents/pdf/pptx-symbols-v2/' + 'a' * 64
+        source = {'repo': 'repo', 'path': 'book.pptx', 'extension': 'pptx', 'revision': 'new'}
+        entry = {'key': 'repo\0book.pptx', 'source_revision': 'new', 'extension': 'pptx',
+                 'conversion_profile': stream.office_symbol_fonts.PROFILE,
+                 'object': root + '/document.pdf', 'manifest': root + '/document-manifest.json'}
+        calls = []
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            (work / 'commits.json').write_text('{}')
+            pdf, manifest = work / 'document.pdf', work / 'document-manifest.json'
+            pdf.write_bytes(b'%PDF-upgraded')
+            manifest.write_bytes(b'{}')
+            args = SimpleNamespace(limit=1, extension='pptx', bucket=stream.BUCKET, apply=True,
+                retry_failures=False, strict=True, revisions=work/'commits.json', search_data=work/'search.json')
+            def checkpoint(bucket, path, previous, entries, failures, uploads, workspace, token, *, apply, kind):
+                calls.append((path, entries, set(uploads)))
+                return {'files': entries, 'failures': failures}
+            with patch.object(stream, 'parse_args', return_value=args), \
+                    patch.object(stream, 'records', return_value=[source]), \
+                    patch.object(stream, 'existing_index', return_value={'files': [], 'failures': []}), \
+                    patch.object(stream, 'build', return_value=(entry, {entry['object']: str(pdf),
+                                                                        entry['manifest']: str(manifest)})), \
+                    patch.object(stream, 'publish_checkpoint', side_effect=checkpoint):
+                self.assertEqual(stream.main(), 0)
+        self.assertEqual(calls[0][0], 'documents/pdf/pptx/index.json')
+        self.assertEqual(calls[0][2], {entry['object'], entry['manifest']})
+        for category, changed in [('documents/pdf/ppt', entry),
+                                  ('documents/pdf/pptx', {**entry, 'conversion_profile': 'other'}),
+                                  ('documents/pdf/pptx', {**entry, 'object': root + '/other.pdf'}),
+                                  ('documents/pdf/pptx', {**entry, 'manifest': 'elsewhere/manifest.json'})]:
+            with self.subTest(category=category, entry=changed):
+                with self.assertRaisesRegex(ValueError, 'permitted source root'):
+                    stream.checkpoint_owner(category, changed)
+
     def test_static_pdf_processing_root_is_per_source_and_handed_off(self):
         from scripts import reader_stream_index, reader_lifecycle, build_reader_assets_v2_sidecar as sidecar
         root='documents/pdf/ps/'+'a'*64
