@@ -11,6 +11,7 @@ import hashlib
 import json
 import posixpath
 import re
+import sys
 import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
@@ -1080,9 +1081,48 @@ def main() -> int:
                         help="exit zero when a report-only scan cannot converge; never authorizes retention")
     args = parser.parse_args()
     if (args.grace_days < 0 or args.limit < 0 or args.generation_grace_days < 0
-            or args.snapshot_retries < 0 or args.snapshot_retries > 5
+            or args.deadline_minutes < 0 or args.snapshot_retries < 0 or args.snapshot_retries > 5
             or not 1 <= args.workers <= 128 or not 1 <= args.max_rounds <= 60):
-        parser.error("grace periods and limit must be non-negative")
+        parser.error("grace periods, deadline and limit must be non-negative")
+    if args.deadline_minutes:
+        # Run a bounded scan in a child process: Python joins thread-pool
+        # workers at interpreter exit even after shutdown(wait=False). A hung
+        # S3 call must not prevent the report-only parent writing an incomplete
+        # artifact. The parent alone may write observations after completion.
+        import subprocess
+        import tempfile
+        with tempfile.TemporaryDirectory(prefix='reader-gc-deadline-') as directory:
+            partial = Path(directory) / 'report.json'
+            command = [sys.executable, str(Path(__file__).resolve()), '--output', str(partial),
+                       '--storage', args.storage, '--grace-days', str(args.grace_days),
+                       '--limit', str(args.limit), '--generation-grace-days', str(args.generation_grace_days),
+                       '--workers', str(args.workers), '--max-rounds', str(args.max_rounds),
+                       '--snapshot-retries', str(args.snapshot_retries)]
+            if args.skip_input_bucket:
+                command.append('--skip-input-bucket')
+            try:
+                result = subprocess.run(command, timeout=args.deadline_minutes * 60, check=False)
+            except subprocess.TimeoutExpired:
+                report = {'version': 1, 'mode': 'report-only', 'graph_complete': False,
+                          'blockers': ['GC scan exceeded wall-clock deadline; child process terminated'],
+                          'buckets': {}, 'deletion_authorized': False,
+                          'consistency': 'deadline reached; partial inventory discarded'}
+            else:
+                if not partial.is_file():
+                    raise RuntimeError('GC scan child failed without a report')
+                report = json.loads(partial.read_text(encoding='utf-8'))
+                if not isinstance(report, dict) or type(report.get('graph_complete')) is not bool:
+                    raise ValueError('GC scan child returned an invalid report')
+                if report['graph_complete'] and result.returncode != 0:
+                    raise RuntimeError('GC scan child failed after producing a complete report')
+        if report['graph_complete'] and args.record_observations:
+            store = HubBucketStore() if args.storage == 'hub' else S3BucketStore()
+            state, report['retention'] = plan_retention(read_gc_state(store), report, args.grace_days, args.limit)
+            store.put_json(READER_ASSETS_BUCKET, 'reader-index/reader_gc_state.json', state)
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2) + '\n', encoding='utf-8')
+        print(f"graph_complete={report['graph_complete']} deletion_enabled=False report={args.output}")
+        return report_exit_code(report, args.allow_incomplete)
     store = HubBucketStore() if args.storage == "hub" else S3BucketStore()
     transient_markers = ("root inventory did not stabilize", "unreadable JSON", "root recheck failed",
                          "root inventory recheck failed")
