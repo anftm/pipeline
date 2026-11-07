@@ -16,14 +16,14 @@ import urllib.request
 from pathlib import Path
 
 try:
-    from .convert_reader_assets import convert_tiff, validate_pdf_content
+    from .convert_reader_assets import validate_pdf_content
     from .pilot_office_stream import converted_output, run_libreoffice
     from .reader_assets import decode_search_payload, relative_path, source_url
     from .reader_stream_index import publish_checkpoint, read_index
     from .shared import hash_file as stream_file_hash
     from . import office_symbol_fonts
 except ImportError:
-    from convert_reader_assets import convert_tiff, validate_pdf_content
+    from convert_reader_assets import validate_pdf_content
     from pilot_office_stream import converted_output, run_libreoffice
     from reader_assets import decode_search_payload, relative_path, source_url
     from reader_stream_index import publish_checkpoint, read_index
@@ -117,10 +117,7 @@ def build(item: dict, work: Path, token: str | None) -> tuple[dict, dict[str, st
         office_source, conversion = office_symbol_fonts.prepare(source, work)
     output_dir = work / "pdf"
     output_dir.mkdir()
-    if item["extension"] in {"tif", "tiff"}:
-        output = output_dir / "document.pdf"
-        convert_tiff(source, output, work)
-    elif item["extension"] == "ps":
+    if item["extension"] == "ps":
         output = output_dir / "document.pdf"
         subprocess.run(["gs", "-q", "-dSAFER", "-dBATCH", "-dNOPAUSE", "-sDEVICE=pdfwrite",
                         f"-sOutputFile={output}", str(source)], check=True, timeout=600)

@@ -8,7 +8,7 @@
 - 旧 OCR 数据、桶对象、部分元数据及两个搜索站的历史阅读代码仍存在，本次没有撤下线上 OCR 数据或完成全站下线。Reader/GC 对旧引用的读取用于避免误把其他资源判为可删；已移除的转换代码可从 Git 历史查阅。
 - 原先用于 BHA OCR 补丁的冲突审核和阻塞检查已删除；后续解析以所选来源版本及补丁为准，不再阻塞等待旧审核流程，结果可能与过去的冲突处理不同。
 - `pdf-account-worker.yml` 仅是现有桶维护检查识别历史工作流库存的无执行哨兵；不得把文件存在当作外部写者已隔离。
-- 截至 2026-11-06，仓库 Actions 已恢复：搜索日常同步、目录测试、Space 保活、Space 契约测试和 Reader v3 手动发布器；其他入口仍需逐项审查。Reader v3 自动退役计划已取消；历史清理工作流仍可能写入或删除数据，不得因测试通过就启用定时 GC。
+- 2026-11-07 正在分批恢复 Actions：搜索同步、目录测试、Space 保活和 Reader v3 手动发布器已运行；普通图片修复、章节搜索修复恢复为手动入口，章节搜索已完成线上只读预演。完整 PDF 转换与跨桶报告调整为手动、默认预演；实际启用及运行结果见 GitHub Actions。完整 PDF 转换每次每种格式限 1–10 份。自动删除工作流仍禁用，旧对象不会仅因到期自动删除；其他生产和校订入口继续逐项审查。
 
 ## 资源查询与下线预览
 
@@ -60,7 +60,7 @@ python3 scripts/reader_route_plan.py --repo 'VoiceOfML/SomeRepo' --path '目录/
 
 原手动 `reader-gc-collect.yml` 提供 `scope=page-plan` / `scope=page-apply` 两步，在现有锁内直接执行：在已隔离并排空生产者的维护窗口，以 `resume_run={"paths":["derived/精确路径"]}` 生成计划，审阅 `page-exact-plan` artifact 和日志 SHA；随后设置 `apply=true`，并通过 `resume_run={"plan_run":"运行ID","plan_sha256":"计划SHA","external_writers_stopped":true}` 应用。应用会重新构建四桶图、核验两站及对象版本、重新验证所遍历的嵌套清单版本、要求额外确认外部写者已停，再记录 intent 并发送一次精确批次；部分成功或响应丢失时只可重新盘点，不会自动重试。计划有效期为 24 小时、artifact 保留两天，一次最多 1000 个键；这只延长审核期限，不延长引用、消费者或对象版本证明，应用时仍须重新扫描和复核。长时间扫描超过期限仍会失败，尚未实测真实桶上的耗时。它仍复用旧 CHM 事务检查及生产者 fence；若任何证明不足便停止，不能仅靠勾选外部确认绕过。旧 GC 尚未整体简化。
 
-2026-11-07 已通过单指针 redirect 将 238 条当前路由切到 `objects/`，两站确认同一代，PDF/CAJ/KDH 的 Range 冒烟和 CAJ 两站浏览器翻页通过；`reconcile-derived-index` 随后对齐了 238 条 PDF canonical 索引，当前 245 条均不再以 `derived/` 为 `new_path`。随后 `reconcile-sidecar`（run `42346461362`）依据所有者声明对齐了 canonical sidecar 与 legacy catalog：238 条路由现指向 `objects/`，pending 标记已清除，v3 指针和 PDF 索引未变，journal 与快照已持久化，两站复核通过，结果仍报告 `external_credentials_verified=false`。三代历史 catalog 仍保护 714 条旧路径引用；旧对象与历史代均未删除，该结果不授权删除。旧多对象迁移仍受旧 fence 阻塞，page 精确删除所在 collector 仍禁用；当前结果不改变删除限制。单条路由下线入口、Pipeline 内 PDF/DjVu 页面流生产和 OCR 生产代码移除也已部署；尚未执行路由撤回、索引迁移或物理删除。历史 CHM 固定批次的 19 个工作流入口已移除，但旧全桶 GC 及其阻塞尚未整体重写；详见 `.github/WORKFLOWS.md`。
+2026-11-07 已通过单指针 redirect 将 238 条当前路由切到 `objects/`，两站确认同一代，PDF/CAJ/KDH 的 Range 冒烟和 CAJ 两站浏览器翻页通过；`reconcile-derived-index` 随后对齐了 238 条 PDF canonical 索引，当前 245 条均不再以 `derived/` 为 `new_path`。随后 `reconcile-sidecar`（run `42346461362`）依据所有者声明对齐了 canonical sidecar 与 legacy catalog：238 条路由现指向 `objects/`，pending 标记已清除，v3 指针和 PDF 索引未变，journal 与快照已持久化，两站复核通过，结果仍报告 `external_credentials_verified=false`。随后 `compact-legacy-history` 已将三代旧 catalog 历史收缩成墓碑，完整的压缩前 catalog 留在 journal 中；v3 redirect 与历史快照仍保护旧路径。旧对象均未删除，该结果不授权删除。旧多对象迁移仍受旧 fence 阻塞，page 精确删除所在 collector 仍禁用；当前结果不改变删除限制。单条路由下线入口、Pipeline 内 PDF/DjVu 页面流生产和 OCR 生产代码移除也已部署；尚未执行路由撤回、索引迁移或物理删除。历史 CHM 固定批次的 19 个工作流入口已移除，但旧全桶 GC 及其阻塞尚未整体重写；详见 `.github/WORKFLOWS.md`。
 
 ## 本地检查
 

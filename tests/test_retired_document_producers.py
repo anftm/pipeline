@@ -153,7 +153,9 @@ class RetiredDocumentProducerTests(unittest.TestCase):
         chm = (ROOT / 'reader-chm-repair.yml').read_text()
         static = (ROOT / 'reader-static-pdf-stream.yml').read_text()
         self.assertIn('EPUB is temporary', chm)
-        self.assertIn('options: [all, ppt, pptx, pps, wps, ps, tif, tiff]', static)
+        self.assertIn('options: [all, ppt, pptx, pps, wps, ps]', static)
+        image = (ROOT / 'reader-image-stream.yml').read_text()
+        self.assertIn('tif, tiff', image)
 
     def test_normal_reader_publish_calls_still_target_unify(self):
         callers = ('reader-chm-repair.yml', 'reader-ebook-stream.yml', 'reader-office-chapters.yml',

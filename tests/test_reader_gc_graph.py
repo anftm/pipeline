@@ -893,21 +893,23 @@ class ReaderGcGraphTests(unittest.TestCase):
         self.assertFalse(report["graph_complete"])
         self.assertEqual(report["buckets"][INPUT]["unreferenced"], [])
 
-    def test_scheduled_gc_is_artifact_only_without_blocking_writers(self):
+    def test_manual_gc_report_cannot_record_observations_or_delete(self):
         root = Path(__file__).resolve().parents[1]
         path = root / '.github/workflows/reader-gc.yml'
         if not path.is_file() and sorted(p.name for p in (root / '.github/workflows').glob('*.yml')) == ['pdf-account-worker.yml']:
             self.skipTest('central GC report workflow is not distributed to account workers')
         workflow = yaml.safe_load(path.read_text())
-        self.assertIn("reader-gc-report", workflow["concurrency"]["group"])
-        self.assertIn("reader-sidecar", workflow["concurrency"]["group"])
-        self.assertIn("record_observations", workflow["concurrency"]["group"])
+        triggers = workflow.get('on', workflow.get(True))
+        self.assertEqual(set(triggers), {'workflow_dispatch'})
+        self.assertNotIn('record_observations', triggers['workflow_dispatch']['inputs'])
+        self.assertEqual(workflow['permissions'], {'contents': 'read'})
+        self.assertEqual(workflow['concurrency']['group'], 'reader-gc-report')
         commands = "\n".join(step.get("run", "") for step in workflow["jobs"]["gc"]["steps"])
         self.assertIn("python scripts/reader_gc_graph.py", commands)
         self.assertIn("--storage s3", commands)
         self.assertLessEqual(workflow["jobs"]["gc"]["timeout-minutes"], 360)
         self.assertNotIn("--apply", commands)
-        self.assertIn("--record-observations", commands)
+        self.assertNotIn("--record-observations", commands)
         artifacts = [step for step in workflow["jobs"]["gc"]["steps"] if "upload-artifact" in step.get("uses", "")]
         self.assertEqual(artifacts[0]["if"], "always()")
 

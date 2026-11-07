@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+import subprocess
 
 import yaml
 
@@ -187,6 +188,36 @@ class StaticPdfCheckpointTests(unittest.TestCase):
                      patch.object(stream,'publish_checkpoint') as checkpoint:
                     self.assertEqual(stream.main(),0)
                     checkpoint.assert_not_called()
+
+    def test_reenabled_workflow_is_manual_bounded_and_matches_real_formats(self):
+        workflow = yaml.safe_load((Path(__file__).resolve().parents[1] /
+                                   '.github/workflows/reader-static-pdf-stream.yml').read_text())
+        triggers = workflow.get('on', workflow.get(True))
+        self.assertEqual(set(triggers), {'workflow_dispatch'})
+        inputs = triggers['workflow_dispatch']['inputs']
+        self.assertEqual(set(inputs['extension']['options']), {'all'} | stream.EXTENSIONS)
+        self.assertEqual(inputs['limit']['default'], '1')
+        self.assertFalse(inputs['apply']['default'])
+        for job in ('plan', 'stream'):
+            commands = '\n'.join(step.get('run', '') for step in workflow['jobs'][job]['steps'])
+            self.assertIn('^([1-9]|10)$', commands)
+            self.assertNotIn('${{ inputs.limit', commands)
+        self.assertIn('inputs.apply == true', workflow['jobs']['stream']['if'])
+        self.assertIn('inputs.apply == true', workflow['jobs']['finalize']['if'])
+
+    def test_manual_plan_limit_rejects_unbounded_apply(self):
+        workflow = yaml.safe_load((Path(__file__).resolve().parents[1] /
+                                   '.github/workflows/reader-static-pdf-stream.yml').read_text())
+        command = next(step['run'] for step in workflow['jobs']['plan']['steps']
+                       if step.get('id') == 'matrix')
+        guard = command.split('args=(', 1)[0]
+        for limit, apply, valid in [('0', 'false', True), ('1', 'true', True), ('10', 'true', True),
+                                    ('0', 'true', False), ('11', 'true', False), ('-1', 'false', False),
+                                    ('1;echo injected', 'true', False)]:
+            with self.subTest(limit=limit, apply=apply):
+                result = subprocess.run(['bash', '-e', '-c', guard],
+                    env={'LIMIT': limit, 'APPLY': apply}, capture_output=True, text=True)
+                self.assertEqual(result.returncode == 0, valid, result.stderr)
 
     def test_static_pdf_checkpoint_is_serialized_with_sidecar_writer(self):
         workflow=yaml.safe_load((Path(__file__).resolve().parents[1]/'.github/workflows/reader-static-pdf-stream.yml').read_text())

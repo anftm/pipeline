@@ -1,11 +1,9 @@
 name: Reader/桶 · Build Static PDF Streams
-run-name: Static PDF ${{ (github.event_name == 'schedule' || inputs.apply == true) && 'apply' || 'plan' }} (${{ inputs.extension || 'all' }})
+run-name: Static PDF ${{ inputs.apply == true && 'apply' || 'plan' }} (${{ inputs.extension || 'all' }})
 
 on:
-  schedule:
-    # PPT-family and TIF/TIFF share the static PDF producer. Weekly is enough
-    # for the small pending set; manual dispatch handles one-off batches.
-    - cron: "23 4 * * 4"
+  # Resume with reviewed, bounded manual batches; scheduled unlimited writes
+  # must not restart merely because this workflow is re-enabled.
   workflow_dispatch:
     inputs:
       extension:
@@ -13,11 +11,11 @@ on:
         required: true
         default: all
         type: choice
-        options: [all, ppt, pptx, pps, wps, ps, tif, tiff]
+        options: [all, ppt, pptx, pps, wps, ps]
       limit:
-        description: Maximum sources; 0 means all pending
+        description: Maximum sources per extension; apply requires 1-10, plan allows 0 for all
         required: true
-        default: "0"
+        default: "1"
         type: string
       retry_failures:
         description: Retry previously recorded failures
@@ -60,9 +58,17 @@ jobs:
         id: matrix
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          EXTENSION: ${{ inputs.extension || 'all' }}
+          LIMIT: ${{ inputs.limit || '1' }}
+          APPLY: ${{ inputs.apply }}
+          RETRY_FAILURES: ${{ inputs.retry_failures }}
         run: |
-          args=(--kind static-pdf --extension "${{ inputs.extension || 'all' }}" --output output/static-pdf-matrix.json)
-          if [[ "${{ inputs.retry_failures }}" == "true" ]]; then args+=(--retry-failures); fi
+          [[ "$LIMIT" =~ ^[0-9]+$ ]] || { echo 'limit must be non-negative' >&2; exit 1; }
+          if [[ "$APPLY" == 'true' && ! "$LIMIT" =~ ^([1-9]|10)$ ]]; then
+            echo 'apply requires 1-10 sources per extension' >&2; exit 1
+          fi
+          args=(--kind static-pdf --extension "$EXTENSION" --output output/static-pdf-matrix.json)
+          if [[ "$RETRY_FAILURES" == "true" ]]; then args+=(--retry-failures); fi
           python scripts/plan_reader_stream_matrix.py "${args[@]}"
           echo "matrix=$(cat output/static-pdf-matrix.json)" >> "$GITHUB_OUTPUT"
       - run: tar -czf output/static-pdf-plan.tgz output/search_data.json state/commits.json output/static-pdf-matrix.json
@@ -75,7 +81,7 @@ jobs:
   stream:
     needs: plan
     if: >-
-      (github.event_name == 'schedule' || inputs.apply == true) &&
+      inputs.apply == true &&
       fromJSON(needs.plan.outputs.matrix).include[0] != null
     runs-on: ubuntu-24.04
     timeout-minutes: 360
@@ -99,11 +105,7 @@ jobs:
       - name: Install PDF conversion tools
         run: |
           sudo apt-get update
-          if [[ "${{ matrix.extension }}" == "tif" || "${{ matrix.extension }}" == "tiff" ]]; then
-            sudo apt-get install -y --no-install-recommends poppler-utils
-          else
-            sudo apt-get install -y --no-install-recommends libreoffice ghostscript poppler-utils fontconfig fonts-noto-cjk fonts-wqy-microhei
-          fi
+          sudo apt-get install -y --no-install-recommends libreoffice ghostscript poppler-utils fontconfig fonts-noto-cjk fonts-wqy-microhei
       - uses: actions/download-artifact@v8
         with:
           name: reader-static-pdf-plan
@@ -112,18 +114,20 @@ jobs:
       - name: Convert and publish static PDF
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          EXTENSION: ${{ matrix.extension }}
+          LIMIT: ${{ inputs.limit || '1' }}
+          RETRY_FAILURES: ${{ inputs.retry_failures }}
         run: |
-          [[ "${{ inputs.limit || '0' }}" =~ ^[0-9]+$ ]] || exit 1
-          args=(--extension "${{ matrix.extension }}" --limit "${{ inputs.limit || '0' }}" --apply --strict)
-          if [[ "${{ inputs.retry_failures }}" == "true" ]]; then args+=(--retry-failures); fi
+          [[ "$LIMIT" =~ ^([1-9]|10)$ ]] || { echo 'apply requires 1-10 sources per extension' >&2; exit 1; }
+          args=(--extension "$EXTENSION" --limit "$LIMIT" --apply --strict)
+          if [[ "$RETRY_FAILURES" == "true" ]]; then args+=(--retry-failures); fi
           python scripts/pilot_static_pdf_stream.py "${args[@]}"
 
   finalize:
     needs: [plan, stream]
     if: >-
       always() && needs.plan.result == 'success' &&
-      (github.event_name == 'schedule' || inputs.apply == true) &&
-      needs.stream.result == 'success'
+      inputs.apply == true && needs.stream.result == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     concurrency:
