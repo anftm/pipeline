@@ -19,14 +19,14 @@ try:
     from .convert_reader_assets import validate_pdf_content
     from .pilot_office_stream import converted_output, run_libreoffice
     from .reader_assets import decode_search_payload, relative_path, source_url
-    from .reader_stream_index import publish_checkpoint, read_index
+    from .reader_stream_index import publish_checkpoint, read_index, unchanged_sources
     from .shared import hash_file as stream_file_hash
     from . import office_symbol_fonts
 except ImportError:
     from convert_reader_assets import validate_pdf_content
     from pilot_office_stream import converted_output, run_libreoffice
     from reader_assets import decode_search_payload, relative_path, source_url
-    from reader_stream_index import publish_checkpoint, read_index
+    from reader_stream_index import publish_checkpoint, read_index, unchanged_sources
     from shared import hash_file as stream_file_hash
     import office_symbol_fonts
 
@@ -100,6 +100,22 @@ def handled(index: dict, key: str, revision: str, extension: str, *, retry_failu
     return any(entry.get('key') == key and entry.get('source_revision') == revision
                and (extension != 'pptx' or entry.get('conversion_profile') == office_symbol_fonts.PROFILE)
                for entry in entries if isinstance(entry, dict))
+
+
+def pending_sources(records: list[dict], index: dict, extension: str, token: str | None,
+                    *, retry_failures: bool = False) -> tuple[list[dict], set[str]]:
+    """Reuse only matching-profile successful conversions with identical pinned LFS bytes."""
+    pending = [item for item in records if not handled(
+        index, item['key'], item['revision'], extension, retry_failures=retry_failures)]
+    failure_keys = {item.get('key') for item in index.get('failures', []) if isinstance(item, dict)}
+    # A failure or profile upgrade must not be hidden by an older good result.
+    reuse = {**index, 'files': [item for item in index.get('files', [])
+        if (isinstance(item, dict) and item.get('key') not in failure_keys
+            and item.get('bucket') == BUCKET and item.get('mode') == 'pdf'
+            and item.get('object') and item.get('manifest') and item.get('sha256')
+            and (extension != 'pptx' or item.get('conversion_profile') == office_symbol_fonts.PROFILE))]}
+    unchanged = unchanged_sources(pending, reuse, token)
+    return [item for item in pending if item['key'] not in unchanged], unchanged
 
 
 def records(path: Path, revisions: dict, extension: str) -> list[dict]:
@@ -184,14 +200,27 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="reader-static-pdf-") as directory:
         root = Path(directory)
         by_category, category_uploads, planned = {}, {}, {}
-        attempted = 0
-        for number, item in enumerate(selected):
+        # Read each format checkpoint and compare source identities before
+        # converting. A repository-only commit must not regenerate different
+        # PDF bytes under an existing source-addressed immutable object path.
+        for item in selected:
             category = f"documents/pdf/{item['extension']}"
             if category not in planned:
                 planned[category] = existing_index(args.bucket, token, category)
-            old = planned[category]
+        pending_keys, reused = set(), set()
+        for ext in sorted({item['extension'] for item in selected}):
+            candidates = [{**item, 'key': f"{item['repo']}\0{item['path']}"}
+                          for item in selected if item['extension'] == ext]
+            pending, unchanged = pending_sources(candidates, planned[f'documents/pdf/{ext}'], ext, token,
+                                                 retry_failures=args.retry_failures)
+            pending_keys.update(item['key'] for item in pending)
+            reused.update(unchanged)
+        print(f"unchanged_by_source_sha={len(reused)} pending={len(pending_keys)}", flush=True)
+        attempted = 0
+        for number, item in enumerate(selected):
+            category = f"documents/pdf/{item['extension']}"
             key = f"{item['repo']}\0{item['path']}"
-            if handled(old, key, item['revision'], item['extension'], retry_failures=args.retry_failures):
+            if key not in pending_keys:
                 continue
             # Count attempts, not just successes: repeated failures must not
             # turn a bounded workflow dispatch into an unlimited batch.

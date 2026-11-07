@@ -243,6 +243,51 @@ class StaticPdfCheckpointTests(unittest.TestCase):
             self.assertEqual(next(value for path,value in writes if path.startswith('reader-index/gc/retirements/'))['roots'],
                              [{'bucket':stream.BUCKET,'root':root}])
 
+    def test_pending_reuses_matching_profile_and_same_lfs_only(self):
+        key = 'VoiceOfML/Test\0book.pptx'
+        good = {'key': key, 'source_revision': 'old', 'source_sha256': 'a' * 64,
+                'conversion_profile': stream.office_symbol_fonts.PROFILE, 'bucket': stream.BUCKET,
+                'mode': 'pdf', 'object': 'old.pdf', 'manifest': 'old.json', 'sha256': 'b' * 64}
+        row = {'key': key, 'revision': 'new', 'extension': 'pptx'}
+        seen = []
+        def unchanged(candidates, index, token):
+            seen.append(index['files'])
+            return {key} if index['files'] else set()
+        with patch.object(stream, 'unchanged_sources', side_effect=unchanged):
+            pending, same = stream.pending_sources([row], {'files': [good]}, 'pptx', None)
+            self.assertEqual((pending, same), ([], {key}))
+            old_profile = {**good, 'conversion_profile': 'previous'}
+            pending, same = stream.pending_sources([row], {'files': [old_profile]}, 'pptx', None)
+            self.assertEqual((pending, same), ([row], set()))
+            pending, same = stream.pending_sources([row], {'files': [good], 'failures': [{'key': key}]},
+                                                   'pptx', None, retry_failures=True)
+            self.assertEqual((pending, same), ([row], set()))
+        self.assertEqual([len(x) for x in seen], [1, 0, 0])
+
+    def test_worker_does_not_convert_or_checkpoint_verified_unchanged_source(self):
+        source = {'repo': 'VoiceOfML/Test', 'path': 'book.pps', 'extension': 'pps', 'revision': 'new'}
+        previous = {'files': [{'key': 'VoiceOfML/Test\0book.pps', 'source_revision': 'old',
+            'source_sha256': 'a' * 64, 'bucket': stream.BUCKET, 'mode': 'pdf',
+            'object': 'documents/pdf/pps/' + 'a' * 64 + '/document.pdf',
+            'manifest': 'documents/pdf/pps/' + 'a' * 64 + '/document-manifest.json',
+            'sha256': 'b' * 64}], 'failures': []}
+        api = SimpleNamespace(get_paths_info=lambda repo, paths, **kwargs:
+            [SimpleNamespace(path='book.pps', lfs=SimpleNamespace(sha256='a' * 64))])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            revisions = root / 'commits.json'
+            revisions.write_text('{}')
+            args = SimpleNamespace(limit=1, extension='pps', bucket=stream.BUCKET, apply=True,
+                retry_failures=False, strict=True, revisions=revisions, search_data=root / 'search.json')
+            with patch.object(stream, 'parse_args', return_value=args), \
+                    patch.object(stream, 'records', return_value=[source]), \
+                    patch.object(stream, 'existing_index', return_value=previous), \
+                    patch('scripts.reader_stream_index.HfApi', return_value=api), \
+                    patch.object(stream, 'build') as build, patch.object(stream, 'publish_checkpoint') as checkpoint:
+                self.assertEqual(stream.main(), 0)
+            build.assert_not_called()
+            checkpoint.assert_not_called()
+
     def test_limit_counts_failed_attempts_and_checkpoints_only_that_batch(self):
         sources = [{'repo': 'repo', 'path': f'{n}.ps', 'extension': 'ps', 'revision': 'new'}
                    for n in range(4)]

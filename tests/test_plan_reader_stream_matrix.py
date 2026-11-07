@@ -66,6 +66,30 @@ class ReaderStreamMatrixIndexTests(unittest.TestCase):
                 self.assertEqual(len(json.loads(args.output.read_text())['include']), expected)
                 self.assertEqual(json.loads(args.report.read_text())['extensions'][0]['pending'], expected)
 
+    def test_static_pdf_plan_reuses_pinned_unchanged_source_without_hiding_profile_upgrade(self):
+        key = 'VoiceOfML/Test\0book.ppt'
+        candidate = {'key': key, 'extension': 'ppt', 'revision': 'new'}
+        good = {'key': key, 'source_revision': 'old', 'source_sha256': 'a' * 64,
+                'bucket': 'vomebook/reader-assets-v2', 'mode': 'pdf', 'sha256': 'b' * 64,
+                'object': 'documents/pdf/ppt/object.pdf', 'manifest': 'documents/pdf/ppt/manifest.json'}
+        api = SimpleNamespace(get_paths_info=lambda repo, paths, **kwargs:
+            [SimpleNamespace(path='book.ppt', lfs={'sha256': 'a' * 64})])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'revisions.json').write_text('{}')
+            args = SimpleNamespace(kind='static-pdf', extensions=['ppt'], search_data=root / 'search.json',
+                revisions=root / 'revisions.json', bucket='bucket', shard_count=8,
+                output=root / 'matrix.json', retry_failures=False, verify_source_sha=False,
+                report=root / 'report.json')
+            with patch.object(matrix, 'args', return_value=args), patch.object(matrix, 'HfFileSystem'), \
+                    patch.object(matrix, 'selected_records', return_value=[candidate]), \
+                    patch.object(matrix, 'read_json', return_value={'files': [good], 'failures': []}), \
+                    patch('scripts.reader_stream_index.HfApi', return_value=api):
+                self.assertEqual(matrix.main(), 0)
+            self.assertEqual(json.loads(args.output.read_text())['include'], [])
+            summary = json.loads(args.report.read_text())['extensions'][0]
+            self.assertEqual((summary['pending'], summary['unchanged_sha']), (0, 1))
+
     def test_office_workflow_exposes_and_passes_explicit_failure_retry(self):
         workflow = (Path(__file__).resolve().parents[1] / ".github" / "workflows" /
                     "reader-office-chapters.yml").read_text(encoding="utf-8")
