@@ -6,6 +6,7 @@
 
 - `search-daily-sync.yml`：生成搜索数据并同步两站；目前仍将生成数据提交到站点 Git，尚未解耦。
 - `bha-*`、`proofread-*`：BHA 数据和校订处理。OCR 生产和冲突审核入口已移除，但 BHA 历史文本输入仍在使用。
+- `publish-ccrd-index.yml`：仅手动、只读比较 CCRD 四源当前 manifest 与一次上游 TXT 快照；不发布、不更新 Space，也不代表消费者字节已核验。旧双源发布器不应对四源直接启用。
 - `reader-*-stream.yml`、`reader-chm-repair.yml`、`reader-office-chapters.yml`、`reader-v3-publish.yml`：Reader 资源转换和发布。`reader-static-pdf-stream.yml` 把 PPT/WPS/PS 等源文件转成供直接阅读的完整 PDF，不是已退场的 PDF/DjVu 逐页渲染链。`redirect-derived` 将匹配的 PDF 阅读路由通过一个 S3 条件指针切到现有 objects；`reconcile-derived-index` 在两站已确认后以单对象条件写更新 PDF canonical 索引，均保留旧对象和历史代；`publish-generation` 可恢复两站发布。redirect 活跃时 `unify` 和单路由修改先重新审计并条件发布；document reset 仍阻止。旧 `migrate-derived` 修改多个 canonical 索引，不删除对象，仍受旧 fence 和写者隔离阻塞。`remove-route` 撤回单条派生 Reader 路由的功能已部署，但尚未执行实际撤回。故障、中断和外部写者风险见 `README.md`。
 - `scripts/reader_sidecar_reconcile.py` 为 canonical sidecar/catalog 对齐提供可恢复事务，入口为 `reader-v3-publish.yml` 的 `reconcile-sidecar`；它只要求中央串行工作流和所有者声明 `owner_declared_single_writer=true`（不证明凭据已收口，不授权删除）。pending 标记会阻止 GC 与普通 handoff。`compact-legacy-history` 用同样的前提收缩 legacy catalog 历史代：先写内容寻址 journal，再一次 `If-Match` 条件写，最后刷新确认回执；它不删对象、不授权删除。
 - 精确桶文件查询留作本地 `scripts/bucket_file.py` 命令，不再单设工作流。`scripts/reader_exact_references.py` 可快速解释已知直接索引和历史代的精确引用；`scripts/reader_route_plan.py` 可预览单书路由。两者均不扫描完整图，也不授权删除。

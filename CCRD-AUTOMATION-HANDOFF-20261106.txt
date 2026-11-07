@@ -50,12 +50,13 @@ Current production and local state
 
 Why not enable the existing workflow
 ------------------------------------
-.github/workflows/publish-ccrd-index.yml remains disabled. Its legacy writer is
-for two sources; update_ccrd_source_txt.py also calls migrate_space(), can move
-or delete legacy CW subdirectories and stages all CW. Current four-source guards
-are designed to reject legacy publication, not to provide the requested updater.
-Do not enable/retry it, do not invoke publish_ccrd_newspapers.py as a substitute,
-and do not reactivate old remote OCR.
+The former .github/workflows/publish-ccrd-index.yml writer supported only two
+sources; update_ccrd_source_txt.py also calls migrate_space(), can move or delete
+legacy CW subdirectories and stages all CW. Four-source guards reject that legacy
+publication; they do not provide the requested updater. The workflow path now
+contains a manual, read-only four-source source-hash report, not a writer. It
+must never be interpreted as publication readiness. Do not run the old writer,
+use publish_ccrd_newspapers.py as a substitute, or reactivate old remote OCR.
 
 Work remaining before production activation
 --------------------------------------------
