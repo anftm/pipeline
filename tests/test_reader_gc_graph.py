@@ -61,6 +61,15 @@ class ReaderGcGraphTests(unittest.TestCase):
         graph.walk({'kind': 'reader-reading-catalog', 'derived_pdf_redirects': {'bad': new}}, ASSETS, path)
         self.assertTrue(any('invalid derived PDF redirects' in x for x in graph.blockers))
 
+    def test_pending_sidecar_reconciliation_blocks_gc_even_if_references_are_complete(self):
+        store = MemoryStore()
+        store.put(ASSETS, 'reader-index/reader_catalog.json', {'version': 1, 'kind': 'reader-catalog',
+            'current': {'generation': 'a' * 32}, 'generations': {'a' * 32: {'generation': 'a' * 32,
+            'status': 'current', 'references': []}}, 'redirect_sidecar_pending': {'kind': 'pending'}})
+        report = gc.ReferenceGraph(store).build()
+        self.assertFalse(report['graph_complete'])
+        self.assertTrue(any('sidecar reconciliation is pending' in b for b in report['blockers']))
+
     def test_external_pin_while_document_is_inflight_does_not_reread_or_lose_pin(self):
         from concurrent.futures import ThreadPoolExecutor
         from threading import Event

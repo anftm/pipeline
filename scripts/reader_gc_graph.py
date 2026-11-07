@@ -452,6 +452,8 @@ class ReferenceGraph:
                     self.walk(task, bucket, origin, explicit, "task")
                 return
             if origin.endswith("reader_catalog.json") and value.get("kind") == "reader-catalog":
+                if 'redirect_sidecar_pending' in value:
+                    self.blockers.add('sidecar reconciliation is pending; deletion is not authorized')
                 current = (value.get("current") or {}).get("generation")
                 for generation in (value.get("generations") or {}).values():
                     if isinstance(generation, dict) and reader_lifecycle.generation_live(

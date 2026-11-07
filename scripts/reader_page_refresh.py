@@ -44,6 +44,8 @@ def prepare(store, api, *, expected_parent=None, action='unify', options=None, w
     legacy = json.loads(legacy_raw)
     current_id = (legacy.get('current') or {}).get('generation')
     current_generation = legacy.get('generations', {}).get(current_id, {})
+    if 'redirect_sidecar_pending' in legacy:
+        raise ValueError('sidecar reconciliation is pending')
     if (legacy.get('version') != 1 or legacy.get('kind') != 'reader-catalog'
             or current_generation.get('sidecar_sha256') != hashlib.sha256(audit.encode(base)).hexdigest()):
         raise ValueError('legacy catalog does not bind the canonical sidecar')

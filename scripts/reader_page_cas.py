@@ -77,10 +77,24 @@ class ConditionalPageStore:
         if bucket != shared.READER_ASSETS_BUCKET or not isinstance(raw, bytes):
             raise ValueError('invalid immutable page publication')
         snapshot = re.fullmatch(r'reader-index/snapshots/([0-9a-f]{64})/reader_assets\.json\.gz', path)
+        legacy = re.fullmatch(r'reader-index/generations/([0-9a-f]{32})/reader_assets\.json\.gz', path)
+        journal = re.fullmatch(r'reader-index/gc/sidecar-reconcile/([0-9a-f]{64})\.json\.gz', path)
         catalog = re.fullmatch(r'reader-index/v3/generations/([0-9a-f]{64})/catalog\.json', path)
         promotion = re.fullmatch(r'reader-index/v3/promotions/([0-9a-f]{64})\.json', path)
         if snapshot:
             valid = hashlib.sha256(raw).hexdigest() == snapshot.group(1)
+        elif legacy or journal:
+            import gzip
+            import io
+            try:
+                with gzip.GzipFile(fileobj=io.BytesIO(raw)) as stream:
+                    expanded = stream.read(100 * 1024 * 1024 + 1)
+                value = json.loads(expanded)
+                valid = (len(expanded) <= 100 * 1024 * 1024 and isinstance(value, dict)
+                         and (hashlib.sha256(expanded).hexdigest() == journal.group(1) if journal
+                              else value.get('v') == 1 and isinstance(value.get('f'), dict)))
+            except (OSError, ValueError, TypeError):
+                valid = False
         elif catalog:
             try:
                 value = json.loads(raw)
@@ -106,7 +120,7 @@ class ConditionalPageStore:
             observed = self.s3.read_bytes(bucket, path)
         except FileNotFoundError:
             namespace, name = self.s3._location(bucket)
-            content_type = 'application/gzip' if snapshot else 'application/json'
+            content_type = 'application/gzip' if snapshot or legacy or journal else 'application/json'
             try:
                 self.s3._client(namespace).put_object(Bucket=name, Key=path, Body=raw,
                     ContentType=content_type, IfNoneMatch='*')

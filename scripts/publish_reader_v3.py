@@ -601,6 +601,8 @@ def record_legacy_acknowledgments(store, *, apply=False):
         from reader_gc_stream import catalog_identity
     identity, digest = store.read_graph_json(ASSETS, "reader-index/reader_catalog.json",
                                              parser=catalog_identity)
+    if identity.get('redirect_sidecar_pending'):
+        return {'applied': False, 'reason': 'sidecar-reconciliation-pending', 'generation': identity['current']}
     if identity["bound_sidecar_sha256"] is None:
         raise ValueError("current catalog generation binds no canonical sidecar")
     base_raw = store.read_bytes(ASSETS, "reader-index/reader_assets.json.gz")
@@ -653,6 +655,8 @@ def compact_legacy_catalog(store, *, apply=False, grace_days=0):
         from reader_gc_stream import catalog_identity, compact_catalog_stream
     path = "reader-index/reader_catalog.json"
     identity, digest = store.read_graph_json(ASSETS, path, parser=catalog_identity)
+    if identity.get('redirect_sidecar_pending'):
+        return {'applied': False, 'reason': 'sidecar-reconciliation-pending'}
     try:
         receipt = json.loads(store.read_bytes(ASSETS, ACKNOWLEDGMENTS))
     except FileNotFoundError:

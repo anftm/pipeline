@@ -183,6 +183,8 @@ def publish_catalog(sidecar: dict, token: str | None = None,
         previous = read_json(INDEX_FILES["catalog"], token)
     except FileNotFoundError:
         previous = reader_lifecycle.empty_catalog()
+    if 'redirect_sidecar_pending' in previous:
+        raise RuntimeError('sidecar reconciliation is pending; catalog publication is blocked')
     catalog, generation = reader_lifecycle.catalog_generation(sidecar, copy.deepcopy(previous), references)
     try:
         from . import reader_gc_retirement as retirement

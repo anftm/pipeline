@@ -104,6 +104,22 @@ class PageCASTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'content addressed'):
             self.store.immutable_put(ASSETS, p_path, json.dumps(promotion).encode())
 
+    def test_legacy_snapshot_and_journal_creates_are_immutable_and_bounded(self):
+        import gzip
+        from scripts import reader_page_audit as audit
+        sidecar = gzip.compress(audit.encode({'v': 1, 'f': {}}), mtime=0)
+        snapshot = 'reader-index/generations/' + 'a' * 32 + '/reader_assets.json.gz'
+        self.client.get_object.return_value = {'Body': io.BytesIO(sidecar), 'ContentLength': len(sidecar), 'ETag': '"v"'}
+        self.store.immutable_put(ASSETS, snapshot, sidecar)
+        raw = audit.encode({'version': 1, 'kind': 'fixture'})
+        journal = gzip.compress(raw, mtime=0)
+        path = 'reader-index/gc/sidecar-reconcile/' + hashlib.sha256(raw).hexdigest() + '.json.gz'
+        self.client.get_object.return_value = {'Body': io.BytesIO(journal), 'ContentLength': len(journal), 'ETag': '"v"'}
+        self.store.immutable_put(ASSETS, path, journal)
+        with self.assertRaisesRegex(ValueError, 'content addressed'):
+            self.store.immutable_put(ASSETS, path.replace(hashlib.sha256(raw).hexdigest(), 'f' * 64), journal)
+        self.client.put_object.assert_not_called()
+
     def test_precondition_failure_and_transport_uncertainty_are_not_retried(self):
         for code, status in [('PreconditionFailed', 412), ('ConditionalRequestConflict', 409)]:
             self.client.put_object.reset_mock()

@@ -269,7 +269,10 @@ def catalog_identity(chunks, compressed=False):
     current = None
     names = set()
     bound = None
+    redirect_sidecar_pending = False
     for prefix, event, value in ijson.parse(decoded, use_float=True):
+        if prefix == '' and event == 'map_key' and value == 'redirect_sidecar_pending':
+            redirect_sidecar_pending = True
         if prefix == "current.generation" and event == "string":
             current = value
             continue
@@ -282,4 +285,5 @@ def catalog_identity(chunks, compressed=False):
         pass
     if current is None or current not in names:
         raise ValueError("Reader catalog has no current generation")
-    return {"current": current, "bound_sidecar_sha256": bound}, source.hash.hexdigest()
+    return {"current": current, "bound_sidecar_sha256": bound,
+            "redirect_sidecar_pending": redirect_sidecar_pending}, source.hash.hexdigest()

@@ -18,10 +18,15 @@ class ReaderSidecarHandoffTests(unittest.TestCase):
             with patch.object(sidecar, 'arguments', return_value=args), patch.dict(os.environ, {'HF_TOKEN': 'fixture'}), \
                     patch.object(sidecar, 'HfFileSystem'), patch.object(sidecar, 'build', return_value={'v': 1, 'f': {}}), \
                     patch.object(publication, 'current', return_value=({'generation': 'a' * 64}, {'derived_pdf_redirects': {'x': 'y'}})), \
-                    patch('scripts.reader_bucket_store.HubBucketStore', autospec=True), \
+                    patch('scripts.reader_bucket_store.HubBucketStore', autospec=True) as hub, \
                     patch.object(refresh, 'prepare', side_effect=ValueError('audit failed')) as audit, \
                     patch.object(sidecar, 'batch_bucket_files') as upload, patch.object(sidecar, 'publish_catalog') as catalog:
+                hub.return_value.read_graph_json.return_value = ({'redirect_sidecar_pending': False}, 'digest')
                 with self.assertRaisesRegex(ValueError, 'audit failed'):
+                    sidecar.main()
+                audit.assert_called_once(); upload.assert_not_called(); catalog.assert_not_called()
+                hub.return_value.read_graph_json.return_value = ({'redirect_sidecar_pending': True}, 'digest')
+                with self.assertRaisesRegex(RuntimeError, 'reconciliation is pending'):
                     sidecar.main()
                 audit.assert_called_once(); upload.assert_not_called(); catalog.assert_not_called()
 

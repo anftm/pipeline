@@ -314,7 +314,15 @@ def main() -> int:
         except ImportError:
             import publish_reader_v3 as publication
             from reader_bucket_store import HubBucketStore
-        _, current_catalog = publication.current(HubBucketStore())
+        hub_store = HubBucketStore()
+        try:
+            from .reader_gc_stream import catalog_identity
+        except ImportError:
+            from reader_gc_stream import catalog_identity
+        identity, _ = hub_store.read_graph_json(ASSETS_BUCKET, 'reader-index/reader_catalog.json', parser=catalog_identity)
+        if identity.get('redirect_sidecar_pending'):
+            raise RuntimeError('sidecar reconciliation is pending; sidecar handoff is blocked')
+        _, current_catalog = publication.current(hub_store)
         if current_catalog.get('derived_pdf_redirects'):
             try:
                 from . import reader_page_refresh as refresh
@@ -323,7 +331,7 @@ def main() -> int:
             from huggingface_hub import HfApi
             # Verify the live redirects, including target object identities and
             # the exact old canonical roots, before starting any handoff.
-            refresh.prepare(HubBucketStore(), HfApi(token=token))
+            refresh.prepare(hub_store, HfApi(token=token))
         import httpx
         try:
             from .reader_bucket_store import S3BucketStore

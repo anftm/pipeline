@@ -499,6 +499,24 @@ class ReaderGcCollectTests(unittest.TestCase):
         self.assertFalse(acknowledged)
         self.assertEqual(reason, 'stale-acknowledgment-receipt')
 
+    def test_pending_sidecar_reconciliation_never_acknowledges_or_compacts(self):
+        from scripts import publish_reader_v3 as publication
+        store = StreamingStore()
+        sidecar = {'v': 1, 'f': {}}
+        store.put(ASSETS, SIDECAR, sidecar)
+        catalog, _ = reader_lifecycle.catalog_generation(sidecar)
+        catalog['redirect_sidecar_pending'] = {'kind': 'pending'}
+        store.put(ASSETS, collector.CATALOG, catalog)
+        identity = collector.catalog_identity(store)
+        self.assertTrue(identity['redirect_sidecar_pending'])
+        self.assertEqual(collector.catalog_acknowledged(store, identity), (False, 'sidecar-reconciliation-pending'))
+        with patch.object(publication, 'assert_writer') as writer:
+            ack = publication.record_legacy_acknowledgments(store, apply=True)
+            compact = publication.compact_legacy_catalog(store, apply=True)
+        self.assertEqual(ack['reason'], 'sidecar-reconciliation-pending')
+        self.assertEqual(compact['reason'], 'sidecar-reconciliation-pending')
+        writer.assert_not_called()
+
     def test_acknowledgment_receipt_binds_catalog_sidecar_and_pinned_projection(self):
         from scripts import publish_reader_v3 as publication
         store = StreamingStore()

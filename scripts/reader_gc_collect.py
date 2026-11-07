@@ -45,6 +45,8 @@ def catalog_acknowledged(store, identity):
     projections, because the 2 GB canonical catalog never had working ``acks``.
     A missing or stale receipt keeps every generation.
     """
+    if identity.get('redirect_sidecar_pending'):
+        return False, 'sidecar-reconciliation-pending'
     try:
         receipt = json.loads(store.read_bytes(ASSETS, ACKNOWLEDGMENTS))
     except FileNotFoundError:
@@ -160,6 +162,8 @@ def observe_projections(store, client):
     base_raw = store.read_bytes(ASSETS, SIDECAR)
     base = graph.decode(base_raw)
     identity = catalog_identity(store)
+    if identity.get('redirect_sidecar_pending'):
+        raise RuntimeError('sidecar reconciliation is pending; GC remains blocked')
     pointer, v3_catalog = current(store)
     expected = project_sidecar(base, v3_catalog) if pointer else base
     receipts, refs = {}, {}
