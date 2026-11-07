@@ -43,7 +43,7 @@ python3 scripts/reader_route_plan.py --repo 'VoiceOfML/SomeRepo' --path '目录/
 
 实际写入及续跑在各写入边界重新检查原有全部配置仓库、以及历史盘点中额外记录仓库的 GitHub 工作流：除当前发布工作流的当前 run 外均须停用并排空，外部仓库还须停用 Actions；检查失败、不可访问、404 或缺少凭据均停止。这是当前部署版本的旧维护 fence，**不代表已退场的 OCR 生产者在新架构中仍应运行，也不应要求用户重新创建旧账户**。后续应在确认实际活跃写者、撤销或收口旧桶写凭据之后，用面向真实写者的隔离替换它；在此之前旧 fence 仍会阻止 apply。仅 Actions 状态或 `external_writers_stopped=true` **不能证明**其他桶凭据已失效；必须在整个迁移和恢复期间协调其他写者停写。站点及对象的旧 URL 缓存、历史代、其他域引用不由迁移解决。
 
-迁移的三个可变索引和 v3 指针使用 S3 `PutObject If-Match`，要求运行环境提供可访问 `vomebook` 桶的 `HF_S3_ACCESS_KEY_ID` / `HF_S3_SECRET_ACCESS_KEY`。2026-11-07 在 `pdf-pages-v2` 和 `reader-assets-v2` 的随机临时键上验证了条件创建、条件更新、过期 ETag 拒绝、Hub/S3 跨接口更新可见性，以及条件删除；临时对象均已确认移除。实际四个索引经 S3 和 Hub 读取的字节相同，实测没有改生产索引。这只是该时间点和该凭据的验证，不代表 Actions 中的同名 Secret 有效。条件写只保护单个对象，**不代替上述 fence、真实写者隔离或跨对象事务**。无版本机制时 ETag 不能防止 ABA；条件写冲突及响应丢失时不要盲目重试，应检查事务再续跑。计划、不可变快照和发布投影仍有独立写入，旧对象仍保留。
+迁移的三个可变索引和 v3 指针使用 S3 `PutObject If-Match`，要求运行环境提供可访问 `vomebook` 桶的 `HF_S3_ACCESS_KEY_ID` / `HF_S3_SECRET_ACCESS_KEY`。只读预演可在三个身份之外额外传入 `"check_s3":true`，用 Actions 同名 Secret 对四个现有索引执行 S3/Hub 字节一致性检查；这不尝试写入，也不能证明写权限或外部隔离。2026-11-07 在 `pdf-pages-v2` 和 `reader-assets-v2` 的随机临时键上验证了条件创建、条件更新、过期 ETag 拒绝、Hub/S3 跨接口更新可见性，以及条件删除；临时对象均已确认移除。实际四个索引经 S3 和 Hub 读取的字节相同，实测没有改生产索引。这只是该时间点和该凭据的验证，不代表 Actions 中的同名 Secret 有效。条件写只保护单个对象，**不代替上述 fence、真实写者隔离或跨对象事务**。无版本机制时 ETag 不能防止 ABA；条件写冲突及响应丢失时不要盲目重试，应检查事务再续跑。计划、不可变快照和发布投影仍有独立写入，旧对象仍保留。
 
 `python3 scripts/reader_page_cleanup.py --graph-report output/gc/reader-gc-report.json --output output/page-cleanup.json` 可以从现有跨桶图的完整报告中分出 page 桶的 `derived/` 和 `objects/` 候选；缺桶或图不完整不输出候选。输出仍只是待审核报告，不能直接删除。
 

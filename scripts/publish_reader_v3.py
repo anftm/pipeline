@@ -845,12 +845,15 @@ def main():
         expected = {'index_sha256', 'sidecar_sha256', 'v3_generation'}
         if args.apply:
             expected.add('external_writers_stopped')
-        if (not isinstance(options, dict) or set(options) != expected
-                or args.apply and options['external_writers_stopped'] is not True):
-            raise ValueError('migrate-derived requires exact root identities and, for apply, external-writer confirmation')
+        if (not isinstance(options, dict)
+                or (set(options) != expected and (args.apply or set(options) != expected | {'check_s3'}))
+                or args.apply and options['external_writers_stopped'] is not True
+                or not args.apply and 'check_s3' in options and options['check_s3'] is not True):
+            raise ValueError('migrate-derived requires exact root identities, optional check_s3=true for preview, and external-writer confirmation for apply')
         if args.apply:
             os.environ['READER_PAGE_EXTERNAL_WRITERS_STOPPED'] = 'true'
             migrate.require_writer_window(store)
+        if args.apply or options.get('check_s3') is True:
             try:
                 from .reader_page_cas import ConditionalPageStore
             except ImportError:
@@ -867,7 +870,8 @@ def main():
                       'changed_routes': plan['changed_routes'], 'base_generation': plan['generation'],
                       'previous_v3_generation': plan['pointer']['generation'], 'objects_deleted': False,
                       'unindexed_legacy_pdfs': len(plan['audit']['unindexed_legacy_pdfs']),
-                      'unclassified_object_pdfs': len(plan['audit']['unclassified_object_pdfs'])}
+                      'unclassified_object_pdfs': len(plan['audit']['unclassified_object_pdfs']),
+                      **({'s3_roots_verified': True} if options.get('check_s3') is True else {})}
     elif args.command in {"remove-route", "restore-route", "verify-route"}:
         try:
             from .reader_route_control import change, verify_consumers

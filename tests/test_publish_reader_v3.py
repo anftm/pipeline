@@ -194,6 +194,12 @@ class V3PublicationTests(unittest.TestCase):
         self.assertIn("complete=", ack_step["run"])
         self.assertIn("retire", workflow[True]["workflow_dispatch"]["inputs"]["operation"]["options"])
         self.assertIn("retire) ;;", operation_step["run"])
+        for name in ('HF_S3_ACCESS_KEY_ID', 'HF_S3_SECRET_ACCESS_KEY'):
+            value = operation_step['env'][name]
+            self.assertIn("inputs.operation == 'migrate-derived'", value)
+            self.assertIn("inputs.operation == 'resume-derived'", value)
+            self.assertIn('secrets.' + name, value)
+            self.assertNotIn('inputs.apply', value)
         self.assertFalse(any(step.get("name", "").startswith("Retire acknowledged")
                              for step in workflow["jobs"]["publish"]["steps"]))
         env = {"GITHUB_ACTIONS": "true", "GITHUB_REPOSITORY": "anftm/pipeline", "GITHUB_RUN_ID": "123",
