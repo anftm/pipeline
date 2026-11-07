@@ -266,8 +266,28 @@ def inspect_fork(token: str, number: int) -> dict:
         if ((name in upstream_branches and not re.fullmatch(r'[0-9a-f]{40}', str(a or '')))
                 or (name in mirror_branches and not re.fullmatch(r'[0-9a-f]{40}', str(b or '')))):
             raise RuntimeError('branch listing changed or contains an invalid revision during read-only inspection')
+        if a is None:
+            relation = 'mirror-only'
+        elif b is None:
+            relation = 'upstream-only'
+        elif a == b:
+            relation = 'identical'
+        elif name in GENERATED_BRANCHES:
+            relation = 'generated-not-compared'
+        else:
+            compare = (f'{repo_path(MIRROR_OWNER, repo)}/compare/'
+                       f'{urllib.parse.quote(a, safe="")}...{urllib.parse.quote(b, safe="")}')
+            status, data = api_request(token, 'GET', compare)
+            if status == 404:
+                relation = 'unknown-not-found'
+            elif status == 200 and isinstance(data, dict) and data.get('status') in {
+                    'identical', 'ahead', 'behind', 'diverged'}:
+                relation = data['status']  # mirror relative to the upstream SHA
+            else:
+                raise RuntimeError(f'[{repo}/{name}] read-only compare failed ({status})')
         differences.append({'branch': name, 'upstream': a, 'mirror': b,
-                            'equal': a == b if a is not None and b is not None else False})
+                            'equal': a == b if a is not None and b is not None else False,
+                            'mirror_relation': relation})
     return {'version': 1, 'kind': 'bha-fork-readonly-report', 'archive': number,
             'upstream': upstream['full_name'], 'mirror': mirror['full_name'],
             'default_branch': default, 'managed_branches': differences,

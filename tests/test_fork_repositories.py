@@ -15,6 +15,7 @@ class ForkRepositoriesTests(unittest.TestCase):
             methods.append(method)
             if path == fork_repositories.repo_path(fork_repositories.UPSTREAM_OWNER, repo): return 200, upstream
             if path == fork_repositories.repo_path(fork_repositories.MIRROR_OWNER, repo): return 200, mirror
+            if '/compare/' in path: return 200, {'status': 'ahead'}
             raise AssertionError(path)
         def sha(_token, owner, _repo, branch):
             return ('a' if owner == fork_repositories.UPSTREAM_OWNER else 'b') * 40
@@ -25,8 +26,10 @@ class ForkRepositoriesTests(unittest.TestCase):
                 patch.object(fork_repositories, 'delete_branch') as delete, \
                 patch.object(fork_repositories, 'sync_branch') as sync:
             report = fork_repositories.inspect_fork('token', 0)
-        self.assertEqual(methods, ['GET', 'GET'])
+        self.assertEqual(methods, ['GET', 'GET', 'GET'])
         self.assertEqual([row['branch'] for row in report['managed_branches']], ['main', 'ocr_cache', 'parsed'])
+        self.assertEqual([row['mirror_relation'] for row in report['managed_branches']],
+                         ['ahead', 'upstream-only', 'mirror-only'])
         self.assertEqual(report['unmanaged_upstream_count'], 1)
         self.assertEqual(report['remote_writes'], 0)
         self.assertFalse(report['synchronization_applied'])
@@ -45,6 +48,18 @@ class ForkRepositoriesTests(unittest.TestCase):
                 patch.object(fork_repositories, 'branch_sha', return_value=None):
             with self.assertRaisesRegex(RuntimeError, 'changed'): fork_repositories.inspect_fork('token', 0)
         with self.assertRaises(ValueError): fork_repositories.inspect_fork('token', 32)
+
+    def test_inspection_compare_404_is_unknown_not_isolation_or_divergence(self):
+        repo = 'banned-historical-archives0'
+        upstream = {'full_name': f'{fork_repositories.UPSTREAM_OWNER}/{repo}', 'default_branch': 'main'}
+        mirror = {'full_name': f'{fork_repositories.MIRROR_OWNER}/{repo}', 'fork': True,
+                  'parent': {'full_name': upstream['full_name']}}
+        with patch.object(fork_repositories, 'api_request', side_effect=[(200, upstream), (200, mirror), (404, {})]), \
+                patch.object(fork_repositories, 'list_branches', side_effect=[['main'], ['main']]), \
+                patch.object(fork_repositories, 'branch_sha', side_effect=['a' * 40, 'b' * 40]):
+            result = fork_repositories.inspect_fork('token', 0)
+        self.assertEqual(result['managed_branches'][0]['mirror_relation'], 'unknown-not-found')
+        self.assertEqual(result['remote_writes'], 0)
 
     def test_restored_fork_workflow_can_only_run_manual_readonly_inspection(self):
         from pathlib import Path
