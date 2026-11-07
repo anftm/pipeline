@@ -176,7 +176,7 @@ class V3PublicationTests(unittest.TestCase):
         self.assertFalse(workflow[True]["workflow_dispatch"]["inputs"]["apply"]["default"])
         self.assertEqual(workflow[True]["workflow_dispatch"]["inputs"]["operation"]["options"],
                          ["inspect", "unify", "ack", "retire", "withdraw", "reset-documents",
-                          "remove-route", "restore-route", "verify-route", "migrate-derived", "resume-derived", "redirect-derived", "reconcile-derived-index", "reconcile-sidecar", "publish-generation", "verify-generation"])
+                          "remove-route", "restore-route", "verify-route", "migrate-derived", "resume-derived", "redirect-derived", "reconcile-derived-index", "reconcile-sidecar", "compact-legacy-history", "publish-generation", "verify-generation"])
         operation_step = next(step for step in workflow["jobs"]["publish"]["steps"]
                               if step.get("id") == "operation")
         # Detached OCR admission and correction are retired; retention remains
@@ -201,6 +201,7 @@ class V3PublicationTests(unittest.TestCase):
             self.assertIn('"redirect-derived"', value)
             self.assertIn('"reconcile-derived-index"', value)
             self.assertIn('"reconcile-sidecar"', value)
+            self.assertIn('"compact-legacy-history"', value)
             for operation in ('unify', 'remove-route', 'restore-route'):
                 self.assertIn('"' + operation + '"', value)
             self.assertIn('secrets.' + name, value)

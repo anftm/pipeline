@@ -78,7 +78,7 @@ class ConditionalPageStore:
             raise ValueError('invalid immutable page publication')
         snapshot = re.fullmatch(r'reader-index/snapshots/([0-9a-f]{64})/reader_assets\.json\.gz', path)
         legacy = re.fullmatch(r'reader-index/generations/([0-9a-f]{32})/reader_assets\.json\.gz', path)
-        journal = re.fullmatch(r'reader-index/gc/sidecar-reconcile/([0-9a-f]{64})\.json\.gz', path)
+        journal = re.fullmatch(r'reader-index/gc/(?:sidecar-reconcile|legacy-compact)/([0-9a-f]{64})\.json\.gz', path)
         catalog = re.fullmatch(r'reader-index/v3/generations/([0-9a-f]{64})/catalog\.json', path)
         promotion = re.fullmatch(r'reader-index/v3/promotions/([0-9a-f]{64})\.json', path)
         if snapshot:

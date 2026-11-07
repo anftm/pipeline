@@ -807,7 +807,7 @@ def main():
     parser.add_argument("command", choices=("withdraw", "ack", "ack-all", "acknowledge-legacy",
                                             "compact-legacy", "inspect", "project", "retire",
                                             "unify", "reset-documents", "remove-route", "restore-route", "verify-route",
-                                            "migrate-derived", "resume-derived", "redirect-derived", "reconcile-derived-index", "reconcile-sidecar", "publish-generation", "verify-generation", "check-page-window"))
+                                            "migrate-derived", "resume-derived", "redirect-derived", "reconcile-derived-index", "reconcile-sidecar", "compact-legacy-history", "publish-generation", "verify-generation", "check-page-window"))
     parser.add_argument("--resource-json")
     parser.add_argument("--expected-parent", default="none")
     parser.add_argument("--apply", action="store_true")
@@ -937,6 +937,37 @@ def main():
                                     expected_catalog=options['catalog_sha256'],
                                     expected_generation=options['v3_generation'])
             report = sidecar.apply(store, api, value) if args.apply else sidecar.preview(value)
+        if args.apply:
+            report = {**report, 'owner_declared_single_writer': True, 'external_credentials_verified': False}
+    elif args.command == 'compact-legacy-history':
+        try:
+            from . import reader_legacy_compact as legacy_compact
+            from .reader_page_cas import ConditionalPageStore
+        except ImportError:
+            import reader_legacy_compact as legacy_compact
+            from reader_page_cas import ConditionalPageStore
+        options = json.loads(args.resource_json or '{}')
+        identities = {'v3_generation', 'catalog_sha256'}
+        declared = 'owner_declared_single_writer'
+        keys = set(options) if isinstance(options, dict) else set()
+        resuming = keys == {'transaction_id', declared}
+        if not (keys == identities or keys == identities | {declared} or resuming):
+            raise ValueError('compact-legacy-history requires exact v3 and catalog identities, or a transaction_id to resume')
+        if (args.apply or resuming) and options.get(declared) is not True:
+            raise ValueError('writing requires the owner declaration owner_declared_single_writer=true')
+        if resuming and not args.apply:
+            raise ValueError('resuming a legacy compaction requires --apply')
+        if args.apply:
+            os.environ['READER_OWNER_DECLARED_SINGLE_WRITER'] = 'true'
+            assert_writer(store)
+            store = ConditionalPageStore(store)
+            store.preflight()
+        if resuming:
+            report = legacy_compact.resume(store, options['transaction_id'])
+        else:
+            value = legacy_compact.prepare(store, expected_generation=options['v3_generation'],
+                                           expected_catalog=options['catalog_sha256'])
+            report = legacy_compact.apply(store, value) if args.apply else legacy_compact.preview(value)
         if args.apply:
             report = {**report, 'owner_declared_single_writer': True, 'external_credentials_verified': False}
     elif args.command == 'migrate-derived':

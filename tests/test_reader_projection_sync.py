@@ -69,7 +69,7 @@ class ReaderProjectionSyncTests(unittest.TestCase):
                 self.assertFalse(condition(step['if'], operation=operation, changed='false'))
             for operation in ('auto', 'correct', 'accept', 'promote', 'rollback',
                               'repair-gbk', 'retire', 'ack', 'inspect', 'verify-route', 'verify-generation', 'reconcile-derived-index',
-                              'reconcile-sidecar'):
+                              'reconcile-sidecar', 'compact-legacy-history'):
                 self.assertFalse(condition(step['if'], operation=operation, changed='true'))
         self.assertLess(steps.index(publish), steps.index(ack))
         self.assertEqual(workflow['concurrency']['group'], 'reader-sidecar')
@@ -179,6 +179,7 @@ class ReaderProjectionSyncTests(unittest.TestCase):
             'redirect-derived': ['--resource-json', '{"key":"fixture"}'],
             'reconcile-derived-index': ['--resource-json', '{"key":"fixture"}'],
             'reconcile-sidecar': ['--resource-json', '{"key":"fixture"}'],
+            'compact-legacy-history': ['--resource-json', '{"key":"fixture"}'],
             'publish-generation': ['--expected-parent', 'parent', '--wait-seconds', '1200'],
             'verify-generation': ['--expected-parent', 'parent', '--wait-seconds', '1200'],
         }
