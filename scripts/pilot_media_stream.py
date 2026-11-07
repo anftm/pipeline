@@ -139,7 +139,9 @@ def main() -> int:
     completed = completed_revisions(previous, args.retry_failures)
     candidates = [item for item in select_records(args.search_data, revisions, args.kind)
                   if shard_for(f"{item['repo']}\0{item['path']}", args.shard_count) == args.shard_index]
-    unchanged = unchanged_sources(candidates, previous, token)
+    failed_keys = {entry['key'] for entry in previous.get('failures', [])}
+    reuse = {**previous, 'files': [entry for entry in previous.get('files', []) if entry['key'] not in failed_keys]}
+    unchanged = unchanged_sources(candidates, reuse, token)
     selected = [item for item in candidates if f"{item['repo']}\0{item['path']}" not in unchanged
                 and completed.get(f"{item['repo']}\0{item['path']}") != item["revision"]]
     print(f"unchanged_by_source_sha={len(unchanged)} pending={len(selected)}", flush=True)

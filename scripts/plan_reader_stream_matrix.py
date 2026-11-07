@@ -162,8 +162,12 @@ def main() -> int:
             if a.verify_source_sha:
                 # Reuse must obey the same profile gate as completion: a bundle
                 # from another profile is stale even when its bytes match.
+                # An explicit or future retry must not be suppressed by a
+                # same-SHA success from before the recorded failure.
+                failed_keys = {entry['key'] for entry in combined.get('failures', [])}
                 reuse = {**combined, "files": [entry for entry in combined.get("files", [])
-                         if expected is None or entry.get("profile") == expected]}
+                         if entry['key'] not in failed_keys
+                         and (expected is None or entry.get("profile") == expected)]}
                 unchanged = unchanged_sources(candidates, reuse, token)
             else:
                 unchanged = set()

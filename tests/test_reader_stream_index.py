@@ -470,6 +470,29 @@ class FormatProducerRegressionTests(unittest.TestCase):
             self.assertIn('^([1-9]|10)$', stream)
             self.assertNotIn('${{ inputs.limit', stream)
 
+    def test_media_retry_does_not_reuse_an_older_same_sha_success(self):
+        key = 'VoiceOfML/Test\0bad.mp3'
+        source = {'repo': 'VoiceOfML/Test', 'path': 'bad.mp3', 'extension': 'mp3',
+                  'revision': 'new', 'source_bytes': 42}
+        previous = {'files': [{'key': key, 'source_revision': 'old', 'source_sha256': 'a' * 64}],
+                    'failures': [{'key': key, 'source_revision': 'new', 'error': 'bad'}]}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            revisions = root / 'revisions.json'
+            revisions.write_text('{}')
+            args = SimpleNamespace(limit=1, shard_count=1, shard_index=0, kind='audio', bucket=BUCKET,
+                retry_failures=True, strict=True, apply=True, revisions=revisions, search_data=root/'search.json')
+            with patch.object(media, 'parse_args', return_value=args), \
+                    patch.object(media, 'existing_index', return_value=previous), \
+                    patch.object(media, 'select_records', return_value=[source]), \
+                    patch.object(media, 'unchanged_sources', return_value=set()) as reuse, \
+                    patch.object(media, 'build_one', side_effect=RuntimeError('still bad')) as build, \
+                    patch.object(media, 'publish_checkpoint', return_value=previous) as checkpoint:
+                self.assertEqual(media.main(), 1)
+            self.assertEqual(reuse.call_args.args[1]['files'], [])
+            build.assert_called_once()
+            self.assertEqual(len(checkpoint.call_args.args[4]), 1)
+
     def test_media_manual_stream_is_bounded_and_uses_shared_writer_lock(self):
         import subprocess
         root = Path(__file__).resolve().parents[1] / '.github/workflows'

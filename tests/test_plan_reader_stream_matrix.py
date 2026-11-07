@@ -90,6 +90,26 @@ class ReaderStreamMatrixIndexTests(unittest.TestCase):
             summary = json.loads(args.report.read_text())['extensions'][0]
             self.assertEqual((summary['pending'], summary['unchanged_sha']), (0, 1))
 
+    def test_sharded_planner_never_hides_recorded_failure_behind_same_sha(self):
+        key = 'VoiceOfML/Test\0bad.mp3'
+        candidate = {'key': key, 'extension': 'audio', 'revision': 'new'}
+        current = {'files': [{'key': key, 'source_revision': 'old', 'source_sha256': 'a' * 64}],
+                   'failures': [{'key': key, 'source_revision': 'new'}]}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'revisions.json').write_text('{}')
+            args = SimpleNamespace(kind='media', extensions=['audio'], search_data=root / 'search.json',
+                revisions=root / 'revisions.json', bucket='bucket', shard_count=1,
+                output=root / 'matrix.json', retry_failures=True, verify_source_sha=True,
+                report=root / 'report.json')
+            with patch.object(matrix, 'args', return_value=args), patch.object(matrix, 'HfFileSystem'), \
+                    patch.object(matrix, 'selected_records', return_value=[candidate]), \
+                    patch.object(matrix, 'read_json', side_effect=[current, {}]), \
+                    patch.object(matrix, 'unchanged_sources', return_value=set()) as reuse:
+                self.assertEqual(matrix.main(), 0)
+            self.assertEqual(reuse.call_args.args[1]['files'], [])
+            self.assertEqual(json.loads(args.output.read_text())['include'], [{'extension': 'audio', 'shard': 0}])
+
     def test_office_workflow_exposes_and_passes_explicit_failure_retry(self):
         workflow = (Path(__file__).resolve().parents[1] / ".github" / "workflows" /
                     "reader-office-chapters.yml").read_text(encoding="utf-8")
