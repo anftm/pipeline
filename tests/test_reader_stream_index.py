@@ -433,7 +433,7 @@ class FormatProducerRegressionTests(unittest.TestCase):
                 commands = "\n".join(s.get("run", "") for s in workflow["jobs"][job]["steps"])
                 self.assertIn("--apply --strict", commands)
                 self.assertIn("--retry-failures", commands)
-                if name in {'web', 'spreadsheet', 'media'}:
+                if name in {'ebook', 'web', 'spreadsheet', 'media'}:
                     self.assertNotIn('schedule', workflow.get('on', workflow.get(True)))
                 else:
                     self.assertIn('== "schedule" ||', commands)
@@ -469,6 +469,33 @@ class FormatProducerRegressionTests(unittest.TestCase):
             stream = '\n'.join(step.get('run', '') for step in workflow['jobs'][f'{family}-stream']['steps'])
             self.assertIn('^([1-9]|10)$', stream)
             self.assertNotIn('${{ inputs.limit', stream)
+
+    def test_ebook_manual_stream_is_bounded_and_uses_shared_writer_lock(self):
+        import subprocess
+        root = Path(__file__).resolve().parents[1] / '.github/workflows'
+        workflow = yaml.safe_load((root / 'reader-ebook-stream.yml').read_text())
+        triggers = workflow.get('on', workflow.get(True))
+        self.assertEqual(set(triggers), {'workflow_dispatch'})
+        inputs = triggers['workflow_dispatch']['inputs']
+        self.assertEqual(set(inputs['extension']['options']), {'all', 'epub', 'mobi', 'azw3', 'fb2'})
+        self.assertEqual(inputs['limit']['default'], '1')
+        self.assertFalse(inputs['apply']['default'])
+        for name in ('ebook-stream', 'finalize'):
+            self.assertEqual(workflow['jobs'][name]['concurrency']['group'], 'reader-sidecar')
+        command = next(step['run'] for step in workflow['jobs']['plan']['steps'] if step.get('id') == 'matrix')
+        guard = command.split('args=(', 1)[0]
+        for limit, apply, valid in [('0', 'false', True), ('1', 'true', True), ('3', 'true', True),
+                                    ('0', 'true', False), ('4', 'true', False), ('-1', 'false', False),
+                                    ('1;echo injected', 'true', False)]:
+            with self.subTest(limit=limit, apply=apply):
+                result = subprocess.run(['bash', '-e', '-c', guard],
+                    env={'LIMIT': limit, 'APPLY': apply, 'MAX_SOURCE_BYTES': '0', 'WORKERS': '1'},
+                    capture_output=True, text=True)
+                self.assertEqual(result.returncode == 0, valid, result.stderr)
+        commands = '\n'.join(s.get('run', '') for s in workflow['jobs']['ebook-stream']['steps'])
+        self.assertIn('^[1-3]$', commands)
+        self.assertNotIn('${{ inputs.limit', commands)
+        self.assertIn('--apply --strict', commands)
 
     def test_media_retry_does_not_reuse_an_older_same_sha_success(self):
         key = 'VoiceOfML/Test\0bad.mp3'

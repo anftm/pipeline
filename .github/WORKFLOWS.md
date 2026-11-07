@@ -17,6 +17,6 @@
 
 PDF/DjVu 的 OCR 前置页面流生产器及其旧 manifest 写入迁移命令已移除并部署，历史 page manifest 的只读引用解析保留。`pdf-account-worker.yml` 暂为旧 GC 护栏所依赖的无执行库存哨兵，不代表外部写者已隔离。此次同时移除固定电子书交接、两个一次性 producer 审计及重复 media backfill 的 Actions 入口；脚本、计划和历史记录仍在。日常 media 工作流手动 `apply=true, limit=0` 覆盖 backfill 目的，但其 codec 检查与空矩阵行为不同；旧交接不能再从 Actions 续跑。
 
-2026-11-07 恢复工作流时，保留原有五项搜索/保活/Reader 发布入口；普通图片资源修复和章节搜索修复恢复为手动入口，默认只预演。`reader-static-pdf-stream.yml` 改为仅手动运行：预演默认不写，实际转换每种格式限 1–10 份，PPT/PPTX/PPS/WPS/PS 输出完整 PDF；TIFF 属于普通图片工作流，不在此菜单中。`reader-web-stream.yml` 和 `reader-spreadsheet-stream.yml` 也改为手动、默认预演，实际处理每种格式限 1–10 次；`reader-media-stream.yml` 每个分片限 1–3 次，全部在写索引时与 Reader sidecar 共享锁。`reader-gc.yml` 改为手动只读报告，不记录观察、不删除资源，也不自动运行。工作流启用状态由 GitHub Actions 决定，部署后仍须实际启用并执行预演，不能以仓库文件代替运行结果。
+2026-11-07 恢复工作流时，保留原有五项搜索/保活/Reader 发布入口；普通图片资源修复和章节搜索修复恢复为手动入口，默认只预演。`reader-static-pdf-stream.yml` 改为仅手动运行：预演默认不写，实际转换每种格式限 1–10 份，PPT/PPTX/PPS/WPS/PS 输出完整 PDF；TIFF 属于普通图片工作流，不在此菜单中。`reader-web-stream.yml` 和 `reader-spreadsheet-stream.yml` 也改为手动、默认预演，实际处理每种格式限 1–10 次；`reader-media-stream.yml` 和 `reader-ebook-stream.yml` 每个分片限 1–3 次，全部在写索引时与 Reader sidecar 共享锁。`reader-gc.yml` 改为手动只读报告，不记录观察、不删除资源，也不自动运行。工作流启用状态由 GitHub Actions 决定，部署后仍须实际启用并执行预演，不能以仓库文件代替运行结果。
 
 `reader-gc-collect.yml`、`reader-maintenance.yml` 和 `reader-gc-ccrd.yml` 仍禁用，不会自动删除旧对象。校订提交链自身的持久交付保护仍暂停，不应仅启用入口就宣称已恢复；BHA 与其余定时生产工作流逐项审查。Reader 发布器为手动入口，不定时执行退役 journal。
