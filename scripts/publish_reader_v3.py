@@ -143,13 +143,17 @@ def pinned_base(store, catalog, fallback):
     return base
 
 
-def unify(store, *, apply=False):
+def unify(store, *, apply=False, conditional_pointer=False, expected_canonical=None, expected_pointer=None):
     try:
         from .reader_route_control import prepare_base
     except ImportError:
         from reader_route_control import prepare_base
     pointer, catalog = current(store)
     canonical = store.read_bytes(ASSETS, "reader-index/reader_assets.json.gz")
+    if expected_pointer is not None and pointer != expected_pointer:
+        raise ValueError('reading pointer changed before unification')
+    if expected_canonical is not None and hashlib.sha256(canonical).hexdigest() != text.sha(expected_canonical):
+        raise ValueError('canonical sidecar changed before unification')
     raw, ref = prepare_base(catalog, canonical)
     if catalog.get("base_sidecar") == ref:
         return {"applied": apply, "unchanged": True, "generation": pointer["generation"]}
@@ -161,7 +165,7 @@ def unify(store, *, apply=False):
     result = {"version": 3, "kind": "reader-reading-catalog", "files": catalog["files"],
               **({"suppressed_sources": catalog["suppressed_sources"]} if "suppressed_sources" in catalog else {}),
               "base_sidecar": ref, "parent_generation": pointer["generation"] if pointer else None}
-    return commit_catalog(store, result, pointer, apply=apply)
+    return commit_catalog(store, result, pointer, apply=apply, conditional_pointer=conditional_pointer)
 
 
 def current(store):
@@ -373,7 +377,7 @@ class CandidateReader:
             walk(payload)
 
 
-def commit_catalog(store, catalog, pointer, *, apply=False, restored_source=None):
+def commit_catalog(store, catalog, pointer, *, apply=False, restored_source=None, conditional_pointer=False):
     parent = pointer["generation"] if pointer else None
     if catalog.get("parent_generation") != parent:
         raise ValueError("catalog parent mismatch")
@@ -389,7 +393,8 @@ def commit_catalog(store, catalog, pointer, *, apply=False, restored_source=None
     if not apply:
         return report
     assert_writer(store)
-    # Central Actions owns the serialized writer. Hub has no CAS operation.
+    # Central Actions owns the serialized writer. Most Hub writes do not have
+    # CAS; page migration separately opts into an S3 conditional pointer put.
     latest, prior_catalog = current(store)
     if latest != pointer:
         raise ValueError("reading pointer changed during verification")
@@ -424,7 +429,17 @@ def commit_catalog(store, catalog, pointer, *, apply=False, restored_source=None
                                  generation, 'v3-replacement')
         if hint:
             store.put_bytes(ASSETS, hint[0], retirement.encode(hint[1]))
-    store.put_bytes(ASSETS, POINTER, encode(new_pointer))
+    if conditional_pointer:
+        # Only page migration opts in: its old pointer must exist and match the
+        # exact bytes read with this ETag, not just a previous Hub GET.
+        if pointer is None:
+            raise ValueError('conditional page promotion requires an existing pointer')
+        observed, etag = store.read_for_update(ASSETS, POINTER)
+        if json.loads(observed) != pointer:
+            raise ValueError('reading pointer changed before conditional promotion')
+        store.put_if_match(ASSETS, POINTER, encode(new_pointer), etag)
+    else:
+        store.put_bytes(ASSETS, POINTER, encode(new_pointer))
     if current(store)[0] != new_pointer:
         raise ValueError("reading pointer verification failed")
     return report
@@ -812,6 +827,13 @@ def main():
                 or options['external_writers_stopped'] is not True):
             raise ValueError('resume-derived requires an exact transaction and external-writer confirmation')
         os.environ['READER_PAGE_EXTERNAL_WRITERS_STOPPED'] = 'true'
+        migrate.require_writer_window(store)
+        try:
+            from .reader_page_cas import ConditionalPageStore
+        except ImportError:
+            from reader_page_cas import ConditionalPageStore
+        store = ConditionalPageStore(store)
+        store.preflight()
         report = migrate.resume(store, HfApi(token=os.environ.get('HF_TOKEN')), options['transaction_id'])
     elif args.command == 'migrate-derived':
         try:
@@ -829,6 +851,12 @@ def main():
         if args.apply:
             os.environ['READER_PAGE_EXTERNAL_WRITERS_STOPPED'] = 'true'
             migrate.require_writer_window(store)
+            try:
+                from .reader_page_cas import ConditionalPageStore
+            except ImportError:
+                from reader_page_cas import ConditionalPageStore
+            store = ConditionalPageStore(store)
+            store.preflight()
         api = HfApi(token=os.environ.get('HF_TOKEN'))
         plan = migrate.prepare(store, api, expected_index=options['index_sha256'],
                                expected_sidecar=options['sidecar_sha256'], expected_v3=options['v3_generation'])

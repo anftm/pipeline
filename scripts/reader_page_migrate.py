@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Switch indexed PDF derivatives to verified existing objects; never delete bytes.
 
-The caller owns the central Reader writer lock. Storage has no atomic
-multi-object transaction or compare-and-swap, so external writers must also be
-coordinated. Old files and old catalog generations are retained.
+The caller owns the central Reader writer lock. Mutable roots use conditional
+single-object S3 writes; these are not a multi-object transaction or a bucket
+lock, so external writers must also be coordinated. Old files and old catalog
+generations are retained.
 """
 from __future__ import annotations
 
@@ -299,18 +300,33 @@ def run_transaction(store, api, value):
     for item, state in zip(value['writes'], states):
         raw = base64.b64decode(item['after_base64'], validate=True)
         require_writer_window(store)
-        # Compare again immediately before each non-CAS write.
-        if root_state(item, store.read_bytes(item['bucket'], item['path'])) != state:
+        # Bind the bytes checked here to the same S3 GET's ETag. A normal
+        # compare-then-Hub-write can overwrite a competing change in between.
+        observed, etag = store.read_for_update(item['bucket'], item['path'])
+        if root_state(item, observed) != state:
             raise ValueError('migration root changed during resume: ' + item['path'])
         if state != 'after':
-            store.put_bytes(item['bucket'], item['path'], raw)
-        if digest(store.read_bytes(item['bucket'], item['path'])) != item['after_sha256']:
+            store.put_if_match(item['bucket'], item['path'], raw, etag)
+        actual, _ = store.read_for_update(item['bucket'], item['path'])
+        if digest(actual) != item['after_sha256']:
             raise ValueError('migration root readback failed: ' + item['path'])
+    # Later root writes can overlap an earlier root's subsequent mutation.
+    # Recheck all three before promotion; external isolation is still required
+    # because no recheck can atomically cover multiple objects.
+    require_writer_window(store)
+    for item in value['writes']:
+        observed, _ = store.read_for_update(item['bucket'], item['path'])
+        if digest(observed) != item['after_sha256']:
+            raise ValueError('migration root changed before promotion: ' + item['path'])
     if already:
+        if publication.current(store)[0] != current_pointer:
+            raise ValueError('v3 pointer changed while checking completed migration')
         generation = current_pointer['generation']
     else:
         require_writer_window(store)
-        generation = publication.unify(store, apply=True)['generation']
+        generation = publication.unify(store, apply=True, conditional_pointer=True,
+                                       expected_canonical=value['writes'][1]['after_sha256'],
+                                       expected_pointer=value['pointer'])['generation']
     return {'applied': True, 'migrated_entries': len(value['rows']),
             'changed_routes': value['changed_routes'], 'base_generation': value['base_generation'],
             'generation': generation, 'v3_generation': generation, 'objects_deleted': False}

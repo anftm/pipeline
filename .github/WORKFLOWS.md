@@ -6,7 +6,7 @@
 
 - `search-daily-sync.yml`：生成搜索数据并同步两站；目前仍将生成数据提交到站点 Git，尚未解耦。
 - `bha-*`、`proofread-*`：BHA 数据和校订处理。OCR 生产和冲突审核入口已移除，但 BHA 历史文本输入仍在使用。
-- `reader-*-stream.yml`、`reader-chm-repair.yml`、`reader-office-chapters.yml`、`reader-v3-publish.yml`：Reader 资源转换和发布。`reader-static-pdf-stream.yml` 把 PPT/WPS/PS 等源文件转成供直接阅读的完整 PDF，不是已退场的 PDF/DjVu 逐页渲染链。`migrate-derived` 已部署，用于将匹配的 PDF 索引切换到现有 objects，不删除桶对象；真实切换仍被写者隔离阻塞。`remove-route` 撤回单条派生 Reader 路由的功能已部署，但尚未执行实际撤回。故障、中断和外部写者风险见 `README.md`。
+- `reader-*-stream.yml`、`reader-chm-repair.yml`、`reader-office-chapters.yml`、`reader-v3-publish.yml`：Reader 资源转换和发布。`reader-static-pdf-stream.yml` 把 PPT/WPS/PS 等源文件转成供直接阅读的完整 PDF，不是已退场的 PDF/DjVu 逐页渲染链。`migrate-derived` 用于将匹配的 PDF 索引切换到现有 objects，不删除桶对象；三个索引和 v3 指针采用单对象 S3 条件写，真实切换仍被写者隔离阻塞。`remove-route` 撤回单条派生 Reader 路由的功能已部署，但尚未执行实际撤回。故障、中断和外部写者风险见 `README.md`。
 - 精确桶文件查询留作本地 `scripts/bucket_file.py` 命令，不再单设工作流。`scripts/reader_route_plan.py` 可预览单书路由，但不授权删除。
 - `reader-gc.yml`、`reader-maintenance.yml`、`reader-gc-collect.yml`、`reader-gc-ccrd.yml`：原有全桶分析和 GC 路径。精确 page 文件计划/应用已部署到现有 collector 菜单，但 collector 仍禁用；仍须维护隔离、四桶图、两站、版本、CHM 检查与外部停写。部分定时任务可写入或删除。
 

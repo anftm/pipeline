@@ -29,6 +29,18 @@ class MemoryApi:
                 yield SimpleNamespace(path=path, **self.files[path])
 
 
+class ConditionalStore(Store):
+    """In-memory stand-in with ETags and an atomic conditional update."""
+    def read_for_update(self, bucket, path):
+        raw = self.read_bytes(bucket, path)
+        return raw, '"' + hashlib.sha256(raw).hexdigest() + '"'
+
+    def put_if_match(self, bucket, path, raw, etag):
+        if self.read_for_update(bucket, path)[1] != etag:
+            raise RuntimeError('page root changed during conditional write')
+        self.put_bytes(bucket, path, raw)
+
+
 class PageMigrationTests(unittest.TestCase):
     def setUp(self):
         env = patch.dict(os.environ, {'READER_PAGE_EXTERNAL_WRITERS_STOPPED': 'true'})
@@ -36,7 +48,7 @@ class PageMigrationTests(unittest.TestCase):
         self.fence = patch('scripts.reader_page_migrate.GitHubProducerFence', autospec=True)
         self.fence_class = self.fence.start(); self.addCleanup(self.fence.stop)
         self.index, self.derived, self.objects, self.manifests, self.sidecar = fixture()
-        self.store = Store(); self.api = MemoryApi(self.derived, self.objects)
+        self.store = ConditionalStore(); self.api = MemoryApi(self.derived, self.objects)
         self.store.objects[audit.BUCKET, audit.INDEX] = audit.encode(self.index)
         self.store.objects[audit.ASSETS, audit.SIDECAR] = gzip.compress(audit.encode(self.sidecar), mtime=0)
         for path, raw in self.manifests.items(): self.store.objects[audit.BUCKET, path] = raw
@@ -245,6 +257,65 @@ class PageMigrationTests(unittest.TestCase):
                     repeated = migration.resume(self.store, self.api, identity)
                     self.assertEqual(repeated['generation'], recovered['generation'])
                     self.assertTrue(original_objects.keys() <= self.store.objects.keys())
+
+    def test_root_concurrent_write_between_s3_read_and_put_is_not_overwritten(self):
+        plan = self.prepare()
+        original = self.store.put_if_match
+        foreign = b'{"concurrent":true}'
+        target = (audit.BUCKET, audit.INDEX)
+        def race(bucket, path, raw, etag):
+            if (bucket, path) == target:
+                self.store.objects[target] = foreign
+            return original(bucket, path, raw, etag)
+        self.store.put_if_match = race
+        with self.assertRaisesRegex(RuntimeError, 'changed during conditional write'):
+            migration.apply(self.store, self.api, plan)
+        self.assertEqual(self.store.objects[target], foreign)
+        self.assertEqual(self.store.objects[audit.ASSETS, audit.SIDECAR], plan['before_sidecar'])
+        self.assertEqual(publication.current(self.store)[0], self.pointer)
+
+    def test_pointer_concurrent_write_between_s3_read_and_put_is_not_overwritten(self):
+        plan = self.prepare()
+        original = self.store.put_if_match
+        target = (audit.ASSETS, publication.POINTER)
+        foreign = b'{"concurrent":true}'
+        def race(bucket, path, raw, etag):
+            if (bucket, path) == target:
+                self.store.objects[target] = foreign
+            return original(bucket, path, raw, etag)
+        self.store.put_if_match = race
+        with self.assertRaisesRegex(RuntimeError, 'changed during conditional write'):
+            migration.apply(self.store, self.api, plan)
+        self.assertEqual(self.store.objects[target], foreign)
+        self.assertEqual(self.store.objects[audit.BUCKET, audit.INDEX], audit.encode(plan['index']))
+        self.assertTrue(any(path.startswith(migration.TRANSACTION_PREFIX) for _, path in self.store.objects))
+
+    def test_promotion_rechecks_all_prior_roots_after_later_writes(self):
+        plan = self.prepare()
+        original = self.store.put_if_match
+        foreign = b'{"concurrent":true}'
+        def race(bucket, path, raw, etag):
+            original(bucket, path, raw, etag)
+            if (bucket, path) == (audit.ASSETS, migration.CATALOG):
+                self.store.objects[audit.BUCKET, audit.INDEX] = foreign
+        self.store.put_if_match = race
+        with self.assertRaisesRegex(ValueError, 'root changed before promotion'):
+            migration.apply(self.store, self.api, plan)
+        self.assertEqual(self.store.objects[audit.BUCKET, audit.INDEX], foreign)
+        self.assertEqual(publication.current(self.store)[0], self.pointer)
+
+    def test_promotion_refuses_a_changed_canonical_after_root_readback(self):
+        plan = self.prepare()
+        original = publication.unify
+        foreign = b'{"concurrent":true}'
+        def race(store, **kwargs):
+            self.store.objects[audit.ASSETS, audit.SIDECAR] = foreign
+            return original(store, **kwargs)
+        with patch('scripts.reader_page_migrate.publication.unify', side_effect=race):
+            with self.assertRaisesRegex(ValueError, 'canonical sidecar changed'):
+                migration.apply(self.store, self.api, plan)
+        self.assertEqual(self.store.objects[audit.ASSETS, audit.SIDECAR], foreign)
+        self.assertEqual(publication.current(self.store)[0], self.pointer)
 
     def test_resume_accepts_semantically_unchanged_json_wire_serialization(self):
         plan = self.prepare()
