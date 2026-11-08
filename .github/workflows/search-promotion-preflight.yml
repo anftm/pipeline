@@ -1,0 +1,57 @@
+name: 搜索 · Verify Promotion Candidate
+run-name: Search candidate preflight / ${{ inputs.generation }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      generation:
+        description: Exact immutable staged generation SHA-256
+        type: string
+        required: true
+      allow_current:
+        description: Permit read-only validation of the current generation
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: daily-sync
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  inspect:
+    if: github.repository == 'anftm/pipeline'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Install exact Pipeline dependencies
+        run: pip install -r scripts/requirements.txt requests==2.32.5 PyYAML==6.0.3
+      - name: Exercise candidate and writer-separation contracts
+        run: python -B -m unittest -v tests.test_search_promotion_preflight tests.test_search_adopt
+      - name: Independently inspect candidate and both sites
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          PAGES_TOKEN: ${{ secrets.PAGES_TOKEN }}
+          GENERATION: ${{ inputs.generation }}
+          ALLOW_CURRENT: ${{ inputs.allow_current }}
+        run: |
+          set -euo pipefail
+          [[ "$GENERATION" =~ ^[0-9a-f]{64}$ ]]
+          args=(--generation "$GENERATION" --output output/search/promotion-preflight.json)
+          if [[ "$ALLOW_CURRENT" == 'true' ]]; then
+            args+=(--allow-current)
+          fi
+          python -B scripts/search_promotion_preflight.py "${args[@]}"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: search-promotion-preflight
+          path: output/search/promotion-preflight.json
+          retention-days: 14
+          if-no-files-found: error
