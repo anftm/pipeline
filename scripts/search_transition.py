@@ -50,6 +50,18 @@ STATES = frozenset({"prepared", "applying", "verified", "publishing", "pointer-o
 SITES = frozenset({"pages", "space"})
 
 
+def _intent_timestamp(value: object) -> None:
+    from datetime import datetime, timedelta
+    if not isinstance(value, str) or not value.endswith("Z"):
+        raise ValueError("invalid operation creation time")
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as error:
+        raise ValueError("invalid operation creation time") from error
+    if parsed.tzinfo is None or parsed.utcoffset() != timedelta(0):
+        raise ValueError("operation creation time must be UTC")
+
+
 class TransitionStore(Protocol):
     def read_head(self) -> tuple[bytes | None, str | None]: ...
     def write_head(self, raw: bytes, etag: str | None) -> None: ...
@@ -147,7 +159,8 @@ def validate_record(raw: bytes) -> dict:
             raise ValueError("default observation is outside this transition")
     pending = value["pending"]
     if pending is not None:
-        pending = _exact(pending, {"site", "operation", "operation_id"})
+        pending = _exact(pending, {"site", "operation", "operation_id", "expected_revision", "created_at",
+                                   "config_before"})
         if (not isinstance(pending["site"], str) or pending["site"] not in SITES
                 or not isinstance(pending["operation"], str)
                 or pending["operation"] not in {"apply", "rollback", "set-default"}):
@@ -156,6 +169,18 @@ def validate_record(raw: bytes) -> dict:
         if value["state"] != expected_state[pending["operation"]]:
             raise ValueError("pending operation does not match transition state")
         _id(pending["operation_id"])
+        if not isinstance(pending["expected_revision"], str) or not re.fullmatch(r"[0-9a-f]{40}", pending["expected_revision"]):
+            raise ValueError("invalid operation expected revision")
+        _intent_timestamp(pending["created_at"])
+        config = pending["config_before"]
+        if pending["site"] == "space" and pending["operation"] in {"apply", "rollback"}:
+            config = _exact(config, {"generation", "updated_at"})
+            _generation(config["generation"])
+            if config["generation"] != observed["space"]["generation"]:
+                raise ValueError("Space configured generation differs from last observed generation")
+            _intent_timestamp(config["updated_at"])
+        elif config is not None:
+            raise ValueError("unexpected operation configuration snapshot")
         target = parent["desired"] if pending["operation"] == "rollback" else value["candidate"]
         evidence = defaults if pending["operation"] == "set-default" else observed
         if evidence[pending["site"]]["generation"] == target:
@@ -458,6 +483,7 @@ def _next(current: Current, **changes) -> dict:
 
 
 def start_site(store: TransitionStore, current: Current, *, site: str, operation_id: str,
+               expected_revision: str, created_at: str, config_before: dict | None = None,
                rollback: bool = False) -> Current:
     if site not in SITES:
         raise ValueError("invalid site")
@@ -471,7 +497,8 @@ def start_site(store: TransitionStore, current: Current, *, site: str, operation
         raise ValueError("site already has the requested observed generation")
     if store.read_pointer() != search_snapshot.canonical(current.record["parent_pointer"]):
         raise ValueError("actual pointer changed before site operation")
-    pending = {"site": site, "operation": "rollback" if rollback else "apply", "operation_id": operation_id}
+    pending = {"site": site, "operation": "rollback" if rollback else "apply", "operation_id": operation_id,
+               "expected_revision": expected_revision, "created_at": created_at, "config_before": config_before}
     return _commit(store, _next(current, state="rolling-back" if rollback else "applying", pending=pending), current)
 
 
@@ -549,7 +576,8 @@ def record_pointer(store: TransitionStore, current: Current, *, observed_pointer
     return _commit(store, _next(current, state="pointer-observed"), current)
 
 
-def start_default(store: TransitionStore, current: Current, *, site: str, operation_id: str) -> Current:
+def start_default(store: TransitionStore, current: Current, *, site: str, operation_id: str,
+                  expected_revision: str, created_at: str) -> Current:
     if site not in SITES or current.record["state"] != "pointer-observed" or current.record["pending"] is not None:
         raise ValueError("transition is not ready for a default-configuration operation")
     _id(operation_id)
@@ -559,7 +587,8 @@ def start_default(store: TransitionStore, current: Current, *, site: str, operat
                             current.record["transition"])
     if store.read_pointer() != intended:
         raise ValueError("actual pointer changed before default-configuration operation")
-    pending = {"site": site, "operation": "set-default", "operation_id": operation_id}
+    pending = {"site": site, "operation": "set-default", "operation_id": operation_id,
+               "expected_revision": expected_revision, "created_at": created_at, "config_before": None}
     return _commit(store, _next(current, pending=pending), current)
 
 

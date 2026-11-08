@@ -9,6 +9,7 @@ from scripts.search_publication_pointer import make_pointer
 
 A, B, C = "a" * 64, "b" * 64, "c" * 64
 T1, T2 = "1" * 32, "2" * 32
+REV, WHEN = "d" * 40, "2026-11-08T00:00:00Z"
 
 
 def receipt(site, generation, tag="observation"):
@@ -102,11 +103,19 @@ class SearchTransitionTests(unittest.TestCase):
         return tx.observe_site(self.s, current, site=site, generation=generation,
                                receipt=receipt(site, generation, tag.decode()))
 
+    def start_site(self, current, **kwargs):
+        if kwargs.get("site") == "space":
+            kwargs["config_before"] = {"generation": B if kwargs.get("rollback") else A, "updated_at": WHEN}
+        return tx.start_site(self.s, current, expected_revision=REV, created_at=WHEN, **kwargs)
+
+    def start_default(self, current, **kwargs):
+        return tx.start_default(self.s, current, expected_revision=REV, created_at=WHEN, **kwargs)
+
     def ready(self):
         c = self.begin()
-        c = tx.start_site(self.s, c, site="pages", operation_id="3" * 32)
+        c = self.start_site(c, site="pages", operation_id="3" * 32)
         c = self.observe(c, "pages", B, b"pages-new")
-        c = tx.start_site(self.s, c, site="space", operation_id="4" * 32)
+        c = self.start_site(c, site="space", operation_id="4" * 32)
         return self.observe(c, "space", B, b"space-new")
 
     def test_full_transition_requires_each_intent_observation_and_exact_pointer(self):
@@ -132,7 +141,7 @@ class SearchTransitionTests(unittest.TestCase):
             tx.finish(self.s, c, pages_receipt=receipt("pages", B), space_receipt=receipt("space", B),
                       pages_default=default_receipt("pages", B), space_default=default_receipt("space", B))
         for site in ("pages", "space"):
-            c = tx.start_default(self.s, c, site=site, operation_id="7" * 32)
+            c = self.start_default(c, site=site, operation_id="7" * 32)
             c = tx.observe_default(self.s, c, site=site, receipt=default_receipt(site, B))
         c = tx.finish(self.s, c, pages_receipt=receipt("pages", B), space_receipt=receipt("space", B),
                       pages_default=default_receipt("pages", B), space_default=default_receipt("space", B))
@@ -178,10 +187,10 @@ class SearchTransitionTests(unittest.TestCase):
         c = self.ready()
         c = tx.mark_publishing(self.s, c, pages_receipt=receipt("pages", B), space_receipt=receipt("space", B))
         c = tx.publish_pointer(self.s, self.s, c, pages_receipt=receipt("pages", B), space_receipt=receipt("space", B))
-        c = tx.start_default(self.s, c, site="pages", operation_id="8" * 32)
+        c = self.start_default(c, site="pages", operation_id="8" * 32)
         self.assertEqual(tx.load(self.s).record["pending"]["operation"], "set-default")
         with self.assertRaisesRegex(ValueError, "not ready"):
-            tx.start_default(self.s, c, site="space", operation_id="9" * 32)
+            self.start_default(c, site="space", operation_id="9" * 32)
         with self.assertRaisesRegex(ValueError, "default receipt identity"):
             tx.observe_default(self.s, c, site="pages", receipt=default_receipt("pages", A))
         with self.assertRaisesRegex(ValueError, "matching pending"):
@@ -211,9 +220,9 @@ class SearchTransitionTests(unittest.TestCase):
         c = self.begin()
         with self.assertRaisesRegex(ValueError, "both sites"):
             tx.mark_publishing(self.s, c, pages_receipt=receipt("pages", B), space_receipt=receipt("space", B))
-        c = tx.start_site(self.s, c, site="space", operation_id="3" * 32)
+        c = self.start_site(c, site="space", operation_id="3" * 32)
         with self.assertRaisesRegex(ValueError, "not ready"):
-            tx.start_site(self.s, c, site="pages", operation_id="4" * 32)
+            self.start_site(c, site="pages", operation_id="4" * 32)
         with self.assertRaisesRegex(ValueError, "does not match"):
             self.observe(c, "space", A, b"old")
         with self.assertRaisesRegex(ValueError, "unfinished work"):
@@ -223,7 +232,7 @@ class SearchTransitionTests(unittest.TestCase):
     def test_recovery_then_explicit_rollback_for_one_or_both_sites(self):
         c = self.ready()
         for site, op in (("space", "5" * 32), ("pages", "6" * 32)):
-            c = tx.start_site(self.s, c, site=site, operation_id=op, rollback=True)
+            c = self.start_site(c, site=site, operation_id=op, rollback=True)
             self.assertEqual(c.record["state"], "rolling-back")
             c = self.observe(c, site, A, (site + "-rollback").encode())
         self.assertEqual(c.record["state"], "rolled-back")
@@ -236,11 +245,11 @@ class SearchTransitionTests(unittest.TestCase):
 
     def test_uncertain_remote_action_requires_observation_before_rollback(self):
         c = self.begin()
-        c = tx.start_site(self.s, c, site="space", operation_id="3" * 32)
+        c = self.start_site(c, site="space", operation_id="3" * 32)
         with self.assertRaisesRegex(ValueError, "not ready"):
-            tx.start_site(self.s, c, site="space", operation_id="4" * 32, rollback=True)
+            self.start_site(c, site="space", operation_id="4" * 32, rollback=True)
         c = self.observe(c, "space", B, b"actual-response")
-        c = tx.start_site(self.s, c, site="space", operation_id="5" * 32, rollback=True)
+        c = self.start_site(c, site="space", operation_id="5" * 32, rollback=True)
         c = self.observe(c, "space", A, b"rollback-response")
         self.assertEqual(c.record["state"], "rolled-back")
 
@@ -253,22 +262,22 @@ class SearchTransitionTests(unittest.TestCase):
         self.assertEqual(self.s.writes, 1)
         self.s.fail_head = "before"
         with self.assertRaises(TimeoutError):
-            tx.start_site(self.s, c, site="pages", operation_id="3" * 32)
+            self.start_site(c, site="pages", operation_id="3" * 32)
         self.assertEqual(self.s.writes, 2)
         self.assertEqual(tx.load(self.s), c)
 
     def test_stale_cas_does_not_erase_other_operation(self):
         initial = self.begin()
-        live = tx.start_site(self.s, initial, site="pages", operation_id="3" * 32)
+        live = self.start_site(initial, site="pages", operation_id="3" * 32)
         with self.assertRaisesRegex(ValueError, "CAS conflict"):
-            tx.start_site(self.s, initial, site="space", operation_id="4" * 32)
+            self.start_site(initial, site="space", operation_id="4" * 32)
         self.assertEqual(tx.load(self.s), live)
 
     def test_pointer_changes_abort_before_site_write_or_publication(self):
         c = self.begin()
         self.s.pointer = make_pointer(C, A, T2)
         with self.assertRaisesRegex(ValueError, "pointer changed"):
-            tx.start_site(self.s, c, site="pages", operation_id="3" * 32)
+            self.start_site(c, site="pages", operation_id="3" * 32)
         self.assertEqual(tx.load(self.s), c)
 
     def test_exact_parent_and_actual_pointer_required(self):
@@ -301,7 +310,7 @@ class SearchTransitionTests(unittest.TestCase):
 
     def test_missing_predecessor_or_receipt_fails_closed(self):
         first = self.begin()
-        current = tx.start_site(self.s, first, site="pages", operation_id="3" * 32)
+        current = self.start_site(first, site="pages", operation_id="3" * 32)
         prior_key = tx.record_key(first.record, first.record_raw)
         prior = self.s.records.pop(prior_key)
         with self.assertRaisesRegex(ValueError, "predecessor"):
@@ -316,7 +325,7 @@ class SearchTransitionTests(unittest.TestCase):
 
     def test_full_history_audit_detects_older_tampering(self):
         first = self.begin()
-        current = tx.start_site(self.s, first, site="pages", operation_id="3" * 32)
+        current = self.start_site(first, site="pages", operation_id="3" * 32)
         current = self.observe(current, "pages", B, b"pages-new")
         self.assertEqual(tx.audit_history(self.s, current), 3)
         self.s.records.pop(tx.record_key(first.record, first.record_raw))
@@ -324,6 +333,24 @@ class SearchTransitionTests(unittest.TestCase):
         self.assertEqual(tx.load(self.s), current)
         with self.assertRaisesRegex(ValueError, "missing or altered record"):
             tx.audit_history(self.s, current)
+
+    def test_operation_intent_requires_revision_time_and_space_config_snapshot(self):
+        c = self.begin()
+        for revision, timestamp in (("main", WHEN), (REV, "yesterday"), (REV, "2026-11-08T00:00:00")):
+            with self.subTest(revision=revision, timestamp=timestamp), self.assertRaises(ValueError):
+                tx.start_site(self.s, c, site="pages", operation_id="3" * 32,
+                              expected_revision=revision, created_at=timestamp)
+        with self.assertRaises(ValueError):
+            tx.start_site(self.s, c, site="space", operation_id="3" * 32,
+                          expected_revision=REV, created_at=WHEN)
+        with self.assertRaisesRegex(ValueError, "configured generation differs"):
+            tx.start_site(self.s, c, site="space", operation_id="3" * 32,
+                          expected_revision=REV, created_at=WHEN,
+                          config_before={"generation": B, "updated_at": WHEN})
+        current = self.start_site(c, site="space", operation_id="3" * 32)
+        self.assertEqual(current.record["pending"]["expected_revision"], REV)
+        self.assertEqual(current.record["pending"]["created_at"], WHEN)
+        self.assertEqual(current.record["pending"]["config_before"]["generation"], A)
 
     def test_s3_adapter_confines_keys_and_conditions(self):
         backing = Mock()
