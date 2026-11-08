@@ -15,10 +15,12 @@ from typing import Protocol
 try:
     from . import ccrd_lifecycle as lifecycle
     from . import ccrd_metadata_patch as metadata
+    from . import ccrd_staging_plan as staging_plan
     from .reader_bucket_store import S3BucketStore
 except ImportError:
     import ccrd_lifecycle as lifecycle
     import ccrd_metadata_patch as metadata
+    import ccrd_staging_plan as staging_plan
     from reader_bucket_store import S3BucketStore
 
 
@@ -29,7 +31,7 @@ MAX_BYTES = 4 * 1024 * 1024 * 1024
 class Store(Protocol):
     def inspect(self, key: str) -> dict | None: ...
     def create(self, key: str, path: Path, expected: dict) -> None: ...
-    def parent_identity(self) -> str: ...
+    def parent_pointer(self) -> bytes: ...
 
 
 def _identity(path: Path) -> dict:
@@ -107,12 +109,14 @@ def _local_map(plan: dict, parent_root: Path, candidate_root: Path, candidate_cw
     return result
 
 
-def stage(plan: dict, *, parent_root: Path, candidate_root: Path, candidate_cw: Path, store: Store) -> dict:
+def stage(plan: dict, *, approved_description: dict, parent_root: Path, candidate_root: Path,
+          candidate_cw: Path, store: Store) -> dict:
     manifest = _validate(plan)
+    parent = store.parent_pointer()
+    if staging_plan.make(parent, approved_description) != plan:
+        raise ValueError('CCRD staging plan differs from the approved four-source candidate')
     entries = plan['objects']
     local_files = _local_map(plan, parent_root, candidate_root, candidate_cw)
-    if store.parent_identity() != plan['identity']['parent_pointer_sha256']:
-        raise ValueError('CCRD current pointer differs before staging')
     if not isinstance(local_files, dict) or set(local_files) != {item['target'] for item in entries}:
         raise ValueError('local staging files do not exactly cover the generation')
     for item in entries:
@@ -136,7 +140,7 @@ def stage(plan: dict, *, parent_root: Path, candidate_root: Path, candidate_cw: 
             written += 1
         if observed != expected:
             raise ValueError('CCRD staged object readback differs: ' + key)
-    if store.parent_identity() != plan['identity']['parent_pointer_sha256']:
+    if store.parent_pointer() != parent:
         raise ValueError('CCRD current pointer changed while staging')
     return {'version': 1, 'kind': 'ccrd-cw0-staged-objects', 'generation': manifest['generation'],
             'objects_verified': len(entries), 'objects_created': written,
@@ -157,12 +161,12 @@ class S3Store:
                                                        response_checksum_validation='when_required'))
         self.generation, self.store = generation, store
 
-    def parent_identity(self) -> str:
+    def parent_pointer(self) -> bytes:
         raw = self.store.read_bytes(lifecycle.BUCKET, 'current.json')
         if not isinstance(raw, bytes) or not 0 < len(raw) <= 2 * 1024 * 1024:
             raise ValueError('invalid CCRD current pointer bytes')
         lifecycle.references(json.loads(raw), 'current.json')
-        return hashlib.sha256(raw).hexdigest()
+        return raw
 
     def _location(self, key: str) -> tuple[str, str]:
         if not isinstance(key, str) or not key.startswith(f'generations/{self.generation}/'):

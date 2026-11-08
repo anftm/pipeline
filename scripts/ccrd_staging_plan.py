@@ -91,6 +91,7 @@ def _construct(parent: dict, description: dict) -> dict:
     # Timing and local observation metadata are excluded so rebuilding the same
     # inputs yields the same generation. This does not assert provenance.
     identity = {'version': 1, 'kind': 'ccrd-cw0-four-source-stage-identity',
+                'candidate_description_sha256': description['candidate_identity'],
                 'parent_generation': parent['generation'], 'parent_pointer_sha256': description['parent_pointer_sha256'],
                 'source_revision': description['source_observation']['revision'],
                 'source_url': description['source_observation']['url'], 'new_text': description['new_text'],
