@@ -1,0 +1,59 @@
+name: 搜索 · Stage Bucket Generation
+run-name: Stage immutable search candidate / ${{ inputs.stage && 'bounded write' || 'offline only' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: Conditionally upload immutable objects after rebuilding locally
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: daily-sync
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  stage:
+    if: github.repository == 'anftm/pipeline'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Install pinned dependencies
+        run: pip install -r scripts/requirements.txt
+      - name: Run search generation and conditional-write contracts
+        run: |
+          python -B -m unittest -v \
+            tests.test_search_snapshot tests.test_search_generation \
+            tests.test_search_artifact_store tests.test_search_artifact_s3 \
+            tests.test_search_artifact_readback tests.test_search_stage_cli
+      - name: Generate and verify source directories
+        run: python -u scripts/update_dirs.py
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          DIRECTORY_REVISIONS_FILE: ${{ runner.temp }}/search-directory-revisions.json
+      - name: Fetch complete pinned source corpus
+        run: python -u scripts/fetch_and_parse.py
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          DIRECTORY_REVISIONS_FILE: ${{ runner.temp }}/search-directory-revisions.json
+          FORCE_SYNC: 'true'
+      - name: Build and optionally stage immutable generation
+        env:
+          HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+          STAGE: ${{ inputs.stage }}
+        run: |
+          set -euo pipefail
+          args=(--source output/search_data.json --tree output/folder_tree.json --browser output/folder_browser.json
+                --revisions "$RUNNER_TEMP/search-directory-revisions.json" --output "$RUNNER_TEMP/search-generation")
+          if [[ "$STAGE" == 'true' ]]; then args+=(--stage); fi
+          python -B scripts/search_stage_cli.py "${args[@]}"
