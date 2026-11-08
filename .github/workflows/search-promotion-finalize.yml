@@ -1,0 +1,80 @@
+name: 搜索 · Finalize Verified Generation
+run-name: Search finalize / ${{ inputs.mode }} / ${{ inputs.operation || inputs.expected_revision }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: One explicit finalization operation
+        type: choice
+        required: true
+        options:
+          - mark
+          - publish
+          - reconcile-pointer
+          - space-default
+          - pages-default-prepare
+          - pages-default-apply
+          - pages-default-reconcile
+          - finish
+      expected_revision:
+        description: Exact site revision for default observation/intent
+        type: string
+        required: false
+      operation:
+        description: Exact persisted Pages default operation ID
+        type: string
+        required: false
+      known_writers_coordinated:
+        description: Known search and deployment writers are coordinated
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: daily-sync
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  finalize:
+    if: github.repository == 'anftm/pipeline'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Install pinned dependencies
+        run: pip install -r scripts/requirements.txt requests==2.32.5 PyYAML==6.0.3
+      - name: Exercise finalization and recovery contracts
+        run: python -B -m unittest -v tests.test_search_finalize_transition tests.test_search_transition tests.test_search_publication_pointer
+      - name: Perform one explicit finalization step
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          PAGES_TOKEN: ${{ secrets.PAGES_TOKEN }}
+          HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+          MODE: ${{ inputs.mode }}
+          EXPECTED_REVISION: ${{ inputs.expected_revision }}
+          OPERATION: ${{ inputs.operation }}
+          WRITERS: ${{ inputs.known_writers_coordinated }}
+        run: |
+          set -euo pipefail
+          [[ "$WRITERS" == 'true' ]]
+          args=(--mode "$MODE")
+          case "$MODE" in
+            mark|publish|reconcile-pointer|finish)
+              [[ -z "$EXPECTED_REVISION" && -z "$OPERATION" ]] ;;
+            space-default|pages-default-prepare)
+              [[ "$EXPECTED_REVISION" =~ ^[0-9a-f]{40}$ && -z "$OPERATION" ]]
+              args+=(--expected-revision "$EXPECTED_REVISION") ;;
+            pages-default-apply|pages-default-reconcile)
+              [[ "$OPERATION" =~ ^[0-9a-f]{32}$ && -z "$EXPECTED_REVISION" ]]
+              args+=(--operation "$OPERATION") ;;
+            *) exit 1 ;;
+          esac
+          python -B scripts/search_finalize_transition.py "${args[@]}"
