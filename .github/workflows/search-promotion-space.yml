@@ -1,0 +1,72 @@
+name: 搜索 · Apply Space Generation
+run-name: Search Space / ${{ inputs.mode }} / ${{ inputs.operation || inputs.expected_revision }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Prepare records an intent, apply writes once, reconcile observes only
+        type: choice
+        required: true
+        options:
+          - prepare
+          - apply
+          - reconcile
+      expected_revision:
+        description: Exact running Space revision, required for prepare
+        type: string
+        required: false
+      operation:
+        description: Exact persisted operation ID, required for apply/reconcile
+        type: string
+        required: false
+      known_writers_coordinated:
+        description: Known search and Space writers are coordinated
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: daily-sync
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  switch:
+    if: github.repository == 'anftm/pipeline'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Install pinned dependencies
+        run: pip install -r scripts/requirements.txt PyYAML==6.0.3
+      - name: Exercise Space transition and recovery contracts
+        run: python -B -m unittest -v tests.test_search_space_transition tests.test_search_space_deploy
+      - name: Perform exactly one transition action
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+          MODE: ${{ inputs.mode }}
+          EXPECTED_REVISION: ${{ inputs.expected_revision }}
+          OPERATION: ${{ inputs.operation }}
+          WRITERS: ${{ inputs.known_writers_coordinated }}
+        run: |
+          set -euo pipefail
+          [[ "$WRITERS" == 'true' ]]
+          case "$MODE" in
+            prepare)
+              [[ "$EXPECTED_REVISION" =~ ^[0-9a-f]{40}$ && -z "$OPERATION" ]]
+              python -B scripts/search_space_transition.py --mode prepare --expected-revision "$EXPECTED_REVISION"
+              ;;
+            apply|reconcile)
+              [[ "$OPERATION" =~ ^[0-9a-f]{32}$ && -z "$EXPECTED_REVISION" ]]
+              python -B scripts/search_space_transition.py --mode "$MODE" --operation "$OPERATION"
+              ;;
+            *) exit 1 ;;
+          esac
