@@ -41,6 +41,10 @@ class CcrdConsumerInspectionTests(unittest.TestCase):
             check.observe(GEN, EXPECTED, get=lambda url, _limit: status() if 'index-status' in url else b'wrong')
         with self.assertRaises(ValueError):
             check.observe(GEN, EXPECTED, get=lambda *_: b'not json')
+        with self.assertRaises(TypeError):
+            check.status(b'[]', GEN)
+        with self.assertRaises(ValueError):
+            check.observe(GEN, {'bytes': 'bad'}, get=lambda *_: status())
 
     def test_changing_consumer_status_fails_closed(self):
         values = iter([status(), TEXT, status(bucket={'state': 'ready', 'generation': GEN, 'pointer_error': None,
@@ -62,6 +66,9 @@ class CcrdConsumerInspectionTests(unittest.TestCase):
             self.assertEqual(opener.call_args.args[0].get_method(), 'GET')
             response.read.return_value = b'abcd'
             with self.assertRaisesRegex(ValueError, 'exceeds'):
+                check.get_bytes('https://example.invalid', 3)
+            response.status = 503
+            with self.assertRaisesRegex(RuntimeError, 'HTTP 503'):
                 check.get_bytes('https://example.invalid', 3)
         finally:
             check.urllib.request.urlopen = old

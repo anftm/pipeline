@@ -51,6 +51,51 @@ class BhaForkSafeSyncTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'approved'):
             sync.inspect('token', archive=0, branch='proofread/foreign')
 
+    def test_identical_branch_remains_a_zero_write_plan(self):
+        p = plan(); up = {'full_name': p['upstream_repository'], 'id': 1}; mir = {'full_name': p['mirror_repository'], 'id': 2}
+        with patch.object(sync, 'identities', return_value=('banned-historical-archives0', up, mir)), \
+                patch.object(sync.fork, 'branch_sha', return_value=A), patch.object(sync.fork, 'api_request') as api:
+            result = sync.inspect('token', archive=0, branch='main')
+        self.assertEqual(result['mirror_relation'], 'identical')
+        self.assertFalse(result['can_fast_forward'])
+        self.assertEqual(result['remote_writes'], 0)
+        api.assert_not_called()
+
+    def test_branch_change_unknown_relation_and_repository_recreation_fail_closed(self):
+        p = plan(); up = {'full_name': p['upstream_repository'], 'id': 1}; mir = {'full_name': p['mirror_repository'], 'id': 2}
+        with patch.object(sync, 'identities', return_value=('banned-historical-archives0', up, mir)), \
+                patch.object(sync.fork, 'branch_sha', side_effect=[B, A]), \
+                patch.object(sync.fork, 'api_request', return_value=(404, {})), \
+                self.assertRaisesRegex(ValueError, 'relationship is unknown'):
+            sync.inspect('token', archive=0, branch='main')
+        with patch.object(sync, 'identities', return_value=('banned-historical-archives0', up, mir)), \
+                patch.object(sync.fork, 'branch_sha', side_effect=[B, A, 'c' * 40]), \
+                patch.object(sync.fork, 'api_request', return_value=(200, {'status': 'behind'})), \
+                self.assertRaisesRegex(RuntimeError, 'branch changed'):
+            sync.inspect('token', archive=0, branch='main')
+        with patch.object(sync, 'identities', side_effect=[('banned-historical-archives0', up, mir),
+                                                          ('banned-historical-archives0', up, {**mir, 'id': 3})]), \
+                patch.object(sync.fork, 'branch_sha', return_value=A), \
+                self.assertRaisesRegex(RuntimeError, 'repository identity changed'):
+            sync.inspect('token', archive=0, branch='main')
+
+    def test_apply_rejects_branch_drift_before_push_and_mismatched_readback(self):
+        p = plan()
+        def run(cmd, **_kwargs):
+            if cmd[:2] == ['git', 'rev-parse']:
+                return SimpleNamespace(stdout=B if cmd[-1].endswith('upstream') else A)
+            return SimpleNamespace(stdout='')
+        changed = {**p, 'upstream': 'c' * 40}
+        with patch.object(sync, 'inspect', side_effect=[p, changed]), patch.object(sync, '_run', side_effect=run) as calls, \
+                patch.object(sync.parsed, 'git_environment', return_value={}):
+            with self.assertRaisesRegex(ValueError, 'changed before push'):
+                sync.apply('token', p, confirmed=True)
+            self.assertFalse(any(c.args[0][:2] == ['git', 'push'] for c in calls.call_args_list))
+        with patch.object(sync, 'inspect', side_effect=[p, p, changed]), patch.object(sync, '_run', side_effect=run), \
+                patch.object(sync.parsed, 'git_environment', return_value={}), \
+                self.assertRaisesRegex(RuntimeError, 'readback differs'):
+            sync.apply('token', p, confirmed=True)
+
     def test_changed_plan_or_no_confirmation_cannot_write(self):
         p = plan()
         with patch.object(sync, 'inspect', return_value={**p, 'mirror': 'c' * 40}), \
