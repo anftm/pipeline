@@ -71,6 +71,10 @@ class StageObjectTests(CandidateAssemblyTests):
         backing = Mock(); backing._location.return_value = ('vomebook', 'ccrd-index')
         client = backing._client.return_value
         adapter = staging.S3Store(generation=generation, store=backing)
+        client.get_object.return_value = {'Body': BytesIO(self.pointer), 'ContentLength': len(self.pointer)}
+        self.assertEqual(adapter.parent_pointer(), self.pointer)
+        client.get_object.return_value = {'Body': BytesIO(b'bad'), 'ContentLength': 4}
+        with self.assertRaisesRegex(ValueError, 'pointer bytes'): adapter.parent_pointer()
         key = f'generations/{generation}/data/example.json'
         path = self.root / 'object'; path.write_bytes(b'abc')
         expected = staging._identity(path)

@@ -162,8 +162,19 @@ class S3Store:
         self.generation, self.store = generation, store
 
     def parent_pointer(self) -> bytes:
-        raw = self.store.read_bytes(lifecycle.BUCKET, 'current.json')
-        if not isinstance(raw, bytes) or not 0 < len(raw) <= 2 * 1024 * 1024:
+        namespace, name = self.store._location(lifecycle.BUCKET)
+        if (namespace, name) != ('vomebook', 'ccrd-index'):
+            raise ValueError('unexpected CCRD bucket mapping')
+        response = self.store._client(namespace).get_object(Bucket=name, Key='current.json')
+        length = response.get('ContentLength')
+        body = response['Body']
+        try:
+            if type(length) is not int or not 0 < length <= 2 * 1024 * 1024:
+                raise ValueError('invalid CCRD current pointer size')
+            raw = body.read(length + 1)
+        finally:
+            body.close()
+        if not isinstance(raw, bytes) or len(raw) != length:
             raise ValueError('invalid CCRD current pointer bytes')
         lifecycle.references(json.loads(raw), 'current.json')
         return raw
