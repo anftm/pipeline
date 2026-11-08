@@ -126,6 +126,37 @@ class CcrdTransactionTests(unittest.TestCase):
         self.store.evidence.clear()
         with self.assertRaisesRegex(ValueError, 'evidence is missing'): tx.load(self.store)
 
+    def test_gc_retention_roots_include_both_exact_manifest_resource_sets(self):
+        c = self.begin()
+        intent_key = tx._intent_key(T, c.record['durable_intent_sha256'])
+        value = json.loads(self.store.intents[intent_key])
+        refs = ccrd_lifecycle.references(value, intent_key)
+        parent, candidate = json.loads(bytes.fromhex(value['parent_pointer_hex'])), json.loads(bytes.fromhex(value['candidate_manifest_hex']))
+        expected = {item['path'] for item in ccrd_lifecycle.references(parent, 'current.json')}
+        expected |= {item['path'] for item in ccrd_lifecycle.references(candidate, 'current.json')}
+        expected.add(f"generations/{candidate['generation']}/manifest.json")
+        self.assertEqual({item['path'] for item in refs}, expected)
+        self.assertEqual(ccrd_lifecycle.references(c.head, tx.HEAD), [])
+        self.assertEqual(ccrd_lifecycle.references(c.record, tx._record_key(T, c.head['record'])), [])
+        with self.assertRaisesRegex(ValueError, 'content address'):
+            ccrd_lifecycle.references(value, tx._intent_key(T, '0' * 64))
+        with self.assertRaisesRegex(ValueError, 'unknown CCRD transaction'):
+            ccrd_lifecycle.references(value, 'control/cw0-publications/unknown.json')
+
+    def test_four_bucket_graph_preserves_both_generations_from_durable_intent(self):
+        from scripts import reader_gc_graph as graph
+        from tests.test_reader_gc_graph import MemoryStore as GraphStore
+        c = self.begin(); key = tx._intent_key(T, c.record['durable_intent_sha256'])
+        value = json.loads(self.store.intents[key]); refs = ccrd_lifecycle.references(value, key)
+        store = GraphStore()
+        # The graph's exact reference walker can mark the union without
+        # claiming a complete scan or authorizing deletion.
+        walker = graph.ReferenceGraph(store)
+        walker.walk(value, ccrd_lifecycle.BUCKET, key)
+        for ref in refs:
+            self.assertIn((ref['bucket'], ref['path']), walker.references)
+        self.assertTrue(any(G in ref['path'] for ref in refs))
+
     def test_durable_intent_is_required_and_rechecked_before_each_transition(self):
         c = self.begin()
         self.assertIn(tx._intent_key(T, c.record['durable_intent_sha256']), self.store.intents)

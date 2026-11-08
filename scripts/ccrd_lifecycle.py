@@ -66,6 +66,15 @@ def references(payload: dict, path: str) -> list[dict]:
     if not isinstance(payload, dict):
         raise ValueError('CCRD lifecycle document must be an object')
     kind = payload.get('kind')
+    if path == 'control/cw0-publication-head.json' or path.startswith('control/cw0-publications/'):
+        try:
+            from . import ccrd_transaction_roots as transaction_roots
+        except ImportError:
+            import ccrd_transaction_roots as transaction_roots
+        refs = transaction_roots.references(payload, path)
+        if refs is None:
+            raise ValueError('unknown CCRD transaction control path')
+        return refs
     if (path == 'current.json' or re.fullmatch(r'generations/ccrd-four-[0-9a-f]{64}/manifest\.json', path)) and payload.get('format') == 2:
         databases = payload.get('databases')
         metadata = payload.get('metadata')
