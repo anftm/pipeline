@@ -1,21 +1,60 @@
 """CCRD journal records intents, not cross-object atomicity or writer isolation."""
+import hashlib
+import json
 import unittest
 
 from scripts import ccrd_lifecycle
 from scripts import ccrd_transaction as tx
 
-T, P, M, A, R = '1' * 32, 'a' * 64, 'b' * 64, 'c' * 64, 'd' * 40
+T, R = '1' * 32, 'd' * 40
 G, CHILD = 'ccrd-four-' + 'e' * 64, 'f' * 40
+
+
+def snapshots():
+    from tests.test_ccrd_lifecycle import CcrdLifecycleTests
+    fixture = CcrdLifecycleTests('test_four_source_pointer_retains_all_databases_metadata_and_txt_archives')
+    fixture.setUp(); parent = fixture.four_source_pointer()
+    original_prefix = f"generations/{parent['generation']}/"
+    parent['generation'] = 'ccrd-four-' + '9' * 64
+    parent_prefix = f"generations/{parent['generation']}/"
+    parent['metadata'] = [{**row, 'path': row['path'].replace(original_prefix, parent_prefix, 1)} for row in parent['metadata']]
+    parent['archives'] = [{**row, 'path': row['path'].replace(original_prefix, parent_prefix, 1)} for row in parent['archives']]
+    parent_raw = json.dumps(parent).encode(); parent_sha = hashlib.sha256(parent_raw).hexdigest()
+    old_prefix = f"generations/{parent['generation']}/"
+    new_prefix = f'generations/{G}/'
+    candidate = {**parent, 'generation': G, 'previous_index_manifest_sha256': parent_sha,
+                 'metadata': [{**row, 'path': row['path'].replace(old_prefix, new_prefix, 1)} for row in parent['metadata']],
+                 'archives': [{**row, 'path': row['path'].replace(old_prefix, new_prefix, 1)} for row in parent['archives']]}
+    candidate_raw = ccrd_lifecycle.canonical(candidate); candidate_sha = hashlib.sha256(candidate_raw).hexdigest()
+    activation_raw = ccrd_lifecycle.canonical({'version': 1, 'kind': 'ccrd-index-activation',
+                                                'bucket': ccrd_lifecycle.BUCKET,
+                                                'path': f"generations/{parent['generation']}/manifest.json",
+                                                'sha256': parent_sha})
+    plan = {'kind': 'ccrd-space-activation-plan', 'space': 'vomebook/Search', 'parent_revision': R,
+            'parent_generation': parent['generation'], 'parent_pointer_sha256': parent_sha,
+            'candidate_generation': G, 'candidate_manifest_sha256': candidate_sha,
+            'parent_activation_hex': activation_raw.hex(),
+            'parent_activation_sha256': hashlib.sha256(activation_raw).hexdigest()}
+    plan['plan_sha256'] = hashlib.sha256(ccrd_lifecycle.canonical(plan)).hexdigest()
+    raw = ccrd_lifecycle.canonical({'version': 1, 'kind': 'ccrd-cw0-durable-intent',
+                                    'parent_pointer_hex': parent_raw.hex(), 'candidate_manifest_hex': candidate_raw.hex(),
+                                    'activation_plan': plan})
+    return raw, parent_sha, candidate_sha, plan['plan_sha256']
+
+
+INTENT, P, M, A = snapshots()
 
 
 class MemoryStore:
     def __init__(self):
-        self.head = None; self.etag = None; self.records = {}; self.evidence = {}; self.writes = 0
+        self.head = None; self.etag = None; self.records = {}; self.evidence = {}; self.intents = {}; self.writes = 0
         self.lose_head = False; self.lose_record = False; self.lose_evidence = False
 
     def read_head(self): return self.head, self.etag
     def read_record(self, key): return self.records.get(key)
     def read_evidence(self, key): return self.evidence.get(key)
+    def read_intent(self, key): return self.intents.get(key)
+    def put_intent(self, key, raw): self.intents[key] = raw
     def put_record(self, key, raw):
         self.records[key] = raw
         if self.lose_record: raise TimeoutError('unknown record write')
@@ -35,12 +74,19 @@ def evidence(**changes):
                                      'activation_verified': True, **changes})
 
 
+def rollback_evidence(**changes):
+    return ccrd_lifecycle.canonical({'kind': 'ccrd-rollback-evidence', 'revision': R, 'parent_sha256': P,
+                                     'candidate_generation': G, 'space_plan_sha256': A,
+                                     'consumer_parent_verified': True, 'activation_parent_verified': True,
+                                     'pointer_parent_verified': True, **changes})
+
+
 class CcrdTransactionTests(unittest.TestCase):
     def setUp(self): self.store = MemoryStore()
 
     def begin(self):
         return tx.begin(self.store, parent_sha256=P, candidate_generation=G, candidate_manifest_sha256=M,
-                        activation_plan_sha256=A, parent_space_revision=R, transaction=T)
+                        activation_plan_sha256=A, parent_space_revision=R, durable_intent=INTENT, transaction=T)
 
     def test_each_side_effect_requires_preceding_durable_intent(self):
         c = self.begin(); self.assertEqual(c.record['state'], 'prepared')
@@ -80,6 +126,29 @@ class CcrdTransactionTests(unittest.TestCase):
         self.store.evidence.clear()
         with self.assertRaisesRegex(ValueError, 'evidence is missing'): tx.load(self.store)
 
+    def test_durable_intent_is_required_and_rechecked_before_each_transition(self):
+        c = self.begin()
+        self.assertIn(tx._intent_key(T, c.record['durable_intent_sha256']), self.store.intents)
+        self.store.intents.clear()
+        with self.assertRaisesRegex(ValueError, 'durable transaction intent is missing'):
+            tx.advance(self.store, c, 'space-intent')
+
+    def test_missing_or_mismatched_intent_never_writes_a_head(self):
+        invalid = json.loads(INTENT)
+        invalid['parent_pointer_hex'] = b'wrong'.hex()
+        with self.assertRaisesRegex(ValueError, 'parent bytes differ'):
+            tx.begin(self.store, parent_sha256=P, candidate_generation=G, candidate_manifest_sha256=M,
+                     activation_plan_sha256=A, parent_space_revision=R, durable_intent=ccrd_lifecycle.canonical(invalid),
+                     transaction=T)
+        self.assertIsNone(self.store.head); self.assertEqual(self.store.writes, 0)
+        invalid = json.loads(INTENT)
+        invalid['activation_plan']['parent_activation_hex'] = b'wrong'.hex()
+        with self.assertRaisesRegex(ValueError, 'activation plan hash differs'):
+            tx.begin(self.store, parent_sha256=P, candidate_generation=G, candidate_manifest_sha256=M,
+                     activation_plan_sha256=A, parent_space_revision=R, durable_intent=ccrd_lifecycle.canonical(invalid),
+                     transaction=T)
+        self.assertIsNone(self.store.head)
+
     def test_history_audit_rejects_missing_older_immutable_record(self):
         root = self.begin(); c = tx.advance(self.store, root, 'space-intent')
         c = tx.advance(self.store, c, 'space-verified', space_revision=CHILD, evidence=evidence())
@@ -87,6 +156,21 @@ class CcrdTransactionTests(unittest.TestCase):
         self.assertEqual(tx.load(self.store), c)
         with self.assertRaisesRegex(ValueError, 'history is missing'):
             tx.advance(self.store, c, 'pointer-intent')
+
+    def test_rollback_intent_requires_exact_parent_consumer_activation_and_pointer_evidence(self):
+        c = tx.advance(self.store, self.begin(), 'space-intent')
+        c = tx.advance(self.store, c, 'rollback-intent')
+        self.assertEqual(c.record['state'], 'rollback-intent')
+        for bad in ({'parent_sha256': '0' * 64}, {'consumer_parent_verified': False},
+                    {'activation_parent_verified': False}, {'pointer_parent_verified': False}):
+            with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, 'rollback evidence'):
+                tx.advance(self.store, c, 'rolled-back', space_revision=R, evidence=rollback_evidence(**bad))
+        c = tx.advance(self.store, c, 'rolled-back', space_revision=R, evidence=rollback_evidence())
+        self.assertEqual(c.record['rollback_revision'], R)
+        self.assertEqual(c.record['state'], 'rolled-back')
+        self.assertEqual(tx.audit(self.store, c), 4)
+        self.store.evidence.clear()
+        with self.assertRaisesRegex(ValueError, 'rollback evidence is missing'): tx.load(self.store)
 
     def test_malformed_or_changed_record_is_rejected(self):
         c = self.begin()

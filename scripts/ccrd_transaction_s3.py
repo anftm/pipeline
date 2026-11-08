@@ -16,7 +16,7 @@ except ImportError:
     from reader_page_cas import strong_etag
 
 
-KEY = re.compile(r'control/cw0-publications/[0-9a-f]{32}/(records|evidence)/([0-9a-f]{64})\.json\Z')
+KEY = re.compile(r'control/cw0-publications/[0-9a-f]{32}/(records|evidence|intents)/([0-9a-f]{64})\.json\Z')
 
 
 class S3Store:
@@ -88,3 +88,5 @@ class S3Store:
     def put_record(self, key: str, raw: bytes) -> None: self._put(key, raw, 'records')
     def read_evidence(self, key: str) -> bytes | None: return self._read(key, 'evidence')
     def put_evidence(self, key: str, raw: bytes) -> None: self._put(key, raw, 'evidence')
+    def read_intent(self, key: str) -> bytes | None: return self._read(key, 'intents')
+    def put_intent(self, key: str, raw: bytes) -> None: self._put(key, raw, 'intents')
