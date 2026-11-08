@@ -53,6 +53,7 @@ FOLDER_BROWSER = Path("data/folder_browser.json.gz")
 SOURCES_PATH = Path("data/sources.json.gz")
 PAGE_SIZE = 100
 SUMMARY_CHARS = 700
+MAX_OVERRIDE_BYTES = 32 * 1024 * 1024
 
 
 def source_urls() -> tuple[str, ...]:
@@ -83,7 +84,12 @@ def download_override(destination: Path) -> dict[str, str | int]:
             )
             try:
                 with urllib.request.urlopen(request, timeout=120) as response, temporary.open("wb") as output:
-                    shutil.copyfileobj(response, output)
+                    copied = 0
+                    while chunk := response.read(min(1024 * 1024, MAX_OVERRIDE_BYTES - copied + 1)):
+                        copied += len(chunk)
+                        if copied > MAX_OVERRIDE_BYTES:
+                            raise ValueError("CCRD source exceeds download limit")
+                        output.write(chunk)
                 selected_url = url
                 break
             except urllib.error.HTTPError as exc:

@@ -1,8 +1,10 @@
-name: BHA · Inspect Parsed Revisions
+name: BHA · Monitor Parsed Revisions
 
 on:
-  # Read-only until rebuilding parsed branches and delivering an index to the
-  # BHA consumer have an independently reviewed, recoverable write protocol.
+  # The scheduled path compares all 32 trees and the consumer; it never writes
+  # parsed branches or requests reindexing.
+  schedule:
+    - cron: '23 */6 * * *'
   workflow_dispatch:
     inputs:
       archive_id:
@@ -29,7 +31,7 @@ jobs:
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
           BHA_REINDEX_TOKEN: ${{ secrets.BHA_REINDEX_TOKEN }}
-          ARCHIVE_ID: ${{ inputs.archive_id }}
+          ARCHIVE_ID: ${{ github.event_name == 'schedule' && 'all' || inputs.archive_id }}
         run: |
           [[ "$ARCHIVE_ID" == 'all' || "$ARCHIVE_ID" =~ ^([0-9]|[12][0-9]|3[01])$ ]] || exit 1
           python3 scripts/check_bha_parsed_readonly.py --archive "$ARCHIVE_ID" --output output/bha/parsed-report.json

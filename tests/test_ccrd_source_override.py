@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import gzip
+import io
 import json
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
@@ -72,6 +74,23 @@ class CCRDSourceOverrideTests(unittest.TestCase):
         write_gz(self.root / "data/folder_tree.json.gz", {"CCRD": [], "CW": []})
         write_gz(self.root / "data/folder_browser.json.gz", {"CCRD": {}, "CW": {}})
         write_gz(self.root / "data/sources.json.gz", search["sources"])
+
+    def test_override_download_is_bounded_and_never_replaces_target_on_overflow(self):
+        destination = self.root / 'captured.txt'
+        destination.write_bytes(b'previous')
+        class Response(io.BytesIO):
+            pass
+        with patch.object(override, 'MAX_OVERRIDE_BYTES', 4), \
+                patch.object(override.urllib.request, 'urlopen', return_value=Response(b'12345')):
+            with self.assertRaisesRegex(ValueError, 'exceeds download limit'):
+                override.download_override(destination)
+        self.assertEqual(destination.read_bytes(), b'previous')
+        self.assertEqual(list(self.root.glob('ccrd-source-*.tmp')), [])
+        with patch.object(override, 'MAX_OVERRIDE_BYTES', 4), \
+                patch.object(override.urllib.request, 'urlopen', return_value=Response(b'1234')):
+            report = override.download_override(destination)
+        self.assertEqual(destination.read_bytes(), b'1234')
+        self.assertEqual(report['bytes'], 4)
 
     def test_migrates_layout_and_metadata(self):
         counts = override.migrate_corpus(self.root)

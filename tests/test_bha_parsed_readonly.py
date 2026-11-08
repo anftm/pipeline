@@ -86,8 +86,12 @@ class BhaParsedReadOnlyTests(unittest.TestCase):
     def test_workflow_never_builds_parsed_or_requests_reindex(self):
         path = Path(__file__).resolve().parents[1] / '.github/workflows/bha-update-index.yml'
         flow = yaml.safe_load(path.read_text())
-        self.assertEqual(set(flow.get('on', flow.get(True))), {'workflow_dispatch'})
+        triggers = flow.get('on', flow.get(True))
+        self.assertEqual(set(triggers), {'workflow_dispatch', 'schedule'})
+        self.assertEqual(triggers['schedule'], [{'cron': '23 */6 * * *'}])
         self.assertEqual(flow['permissions'], {'contents': 'read'})
+        inspect = next(step for step in flow['jobs']['inspect']['steps'] if step.get('name') == 'Compare parsed tree to recorded baseline')
+        self.assertEqual(inspect['env']['ARCHIVE_ID'], "${{ github.event_name == 'schedule' && 'all' || inputs.archive_id }}")
         commands = '\n'.join(step.get('run', '') for job in flow['jobs'].values() for step in job['steps'])
         self.assertIn('check_bha_parsed_readonly.py', commands)
         for forbidden in ('build_fork_parsed.py', '/api/reindex', 'update_proofread_issues.py', 'git push'):

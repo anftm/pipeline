@@ -2,7 +2,7 @@
 """Compare the upstream CW:0 text to the live four-source manifest, read-only.
 
 A mismatch is diagnostic, not a publication plan. This command never uploads,
-activates, migrates, or removes anything and cannot prove consumer state.
+activates, migrates, or removes anything.
 """
 from __future__ import annotations
 
@@ -13,15 +13,16 @@ from pathlib import Path
 import tempfile
 
 try:
-    from . import ccrd_lifecycle as lifecycle, ccrd_source_override as source
+    from . import ccrd_consumer_inspection as consumer, ccrd_lifecycle as lifecycle, ccrd_source_override as source
     from .reader_bucket_store import HubBucketStore
 except ImportError:
+    import ccrd_consumer_inspection as consumer
     import ccrd_lifecycle as lifecycle
     import ccrd_source_override as source
     from reader_bucket_store import HubBucketStore
 
 
-def check(store, download=source.download_override):
+def check(store, download=source.download_override, observe=consumer.observe):
     before = store.read_bytes(lifecycle.BUCKET, 'current.json')
     manifest = json.loads(before)
     if manifest.get('format') != 2:
@@ -41,15 +42,16 @@ def check(store, download=source.download_override):
         if not raw or any(observed.get(field) != value for field, value in actual.items()):
             raise ValueError('downloaded CW:0 identity is inconsistent')
         raw.decode('utf-8')
+    recorded_identity = {field: recorded[field] for field in ('sha256', 'bytes')}
+    observed_consumer = observe(manifest['generation'], recorded_identity)
     if store.read_bytes(lifecycle.BUCKET, 'current.json') != before:
         raise RuntimeError('current CCRD manifest changed during the check')
     return {'version': 1, 'kind': 'ccrd-four-source-readonly-check',
             'generation': manifest['generation'], 'current_sha256': hashlib.sha256(before).hexdigest(),
             'sources': sorted(manifest['databases']), 'declared_resources': len(refs),
-            'recorded': {field: recorded[field] for field in ('sha256', 'bytes')},
-            'upstream': actual, 'source_changed': actual != {field: recorded[field] for field in actual},
-            'remote_writes': 0, 'publication_ready': False,
-            'scope': 'manifest metadata and one upstream text snapshot; consumer activation not checked'}
+            'recorded': recorded_identity, 'upstream': actual, 'source_changed': actual != recorded_identity,
+            'consumer': observed_consumer, 'remote_writes': 0, 'publication_ready': False,
+            'scope': 'four-source manifest, upstream snapshot and CW:0 consumer bytes; other consumer bytes unverified'}
 
 
 def main(argv=None):

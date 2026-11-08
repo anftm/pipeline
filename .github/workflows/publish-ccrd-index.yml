@@ -1,8 +1,10 @@
-name: CCRD · Four-Source Text Change Report
+name: CCRD · Monitor Four-Source Text
 
 on:
-  # The legacy two-source writer cannot safely replace the live four-source
-  # generation. This entry is a diagnostic only, not an automatic publisher.
+  # Monitoring reads the source, current manifest and consumer; it is not a
+  # publisher and never replaces the four-source generation.
+  schedule:
+    - cron: '41 */6 * * *'
   workflow_dispatch:
 
 permissions:
@@ -23,7 +25,7 @@ jobs:
         with:
           python-version: '3.11'
       - run: pip install -r scripts/requirements.txt
-      - name: Compare one upstream snapshot to the active manifest
+      - name: Compare upstream text and actual four-source consumer
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: python scripts/check_ccrd_four_source.py --output output/ccrd/four-source-check.json
