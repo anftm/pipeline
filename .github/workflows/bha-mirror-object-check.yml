@@ -1,0 +1,60 @@
+name: BHA · Verify Mirror Object Sample
+
+on:
+  workflow_dispatch:
+    inputs:
+      archive_id:
+        description: One BHA archive number (0–31)
+        type: string
+        required: true
+        default: '0'
+      full_samples:
+        description: Number of complete objects to hash (0–4)
+        type: choice
+        default: '1'
+        options:
+          - '0'
+          - '1'
+          - '2'
+          - '3'
+          - '4'
+
+permissions:
+  contents: read
+
+concurrency:
+  # This is read-only and has an independent group so an old queued source
+  # workflow cannot prevent an object-integrity inspection.
+  group: bha-mirror-object-check
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - run: pip install -r scripts/requirements.txt PyYAML==6.0.3
+      - name: Verify mirror object inspection contract
+        run: python -B -m unittest -v tests.test_bha_mirror_object_inspection
+      - name: Check exact pinned metadata and selected bytes
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          ARCHIVE_ID: ${{ inputs.archive_id }}
+          FULL_SAMPLES: ${{ inputs.full_samples }}
+        run: |
+          set -euo pipefail
+          [[ "$ARCHIVE_ID" =~ ^([0-9]|[12][0-9]|3[01])$ ]]
+          [[ "$FULL_SAMPLES" =~ ^[0-4]$ ]]
+          python -B scripts/bha_mirror_object_inspection.py --archive "$ARCHIVE_ID" \
+            --full-limit "$FULL_SAMPLES" --output output/bha/mirror-object-report.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: bha-mirror-object-report
+          path: output/bha/mirror-object-report.json
+          retention-days: 30
+          if-no-files-found: error
