@@ -22,6 +22,10 @@ def health(**changes):
                  'document_count': 1, **changes})
 
 
+def query(doc_id, _archive, _title):
+    return data({'indexing': False, 'index_status': 'ready', 'total': 1, 'results': [{'doc_id': doc_id}]})
+
+
 def fetch(url, _limit):
     if url.endswith('/api/health'):
         return health()
@@ -41,12 +45,13 @@ class BhaConsumerSampleTests(unittest.TestCase):
         calls = []
         def lookup(token, number):
             calls.append((token, number)); return '0', COMMIT, TREE
-        result = sample.observe('token', rows, fetch=fetch, lookup=lookup)
+        result = sample.observe('token', rows, fetch=fetch, lookup=lookup, query=query)
         self.assertEqual(calls, [('token', 0), ('token', 0)])
         self.assertEqual(result['samples'][0]['doc_id'], DOC)
         self.assertEqual(result['samples'][0]['source_sha256'], hashlib.sha256(data(ARTICLE)).hexdigest())
         self.assertEqual(result['samples'][0]['tags_sha256'], hashlib.sha256(data(TAGS)).hexdigest())
         self.assertTrue(result['samples'][0]['preview_article_equal'])
+        self.assertTrue(result['samples'][0]['exact_title_search_found'])
         self.assertEqual(result['remote_writes'], 0)
 
     def test_invalid_paths_cannot_escape_or_cross_archive(self):
@@ -68,21 +73,29 @@ class BhaConsumerSampleTests(unittest.TestCase):
                              'publication_id': 'maoquanji27', 'article': {**ARTICLE, 'tags': []}})
             return fetch(url, limit)
         with self.assertRaisesRegex(ValueError, 'preview differs'):
-            sample.observe_one(0, COMMIT, PATH, fetch=wrong)
+            sample.observe_one(0, COMMIT, PATH, fetch=wrong, query=query)
         with self.assertRaisesRegex(ValueError, 'invalid BHA tags JSON'):
-            sample.observe_one(0, COMMIT, PATH, fetch=lambda url, limit: b'bad' if url.endswith('.tags') else fetch(url, limit))
+            sample.observe_one(0, COMMIT, PATH, fetch=lambda url, limit: b'bad' if url.endswith('.tags') else fetch(url, limit),
+                               query=query)
 
     def test_moving_head_or_unready_consumer_stops(self):
         states = iter([('0', COMMIT, TREE), ('0', 'c' * 40, TREE)])
         with self.assertRaisesRegex(RuntimeError, 'revision changed'):
-            sample.observe('token', [{'archive': 0, 'path': PATH}], fetch=fetch, lookup=lambda *_: next(states))
+            sample.observe('token', [{'archive': 0, 'path': PATH}], fetch=fetch, lookup=lambda *_: next(states), query=query)
         with self.assertRaisesRegex(ValueError, 'not ready'):
             sample.observe('token', [{'archive': 0, 'path': PATH}],
                            fetch=lambda *_: health(index_ready=False), lookup=lambda *_: ('0', COMMIT, TREE))
         values = iter([health(), data(ARTICLE), data(TAGS), fetch(BASE_PREVIEW, 10), health(document_count=2)])
         with self.assertRaisesRegex(RuntimeError, 'health changed'):
             sample.observe('token', [{'archive': 0, 'path': PATH}],
-                           fetch=lambda *_: next(values), lookup=lambda *_: ('0', COMMIT, TREE))
+                           fetch=lambda *_: next(values), lookup=lambda *_: ('0', COMMIT, TREE), query=query)
+
+    def test_missing_or_incomplete_search_result_is_not_a_success(self):
+        for result in ({'indexing': True, 'index_status': 'ready', 'total': 1, 'results': [{'doc_id': DOC}]},
+                       {'indexing': False, 'index_status': 'ready', 'total': 1, 'results': []},
+                       {'indexing': False, 'index_status': 'ready', 'total': 101, 'results': [{'doc_id': DOC}]}):
+            with self.subTest(result=result), self.assertRaisesRegex(ValueError, 'search did not return'):
+                sample.observe_one(0, COMMIT, PATH, fetch=fetch, query=lambda *_, result=result: data(result))
 
     def test_bounded_get_never_accepts_large_body(self):
         response = Mock(); response.status = 200; response.read.return_value = b'1234'

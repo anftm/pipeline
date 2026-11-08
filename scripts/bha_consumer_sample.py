@@ -40,6 +40,23 @@ def get(url: str, limit: int) -> bytes:
     return raw
 
 
+def search(doc_id: str, archive: int, title: str) -> bytes:
+    if not isinstance(title, str) or not 1 <= len(title.strip()) <= 256:
+        raise ValueError('invalid BHA sample title')
+    body = json.dumps({'q': title, 'exact': True, 'fulltext': False, 'page': 1,
+                       'page_size': 100, 'archive_id': archive}, ensure_ascii=False).encode()
+    request = urllib.request.Request(BASE + '/api/search', data=body, method='POST',
+                                     headers={'Content-Type': 'application/json',
+                                              'User-Agent': 'pipeline-bha-consumer-sample/1.0'})
+    with urllib.request.urlopen(request, timeout=60) as response:
+        if response.status != 200:
+            raise RuntimeError(f'BHA sample search HTTP {response.status}')
+        raw = response.read(MAX_PREVIEW + 1)
+    if len(raw) > MAX_PREVIEW:
+        raise ValueError('BHA sample search response exceeds limit')
+    return raw
+
+
 def sample_path(archive: int, commit: str, path: str) -> tuple[str, str]:
     if type(archive) is not int or not 0 <= archive <= 31 or not isinstance(commit, str) or not SHA.fullmatch(commit):
         raise ValueError('invalid BHA archive or pinned commit')
@@ -71,7 +88,7 @@ def health(raw: bytes) -> dict:
     return {'document_count': value['document_count'], 'index_status': value['index_status']}
 
 
-def observe_one(archive: int, commit: str, path: str, *, fetch=get) -> dict:
+def observe_one(archive: int, commit: str, path: str, *, fetch=get, query=search) -> dict:
     doc_id, escaped_path = sample_path(archive, commit, path)
     prefix = f'https://raw.githubusercontent.com/{OWNER}/banned-historical-archives{archive}/{commit}/'
     article_raw = fetch(prefix + escaped_path, MAX_SOURCE)
@@ -79,17 +96,26 @@ def observe_one(archive: int, commit: str, path: str, *, fetch=get) -> dict:
     article, tags = _object(article_raw, 'article'), _object(tags_raw, 'tags')
     if not isinstance(article, dict) or 'tags' in article or not isinstance(tags, list):
         raise ValueError('invalid BHA parsed article or tags')
+    title = article.get('title')
+    if not isinstance(title, str) or not 1 <= len(title.strip()) <= 256:
+        raise ValueError('invalid BHA sample article title')
     preview = _object(fetch(BASE + '/api/preview/' + urllib.parse.quote(doc_id, safe=':'), MAX_PREVIEW), 'preview')
     if (not isinstance(preview, dict) or preview.get('doc_id') != doc_id or preview.get('archive_id') != archive
             or preview.get('article_id') != path.split('/')[-1][:-5]
             or preview.get('publication_id') != path.split('/')[1] or preview.get('article') != {**article, 'tags': tags}):
         raise ValueError('BHA preview differs from the pinned parsed article and tags')
+    hits = _object(query(doc_id, archive, title), 'search')
+    if (not isinstance(hits, dict) or hits.get('indexing') is not False or hits.get('index_status') != 'ready'
+            or type(hits.get('total')) is not int or not 1 <= hits['total'] <= 100
+            or not isinstance(hits.get('results'), list)
+            or not any(isinstance(item, dict) and item.get('doc_id') == doc_id for item in hits['results'])):
+        raise ValueError('BHA exact-title search did not return the sampled article')
     return {'archive': archive, 'commit': commit, 'path': path, 'doc_id': doc_id,
             'source_sha256': hashlib.sha256(article_raw).hexdigest(), 'tags_sha256': hashlib.sha256(tags_raw).hexdigest(),
-            'preview_article_equal': True}
+            'preview_article_equal': True, 'exact_title_search_found': True}
 
 
-def observe(token: str, samples: list[dict], *, fetch=get, lookup=revisions.archive_identity) -> dict:
+def observe(token: str, samples: list[dict], *, fetch=get, lookup=revisions.archive_identity, query=search) -> dict:
     if not token or not isinstance(samples, list) or not 1 <= len(samples) <= 16:
         raise ValueError('a credential and one to sixteen BHA samples are required')
     if any(not isinstance(row, dict) or set(row) != {'archive', 'path'}
@@ -106,7 +132,7 @@ def observe(token: str, samples: list[dict], *, fetch=get, lookup=revisions.arch
         key, commit, tree = identities[row['archive']]
         if key != str(row['archive']) or not isinstance(tree, str) or not SHA.fullmatch(tree):
             raise ValueError('invalid BHA pinned tree identity')
-        result = observe_one(row['archive'], commit, row['path'], fetch=fetch)
+        result = observe_one(row['archive'], commit, row['path'], fetch=fetch, query=query)
         result['tree'] = tree
         rows.append(result)
     for archive, old in identities.items():
@@ -117,4 +143,4 @@ def observe(token: str, samples: list[dict], *, fetch=get, lookup=revisions.arch
         raise RuntimeError('BHA health changed during sampling')
     return {'version': 1, 'kind': 'bha-consumer-sample', 'samples': rows,
             'consumer_health_observed_twice': True, 'remote_writes': 0,
-            'scope': 'explicit pinned articles and tags only; whole index bytes and future states unverified'}
+            'scope': 'explicit pinned articles, tags and exact-title searches only; whole index bytes unverified'}
