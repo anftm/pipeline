@@ -99,6 +99,28 @@ jobs:
             --browser output/folder_browser.json --revisions "$RUNNER_TEMP/search-directory-revisions.json" \
             --output "$RUNNER_TEMP/search-generation"
 
+      - name: Inspect newly staged candidate without publication
+        if: steps.fetch.outputs.data_changed == 'true' && steps.stage.outputs.generation != steps.published.outputs.generation
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          PAGES_TOKEN: ${{ secrets.PAGES_TOKEN }}
+          HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+          STAGED_GENERATION: ${{ steps.stage.outputs.generation }}
+        run: |
+          set -euo pipefail
+          python -B scripts/search_daily_handoff.py --generation "$STAGED_GENERATION" \
+            --output "$RUNNER_TEMP/search-daily-candidate-handoff.json"
+
+      - name: Upload candidate handoff evidence
+        if: steps.fetch.outputs.data_changed == 'true' && steps.stage.outputs.generation != steps.published.outputs.generation
+        uses: actions/upload-artifact@v7
+        with:
+          name: search-daily-candidate-handoff
+          path: ${{ runner.temp }}/search-daily-candidate-handoff.json
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Fail closed when a new generation awaits promotion
         if: steps.fetch.outputs.data_changed == 'true'
         env:

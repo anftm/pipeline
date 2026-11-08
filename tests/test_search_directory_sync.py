@@ -291,6 +291,17 @@ class DirectorySnapshotTests(unittest.TestCase):
                         job['steps'].index(steps['Fetch and parse']))
         self.assertIn('--expected-receipt "$RUNNER_TEMP/search-published-receipt.json"',
                       steps['Verify publication did not change during the run']['run'])
+        handoff = steps['Inspect newly staged candidate without publication']
+        artifact = steps['Upload candidate handoff evidence']
+        new_candidate = "steps.fetch.outputs.data_changed == 'true' && steps.stage.outputs.generation != steps.published.outputs.generation"
+        self.assertEqual(handoff['if'], new_candidate)
+        self.assertEqual(artifact['if'], new_candidate)
+        self.assertIn('scripts/search_daily_handoff.py', handoff['run'])
+        self.assertEqual(artifact['uses'], 'actions/upload-artifact@v7')
+        self.assertEqual(artifact['with']['if-no-files-found'], 'error')
+        self.assertLess(job['steps'].index(steps['Stage immutable search generation']), job['steps'].index(handoff))
+        self.assertLess(job['steps'].index(handoff), job['steps'].index(artifact))
+        self.assertLess(job['steps'].index(artifact), job['steps'].index(steps['Fail closed when a new generation awaits promotion']))
         self.assertEqual(steps['Fail closed when a new generation awaits promotion']['if'], "steps.fetch.outputs.data_changed == 'true'")
         self.assertIn('STAGED_GENERATION', steps['Fail closed when a new generation awaits promotion']['env'])
         self.assertIn('PUBLISHED_GENERATION', steps['Fail closed when a new generation awaits promotion']['env'])
