@@ -168,11 +168,47 @@ def finish(store, *, session, api, hub, get, revision) -> tx.Current:
                      space_default=defaults.observe_space(current.record['candidate'], api=api))
 
 
+def finish_rollback(store, *, session, api, hub, get) -> tx.Current:
+    """Accept rollback only after both actual sites and defaults are parent."""
+    current = _current(store, 'rolling-back')
+    if current.record['pending'] is not None:
+        raise ValueError('rollback has a pending site operation')
+    parent = current.record['parent_pointer']['desired']
+    response = session.get(f'{pages.BASE}/branches/main', timeout=20); response.raise_for_status()
+    main = response.json().get('commit', {}).get('sha')
+    if not isinstance(main, str) or not pages.SHA.fullmatch(main):
+        raise ValueError('Pages main revision is unavailable')
+    manifest = adoption.validate_generation(hub, parent)
+    pages.assert_idle(session)
+    configured, updated = space.variable(api)
+    if configured != parent:
+        raise ValueError('Space configured generation is not the parent')
+    runtime = api.get_space_runtime(space.SPACE)
+    if runtime.stage != 'RUNNING' or not isinstance(runtime.raw, dict):
+        raise ValueError('Space runtime is not running')
+    sha = runtime.raw.get('sha', '')
+    space.runtime(api, expected_sha=sha)
+    page_default = defaults.observe_pages(parent, session=session)
+    space_default = defaults.observe_space(parent, api=api)
+    first = consumers.observe('pages', parent, manifest, get=get)
+    second = consumers.observe('space', parent, manifest, get=get)
+    if space.variable(api) != (configured, updated):
+        raise ValueError('Space configuration changed during rollback acceptance')
+    space.runtime(api, expected_sha=sha)
+    defaults.observe_pages(parent, session=session)
+    pages.assert_idle(session)
+    response = session.get(f'{pages.BASE}/branches/main', timeout=20); response.raise_for_status()
+    if response.json().get('commit', {}).get('sha') != main:
+        raise ValueError('Pages main changed during rollback acceptance')
+    return tx.finish_rollback(store, current, pages_receipt=first, space_receipt=second,
+                              pages_default=page_default, space_default=space_default)
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--mode', required=True, choices=('mark', 'publish', 'reconcile-pointer', 'space-default',
                                                           'pages-default-prepare', 'pages-default-apply',
-                                                          'pages-default-reconcile', 'finish'))
+                                                          'pages-default-reconcile', 'finish', 'rollback-finish'))
     parser.add_argument('--expected-revision', default=''); parser.add_argument('--operation', default='')
     args = parser.parse_args(argv)
     import requests
@@ -197,6 +233,8 @@ def main(argv=None) -> int:
     elif args.mode == 'pages-default-apply':
         print(json.dumps(set_pages_default(store, **common, operation=op), sort_keys=True)); return 0
     elif args.mode == 'pages-default-reconcile': current = reconcile_pages_default(store, **common, operation=op)
+    elif args.mode == 'rollback-finish':
+        current = finish_rollback(store, session=session, api=api, hub=hub, get=bounded_get)
     else: current = finish(store, **common)
     print(json.dumps({'kind': 'search-finalization-step', 'mode': args.mode, 'operation': op,
                       'state': current.record['state'], 'sequence': current.record['sequence'],

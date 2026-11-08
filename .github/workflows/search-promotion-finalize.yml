@@ -17,6 +17,7 @@ on:
           - pages-default-apply
           - pages-default-reconcile
           - finish
+          - rollback-finish
       expected_revision:
         description: Exact site revision for default observation/intent
         type: string
@@ -67,7 +68,7 @@ jobs:
           [[ "$WRITERS" == 'true' ]]
           args=(--mode "$MODE")
           case "$MODE" in
-            mark|publish|reconcile-pointer|finish)
+            mark|publish|reconcile-pointer|finish|rollback-finish)
               [[ -z "$EXPECTED_REVISION" && -z "$OPERATION" ]] ;;
             space-default|pages-default-prepare)
               [[ "$EXPECTED_REVISION" =~ ^[0-9a-f]{40}$ && -z "$OPERATION" ]]

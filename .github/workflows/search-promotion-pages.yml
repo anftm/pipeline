@@ -5,13 +5,15 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: Prepare records an intent, apply dispatches once, reconcile observes
+        description: Prepare promotion or pre-pointer rollback; failed apply recovery is limited to reviewed pre-deploy failures
         type: choice
         required: true
         options:
           - prepare
+          - rollback-prepare
           - apply
           - reconcile
+          - recover-failed-apply
       expected_revision:
         description: Exact Pages main revision, required for prepare
         type: string
@@ -61,11 +63,11 @@ jobs:
           set -euo pipefail
           [[ "$WRITERS" == 'true' ]]
           case "$MODE" in
-            prepare)
+            prepare|rollback-prepare)
               [[ "$EXPECTED_REVISION" =~ ^[0-9a-f]{40}$ && -z "$OPERATION" ]]
-              python -B scripts/search_pages_transition.py --mode prepare --expected-revision "$EXPECTED_REVISION"
+              python -B scripts/search_pages_transition.py --mode "$MODE" --expected-revision "$EXPECTED_REVISION"
               ;;
-            apply|reconcile)
+            apply|reconcile|recover-failed-apply)
               [[ "$OPERATION" =~ ^[0-9a-f]{32}$ && -z "$EXPECTED_REVISION" ]]
               python -B scripts/search_pages_transition.py --mode "$MODE" --operation "$OPERATION"
               ;;

@@ -264,11 +264,17 @@ def validate_advance(previous: dict, value: dict, *, prior_digest: str) -> None:
                 raise ValueError("invalid default-configuration observation")
             return
         target = value["candidate"] if old_pending["operation"] == "apply" else value["parent_pointer"]["desired"]
-        expected_state = ("verified" if all(after[s]["generation"] == target for s in SITES) else "applying") \
+        # Historical journals may have ended directly after the last rollback
+        # observation. New operations require an explicit fresh two-site finish.
+        expected_states = ({"verified"} if all(after[s]["generation"] == target for s in SITES) else {"applying"}) \
             if old_pending["operation"] == "apply" else (
-                "rolled-back" if all(after[s]["generation"] == target for s in SITES) else "rolling-back")
-        if (after[site]["generation"] != target or any(after[s] != before[s] for s in SITES - {site})
-                or defaults_before != defaults_after or b != expected_state):
+                {"rolling-back", "rolled-back"} if all(after[s]["generation"] == target for s in SITES)
+                else {"rolling-back"})
+        unchanged_recovery = (old_pending["operation"] == "apply" and b == "rolling-back"
+                              and before[site]["generation"] == value["parent_pointer"]["desired"]
+                              and after[site]["generation"] == value["parent_pointer"]["desired"])
+        if ((after[site]["generation"] != target or b not in expected_states) and not unchanged_recovery
+                or any(after[s] != before[s] for s in SITES - {site}) or defaults_before != defaults_after):
             raise ValueError("invalid site-operation observation")
         return
     if old_pending is None and new_pending is None:
@@ -279,6 +285,9 @@ def validate_advance(previous: dict, value: dict, *, prior_digest: str) -> None:
             return
         if ((a, b) == ("pointer-observed", "complete") and before == after and defaults_before == defaults_after
                 and all(defaults_after[s]["generation"] == value["candidate"] for s in SITES)):
+            return
+        if ((a, b) == ("rolling-back", "rolled-back") and defaults_before == defaults_after
+                and all(after[s]["generation"] == value["parent_pointer"]["desired"] for s in SITES)):
             return
     raise ValueError("invalid transition state change")
 
@@ -575,8 +584,55 @@ def observe_site(store: TransitionStore, current: Current, *, site: str, generat
     if pending["operation"] == "apply":
         state = "verified" if all(observed[s]["generation"] == expected for s in SITES) else "applying"
     else:
-        state = "rolled-back" if all(observed[s]["generation"] == expected for s in SITES) else "rolling-back"
+        state = "rolling-back"
     return _commit(store, _next(current, observed=observed, pending=None, state=state), current)
+
+
+def observe_failed_apply(store: TransitionStore, current: Current, *, site: str, receipt: bytes) -> Current:
+    """Record a freshly observed parent after externally established terminal failure.
+
+    The caller must first verify an exact terminal failed run and ensure it and
+    all re-runs are quiescent. This method cannot establish remote job finality.
+    """
+    pending = current.record['pending']
+    if (not isinstance(pending, dict) or pending['site'] != site or pending['operation'] != 'apply'
+            or current.record['state'] != 'applying'):
+        raise ValueError('site has no matching pending apply operation')
+    parent = current.record['parent_pointer']['desired']
+    if current.record['observed'][site]['generation'] != parent:
+        raise ValueError('last observed site is not the parent')
+    if store.read_pointer() != search_snapshot.canonical(current.record['parent_pointer']):
+        raise ValueError('actual pointer changed before failed apply observation')
+    _check_receipt(receipt, site=site, generation=parent)
+    digest = _store_receipt(store, current.record['transition'], receipt)
+    observed = {**current.record['observed'], site: _observed(parent, digest)}
+    return _commit(store, _next(current, observed=observed, pending=None, state='rolling-back'), current)
+
+
+def finish_rollback(store: TransitionStore, current: Current, *, pages_receipt: bytes, space_receipt: bytes,
+                    pages_default: bytes, space_default: bytes) -> Current:
+    """Record fresh observations of both parents before ending a failed rollout."""
+    if current.record['state'] != 'rolling-back' or current.record['pending'] is not None:
+        raise ValueError('transition is not ready for rollback completion')
+    active = load(store)
+    if active is None or active.head_raw != current.head_raw or active.etag != current.etag:
+        raise ValueError('transition head changed before rollback completion')
+    audit_history(store, current)
+    if store.read_pointer() != search_snapshot.canonical(current.record['parent_pointer']):
+        raise ValueError('actual pointer changed before rollback completion')
+    parent = current.record['parent_pointer']['desired']
+    for site, actual, configured in (('pages', pages_receipt, pages_default),
+                                     ('space', space_receipt, space_default)):
+        _check_receipt(actual, site=site, generation=parent)
+        _check_default(configured, site=site, generation=parent)
+        if (current.record['observed'][site]['generation'] != parent
+                or current.record['defaults'][site]['generation'] != parent):
+            raise ValueError('parent has not been durably observed by both sites')
+    observed = {site: _observed(parent, _store_receipt(store, current.record['transition'], receipt))
+                for site, receipt in (('pages', pages_receipt), ('space', space_receipt))}
+    defaults = {site: _observed(parent, _store_receipt(store, current.record['transition'], receipt))
+                for site, receipt in (('pages', pages_default), ('space', space_default))}
+    return _commit(store, _next(current, state='rolled-back', observed=observed, defaults=defaults), current)
 
 
 def mark_publishing(store: TransitionStore, current: Current, *, pages_receipt: bytes, space_receipt: bytes) -> Current:

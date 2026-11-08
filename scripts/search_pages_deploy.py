@@ -20,6 +20,9 @@ BASE = f"https://api.github.com/repos/{REPO}"
 WORKFLOW = "static.yml"
 OPERATION = re.compile(r"[0-9a-f]{32}\Z")
 SHA = re.compile(r"[0-9a-f]{40}\Z")
+# Reviewed topology: source-checks has no deployment permissions; deploy is a
+# separate needs: source-checks job. A change requires a new code review.
+RECOVERY_WORKFLOW_BLOBS = frozenset({'3e13f0e4c9ca38d4019151cf07becc756d8da1f0'})
 
 
 def _operation(value: str) -> str:
@@ -56,7 +59,9 @@ def matching_run(runs: list, *, operation: str, not_before: str, expected_sha: s
         return None
     run = matches[0]
     path = run.get("path")
-    if (type(run.get("id")) is not int or run["id"] <= 0 or run.get("event") != "workflow_dispatch"
+    if (type(run.get("id")) is not int or run["id"] <= 0
+            or type(run.get("run_attempt")) is not int or run["run_attempt"] != 1
+            or run.get("event") != "workflow_dispatch"
             or run.get("head_branch") != "main" or run.get("head_sha") != expected_sha
             or not isinstance(path, str) or path.split("@", 1)[0] != ".github/workflows/static.yml"
             or _timestamp(run.get("created_at")) < start):
@@ -79,6 +84,43 @@ def assert_idle(session) -> None:
             raise TypeError("invalid Pages workflow runs response")
         if getattr(response, "links", {}).get("next") or body["workflow_runs"]:
             raise ValueError("Pages deployment is active, queued or incomplete to inspect")
+
+
+def failed_before_deploy(session, run: dict, *, expected_sha: str) -> None:
+    """Accept only the known pinned workflow and an unstarted deployment job."""
+    run_id = run.get('id') if isinstance(run, dict) else None
+    if (type(run_id) is not int or run_id <= 0 or run.get('run_attempt') != 1
+            or not isinstance(expected_sha, str) or not SHA.fullmatch(expected_sha)):
+        raise ValueError('invalid failed Pages run identity')
+    # Job names alone do not prove the topology: another workflow version could
+    # deploy from a different job. Refuse new revisions until independently
+    # reviewed and explicitly added; never execute or evaluate remote YAML.
+    response = session.get(f'{BASE}/contents/.github/workflows/static.yml',
+                           params={'ref': expected_sha}, timeout=20)
+    response.raise_for_status()
+    metadata = response.json()
+    if (not isinstance(metadata, dict) or metadata.get('sha') not in RECOVERY_WORKFLOW_BLOBS
+            or metadata.get('type') != 'file'):
+        raise ValueError('Pages workflow topology is not reviewed for failed-run recovery')
+    response = session.get(f'{BASE}/actions/runs/{run_id}/attempts/1/jobs', params={'per_page': 100}, timeout=20)
+    response.raise_for_status()
+    body = response.json()
+    if (not isinstance(body, dict) or not isinstance(body.get('jobs'), list)
+            or type(body.get('total_count')) is not int or body['total_count'] != len(body['jobs'])
+            or getattr(response, 'links', {}).get('next')):
+        raise ValueError('Pages failed-run job list is incomplete')
+    jobs = body['jobs']
+    if (len(jobs) != 2 or any(not isinstance(job, dict) for job in jobs)
+            or {job.get('name') for job in jobs} != {'source-checks', 'deploy'}):
+        raise ValueError('Pages failed-run jobs differ from the pinned workflow')
+    source = next(job for job in jobs if job['name'] == 'source-checks')
+    deployment = next(job for job in jobs if job['name'] == 'deploy')
+    if (source.get('status') != 'completed' or source.get('conclusion') not in {'failure', 'cancelled', 'timed_out'}
+            or deployment.get('status') != 'completed' or deployment.get('conclusion') != 'skipped'):
+        raise ValueError('Pages deployment may have started; keep intent pending')
+    steps = deployment.get('steps')
+    if not isinstance(steps, list) or any(not isinstance(step, dict) or step.get('conclusion') != 'skipped' for step in steps):
+        raise ValueError('Pages deploy step status is unknown; keep intent pending')
 
 
 def inspect_runs(session, *, operation: str, not_before: str, expected_sha: str) -> dict | None:

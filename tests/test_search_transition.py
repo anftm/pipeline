@@ -235,6 +235,10 @@ class SearchTransitionTests(unittest.TestCase):
             c = self.start_site(c, site=site, operation_id=op, rollback=True)
             self.assertEqual(c.record["state"], "rolling-back")
             c = self.observe(c, site, A, (site + "-rollback").encode())
+        self.assertEqual(c.record["state"], "rolling-back")
+        c = tx.finish_rollback(self.s, c, pages_receipt=receipt('pages', A, 'final'),
+                               space_receipt=receipt('space', A, 'final'),
+                               pages_default=default_receipt('pages', A), space_default=default_receipt('space', A))
         self.assertEqual(c.record["state"], "rolled-back")
         self.assertEqual(self.s.pointer, make_pointer(A, None, "0" * 32))
         nxt = tx.begin(self.s, parent_pointer=self.s.pointer, candidate=C, source_revisions_sha256=B,
@@ -242,6 +246,37 @@ class SearchTransitionTests(unittest.TestCase):
                        pages_default=default_receipt("pages", A), space_default=default_receipt("space", A),
                        transition=T2)
         self.assertEqual(nxt.record["sequence"], c.record["sequence"] + 1)
+
+    def test_failed_apply_clears_only_with_parent_receipt_and_stays_rolling_back(self):
+        c = self.begin()
+        c = self.start_site(c, site='pages', operation_id='3' * 32)
+        with self.assertRaisesRegex(ValueError, 'receipt identity'):
+            tx.observe_failed_apply(self.s, c, site='pages', receipt=receipt('pages', B))
+        with self.assertRaisesRegex(ValueError, 'matching pending'):
+            tx.observe_failed_apply(self.s, c, site='space', receipt=receipt('space', A))
+        c = tx.observe_failed_apply(self.s, c, site='pages', receipt=receipt('pages', A, 'failed-run'))
+        self.assertEqual(c.record['state'], 'rolling-back')
+        self.assertIsNone(c.record['pending'])
+        with self.assertRaisesRegex(ValueError, 'default receipt identity'):
+            tx.finish_rollback(self.s, c, pages_receipt=receipt('pages', A), space_receipt=receipt('space', A),
+                               pages_default=default_receipt('pages', A), space_default=default_receipt('space', B))
+        c = tx.finish_rollback(self.s, c, pages_receipt=receipt('pages', A), space_receipt=receipt('space', A),
+                               pages_default=default_receipt('pages', A), space_default=default_receipt('space', A))
+        self.assertEqual(c.record['state'], 'rolled-back')
+        self.assertEqual(tx.audit_history(self.s, c), 4)
+
+    def test_rollback_finish_rejects_stale_head_and_nonparent_site(self):
+        c = self.ready()
+        c = self.start_site(c, site='pages', operation_id='5' * 32, rollback=True)
+        c = self.observe(c, 'pages', A, b'parent')
+        with self.assertRaisesRegex(ValueError, 'durably observed'):
+            tx.finish_rollback(self.s, c, pages_receipt=receipt('pages', A), space_receipt=receipt('space', A),
+                               pages_default=default_receipt('pages', A), space_default=default_receipt('space', A))
+        newer = self.start_site(c, site='space', operation_id='6' * 32, rollback=True)
+        with self.assertRaisesRegex(ValueError, 'head changed'):
+            tx.finish_rollback(self.s, c, pages_receipt=receipt('pages', A), space_receipt=receipt('space', A),
+                               pages_default=default_receipt('pages', A), space_default=default_receipt('space', A))
+        self.assertEqual(tx.load(self.s), newer)
 
     def test_uncertain_remote_action_requires_observation_before_rollback(self):
         c = self.begin()
@@ -251,6 +286,9 @@ class SearchTransitionTests(unittest.TestCase):
         c = self.observe(c, "space", B, b"actual-response")
         c = self.start_site(c, site="space", operation_id="5" * 32, rollback=True)
         c = self.observe(c, "space", A, b"rollback-response")
+        self.assertEqual(c.record["state"], "rolling-back")
+        c = tx.finish_rollback(self.s, c, pages_receipt=receipt('pages', A), space_receipt=receipt('space', A),
+                               pages_default=default_receipt('pages', A), space_default=default_receipt('space', A))
         self.assertEqual(c.record["state"], "rolled-back")
 
     def test_immutable_and_cas_lost_response_are_not_replayed(self):

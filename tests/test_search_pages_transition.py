@@ -25,6 +25,7 @@ class PagesTransitionTests(unittest.TestCase):
         self.session, self.api, self.hub = Mock(), Mock(), Mock()
         self.patches = [patch.object(subject, '_main', return_value=REV),
                         patch.object(subject, '_space_loaded'), patch.object(subject.deploy, 'assert_idle'),
+                        patch.object(subject.deploy, 'failed_before_deploy'),
                         patch.object(subject.defaults, 'observe_pages', return_value=default_receipt('pages', A)),
                         patch.object(subject.adoption, 'validate_generation', return_value={}),
                         patch.object(subject.receipts, 'observe', side_effect=lambda site, generation, *_a, **_k: receipt(site, generation))]
@@ -101,13 +102,101 @@ class PagesTransitionTests(unittest.TestCase):
                               get=lambda *_: b'', operation_id=OP)
         self.assertEqual(subject.tx.load(self.s).record['state'], 'applying')
 
+    def test_failed_apply_requires_exact_terminal_run_and_live_parent(self):
+        self.prepare_pages()
+        run = {'id': 7, 'status': 'completed', 'conclusion': 'failure', 'run_attempt': 1}
+        for invalid in (None, {'id': 7, 'status': 'in_progress', 'conclusion': None},
+                        {'id': 7, 'status': 'completed', 'conclusion': 'success'},
+                        {'id': 7, 'status': 'completed', 'conclusion': 'action_required'}):
+            with self.subTest(invalid=invalid), patch.object(subject.deploy, 'inspect_runs', return_value=invalid):
+                with self.assertRaisesRegex(ValueError, 'terminal failed'):
+                    subject.recover_failed_apply(self.s, session=self.session, hub=self.hub,
+                                                 get=lambda *_: b'', operation_id=OP)
+        with patch.object(subject.deploy, 'inspect_runs', return_value=run), \
+                patch.object(subject.receipts, 'observe', side_effect=ValueError('not parent')):
+            with self.assertRaisesRegex(ValueError, 'not parent'):
+                subject.recover_failed_apply(self.s, session=self.session, hub=self.hub,
+                                             get=lambda *_: b'', operation_id=OP)
+        self.assertEqual(subject.tx.load(self.s).record['pending']['operation_id'], OP)
+        with patch.object(subject.deploy, 'inspect_runs', return_value=run), \
+                patch.object(subject.deploy, 'failed_before_deploy', side_effect=ValueError('deploy may have started')):
+            with self.assertRaisesRegex(ValueError, 'deploy may have started'):
+                subject.recover_failed_apply(self.s, session=self.session, hub=self.hub,
+                                             get=lambda *_: b'', operation_id=OP)
+        self.assertEqual(subject.tx.load(self.s).record['pending']['operation_id'], OP)
+        with patch.object(subject.deploy, 'inspect_runs', return_value=run):
+            result = subject.recover_failed_apply(self.s, session=self.session, hub=self.hub,
+                                                   get=lambda *_: b'', operation_id=OP)
+        self.assertEqual(result['status'], 'parent-loaded')
+        self.assertFalse(result['external_writers_verified'])
+        current = subject.tx.load(self.s)
+        self.assertIsNone(current.record['pending'])
+        self.assertEqual(current.record['state'], 'rolling-back')
+        self.assertEqual(current.record['observed']['space']['generation'], B)
+        self.assertGreater(subject.tx.audit_history(self.s, current), 1)
+        self.session.post.assert_not_called()
+
+    def test_failed_apply_changed_run_or_pointer_never_clears_pending(self):
+        self.prepare_pages()
+        run = {'id': 7, 'status': 'completed', 'conclusion': 'failure', 'run_attempt': 1}
+        changed = {**run, 'run_attempt': 2}
+        with patch.object(subject.deploy, 'inspect_runs', side_effect=[run, changed]):
+            with self.assertRaisesRegex(ValueError, 'run changed'):
+                subject.recover_failed_apply(self.s, session=self.session, hub=self.hub,
+                                             get=lambda *_: b'', operation_id=OP)
+        self.assertIsNotNone(subject.tx.load(self.s).record['pending'])
+        from scripts.search_publication_pointer import make_pointer
+        self.s.pointer = make_pointer(C, A, '2' * 32)
+        with self.assertRaisesRegex(ValueError, 'pointer changed'):
+            subject.recover_failed_apply(self.s, session=self.session, hub=self.hub,
+                                         get=lambda *_: b'', operation_id=OP)
+        self.assertIsNotNone(subject.tx.load(self.s).record['pending'])
+
+    def test_failed_apply_does_not_require_healthy_space_for_parent_acceptance(self):
+        self.prepare_pages()
+        run = {'id': 7, 'status': 'completed', 'conclusion': 'failure', 'run_attempt': 1}
+        with patch.object(subject.deploy, 'inspect_runs', return_value=run), \
+                patch.object(subject, '_space_loaded', side_effect=AssertionError('Space is unavailable')):
+            result = subject.recover_failed_apply(self.s, session=self.session, hub=self.hub,
+                                                   get=lambda *_: b'', operation_id=OP)
+        self.assertEqual(result['status'], 'parent-loaded')
+        self.assertEqual(subject.tx.load(self.s).record['state'], 'rolling-back')
+
+    def test_pages_rollback_uses_parent_and_no_space_dependency(self):
+        self.prepare_pages()
+        run = {'id': 7, 'status': 'completed', 'conclusion': 'success'}
+        with patch.object(subject.deploy, 'inspect_runs', return_value=run):
+            subject.reconcile(self.s, session=self.session, api=self.api, hub=self.hub,
+                              get=lambda *_: b'', operation_id=OP)
+        with patch.object(subject, '_space_loaded', side_effect=AssertionError('should not block recovery')):
+            c = subject.prepare(self.s, session=self.session, api=self.api, hub=self.hub, get=lambda *_: b'',
+                                expected_revision=REV, operation_id='5' * 32, created_at=TIME, rollback=True)
+            self.assertEqual(c.record['pending']['operation'], 'rollback')
+            with patch.object(subject.deploy, 'inspect_runs', return_value=None), \
+                    patch.object(subject.deploy, 'dispatch', side_effect=TimeoutError('lost')) as send:
+                with self.assertRaises(TimeoutError):
+                    subject.apply_once(self.s, session=self.session, api=self.api, hub=self.hub,
+                                       get=lambda *_: b'', operation_id='5' * 32)
+                self.assertEqual(send.call_args.kwargs['generation'], A)
+                with self.assertRaisesRegex(ValueError, 'already claimed'):
+                    subject.apply_once(self.s, session=self.session, api=self.api, hub=self.hub,
+                                       get=lambda *_: b'', operation_id='5' * 32)
+                send.assert_called_once()
+            with patch.object(subject.deploy, 'inspect_runs', return_value=run):
+                result = subject.reconcile(self.s, session=self.session, api=self.api, hub=self.hub,
+                                           get=lambda *_: b'', operation_id='5' * 32)
+        self.assertEqual(result['status'], 'parent-loaded')
+        self.assertEqual(subject.tx.load(self.s).record['state'], 'rolling-back')
+        self.assertEqual(subject.tx.load(self.s).record['observed']['pages']['generation'], A)
+
     def test_workflow_is_manual_and_serialized_with_daily(self):
         path = Path(__file__).resolve().parents[1] / '.github/workflows/search-promotion-pages.yml'
         flow = yaml.load(path.read_text(), Loader=yaml.BaseLoader)
         self.assertEqual(set(flow['on']), {'workflow_dispatch'})
         self.assertEqual(flow['permissions'], {'contents': 'read'})
         self.assertEqual(flow['concurrency']['group'], 'daily-sync')
-        self.assertEqual(flow['on']['workflow_dispatch']['inputs']['mode']['options'], ['prepare', 'apply', 'reconcile'])
+        self.assertEqual(flow['on']['workflow_dispatch']['inputs']['mode']['options'],
+                         ['prepare', 'rollback-prepare', 'apply', 'reconcile', 'recover-failed-apply'])
         self.assertEqual(flow['on']['workflow_dispatch']['inputs']['known_writers_coordinated']['default'], 'false')
 
 

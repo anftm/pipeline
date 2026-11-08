@@ -22,7 +22,7 @@ def idle_session():
 
 
 def run(**changes):
-    return {"id": 100, "display_title": pages.run_name(OP), "created_at": TIME,
+    return {"id": 100, "run_attempt": 1, "display_title": pages.run_name(OP), "created_at": TIME,
             "event": "workflow_dispatch", "head_branch": "main", "head_sha": SHA,
             "path": ".github/workflows/static.yml@refs/heads/main", "status": "in_progress",
             "conclusion": None, **changes}
@@ -39,6 +39,7 @@ class PagesDeployTests(unittest.TestCase):
     def test_mismatch_drift_and_unknown_status_are_rejected(self):
         variants = ({"head_sha": "d" * 40}, {"event": "push"}, {"head_branch": "feature"},
                     {"path": None}, {"status": "surprise"}, {"id": True},
+                    {"run_attempt": 2}, {"run_attempt": None}, {"run_attempt": True},
                     {"status": "completed", "conclusion": None}, {"created_at": "2025-01-01T00:00:00Z"})
         for patch in variants:
             with self.subTest(patch=patch), self.assertRaises(ValueError):
@@ -92,6 +93,40 @@ class PagesDeployTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "active, queued"):
             pages.dispatch(session, generation=GEN, operation=OP, expected_sha=SHA)
         session.post.assert_not_called()
+
+    def test_failed_before_deploy_requires_complete_exact_skipped_job(self):
+        source = {'name': 'source-checks', 'status': 'completed', 'conclusion': 'failure'}
+        deploy = {'name': 'deploy', 'status': 'completed', 'conclusion': 'skipped',
+                  'started_at': '2026-01-01T00:00:00Z', 'steps': []}
+        response, metadata, session = Mock(), Mock(), Mock()
+        response.links = {}
+        response.json.return_value = {'total_count': 2, 'jobs': [source, deploy]}
+        metadata.json.return_value = {'type': 'file', 'sha': next(iter(pages.RECOVERY_WORKFLOW_BLOBS))}
+        session.get.side_effect = lambda url, **_kw: metadata if '/contents/' in url else response
+        pages.failed_before_deploy(session, run(status='completed', conclusion='failure'), expected_sha=SHA)
+        self.assertIn('/actions/runs/100/attempts/1/jobs', session.get.call_args.args[0])
+        invalid = [
+            {'total_count': 3, 'jobs': [source, deploy]},
+            {'total_count': 1, 'jobs': [source]},
+            {'total_count': 2, 'jobs': [source, {**deploy, 'name': 'something-else'}]},
+            {'total_count': 2, 'jobs': [source, {**deploy, 'conclusion': 'failure'}]},
+            {'total_count': 2, 'jobs': [source, {**deploy, 'steps': [{'conclusion': 'success'}]}]},
+            {'total_count': 2, 'jobs': [source, {**deploy, 'steps': None}]},
+            {'total_count': 2, 'jobs': [{**source, 'conclusion': 'success'}, deploy]},
+        ]
+        for value in invalid:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                response.json.return_value = value
+                pages.failed_before_deploy(session, run(), expected_sha=SHA)
+        response.json.return_value = {'total_count': 2, 'jobs': [source, deploy]}
+        response.links = {'next': {'url': 'more'}}
+        with self.assertRaisesRegex(ValueError, 'incomplete'):
+            pages.failed_before_deploy(session, run(), expected_sha=SHA)
+        with self.assertRaisesRegex(ValueError, 'identity'):
+            pages.failed_before_deploy(session, run(run_attempt=2), expected_sha=SHA)
+        metadata.json.return_value = {'type': 'file', 'sha': 'f' * 40}
+        with self.assertRaisesRegex(ValueError, 'not reviewed'):
+            pages.failed_before_deploy(session, run(), expected_sha=SHA)
 
     def test_inputs_cannot_change_repo_or_inject_operation(self):
         session = Mock()

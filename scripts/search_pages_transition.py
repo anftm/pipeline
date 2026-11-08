@@ -42,8 +42,8 @@ def _pending(store, operation: str) -> tuple[tx.Current, dict]:
     current = tx.load(store)
     pending = current.record['pending'] if current is not None else None
     if (current is None or not isinstance(pending, dict) or pending.get('site') != 'pages'
-            or pending.get('operation') != 'apply' or pending.get('operation_id') != operation):
-        raise ValueError('no exact pending Pages apply operation')
+            or pending.get('operation') not in {'apply', 'rollback'} or pending.get('operation_id') != operation):
+        raise ValueError('no exact pending Pages operation')
     tx.audit_history(store, current)
     if store.read_pointer() != search_parent_bytes(current):
         raise ValueError('search desired pointer changed during Pages operation')
@@ -60,7 +60,7 @@ def _main(session) -> str:
 
 def _space_loaded(current: tx.Current, *, api, hub, get) -> None:
     manifest = adoption.validate_generation(hub, current.record['candidate'])
-    configured, _updated = space_deploy.variable(api)
+    configured, updated = space_deploy.variable(api)
     if configured != current.record['candidate']:
         raise ValueError('Space configured generation is not the candidate')
     state = api.get_space_runtime(space_deploy.SPACE)
@@ -68,24 +68,40 @@ def _space_loaded(current: tx.Current, *, api, hub, get) -> None:
         raise ValueError('Space runtime is not running a known revision')
     space_deploy.runtime(api, expected_sha=state.raw['sha'])
     receipts.observe('space', current.record['candidate'], manifest, get=get)
+    if space_deploy.variable(api) != (configured, updated):
+        raise ValueError('Space configuration changed during candidate observation')
+    space_deploy.runtime(api, expected_sha=state.raw['sha'])
 
 
-def prepare(store, *, session, api, hub, get, expected_revision: str, operation_id: str, created_at: str) -> tx.Current:
+def prepare(store, *, session, api, hub, get, expected_revision: str, operation_id: str, created_at: str,
+            rollback: bool = False) -> tx.Current:
     current = tx.load(store)
-    if current is None or current.record['state'] != 'applying' or current.record['pending'] is not None:
+    allowed = {'applying', 'verified', 'rolling-back'} if rollback else {'applying'}
+    if current is None or current.record['state'] not in allowed or current.record['pending'] is not None:
         raise ValueError('search transaction is not ready for Pages')
-    if current.record['observed']['space']['generation'] != current.record['candidate']:
+    tx.audit_history(store, current)
+    if not rollback and current.record['observed']['space']['generation'] != current.record['candidate']:
         raise ValueError('Space has not been durably observed on the candidate')
     if _main(session) != expected_revision:
         raise ValueError('Pages main differs from requested revision')
     deploy.assert_idle(session)
-    _space_loaded(current, api=api, hub=hub, get=get)
+    if not rollback:
+        _space_loaded(current, api=api, hub=hub, get=get)
     parent = current.record['parent_pointer']['desired']
     defaults.observe_pages(parent, session=session)
-    manifest = adoption.validate_generation(hub, parent)
-    receipts.observe('pages', parent, manifest, get=get)
+    observed = current.record['candidate'] if rollback else parent
+    manifest = adoption.validate_generation(hub, observed)
+    receipts.observe('pages', observed, manifest, get=get)
+    if rollback:
+        adoption.validate_generation(hub, parent)
+    if _main(session) != expected_revision:
+        raise ValueError('Pages main changed during intent preparation')
+    defaults.observe_pages(parent, session=session)
+    deploy.assert_idle(session)
+    if not rollback:
+        _space_loaded(current, api=api, hub=hub, get=get)
     return tx.start_site(store, current, site='pages', operation_id=operation_id,
-                         expected_revision=expected_revision, created_at=created_at)
+                         expected_revision=expected_revision, created_at=created_at, rollback=rollback)
 
 
 def apply_once(store, *, session, api, hub, get, operation_id: str) -> dict:
@@ -93,13 +109,17 @@ def apply_once(store, *, session, api, hub, get, operation_id: str) -> dict:
     if deploy.inspect_runs(session, operation=operation_id, not_before=pending['created_at'],
                            expected_sha=pending['expected_revision']) is not None:
         raise ValueError('Pages operation already has a run; reconcile instead of redispatch')
-    _space_loaded(current, api=api, hub=hub, get=get)
+    if pending['operation'] == 'apply':
+        _space_loaded(current, api=api, hub=hub, get=get)
+    target = current.record['parent_pointer']['desired'] if pending['operation'] == 'rollback' else current.record['candidate']
+    if pending['operation'] == 'rollback':
+        adoption.validate_generation(hub, target)
+    defaults.observe_pages(current.record['parent_pointer']['desired'], session=session)
     # A run not yet visible does not prove a prior dispatch was never sent.
     # Persist a unique write claim before issuing the one allowed request.
-    current = tx.claim_write(store, current, site='pages', operation='apply', operation_id=operation_id)
+    current = tx.claim_write(store, current, site='pages', operation=pending['operation'], operation_id=operation_id)
     tx.check_write_claim(store, current)
-    deploy.dispatch(session, generation=current.record['candidate'], operation=operation_id,
-                    expected_sha=pending['expected_revision'])
+    deploy.dispatch(session, generation=target, operation=operation_id, expected_sha=pending['expected_revision'])
     return {'kind': 'search-pages-dispatch', 'operation': operation_id, 'dispatch_confirmed': True,
             'loaded_verified': False, 'journal_advanced': False, 'external_writers_verified': False}
 
@@ -119,22 +139,67 @@ def reconcile(store, *, session, api, hub, get, operation_id: str) -> dict:
     if _main(session) != pending['expected_revision']:
         raise ValueError('Pages main changed before deployment acceptance')
     deploy.assert_idle(session)
-    _space_loaded(current, api=api, hub=hub, get=get)
+    if pending['operation'] == 'apply':
+        _space_loaded(current, api=api, hub=hub, get=get)
+    target = current.record['parent_pointer']['desired'] if pending['operation'] == 'rollback' else current.record['candidate']
     defaults.observe_pages(current.record['parent_pointer']['desired'], session=session)
-    manifest = adoption.validate_generation(hub, current.record['candidate'])
-    actual = receipts.observe('pages', current.record['candidate'], manifest, get=get)
+    manifest = adoption.validate_generation(hub, target)
+    actual = receipts.observe('pages', target, manifest, get=get)
     if _main(session) != pending['expected_revision'] or store.read_pointer() != search_parent_bytes(current):
         raise ValueError('Pages or desired pointer changed during acceptance')
+    defaults.observe_pages(current.record['parent_pointer']['desired'], session=session)
     deploy.assert_idle(session)
-    result = tx.observe_site(store, current, site='pages', generation=current.record['candidate'], receipt=actual)
-    return {'kind': 'search-pages-observation', 'operation': operation_id, 'status': 'candidate-loaded',
-            'run_id': run['id'], 'generation': result.record['candidate'], 'sequence': result.record['sequence'],
+    if pending['operation'] == 'apply':
+        _space_loaded(current, api=api, hub=hub, get=get)
+    result = tx.observe_site(store, current, site='pages', generation=target, receipt=actual)
+    status = 'parent-loaded' if pending['operation'] == 'rollback' else 'candidate-loaded'
+    return {'kind': 'search-pages-observation', 'operation': operation_id, 'status': status,
+            'run_id': run['id'], 'generation': target, 'sequence': result.record['sequence'],
             'journal_advanced': True, 'external_writers_verified': False}
+
+
+def recover_failed_apply(store, *, session, hub, get, operation_id: str) -> dict:
+    """Record parent after a reviewed workflow failed before deployment.
+
+    Operators must coordinate both writers and anyone able to re-run the Pages
+    workflow. A terminal response and two queue observations are not a fence;
+    a failed deploy, missing run or unreviewed topology remains unresolved.
+    """
+    current, pending = _pending(store, operation_id)
+    if pending['operation'] != 'apply':
+        raise ValueError('only a failed apply can be accepted on the parent')
+    run = deploy.inspect_runs(session, operation=operation_id, not_before=pending['created_at'],
+                              expected_sha=pending['expected_revision'])
+    if (run is None or run.get('status') != 'completed'
+            or run.get('conclusion') not in {'failure', 'cancelled', 'timed_out'}):
+        raise ValueError('no exact terminal failed Pages run; keep intent pending')
+    deploy.failed_before_deploy(session, run, expected_sha=pending['expected_revision'])
+    if _main(session) != pending['expected_revision']:
+        raise ValueError('Pages main changed before failed-run recovery')
+    deploy.assert_idle(session)
+    parent = current.record['parent_pointer']['desired']
+    defaults.observe_pages(parent, session=session)
+    manifest = adoption.validate_generation(hub, parent)
+    actual = receipts.observe('pages', parent, manifest, get=get)
+    if _main(session) != pending['expected_revision'] or store.read_pointer() != search_parent_bytes(current):
+        raise ValueError('Pages or desired pointer changed during failed-run recovery')
+    defaults.observe_pages(parent, session=session)
+    deploy.assert_idle(session)
+    later = deploy.inspect_runs(session, operation=operation_id, not_before=pending['created_at'],
+                               expected_sha=pending['expected_revision'])
+    if later != run:
+        raise ValueError('Pages run changed during failed-run recovery')
+    deploy.failed_before_deploy(session, later, expected_sha=pending['expected_revision'])
+    result = tx.observe_failed_apply(store, current, site='pages', receipt=actual)
+    return {'kind': 'search-pages-failed-apply-observation', 'operation': operation_id,
+            'run_id': run['id'], 'status': 'parent-loaded', 'generation': parent,
+            'sequence': result.record['sequence'], 'journal_advanced': True, 'external_writers_verified': False}
 
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--mode', required=True, choices=('prepare', 'apply', 'reconcile'))
+    parser.add_argument('--mode', required=True, choices=('prepare', 'rollback-prepare', 'apply', 'reconcile',
+                                                          'recover-failed-apply'))
     parser.add_argument('--expected-revision', default='')
     parser.add_argument('--operation', default='')
     args = parser.parse_args(argv)
@@ -146,18 +211,21 @@ def main(argv=None) -> int:
                                                            'Accept': 'application/vnd.github+json',
                                                            'User-Agent': 'pipeline-search-pages-transition/1.0'})
     api = HfApi(token=os.environ.get('HF_TOKEN')); hub = HubBucketStore(); store = tx.S3TransitionStore()
-    if args.mode == 'prepare':
+    if args.mode in {'prepare', 'rollback-prepare'}:
         if not REV.fullmatch(args.expected_revision) or args.operation:
             raise ValueError('prepare requires one exact Pages revision and no caller operation ID')
         op = secrets.token_hex(16); now = datetime.now(UTC).isoformat(timespec='seconds').replace('+00:00', 'Z')
         print(json.dumps({'kind': 'search-pages-intent-start', 'operation': op, 'revision': args.expected_revision},
                          sort_keys=True), flush=True)
         current = prepare(store, session=session, api=api, hub=hub, get=bounded_get,
-                          expected_revision=args.expected_revision, operation_id=op, created_at=now)
+                          expected_revision=args.expected_revision, operation_id=op, created_at=now,
+                          rollback=args.mode == 'rollback-prepare')
         result = {'kind': 'search-pages-intent', 'operation': op, 'sequence': current.record['sequence'],
                   'candidate': current.record['candidate'], 'site_changed': False, 'pointer_written': False}
     elif args.mode == 'apply':
         result = apply_once(store, session=session, api=api, hub=hub, get=bounded_get, operation_id=args.operation)
+    elif args.mode == 'recover-failed-apply':
+        result = recover_failed_apply(store, session=session, hub=hub, get=bounded_get, operation_id=args.operation)
     else:
         result = reconcile(store, session=session, api=api, hub=hub, get=bounded_get, operation_id=args.operation)
     print(json.dumps(result, ensure_ascii=False, sort_keys=True), flush=True)

@@ -30,37 +30,54 @@ except ImportError:
 SHA = re.compile(r'[0-9a-f]{40}\Z')
 
 
-def prepare(store, *, api, expected_revision: str, operation_id: str, created_at: str) -> tx.Current:
+def prepare(store, *, api, expected_revision: str, operation_id: str, created_at: str,
+            rollback: bool = False, hub=None, get=None) -> tx.Current:
     current = tx.load(store)
-    if current is None or current.record['state'] not in {'prepared', 'applying'} or current.record['pending'] is not None:
+    allowed = {'applying', 'verified', 'rolling-back'} if rollback else {'prepared', 'applying'}
+    if current is None or current.record['state'] not in allowed or current.record['pending'] is not None:
         raise ValueError('search transaction is not ready for a Space operation')
     tx.audit_history(store, current)
-    parent = current.record['parent_pointer']['desired']
-    if current.record['observed']['space']['generation'] != parent:
-        raise ValueError('Space does not have the expected parent observation')
+    expected = current.record['candidate'] if rollback else current.record['parent_pointer']['desired']
+    if current.record['observed']['space']['generation'] != expected:
+        raise ValueError('Space does not have the expected source observation')
     deploy.runtime(api, expected_sha=expected_revision)
     configured, updated = deploy.variable(api)
-    if configured != parent:
-        raise ValueError('Space configured generation differs from expected parent')
+    if configured != expected:
+        raise ValueError('Space configured generation differs from expected source')
+    if rollback:
+        if hub is None or get is None:
+            raise ValueError('Space rollback requires fresh generation and consumer checks')
+        manifest = adoption.validate_generation(hub, expected)
+        receipts.observe('space', expected, manifest, get=get)
+        adoption.validate_generation(hub, current.record['parent_pointer']['desired'])
+        if deploy.variable(api) != (configured, updated):
+            raise ValueError('Space configuration changed during rollback preparation')
+        deploy.runtime(api, expected_sha=expected_revision)
     return tx.start_site(store, current, site='space', operation_id=operation_id, expected_revision=expected_revision,
-                         created_at=created_at, config_before={'generation': configured, 'updated_at': updated})
+                         created_at=created_at, config_before={'generation': configured, 'updated_at': updated},
+                         rollback=rollback)
 
 
-def apply_once(store, *, api, operation_id: str) -> dict:
+def apply_once(store, *, api, operation_id: str, hub=None) -> dict:
     current = tx.load(store)
     pending = current.record['pending'] if current is not None else None
     if (current is None or not isinstance(pending, dict) or pending.get('site') != 'space'
-            or pending.get('operation') != 'apply' or pending.get('operation_id') != operation_id):
-        raise ValueError('no exact pending Space apply operation')
+            or pending.get('operation') not in {'apply', 'rollback'} or pending.get('operation_id') != operation_id):
+        raise ValueError('no exact pending Space operation')
     if store.read_pointer() != search_parent_bytes(current):
         raise ValueError('search desired pointer changed before Space update')
+    if pending['operation'] == 'rollback':
+        if hub is None:
+            raise ValueError('Space rollback requires a fresh target generation check')
+        adoption.validate_generation(hub, current.record['parent_pointer']['desired'])
     # Consume a single durable write opportunity, even if the process crashes
     # before the API call. Unknown outcomes are reconciled, never replayed.
-    current = tx.claim_write(store, current, site='space', operation='apply', operation_id=operation_id)
+    current = tx.claim_write(store, current, site='space', operation=pending['operation'], operation_id=operation_id)
     tx.check_write_claim(store, current)
     before = pending['config_before']
+    target = current.record['parent_pointer']['desired'] if pending['operation'] == 'rollback' else current.record['candidate']
     deploy.set_generation(api, expected=before['generation'], expected_updated_at=before['updated_at'],
-                          target=current.record['candidate'], expected_sha=pending['expected_revision'])
+                          target=target, expected_sha=pending['expected_revision'])
     return {'kind': 'search-space-update-request', 'operation': operation_id, 'variable_written': True,
             'loaded_verified': False, 'journal_advanced': False, 'external_writers_verified': False}
 
@@ -77,18 +94,20 @@ def reconcile(store, *, api, hub, get, operation_id: str) -> dict:
     current = tx.load(store)
     pending = current.record['pending'] if current is not None else None
     if (current is None or not isinstance(pending, dict) or pending.get('site') != 'space'
-            or pending.get('operation') != 'apply' or pending.get('operation_id') != operation_id):
-        raise ValueError('no exact pending Space apply operation')
+            or pending.get('operation') not in {'apply', 'rollback'} or pending.get('operation_id') != operation_id):
+        raise ValueError('no exact pending Space operation')
     tx.audit_history(store, current)
     if store.read_pointer() != search_parent_bytes(current):
         raise ValueError('search desired pointer changed before Space reconciliation')
     configured, updated = deploy.variable(api)
-    parent = pending['config_before']['generation']
-    if configured == parent:
-        return {'kind': 'search-space-observation', 'operation': operation_id, 'status': 'parent-configured',
+    source = pending['config_before']['generation']
+    target = current.record['parent_pointer']['desired'] if pending['operation'] == 'rollback' else current.record['candidate']
+    if configured == source:
+        status = 'candidate-configured' if pending['operation'] == 'rollback' else 'parent-configured'
+        return {'kind': 'search-space-observation', 'operation': operation_id, 'status': status,
                 'journal_advanced': False, 'external_writers_verified': False}
-    if configured != current.record['candidate']:
-        raise ValueError('Space configuration is neither parent nor candidate')
+    if configured != target:
+        raise ValueError('Space configuration is neither the source nor the requested target')
     if deploy._timestamp(updated) < deploy._timestamp(pending['config_before']['updated_at']):
         raise ValueError('Space configuration timestamp moved backwards')
     state = api.get_space_runtime(deploy.SPACE)
@@ -98,39 +117,49 @@ def reconcile(store, *, api, hub, get, operation_id: str) -> dict:
     if state.stage != 'RUNNING' or not isinstance(state.raw, dict) or state.raw.get('sha') != pending['expected_revision']:
         raise ValueError('Space runtime is unavailable or running an unexpected revision')
     deploy.runtime(api, expected_sha=pending['expected_revision'])
-    manifest = adoption.validate_generation(hub, current.record['candidate'])
-    actual = receipts.observe('space', current.record['candidate'], manifest, get=get)
+    manifest = adoption.validate_generation(hub, target)
+    actual = receipts.observe('space', target, manifest, get=get)
     if store.read_pointer() != search_parent_bytes(current):
         raise ValueError('search desired pointer changed during Space reconciliation')
     configured_after, updated_after = deploy.variable(api)
     if (configured_after, updated_after) != (configured, updated):
         raise ValueError('Space configuration changed during reconciliation')
     deploy.runtime(api, expected_sha=pending['expected_revision'])
-    result = tx.observe_site(store, current, site='space', generation=current.record['candidate'], receipt=actual)
-    return {'kind': 'search-space-observation', 'operation': operation_id, 'status': 'candidate-loaded',
-            'generation': result.record['candidate'], 'journal_advanced': True, 'sequence': result.record['sequence'],
+    result = tx.observe_site(store, current, site='space', generation=target, receipt=actual)
+    status = 'parent-loaded' if pending['operation'] == 'rollback' else 'candidate-loaded'
+    return {'kind': 'search-space-observation', 'operation': operation_id, 'status': status,
+            'generation': target, 'journal_advanced': True, 'sequence': result.record['sequence'],
             'external_writers_verified': False}
 
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--mode', required=True, choices=('prepare', 'apply', 'reconcile'))
+    parser.add_argument('--mode', required=True, choices=('prepare', 'rollback-prepare', 'apply', 'reconcile'))
     parser.add_argument('--expected-revision', default='')
     parser.add_argument('--operation', default='')
     args = parser.parse_args(argv)
     from huggingface_hub import HfApi
     api = HfApi(token=os.environ.get('HF_TOKEN')); store = tx.S3TransitionStore()
-    if args.mode == 'prepare':
+    if args.mode in {'prepare', 'rollback-prepare'}:
         if not SHA.fullmatch(args.expected_revision) or args.operation:
             raise ValueError('prepare requires one exact Space revision and no caller operation ID')
         op = secrets.token_hex(16); now = datetime.now(UTC).isoformat(timespec='seconds').replace('+00:00', 'Z')
         print(json.dumps({'kind': 'search-space-intent-start', 'operation': op, 'revision': args.expected_revision},
                          sort_keys=True), flush=True)
-        current = prepare(store, api=api, expected_revision=args.expected_revision, operation_id=op, created_at=now)
+        if args.mode == 'rollback-prepare':
+            try:
+                from .search_daily import bounded_get
+            except ImportError:
+                from search_daily import bounded_get
+            current = prepare(store, api=api, expected_revision=args.expected_revision, operation_id=op,
+                              created_at=now, rollback=True, hub=HubBucketStore(), get=bounded_get)
+        else:
+            current = prepare(store, api=api, expected_revision=args.expected_revision, operation_id=op,
+                              created_at=now)
         result = {'kind': 'search-space-intent', 'operation': op, 'sequence': current.record['sequence'],
                   'candidate': current.record['candidate'], 'site_changed': False, 'pointer_written': False}
     elif args.mode == 'apply':
-        result = apply_once(store, api=api, operation_id=args.operation)
+        result = apply_once(store, api=api, operation_id=args.operation, hub=HubBucketStore())
     else:
         try:
             from .search_daily import bounded_get

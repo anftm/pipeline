@@ -30,7 +30,7 @@ class SearchSpaceTransitionTests(SearchTransitionTests):
         self.assertEqual(flow['permissions'], {'contents': 'read'})
         self.assertEqual(flow['concurrency']['group'], 'daily-sync')
         inputs = flow['on']['workflow_dispatch']['inputs']
-        self.assertEqual(inputs['mode']['options'], ['prepare', 'apply', 'reconcile'])
+        self.assertEqual(inputs['mode']['options'], ['prepare', 'rollback-prepare', 'apply', 'reconcile'])
         self.assertEqual(inputs['known_writers_coordinated']['default'], 'false')
         commands = '\n'.join(step.get('run', '') for step in flow['jobs']['switch']['steps'])
         self.assertIn('[[ "$WRITERS" == \'true\' ]]', commands)
@@ -138,6 +138,54 @@ class SearchSpaceTransitionTests(SearchTransitionTests):
             result = subject.reconcile(self.s, api=api, hub=Mock(), get=lambda *_: b'', operation_id='3' * 32)
         self.assertEqual(result['status'], 'candidate-loaded'); self.assertTrue(result['journal_advanced'])
         self.assertEqual(subject.tx.load(self.s).record['observed']['space']['generation'], B)
+
+    def test_space_rollback_claims_once_and_accepts_only_loaded_parent(self):
+        _current, api = self.prepare_space()
+        api.get_space_runtime.return_value = SimpleNamespace(stage='RUNNING', raw={'sha': REV})
+        with patch.object(subject.deploy, 'variable', return_value=(B, TIME)), \
+                patch.object(subject.deploy, 'runtime', return_value={'sha': REV}), \
+                patch.object(subject.adoption, 'validate_generation', return_value={'generation': B}), \
+                patch.object(subject.receipts, 'observe', return_value=receipt('space', B)):
+            subject.reconcile(self.s, api=api, hub=Mock(), get=lambda *_: b'', operation_id='3' * 32)
+            c = subject.prepare(self.s, api=api, expected_revision=REV, operation_id='5' * 32,
+                                created_at=TIME, rollback=True, hub=Mock(), get=lambda *_: b'')
+        self.assertEqual(c.record['pending']['operation'], 'rollback')
+        with patch.object(subject.deploy, 'set_generation', side_effect=TimeoutError('lost')) as send, \
+                patch.object(subject.adoption, 'validate_generation', return_value={'generation': A}):
+            with self.assertRaises(TimeoutError):
+                subject.apply_once(self.s, api=api, operation_id='5' * 32, hub=Mock())
+            self.assertEqual(send.call_args.kwargs['target'], A)
+            with self.assertRaisesRegex(ValueError, 'already claimed'):
+                subject.apply_once(self.s, api=api, operation_id='5' * 32, hub=Mock())
+            send.assert_called_once()
+        with patch.object(subject.deploy, 'variable', return_value=(B, TIME)):
+            result = subject.reconcile(self.s, api=api, hub=Mock(), get=lambda *_: b'', operation_id='5' * 32)
+        self.assertEqual(result['status'], 'candidate-configured')
+        self.assertFalse(result['journal_advanced'])
+        with patch.object(subject.deploy, 'variable', return_value=(A, TIME)), \
+                patch.object(subject.deploy, 'runtime', return_value={'sha': REV}), \
+                patch.object(subject.adoption, 'validate_generation', return_value={'generation': A}), \
+                patch.object(subject.receipts, 'observe', return_value=receipt('space', A)):
+            result = subject.reconcile(self.s, api=api, hub=Mock(), get=lambda *_: b'', operation_id='5' * 32)
+        self.assertEqual(result['status'], 'parent-loaded')
+        self.assertEqual(subject.tx.load(self.s).record['state'], 'rolling-back')
+        self.assertEqual(subject.tx.load(self.s).record['observed']['space']['generation'], A)
+
+    def test_rollback_preparation_rejects_missing_target_or_source_evidence(self):
+        c = self.begin()
+        c = self.start_site(c, site='space', operation_id='3' * 32)
+        self.observe(c, 'space', B, b'candidate')
+        api = Mock()
+        with patch.object(subject.deploy, 'runtime'), \
+                patch.object(subject.deploy, 'variable', return_value=(B, TIME)):
+            with self.assertRaisesRegex(ValueError, 'fresh generation'):
+                subject.prepare(self.s, api=api, expected_revision=REV, operation_id='5' * 32,
+                                created_at=TIME, rollback=True)
+            with patch.object(subject.adoption, 'validate_generation', side_effect=ValueError('object missing')):
+                with self.assertRaisesRegex(ValueError, 'object missing'):
+                    subject.prepare(self.s, api=api, expected_revision=REV, operation_id='5' * 32,
+                                    created_at=TIME, rollback=True, hub=Mock(), get=lambda *_: b'')
+        self.assertIsNone(subject.tx.load(self.s).record['pending'])
 
     def test_foreign_state_revision_or_pointer_cannot_advance(self):
         _current, api = self.prepare_space(); api.get_space_runtime.return_value = SimpleNamespace(stage='RUNNING', raw={'sha': 'f' * 40})

@@ -42,6 +42,7 @@ class FinalizeTests(unittest.TestCase):
         self.assertEqual(flow['on']['workflow_dispatch']['inputs']['known_writers_coordinated']['default'], 'false')
         self.assertIn('reconcile-pointer', flow['on']['workflow_dispatch']['inputs']['mode']['options'])
         self.assertIn('pages-default-reconcile', flow['on']['workflow_dispatch']['inputs']['mode']['options'])
+        self.assertIn('rollback-finish', flow['on']['workflow_dispatch']['inputs']['mode']['options'])
 
     def test_pointer_write_after_both_actual_receipts_and_lost_response(self):
         current = self.marked(); self.assertEqual(current.record['state'], 'publishing')
@@ -114,6 +115,30 @@ class FinalizeTests(unittest.TestCase):
             current = subject.reconcile_pages_default(self.store, **self.common, operation='8' * 32)
         self.assertEqual(current.record['defaults']['pages']['generation'], B)
         self.session.patch.assert_called_once()
+
+    def test_rollback_finish_reads_both_live_consumers_and_defaults(self):
+        current = self.current
+        for site, op in (('pages', '5' * 32), ('space', '6' * 32)):
+            kwargs = {'config_before': {'generation': B, 'updated_at': TIME}} if site == 'space' else {}
+            current = subject.tx.start_site(self.store, current, site=site, operation_id=op,
+                                            expected_revision=REV, created_at=TIME, rollback=True, **kwargs)
+            current = subject.tx.observe_site(self.store, current, site=site, generation=A, receipt=receipt(site, A))
+        self.assertEqual(current.record['state'], 'rolling-back')
+        self.api.get_space_runtime.return_value = Mock(stage='RUNNING', raw={'sha': REV})
+        self.session.get.return_value.json.return_value = {'commit': {'sha': REV}}
+        with patch.object(subject.adoption, 'validate_generation', return_value={}), \
+                patch.object(subject.pages, 'assert_idle'), patch.object(subject.space, 'runtime'), \
+                patch.object(subject.space, 'variable', return_value=(A, TIME)), \
+                patch.object(subject.defaults, 'observe_pages', return_value=default_receipt('pages', A)), \
+                patch.object(subject.defaults, 'observe_space', return_value=default_receipt('space', A)), \
+                patch.object(subject.consumers, 'observe', side_effect=lambda site, generation, *_a, **_k: receipt(site, generation)) as observe:
+            result = subject.finish_rollback(self.store, session=self.session, api=self.api, hub=self.hub,
+                                             get=lambda *_: b'')
+        self.assertEqual(result.record['state'], 'rolled-back')
+        self.assertEqual(observe.call_count, 2)
+        self.assertEqual(self.store.pointer, make_pointer(A, None, '0' * 32))
+        self.session.patch.assert_not_called()
+        self.assertEqual(subject.tx.audit_history(self.store, result), 10)
 
     def test_foreign_or_missing_pending_default_never_writes(self):
         self.pointer_observed()
