@@ -159,8 +159,14 @@ def validate_record(raw: bytes) -> dict:
             raise ValueError("default observation is outside this transition")
     pending = value["pending"]
     if pending is not None:
-        pending = _exact(pending, {"site", "operation", "operation_id", "expected_revision", "created_at",
-                                   "config_before"})
+        fields = {"site", "operation", "operation_id", "expected_revision", "created_at", "config_before"}
+        # Pending operations written by older versions have no write_claim. They
+        # remain readable/reconcilable, but cannot be newly claimed for writing.
+        if isinstance(pending, dict) and "write_claim" in pending:
+            fields.add("write_claim")
+        pending = _exact(pending, fields)
+        if "write_claim" in pending and pending["write_claim"] is not None:
+            _id(pending["write_claim"])
         if (not isinstance(pending["site"], str) or pending["site"] not in SITES
                 or not isinstance(pending["operation"], str)
                 or pending["operation"] not in {"apply", "rollback", "set-default"}):
@@ -235,11 +241,19 @@ def validate_advance(previous: dict, value: dict, *, prior_digest: str) -> None:
     before, after = previous["observed"], value["observed"]
     defaults_before, defaults_after = previous["defaults"], value["defaults"]
     old_pending, new_pending = previous["pending"], value["pending"]
+    if old_pending is not None and new_pending is not None:
+        if ("write_claim" not in old_pending or old_pending["write_claim"] is not None
+                or "write_claim" not in new_pending or new_pending["write_claim"] is None
+                or {**old_pending, "write_claim": new_pending["write_claim"]} != new_pending
+                or a != b or before != after or defaults_before != defaults_after):
+            raise ValueError("invalid site write claim")
+        return
     if old_pending is None and new_pending is not None:
         allowed = {"apply": {"prepared", "applying"},
                    "rollback": {"prepared", "applying", "verified", "rolling-back"},
                    "set-default": {"pointer-observed"}}[new_pending["operation"]]
-        if a not in allowed or before != after or defaults_before != defaults_after:
+        if (a not in allowed or before != after or defaults_before != defaults_after
+                or ("write_claim" in new_pending and new_pending["write_claim"] is not None)):
             raise ValueError("invalid site-operation intent")
         return
     if old_pending is not None and new_pending is None:
@@ -498,8 +512,52 @@ def start_site(store: TransitionStore, current: Current, *, site: str, operation
     if store.read_pointer() != search_snapshot.canonical(current.record["parent_pointer"]):
         raise ValueError("actual pointer changed before site operation")
     pending = {"site": site, "operation": "rollback" if rollback else "apply", "operation_id": operation_id,
-               "expected_revision": expected_revision, "created_at": created_at, "config_before": config_before}
+               "expected_revision": expected_revision, "created_at": created_at, "config_before": config_before,
+               "write_claim": None}
     return _commit(store, _next(current, state="rolling-back" if rollback else "applying", pending=pending), current)
+
+
+def _write_pointer(current: Current, pending: dict) -> bytes:
+    if pending["operation"] == "set-default":
+        return make_pointer(current.record["candidate"], current.record["parent_pointer"]["desired"],
+                            current.record["transition"])
+    return search_snapshot.canonical(current.record["parent_pointer"])
+
+
+def claim_write(store: TransitionStore, current: Current, *, site: str, operation: str,
+                operation_id: str) -> Current:
+    """Durably consume one write opportunity before any non-CAS remote call.
+
+    Each caller gets a distinct claim identity. A failed or interrupted caller
+    must reconcile, never claim or send the same operation again. This CAS only
+    coordinates participants using this journal; it is not an external fence.
+    """
+    pending = current.record["pending"]
+    if (not isinstance(pending, dict) or pending.get("site") != site
+            or pending.get("operation") != operation or pending.get("operation_id") != operation_id):
+        raise ValueError("no exact pending write operation")
+    if "write_claim" not in pending or pending["write_claim"] is not None:
+        raise ValueError("write opportunity already claimed or legacy intent; reconcile instead")
+    active = load(store)
+    if active is None or active.head_raw != current.head_raw or active.etag != current.etag:
+        raise ValueError("transition head changed before write claim")
+    audit_history(store, current)
+    if store.read_pointer() != _write_pointer(current, pending):
+        raise ValueError("actual pointer changed before write claim")
+    claimed = {**pending, "write_claim": uuid.uuid4().hex}
+    return _commit(store, _next(current, pending=claimed), current)
+
+
+def check_write_claim(store: TransitionStore, current: Current) -> None:
+    """Recheck the exact claim and pointer immediately before the remote call."""
+    pending = current.record["pending"]
+    if not isinstance(pending, dict) or not isinstance(pending.get("write_claim"), str):
+        raise ValueError("site write is not claimed")
+    active = load(store)
+    if active is None or active.head_raw != current.head_raw or active.etag != current.etag:
+        raise ValueError("transition head changed after write claim")
+    if store.read_pointer() != _write_pointer(current, pending):
+        raise ValueError("actual pointer changed after write claim")
 
 
 def observe_site(store: TransitionStore, current: Current, *, site: str, generation: str, receipt: bytes) -> Current:
@@ -588,7 +646,8 @@ def start_default(store: TransitionStore, current: Current, *, site: str, operat
     if store.read_pointer() != intended:
         raise ValueError("actual pointer changed before default-configuration operation")
     pending = {"site": site, "operation": "set-default", "operation_id": operation_id,
-               "expected_revision": expected_revision, "created_at": created_at, "config_before": None}
+               "expected_revision": expected_revision, "created_at": created_at, "config_before": None,
+               "write_claim": None}
     return _commit(store, _next(current, pending=pending), current)
 
 

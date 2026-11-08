@@ -77,6 +77,44 @@ class FinalizeTests(unittest.TestCase):
             current = subject.finish(self.store, **self.common)
         self.assertEqual(current.record['state'], 'complete')
 
+    def test_space_default_read_only_recovery_after_interruption(self):
+        self.pointer_observed()
+        with patch.object(subject.space, 'runtime'), \
+                patch.object(subject.defaults, 'observe_space', side_effect=TimeoutError('read interrupted')):
+            with self.assertRaises(TimeoutError):
+                subject.observe_space_default(self.store, **self.common, expected_revision=REV,
+                                              operation=OP, created_at=TIME)
+        interrupted = subject.tx.load(self.store)
+        pending = interrupted.record['pending']
+        self.assertEqual(pending['operation_id'], OP)
+        with patch.object(subject.space, 'runtime'), \
+                patch.object(subject.defaults, 'observe_space', return_value=default_receipt('space', B)):
+            current = subject.observe_space_default(self.store, **self.common, expected_revision=REV,
+                                                     operation='7' * 32, created_at=TIME)
+        self.assertIsNone(current.record['pending'])
+        self.assertEqual(current.record['defaults']['space']['generation'], B)
+        self.assertEqual(current.record['sequence'], interrupted.record['sequence'] + 1)
+        self.session.patch.assert_not_called()
+
+    def test_lost_pages_default_response_cannot_be_patched_again(self):
+        self.pointer_observed()
+        self.session.get.return_value.json.return_value = {'commit': {'sha': REV}}
+        self.session.patch.side_effect = TimeoutError('response lost')
+        with patch.object(subject.pages, 'assert_idle'), \
+                patch.object(subject.defaults, 'observe_pages', return_value=default_receipt('pages', A)):
+            subject.start_pages_default(self.store, session=self.session, expected_revision=REV,
+                                        operation='8' * 32, created_at=TIME)
+            with self.assertRaises(TimeoutError):
+                subject.set_pages_default(self.store, **self.common, operation='8' * 32)
+            with self.assertRaisesRegex(ValueError, 'already claimed'):
+                subject.set_pages_default(self.store, **self.common, operation='8' * 32)
+        self.session.patch.assert_called_once()
+        self.assertIsNotNone(subject.tx.load(self.store).record['pending']['write_claim'])
+        with patch.object(subject.defaults, 'observe_pages', return_value=default_receipt('pages', B)):
+            current = subject.reconcile_pages_default(self.store, **self.common, operation='8' * 32)
+        self.assertEqual(current.record['defaults']['pages']['generation'], B)
+        self.session.patch.assert_called_once()
+
     def test_foreign_or_missing_pending_default_never_writes(self):
         self.pointer_observed()
         with self.assertRaisesRegex(ValueError, 'no exact'):

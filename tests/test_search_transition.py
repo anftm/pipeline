@@ -352,6 +352,73 @@ class SearchTransitionTests(unittest.TestCase):
         self.assertEqual(current.record["pending"]["created_at"], WHEN)
         self.assertEqual(current.record["pending"]["config_before"]["generation"], A)
 
+    def test_unique_claim_is_durable_and_blocks_replay_and_stale_callers(self):
+        c = self.begin()
+        c = self.start_site(c, site='pages', operation_id='3' * 32)
+        claimed = tx.claim_write(self.s, c, site='pages', operation='apply', operation_id='3' * 32)
+        self.assertRegex(claimed.record['pending']['write_claim'], r'^[0-9a-f]{32}$')
+        self.assertEqual(tx.audit_history(self.s, claimed), 3)
+        tx.check_write_claim(self.s, claimed)
+        with self.assertRaisesRegex(ValueError, 'already claimed'):
+            tx.claim_write(self.s, claimed, site='pages', operation='apply', operation_id='3' * 32)
+        with self.assertRaisesRegex(ValueError, 'head changed'):
+            tx.claim_write(self.s, c, site='pages', operation='apply', operation_id='3' * 32)
+        other = tx.observe_site(self.s, claimed, site='pages', generation=B, receipt=receipt('pages', B))
+        with self.assertRaisesRegex(ValueError, 'head changed'):
+            tx.check_write_claim(self.s, claimed)
+        self.assertEqual(other.record['state'], 'applying')
+
+    def test_distinct_claims_racing_on_same_head_do_not_both_win(self):
+        c = self.begin()
+        c = self.start_site(c, site='pages', operation_id='3' * 32)
+        winner = tx.claim_write(self.s, c, site='pages', operation='apply', operation_id='3' * 32)
+        with self.assertRaisesRegex(ValueError, 'CAS conflict'):
+            tx._commit(self.s, tx._next(c, pending={**c.record['pending'], 'write_claim': 'f' * 32}), c)
+        self.assertEqual(tx.load(self.s), winner)
+        self.assertNotEqual(winner.record['pending']['write_claim'], 'f' * 32)
+
+    def test_claim_cas_lost_response_does_not_retry_or_authorize_another_caller(self):
+        c = self.begin()
+        c = self.start_site(c, site='pages', operation_id='3' * 32)
+        before = self.s.writes
+        self.s.fail_head = 'after'
+        claimed = tx.claim_write(self.s, c, site='pages', operation='apply', operation_id='3' * 32)
+        self.assertEqual(self.s.writes, before + 1)
+        self.assertEqual(tx.load(self.s).record['pending']['write_claim'], claimed.record['pending']['write_claim'])
+        with self.assertRaisesRegex(ValueError, 'already claimed'):
+            tx.claim_write(self.s, tx.load(self.s), site='pages', operation='apply', operation_id='3' * 32)
+        self.assertEqual(self.s.writes, before + 1)
+
+    def test_legacy_pending_can_be_observed_but_never_claimed(self):
+        initial = self.begin()
+        current = self.start_site(initial, site='pages', operation_id='3' * 32)
+        legacy = {**current.record, 'pending': {k: v for k, v in current.record['pending'].items() if k != 'write_claim'}}
+        raw = search_snapshot.canonical(legacy)
+        key = tx.record_key(legacy, raw)
+        self.s.records[key] = raw
+        self.s.head = search_snapshot.canonical({**current.head, 'record': hashlib.sha256(raw).hexdigest()})
+        loaded = tx.load(self.s)
+        with self.assertRaisesRegex(ValueError, 'legacy intent'):
+            tx.claim_write(self.s, loaded, site='pages', operation='apply', operation_id='3' * 32)
+        done = tx.observe_site(self.s, loaded, site='pages', generation=B, receipt=receipt('pages', B))
+        self.assertEqual(done.record['state'], 'applying')
+        self.assertEqual(tx.audit_history(self.s, done), 3)
+
+    def test_claim_rejects_changed_pointer_and_forged_claim_mutations(self):
+        c = self.begin()
+        c = self.start_site(c, site='pages', operation_id='3' * 32)
+        self.s.pointer = make_pointer(C, A, T2)
+        with self.assertRaisesRegex(ValueError, 'pointer changed'):
+            tx.claim_write(self.s, c, site='pages', operation='apply', operation_id='3' * 32)
+        self.s.pointer = make_pointer(A, None, '0' * 32)
+        claimed = tx.claim_write(self.s, c, site='pages', operation='apply', operation_id='3' * 32)
+        self.s.pointer = make_pointer(C, A, T2)
+        with self.assertRaisesRegex(ValueError, 'pointer changed'):
+            tx.check_write_claim(self.s, claimed)
+        forged = tx._next(claimed, pending={**claimed.record['pending'], 'write_claim': 'f' * 32})
+        with self.assertRaisesRegex(ValueError, 'invalid site write claim'):
+            tx.validate_advance(claimed.record, forged, prior_digest=claimed.head['record'])
+
     def test_s3_adapter_confines_keys_and_conditions(self):
         backing = Mock()
         backing._location.return_value = ("vomebook", "search-data-v1")

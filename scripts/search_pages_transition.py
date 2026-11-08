@@ -94,6 +94,10 @@ def apply_once(store, *, session, api, hub, get, operation_id: str) -> dict:
                            expected_sha=pending['expected_revision']) is not None:
         raise ValueError('Pages operation already has a run; reconcile instead of redispatch')
     _space_loaded(current, api=api, hub=hub, get=get)
+    # A run not yet visible does not prove a prior dispatch was never sent.
+    # Persist a unique write claim before issuing the one allowed request.
+    current = tx.claim_write(store, current, site='pages', operation='apply', operation_id=operation_id)
+    tx.check_write_claim(store, current)
     deploy.dispatch(session, generation=current.record['candidate'], operation=operation_id,
                     expected_sha=pending['expected_revision'])
     return {'kind': 'search-pages-dispatch', 'operation': operation_id, 'dispatch_confirmed': True,

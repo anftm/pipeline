@@ -48,6 +48,38 @@ class PagesTransitionTests(unittest.TestCase):
                                    get=lambda *_: b'', operation_id=OP)
             send.assert_not_called()
 
+    def test_lost_dispatch_is_not_replayed_when_run_is_not_yet_visible(self):
+        self.prepare_pages()
+        with patch.object(subject.deploy, 'inspect_runs', return_value=None), \
+                patch.object(subject.deploy, 'dispatch', side_effect=TimeoutError('response lost')) as send:
+            with self.assertRaises(TimeoutError):
+                subject.apply_once(self.s, session=self.session, api=self.api, hub=self.hub,
+                                   get=lambda *_: b'', operation_id=OP)
+            with self.assertRaisesRegex(ValueError, 'already claimed'):
+                subject.apply_once(self.s, session=self.session, api=self.api, hub=self.hub,
+                                   get=lambda *_: b'', operation_id=OP)
+            result = subject.reconcile(self.s, session=self.session, api=self.api, hub=self.hub,
+                                       get=lambda *_: b'', operation_id=OP)
+        send.assert_called_once()
+        self.assertEqual(result['status'], 'run-not-visible')
+        self.assertFalse(result['journal_advanced'])
+        self.assertIsNotNone(subject.tx.load(self.s).record['pending']['write_claim'])
+
+    def test_lost_dispatch_followed_by_exact_live_success_reconciles_without_a_second_send(self):
+        self.prepare_pages()
+        with patch.object(subject.deploy, 'inspect_runs', return_value=None), \
+                patch.object(subject.deploy, 'dispatch', side_effect=TimeoutError('response lost')) as send:
+            with self.assertRaises(TimeoutError):
+                subject.apply_once(self.s, session=self.session, api=self.api, hub=self.hub,
+                                   get=lambda *_: b'', operation_id=OP)
+        run = {'id': 7, 'status': 'completed', 'conclusion': 'success'}
+        with patch.object(subject.deploy, 'inspect_runs', return_value=run):
+            result = subject.reconcile(self.s, session=self.session, api=self.api, hub=self.hub,
+                                       get=lambda *_: b'', operation_id=OP)
+        send.assert_called_once()
+        self.assertEqual(result['status'], 'candidate-loaded')
+        self.assertEqual(subject.tx.load(self.s).record['state'], 'verified')
+
     def test_reconcile_waits_for_actual_success_and_fresh_pages_bytes(self):
         self.prepare_pages()
         with patch.object(subject.deploy, 'inspect_runs', return_value=None):

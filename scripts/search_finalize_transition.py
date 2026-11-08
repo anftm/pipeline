@@ -97,9 +97,18 @@ def observe_space_default(store, *, hub, api, session, get, revision, expected_r
     current = _current(store, 'pointer-observed')
     _actual(current, hub=hub, api=api, session=session, get=get, revision=revision)
     space.runtime(api, expected_sha=expected_revision)
+    pending = current.record['pending']
+    if pending is None:
+        current = tx.start_default(store, current, site='space', operation_id=operation,
+                                   expected_revision=expected_revision, created_at=created_at)
+        pending = current.record['pending']
+    elif (pending.get('site') != 'space' or pending.get('operation') != 'set-default'
+          or pending.get('expected_revision') != expected_revision):
+        raise ValueError('no matching Space default observation intent')
+    # The prior process may have stopped after persisting the intent. Re-read
+    # the live default for both first acceptance and recovery; never mutate it.
     receipt = defaults.observe_space(current.record['candidate'], api=api)
-    current = tx.start_default(store, current, site='space', operation_id=operation,
-                               expected_revision=expected_revision, created_at=created_at)
+    space.runtime(api, expected_sha=expected_revision)
     return tx.observe_default(store, current, site='space', receipt=receipt)
 
 
@@ -116,7 +125,8 @@ def start_pages_default(store, *, session, expected_revision: str, operation: st
 
 def set_pages_default(store, *, session, api, hub, get, revision, operation: str) -> dict:
     current = _current(store, 'pointer-observed'); pending = current.record['pending']
-    if not isinstance(pending, dict) or pending.get('site') != 'pages' or pending.get('operation_id') != operation:
+    if (not isinstance(pending, dict) or pending.get('site') != 'pages'
+            or pending.get('operation') != 'set-default' or pending.get('operation_id') != operation):
         raise ValueError('no exact Pages default update intent')
     response = session.get(f'{pages.BASE}/branches/main', timeout=20); response.raise_for_status()
     if response.json().get('commit', {}).get('sha') != pending['expected_revision']:
@@ -125,8 +135,10 @@ def set_pages_default(store, *, session, api, hub, get, revision, operation: str
     _actual(current, hub=hub, api=api, session=session, get=get, revision=revision)
     defaults.observe_pages(current.record['parent_pointer']['desired'], session=session)
     url = f'{pages.BASE}/actions/variables/{VARIABLE}'
-    # PATCH is deliberately sent once. Lost response -> inspect exact variable,
-    # site and journal; never replay blindly from this function.
+    # The claim survives process death and prevents another invocation from
+    # replaying an uncertain PATCH. A claim is not an external writer fence.
+    current = tx.claim_write(store, current, site='pages', operation='set-default', operation_id=operation)
+    tx.check_write_claim(store, current)
     response = session.patch(url, json={'name': VARIABLE, 'value': current.record['candidate']}, timeout=25)
     if response.status_code != 204:
         raise RuntimeError('Pages default update outcome is unconfirmed; inspect before recovery')
@@ -137,7 +149,8 @@ def set_pages_default(store, *, session, api, hub, get, revision, operation: str
 
 def reconcile_pages_default(store, *, session, api, hub, get, revision, operation: str) -> tx.Current:
     current = _current(store, 'pointer-observed'); pending = current.record['pending']
-    if not isinstance(pending, dict) or pending.get('site') != 'pages' or pending.get('operation_id') != operation:
+    if (not isinstance(pending, dict) or pending.get('site') != 'pages'
+            or pending.get('operation') != 'set-default' or pending.get('operation_id') != operation):
         raise ValueError('no exact Pages default update intent')
     response = session.get(f'{pages.BASE}/branches/main', timeout=20); response.raise_for_status()
     if response.json().get('commit', {}).get('sha') != pending['expected_revision']:

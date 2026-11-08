@@ -54,6 +54,10 @@ def apply_once(store, *, api, operation_id: str) -> dict:
         raise ValueError('no exact pending Space apply operation')
     if store.read_pointer() != search_parent_bytes(current):
         raise ValueError('search desired pointer changed before Space update')
+    # Consume a single durable write opportunity, even if the process crashes
+    # before the API call. Unknown outcomes are reconciled, never replayed.
+    current = tx.claim_write(store, current, site='space', operation='apply', operation_id=operation_id)
+    tx.check_write_claim(store, current)
     before = pending['config_before']
     deploy.set_generation(api, expected=before['generation'], expected_updated_at=before['updated_at'],
                           target=current.record['candidate'], expected_sha=pending['expected_revision'])
