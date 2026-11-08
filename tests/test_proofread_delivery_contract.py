@@ -1,5 +1,6 @@
 """Lock the safety assumptions that keep proofreading submissions paused."""
 from pathlib import Path
+import os
 import unittest
 from unittest.mock import patch
 
@@ -27,12 +28,22 @@ class ProofreadDeliveryContractTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 submit_proofread.segmented_request(invalid)
 
-    def test_delivery_design_explicitly_disallows_activation_and_imagined_replay(self):
-        text = (ROOT / 'scripts/proofread_delivery_design.txt').read_text()
-        for phrase in ('not an activation procedure', 'Do not invent or replay missing events',
-                       'GitHub repository_dispatch response of 204', 'partial outcome',
-                       'confer no permission to enable Actions'):
-            self.assertIn(phrase, text)
+    def test_no_event_or_partial_replay_is_processed_without_durable_delivery(self):
+        payload = {'kind': 'proofread', 'request_id': 'uncertain-existing-request',
+                   'payload_blobs': ['a' * 40], 'payload_sha256': 'b' * 64,
+                   'payload_characters': 1}
+        for environment in ({}, {'BHA_PIPELINE_SUBMISSIONS_PAUSED': '0', 'GH_PAT': 'fixture-token'}):
+            with self.subTest(environment=environment), patch.dict(os.environ, environment, clear=True), \
+                    patch.object(submit_proofread, 'load_request', return_value=payload) as load, \
+                    patch.object(submit_proofread, 'api_request') as api, \
+                    patch.object(submit_proofread, 'response_or_fail') as write, \
+                    patch('urllib.request.urlopen') as network:
+                with self.assertRaisesRegex(RuntimeError, 'delivery is paused'):
+                    submit_proofread.main()
+                load.assert_not_called()
+                api.assert_not_called()
+                write.assert_not_called()
+                network.assert_not_called()
 
 
 if __name__ == '__main__':
