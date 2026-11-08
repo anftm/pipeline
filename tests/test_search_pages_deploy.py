@@ -10,6 +10,17 @@ GEN = "c" * 64
 TIME = "2026-01-01T00:00:00Z"
 
 
+def idle_session():
+    session = Mock()
+    branch = Mock()
+    branch.json.return_value = {"commit": {"sha": SHA}}
+    idle = Mock()
+    idle.json.return_value = {"workflow_runs": []}
+    idle.links = {}
+    session.get.side_effect = lambda url, **_kwargs: branch if url.endswith("/branches/main") else idle
+    return session
+
+
 def run(**changes):
     return {"id": 100, "display_title": pages.run_name(OP), "created_at": TIME,
             "event": "workflow_dispatch", "head_branch": "main", "head_sha": SHA,
@@ -34,21 +45,21 @@ class PagesDeployTests(unittest.TestCase):
                 pages.matching_run([run(**patch)], operation=OP, not_before=TIME, expected_sha=SHA)
 
     def test_dispatch_is_one_attempt_even_for_unknown_outcome(self):
-        session = Mock()
+        session = idle_session()
         session.post.return_value.status_code = 204
-        pages.dispatch(session, generation=GEN, operation=OP)
+        pages.dispatch(session, generation=GEN, operation=OP, expected_sha=SHA)
         self.assertEqual(session.post.call_count, 1)
         self.assertEqual(session.post.call_args.kwargs["json"]["inputs"],
                          {"search_generation": GEN, "search_transition": OP})
         session.reset_mock()
         session.post.side_effect = TimeoutError("lost")
         with self.assertRaises(TimeoutError):
-            pages.dispatch(session, generation=GEN, operation=OP)
+            pages.dispatch(session, generation=GEN, operation=OP, expected_sha=SHA)
         self.assertEqual(session.post.call_count, 1)
         session.post.side_effect = None
         session.post.return_value.status_code = 500
         with self.assertRaisesRegex(RuntimeError, "inspect before any retry"):
-            pages.dispatch(session, generation=GEN, operation=OP)
+            pages.dispatch(session, generation=GEN, operation=OP, expected_sha=SHA)
 
     def test_bounded_run_lookup_rejects_pagination(self):
         response = Mock()
@@ -65,11 +76,28 @@ class PagesDeployTests(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "invalid Pages"):
             pages.inspect_runs(session, operation=OP, not_before=TIME, expected_sha=SHA)
 
+    def test_different_main_or_any_active_deploy_stops_before_dispatch(self):
+        session = idle_session()
+        session.get.side_effect = None
+        session.get.return_value.json.return_value = {"commit": {"sha": "d" * 40}}
+        with self.assertRaisesRegex(ValueError, "main changed"):
+            pages.dispatch(session, generation=GEN, operation=OP, expected_sha=SHA)
+        session.post.assert_not_called()
+        session = idle_session()
+        branch, active = Mock(), Mock()
+        branch.json.return_value = {"commit": {"sha": SHA}}
+        active.json.return_value = {"workflow_runs": [run()]}
+        active.links = {}
+        session.get.side_effect = [branch, active]
+        with self.assertRaisesRegex(ValueError, "active, queued"):
+            pages.dispatch(session, generation=GEN, operation=OP, expected_sha=SHA)
+        session.post.assert_not_called()
+
     def test_inputs_cannot_change_repo_or_inject_operation(self):
         session = Mock()
         for generation, operation in (("bad", OP), (GEN, "a" * 31), (GEN, "A" * 32)):
             with self.subTest(generation=generation, operation=operation), self.assertRaises(ValueError):
-                pages.dispatch(session, generation=generation, operation=operation)
+                pages.dispatch(session, generation=generation, operation=operation, expected_sha=SHA)
         session.post.assert_not_called()
         with self.assertRaises(ValueError):
             pages.matching_run([], operation=OP, not_before="yesterday", expected_sha=SHA)

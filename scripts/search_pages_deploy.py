@@ -68,6 +68,19 @@ def matching_run(runs: list, *, operation: str, not_before: str, expected_sha: s
     return run
 
 
+def assert_idle(session) -> None:
+    """Never dispatch into a Pages queue whose ordering can cancel pending work."""
+    for state in ("in_progress", "queued", "waiting", "pending", "requested"):
+        response = session.get(f"{BASE}/actions/workflows/{WORKFLOW}/runs",
+                               params={"per_page": 100, "status": state}, timeout=20)
+        response.raise_for_status()
+        body = response.json()
+        if not isinstance(body, dict) or not isinstance(body.get("workflow_runs"), list):
+            raise TypeError("invalid Pages workflow runs response")
+        if getattr(response, "links", {}).get("next") or body["workflow_runs"]:
+            raise ValueError("Pages deployment is active, queued or incomplete to inspect")
+
+
 def inspect_runs(session, *, operation: str, not_before: str, expected_sha: str) -> dict | None:
     """Read a bounded run set; pagination or errors are unknown, never absent."""
     _timestamp(not_before)
@@ -82,10 +95,18 @@ def inspect_runs(session, *, operation: str, not_before: str, expected_sha: str)
     return matching_run(body["workflow_runs"], operation=operation, not_before=not_before, expected_sha=expected_sha)
 
 
-def dispatch(session, *, generation: str, operation: str) -> None:
-    """Send exactly once; callers persist the intent before calling this method."""
+def dispatch(session, *, generation: str, operation: str, expected_sha: str) -> None:
+    """Send once after checking main and queue; these reads do not fence other writers."""
     _generation(generation)
     _operation(operation)
+    if not isinstance(expected_sha, str) or not SHA.fullmatch(expected_sha):
+        raise ValueError("invalid expected Pages revision")
+    response = session.get(f"{BASE}/branches/main", timeout=20)
+    response.raise_for_status()
+    body = response.json()
+    if not isinstance(body, dict) or not isinstance(body.get("commit"), dict) or body["commit"].get("sha") != expected_sha:
+        raise ValueError("Pages main changed before dispatch")
+    assert_idle(session)
     response = session.post(f"{BASE}/actions/workflows/{WORKFLOW}/dispatches", timeout=25,
                             json={"ref": "main", "inputs": {"search_generation": generation,
                                                               "search_transition": operation}})
