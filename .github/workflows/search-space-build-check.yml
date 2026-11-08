@@ -38,8 +38,12 @@ jobs:
       - name: Fetch exact public Space commit and LFS objects
         run: |
           set -euo pipefail
-          git clone --filter=blob:none --no-checkout https://huggingface.co/spaces/VoiceOfML/Search candidate-space
-          git -C candidate-space checkout --detach "$HF_REVISION"
+          # The Hub Git endpoint does not reliably serve partial-clone
+          # promisor packs. Clone the bounded candidate branch without LFS
+          # smudging, then check out the exact requested commit.
+          GIT_LFS_SKIP_SMUDGE=1 git clone --single-branch --branch cutover/search-data-v1-20261108 --no-checkout \
+            https://huggingface.co/spaces/VoiceOfML/Search candidate-space
+          GIT_LFS_SKIP_SMUDGE=1 git -C candidate-space checkout --detach "$HF_REVISION"
           test "$(git -C candidate-space rev-parse HEAD)" = "$HF_REVISION"
           git -C candidate-space lfs pull
           git -C candidate-space lfs fsck
