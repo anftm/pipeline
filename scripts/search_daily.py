@@ -14,12 +14,14 @@ from pathlib import Path
 
 try:
     from . import search_snapshot
+    from .search_adopt import MAX_CORPUS, observe_consumers
     from .search_artifact_s3 import S3SearchArtifactStore
     from .search_artifact_store import stage_generation
     from .search_generation import build_generation
     from .search_publication_pointer import decode_pointer
 except ImportError:
     import search_snapshot
+    from search_adopt import MAX_CORPUS, observe_consumers
     from search_artifact_s3 import S3SearchArtifactStore
     from search_artifact_store import stage_generation
     from search_generation import build_generation
@@ -32,40 +34,41 @@ PAGES_MANIFEST = "https://vomebook.github.io/search/data/generation-manifest.jso
 MAX_JSON = 1024 * 1024
 
 
-def bounded_get(url: str) -> bytes:
+def bounded_get(url: str, limit: int = MAX_JSON) -> bytes:
+    if not 0 < limit <= MAX_CORPUS:
+        raise ValueError("invalid search read limit")
     request = urllib.request.Request(url, headers={"User-Agent": "Vomebook-Daily-Search/1.0", "Cache-Control": "no-cache"})
     with urllib.request.urlopen(request, timeout=40) as response:
         if response.status != 200:
             raise RuntimeError(f"search metadata HTTP {response.status}")
-        raw = response.read(MAX_JSON + 1)
-    if len(raw) > MAX_JSON:
-        raise ValueError("oversized search metadata")
+        raw = response.read(limit + 1)
+    if len(raw) > limit:
+        raise ValueError("oversized search response")
     return raw
 
 
 def inspect_published(*, get=bounded_get) -> dict:
     """Return only after pointer, manifest and both actual consumers agree."""
-    raw_pointer = get(BUCKET_RESOLVE + "published/current.json")
+    raw_pointer = get(BUCKET_RESOLVE + "published/current.json", MAX_JSON)
     pointer = decode_pointer(raw_pointer)
     generation = pointer["desired"]
-    raw_manifest = get(BUCKET_RESOLVE + f"generations/{generation}/manifest.json")
+    raw_manifest = get(BUCKET_RESOLVE + f"generations/{generation}/manifest.json", MAX_JSON)
     manifest = json.loads(raw_manifest)
-    if not isinstance(manifest, dict) or manifest.get("generation") != generation:
+    if (not isinstance(manifest, dict) or manifest.get("generation") != generation
+            or manifest.get("version") != 1 or manifest.get("kind") != "search-snapshot-local"
+            or manifest.get("object_layout") != "objects/sha256/<first-two>/<sha256>"
+            or type(manifest.get("record_count")) is not int or manifest["record_count"] < 1):
         raise ValueError("published search manifest does not match desired generation")
     excluded = {"generation", "remote_writes", "publication_ready", "object_layout", "objects", "additional_checks"}
     import hashlib
     if hashlib.sha256(search_snapshot.canonical({k: v for k, v in manifest.items() if k not in excluded})).hexdigest() != generation:
         raise ValueError("published search manifest identity mismatch")
-    pages = json.loads(get(PAGES_MANIFEST))
-    space = json.loads(get(SPACE_RECEIPT))
-    if (not isinstance(pages, dict) or pages.get("generation") != generation
-            or pages.get("files") != manifest.get("files") or pages.get("objects") != manifest.get("objects")):
-        raise ValueError("Pages has not acknowledged desired generation")
-    if (not isinstance(space, dict) or space.get("generation") != generation or space.get("surface") != "space"
-            or space.get("verified") is not True or space.get("records") != manifest.get("record_count")):
-        raise ValueError("Space has not acknowledged desired generation")
+    observed = observe_consumers(generation, manifest, get=get)
+    if get(BUCKET_RESOLVE + "published/current.json", MAX_JSON) != raw_pointer:
+        raise ValueError("published pointer changed during consumer verification")
     return {"generation": generation, "source_revisions": manifest.get("source_revisions"),
-            "record_count": manifest.get("record_count"), "space_api_generation": space.get("api_generation"),
+            "record_count": manifest.get("record_count"), "space_api_generation": observed["space_api_generation"],
+            "pages_corpus_sha256": observed["pages_corpus_sha256"],
             "transition": pointer["transition"], "both_consumers_observed": True}
 
 

@@ -19,7 +19,7 @@ class SearchDailyTests(SearchAdoptionTests):
 
     def test_both_consumers_must_acknowledge_pointer(self):
         urls = self.urls_for_published()
-        result = search_daily.inspect_published(get=lambda url: urls[url])
+        result = search_daily.inspect_published(get=lambda url, _limit: urls[url])
         self.assertEqual(result["generation"], self.generation)
         self.assertTrue(result["both_consumers_observed"])
         self.assertEqual(result["record_count"], 1)
@@ -29,25 +29,51 @@ class SearchDailyTests(SearchAdoptionTests):
             altered["generation"] = "b" * 64
             urls[url] = compact(altered)
             with self.subTest(url=url), self.assertRaises(ValueError):
-                search_daily.inspect_published(get=lambda value: urls[value])
+                search_daily.inspect_published(get=lambda value, _limit: urls[value])
             urls[url] = saved
 
     def test_pointer_or_manifest_unavailable_never_reports_synced(self):
         urls = self.urls_for_published()
         with self.assertRaises(KeyError):
-            search_daily.inspect_published(get=lambda _url: (_ for _ in ()).throw(KeyError("not found")))
+            search_daily.inspect_published(get=lambda _url, _limit: (_ for _ in ()).throw(KeyError("not found")))
         key = search_daily.BUCKET_RESOLVE + f"generations/{self.generation}/manifest.json"
         value = json.loads(urls[key])
         value["record_count"] = 123
         urls[key] = compact(value)
         with self.assertRaisesRegex(ValueError, "identity mismatch"):
-            search_daily.inspect_published(get=lambda url: urls[url])
+            search_daily.inspect_published(get=lambda url, _limit: urls[url])
+
+    def test_bad_pages_corpus_or_initial_payload_never_counts_as_observed(self):
+        urls = self.urls_for_published()
+        for suffix in ("/data/search_data.json.gz", "/data/initial/global.json"):
+            url = search_daily.PAGES_MANIFEST.removesuffix("/data/generation-manifest.json") + suffix
+            before = urls[url]
+            urls[url] = b"{}"
+            with self.subTest(url=url), self.assertRaises(ValueError):
+                search_daily.inspect_published(get=lambda value, _limit: urls[value])
+            urls[url] = before
+
+    def test_pointer_changing_during_observation_is_rejected(self):
+        urls = self.urls_for_published()
+        pointer_url = search_daily.BUCKET_RESOLVE + "published/current.json"
+        reads = []
+
+        def get(url, _limit):
+            if url == pointer_url:
+                reads.append(url)
+                if len(reads) == 2:
+                    return make_pointer(self.generation, None, "2" * 32)
+            return urls[url]
+
+        with self.assertRaisesRegex(ValueError, "pointer changed"):
+            search_daily.inspect_published(get=get)
+        self.assertEqual(len(reads), 2)
 
     def test_receipt_and_baseline_are_written_exclusively_after_verification(self):
         urls = self.urls_for_published()
         baseline = self.root / "baseline.json"
         receipt = self.root / "receipt.json"
-        expected = search_daily.inspect_published(get=lambda url: urls[url])
+        expected = search_daily.inspect_published(get=lambda url, _limit: urls[url])
         with patch.object(search_daily, "inspect_published", return_value=expected):
             self.assertEqual(search_daily.main(["inspect", "--baseline-output", str(baseline),
                                                "--receipt-output", str(receipt)]), 0)
