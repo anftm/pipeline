@@ -1,0 +1,39 @@
+name: BHA · Monitor Parser Inputs
+
+on:
+  schedule:
+    - cron: '7 */12 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: maintain-archive-forks
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Install pinned parser audit dependencies
+        run: pip install -r scripts/requirements.txt PyYAML==6.0.3
+      - name: Verify read-only parser-input contracts
+        run: python -B -m unittest -v tests.test_bha_input_monitor
+      - name: Compare all pinned parser inputs twice
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: python -B scripts/bha_input_monitor.py --output output/bha/input-report.json --fail-on-change
+      - uses: actions/upload-artifact@v7
+        if: ${{ always() }}
+        with:
+          name: bha-input-readonly-report
+          path: output/bha/input-report.json
+          retention-days: 30
+          if-no-files-found: warn

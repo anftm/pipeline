@@ -192,6 +192,12 @@ def apply(plan_value: dict, parent_raw: bytes, candidate_plan: dict, description
     if refreshed != plan_value:
         raise ValueError('CCRD Space parent or candidate changed before commit')
     changes = _local_changes(plan_value, candidate_root, new_text)
+    if store.parent_pointer() != parent_raw:
+        raise ValueError('CCRD bucket parent changed while preparing Space commit')
+    manifest_stage._source_check(candidate_plan, capture())
+    manifest_stage._consumer_check(json.loads(parent_raw), observe())
+    _ocr_disabled(api, plan_value['parent_revision'], get=get)
+    _revision(api, plan_value['parent_revision'])
     from huggingface_hub import CommitOperationAdd
     operations = [CommitOperationAdd(path_in_repo=path, path_or_fileobj=value) for path, value in sorted(changes.items())]
     # Exactly one parent-guarded commit. Any exception may hide a committed

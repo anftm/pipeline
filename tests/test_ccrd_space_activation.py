@@ -90,7 +90,7 @@ class CcrdSpaceActivationTests(CandidateAssemblyTests):
         planned = self.activation_plan()
         self.api.create_commit.return_value = SimpleNamespace(oid=NEW_REV)
         self.api.space_info.side_effect = [SimpleNamespace(sha=REV), SimpleNamespace(sha=REV),
-                                           SimpleNamespace(sha=NEW_REV)]
+                                           SimpleNamespace(sha=REV), SimpleNamespace(sha=NEW_REV)]
         result = subject.apply(planned, self.pointer, self.plan_value, self.description, api=self.api, store=self.store,
                                capture=self.capture, observe=lambda: self.observed, candidate_root=self.output,
                                new_text=NEW.encode(), current_manifest=self.pointer, candidate_manifest=self.target_manifest,
@@ -103,6 +103,20 @@ class CcrdSpaceActivationTests(CandidateAssemblyTests):
         self.assertEqual({x.path_in_repo for x in kwargs['operations']}, set(result['files_written']))
         self.assertEqual(len(result['files_written']), 6)
         self.assertTrue(all(isinstance(x.path_or_fileobj, bytes) for x in kwargs['operations']))
+
+    def test_source_or_parent_drift_at_final_boundary_never_commits(self):
+        planned = self.activation_plan()
+        count = []
+        def capture():
+            count.append(True)
+            value = self.capture()
+            return {**value, 'revision': 'f' * 40} if len(count) == 3 else value
+        with self.assertRaisesRegex(ValueError, 'source does not match'):
+            subject.apply(planned, self.pointer, self.plan_value, self.description, api=self.api, store=self.store,
+                          capture=capture, observe=lambda: self.observed, candidate_root=self.output,
+                          new_text=NEW.encode(), current_manifest=self.pointer, candidate_manifest=self.target_manifest,
+                          confirm_plan_sha256=planned['plan_sha256'], get=self.get)
+        self.api.create_commit.assert_not_called()
 
     def test_unknown_commit_response_is_never_retried(self):
         planned = self.activation_plan(); self.api.create_commit.side_effect = TimeoutError('uncertain')
