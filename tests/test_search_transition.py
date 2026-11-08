@@ -17,6 +17,12 @@ def receipt(site, generation, tag="observation"):
                                       "observed_at": "2026-01-01T00:00:00Z", "details": {"tag": tag}})
 
 
+def default_receipt(site, generation):
+    return search_snapshot.canonical({"version": 1, "kind": "search-default-observation", "site": site,
+                                      "generation": generation, "observed_at": "2026-01-01T00:00:00Z",
+                                      "details": {"variable": "SEARCH_DATA_GENERATION"}})
+
+
 class MemoryStore:
     def __init__(self):
         self.head = None
@@ -89,6 +95,7 @@ class SearchTransitionTests(unittest.TestCase):
     def begin(self):
         return tx.begin(self.s, parent_pointer=self.s.pointer, candidate=B, source_revisions_sha256=C,
                         pages_receipt=receipt("pages", A, "parent"), space_receipt=receipt("space", A, "parent"),
+                        pages_default=default_receipt("pages", A), space_default=default_receipt("space", A),
                         transition=T1)
 
     def observe(self, current, site, generation, tag):
@@ -115,23 +122,33 @@ class SearchTransitionTests(unittest.TestCase):
         self.assertEqual(c.record["state"], "publishing")
         intended = make_pointer(B, A, T1)
         with self.assertRaisesRegex(ValueError, "not the current pointer"):
-            tx.finish(self.s, c, observed_pointer=intended,
-                      pages_receipt=receipt("pages", B), space_receipt=receipt("space", B))
+            tx.record_pointer(self.s, c, observed_pointer=intended,
+                              pages_receipt=receipt("pages", B), space_receipt=receipt("space", B))
         self.s.pointer = intended
-        c = tx.finish(self.s, c, observed_pointer=intended,
-                      pages_receipt=receipt("pages", B), space_receipt=receipt("space", B))
+        c = tx.record_pointer(self.s, c, observed_pointer=intended,
+                              pages_receipt=receipt("pages", B), space_receipt=receipt("space", B))
+        self.assertEqual(c.record["state"], "pointer-observed")
+        with self.assertRaisesRegex(ValueError, "durably observed"):
+            tx.finish(self.s, c, pages_receipt=receipt("pages", B), space_receipt=receipt("space", B),
+                      pages_default=default_receipt("pages", B), space_default=default_receipt("space", B))
+        for site in ("pages", "space"):
+            c = tx.start_default(self.s, c, site=site, operation_id="7" * 32)
+            c = tx.observe_default(self.s, c, site=site, receipt=default_receipt(site, B))
+        c = tx.finish(self.s, c, pages_receipt=receipt("pages", B), space_receipt=receipt("space", B),
+                      pages_default=default_receipt("pages", B), space_default=default_receipt("space", B))
         self.assertEqual(c.record["state"], "complete")
-        self.assertEqual(c.record["sequence"], 6)
+        self.assertEqual(c.record["sequence"], 11)
         self.assertEqual(tx.load(self.s), c)
-        self.assertEqual(tx.audit_history(self.s, c), 7)
+        self.assertEqual(tx.audit_history(self.s, c), 12)
         with self.assertRaisesRegex(ValueError, "audit limit"):
-            tx.audit_history(self.s, c, max_records=6)
+            tx.audit_history(self.s, c, max_records=11)
         nxt = tx.begin(self.s, parent_pointer=self.s.pointer, candidate=C, source_revisions_sha256=A,
-                       pages_receipt=receipt("pages", B, "parent2"),
-                       space_receipt=receipt("space", B, "parent2"), transition=T2)
+                       pages_receipt=receipt("pages", B, "parent2"), space_receipt=receipt("space", B, "parent2"),
+                       pages_default=default_receipt("pages", B), space_default=default_receipt("space", B),
+                       transition=T2)
         self.assertEqual(nxt.record["prior"], c.head["record"])
-        self.assertEqual(nxt.record["sequence"], 7)
-        self.assertEqual(tx.audit_history(self.s, nxt), 8)
+        self.assertEqual(nxt.record["sequence"], 12)
+        self.assertEqual(tx.audit_history(self.s, nxt), 13)
         self.assertNotEqual(nxt.record["transition"], c.record["transition"])
 
     def test_pointer_write_lost_response_is_read_back_without_replay(self):
@@ -140,7 +157,7 @@ class SearchTransitionTests(unittest.TestCase):
         self.s.lose_pointer_response = True
         done = tx.publish_pointer(self.s, self.s, c, pages_receipt=receipt("pages", B, "fresh"),
                                   space_receipt=receipt("space", B, "fresh"))
-        self.assertEqual(done.record["state"], "complete")
+        self.assertEqual(done.record["state"], "pointer-observed")
         self.assertEqual(self.s.pointer_writes, 1)
         self.assertEqual(self.s.pointer, make_pointer(B, A, T1))
 
@@ -153,9 +170,30 @@ class SearchTransitionTests(unittest.TestCase):
                                space_receipt=receipt("space", B, "fresh"))
         self.assertEqual(self.s.pointer_writes, 0)
         # Reconciliation observes the exact intended pointer; it does not replay the write.
-        done = tx.finish(self.s, c, observed_pointer=self.s.pointer,
-                         pages_receipt=receipt("pages", B), space_receipt=receipt("space", B))
-        self.assertEqual(done.record["state"], "complete")
+        done = tx.record_pointer(self.s, c, observed_pointer=self.s.pointer,
+                                 pages_receipt=receipt("pages", B), space_receipt=receipt("space", B))
+        self.assertEqual(done.record["state"], "pointer-observed")
+
+    def test_default_update_uncertain_requires_exact_observation_before_next_action(self):
+        c = self.ready()
+        c = tx.mark_publishing(self.s, c, pages_receipt=receipt("pages", B), space_receipt=receipt("space", B))
+        c = tx.publish_pointer(self.s, self.s, c, pages_receipt=receipt("pages", B), space_receipt=receipt("space", B))
+        c = tx.start_default(self.s, c, site="pages", operation_id="8" * 32)
+        self.assertEqual(tx.load(self.s).record["pending"]["operation"], "set-default")
+        with self.assertRaisesRegex(ValueError, "not ready"):
+            tx.start_default(self.s, c, site="space", operation_id="9" * 32)
+        with self.assertRaisesRegex(ValueError, "default receipt identity"):
+            tx.observe_default(self.s, c, site="pages", receipt=default_receipt("pages", A))
+        with self.assertRaisesRegex(ValueError, "matching pending"):
+            self.observe(c, "pages", B, b"not-a-default")
+        c = tx.observe_default(self.s, c, site="pages", receipt=default_receipt("pages", B))
+        self.assertEqual(c.record["defaults"]["pages"]["generation"], B)
+        self.assertEqual(c.record["defaults"]["space"]["generation"], A)
+        self.assertEqual(c.record["state"], "pointer-observed")
+        with self.assertRaisesRegex(ValueError, "unfinished work"):
+            tx.begin(self.s, parent_pointer=self.s.pointer, candidate=C, source_revisions_sha256=A,
+                     pages_receipt=receipt("pages", B), space_receipt=receipt("space", B),
+                     pages_default=default_receipt("pages", B), space_default=default_receipt("space", B))
 
     def test_invalid_fresh_receipt_or_foreign_pointer_never_writes_pointer(self):
         c = self.ready()
@@ -191,7 +229,9 @@ class SearchTransitionTests(unittest.TestCase):
         self.assertEqual(c.record["state"], "rolled-back")
         self.assertEqual(self.s.pointer, make_pointer(A, None, "0" * 32))
         nxt = tx.begin(self.s, parent_pointer=self.s.pointer, candidate=C, source_revisions_sha256=B,
-                       pages_receipt=receipt("pages", A), space_receipt=receipt("space", A), transition=T2)
+                       pages_receipt=receipt("pages", A), space_receipt=receipt("space", A),
+                       pages_default=default_receipt("pages", A), space_default=default_receipt("space", A),
+                       transition=T2)
         self.assertEqual(nxt.record["sequence"], c.record["sequence"] + 1)
 
     def test_uncertain_remote_action_requires_observation_before_rollback(self):
@@ -234,11 +274,13 @@ class SearchTransitionTests(unittest.TestCase):
     def test_exact_parent_and_actual_pointer_required(self):
         with self.assertRaisesRegex(ValueError, "actual pointer"):
             tx.begin(self.s, parent_pointer=make_pointer(A, None, T2), candidate=B, source_revisions_sha256=C,
-                     pages_receipt=receipt("pages", A), space_receipt=receipt("space", A))
+                     pages_receipt=receipt("pages", A), space_receipt=receipt("space", A),
+                     pages_default=default_receipt("pages", A), space_default=default_receipt("space", A))
         self.assertEqual(self.s.writes, 0)
         with self.assertRaisesRegex(ValueError, "candidate equals parent"):
             tx.begin(self.s, parent_pointer=self.s.pointer, candidate=A, source_revisions_sha256=C,
-                     pages_receipt=receipt("pages", A), space_receipt=receipt("space", A))
+                     pages_receipt=receipt("pages", A), space_receipt=receipt("space", A),
+                     pages_default=default_receipt("pages", A), space_default=default_receipt("space", A))
         self.assertEqual(self.s.writes, 0)
 
     def test_forged_transition_and_corrupt_records_are_rejected(self):

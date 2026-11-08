@@ -45,7 +45,8 @@ RECORD_ROOT = "published/transitions/"
 HEX32 = re.compile(r"[0-9a-f]{32}\Z")
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 MAX_JSON = 128 * 1024
-STATES = frozenset({"prepared", "applying", "verified", "publishing", "complete", "rolling-back", "rolled-back"})
+STATES = frozenset({"prepared", "applying", "verified", "publishing", "pointer-observed", "complete",
+                    "rolling-back", "rolled-back"})
 SITES = frozenset({"pages", "space"})
 
 
@@ -116,7 +117,7 @@ def validate_head(raw: bytes) -> dict:
 
 def validate_record(raw: bytes) -> dict:
     fields = {"version", "kind", "sequence", "transition", "prior", "prior_transition", "state", "parent_pointer",
-              "candidate", "source_revisions_sha256", "observed", "pending"}
+              "candidate", "source_revisions_sha256", "observed", "defaults", "pending"}
     value = _exact(_json(raw), fields)
     if (type(value["version"]) is not int or value["version"] != 1
             or value["kind"] != "search-transition-record" or type(value["sequence"]) is not int
@@ -139,27 +140,41 @@ def validate_record(raw: bytes) -> dict:
         _evidence(observed[site])
         if observed[site]["generation"] not in {parent["desired"], value["candidate"]}:
             raise ValueError("site observation is outside this transition")
+    defaults = _exact(value["defaults"], {"pages", "space"})
+    for site in SITES:
+        _evidence(defaults[site])
+        if defaults[site]["generation"] not in {parent["desired"], value["candidate"]}:
+            raise ValueError("default observation is outside this transition")
     pending = value["pending"]
     if pending is not None:
         pending = _exact(pending, {"site", "operation", "operation_id"})
         if (not isinstance(pending["site"], str) or pending["site"] not in SITES
-                or not isinstance(pending["operation"], str) or pending["operation"] not in {"apply", "rollback"}):
+                or not isinstance(pending["operation"], str)
+                or pending["operation"] not in {"apply", "rollback", "set-default"}):
             raise ValueError("invalid pending site operation")
-        expected_state = "applying" if pending["operation"] == "apply" else "rolling-back"
-        if value["state"] != expected_state:
+        expected_state = {"apply": "applying", "rollback": "rolling-back", "set-default": "pointer-observed"}
+        if value["state"] != expected_state[pending["operation"]]:
             raise ValueError("pending operation does not match transition state")
         _id(pending["operation_id"])
-        target = value["candidate"] if pending["operation"] == "apply" else parent["desired"]
-        if observed[pending["site"]]["generation"] == target:
+        target = parent["desired"] if pending["operation"] == "rollback" else value["candidate"]
+        evidence = defaults if pending["operation"] == "set-default" else observed
+        if evidence[pending["site"]]["generation"] == target:
             raise ValueError("pending operation already observed its target")
-    if value["state"] == "prepared" and any(observed[s]["generation"] != parent["desired"] for s in SITES):
+    if value["state"] == "prepared" and any(
+            observed[s]["generation"] != parent["desired"] or defaults[s]["generation"] != parent["desired"]
+            for s in SITES):
         raise ValueError("prepared transition must start from the parent")
-    if (value["state"] in {"verified", "publishing", "complete"}
+    if (value["state"] in {"verified", "publishing", "pointer-observed", "complete"}
             and any(observed[site]["generation"] != value["candidate"] for site in SITES)):
         raise ValueError("candidate is not observed by both consumers")
     if (value["state"] == "rolled-back"
             and any(observed[site]["generation"] != parent["desired"] for site in SITES)):
         raise ValueError("parent is not observed by both consumers")
+    if value["state"] not in {"pointer-observed", "complete"} and any(
+            defaults[s]["generation"] != parent["desired"] for s in SITES):
+        raise ValueError("site defaults changed before pointer publication")
+    if value["state"] == "complete" and any(defaults[s]["generation"] != value["candidate"] for s in SITES):
+        raise ValueError("candidate is not configured as both site defaults")
     if ((value["sequence"] == 0) != (value["prior"] is None)
             or (value["prior"] is None) != (value["prior_transition"] is None)):
         raise ValueError("invalid transition predecessor")
@@ -193,28 +208,38 @@ def validate_advance(previous: dict, value: dict, *, prior_digest: str) -> None:
         raise ValueError("transition immutable fields changed")
     a, b = previous["state"], value["state"]
     before, after = previous["observed"], value["observed"]
+    defaults_before, defaults_after = previous["defaults"], value["defaults"]
     old_pending, new_pending = previous["pending"], value["pending"]
     if old_pending is None and new_pending is not None:
-        allowed = ({"prepared", "applying"} if new_pending["operation"] == "apply"
-                   else {"prepared", "applying", "verified", "rolling-back"})
-        if a not in allowed or before != after:
+        allowed = {"apply": {"prepared", "applying"},
+                   "rollback": {"prepared", "applying", "verified", "rolling-back"},
+                   "set-default": {"pointer-observed"}}[new_pending["operation"]]
+        if a not in allowed or before != after or defaults_before != defaults_after:
             raise ValueError("invalid site-operation intent")
         return
     if old_pending is not None and new_pending is None:
         site = old_pending["site"]
+        if old_pending["operation"] == "set-default":
+            if (b != "pointer-observed" or before != after or defaults_after[site]["generation"] != value["candidate"]
+                    or any(defaults_after[s] != defaults_before[s] for s in SITES - {site})):
+                raise ValueError("invalid default-configuration observation")
+            return
         target = value["candidate"] if old_pending["operation"] == "apply" else value["parent_pointer"]["desired"]
         expected_state = ("verified" if all(after[s]["generation"] == target for s in SITES) else "applying") \
             if old_pending["operation"] == "apply" else (
                 "rolled-back" if all(after[s]["generation"] == target for s in SITES) else "rolling-back")
         if (after[site]["generation"] != target or any(after[s] != before[s] for s in SITES - {site})
-                or b != expected_state):
+                or defaults_before != defaults_after or b != expected_state):
             raise ValueError("invalid site-operation observation")
         return
     if old_pending is None and new_pending is None:
-        if (a, b) == ("verified", "publishing") and all(
+        if (a, b) == ("verified", "publishing") and defaults_before == defaults_after and all(
                 after[s]["generation"] == before[s]["generation"] == value["candidate"] for s in SITES):
             return
-        if (a, b) == ("publishing", "complete") and before == after:
+        if (a, b) == ("publishing", "pointer-observed") and before == after and defaults_before == defaults_after:
+            return
+        if ((a, b) == ("pointer-observed", "complete") and before == after and defaults_before == defaults_after
+                and all(defaults_after[s]["generation"] == value["candidate"] for s in SITES)):
             return
     raise ValueError("invalid transition state change")
 
@@ -243,6 +268,15 @@ def _observed(generation: str, digest: str) -> dict:
     _generation(generation)
     _digest(digest)
     return {"generation": generation, "receipt_sha256": digest}
+
+
+def _check_default(raw: bytes, *, site: str, generation: str) -> None:
+    value = _exact(_json(raw), {"version", "kind", "site", "generation", "observed_at", "details"})
+    if (type(value["version"]) is not int or value["version"] != 1
+            or value["kind"] != "search-default-observation" or value["site"] != site
+            or value["generation"] != generation or not isinstance(value["observed_at"], str)
+            or not value["observed_at"] or not isinstance(value["details"], dict)):
+        raise ValueError("default receipt identity does not match the site and generation")
 
 
 def _check_receipt(raw: bytes, *, site: str, generation: str) -> None:
@@ -279,12 +313,7 @@ def load(store: TransitionStore) -> Current | None:
     record = validate_record(record_raw)
     if record["transition"] != head["transition"] or record["sequence"] != head["sequence"]:
         raise ValueError("transition head does not match its record")
-    for site, evidence in record["observed"].items():
-        receipt_key = f"{RECORD_ROOT}{head['transition']}/receipts/{evidence['receipt_sha256']}.json"
-        receipt = store.read_receipt(receipt_key)
-        if receipt is None or hashlib.sha256(receipt).hexdigest() != evidence["receipt_sha256"]:
-            raise ValueError("transition observation receipt is missing or altered")
-        _check_receipt(receipt, site=site, generation=evidence["generation"])
+    _verify_receipts(store, record, error="transition observation receipt is missing or altered")
     if record["prior"] is not None:
         prior_key = f"{RECORD_ROOT}{record['prior_transition']}/{record['prior']}.json"
         prior_raw = store.read_record(prior_key)
@@ -304,12 +333,7 @@ def audit_history(store: TransitionStore, current: Current, *, max_records: int 
         count += 1
         if count > max_records:
             raise ValueError("transition history exceeds audit limit")
-        for site, evidence in record["observed"].items():
-            key = f"{RECORD_ROOT}{record['transition']}/receipts/{evidence['receipt_sha256']}.json"
-            raw = store.read_receipt(key)
-            if raw is None or hashlib.sha256(raw).hexdigest() != evidence["receipt_sha256"]:
-                raise ValueError("transition history has a missing or altered receipt")
-            _check_receipt(raw, site=site, generation=evidence["generation"])
+        _verify_receipts(store, record, error="transition history has a missing or altered receipt")
         if record["prior"] is None:
             if record["sequence"] != 0 or record["state"] != "prepared":
                 raise ValueError("invalid first transition record")
@@ -321,6 +345,16 @@ def audit_history(store: TransitionStore, current: Current, *, max_records: int 
         previous = validate_record(raw)
         validate_advance(previous, record, prior_digest=record["prior"])
         record = previous
+
+
+def _verify_receipts(store: TransitionStore, record: dict, *, error: str) -> None:
+    for field, check in (("observed", _check_receipt), ("defaults", _check_default)):
+        for site, evidence in record[field].items():
+            key = f"{RECORD_ROOT}{record['transition']}/receipts/{evidence['receipt_sha256']}.json"
+            raw = store.read_receipt(key)
+            if raw is None or hashlib.sha256(raw).hexdigest() != evidence["receipt_sha256"]:
+                raise ValueError(error)
+            check(raw, site=site, generation=evidence["generation"])
 
 
 def _put_record(store: TransitionStore, raw: bytes) -> str:
@@ -369,7 +403,8 @@ def _commit(store: TransitionStore, value: dict, current: Current | None) -> Cur
 
 
 def begin(store: TransitionStore, *, parent_pointer: bytes, candidate: str, source_revisions_sha256: str,
-          pages_receipt: bytes, space_receipt: bytes, transition: str | None = None) -> Current:
+          pages_receipt: bytes, space_receipt: bytes, pages_default: bytes, space_default: bytes,
+          transition: str | None = None) -> Current:
     previous = load(store)
     if previous is not None and previous.record["state"] not in {"complete", "rolled-back"}:
         raise ValueError("transition journal has unfinished work; inspect before beginning")
@@ -398,8 +433,12 @@ def begin(store: TransitionStore, *, parent_pointer: bytes, candidate: str, sour
         raise ValueError("new transition must have a different identity")
     _check_receipt(pages_receipt, site="pages", generation=parent["desired"])
     _check_receipt(space_receipt, site="space", generation=parent["desired"])
+    _check_default(pages_default, site="pages", generation=parent["desired"])
+    _check_default(space_default, site="space", generation=parent["desired"])
     pages_digest = _store_receipt(store, transition, pages_receipt)
     space_digest = _store_receipt(store, transition, space_receipt)
+    pages_default_digest = _store_receipt(store, transition, pages_default)
+    space_default_digest = _store_receipt(store, transition, space_default)
     value = {"version": 1, "kind": "search-transition-record",
              "sequence": previous.record["sequence"] + 1 if previous else 0,
              "transition": transition,
@@ -407,7 +446,9 @@ def begin(store: TransitionStore, *, parent_pointer: bytes, candidate: str, sour
              "prior_transition": previous.head["transition"] if previous else None, "state": "prepared",
              "parent_pointer": parent, "candidate": candidate, "source_revisions_sha256": source_revisions_sha256,
              "observed": {"pages": _observed(parent["desired"], pages_digest),
-                          "space": _observed(parent["desired"], space_digest)}, "pending": None}
+                          "space": _observed(parent["desired"], space_digest)},
+             "defaults": {"pages": _observed(parent["desired"], pages_default_digest),
+                          "space": _observed(parent["desired"], space_default_digest)}, "pending": None}
     return _commit(store, value, previous)
 
 
@@ -436,7 +477,7 @@ def start_site(store: TransitionStore, current: Current, *, site: str, operation
 
 def observe_site(store: TransitionStore, current: Current, *, site: str, generation: str, receipt: bytes) -> Current:
     pending = current.record["pending"]
-    if not isinstance(pending, dict) or pending["site"] != site:
+    if not isinstance(pending, dict) or pending["site"] != site or pending["operation"] not in {"apply", "rollback"}:
         raise ValueError("site has no matching pending operation")
     expected = current.record["candidate"] if pending["operation"] == "apply" else current.record["parent_pointer"]["desired"]
     if generation != expected:
@@ -484,14 +525,17 @@ def publish_pointer(store: TransitionStore, pointer_store, current: Current, *,
         raise ValueError("actual pointer differs from expected parent; inspect before resuming")
     apply_pointer(pointer_store, desired=candidate, expected=current.record["parent_pointer"]["desired"],
                   transition=current.record["transition"], expected_pointer=parent)
-    return finish(store, current, observed_pointer=intended,
-                  pages_receipt=pages_receipt, space_receipt=space_receipt)
+    return record_pointer(store, current, observed_pointer=intended,
+                          pages_receipt=pages_receipt, space_receipt=space_receipt)
 
 
-def finish(store: TransitionStore, current: Current, *, observed_pointer: bytes,
-           pages_receipt: bytes, space_receipt: bytes) -> Current:
+def record_pointer(store: TransitionStore, current: Current, *, observed_pointer: bytes,
+                   pages_receipt: bytes, space_receipt: bytes) -> Current:
     if current.record["state"] != "publishing":
         raise ValueError("transition is not publishing")
+    active = load(store)
+    if active is None or active.head_raw != current.head_raw or active.etag != current.etag:
+        raise ValueError("transition head changed before pointer observation")
     audit_history(store, current)
     _check_receipt(pages_receipt, site="pages", generation=current.record["candidate"])
     _check_receipt(space_receipt, site="space", generation=current.record["candidate"])
@@ -502,6 +546,53 @@ def finish(store: TransitionStore, current: Current, *, observed_pointer: bytes,
             or pointer["previous"] != current.record["parent_pointer"]["desired"]
             or pointer["transition"] != current.record["transition"]):
         raise ValueError("actual pointer does not match publication intent")
+    return _commit(store, _next(current, state="pointer-observed"), current)
+
+
+def start_default(store: TransitionStore, current: Current, *, site: str, operation_id: str) -> Current:
+    if site not in SITES or current.record["state"] != "pointer-observed" or current.record["pending"] is not None:
+        raise ValueError("transition is not ready for a default-configuration operation")
+    _id(operation_id)
+    if current.record["defaults"][site]["generation"] == current.record["candidate"]:
+        raise ValueError("site already has the requested observed default")
+    intended = make_pointer(current.record["candidate"], current.record["parent_pointer"]["desired"],
+                            current.record["transition"])
+    if store.read_pointer() != intended:
+        raise ValueError("actual pointer changed before default-configuration operation")
+    pending = {"site": site, "operation": "set-default", "operation_id": operation_id}
+    return _commit(store, _next(current, pending=pending), current)
+
+
+def observe_default(store: TransitionStore, current: Current, *, site: str, receipt: bytes) -> Current:
+    pending = current.record["pending"]
+    if (current.record["state"] != "pointer-observed" or not isinstance(pending, dict)
+            or pending["site"] != site or pending["operation"] != "set-default"):
+        raise ValueError("site has no matching pending default-configuration operation")
+    candidate = current.record["candidate"]
+    intended = make_pointer(candidate, current.record["parent_pointer"]["desired"], current.record["transition"])
+    if store.read_pointer() != intended:
+        raise ValueError("actual pointer changed before default observation")
+    _check_default(receipt, site=site, generation=candidate)
+    digest = _store_receipt(store, current.record["transition"], receipt)
+    defaults = {**current.record["defaults"], site: _observed(candidate, digest)}
+    return _commit(store, _next(current, defaults=defaults, pending=None), current)
+
+
+def finish(store: TransitionStore, current: Current, *, pages_receipt: bytes, space_receipt: bytes,
+           pages_default: bytes, space_default: bytes) -> Current:
+    if current.record["state"] != "pointer-observed" or current.record["pending"] is not None:
+        raise ValueError("transition is not ready for completion")
+    audit_history(store, current)
+    candidate = current.record["candidate"]
+    intended = make_pointer(candidate, current.record["parent_pointer"]["desired"], current.record["transition"])
+    if store.read_pointer() != intended:
+        raise ValueError("actual pointer changed before completion")
+    for site, actual, configured in (("pages", pages_receipt, pages_default),
+                                     ("space", space_receipt, space_default)):
+        _check_receipt(actual, site=site, generation=candidate)
+        _check_default(configured, site=site, generation=candidate)
+        if current.record["defaults"][site]["generation"] != candidate:
+            raise ValueError("site default has not been durably observed")
     return _commit(store, _next(current, state="complete"), current)
 
 
