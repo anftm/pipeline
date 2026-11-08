@@ -140,6 +140,65 @@ class FetchAndParseTests(unittest.TestCase):
             self.assertEqual(action_output.read_text(encoding="utf-8"), "data_changed=false\n")
             self.assertFalse((temporary_path / "missing.json").exists())
 
+    def test_published_baseline_overrides_stale_git_state_without_writing_baseline(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            baseline, state, output = (root / name for name in ("baseline.json", "state.json", "action-output"))
+            revisions = {repo: "a" * 40 for repo in self.module.REPOS}
+            baseline.write_text(json.dumps(revisions), encoding="utf-8")
+            before = baseline.read_bytes()
+            state.write_text(json.dumps({repo: "b" * 40 for repo in self.module.REPOS}), encoding="utf-8")
+            with patch.object(self.module, "STATE_FILE", state), \
+                    patch.object(self.module, "get_repo_sha", return_value="a" * 40), \
+                    patch.object(self.module, "http_get_text") as fetch_catalog, \
+                    patch.dict(os.environ, {"SEARCH_BASELINE_FILE": str(baseline),
+                                            "GITHUB_OUTPUT": str(output)}, clear=True):
+                self.assertEqual(self.module.main(), 0)
+            self.assertEqual(output.read_text(), "data_changed=false\n")
+            self.assertEqual(baseline.read_bytes(), before)
+            self.assertEqual(json.loads(state.read_text()), revisions)
+            fetch_catalog.assert_not_called()
+
+    def test_published_baseline_invalid_missing_or_writable_fails_closed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            baseline, state, output = (root / name for name in ("baseline.json", "state.json", "action-output"))
+            state.write_text('{}', encoding="utf-8")
+            cases = [root / "missing", baseline, state]
+            baseline.write_text('{"unexpected": "a"}', encoding="utf-8")
+            for value in cases:
+                with self.subTest(baseline=value), patch.object(self.module, "STATE_FILE", state), \
+                        patch.object(self.module, "get_repo_sha") as get_sha, \
+                        patch.dict(os.environ, {"SEARCH_BASELINE_FILE": str(value),
+                                                "GITHUB_OUTPUT": str(output)}, clear=True):
+                    self.assertEqual(self.module.main(), 1)
+                    get_sha.assert_not_called()
+            self.assertEqual(state.read_text(), '{}')
+            self.assertEqual(output.read_text(), "data_changed=false\n" * len(cases))
+
+    def test_changed_source_against_published_baseline_generates(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            baseline, state, output = (root / name for name in ("baseline.json", "state.json", "action-output"))
+            baseline.write_text(json.dumps({repo: "a" * 40 for repo in self.module.REPOS}), encoding="utf-8")
+            state.write_text(json.dumps({repo: "b" * 40 for repo in self.module.REPOS}), encoding="utf-8")
+            with patch.object(self.module, "STATE_FILE", state), \
+                    patch.object(self.module, "OUTPUT_DIR", root), \
+                    patch.object(self.module, "OUTPUT_FILE", root / "corpus.json"), \
+                    patch.object(self.module, "FOLDER_TREE_FILE", root / "tree.json"), \
+                    patch.object(self.module, "FOLDER_BROWSER_FILE", root / "browser.json"), \
+                    patch.object(self.module, "get_repo_sha", return_value="b" * 40), \
+                    patch.object(self.module, "http_get_text", return_value="Book.docx\n"), \
+                    patch.object(self.module, "batch_get_sizes", return_value={}), \
+                    patch.object(self.module.time, "sleep"), \
+                    patch.dict(os.environ, {"SEARCH_BASELINE_FILE": str(baseline),
+                                            "GITHUB_OUTPUT": str(output)}, clear=True):
+                self.assertEqual(self.module.main(), 0)
+            self.assertEqual(output.read_text(), "data_changed=true\n")
+            self.assertEqual(set(json.loads(baseline.read_text()).values()), {"a" * 40})
+            self.assertEqual(set(json.loads(state.read_text()).values()), {"b" * 40})
+            self.assertTrue((root / "corpus.json").exists())
+
     def test_main_stops_when_a_source_revision_is_unavailable(self):
         with tempfile.TemporaryDirectory() as temporary:
             temporary_path = Path(temporary)

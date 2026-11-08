@@ -1,6 +1,7 @@
 """The daily guard never equates a desired pointer with loaded consumers."""
 import json
 import unittest
+from unittest.mock import patch
 
 from scripts import search_daily
 from scripts.search_publication_pointer import make_pointer
@@ -41,6 +42,31 @@ class SearchDailyTests(SearchAdoptionTests):
         urls[key] = compact(value)
         with self.assertRaisesRegex(ValueError, "identity mismatch"):
             search_daily.inspect_published(get=lambda url: urls[url])
+
+    def test_receipt_and_baseline_are_written_exclusively_after_verification(self):
+        urls = self.urls_for_published()
+        baseline = self.root / "baseline.json"
+        receipt = self.root / "receipt.json"
+        expected = search_daily.inspect_published(get=lambda url: urls[url])
+        with patch.object(search_daily, "inspect_published", return_value=expected):
+            self.assertEqual(search_daily.main(["inspect", "--baseline-output", str(baseline),
+                                               "--receipt-output", str(receipt)]), 0)
+            self.assertEqual(json.loads(baseline.read_text()), self.manifest["source_revisions"])
+            self.assertEqual(json.loads(receipt.read_text()), expected)
+            self.assertEqual(search_daily.main(["inspect", "--expected-receipt", str(receipt)]), 0)
+            with self.assertRaises(FileExistsError):
+                search_daily.main(["inspect", "--baseline-output", str(baseline)])
+        changed = {**expected, "transition": "2" * 32}
+        with patch.object(search_daily, "inspect_published", return_value=changed), \
+                self.assertRaisesRegex(ValueError, "changed during the run"):
+            search_daily.main(["inspect", "--expected-receipt", str(receipt)])
+
+    def test_failed_consumer_verification_never_writes_baseline(self):
+        baseline = self.root / "baseline.json"
+        with patch.object(search_daily, "inspect_published", side_effect=ValueError("no consumer")), \
+                self.assertRaisesRegex(ValueError, "no consumer"):
+            search_daily.main(["inspect", "--baseline-output", str(baseline)])
+        self.assertFalse(baseline.exists())
 
     def test_stage_does_not_write_mutable_pointer(self):
         store = MemoryStore()

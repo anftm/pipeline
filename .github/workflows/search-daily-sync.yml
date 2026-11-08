@@ -70,12 +70,20 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           DIRECTORY_REVISIONS_FILE: ${{ runner.temp }}/search-directory-revisions.json
 
+      - name: Verify published generation and both consumers
+        id: published
+        run: |
+          python -B scripts/search_daily.py inspect \
+            --baseline-output "$RUNNER_TEMP/search-published-revisions.json" \
+            --receipt-output "$RUNNER_TEMP/search-published-receipt.json"
+
       - name: Fetch and parse
         id: fetch
         run: python scripts/fetch_and_parse.py
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           DIRECTORY_REVISIONS_FILE: ${{ runner.temp }}/search-directory-revisions.json
+          SEARCH_BASELINE_FILE: ${{ runner.temp }}/search-published-revisions.json
           FORCE_SYNC: ${{ (inputs.force_sync || inputs.target == 'hf-space') && 'true' || 'false' }}
 
       - name: Stage immutable search generation
@@ -91,10 +99,6 @@ jobs:
             --browser output/folder_browser.json --revisions "$RUNNER_TEMP/search-directory-revisions.json" \
             --output "$RUNNER_TEMP/search-generation"
 
-      - name: Verify published generation and both consumers
-        id: published
-        run: python -B scripts/search_daily.py inspect
-
       - name: Fail closed when a new generation awaits promotion
         if: steps.fetch.outputs.data_changed == 'true'
         env:
@@ -107,6 +111,9 @@ jobs:
             echo "candidate=$STAGED_GENERATION published=$PUBLISHED_GENERATION" >&2
             exit 1
           fi
+
+      - name: Verify publication did not change during the run
+        run: python -B scripts/search_daily.py inspect --expected-receipt "$RUNNER_TEMP/search-published-receipt.json"
 
       - name: Verify source revisions are fully published
         env:

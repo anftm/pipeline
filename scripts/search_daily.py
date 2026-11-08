@@ -69,6 +69,12 @@ def inspect_published(*, get=bounded_get) -> dict:
             "transition": pointer["transition"], "both_consumers_observed": True}
 
 
+def verify_unchanged(previous: dict, current: dict) -> None:
+    """Check the transition, not only the potentially identical source revisions."""
+    if previous != current:
+        raise ValueError("published pointer or consumer receipt changed during the run")
+
+
 def stage(source: Path, tree: Path, browser: Path, revisions: Path, output: Path, store) -> dict:
     report = build_generation(source, tree, browser, revisions, output)
     result = stage_generation(output, store)
@@ -79,13 +85,25 @@ def stage(source: Path, tree: Path, browser: Path, revisions: Path, output: Path
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("inspect")
+    inspect = sub.add_parser("inspect")
+    inspect.add_argument("--baseline-output", type=Path)
+    inspect.add_argument("--receipt-output", type=Path)
+    inspect.add_argument("--expected-receipt", type=Path)
     build = sub.add_parser("stage")
     for name in ("source", "tree", "browser", "revisions", "output"):
         build.add_argument("--" + name, type=Path, required=True)
     args = parser.parse_args(argv)
     if args.command == "inspect":
         result = inspect_published()
+        if args.expected_receipt is not None:
+            verify_unchanged(json.loads(args.expected_receipt.read_bytes()), result)
+        if args.baseline_output is not None:
+            with args.baseline_output.open("x", encoding="utf-8") as output:
+                json.dump(result["source_revisions"], output, ensure_ascii=False, sort_keys=True,
+                          separators=(",", ":"))
+        if args.receipt_output is not None:
+            with args.receipt_output.open("x", encoding="utf-8") as output:
+                json.dump(result, output, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     else:
         result = stage(args.source, args.tree, args.browser, args.revisions, args.output, S3SearchArtifactStore())
     print(json.dumps(result, ensure_ascii=False, sort_keys=True), flush=True)

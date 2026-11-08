@@ -7,6 +7,7 @@
   python scripts/fetch_and_parse.py
   可选环境变量: HF_TOKEN（提升 API 频率限制）
   FORCE_SYNC=true 可在来源未变化时强制重新生成
+  SEARCH_BASELINE_FILE 指定用于比较的已发布来源版本；不可写回此文件。
 """
 
 import json
@@ -588,9 +589,25 @@ def main():
     print("📂 VoiceOfML Search Pipeline — fetch_and_parse")
     print("=" * 60)
 
-    # ── 1. 读取上次 commit 状态 ────────────────────────
+    # ── 1. 读取已发布来源版本；输出状态仍写到独立的 STATE_FILE ──
+    baseline = os.environ.get("SEARCH_BASELINE_FILE", "")
     old_state = {}
-    if STATE_FILE.exists():
+    if baseline:
+        try:
+            baseline_path = Path(baseline)
+            if baseline_path.resolve() == STATE_FILE.resolve():
+                raise ValueError("published baseline cannot be the writable output state")
+            old_state = json.loads(baseline_path.read_text(encoding="utf-8"))
+            if (not isinstance(old_state, dict) or set(old_state) != set(REPOS)
+                    or any(not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}", sha)
+                           for sha in old_state.values())):
+                raise ValueError("invalid published source revision map")
+        except (OSError, ValueError, UnicodeError) as error:
+            print(f"❌ 无法读取已发布来源版本: {error}")
+            write_action_output("data_changed", "false")
+            return 1
+        print(f"📖 已读取已发布状态: {len(old_state)} 个仓库")
+    elif STATE_FILE.exists():
         try:
             old_state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
             print(f"📖 已读取上次状态: {len(old_state)} 个仓库")

@@ -281,8 +281,16 @@ class DirectorySnapshotTests(unittest.TestCase):
         self.assertNotIn('if', steps['Fetch and parse'])
         self.assertEqual(steps['Stage immutable search generation']['if'], "steps.fetch.outputs.data_changed == 'true'")
         self.assertEqual(steps['Stage immutable search generation']['id'], 'stage')
-        self.assertEqual(steps['Verify published generation and both consumers']['run'], 'python -B scripts/search_daily.py inspect')
+        self.assertIn('--baseline-output "$RUNNER_TEMP/search-published-revisions.json"',
+                      steps['Verify published generation and both consumers']['run'])
+        self.assertIn('--receipt-output "$RUNNER_TEMP/search-published-receipt.json"',
+                      steps['Verify published generation and both consumers']['run'])
         self.assertEqual(steps['Verify published generation and both consumers']['id'], 'published')
+        self.assertIn('SEARCH_BASELINE_FILE', steps['Fetch and parse']['env'])
+        self.assertLess(job['steps'].index(steps['Verify published generation and both consumers']),
+                        job['steps'].index(steps['Fetch and parse']))
+        self.assertIn('--expected-receipt "$RUNNER_TEMP/search-published-receipt.json"',
+                      steps['Verify publication did not change during the run']['run'])
         self.assertEqual(steps['Fail closed when a new generation awaits promotion']['if'], "steps.fetch.outputs.data_changed == 'true'")
         self.assertIn('STAGED_GENERATION', steps['Fail closed when a new generation awaits promotion']['env'])
         self.assertIn('PUBLISHED_GENERATION', steps['Fail closed when a new generation awaits promotion']['env'])
