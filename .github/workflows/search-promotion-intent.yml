@@ -1,0 +1,60 @@
+name: 搜索 · Prepare Promotion Intent
+run-name: Prepare search promotion / ${{ inputs.generation }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      generation:
+        description: Exact immutable staged generation SHA-256
+        type: string
+        required: true
+      apply:
+        description: Conditionally create the durable transaction intent
+        type: boolean
+        default: false
+      known_writers_coordinated:
+        description: Operator confirms known search writers are coordinated
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: daily-sync
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  prepare:
+    if: github.repository == 'anftm/pipeline'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Install pinned Pipeline dependencies
+        run: pip install -r scripts/requirements.txt requests==2.32.5 PyYAML==6.0.3
+      - name: Exercise preflight and intent safety contracts
+        run: python -B -m unittest -v tests.test_search_promotion_preflight tests.test_search_promotion_intent tests.test_search_transition
+      - name: Verify candidate or create only its durable intent
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          PAGES_TOKEN: ${{ secrets.PAGES_TOKEN }}
+          HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+          GENERATION: ${{ inputs.generation }}
+          APPLY: ${{ inputs.apply }}
+          WRITERS: ${{ inputs.known_writers_coordinated }}
+        run: |
+          set -euo pipefail
+          [[ "$GENERATION" =~ ^[0-9a-f]{64}$ ]]
+          if [[ "$APPLY" == 'true' ]]; then
+            [[ "$WRITERS" == 'true' ]]
+            python -B scripts/search_promotion_intent.py --generation "$GENERATION" --known-writers-coordinated
+          else
+            python -B scripts/search_promotion_preflight.py --generation "$GENERATION" \
+              --output "$RUNNER_TEMP/search-promotion-preview.json"
+          fi
