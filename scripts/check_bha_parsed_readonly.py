@@ -10,8 +10,10 @@ from pathlib import Path
 import re
 
 try:
+    from . import bha_consumer_sample as sample
     from . import check_bha_revisions as revisions, check_bha_reindex_access as access
 except ImportError:
+    import bha_consumer_sample as sample
     import check_bha_revisions as revisions
     import check_bha_reindex_access as access
 
@@ -82,13 +84,26 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--archive', required=True, help='one archive number or all')
     parser.add_argument('--state', type=Path, default=Path('state/bha-parsed-revisions.json'))
+    parser.add_argument('--samples', type=Path, help='explicit pinned-source sample paths; all mode only')
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args(argv)
-    if args.output.resolve() == args.state.resolve():
-        raise ValueError('report cannot overwrite the revision baseline')
+    if (args.output.resolve() == args.state.resolve()
+            or args.samples is not None and args.output.resolve() == args.samples.resolve()):
+        raise ValueError('report cannot overwrite its inputs')
+    if args.samples is not None and args.archive != 'all':
+        raise ValueError('consumer sampling requires the all-archive inspection')
     token = os.environ.get('GH_PAT') or os.environ.get('GITHUB_TOKEN', '')
     if args.archive == 'all':
         report = inspect_all(token, os.environ.get('BHA_REINDEX_TOKEN', ''), args.state)
+        if args.samples is not None:
+            spec = json.loads(args.samples.read_bytes())
+            if not isinstance(spec, dict) or set(spec) != {'version', 'samples'} or spec['version'] != 1:
+                raise ValueError('invalid BHA sample configuration')
+            observed = sample.observe(token, spec['samples'])
+            expected = {row['archive']: (row['commit'], row['tree']) for row in report['archives']}
+            if any(expected.get(row['archive']) != (row['commit'], row['tree']) for row in observed['samples']):
+                raise RuntimeError('sample revisions differ from the consumer revision observation')
+            report['consumer_samples'] = observed
     else:
         try:
             archive = int(args.archive)

@@ -83,6 +83,28 @@ class BhaParsedReadOnlyTests(unittest.TestCase):
                     check.main(['--archive', '0', '--state', str(state), '--output', str(state)])
             self.assertEqual(state.read_text(), '{}')
 
+    def test_all_mode_binds_actual_samples_to_observed_tree_and_commit(self):
+        report = {'archives': [{'archive': 0, 'commit': 'b' * 40, 'tree': 'c' * 40}]}
+        observed = {'samples': [{'archive': 0, 'commit': 'b' * 40, 'tree': 'c' * 40}], 'remote_writes': 0}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); samples = root / 'samples.json'; output = root / 'report.json'
+            samples.write_text(json.dumps({'version': 1, 'samples': [{'archive': 0, 'path': 'x'}]}))
+            with patch.object(check, 'inspect_all', return_value=report.copy()), \
+                    patch.object(check.sample, 'observe', return_value=observed), \
+                    patch.dict('os.environ', {'GH_PAT': 'test', 'BHA_REINDEX_TOKEN': 'other'}):
+                self.assertEqual(check.main(['--archive', 'all', '--samples', str(samples), '--output', str(output)]), 0)
+            self.assertEqual(json.loads(output.read_text())['consumer_samples'], observed)
+            output.unlink()
+            stale = {'samples': [{'archive': 0, 'commit': 'd' * 40, 'tree': 'c' * 40}]}
+            with patch.object(check, 'inspect_all', return_value=report.copy()), \
+                    patch.object(check.sample, 'observe', return_value=stale), \
+                    patch.dict('os.environ', {'GH_PAT': 'test', 'BHA_REINDEX_TOKEN': 'other'}), \
+                    self.assertRaisesRegex(RuntimeError, 'sample revisions differ'):
+                check.main(['--archive', 'all', '--samples', str(samples), '--output', str(output)])
+            self.assertFalse(output.exists())
+            with self.assertRaisesRegex(ValueError, 'all-archive'):
+                check.main(['--archive', '0', '--samples', str(samples), '--output', str(output)])
+
     def test_workflow_never_builds_parsed_or_requests_reindex(self):
         path = Path(__file__).resolve().parents[1] / '.github/workflows/bha-update-index.yml'
         flow = yaml.safe_load(path.read_text())
@@ -94,6 +116,7 @@ class BhaParsedReadOnlyTests(unittest.TestCase):
         self.assertEqual(inspect['env']['ARCHIVE_ID'], "${{ github.event_name == 'schedule' && 'all' || inputs.archive_id }}")
         commands = '\n'.join(step.get('run', '') for job in flow['jobs'].values() for step in job['steps'])
         self.assertIn('check_bha_parsed_readonly.py', commands)
+        self.assertIn('--samples config/bha-consumer-samples.json', commands)
         for forbidden in ('build_fork_parsed.py', '/api/reindex', 'update_proofread_issues.py', 'git push'):
             self.assertNotIn(forbidden, commands)
 

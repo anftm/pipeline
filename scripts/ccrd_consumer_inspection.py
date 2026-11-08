@@ -1,7 +1,7 @@
 """Read-only CCRD consumer evidence for the currently selected four-source index.
 
-Ready/status, one text download and a search hit are observations at a point in
-time.  They do not prove every indexed document or authorize publication.
+Ready/status and one text download are observations at a point in time. They do
+not prove every indexed document or authorize publication.
 """
 from __future__ import annotations
 

@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "samples": [
+    {"archive": 0, "path": "mao/maoquanji27/002/002fff5d4e.json"},
+    {"archive": 2, "path": "02a/02af10b3-2972-4837-874e-a4c001c66ea6/07b/07bb507578.json"},
+    {"archive": 4, "path": "027/027ebe43-b178-4a02-91bc-4c52456a84da/ef2/ef2c7708be.json"},
+    {"archive": 25, "path": "01a/01a44a03-a723-425b-b4b5-b67a28649fe1/6dc/6dcac4ce0a.json"}
+  ]
+}

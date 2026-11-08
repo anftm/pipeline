@@ -34,7 +34,11 @@ jobs:
           ARCHIVE_ID: ${{ github.event_name == 'schedule' && 'all' || inputs.archive_id }}
         run: |
           [[ "$ARCHIVE_ID" == 'all' || "$ARCHIVE_ID" =~ ^([0-9]|[12][0-9]|3[01])$ ]] || exit 1
-          python3 scripts/check_bha_parsed_readonly.py --archive "$ARCHIVE_ID" --output output/bha/parsed-report.json
+          args=(--archive "$ARCHIVE_ID" --output output/bha/parsed-report.json)
+          if [[ "$ARCHIVE_ID" == 'all' ]]; then
+            args+=(--samples config/bha-consumer-samples.json)
+          fi
+          python3 scripts/check_bha_parsed_readonly.py "${args[@]}"
       - uses: actions/upload-artifact@v7
         with:
           name: bha-parsed-report
