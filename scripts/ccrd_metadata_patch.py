@@ -214,9 +214,18 @@ def _input(root: Path, relative: str) -> Path:
     return path
 
 
-def build(root: Path, output: Path, *, expected: dict, old_text: str, new_text: str) -> dict:
+def build(root: Path, output: Path, *, expected: dict, old_text: str, new_text: str,
+          manifest: dict) -> dict:
+    try:
+        from . import ccrd_metadata_inventory as inventory
+    except ImportError:
+        import ccrd_metadata_inventory as inventory
     if not isinstance(expected, dict) or set(expected) != set(PATHS):
         raise ValueError('exact CCRD metadata input identities are required')
+    complete = inventory.inventory(manifest, root)
+    inventory.classify(complete)
+    if any(complete['files'][name]['identity'] != expected[name] for name in PATHS):
+        raise ValueError('CCRD metadata patch identities differ from complete parent inventory')
     old_size, new_size = len(old_text.encode()), len(new_text.encode())
     if not old_text or not new_text or old_text == new_text or max(old_size, new_size) > 32 * 1024 * 1024:
         raise ValueError('CCRD text change is empty, unchanged or oversized')
@@ -245,5 +254,6 @@ def build(root: Path, output: Path, *, expected: dict, old_text: str, new_text: 
         shutil.rmtree(output)
         raise
     return {'version': 1, 'kind': 'ccrd-cw0-local-metadata-candidate', 'files': results,
+            'parent_generation': complete['generation'], 'parent_metadata_members': len(complete['files']),
             'old_bytes': old_size, 'new_bytes': new_size, 'all_other_json_values_verified': True,
             'publication_ready': False, 'remote_writes': 0}

@@ -7,6 +7,7 @@ from pathlib import Path
 
 from scripts import ccrd_metadata_patch as patcher
 from scripts import ccrd_text_features as features
+from tests.test_ccrd_lifecycle import CcrdLifecycleTests
 
 OLD, NEW = '原始 text\n', '更新 after text\n'
 
@@ -42,12 +43,25 @@ class CcrdMetadataPatchTests(unittest.TestCase):
         self.data = fixture()
         for name, value in self.data.items(): save(self.inputs / name, value)
         self.expected = {name: patcher.identity(self.inputs / name) for name in patcher.PATHS}
+        fixture_test = CcrdLifecycleTests('test_four_source_pointer_retains_all_databases_metadata_and_txt_archives')
+        fixture_test.setUp(); self.manifest = fixture_test.four_source_pointer(); self.update_manifest()
+
+    def update_manifest(self):
+        prefix = f"generations/{self.manifest['generation']}/"
+        self.manifest['metadata'] = [{'bucket': 'vomebook/ccrd-index', 'path': prefix + name, 'role': 'runtime',
+                                      **self.expected[name]} for name in patcher.PATHS]
+        self.manifest['base_metadata_sha256'] = self.expected[patcher.PATHS[0]]['sha256']
+
+    def build(self):
+        return patcher.build(self.inputs, self.output, expected=self.expected, old_text=OLD, new_text=NEW,
+                             manifest=self.manifest)
 
     def test_all_non_target_json_values_and_input_bytes_are_preserved(self):
         before = {name: (self.inputs / name).read_bytes() for name in patcher.PATHS}
-        result = patcher.build(self.inputs, self.output, expected=self.expected, old_text=OLD, new_text=NEW)
+        result = self.build()
         self.assertFalse(result['publication_ready']); self.assertEqual(result['remote_writes'], 0)
         self.assertTrue(result['all_other_json_values_verified'])
+        self.assertEqual(result['parent_metadata_members'], 4)
         for name in patcher.PATHS:
             self.assertEqual((self.inputs / name).read_bytes(), before[name])
             item = patcher._selected(self.output / name, name)
@@ -59,22 +73,23 @@ class CcrdMetadataPatchTests(unittest.TestCase):
 
     def test_bad_identity_target_size_and_duplicate_fail_before_publication(self):
         self.expected[patcher.PATHS[0]] = {'bytes': 1, 'sha256': '0' * 64}
-        with self.assertRaisesRegex(ValueError, 'identity differs'):
-            patcher.build(self.inputs, self.output, expected=self.expected, old_text=OLD, new_text=NEW)
+        with self.assertRaisesRegex(ValueError, 'identities differ'):
+            self.build()
         self.assertFalse(self.output.exists())
         self.expected[patcher.PATHS[0]] = patcher.identity(self.inputs / patcher.PATHS[0])
         altered = fixture()[patcher.PATHS[3]]; altered['files'][0]['size'] = 999
         save(self.inputs / patcher.PATHS[3], altered); self.expected[patcher.PATHS[3]] = patcher.identity(self.inputs / patcher.PATHS[3])
+        self.update_manifest()
         with self.assertRaisesRegex(ValueError, 'size differs'):
-            patcher.build(self.inputs, self.output, expected=self.expected, old_text=OLD, new_text=NEW)
+            self.build()
         self.assertFalse(self.output.exists())
         altered['files'].append(dict(altered['files'][0])); save(self.inputs / patcher.PATHS[3], altered)
-        self.expected[patcher.PATHS[3]] = patcher.identity(self.inputs / patcher.PATHS[3])
-        with self.assertRaisesRegex(ValueError, 'duplicate'):
-            patcher.build(self.inputs, self.output, expected=self.expected, old_text=OLD, new_text=NEW)
+        self.expected[patcher.PATHS[3]] = patcher.identity(self.inputs / patcher.PATHS[3]); self.update_manifest()
+        with self.assertRaisesRegex(ValueError, 'reference identity differs'):
+            self.build()
 
     def test_verifier_rejects_non_target_drift_and_target_mismatch(self):
-        patcher.build(self.inputs, self.output, expected=self.expected, old_text=OLD, new_text=NEW)
+        self.build()
         name = patcher.PATHS[3]; old_item = self.data[name]['files'][0]
         changed = load(self.output / name); changed['folders'] = [{'unexpected': True}]; save(self.output / name, changed)
         with self.assertRaisesRegex(ValueError, 'non-target values changed'):
@@ -82,12 +97,14 @@ class CcrdMetadataPatchTests(unittest.TestCase):
 
     def test_source_symlink_and_output_inside_input_are_rejected(self):
         with self.assertRaisesRegex(ValueError, 'outside input'):
-            patcher.build(self.inputs, self.inputs / 'nested', expected=self.expected, old_text=OLD, new_text=NEW)
+            patcher.build(self.inputs, self.inputs / 'nested', expected=self.expected, old_text=OLD, new_text=NEW,
+                          manifest=self.manifest)
         with self.assertRaisesRegex(ValueError, 'outside input'):
-            patcher.build(self.inputs, self.root, expected=self.expected, old_text=OLD, new_text=NEW)
+            patcher.build(self.inputs, self.root, expected=self.expected, old_text=OLD, new_text=NEW,
+                          manifest=self.manifest)
         target = self.inputs / patcher.PATHS[3]; real = self.root / 'real.json'; target.rename(real); target.symlink_to(real)
         with self.assertRaisesRegex(ValueError, 'symlink'):
-            patcher.build(self.inputs, self.output, expected=self.expected, old_text=OLD, new_text=NEW)
+            self.build()
 
 
 if __name__ == '__main__':
