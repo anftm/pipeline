@@ -123,6 +123,23 @@ class StageObjectTests(CandidateAssemblyTests):
             self.stage(broken, store)
         self.assertEqual(store.creates, 0)
 
+    def test_preserved_read_and_manifest_writes_are_narrowly_confined(self):
+        from io import BytesIO
+        from unittest.mock import Mock
+        value = self.prepare(); generation = value['generation']
+        backing = Mock(); backing._location.return_value = ('vomebook', 'ccrd-index')
+        adapter = staging.S3Store(generation=generation, store=backing)
+        raw = ccrd_lifecycle.canonical(value['manifest'])
+        backing._client.return_value.get_object.return_value = {'Body': BytesIO(raw), 'ContentLength': len(raw)}
+        self.assertEqual(adapter.read_manifest(), raw)
+        adapter.create_manifest(raw)
+        kwargs = backing._client.return_value.put_object.call_args.kwargs
+        self.assertEqual(kwargs['Key'], f'generations/{generation}/manifest.json')
+        self.assertEqual(kwargs['IfNoneMatch'], '*')
+        with self.assertRaises(ValueError): adapter.create_manifest(raw + b' ')
+        for key in ('current.json', 'control/ocr-current.json', 'generations/ccrd-four-bad/data/foo'):
+            with self.subTest(key=key), self.assertRaises(ValueError): adapter.inspect_preserved(key)
+
     def test_store_refuses_any_other_bucket_or_mutable_root(self):
         generation = 'ccrd-four-' + 'a' * 64
         s = staging.S3Store(generation=generation, store=object())

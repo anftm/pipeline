@@ -190,8 +190,7 @@ class S3Store:
             raise ValueError('unexpected CCRD bucket mapping')
         return namespace, name
 
-    def inspect(self, key: str) -> dict | None:
-        namespace, name = self._location(key)
+    def _inspect(self, key: str, namespace: str, name: str) -> dict | None:
         try:
             response = self.store._client(namespace).get_object(Bucket=name, Key=key)
         except Exception as error:
@@ -215,6 +214,60 @@ class S3Store:
         if count != size:
             raise ValueError('CCRD staged object is truncated')
         return {'sha256': digest.hexdigest(), 'bytes': count}
+
+    def inspect(self, key: str) -> dict | None:
+        namespace, name = self._location(key)
+        return self._inspect(key, namespace, name)
+
+    def inspect_preserved(self, key: str) -> dict | None:
+        """Hash only immutable CCRD index/archive paths already named in a plan."""
+        lifecycle.safe_path(key)
+        permitted = (re.fullmatch(r'generations/ccrd-[A-Za-z0-9._-]+/(?:CCRD|CW)\.sqlite3', key)
+                     or re.fullmatch(r'indexes/newspapers/(?:RMRB|PLA)/[0-9a-f]{64}\.sqlite3', key)
+                     or re.fullmatch(r'generations/ccrd-four-[0-9a-f]{64}/(?:data/.+|archives/(?:RMRB|PLA)/[^/]+\.tar\.gz)', key))
+        if not permitted:
+            raise ValueError('preserved CCRD member is outside the immutable allowlist')
+        namespace, name = self.store._location(lifecycle.BUCKET)
+        if (namespace, name) != ('vomebook', 'ccrd-index'):
+            raise ValueError('unexpected CCRD bucket mapping')
+        return self._inspect(key, namespace, name)
+
+    def read_manifest(self) -> bytes | None:
+        namespace, name = self.store._location(lifecycle.BUCKET)
+        if (namespace, name) != ('vomebook', 'ccrd-index'):
+            raise ValueError('unexpected CCRD bucket mapping')
+        key = f'generations/{self.generation}/manifest.json'
+        try:
+            response = self.store._client(namespace).get_object(Bucket=name, Key=key)
+        except Exception as error:
+            from botocore.exceptions import ClientError
+            if isinstance(error, ClientError) and error.response.get('Error', {}).get('Code') in {'404', 'NoSuchKey', 'NotFound'}:
+                return None
+            raise
+        length, body = response.get('ContentLength'), response['Body']
+        try:
+            if type(length) is not int or not 0 < length <= 2 * 1024 * 1024:
+                raise ValueError('invalid CCRD manifest object length')
+            raw = body.read(length + 1)
+        finally:
+            body.close()
+        if not isinstance(raw, bytes) or len(raw) != length:
+            raise ValueError('CCRD manifest readback is truncated')
+        return raw
+
+    def create_manifest(self, raw: bytes) -> None:
+        if not isinstance(raw, bytes) or not 0 < len(raw) <= 2 * 1024 * 1024:
+            raise ValueError('invalid CCRD manifest bytes')
+        value = json.loads(raw)
+        key = f'generations/{self.generation}/manifest.json'
+        if lifecycle.canonical(value) != raw:
+            raise ValueError('CCRD manifest must use canonical bytes')
+        lifecycle.references(value, key)
+        namespace, name = self.store._location(lifecycle.BUCKET)
+        if (namespace, name) != ('vomebook', 'ccrd-index'):
+            raise ValueError('unexpected CCRD bucket mapping')
+        self.store._client(namespace).put_object(Bucket=name, Key=key, Body=raw,
+                                                  ContentType='application/json', IfNoneMatch='*')
 
     def create(self, key: str, path: Path, expected: dict) -> None:
         namespace, name = self._location(key)
