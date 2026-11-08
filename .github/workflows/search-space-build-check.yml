@@ -1,0 +1,79 @@
+name: 搜索 · Check Candidate Space Image
+run-name: Build pinned Space candidate / ${{ inputs.revision }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      revision:
+        description: Exact HF Space commit SHA to build
+        type: string
+        required: true
+      generation:
+        description: Exact immutable search generation SHA
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: search-space-candidate-image
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.repository == 'anftm/pipeline'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    env:
+      HF_REVISION: ${{ inputs.revision }}
+      SEARCH_GENERATION: ${{ inputs.generation }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check immutable inputs
+        run: |
+          set -euo pipefail
+          [[ "$HF_REVISION" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$SEARCH_GENERATION" =~ ^[0-9a-f]{64}$ ]]
+      - name: Fetch exact public Space commit and LFS objects
+        run: |
+          set -euo pipefail
+          git clone --filter=blob:none --no-checkout https://huggingface.co/spaces/VoiceOfML/Search candidate-space
+          git -C candidate-space checkout --detach "$HF_REVISION"
+          test "$(git -C candidate-space rev-parse HEAD)" = "$HF_REVISION"
+          git -C candidate-space lfs pull
+          git -C candidate-space lfs fsck
+      - name: Build Docker image with the requested immutable generation
+        timeout-minutes: 55
+        run: |
+          set -euo pipefail
+          docker build --pull --build-arg "SEARCH_DATA_GENERATION=$SEARCH_GENERATION" -t vome-search-cutover-candidate candidate-space
+      - name: Start image and verify actual generation and searches
+        timeout-minutes: 8
+        run: |
+          set -euo pipefail
+          docker run -d --name vome-search-cutover-test -p 127.0.0.1:17860:7860 vome-search-cutover-candidate
+          trap 'docker logs --tail 80 vome-search-cutover-test || true; docker rm -f vome-search-cutover-test || true' EXIT
+          for attempt in $(seq 1 80); do
+            if curl --fail --silent --show-error http://127.0.0.1:17860/api/search-data-generation > "$RUNNER_TEMP/search-generation.json"; then break; fi
+            sleep 3
+          done
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          data = json.loads((Path(os.environ['RUNNER_TEMP']) / 'search-generation.json').read_bytes())
+          assert data.get('verified') is True, data
+          assert data.get('surface') == 'space', data
+          assert data.get('generation') == os.environ['SEARCH_GENERATION'], data
+          assert data.get('records', 0) > 0 and data.get('files', 0) > 0, data
+          print('Space generation verified:', data['generation'], 'records:', data['records'])
+          PY
+          curl --fail --silent --show-error --header 'Content-Type: application/json' \
+            --data '{"q":"马克思","page_size":3}' http://127.0.0.1:17860/api/search > "$RUNNER_TEMP/search-response.json"
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          data = json.loads((Path(os.environ['RUNNER_TEMP']) / 'search-response.json').read_bytes())
+          assert data.get('total', 0) > 0 and data.get('results'), data
+          print('Candidate image search returned', data['total'], 'records')
+          PY
