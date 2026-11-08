@@ -279,9 +279,18 @@ class DirectorySnapshotTests(unittest.TestCase):
         self.assertNotIn('if', directory)
         self.assertIn('DIRECTORY_REVISIONS_FILE', directory['env'])
         self.assertNotIn('if', steps['Fetch and parse'])
-        self.assertEqual(steps['Sync to HF Space']['if'], "steps.fetch.outputs.data_changed == 'true'")
-        for name in ('Sync to GitHub Pages', 'Deploy GitHub Pages', 'Commit updated state'):
-            self.assertIn("env.TARGET == 'all'", steps[name]['if'], name)
+        self.assertEqual(steps['Stage immutable search generation']['if'], "steps.fetch.outputs.data_changed == 'true'")
+        self.assertEqual(steps['Stage immutable search generation']['id'], 'stage')
+        self.assertEqual(steps['Verify published generation and both consumers']['run'], 'python -B scripts/search_daily.py inspect')
+        self.assertEqual(steps['Verify published generation and both consumers']['id'], 'published')
+        self.assertEqual(steps['Fail closed when a new generation awaits promotion']['if'], "steps.fetch.outputs.data_changed == 'true'")
+        self.assertIn('STAGED_GENERATION', steps['Fail closed when a new generation awaits promotion']['env'])
+        self.assertIn('PUBLISHED_GENERATION', steps['Fail closed when a new generation awaits promotion']['env'])
+        self.assertIn('SOURCE_REVISIONS_FILE', steps['Verify source revisions are fully published']['env'])
+        for retired in ('Sync to HF Space', 'Sync to GitHub Pages', 'Deploy GitHub Pages', 'Commit updated state'):
+            self.assertNotIn(retired, steps)
+        self.assertFalse(any('sync_to_pages.py' in step.get('run', '') or 'sync_to_space.py' in step.get('run', '')
+                             or 'git push' in step.get('run', '') for step in job['steps']))
         # The entire sync job is skipped in directory-only mode; no consumer
         # can treat an absent output as proof of synchronization.
         self.assertEqual(steps['Fetch and parse']['id'], 'fetch')

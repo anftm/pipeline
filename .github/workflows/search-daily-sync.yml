@@ -11,7 +11,7 @@ on:
         type: boolean
         default: false
       target:
-        description: "all: HF Space + Pages + state; hf-space: HF Search only; directories: source directories only"
+        description: "all/hf-space: stage changed search data and verify both sites; directories: source directories only"
         type: choice
         default: all
         options:
@@ -78,58 +78,47 @@ jobs:
           DIRECTORY_REVISIONS_FILE: ${{ runner.temp }}/search-directory-revisions.json
           FORCE_SYNC: ${{ (inputs.force_sync || inputs.target == 'hf-space') && 'true' || 'false' }}
 
-      - name: Sync to HF Space
+      - name: Stage immutable search generation
+        id: stage
         if: steps.fetch.outputs.data_changed == 'true'
-        run: python scripts/sync_to_space.py
         env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-
-      - name: Sync to GitHub Pages
-        if: steps.fetch.outputs.data_changed == 'true' && env.TARGET == 'all'
-        run: python scripts/sync_to_pages.py
-        env:
-          PAGES_TOKEN: ${{ secrets.PAGES_TOKEN }}
-          PAGES_REPO: ${{ secrets.PAGES_REPO }}
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-
-      - name: Deploy GitHub Pages
-        if: steps.fetch.outputs.data_changed == 'true' && env.TARGET == 'all'
-        env:
-          PAGES_TOKEN: ${{ secrets.PAGES_TOKEN }}
-          PAGES_REPO: ${{ secrets.PAGES_REPO }}
+          HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
         run: |
-          curl --fail-with-body --silent --show-error \
-            --request POST \
-            --header "Authorization: Bearer ${PAGES_TOKEN}" \
-            --header "Accept: application/vnd.github+json" \
-            --header "X-GitHub-Api-Version: 2022-11-28" \
-            "https://api.github.com/repos/${PAGES_REPO}/actions/workflows/static.yml/dispatches" \
-            --data '{"ref":"main"}'
+          set -euo pipefail
+          python -B scripts/search_daily.py stage \
+            --source output/search_data.json --tree output/folder_tree.json \
+            --browser output/folder_browser.json --revisions "$RUNNER_TEMP/search-directory-revisions.json" \
+            --output "$RUNNER_TEMP/search-generation"
 
-      - name: Commit updated state
-        # An HF-only publication must not mark Pages as synchronized.
-        if: steps.fetch.outputs.data_changed == 'true' && env.TARGET == 'all'
+      - name: Verify published generation and both consumers
+        id: published
+        run: python -B scripts/search_daily.py inspect
+
+      - name: Fail closed when a new generation awaits promotion
+        if: steps.fetch.outputs.data_changed == 'true'
+        env:
+          STAGED_GENERATION: ${{ steps.stage.outputs.generation }}
+          PUBLISHED_GENERATION: ${{ steps.published.outputs.generation }}
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add state/commits.json
-          if git diff --staged --quiet; then
-            echo "No state changes to commit"
-           else
-             git commit -m "chore: update commit state [skip ci]"
-            for attempt in 1 2 3 4 5; do
-              if git push; then
-                exit 0
-              fi
-              echo "State push raced with another pipeline update; rebasing (attempt $((attempt + 1))/5)" >&2
-              git fetch origin main
-              if ! git rebase origin/main; then
-                git checkout --theirs state/commits.json
-                git add state/commits.json
-                GIT_EDITOR=true git rebase --continue
-              fi
-              sleep $((attempt * 5))
-            done
-            echo "Unable to publish updated commit state after retries" >&2
-             exit 1
-           fi
+          set -euo pipefail
+          if [[ "$STAGED_GENERATION" != "$PUBLISHED_GENERATION" ]]; then
+            echo "A new immutable search generation is staged but not yet promoted." >&2
+            echo "candidate=$STAGED_GENERATION published=$PUBLISHED_GENERATION" >&2
+            exit 1
+          fi
+
+      - name: Verify source revisions are fully published
+        env:
+          PUBLISHED_REVISIONS: ${{ steps.published.outputs.source_revisions }}
+          SOURCE_REVISIONS_FILE: ${{ runner.temp }}/search-directory-revisions.json
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          actual = json.loads(Path(os.environ['SOURCE_REVISIONS_FILE']).read_bytes())
+          published = json.loads(os.environ['PUBLISHED_REVISIONS'])
+          if actual != published:
+              raise SystemExit('Source revisions differ from the two-site published generation')
+          print('Both sites use the current source revision snapshot')
+          PY
