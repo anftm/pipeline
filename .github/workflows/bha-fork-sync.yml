@@ -1,0 +1,149 @@
+name: BHA · Single-Branch Safe Fork Sync
+
+on:
+  workflow_dispatch:
+    inputs:
+      archive_id:
+        description: One archive number (0–31)
+        type: string
+        required: true
+      branch:
+        description: One managed upstream input branch
+        type: choice
+        required: true
+        options:
+          - main
+          - config
+          - ocr_cache
+          - ocr_patch
+          - ocr_config
+          - parsed_article
+          - tags
+          - origin
+          - selected
+      plan_run:
+        description: Successful plan-only Actions run ID; required for apply
+        type: string
+        required: false
+      plan_sha256:
+        description: Exact SHA-256 of the reviewed plan artifact; required for apply
+        type: string
+        required: false
+      apply:
+        description: Apply the exact reviewed fast-forward only
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: maintain-archive-forks
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  synchronize:
+    if: github.repository == 'anftm/pipeline'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Install pinned dependencies
+        run: pip install -r scripts/requirements.txt PyYAML==6.0.3
+      - name: Test exact fork branch safety
+        run: python3 -B -m unittest -v tests.test_bha_fork_safe_sync
+      - name: Validate request
+        env:
+          ARCHIVE_ID: ${{ inputs.archive_id }}
+          APPLY: ${{ inputs.apply }}
+          PLAN_RUN: ${{ inputs.plan_run }}
+          PLAN_SHA: ${{ inputs.plan_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$ARCHIVE_ID" =~ ^([0-9]|[12][0-9]|3[01])$ ]]
+          if [[ "$APPLY" == 'true' ]]; then
+            [[ "$PLAN_RUN" =~ ^[0-9]+$ ]]
+            [[ "$PLAN_SHA" =~ ^[0-9a-f]{64}$ ]]
+          else
+            [[ -z "$PLAN_RUN" && -z "$PLAN_SHA" ]]
+          fi
+      - name: Download previously reviewed plan
+        if: inputs.apply
+        uses: actions/download-artifact@v8
+        with:
+          name: bha-fork-safe-plan
+          path: ${{ runner.temp }}/bha-plan
+          run-id: ${{ inputs.plan_run }}
+          github-token: ${{ github.token }}
+      - name: Verify plan provenance and exact content
+        if: inputs.apply
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PLAN_RUN: ${{ inputs.plan_run }}
+          PLAN_SHA: ${{ inputs.plan_sha256 }}
+          ARCHIVE_ID: ${{ inputs.archive_id }}
+          BRANCH: ${{ inputs.branch }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PLAN_RUN" > "$RUNNER_TEMP/plan-run.json"
+          python3 - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP'])
+          run = json.loads((root / 'plan-run.json').read_bytes())
+          if (run.get('status') != 'completed' or run.get('conclusion') != 'success'
+                  or run.get('event') != 'workflow_dispatch' or run.get('head_branch') != 'main'
+                  or run.get('path', '').split('@', 1)[0] != '.github/workflows/bha-fork-sync.yml'
+                  or run.get('head_sha') != os.environ['GITHUB_SHA']):
+              raise SystemExit('plan run identity is not an exact successful plan on this revision')
+          plan_file = root / 'bha-plan/plan.json'
+          raw = plan_file.read_bytes()
+          if len(raw) > 64 * 1024 or hashlib.sha256(raw).hexdigest() != os.environ['PLAN_SHA']:
+              raise SystemExit('approved plan hash differs')
+          plan = json.loads(raw)
+          if (plan.get('kind') != 'bha-fork-branch-plan' or str(plan.get('archive')) != os.environ['ARCHIVE_ID']
+                  or plan.get('branch') != os.environ['BRANCH'] or plan.get('can_fast_forward') is not True
+                  or plan.get('remote_writes') != 0):
+              raise SystemExit('plan is not the requested safe fast-forward')
+          PY
+      - name: Inspect or apply one branch
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+          ARCHIVE_ID: ${{ inputs.archive_id }}
+          BRANCH: ${{ inputs.branch }}
+          APPLY: ${{ inputs.apply }}
+          PLAN_SHA: ${{ inputs.plan_sha256 }}
+        run: |
+          set -euo pipefail
+          mkdir -p output/bha
+          if [[ "$APPLY" == 'true' ]]; then
+            python3 -B scripts/bha_fork_safe_sync.py --archive "$ARCHIVE_ID" --branch "$BRANCH" \
+              --apply-plan "$RUNNER_TEMP/bha-plan/plan.json" --plan-sha256 "$PLAN_SHA" \
+              --confirm-exact-fast-forward \
+              --output output/bha/result.json
+          else
+            python3 -B scripts/bha_fork_safe_sync.py --archive "$ARCHIVE_ID" --branch "$BRANCH" \
+              --output output/bha/plan.json
+            sha256sum output/bha/plan.json
+          fi
+      - name: Preserve reviewed plan
+        if: ${{ !inputs.apply }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: bha-fork-safe-plan
+          path: output/bha/plan.json
+          retention-days: 14
+          if-no-files-found: error
+      - name: Preserve synchronization result
+        if: ${{ inputs.apply }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: bha-fork-safe-result
+          path: output/bha/result.json
+          retention-days: 30
+          if-no-files-found: error
