@@ -45,6 +45,18 @@ class SearchPublicationPointerTests(unittest.TestCase):
             pointer.apply_pointer(store, desired="a" * 64, expected="a" * 64, transition="2" * 32)
         self.assertEqual(store.calls, 0)
 
+    def test_full_expected_parent_detects_same_generation_different_transition(self):
+        old = pointer.make_pointer("a" * 64, None, "1" * 32)
+        store = MemoryPointer(pointer.make_pointer("a" * 64, None, "2" * 32))
+        with self.assertRaisesRegex(ValueError, "full pointer identity changed"):
+            pointer.apply_pointer(store, desired="b" * 64, expected="a" * 64,
+                                  transition="3" * 32, expected_pointer=old)
+        self.assertEqual(store.calls, 0)
+        result = pointer.apply_pointer(store, desired="b" * 64, expected="a" * 64,
+                                       transition="3" * 32, expected_pointer=store.raw)
+        self.assertEqual(result["status"], "written")
+        self.assertEqual(store.calls, 1)
+
     def test_missing_validator_cannot_turn_existing_pointer_into_create(self):
         store = MemoryPointer(pointer.make_pointer("a" * 64, None, "1" * 32))
         store.etag = None

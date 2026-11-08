@@ -92,8 +92,14 @@ class S3SearchPointerStore:
                                                   ContentType="application/json", **condition)
 
 
-def apply_pointer(store, *, desired: str, expected: str | None, transition: str) -> dict:
-    """CAS the requested change; caller must hold its independently verified writer coordination."""
+def apply_pointer(store, *, desired: str, expected: str | None, transition: str,
+                  expected_pointer: bytes | None = None) -> dict:
+    """CAS the requested change; caller must hold its independently verified writer coordination.
+
+    When supplied, expected_pointer binds the full observed parent identity,
+    including its transition. It detects a different same-generation pointer
+    before CAS, but cannot prevent an intervening ABA or replace writer fencing.
+    """
     _generation(desired)
     if expected is not None:
         _generation(expected)
@@ -101,6 +107,10 @@ def apply_pointer(store, *, desired: str, expected: str | None, transition: str)
     if (raw is None) != (etag is None):
         raise ValueError("pointer identity and validator are inconsistent")
     current = decode_pointer(raw) if raw is not None else None
+    if expected_pointer is not None:
+        decode_pointer(expected_pointer)
+        if raw != expected_pointer:
+            raise ValueError("full pointer identity changed; inspect before resuming")
     actual = current["desired"] if current else None
     if actual != expected:
         raise ValueError("desired pointer parent changed; inspect before resuming")
