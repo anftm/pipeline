@@ -208,7 +208,8 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--mode', required=True, choices=('mark', 'publish', 'reconcile-pointer', 'space-default',
                                                           'pages-default-prepare', 'pages-default-apply',
-                                                          'pages-default-reconcile', 'finish', 'rollback-finish'))
+                                                          'pages-default-reconcile', 'finish', 'rollback-finish',
+                                                          'abort-unpublished'))
     parser.add_argument('--expected-revision', default=''); parser.add_argument('--operation', default='')
     args = parser.parse_args(argv)
     import requests
@@ -235,6 +236,8 @@ def main(argv=None) -> int:
     elif args.mode == 'pages-default-reconcile': current = reconcile_pages_default(store, **common, operation=op)
     elif args.mode == 'rollback-finish':
         current = finish_rollback(store, session=session, api=api, hub=hub, get=bounded_get)
+    elif args.mode == 'abort-unpublished':
+        current = tx.abort_publishing(store, _current(store, 'publishing'))
     else: current = finish(store, **common)
     print(json.dumps({'kind': 'search-finalization-step', 'mode': args.mode, 'operation': op,
                       'state': current.record['state'], 'sequence': current.record['sequence'],

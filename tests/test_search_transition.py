@@ -204,6 +204,33 @@ class SearchTransitionTests(unittest.TestCase):
                      pages_receipt=receipt("pages", B), space_receipt=receipt("space", B),
                      pages_default=default_receipt("pages", B), space_default=default_receipt("space", B))
 
+    def test_abort_unpublished_checks_exact_pointer_and_blocks_stale_publisher(self):
+        c = self.ready()
+        c = tx.mark_publishing(self.s, c, pages_receipt=receipt('pages', B), space_receipt=receipt('space', B))
+        for pointer in (make_pointer(B, A, T1), make_pointer(A, None, T2)):
+            self.s.pointer = pointer
+            with self.assertRaisesRegex(ValueError, 'not the exact parent'):
+                tx.abort_publishing(self.s, c)
+            self.assertEqual(tx.load(self.s), c)
+        self.s.pointer = make_pointer(A, None, '0' * 32)
+        aborted = tx.abort_publishing(self.s, c)
+        self.assertEqual(aborted.record['state'], 'rolling-back')
+        with self.assertRaisesRegex(ValueError, 'head changed'):
+            tx.publish_pointer(self.s, self.s, c, pages_receipt=receipt('pages', B),
+                               space_receipt=receipt('space', B))
+        self.assertEqual(self.s.pointer_writes, 0)
+        self.assertEqual(tx.audit_history(self.s, aborted), 7)
+
+    def test_abort_lost_head_response_is_read_without_replay(self):
+        c = self.ready()
+        c = tx.mark_publishing(self.s, c, pages_receipt=receipt('pages', B), space_receipt=receipt('space', B))
+        self.s.fail_head = 'after'
+        count = self.s.writes
+        aborted = tx.abort_publishing(self.s, c)
+        self.assertEqual(aborted.record['state'], 'rolling-back')
+        self.assertEqual(self.s.writes, count + 1)
+        self.assertEqual(self.s.pointer_writes, 0)
+
     def test_invalid_fresh_receipt_or_foreign_pointer_never_writes_pointer(self):
         c = self.ready()
         c = tx.mark_publishing(self.s, c, pages_receipt=receipt("pages", B), space_receipt=receipt("space", B))

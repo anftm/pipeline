@@ -286,6 +286,8 @@ def validate_advance(previous: dict, value: dict, *, prior_digest: str) -> None:
         if ((a, b) == ("pointer-observed", "complete") and before == after and defaults_before == defaults_after
                 and all(defaults_after[s]["generation"] == value["candidate"] for s in SITES)):
             return
+        if ((a, b) == ("publishing", "rolling-back") and before == after and defaults_before == defaults_after):
+            return
         if ((a, b) == ("rolling-back", "rolled-back") and defaults_before == defaults_after
                 and all(after[s]["generation"] == value["parent_pointer"]["desired"] for s in SITES)):
             return
@@ -633,6 +635,27 @@ def finish_rollback(store: TransitionStore, current: Current, *, pages_receipt: 
     defaults = {site: _observed(parent, _store_receipt(store, current.record['transition'], receipt))
                 for site, receipt in (('pages', pages_default), ('space', space_default))}
     return _commit(store, _next(current, state='rolled-back', observed=observed, defaults=defaults), current)
+
+
+def abort_publishing(store: TransitionStore, current: Current) -> Current:
+    """Stop a pointer attempt before rollback only after observing its exact parent.
+
+    The caller must first ensure no older publisher is still running. The head
+    CAS rejects subsequent cooperating publishers, but is not a fence against an
+    already in-flight request or external writers.
+    """
+    if current.record['state'] != 'publishing' or current.record['pending'] is not None:
+        raise ValueError('transition is not awaiting pointer publication')
+    active = load(store)
+    if active is None or active.head_raw != current.head_raw or active.etag != current.etag:
+        raise ValueError('transition head changed before publishing abort')
+    audit_history(store, current)
+    if store.read_pointer() != search_snapshot.canonical(current.record['parent_pointer']):
+        raise ValueError('pointer is not the exact parent; reconcile publication instead')
+    result = _commit(store, _next(current, state='rolling-back'), current)
+    if store.read_pointer() != search_snapshot.canonical(current.record['parent_pointer']):
+        raise ValueError('pointer changed while aborting publication; halt and inspect')
+    return result
 
 
 def mark_publishing(store: TransitionStore, current: Current, *, pages_receipt: bytes, space_receipt: bytes) -> Current:

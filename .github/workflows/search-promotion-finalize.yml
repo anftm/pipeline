@@ -18,6 +18,7 @@ on:
           - pages-default-reconcile
           - finish
           - rollback-finish
+          - abort-unpublished
       expected_revision:
         description: Exact site revision for default observation/intent
         type: string
@@ -27,7 +28,7 @@ on:
         type: string
         required: false
       known_writers_coordinated:
-        description: Known search and deployment writers are coordinated
+        description: Known search, deployment and any in-flight pointer writers are coordinated
         type: boolean
         default: false
 
@@ -68,7 +69,7 @@ jobs:
           [[ "$WRITERS" == 'true' ]]
           args=(--mode "$MODE")
           case "$MODE" in
-            mark|publish|reconcile-pointer|finish|rollback-finish)
+            mark|publish|reconcile-pointer|finish|rollback-finish|abort-unpublished)
               [[ -z "$EXPECTED_REVISION" && -z "$OPERATION" ]] ;;
             space-default|pages-default-prepare)
               [[ "$EXPECTED_REVISION" =~ ^[0-9a-f]{40}$ && -z "$OPERATION" ]]

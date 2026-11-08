@@ -43,6 +43,7 @@ class FinalizeTests(unittest.TestCase):
         self.assertIn('reconcile-pointer', flow['on']['workflow_dispatch']['inputs']['mode']['options'])
         self.assertIn('pages-default-reconcile', flow['on']['workflow_dispatch']['inputs']['mode']['options'])
         self.assertIn('rollback-finish', flow['on']['workflow_dispatch']['inputs']['mode']['options'])
+        self.assertIn('abort-unpublished', flow['on']['workflow_dispatch']['inputs']['mode']['options'])
 
     def test_pointer_write_after_both_actual_receipts_and_lost_response(self):
         current = self.marked(); self.assertEqual(current.record['state'], 'publishing')
