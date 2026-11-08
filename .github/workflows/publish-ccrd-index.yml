@@ -28,6 +28,7 @@ jobs:
       - name: Compare upstream text and actual four-source consumer
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: python scripts/check_ccrd_four_source.py --output output/ccrd/four-source-check.json
       - uses: actions/upload-artifact@v7
         with:

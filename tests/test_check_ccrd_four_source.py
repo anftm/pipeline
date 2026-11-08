@@ -89,6 +89,17 @@ class FourSourceCheckTests(unittest.TestCase):
         with self.assertRaises(UnicodeDecodeError):
             checker.check(ReadOnlyStore(self.manifest), invalid, self.observe)
 
+    def test_pinned_source_observation_is_checked_and_preserved(self):
+        receipt = {'sha256': self.digest, 'bytes': len(self.raw), 'revision': 'a' * 40,
+                   'url': 'https://example.invalid/pinned', 'source_stable': True, 'remote_writes': 0}
+        result = checker.check(ReadOnlyStore(self.manifest), observe=self.observe,
+                               capture=lambda: (self.raw, receipt))
+        self.assertEqual(result['source_observation'], receipt)
+        self.assertFalse(result['source_changed'])
+        for bad in ({**receipt, 'source_stable': False}, {**receipt, 'sha256': 'b' * 64}):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                checker.check(ReadOnlyStore(self.manifest), observe=self.observe, capture=lambda bad=bad: (self.raw, bad))
+
     def test_consumer_failure_does_not_produce_a_report(self):
         def failed(*_args):
             raise RuntimeError('consumer unavailable')
