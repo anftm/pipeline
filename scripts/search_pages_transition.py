@@ -22,7 +22,7 @@ try:
     from . import search_transition as tx
     from .reader_bucket_store import HubBucketStore
     from .search_daily import bounded_get
-    from .search_space_transition import search_parent_bytes
+    from .search_space_transition import search_parent_bytes, _verify_candidate_sources
 except ImportError:
     import search_adopt as adoption
     import search_consumer_receipts as receipts
@@ -32,7 +32,7 @@ except ImportError:
     import search_transition as tx
     from reader_bucket_store import HubBucketStore
     from search_daily import bounded_get
-    from search_space_transition import search_parent_bytes
+    from search_space_transition import search_parent_bytes, _verify_candidate_sources
 
 
 REV = re.compile(r'[0-9a-f]{40}\Z')
@@ -111,6 +111,11 @@ def apply_once(store, *, session, api, hub, get, operation_id: str) -> dict:
         raise ValueError('Pages operation already has a run; reconcile instead of redispatch')
     if pending['operation'] == 'apply':
         _space_loaded(current, api=api, hub=hub, get=get)
+        # Do not dispatch a newly stale generation after the Space switch.
+        manifest = adoption.validate_generation(hub, current.record['candidate'])
+        _verify_candidate_sources(manifest, current.record['source_revisions_sha256'])
+        if store.read_pointer() != search_parent_bytes(current):
+            raise ValueError('search desired pointer changed during Pages preflight')
     target = current.record['parent_pointer']['desired'] if pending['operation'] == 'rollback' else current.record['candidate']
     if pending['operation'] == 'rollback':
         adoption.validate_generation(hub, target)

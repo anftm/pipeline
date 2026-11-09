@@ -24,7 +24,8 @@ class PagesTransitionTests(unittest.TestCase):
         subject.tx.observe_site(self.s, current, site='space', generation=B, receipt=receipt('space', B))
         self.session, self.api, self.hub = Mock(), Mock(), Mock()
         self.patches = [patch.object(subject, '_main', return_value=REV),
-                        patch.object(subject, '_space_loaded'), patch.object(subject.deploy, 'assert_idle'),
+                        patch.object(subject, '_space_loaded'), patch.object(subject, '_verify_candidate_sources'),
+                        patch.object(subject.deploy, 'assert_idle'),
                         patch.object(subject.deploy, 'failed_before_deploy'),
                         patch.object(subject.defaults, 'observe_pages', return_value=default_receipt('pages', A)),
                         patch.object(subject.adoption, 'validate_generation', return_value={}),
@@ -48,6 +49,17 @@ class PagesTransitionTests(unittest.TestCase):
                 subject.apply_once(self.s, session=self.session, api=self.api, hub=self.hub,
                                    get=lambda *_: b'', operation_id=OP)
             send.assert_not_called()
+
+    def test_changed_source_or_missing_candidate_fails_before_dispatch_claim(self):
+        self.prepare_pages()
+        with patch.object(subject.deploy, 'inspect_runs', return_value=None), \
+                patch.object(subject, '_verify_candidate_sources', side_effect=ValueError('sources changed')), \
+                patch.object(subject.deploy, 'dispatch') as send:
+            with self.assertRaisesRegex(ValueError, 'sources changed'):
+                subject.apply_once(self.s, session=self.session, api=self.api, hub=self.hub,
+                                   get=lambda *_: b'', operation_id=OP)
+            send.assert_not_called()
+        self.assertIsNone(subject.tx.load(self.s).record['pending']['write_claim'])
 
     def test_lost_dispatch_is_not_replayed_when_run_is_not_yet_visible(self):
         self.prepare_pages()

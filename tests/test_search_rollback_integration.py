@@ -49,6 +49,7 @@ class SearchRollbackIntegrationTests(unittest.TestCase):
                 patch.object(space.deploy, 'variable', side_effect=lambda _api: (variables['generation'], variables['updated_at'])), \
                 patch.object(space.deploy, 'set_generation', side_effect=update_space), \
                 patch.object(pages, '_main', return_value=REV), \
+                patch.object(pages, '_verify_candidate_sources'), \
                 patch.object(pages.deploy, 'assert_idle'), \
                 patch.object(pages.deploy, 'failed_before_deploy'), \
                 patch.object(pages.deploy, 'dispatch', side_effect=dispatch), \

@@ -23,6 +23,7 @@ try:
     from .reader_bucket_store import HubBucketStore
     from .search_daily import bounded_get
     from .search_publication_pointer import S3SearchPointerStore, make_pointer
+    from .search_space_transition import _verify_candidate_sources
 except ImportError:
     import fetch_and_parse as fetch
     import search_adopt as adoption
@@ -34,6 +35,7 @@ except ImportError:
     from reader_bucket_store import HubBucketStore
     from search_daily import bounded_get
     from search_publication_pointer import S3SearchPointerStore, make_pointer
+    from search_space_transition import _verify_candidate_sources
 
 
 VARIABLE = defaults.VARIABLE
@@ -50,8 +52,7 @@ def _current(store, state: str) -> tx.Current:
 def _actual(current: tx.Current, *, hub, api, session, get, revision) -> tuple[bytes, bytes]:
     candidate = current.record['candidate']; manifest = adoption.validate_generation(hub, candidate)
     revisions = manifest.get('source_revisions')
-    if not isinstance(revisions, dict) or set(revisions) != set(fetch.REPOS):
-        raise ValueError('search candidate source revisions are incomplete')
+    _verify_candidate_sources(manifest, current.record['source_revisions_sha256'])
     token = os.environ.get('HF_TOKEN', '')
     if {repo: revision(repo, token) for repo in fetch.REPOS} != revisions:
         raise ValueError('search source revisions changed before promotion')

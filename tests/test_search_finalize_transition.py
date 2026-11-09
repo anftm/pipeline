@@ -45,6 +45,27 @@ class FinalizeTests(unittest.TestCase):
         self.assertIn('rollback-finish', flow['on']['workflow_dispatch']['inputs']['mode']['options'])
         self.assertIn('abort-unpublished', flow['on']['workflow_dispatch']['inputs']['mode']['options'])
 
+    def test_actual_prepublication_checks_durable_source_digest(self):
+        import hashlib
+        from scripts import search_snapshot
+        from types import SimpleNamespace
+        self.actual.stop()
+        revisions={repo:'a'*40 for repo in subject.fetch.REPOS}
+        digest=hashlib.sha256(search_snapshot.canonical(revisions)).hexdigest()
+        current=SimpleNamespace(record={'candidate':B,'source_revisions_sha256':digest})
+        self.api.get_space_runtime.return_value=SimpleNamespace(stage='RUNNING',raw={'sha':REV})
+        common={**self.common,'revision':lambda *_:'a'*40}
+        with patch.object(subject.adoption,'validate_generation',return_value={'source_revisions':revisions}), \
+                patch.object(subject.fetch,'get_repo_sha',return_value='a'*40), \
+                patch.object(subject.space,'variable',return_value=(B,TIME)), \
+                patch.object(subject.space,'runtime'),patch.object(subject.pages,'assert_idle'), \
+                patch.object(subject.consumers,'observe',side_effect=lambda site,generation,*_a,**_k:receipt(site,generation)):
+            first,second=subject._actual(current,**common)
+            self.assertEqual(first,receipt('pages',B));self.assertEqual(second,receipt('space',B))
+            current.record['source_revisions_sha256']='f'*64
+            with self.assertRaisesRegex(ValueError,'durable intent'):
+                subject._actual(current,**common)
+
     def test_pointer_write_after_both_actual_receipts_and_lost_response(self):
         current = self.marked(); self.assertEqual(current.record['state'], 'publishing')
         self.store.lose_pointer_response = True
