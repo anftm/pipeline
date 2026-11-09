@@ -13,10 +13,14 @@ import urllib.request
 try:
     from . import bha_reindex_journal as journal
     from . import bha_reindex_plan as planning
+    from . import bha_consumer_sample as consumer_samples
+    from . import bha_snapshot_inspection as snapshots
     from . import check_bha_reindex_access as access
 except ImportError:
     import bha_reindex_journal as journal
     import bha_reindex_plan as planning
+    import bha_consumer_sample as consumer_samples
+    import bha_snapshot_inspection as snapshots
     import check_bha_reindex_access as access
 
 
@@ -111,8 +115,13 @@ def apply_once(store, *, operation: str, token: str, inspect_live, post=_post) -
             'state': updated.record['state'], 'consumer_verified': False, 'external_writers_verified': False}
 
 
-def reconcile(store, *, operation: str, token: str, status=_raw_status, verify_samples=None) -> dict:
-    """Accept only the exact job and independently observed target revisions."""
+def reconcile(store, *, operation: str, token: str, status=_raw_status, verify_samples=None,
+              verify_snapshot=None, fetch=consumer_samples.get) -> dict:
+    """Accept exact job, live target, samples and independently observed snapshot.
+
+    The snapshot verifier must read the exact bucket generation itself. A
+    caller-provided fixture or a manifest alone is not production evidence.
+    """
     current = journal.load(store)
     if current is None or current.record['operation'] != operation or current.record['state'] not in {'claimed', 'accepted'}:
         raise ValueError('BHA request is not pending reconciliation')
@@ -168,8 +177,58 @@ def reconcile(store, *, operation: str, token: str, status=_raw_status, verify_s
             or later.get('index_status') != 'ready' or later.get('switch_pending') is not False
             or planning._trees(later.get('archive_revisions'), 'consumer trees') != current.record['archive_revisions']):
         raise ValueError('BHA consumer changed during acceptance')
+    # The service marks its job succeeded before asynchronous snapshot
+    # publication. Do not call that a durable, restart-safe index update.
+    if verify_snapshot is None or type(job.get('finished_at')) is not int:
+        return {'status': 'snapshot-unverified', 'job_id': job_id, 'journal_advanced': False,
+                'external_writers_verified': False}
+    # Match the post-job snapshot reported by the live service *and* full byte
+    # hashes; a same-tree snapshot from an earlier full rebuild is insufficient.
+    health = consumer_samples._object(fetch(consumer_samples.BASE + '/api/health',
+                                              consumer_samples.MAX_HEALTH), 'health')
+    snapshot_status = health.get('bucket_snapshot') if isinstance(health, dict) else None
+    if (not isinstance(snapshot_status, dict) or snapshot_status.get('state') != 'published'
+            or snapshot_status.get('stage') != 'complete' or not isinstance(snapshot_status.get('snapshot'), str)
+            or not snapshots.GEN.fullmatch(snapshot_status['snapshot'])
+            or type(snapshot_status.get('updated_at')) is not int or snapshot_status['updated_at'] < job['finished_at']):
+        return {'status': 'snapshot-pending', 'job_id': job_id, 'journal_advanced': False,
+                'external_writers_verified': False}
+    snapshot = verify_snapshot(current.record['archive_revisions'], full_sidecars=True,
+                               expected_generation=snapshot_status['snapshot'], not_before=job['finished_at'])
+    if (not isinstance(snapshot, dict) or snapshot.get('kind') != 'bha-durable-snapshot-observation'
+            or snapshot.get('generation') != snapshot_status['snapshot']
+            or snapshot.get('manifest_verified') is not True or snapshot.get('sidecars_verified') is not True
+            or snapshot.get('archive_revisions') != current.record['archive_revisions']
+            or snapshot.get('remote_writes') != 0 or snapshot.get('external_writers_verified') is not False
+            or not isinstance(snapshot.get('generation'), str) or not snapshot['generation']
+            or not isinstance(snapshot.get('manifest_sha256'), str)
+            or not journal.SHA.fullmatch(snapshot['manifest_sha256'])):
+        raise ValueError('BHA snapshot evidence is missing, incomplete or differs from target')
+    # The hashes do not verify an Elasticsearch restore. Preserve that limit in
+    # the terminal result rather than treating a snapshot as a restore test.
+    if snapshot.get('restore_verified') is not False:
+        raise ValueError('BHA snapshot evidence has an unsupported restore claim')
+    health_after = consumer_samples._object(fetch(consumer_samples.BASE + '/api/health',
+                                                    consumer_samples.MAX_HEALTH), 'health')
+    after_snapshot = health_after.get('bucket_snapshot') if isinstance(health_after, dict) else None
+    if (not isinstance(after_snapshot, dict) or after_snapshot.get('state') != 'published'
+            or after_snapshot.get('stage') != 'complete'
+            or after_snapshot.get('snapshot') != snapshot_status['snapshot']):
+        raise ValueError('BHA snapshot status changed during acceptance')
+    final = status(token)
+    final_job = final.get('job') if isinstance(final, dict) else None
+    if (not isinstance(final, dict) or not isinstance(final_job, dict)
+            or final_job.get('job_id') != job_id or final_job.get('state') != 'succeeded'
+            or final_job.get('mode') != current.record['mode']
+            or final_job.get('target_archive_revisions') != current.record['archive_revisions']
+            or final_job.get('changed_archives') != current.record['changed_archives']
+            or final.get('index_status') != 'ready' or final.get('switch_pending') is not False
+            or planning._trees(final.get('archive_revisions'), 'consumer trees') != current.record['archive_revisions']):
+        raise ValueError('BHA consumer changed during snapshot acceptance')
     result = {'job_id': job_id, 'state': 'succeeded', 'consumer_revisions_verified': True,
-              'samples': sample_report['samples'], 'sample_count': len(sample_report['samples'])}
+              'samples': sample_report['samples'], 'sample_count': len(sample_report['samples']),
+              'snapshot_generation': snapshot['generation'], 'snapshot_manifest_sha256': snapshot['manifest_sha256'],
+              'snapshot_sidecars_verified': True, 'snapshot_restore_verified': False}
     terminal = journal.terminal(store, current, state='verified', result=result)
     return {'status': 'verified', 'job_id': job_id, 'sequence': terminal.record['sequence'],
             'journal_advanced': True, 'external_writers_verified': False}

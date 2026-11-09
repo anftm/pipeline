@@ -42,7 +42,7 @@ class Store:
 
 def live_status(value, *, state='succeeded', job_id=JOB):
     return {'index_status': 'ready', 'switch_pending': False, 'archive_revisions': value['archive_revisions'],
-            'job': {'job_id': job_id, 'state': state, 'mode': 'incremental',
+            'job': {'job_id': job_id, 'state': state, 'mode': 'incremental', 'finished_at': 100,
                     'target_archive_revisions': value['archive_revisions'], 'changed_archives': value['changed_archives']}}
 
 
@@ -50,6 +50,21 @@ def sample_report(value):
     return {'consumer_health_observed_twice': True, 'remote_writes': 0,
             'samples': [{'archive': 0, 'commit': B, 'tree': value['archive_revisions']['0'],
                          'preview_article_equal': True, 'exact_title_search_found': True}]}
+
+
+def snapshot_report(trees, *, full_sidecars, expected_generation, not_before):
+    if full_sidecars is not True or expected_generation != 'bha-fixture' or not_before != 100:
+        raise ValueError('full sidecar verification and exact generation required')
+    return {'kind': 'bha-durable-snapshot-observation', 'generation': 'bha-fixture',
+            'manifest_sha256': 'f' * 64, 'archive_revisions': trees, 'manifest_verified': True,
+            'sidecars_verified': True, 'restore_verified': False, 'remote_writes': 0,
+            'external_writers_verified': False}
+
+
+def snapshot_health(*_args):
+    import json
+    return json.dumps({'bucket_snapshot': {'state': 'published', 'stage': 'complete',
+                                            'snapshot': 'bha-fixture', 'updated_at': 101}}).encode()
 
 
 class BhaReindexDeliveryTests(unittest.TestCase):
@@ -64,7 +79,8 @@ class BhaReindexDeliveryTests(unittest.TestCase):
         running = delivery.reconcile(self.s, operation=T, token='fixture', status=lambda *_: live_status(self.plan, state='running'))
         self.assertEqual(running['status'], 'running'); self.assertFalse(running['journal_advanced'])
         done = delivery.reconcile(self.s, operation=T, token='fixture', status=lambda *_: live_status(self.plan),
-                                  verify_samples=lambda: sample_report(self.plan))
+                                  verify_samples=lambda: sample_report(self.plan), verify_snapshot=snapshot_report,
+                                  fetch=snapshot_health)
         self.assertEqual(done['status'], 'verified'); self.assertEqual(journal.load(self.s).record['state'], 'verified')
         self.assertEqual(journal.audit(self.s, journal.load(self.s)), 4)
         self.assertFalse(done['external_writers_verified'])
@@ -75,7 +91,8 @@ class BhaReindexDeliveryTests(unittest.TestCase):
     def test_next_operation_requires_live_consumer_to_match_verified_predecessor(self):
         self.prepare(); self.apply(Mock(return_value={'ok': True, 'status': 'accepted', 'mode': 'incremental', 'job_id': JOB}))
         delivery.reconcile(self.s, operation=T, token='fixture', status=lambda *_: live_status(self.plan),
-                           verify_samples=lambda: sample_report(self.plan))
+                           verify_samples=lambda: sample_report(self.plan), verify_snapshot=snapshot_report,
+                           fetch=snapshot_health)
         before = self.s.writes
         with self.assertRaisesRegex(ValueError, 'last verified index target'):
             delivery.prepare(self.s, plan=self.plan, mode='incremental', inspect_live=lambda: self.plan, operation='3' * 32)
@@ -103,7 +120,8 @@ class BhaReindexDeliveryTests(unittest.TestCase):
             journal._record(search_snapshot.canonical(forged))
         self.apply(Mock(return_value={'ok': True, 'status': 'accepted', 'mode': 'incremental', 'job_id': JOB}))
         delivery.reconcile(self.s, operation=T, token='fixture', status=lambda *_: live_status(self.plan),
-                           verify_samples=lambda: sample_report(self.plan))
+                           verify_samples=lambda: sample_report(self.plan), verify_snapshot=snapshot_report,
+                           fetch=snapshot_health)
         next_plan = {**self.plan, 'consumer_revisions': dict(self.plan['archive_revisions']),
                      'archive_revisions': {**self.plan['archive_revisions'], '1': 'd' * 40}, 'changed_archives': [1]}
         next_plan['plan_sha256'] = hashlib.sha256(search_snapshot.canonical(
@@ -152,6 +170,45 @@ class BhaReindexDeliveryTests(unittest.TestCase):
         self.assertEqual(result['status'], 'failed'); self.assertEqual(journal.load(self.s).record['state'], 'failed')
         with self.assertRaisesRegex(ValueError, 'failed work'):
             delivery.prepare(self.s, plan=self.plan, mode='incremental', inspect_live=lambda: self.plan, operation='4' * 32)
+
+    def test_successful_job_without_full_snapshot_evidence_stays_pending(self):
+        self.prepare(); self.apply(Mock(return_value={'ok': True, 'status': 'accepted', 'mode': 'incremental', 'job_id': JOB}))
+        result = delivery.reconcile(self.s, operation=T, token='fixture', status=lambda *_: live_status(self.plan),
+                                    verify_samples=lambda: sample_report(self.plan))
+        self.assertEqual(result['status'], 'snapshot-unverified'); self.assertFalse(result['journal_advanced'])
+        self.assertEqual(journal.load(self.s).record['state'], 'accepted')
+        for changes in ({'sidecars_verified': False}, {'manifest_verified': False}, {'archive_revisions': {}},
+                        {'remote_writes': 1}, {'external_writers_verified': True}, {'restore_verified': True}):
+            def bad(trees, *, full_sidecars, expected_generation, not_before):
+                return {**snapshot_report(trees, full_sidecars=full_sidecars, expected_generation=expected_generation,
+                                          not_before=not_before), **changes}
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                delivery.reconcile(self.s, operation=T, token='fixture', status=lambda *_: live_status(self.plan),
+                                   verify_samples=lambda: sample_report(self.plan), verify_snapshot=bad, fetch=snapshot_health)
+            self.assertEqual(journal.load(self.s).record['state'], 'accepted')
+
+    def test_snapshot_status_drift_or_pending_does_not_finish(self):
+        self.prepare(); self.apply(Mock(return_value={'ok': True, 'status': 'accepted', 'mode': 'incremental', 'job_id': JOB}))
+        pending = lambda *_: b'{"bucket_snapshot":{"state":"pending_publish","stage":"waiting","snapshot":"bha-fixture"}}'
+        result = delivery.reconcile(self.s, operation=T, token='fixture', status=lambda *_: live_status(self.plan),
+                                    verify_samples=lambda: sample_report(self.plan), verify_snapshot=snapshot_report, fetch=pending)
+        self.assertEqual(result['status'], 'snapshot-pending'); self.assertFalse(result['journal_advanced'])
+        healths = iter([snapshot_health(), pending()])
+        with self.assertRaisesRegex(ValueError, 'snapshot status changed'):
+            delivery.reconcile(self.s, operation=T, token='fixture', status=lambda *_: live_status(self.plan),
+                               verify_samples=lambda: sample_report(self.plan), verify_snapshot=snapshot_report,
+                               fetch=lambda *_: next(healths))
+        self.assertEqual(journal.load(self.s).record['state'], 'accepted')
+
+    def test_consumer_drift_during_snapshot_verification_never_finishes(self):
+        self.prepare(); self.apply(Mock(return_value={'ok': True, 'status': 'accepted', 'mode': 'incremental', 'job_id': JOB}))
+        good = live_status(self.plan); foreign = live_status(self.plan); foreign['job']['job_id'] = '3' * 32
+        values = iter([good, good, foreign])
+        with self.assertRaisesRegex(ValueError, 'consumer changed during snapshot'):
+            delivery.reconcile(self.s, operation=T, token='fixture', status=lambda *_: next(values),
+                               verify_samples=lambda: sample_report(self.plan), verify_snapshot=snapshot_report,
+                               fetch=snapshot_health)
+        self.assertEqual(journal.load(self.s).record['state'], 'accepted')
 
     def test_full_rebuild_is_explicit_and_changed_archive_samples_are_required(self):
         unchanged = plan(changed=False); other = Store()

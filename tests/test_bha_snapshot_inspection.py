@@ -43,6 +43,18 @@ class BhaSnapshotInspectionTests(unittest.TestCase):
         self.assertTrue(report['sidecars_verified']); self.assertFalse(report['restore_verified'])
         self.assertFalse(report['external_writers_verified'])
 
+    def test_expected_generation_and_creation_time_reject_stale_same_tree_snapshot(self):
+        self.value['created_at'] = 100
+        raw = json.dumps(self.value).encode()
+        good = subject.inspect(self.trees, get=lambda *_: raw, expected_generation='bha-123-abc', not_before=100)
+        self.assertTrue(good['manifest_verified'])
+        with self.assertRaisesRegex(ValueError, 'identity is malformed'):
+            subject.inspect(self.trees, get=lambda *_: raw, expected_generation='bha-123-abc', not_before=101)
+        with self.assertRaisesRegex(ValueError, 'identity is malformed'):
+            subject.inspect(self.trees, get=lambda *_: raw, expected_generation='bha-other', not_before=100)
+        with self.assertRaisesRegex(ValueError, 'minimum time'):
+            subject.inspect(self.trees, get=lambda *_: raw, not_before=True)
+
     def test_foreign_revisions_sidecars_or_moving_pointer_fail_closed(self):
         with self.assertRaisesRegex(ValueError, 'sidecar bytes differ'):
             subject.inspect(self.trees, full_sidecars=True, get=self.get, hash_object=lambda *_: '0' * 64)

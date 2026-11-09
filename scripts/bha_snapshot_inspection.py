@@ -52,9 +52,14 @@ def _hash(key: str, expected_bytes: int, *, opener=urlopen) -> str:
     return digest.hexdigest()
 
 
-def inspect(expected: dict[str, str], *, full_sidecars: bool = False, get=_get, hash_object=_hash) -> dict:
+def inspect(expected: dict[str, str], *, full_sidecars: bool = False, expected_generation: str | None = None,
+            not_before: int | None = None, get=_get, hash_object=_hash) -> dict:
     target = planning._trees(expected, 'snapshot target revisions')
     if type(full_sidecars) is not bool: raise ValueError('BHA sidecar inspection mode must be explicit')
+    if expected_generation is not None and (not isinstance(expected_generation, str) or not GEN.fullmatch(expected_generation)):
+        raise ValueError('BHA expected snapshot generation is invalid')
+    if not_before is not None and (type(not_before) is not int or not_before < 0):
+        raise ValueError('BHA snapshot minimum time is invalid')
     raw = get('current.json', MAX_MANIFEST)
     value = json.loads(raw)
     metadata = value.get('index_metadata') if isinstance(value, dict) else None
@@ -64,6 +69,8 @@ def inspect(expected: dict[str, str], *, full_sidecars: bool = False, get=_get, 
         raise ValueError('BHA durable snapshot does not describe the target revisions')
     generation, snapshot = value.get('generation'), value.get('snapshot')
     if (not isinstance(generation, str) or not GEN.fullmatch(generation) or generation != snapshot
+            or expected_generation is not None and generation != expected_generation
+            or not_before is not None and (type(value.get('created_at')) is not int or value['created_at'] < not_before)
             or metadata.get('archive_start') != 0 or metadata.get('archive_end') != 31
             or not isinstance(metadata.get('version'), str) or not metadata['version']
             or not isinstance(metadata.get('source_fingerprint'), str) or not DIGEST.fullmatch(metadata['source_fingerprint'])
