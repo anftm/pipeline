@@ -35,6 +35,7 @@ STATES = {'prepared', 'space-intent', 'space-verified', 'pointer-intent', 'point
 STATE_SEQUENCE = {'prepared': {0}, 'space-intent': {1}, 'space-verified': {2},
                   'pointer-intent': {3}, 'pointer-verified': {4}, 'complete': {5},
                   'rollback-intent': {2, 3, 4, 5}, 'rolled-back': {3, 4, 5, 6}}
+MAX_HISTORY_RECORDS = 10_000
 
 
 class Store(Protocol):
@@ -79,12 +80,29 @@ def _record(raw: bytes) -> dict:
     keys = {'version', 'kind', 'transaction', 'sequence', 'prior', 'state', 'parent_sha256', 'candidate_generation',
             'candidate_manifest_sha256', 'activation_plan_sha256', 'durable_intent_sha256', 'parent_space_revision', 'space_revision',
             'evidence_sha256', 'rollback_revision', 'rollback_evidence_sha256'}
+    if not isinstance(raw, bytes) or not 0 < len(raw) <= MAX_BYTES:
+        raise ValueError('invalid CCRD transaction object size')
+    try:
+        preview = json.loads(raw)
+    except (TypeError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError('invalid CCRD transaction record') from error
+    if isinstance(preview, dict) and preview.get('version') == 2:
+        keys.add('previous_transaction')
     value = _exact(raw, keys)
-    if (type(value['version']) is not int or value['version'] != 1 or value['kind'] != 'ccrd-cw0-transaction-record'
+    if (type(value['version']) is not int or value['version'] not in {1, 2} or value['kind'] != 'ccrd-cw0-transaction-record'
             or type(value['sequence']) is not int or not 0 <= value['sequence'] <= 1_000_000
             or not isinstance(value['state'], str) or value['state'] not in STATES):
         raise ValueError('invalid CCRD transaction record')
     _match(value['transaction'], ID, 'transaction ID')
+    if value['version'] == 2 and value['previous_transaction'] is not None:
+        previous = value['previous_transaction']
+        if not isinstance(previous, dict) or set(previous) != {'transaction', 'record', 'sequence'}:
+            raise ValueError('invalid CCRD previous transaction reference')
+        _match(previous['transaction'], ID, 'previous transaction ID')
+        _match(previous['record'], SHA, 'previous transaction record')
+        if (previous['transaction'] == value['transaction'] or type(previous['sequence']) is not int
+                or not 0 <= previous['sequence'] <= max(max(x) for x in STATE_SEQUENCE.values())):
+            raise ValueError('invalid CCRD previous transaction identity')
     for key in ('parent_sha256', 'candidate_manifest_sha256', 'activation_plan_sha256', 'durable_intent_sha256'):
         _match(value[key], SHA, key)
     _match(value['candidate_generation'], GEN, 'candidate generation')
@@ -121,6 +139,8 @@ def _record(raw: bytes) -> dict:
 def _advance(previous: dict, current: dict, previous_digest: str) -> None:
     immutable = {'version', 'kind', 'transaction', 'parent_sha256', 'candidate_generation',
                  'candidate_manifest_sha256', 'activation_plan_sha256', 'durable_intent_sha256', 'parent_space_revision'}
+    if previous.get('previous_transaction') != current.get('previous_transaction'):
+        raise ValueError('CCRD previous transaction reference changed')
     if (any(previous[key] != current[key] for key in immutable)
             or current['sequence'] != previous['sequence'] + 1 or current['prior'] != previous_digest):
         raise ValueError('CCRD transaction immutable identity or predecessor changed')
@@ -138,6 +158,17 @@ def _advance(previous: dict, current: dict, previous_digest: str) -> None:
             previous['rollback_revision'] != current['rollback_revision']
             or previous['rollback_evidence_sha256'] != current['rollback_evidence_sha256']):
         raise ValueError('CCRD transaction rollback evidence changed')
+
+
+def _successor(previous: dict, current: dict, previous_digest: str) -> None:
+    """Bind a new root to the exact terminal predecessor and restored parent."""
+    reference = current.get('previous_transaction')
+    expected = {'transaction': previous['transaction'], 'record': previous_digest, 'sequence': previous['sequence']}
+    parent = previous['candidate_manifest_sha256'] if previous['state'] == 'complete' else previous['parent_sha256']
+    if (current['version'] != 2 or current['sequence'] != 0 or current['state'] != 'prepared'
+            or current['prior'] is not None or reference != expected or current['transaction'] == previous['transaction']
+            or previous['state'] not in {'complete', 'rolled-back'} or current['parent_sha256'] != parent):
+        raise ValueError('invalid CCRD successor transaction or terminal parent')
 
 
 @dataclass(frozen=True)
@@ -288,26 +319,61 @@ def load(store: Store) -> Current | None:
         if prior_raw is None or hashlib.sha256(prior_raw).hexdigest() != value['prior']:
             raise ValueError('CCRD prior transaction record is missing or altered')
         _advance(_record(prior_raw), value, value['prior'])
+    elif value.get('previous_transaction') is not None:
+        previous = value['previous_transaction']
+        prior_raw = store.read_record(_record_key(previous['transaction'], previous['record']))
+        if prior_raw is None or hashlib.sha256(prior_raw).hexdigest() != previous['record']:
+            raise ValueError('CCRD previous transaction record is missing or altered')
+        _successor(_record(prior_raw), value, previous['record'])
     return Current(head, raw, etag, value, record_raw)
 
 
-def audit(store: Store, current: Current) -> int:
-    """Verify the complete bounded immutable record chain and activation evidence."""
-    value = current.record
-    count = 1
-    while value['prior'] is not None:
-        prior_raw = store.read_record(_record_key(value['transaction'], value['prior']))
-        if prior_raw is None or hashlib.sha256(prior_raw).hexdigest() != value['prior']:
+def _audit_payloads(store: Store, value: dict) -> None:
+    intent = store.read_intent(_intent_key(value['transaction'], value['durable_intent_sha256']))
+    if intent is None or hashlib.sha256(intent).hexdigest() != value['durable_intent_sha256']:
+        raise ValueError('CCRD transaction history intent is missing or altered')
+    _intent(intent, value)
+    for field, revision, validate in (('evidence_sha256', 'space_revision', _activation_evidence),
+                                      ('rollback_evidence_sha256', 'rollback_revision', _rollback_evidence)):
+        digest = value[field]
+        if digest is None:
+            continue
+        raw = store.read_evidence(_evidence_key(value['transaction'], digest))
+        if raw is None or hashlib.sha256(raw).hexdigest() != digest:
+            raise ValueError('CCRD transaction history evidence is missing or altered')
+        validate(raw, value, value[revision])
+
+
+def audit(store: Store, current: Current, *, max_records: int = MAX_HISTORY_RECORDS) -> int:
+    """Verify every linked transaction, intent and evidence within a hard bound."""
+    if type(max_records) is not int or not 1 <= max_records <= MAX_HISTORY_RECORDS:
+        raise ValueError('invalid CCRD transaction history limit')
+    value, count, visited = current.record, 0, set()
+    while True:
+        count += 1
+        if count > max_records:
+            raise ValueError('CCRD transaction history exceeds audit limit')
+        _audit_payloads(store, value)
+        reference = value.get('previous_transaction') if value['prior'] is None else None
+        if value['prior'] is None and reference is None:
+            if value['sequence'] != 0 or value['state'] != 'prepared':
+                raise ValueError('CCRD transaction does not have an exact prepared root')
+            return count
+        owner = reference['transaction'] if reference else value['transaction']
+        digest = reference['record'] if reference else value['prior']
+        key = _record_key(owner, digest)
+        if key in visited:
+            raise ValueError('CCRD transaction history has a cycle')
+        visited.add(key)
+        prior_raw = store.read_record(key)
+        if prior_raw is None or hashlib.sha256(prior_raw).hexdigest() != digest:
             raise ValueError('CCRD transaction history is missing or altered')
         prior = _record(prior_raw)
-        _advance(prior, value, value['prior'])
-        count += 1
-        if count > max(max(values) for values in STATE_SEQUENCE.values()) + 1:
-            raise ValueError('CCRD transaction history exceeds state bounds')
+        if reference:
+            _successor(prior, value, digest)
+        else:
+            _advance(prior, value, digest)
         value = prior
-    if value['sequence'] != 0 or value['state'] != 'prepared':
-        raise ValueError('CCRD transaction does not have an exact prepared root')
-    return count
 
 
 def _commit(store: Store, value: dict, previous: Current | None) -> Current:
@@ -315,6 +381,8 @@ def _commit(store: Store, value: dict, previous: Current | None) -> Current:
     if previous is None:
         if value['sequence'] != 0 or value['state'] != 'prepared':
             raise ValueError('first CCRD transaction record must be prepared')
+    elif value['transaction'] != previous.record['transaction']:
+        _successor(previous.record, value, previous.head['record'])
     else:
         _advance(previous.record, value, previous.head['record'])
     digest = hashlib.sha256(raw).hexdigest(); key = _record_key(value['transaction'], digest)
@@ -345,14 +413,90 @@ def _commit(store: Store, value: dict, previous: Current | None) -> Current:
 def begin(store: Store, *, parent_sha256: str, candidate_generation: str, candidate_manifest_sha256: str,
           activation_plan_sha256: str, parent_space_revision: str, durable_intent: bytes,
           transaction: str | None = None) -> Current:
+    """Start only the first transaction; later transactions require a live parent read."""
     if load(store) is not None:
         raise ValueError('a CCRD transaction head already exists; inspect it before starting')
+    return _begin(store, parent_sha256=parent_sha256, candidate_generation=candidate_generation,
+                  candidate_manifest_sha256=candidate_manifest_sha256, activation_plan_sha256=activation_plan_sha256,
+                  parent_space_revision=parent_space_revision, durable_intent=durable_intent,
+                  transaction=transaction, previous=None)
+
+
+def begin_next(store: Store, current: Current, *, pointer_store, parent_sha256: str, candidate_generation: str,
+               candidate_manifest_sha256: str, activation_plan_sha256: str, parent_space_revision: str,
+               durable_intent: bytes, transaction: str | None = None) -> Current:
+    """Start a successor from a fully audited terminal journal and exact live parent.
+
+    Pointer reads and the journal CAS are separate objects, not a global lock;
+    actual external writers must still be coordinated independently.
+    """
+    _match(candidate_manifest_sha256, SHA, 'candidate manifest digest')
+    if parent_sha256 == candidate_manifest_sha256:
+        raise ValueError('CCRD successor candidate must differ from parent')
+    active = load(store)
+    if active is None or active.head_raw != current.head_raw or active.etag != current.etag:
+        raise ValueError('CCRD transaction head changed before successor')
+    if current.record['state'] not in {'complete', 'rolled-back'}:
+        raise ValueError('CCRD transaction is not terminal')
+    audit(store, current)
+    prior_intent = _intent(store.read_intent(_intent_key(current.record['transaction'],
+                                                         current.record['durable_intent_sha256'])), current.record)
+    expected = bytes.fromhex(prior_intent['candidate_manifest_hex'] if current.record['state'] == 'complete'
+                             else prior_intent['parent_pointer_hex'])
+    actual, etag = pointer_store.read_for_update()
+    strong_etag(etag)
+    if actual != expected or hashlib.sha256(actual).hexdigest() != parent_sha256:
+        raise ValueError('CCRD live pointer is not the exact preceding terminal parent')
+    result = _begin(store, parent_sha256=parent_sha256, candidate_generation=candidate_generation,
+                    candidate_manifest_sha256=candidate_manifest_sha256, activation_plan_sha256=activation_plan_sha256,
+                    parent_space_revision=parent_space_revision, durable_intent=durable_intent,
+                    transaction=transaction, previous=current)
+    later, later_etag = pointer_store.read_for_update()
+    if later != actual or strong_etag(later_etag) != etag:
+        raise ValueError('CCRD pointer changed while starting successor; halt and inspect')
+    return result
+
+
+def _history_transactions(store: Store, current: Current) -> set[str]:
+    """Collect transaction identities only after the entire history was audited."""
+    result, value, count = set(), current.record, 0
+    while True:
+        count += 1
+        if count > MAX_HISTORY_RECORDS:
+            raise ValueError('CCRD transaction history exceeds audit limit')
+        result.add(value['transaction'])
+        link = value.get('previous_transaction') if value['prior'] is None else None
+        if value['prior'] is None and link is None:
+            return result
+        owner = link['transaction'] if link else value['transaction']
+        digest = link['record'] if link else value['prior']
+        raw = store.read_record(_record_key(owner, digest))
+        if raw is None or hashlib.sha256(raw).hexdigest() != digest:
+            raise ValueError('CCRD transaction history is missing or altered')
+        prior = _record(raw)
+        if link:
+            _successor(prior, value, digest)
+        else:
+            _advance(prior, value, digest)
+        value = prior
+
+
+def _begin(store: Store, *, parent_sha256: str, candidate_generation: str, candidate_manifest_sha256: str,
+           activation_plan_sha256: str, parent_space_revision: str, durable_intent: bytes,
+           transaction: str | None, previous: Current | None) -> Current:
     transaction = transaction or uuid.uuid4().hex
     _match(transaction, ID, 'transaction ID')
+    if previous is not None and transaction in _history_transactions(store, previous):
+        raise ValueError('CCRD successor transaction ID must differ from all prior IDs')
     identity = {'parent_sha256': parent_sha256, 'candidate_generation': candidate_generation,
                 'candidate_manifest_sha256': candidate_manifest_sha256, 'activation_plan_sha256': activation_plan_sha256,
                 'parent_space_revision': parent_space_revision}
     _intent(durable_intent, identity)
+    if previous is not None:
+        probe = {'version': 2, 'transaction': transaction, 'sequence': 0, 'state': 'prepared', 'prior': None,
+                 'parent_sha256': parent_sha256, 'previous_transaction': {'transaction': previous.record['transaction'],
+                 'record': previous.head['record'], 'sequence': previous.record['sequence']}}
+        _successor(previous.record, probe, previous.head['record'])
     digest = hashlib.sha256(durable_intent).hexdigest(); key = _intent_key(transaction, digest)
     existing = store.read_intent(key)
     if existing is None:
@@ -364,14 +508,16 @@ def begin(store: Store, *, parent_sha256: str, candidate_generation: str, candid
         else:
             existing = store.read_intent(key)
     if existing != durable_intent: raise ValueError('CCRD durable intent immutable conflict')
-    value = {'version': 1, 'kind': 'ccrd-cw0-transaction-record', 'transaction': transaction,
+    value = {'version': 2, 'kind': 'ccrd-cw0-transaction-record', 'transaction': transaction,
+             'previous_transaction': ({'transaction': previous.record['transaction'], 'record': previous.head['record'],
+                                       'sequence': previous.record['sequence']} if previous else None),
              'sequence': 0, 'prior': None, 'state': 'prepared', 'parent_sha256': parent_sha256,
              'candidate_generation': candidate_generation, 'candidate_manifest_sha256': candidate_manifest_sha256,
              'activation_plan_sha256': activation_plan_sha256, 'durable_intent_sha256': digest,
              'parent_space_revision': parent_space_revision,
              'space_revision': None, 'evidence_sha256': None,
              'rollback_revision': None, 'rollback_evidence_sha256': None}
-    return _commit(store, value, None)
+    return _commit(store, value, previous)
 
 
 def _store_evidence(store: Store, transaction: str, evidence: bytes) -> str:

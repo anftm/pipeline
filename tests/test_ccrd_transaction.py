@@ -45,6 +45,32 @@ def snapshots():
 INTENT, P, M, A = snapshots()
 
 
+def successor_intent(parent_raw, generation='ccrd-four-' + '8' * 64):
+    parent = json.loads(parent_raw)
+    parent_sha = hashlib.sha256(parent_raw).hexdigest()
+    old = f"generations/{parent['generation']}/"
+    new = f'generations/{generation}/'
+    candidate = {**parent, 'generation': generation, 'previous_index_manifest_sha256': parent_sha,
+                 'metadata': [{**row, 'path': row['path'].replace(old, new, 1)} for row in parent['metadata']],
+                 'archives': [{**row, 'path': row['path'].replace(old, new, 1)} for row in parent['archives']]}
+    raw = ccrd_lifecycle.canonical(candidate); digest = hashlib.sha256(raw).hexdigest()
+    old_activation = ccrd_lifecycle.canonical({'version': 1, 'kind': 'ccrd-index-activation',
+                                                'bucket': ccrd_lifecycle.BUCKET,
+                                                'path': f"generations/{parent['generation']}/manifest.json",
+                                                'sha256': parent_sha})
+    plan = {'kind': 'ccrd-space-activation-plan', 'space': 'vomebook/Search', 'parent_revision': CHILD,
+            'parent_generation': parent['generation'], 'parent_pointer_sha256': parent_sha,
+            'candidate_generation': generation, 'candidate_manifest_sha256': digest,
+            'parent_activation_hex': old_activation.hex(),
+            'parent_activation_sha256': hashlib.sha256(old_activation).hexdigest()}
+    plan['plan_sha256'] = hashlib.sha256(ccrd_lifecycle.canonical(plan)).hexdigest()
+    intent = ccrd_lifecycle.canonical({'version': 1, 'kind': 'ccrd-cw0-durable-intent',
+                                       'parent_pointer_hex': parent_raw.hex(), 'candidate_manifest_hex': raw.hex(),
+                                       'activation_plan': plan})
+    return {'parent_sha256': parent_sha, 'candidate_generation': generation, 'candidate_manifest_sha256': digest,
+            'activation_plan_sha256': plan['plan_sha256'], 'parent_space_revision': CHILD, 'durable_intent': intent}
+
+
 class MemoryStore:
     def __init__(self):
         self.head = None; self.etag = None; self.records = {}; self.evidence = {}; self.intents = {}; self.writes = 0
@@ -202,6 +228,169 @@ class CcrdTransactionTests(unittest.TestCase):
         self.assertEqual(tx.audit(self.store, c), 4)
         self.store.evidence.clear()
         with self.assertRaisesRegex(ValueError, 'rollback evidence is missing'): tx.load(self.store)
+
+    def complete(self):
+        c = self.begin()
+        c = tx.advance(self.store, c, 'space-intent')
+        c = tx.advance(self.store, c, 'space-verified', space_revision=CHILD, evidence=evidence())
+        c = tx.advance(self.store, c, 'pointer-intent')
+        c = tx.advance(self.store, c, 'pointer-verified')
+        return tx.advance(self.store, c, 'complete')
+
+    def test_next_transaction_links_and_audits_complete_predecessor(self):
+        from tests.test_ccrd_pointer_transition import PointerMemory
+        terminal = self.complete()
+        raw = bytes.fromhex(json.loads(INTENT)['candidate_manifest_hex'])
+        next_args = successor_intent(raw)
+        pointer = PointerMemory(raw)
+        current = tx.begin_next(self.store, terminal, pointer_store=pointer, **next_args, transaction='2' * 32)
+        self.assertEqual(current.record['version'], 2)
+        self.assertEqual(current.record['state'], 'prepared')
+        self.assertEqual(current.record['previous_transaction'], {'transaction': T, 'record': terminal.head['record'],
+                                                                   'sequence': terminal.record['sequence']})
+        self.assertEqual(tx.audit(self.store, current), 7)
+        with self.assertRaisesRegex(ValueError, 'audit limit'):
+            tx.audit(self.store, current, max_records=6)
+        self.assertEqual(pointer.writes, 0)
+        current = tx.advance(self.store, current, 'space-intent')
+        self.assertEqual(tx.audit(self.store, current), 8)
+        self.assertEqual(current.record['previous_transaction']['record'], terminal.head['record'])
+
+    def test_next_after_rollback_requires_exact_restored_parent(self):
+        from tests.test_ccrd_pointer_transition import PointerMemory
+        c = tx.advance(self.store, self.begin(), 'space-intent')
+        terminal = tx.advance(self.store, c, 'rollback-intent')
+        terminal = tx.advance(self.store, terminal, 'rolled-back', space_revision=R, evidence=rollback_evidence())
+        raw = bytes.fromhex(json.loads(INTENT)['parent_pointer_hex'])
+        args = successor_intent(raw)
+        wrong = PointerMemory(bytes.fromhex(json.loads(INTENT)['candidate_manifest_hex']))
+        with self.assertRaisesRegex(ValueError, 'not the exact'):
+            tx.begin_next(self.store, terminal, pointer_store=wrong, **args, transaction='2' * 32)
+        current = tx.begin_next(self.store, terminal, pointer_store=PointerMemory(raw), **args, transaction='2' * 32)
+        self.assertEqual(current.record['parent_sha256'], P)
+        self.assertEqual(tx.audit(self.store, current), 5)
+
+    def test_successor_rejects_stale_head_aba_and_missing_older_evidence(self):
+        from tests.test_ccrd_pointer_transition import PointerMemory
+        terminal = self.complete()
+        raw = bytes.fromhex(json.loads(INTENT)['candidate_manifest_hex'])
+        args = successor_intent(raw)
+        pointer = PointerMemory(raw)
+        pointer.etag = 'W/"weak"'
+        with self.assertRaises(ValueError):
+            tx.begin_next(self.store, terminal, pointer_store=pointer, **args, transaction='2' * 32)
+        pointer.etag = '"v1"'
+        newer = tx.begin_next(self.store, terminal, pointer_store=pointer, **args, transaction='2' * 32)
+        with self.assertRaisesRegex(ValueError, 'head changed'):
+            tx.begin_next(self.store, terminal, pointer_store=pointer, **args, transaction='3' * 32)
+        self.store.evidence.clear()
+        self.assertEqual(tx.load(self.store), newer)
+        with self.assertRaisesRegex(ValueError, 'history evidence'):
+            tx.audit(self.store, newer)
+
+    def test_successor_pointer_changed_during_head_cas_remains_prepared_and_halts(self):
+        from tests.test_ccrd_pointer_transition import PointerMemory
+        terminal = self.complete()
+        raw = bytes.fromhex(json.loads(INTENT)['candidate_manifest_hex'])
+        args = successor_intent(raw)
+        pointer = PointerMemory(raw)
+        first = pointer.read_for_update
+        calls = []
+        def read():
+            calls.append(True)
+            return first() if len(calls) == 1 else (raw, '"changed"')
+        pointer.read_for_update = read
+        with self.assertRaisesRegex(ValueError, 'pointer changed while starting successor'):
+            tx.begin_next(self.store, terminal, pointer_store=pointer, **args, transaction='2' * 32)
+        self.assertEqual(tx.load(self.store).record['state'], 'prepared')
+        self.assertEqual(tx.load(self.store).record['transaction'], '2' * 32)
+        self.assertEqual(pointer.writes, 0)
+
+    def test_successor_rejects_unfinished_tampered_parent_and_identity_reuse(self):
+        from tests.test_ccrd_pointer_transition import PointerMemory
+        root = self.begin()
+        raw = bytes.fromhex(json.loads(INTENT)['parent_pointer_hex'])
+        args = successor_intent(raw)
+        with self.assertRaisesRegex(ValueError, 'not terminal'):
+            tx.begin_next(self.store, root, pointer_store=PointerMemory(raw), **args, transaction='2' * 32)
+        c = tx.advance(self.store, root, 'space-intent')
+        c = tx.advance(self.store, c, 'rollback-intent')
+        terminal = tx.advance(self.store, c, 'rolled-back', space_revision=R, evidence=rollback_evidence())
+        with self.assertRaisesRegex(ValueError, 'ID must differ'):
+            tx.begin_next(self.store, terminal, pointer_store=PointerMemory(raw), **args, transaction=T)
+        altered = {**args, 'candidate_manifest_sha256': args['parent_sha256']}
+        with self.assertRaisesRegex(ValueError, 'must differ'):
+            tx.begin_next(self.store, terminal, pointer_store=PointerMemory(raw), **altered, transaction='2' * 32)
+        next_record = tx.begin_next(self.store, terminal, pointer_store=PointerMemory(raw), **args, transaction='2' * 32)
+        prior_key = tx._record_key(T, terminal.head['record'])
+        self.store.records[prior_key] = b'bad'
+        with self.assertRaisesRegex(ValueError, 'previous transaction record'):
+            tx.load(self.store)
+        with self.assertRaisesRegex(ValueError, 'history is missing'):
+            tx.audit(self.store, next_record)
+
+    def test_legacy_v1_predecessor_can_link_to_v2_successor(self):
+        from tests.test_ccrd_pointer_transition import PointerMemory
+        c = self.begin()
+        legacy = {k: v for k, v in c.record.items() if k != 'previous_transaction'}
+        legacy['version'] = 1
+        raw = ccrd_lifecycle.canonical(legacy)
+        digest = hashlib.sha256(raw).hexdigest()
+        self.store.records[tx._record_key(T, digest)] = raw
+        self.store.head = ccrd_lifecycle.canonical({**c.head, 'record': digest})
+        c = tx.load(self.store)
+        c = tx.advance(self.store, c, 'space-intent')
+        c = tx.advance(self.store, c, 'rollback-intent')
+        c = tx.advance(self.store, c, 'rolled-back', space_revision=R, evidence=rollback_evidence())
+        parent = bytes.fromhex(json.loads(INTENT)['parent_pointer_hex'])
+        successor = tx.begin_next(self.store, c, pointer_store=PointerMemory(parent),
+                                  **successor_intent(parent), transaction='2' * 32)
+        self.assertEqual(successor.record['version'], 2)
+        self.assertEqual(tx.audit(self.store, successor), 5)
+
+    def test_successor_cannot_reuse_any_earlier_transaction_id(self):
+        from tests.test_ccrd_pointer_transition import PointerMemory
+        terminal = self.complete()
+        raw = bytes.fromhex(json.loads(INTENT)['candidate_manifest_hex'])
+        args = successor_intent(raw)
+        second = tx.begin_next(self.store, terminal, pointer_store=PointerMemory(raw), **args, transaction='2' * 32)
+        second = tx.advance(self.store, second, 'space-intent')
+        second = tx.advance(self.store, second, 'rollback-intent')
+        proof = ccrd_lifecycle.canonical({'kind': 'ccrd-rollback-evidence', 'revision': CHILD,
+                    'parent_sha256': args['parent_sha256'], 'candidate_generation': args['candidate_generation'],
+                    'space_plan_sha256': args['activation_plan_sha256'], 'consumer_parent_verified': True,
+                    'activation_parent_verified': True, 'pointer_parent_verified': True})
+        second = tx.advance(self.store, second, 'rolled-back', space_revision=CHILD, evidence=proof)
+        with self.assertRaisesRegex(ValueError, 'all prior IDs'):
+            tx.begin_next(self.store, second, pointer_store=PointerMemory(raw), **successor_intent(raw), transaction=T)
+        self.assertEqual(tx.load(self.store), second)
+
+    def test_successor_parent_and_candidate_remain_gc_roots(self):
+        from tests.test_ccrd_pointer_transition import PointerMemory
+        terminal = self.complete()
+        raw = bytes.fromhex(json.loads(INTENT)['candidate_manifest_hex'])
+        args = successor_intent(raw)
+        current = tx.begin_next(self.store, terminal, pointer_store=PointerMemory(raw), **args, transaction='2' * 32)
+        key = tx._intent_key('2' * 32, current.record['durable_intent_sha256'])
+        intent = json.loads(self.store.intents[key])
+        refs = ccrd_lifecycle.references(intent, key)
+        candidate = json.loads(bytes.fromhex(intent['candidate_manifest_hex']))
+        self.assertIn(f"generations/{candidate['generation']}/manifest.json", {item['path'] for item in refs})
+        self.assertTrue(all(item['bucket'] == ccrd_lifecycle.BUCKET for item in refs))
+        self.assertEqual(ccrd_lifecycle.references(current.record, tx._record_key('2' * 32, current.head['record'])), [])
+        self.assertEqual(tx.audit(self.store, current), 7)
+
+    def test_successor_lost_head_response_does_not_replay(self):
+        from tests.test_ccrd_pointer_transition import PointerMemory
+        terminal = self.complete()
+        raw = bytes.fromhex(json.loads(INTENT)['candidate_manifest_hex'])
+        pointer, args = PointerMemory(raw), successor_intent(raw)
+        self.store.lose_head = True
+        count = self.store.writes
+        current = tx.begin_next(self.store, terminal, pointer_store=pointer, **args, transaction='2' * 32)
+        self.assertEqual(self.store.writes, count + 1)
+        self.assertEqual(tx.audit(self.store, current), 7)
+        self.assertEqual(pointer.writes, 0)
 
     def test_malformed_or_changed_record_is_rejected(self):
         c = self.begin()

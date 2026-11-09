@@ -16,10 +16,54 @@ class CoordinatorTests(RecoveryTests):
     def prepared_transaction(self):
         planned = self.activation_plan(); journal = MemoryStore()
         current = coord.prepare(journal, parent_pointer=self.pointer, candidate_plan=self.plan_value,
-                                description=self.description, activation_plan=planned, transaction='1' * 32)
+                                description=self.description, activation_plan=planned,
+                                pointer_store=PointerMemory(self.pointer), transaction='1' * 32)
         self.assertEqual(current.record['state'], 'prepared')
         coord.start_space(journal)
         return journal, planned
+
+    def test_prepare_checks_live_pointer_before_first_journal_write(self):
+        planned = self.activation_plan()
+        journal = MemoryStore()
+        pointer = PointerMemory(b'foreign')
+        with self.assertRaisesRegex(ValueError, 'live pointer differs'):
+            coord.prepare(journal, parent_pointer=self.pointer, candidate_plan=self.plan_value,
+                          description=self.description, activation_plan=planned,
+                          pointer_store=pointer, transaction='1' * 32)
+        self.assertIsNone(journal.head)
+        self.assertEqual(pointer.writes, 0)
+        pointer = PointerMemory(self.pointer)
+        original = pointer.read_for_update
+        calls = []
+        def changing():
+            calls.append(True)
+            return original() if len(calls) == 1 else (self.pointer, '"changed"')
+        pointer.read_for_update = changing
+        with self.assertRaisesRegex(ValueError, 'pointer changed during first intent'):
+            coord.prepare(journal, parent_pointer=self.pointer, candidate_plan=self.plan_value,
+                          description=self.description, activation_plan=planned,
+                          pointer_store=pointer, transaction='1' * 32)
+        self.assertEqual(tx.load(journal).record['state'], 'prepared')
+        self.assertEqual(pointer.writes, 0)
+
+    def test_prepare_starts_successor_only_from_verified_rollback_parent(self):
+        planned = self.activation_plan()
+        journal = MemoryStore(); pointer = PointerMemory(self.pointer)
+        first = coord.prepare(journal, parent_pointer=self.pointer, candidate_plan=self.plan_value,
+                              description=self.description, activation_plan=planned,
+                              pointer_store=pointer, transaction='1' * 32)
+        first = tx.advance(journal, first, 'space-intent')
+        first = tx.advance(journal, first, 'rollback-intent')
+        from tests.test_ccrd_transaction import rollback_evidence
+        evidence = rollback_evidence(parent_sha256=self.pointer_sha, candidate_generation=self.plan_value['generation'],
+                                     space_plan_sha256=planned['plan_sha256'], revision=planned['parent_revision'])
+        first = tx.advance(journal, first, 'rolled-back', space_revision=planned['parent_revision'], evidence=evidence)
+        current = coord.prepare(journal, parent_pointer=self.pointer, candidate_plan=self.plan_value,
+                                description=self.description, activation_plan=planned,
+                                pointer_store=pointer, transaction='2' * 32)
+        self.assertEqual(current.record['previous_transaction']['record'], first.head['record'])
+        self.assertEqual(tx.audit(journal, current), 5)
+        self.assertEqual(pointer.writes, 0)
 
     def test_uncertain_no_commit_is_observed_without_automatic_replay(self):
         journal, _plan = self.prepared_transaction()

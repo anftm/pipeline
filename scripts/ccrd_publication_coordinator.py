@@ -43,7 +43,7 @@ def _intent(store, current: tx.Current) -> dict:
 
 
 def prepare(store, *, parent_pointer: bytes, candidate_plan: dict, description: dict, activation_plan: dict,
-            transaction: str | None = None) -> tx.Current:
+            pointer_store, transaction: str | None = None) -> tx.Current:
     parent_sha = hashlib.sha256(parent_pointer).hexdigest()
     if planning.make(parent_pointer, description) != candidate_plan:
         raise ValueError('CCRD transaction candidate differs from exact parent plan')
@@ -56,10 +56,25 @@ def prepare(store, *, parent_pointer: bytes, candidate_plan: dict, description: 
             or candidate_plan.get('manifest_sha256') != activation_plan.get('candidate_manifest_sha256')
             or activation_plan.get('parent_pointer_sha256') != parent_sha):
         raise ValueError('CCRD durable transaction does not bind the approved candidate')
-    return tx.begin(store, parent_sha256=parent_sha, candidate_generation=candidate_plan['generation'],
-                    candidate_manifest_sha256=candidate_plan['manifest_sha256'],
-                    activation_plan_sha256=activation_plan['plan_sha256'],
-                    parent_space_revision=activation_plan['parent_revision'], durable_intent=intent, transaction=transaction)
+    current = tx.load(store)
+    if current is None:
+        actual, etag = pointer_store.read_for_update()
+        if actual != parent_pointer:
+            raise ValueError('CCRD live pointer differs from first transaction parent')
+        tx.strong_etag(etag)
+        result = tx.begin(store, parent_sha256=parent_sha, candidate_generation=candidate_plan['generation'],
+                          candidate_manifest_sha256=candidate_plan['manifest_sha256'],
+                          activation_plan_sha256=activation_plan['plan_sha256'],
+                          parent_space_revision=activation_plan['parent_revision'], durable_intent=intent, transaction=transaction)
+        later, later_etag = pointer_store.read_for_update()
+        if later != actual or tx.strong_etag(later_etag) != etag:
+            raise ValueError('CCRD pointer changed during first intent; halt and inspect')
+        return result
+    return tx.begin_next(store, current, pointer_store=pointer_store, parent_sha256=parent_sha,
+                         candidate_generation=candidate_plan['generation'],
+                         candidate_manifest_sha256=candidate_plan['manifest_sha256'],
+                         activation_plan_sha256=activation_plan['plan_sha256'],
+                         parent_space_revision=activation_plan['parent_revision'], durable_intent=intent, transaction=transaction)
 
 
 def start_space(store) -> tx.Current:
