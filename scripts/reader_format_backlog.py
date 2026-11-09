@@ -187,38 +187,38 @@ def _matches_route(entry, route):
     if entry.get('bucket') != READER_BUCKET:
         return False
     refs = {(ref['bucket'], ref['path']) for ref in reader_lifecycle.sidecar_references({'f': {'entry': route}})}
-    for field in ('manifest', 'object'):
+    for field in ('manifest', 'object', 'path'):
         path = entry.get(field)
         if isinstance(path, str) and (READER_BUCKET, path) in refs:
             return True
     return False
 
 
-def classify_epub(records, routes, canonical, shards, api):
-    """Return key-level states and old/new metadata, never compare revision alone."""
-    source = [value for value in records.values() if value['extension'] == 'epub']
-    if not isinstance(canonical, dict) or canonical.get('version') != 1 or canonical.get('kind') != 'ebook-chapter-stream-index':
-        raise ValueError('canonical EPUB index is invalid')
-    reader_stream_index.validate_index(canonical, 'EPUB canonical index')
+def classify_indexed(records, routes, canonical, shards, api, *, extensions, kind, route_modes, shard_count=8):
+    """Compare exact source bytes without treating repository commits as content."""
+    source = [value for value in records.values() if value['extension'] in extensions]
+    if not isinstance(canonical, dict) or canonical.get('version') != 1 or canonical.get('kind') != kind:
+        raise ValueError('canonical Reader index is invalid')
+    reader_stream_index.validate_index(canonical, 'canonical Reader index')
     for field in ('files', 'failures'):
         keys = [entry['key'] for entry in canonical.get(field, [])]
         if len(keys) != len(set(keys)):
-            raise ValueError('duplicate canonical EPUB ' + field)
+            raise ValueError('duplicate canonical Reader ' + field)
     seen_shards = set()
     for number, shard in shards:
-        if type(number) is not int or not 0 <= number < 8 or number in seen_shards:
-            raise ValueError('invalid or duplicate EPUB shard')
+        if type(number) is not int or not 0 <= number < shard_count or number in seen_shards:
+            raise ValueError('invalid or duplicate Reader shard')
         seen_shards.add(number)
-        if shard.get('version') != 1 or shard.get('kind') != 'ebook-chapter-stream-index':
-            raise ValueError('invalid EPUB shard schema')
-        reader_stream_index.validate_index(shard, 'EPUB shard')
+        if shard.get('version') != 1 or shard.get('kind') != kind:
+            raise ValueError('invalid Reader shard schema')
+        reader_stream_index.validate_index(shard, 'Reader shard')
         for field in ('files', 'failures'):
             keys = [entry['key'] for entry in shard.get(field, [])]
             if len(keys) != len(set(keys)):
-                raise ValueError('duplicate EPUB shard ' + field)
+                raise ValueError('duplicate Reader shard ' + field)
     # Do not mistake an index checkpoint not yet merged into the published
     # sidecar for a completed update; report it separately.
-    merged = reader_stream_index.merge_shards(canonical, shards, 'ebook-chapter-stream-index', {'epub'}, 8)
+    merged = reader_stream_index.merge_shards(canonical, shards, kind, set(extensions), shard_count)
     entries = {entry['key']: entry for entry in canonical['files']}
     merged_entries = {entry['key']: entry for entry in merged.get('files', [])}
     # Keep each failure observation separately. Merging an old success with a
@@ -229,7 +229,7 @@ def classify_epub(records, routes, canonical, shards, api):
         failure_rows[entry['key']].append(entry)
     for number, shard in shards:
         for entry in shard.get('failures', []):
-            if reader_stream_index.shard_for(entry['key'], 8) == number:
+            if reader_stream_index.shard_for(entry['key'], shard_count) == number:
                 failure_rows[entry['key']].append(entry)
     rows, current_requests = {}, set()
     for item in source:
@@ -241,8 +241,8 @@ def classify_epub(records, routes, canonical, shards, api):
         row = {'key': key, 'source_revision': item['revision'], 'recorded_failure': failure_current}
         if route is None:
             row['state'] = 'not_mapped'
-        elif (not isinstance(route, dict) or route.get('s') != 2 or route.get('m') != 'e'
-              or not _matches_route(entry, route)):
+        elif (not isinstance(route, dict) or route.get('s') != 2
+              or route.get('m') not in route_modes or not _matches_route(entry, route)):
             row['state'] = 'route_or_index_mismatch'
         elif not isinstance(entry.get('source_revision'), str) or not REV.fullmatch(entry['source_revision']):
             row['state'] = 'source_identity_unknown'
@@ -311,7 +311,13 @@ def classify_epub(records, routes, canonical, shards, api):
     return rows
 
 
-def summarize(records: dict, routes: dict, epub_rows: dict, *, threshold: int = 100) -> list[dict]:
+def classify_epub(records, routes, canonical, shards, api):
+    return classify_indexed(records, routes, canonical, shards, api, extensions={'epub'},
+                            kind='ebook-chapter-stream-index', route_modes={'e'})
+
+
+def summarize(records: dict, routes: dict, checked_rows: dict, *, threshold: int = 100,
+              checked_extensions=frozenset({'epub'})) -> list[dict]:
     if type(threshold) is not int or threshold < 0:
         raise ValueError('threshold must be nonnegative')
     grouped = defaultdict(list)
@@ -324,8 +330,8 @@ def summarize(records: dict, routes: dict, epub_rows: dict, *, threshold: int = 
         counts = Counter()
         for item in grouped[extension]:
             route = routes.get(item['key'])
-            if extension == 'epub':
-                row = epub_rows[item['key']]
+            if extension in checked_extensions:
+                row = checked_rows[item['key']]
                 state = row['state']
                 counts[state] += 1
                 if row.get('recorded_failure'):
@@ -340,8 +346,9 @@ def summarize(records: dict, routes: dict, epub_rows: dict, *, threshold: int = 
                 counts['mapped_content_not_checked'] += 1
         actionable = counts['not_mapped'] + counts['content_changed']
         unverified = counts['source_identity_unknown'] + counts['route_or_index_mismatch'] + counts['route_unverified']
-        verified = (extension == 'epub' and unverified == 0
+        verified = (extension in checked_extensions and unverified == 0
                     and counts['pending_shard_checkpoint'] == 0 and counts['recorded_failure_current'] == 0)
+        dependencies_checked = extension not in {'html', 'htm', 'mht', 'mhtml'}
         output.append({'extension': extension, 'family': family, 'workflow': workflow,
                        'sources': len(grouped[extension]), 'not_mapped': counts['not_mapped'],
                        'source_content_changed': counts['content_changed'],
@@ -351,7 +358,8 @@ def summarize(records: dict, routes: dict, epub_rows: dict, *, threshold: int = 
                        'recorded_failure_current': counts['recorded_failure_current'],
                        'pending_shard_checkpoint': counts['pending_shard_checkpoint'],
                        'definite_backlog': actionable, 'threshold_exceeded': actionable > threshold,
-                       'all_source_identities_checked': verified, 'trigger_ready': False})
+                       'all_source_identities_checked': verified,
+                       'conversion_dependencies_checked': dependencies_checked, 'trigger_ready': False})
     return output
 
 
@@ -383,7 +391,18 @@ def inspect(*, hub, api, fs, client, threshold=100, observe_search=search_daily.
         if value:
             shards.append((number, value))
     epub = classify_epub(records, routes, canonical, shards, api)
-    summaries = summarize(records, routes, epub, threshold=threshold)
+    checked = dict(epub)
+    checked_extensions = {'epub'}
+    web_indexes = {}
+    for extension in FAMILIES['web'][0]:
+        path = f'documents/web/{extension}/index.json'
+        index = matrix.read_json(fs, READER_BUCKET, path)
+        if index:
+            checked.update(classify_indexed(records, routes, index, [], api, extensions={extension},
+                                            kind='web-document-stream-index', route_modes={'h'}))
+            checked_extensions.add(extension)
+            web_indexes[path] = index
+    summaries = summarize(records, routes, checked, threshold=threshold, checked_extensions=checked_extensions)
     # Fail closed if the exact shared inputs changed. This is a point-in-time
     # observation only: it cannot fence independent writers or ABA changes.
     if hub.read_bytes(SEARCH_BUCKET, CURRENT) != pointer_raw:
@@ -398,6 +417,9 @@ def inspect(*, hub, api, fs, client, threshold=100, observe_search=search_daily.
         latest = matrix.read_json(fs, READER_BUCKET, f'{root}/index-{number:02d}.json')
         if latest != dict(shards).get(number, {}):
             raise ValueError('EPUB shard index changed during backlog inspection')
+    for path, expected in web_indexes.items():
+        if matrix.read_json(fs, READER_BUCKET, path) != expected:
+            raise ValueError('Web source index changed during backlog inspection')
     for repo, expected in sorted(revisions.items()):
         info = retry_read(lambda: api.repo_info(repo, repo_type='dataset', timeout=30))
         if getattr(info, 'sha', None) != expected:
@@ -413,7 +435,8 @@ def inspect(*, hub, api, fs, client, threshold=100, observe_search=search_daily.
                'reader_generation': reader_pointer['generation'], 'threshold': threshold,
                'reader_consumers': receipts, 'formats': summaries, 'remote_writes': 0,
                'dispatches': 0, 'publication_ready': False, 'external_writers_verified': False,
-               'scope': 'published search and pinned Reader projection; exact content drift checked for EPUB only'}
+               'scope': ('published search and pinned Reader projection; exact source content checked for EPUB and indexed web files; '
+                         'HTML dependencies may change independently and are not checked')}
     details = {'version': 1, 'kind': 'reader-epub-content-backlog',
                'search_generation': summary['search_generation'], 'reader_generation': summary['reader_generation'],
                'rows': [row for row in sorted(epub.values(), key=lambda x: x['key'])

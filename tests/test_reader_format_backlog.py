@@ -86,6 +86,23 @@ class ReaderFormatBacklogTests(unittest.TestCase):
         result = subject.classify_epub(records, {entry['key']: route(entry)}, index, [], Metadata(metadata))
         self.assertEqual(result[entry['key']]['state'], 'source_identity_unknown')
 
+    def test_web_content_comparison_is_not_a_claim_about_relative_resources(self):
+        source = item('page', 'html');key = source['key']
+        entry = {'key': key, 'source_revision': OLD, 'source_sha256': SHA_A, 'bucket': subject.READER_BUCKET,
+                 'object': 'documents/web/html/hash/document.html',
+                 'manifest': 'documents/web/html/hash/document-manifest.json'}
+        route = {'s': 2, 'm': 'h', 'b': subject.READER_BUCKET, 'p': entry['object']}
+        canonical = {'version': 1, 'kind': 'web-document-stream-index', 'files': [entry], 'failures': []}
+        api = Metadata({(NEW, 'page.html'): file('page.html', lfs=SHA_B)})
+        rows = subject.classify_indexed({key: source}, {key: route}, canonical, [], api,
+                                        extensions={'html'}, kind='web-document-stream-index', route_modes={'h'})
+        self.assertEqual(rows[key]['state'], 'content_changed')
+        report = {row['extension']: row for row in subject.summarize(
+            {key: source}, {key: route}, rows, threshold=0, checked_extensions={'html'})}['html']
+        self.assertEqual(report['source_content_changed'], 1)
+        self.assertTrue(report['threshold_exceeded'])
+        self.assertFalse(report['trigger_ready'])
+
     def test_malformed_lfs_or_wrong_response_never_becomes_content_proof(self):
         records = {item('book')['key']: item('book')}; entry = row('book')
         index = {'version': 1, 'kind': 'ebook-chapter-stream-index', 'files': [entry], 'failures': []}
@@ -108,7 +125,7 @@ class ReaderFormatBacklogTests(unittest.TestCase):
         self.assertTrue(result[source['key']]['pending_shard_checkpoint'])
         self.assertTrue(result[source['key']]['recorded_failure'])
         self.assertEqual(index['files'], [entry])
-        with self.assertRaisesRegex(ValueError, 'duplicate EPUB shard'):
+        with self.assertRaisesRegex(ValueError, 'duplicate Reader shard'):
             subject.classify_epub({source['key']: source}, {source['key']: route(entry)}, index,
                                   [(number, shard), (number, shard)], Metadata({}))
 
