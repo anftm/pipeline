@@ -55,6 +55,31 @@ class BhaSnapshotInspectionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'minimum time'):
             subject.inspect(self.trees, get=lambda *_: raw, not_before=True)
 
+    def test_live_restored_snapshot_is_observation_not_a_new_restore(self):
+        health = {'ok': True, 'index_ready': True, 'index_status': 'ready', 'es': True, 'document_count': 2,
+                  'bucket_snapshot': {'state': 'restored', 'stage': 'complete', 'snapshot': 'bha-123-abc',
+                                      'source_stale': False}}
+        result = subject.inspect_live(get=self.get, fetch=lambda *_: json.dumps(health).encode())
+        self.assertTrue(result['manifest_verified']); self.assertTrue(result['reported_restore_complete'])
+        self.assertFalse(result['sidecars_verified']); self.assertFalse(result['restore_executed'])
+        self.assertFalse(result['publication_ready']); self.assertEqual(result['remote_writes'], 0)
+        self.assertEqual(self.get.call_count, 3)
+
+    def test_live_snapshot_rejects_stale_unknown_or_mismatched_status(self):
+        base = {'ok': True, 'index_ready': True, 'index_status': 'ready', 'es': True, 'document_count': 2,
+                'bucket_snapshot': {'state': 'restored', 'stage': 'complete', 'snapshot': 'bha-123-abc',
+                                    'source_stale': False}}
+        for snapshot in ({**base['bucket_snapshot'], 'source_stale': True},
+                         {k: v for k, v in base['bucket_snapshot'].items() if k != 'source_stale'},
+                         {**base['bucket_snapshot'], 'snapshot': 'bha-other'},
+                         {**base['bucket_snapshot'], 'state': 'pending_publish'}):
+            with self.subTest(snapshot=snapshot), self.assertRaises(ValueError):
+                subject.inspect_live(get=lambda *_: self.raw,
+                                     fetch=lambda *_: json.dumps({**base, 'bucket_snapshot': snapshot}).encode())
+        values = iter([base, {**base, 'bucket_snapshot': {**base['bucket_snapshot'], 'snapshot': 'bha-other'}}])
+        with self.assertRaisesRegex(ValueError, 'status changed'):
+            subject.inspect_live(get=lambda *_: self.raw, fetch=lambda *_: json.dumps(next(values)).encode())
+
     def test_foreign_revisions_sidecars_or_moving_pointer_fail_closed(self):
         with self.assertRaisesRegex(ValueError, 'sidecar bytes differ'):
             subject.inspect(self.trees, full_sidecars=True, get=self.get, hash_object=lambda *_: '0' * 64)
@@ -83,8 +108,10 @@ class BhaSnapshotInspectionTests(unittest.TestCase):
         self.assertEqual(set(flow['on']), {'workflow_dispatch'})
         self.assertEqual(flow['permissions'], {'contents': 'read'})
         self.assertEqual(flow['concurrency']['group'], 'update-bha-index')
+        self.assertEqual(flow['on']['workflow_dispatch']['inputs']['live_health']['default'], 'false')
         commands = '\n'.join(x.get('run', '') for x in flow['jobs']['inspect']['steps'])
         self.assertIn('scripts/bha_snapshot_inspection.py', commands)
+        self.assertIn('--live', commands)
         self.assertNotIn('git push', commands)
         self.assertNotIn('HF_S3_SECRET_ACCESS_KEY', str(flow))
 

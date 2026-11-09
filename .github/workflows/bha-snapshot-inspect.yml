@@ -7,6 +7,10 @@ on:
         description: Stream and hash the complete snapshot sidecars (several GiB)
         type: boolean
         default: false
+      live_health:
+        description: Compare actual serving health to the selected snapshot manifest
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -33,10 +37,13 @@ jobs:
       - name: Inspect snapshot without any write
         env:
           FULL: ${{ inputs.full_sidecars }}
+          LIVE: ${{ inputs.live_health }}
         run: |
           set -euo pipefail
+          [[ "$FULL" != 'true' || "$LIVE" != 'true' ]]
           args=(--output output/bha/snapshot-inspection.json)
           if [[ "$FULL" == 'true' ]]; then args+=(--full-sidecars); fi
+          if [[ "$LIVE" == 'true' ]]; then args+=(--live); fi
           python -B scripts/bha_snapshot_inspection.py "${args[@]}"
       - uses: actions/upload-artifact@v7
         with:

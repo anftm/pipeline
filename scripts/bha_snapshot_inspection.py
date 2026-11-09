@@ -106,16 +106,61 @@ def inspect(expected: dict[str, str], *, full_sidecars: bool = False, expected_g
             'scope': 'manifest and optional sidecar hashes only; Elasticsearch snapshot blobs not restored or checked'}
 
 
+def inspect_live(*, get=_get, fetch=None) -> dict:
+    """Check manifest, service health and snapshot identity without indexing.
+
+    A stable restored snapshot is useful evidence, not a new restore test.
+    Failure, stale source or a changed snapshot status is never success.
+    """
+    try:
+        from . import bha_consumer_sample as samples
+    except ImportError:
+        import bha_consumer_sample as samples
+    if fetch is None:
+        fetch = samples.get
+    before = samples._object(fetch(samples.BASE + '/api/health', samples.MAX_HEALTH), 'health')
+    ready = samples.health(json.dumps(before).encode('utf-8'))
+    state = before.get('bucket_snapshot') if isinstance(before, dict) else None
+    if (not isinstance(state, dict) or state.get('state') not in {'published', 'restored'}
+            or state.get('stage') != 'complete' or not isinstance(state.get('snapshot'), str)
+            or not GEN.fullmatch(state['snapshot'])
+            or state.get('state') == 'restored' and state.get('source_stale') is not False):
+        raise ValueError('BHA live snapshot is not a complete current publication or restore')
+    raw = get('current.json', MAX_MANIFEST)
+    value = json.loads(raw)
+    metadata = value.get('index_metadata') if isinstance(value, dict) else None
+    if not isinstance(metadata, dict):
+        raise ValueError('BHA snapshot has no index metadata')
+    report = inspect(metadata.get('archive_revisions'), expected_generation=state['snapshot'], get=get)
+    if report['manifest_sha256'] != hashlib.sha256(raw).hexdigest() or report['document_count'] != ready['document_count']:
+        raise ValueError('BHA live service differs from current snapshot manifest')
+    after = samples._object(fetch(samples.BASE + '/api/health', samples.MAX_HEALTH), 'health')
+    after_ready = samples.health(json.dumps(after).encode('utf-8'))
+    after_state = after.get('bucket_snapshot') if isinstance(after, dict) else None
+    if after_ready != ready or after_state != state:
+        raise ValueError('BHA live snapshot status changed during inspection')
+    return {'kind': 'bha-live-snapshot-readonly-observation', 'generation': report['generation'],
+            'manifest_sha256': report['manifest_sha256'], 'document_count': report['document_count'],
+            'archive_revisions': report['archive_revisions'], 'snapshot_state': state['state'],
+            'reported_restore_complete': state['state'] == 'restored',
+            'manifest_verified': True, 'sidecars_verified': False, 'restore_executed': False,
+            'remote_writes': 0, 'publication_ready': False, 'external_writers_verified': False,
+            'scope': 'two live health observations and exact snapshot manifest; no sidecar hash or new restore'}
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--baseline', type=Path, default=Path('state/bha-parsed-revisions.json'))
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--full-sidecars', action='store_true')
+    parser.add_argument('--live', action='store_true', help='inspect live service and snapshot without performing a restore')
     args = parser.parse_args(argv)
+    if args.live and args.full_sidecars:
+        raise ValueError('live snapshot health and full sidecar hashing are separate operations')
     if (args.output.exists() or args.output.is_symlink() or args.output.resolve() == args.baseline.resolve()
             or args.baseline.is_symlink() or not args.baseline.is_file() or args.baseline.stat().st_size > MAX_MANIFEST):
         raise ValueError('BHA snapshot report and baseline paths are invalid')
-    result = inspect(json.loads(args.baseline.read_bytes()), full_sidecars=args.full_sidecars)
+    result = inspect_live() if args.live else inspect(json.loads(args.baseline.read_bytes()), full_sidecars=args.full_sidecars)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open('x', encoding='utf-8') as stream:
         json.dump(result, stream, ensure_ascii=False, sort_keys=True); stream.write('\n')
