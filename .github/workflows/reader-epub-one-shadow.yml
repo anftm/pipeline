@@ -1,0 +1,53 @@
+name: Reader/桶 · Build One Exact EPUB Shadow
+run-name: EPUB one-source shadow / shard ${{ inputs.shard }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      shard:
+        description: Exact EPUB content-change shard, one source only
+        type: choice
+        options: ["0", "1", "2", "3", "4", "5", "6", "7"]
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reader-backlog-inspection
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  build:
+    if: github.repository == 'anftm/pipeline'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Install pinned dependencies
+        run: pip install -r scripts/requirements.txt PyYAML==6.0.3
+      - name: Verify exact one-source and recovery boundaries
+        run: python -B -m unittest -v tests.test_reader_epub_plan tests.test_reader_epub_one_shadow
+      - name: Build one exact EPUB without bucket writes
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          SHARD: ${{ inputs.shard }}
+        run: |
+          set -euo pipefail
+          [[ "$SHARD" =~ ^[0-7]$ ]] || exit 1
+          python -B scripts/reader_epub_one_shadow.py --shard "$SHARD" --output output/epub-one-shadow
+      - name: Preserve only exact verification metadata
+        uses: actions/upload-artifact@v7
+        with:
+          name: reader-epub-one-shadow
+          path: |
+            output/epub-one-shadow/plan.json
+            output/epub-one-shadow/report.json
+            output/epub-one-shadow/staging-preview.json
+            output/epub-one-shadow/summary.json
+          if-no-files-found: error
+          retention-days: 14
