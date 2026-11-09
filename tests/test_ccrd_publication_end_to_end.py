@@ -120,7 +120,8 @@ class CcrdPublicationEndToEndTests(CandidateAssemblyTests):
         self.assertEqual(tx.load(journal).record['state'], 'space-verified')
         coord.start_pointer(journal)
         pointer.lost = True
-        pointer_args = {'candidate_plan': plan, 'description': description, 'immutable_manifest': target,
+        staging.generation = plan['generation']
+        pointer_args = {'candidate_plan': plan, 'description': description, 'staging_store': staging,
                         'api': api, 'capture': capture, 'observe_activation': activation_read,
                         'observe_consumer': consumer_read}
         result = coord.apply_pointer_once(journal, pointer, **pointer_args)
@@ -136,6 +137,13 @@ class CcrdPublicationEndToEndTests(CandidateAssemblyTests):
         self.assertEqual(pointer.writes, 1)
         self.assertEqual(staging.pointer, self.pointer)  # separate fake, no production bucket
         self.assertEqual(tx.audit(journal, tx.load(journal)), 7)
+        staging.generation = plan['generation']
+        finish_args = {key: value for key, value in pointer_args.items() if key != 'immutable_manifest'}
+        finish_args['staging_store'] = staging
+        completed = coord.finish(journal, pointer, **finish_args)
+        self.assertEqual(completed.record['state'], 'complete')
+        self.assertEqual(tx.audit(journal, completed), 8)
+        self.assertEqual(pointer.writes, 1)
         self.assertEqual(set(plan['manifest']['databases']), {'CCRD', 'CW', 'RMRB', 'PLA'})
         self.assertEqual(len(plan['manifest']['metadata']), 17)
         self.assertEqual(len(plan['manifest']['archives']), len(self.manifest['archives']))

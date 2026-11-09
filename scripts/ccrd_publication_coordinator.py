@@ -170,31 +170,71 @@ def _pointer_evidence(current: tx.Current, intent: dict, *, api, capture, observ
             'activation': activated, 'consumer': consumed, 'source': source}
 
 
-def apply_pointer_once(store, pointer_store, *, candidate_plan: dict, description: dict, immutable_manifest: bytes,
+def apply_pointer_once(store, pointer_store, *, candidate_plan: dict, description: dict, staging_store,
                        api, capture, observe_activation=activation.observe, observe_consumer=consumer.observe) -> dict:
     """Verify fresh live evidence, then claim and perform a single pointer CAS."""
     current = _current(store, 'pointer-intent'); intent = _intent(store, current)
     parent = bytes.fromhex(intent['parent_pointer_hex']); candidate = bytes.fromhex(intent['candidate_manifest_hex'])
     if (planning.make(parent, description) != candidate_plan or lifecycle.canonical(candidate_plan['manifest']) != candidate
-            or immutable_manifest != candidate or description.get('candidate_identity') !=
-            intent['activation_plan'].get('candidate_description_sha256')):
+            or description.get('candidate_identity') != intent['activation_plan'].get('candidate_description_sha256')):
         raise ValueError('CCRD pointer apply differs from durable transaction intent')
+    _immutable_candidate(staging_store, current, candidate)
     evidence = _pointer_evidence(current, intent, api=api, capture=capture,
                                  observe_activation=observe_activation, observe_consumer=observe_consumer)
     raw, etag = pointer_store.read_for_update()
     if raw != parent:
         raise ValueError('CCRD pointer is not the exact parent before claim')
-    pointer.validate_evidence(candidate_plan, immutable_manifest=immutable_manifest, evidence=evidence)
+    pointer.validate_evidence(candidate_plan, immutable_manifest=candidate, evidence=evidence)
     claimed = tx.claim_write(store, current, operation='pointer')
     refreshed = _pointer_evidence(claimed, intent, api=api, capture=capture,
                                   observe_activation=observe_activation, observe_consumer=observe_consumer)
-    pointer.validate_evidence(candidate_plan, immutable_manifest=immutable_manifest, evidence=refreshed)
+    pointer.validate_evidence(candidate_plan, immutable_manifest=candidate, evidence=refreshed)
+    _immutable_candidate(staging_store, claimed, candidate)
     tx.check_write_claim(store, claimed, operation='pointer')
     return pointer.apply(candidate_plan, approved_description=description, expected_parent=parent,
-                         expected_etag=etag, store=pointer_store, immutable_manifest=immutable_manifest, evidence=refreshed)
+                         expected_etag=etag, store=pointer_store, immutable_manifest=candidate, evidence=refreshed)
 
 
-def observe_pointer(store, pointer_store, *, candidate_plan: dict, description: dict, immutable_manifest: bytes,
+def _immutable_candidate(staging_store, current: tx.Current, expected: bytes) -> None:
+    """Read candidate bytes from the confined generation adapter, never a caller receipt."""
+    if getattr(staging_store, 'generation', None) != current.record['candidate_generation']:
+        raise ValueError('CCRD immutable manifest reader points to a different generation')
+    if staging_store.read_manifest() != expected:
+        raise ValueError('CCRD immutable manifest is missing or differs from durable intent')
+
+
+def finish(store, pointer_store, *, candidate_plan: dict, description: dict, staging_store,
+           api, capture, observe_activation=activation.observe, observe_consumer=consumer.observe) -> tx.Current:
+    """Finish only after fresh pointer, immutable manifest, Space and consumer reads.
+
+    No remote mutation occurs here. Two pointer observations cannot fence a
+    writer or prevent ABA; external publishers must still be coordinated.
+    """
+    current = _current(store, 'pointer-verified'); intent = _intent(store, current)
+    parent = bytes.fromhex(intent['parent_pointer_hex']); candidate = bytes.fromhex(intent['candidate_manifest_hex'])
+    if (planning.make(parent, description) != candidate_plan or lifecycle.canonical(candidate_plan['manifest']) != candidate
+            or description.get('candidate_identity') != intent['activation_plan'].get('candidate_description_sha256')):
+        raise ValueError('CCRD completion plan differs from durable intent')
+    raw, etag = pointer_store.read_for_update()
+    if raw != candidate:
+        raise ValueError('CCRD current pointer is not the exact candidate at completion')
+    tx.strong_etag(etag)
+    _immutable_candidate(staging_store, current, candidate)
+    evidence = _pointer_evidence(current, intent, api=api, capture=capture,
+                                 observe_activation=observe_activation, observe_consumer=observe_consumer)
+    pointer.validate_evidence(candidate_plan, immutable_manifest=candidate, evidence=evidence)
+    _immutable_candidate(staging_store, current, candidate)
+    later, later_etag = pointer_store.read_for_update()
+    if later != raw or tx.strong_etag(later_etag) != etag:
+        raise ValueError('CCRD pointer changed during completion')
+    result = tx.advance(store, current, 'complete')
+    after, after_etag = pointer_store.read_for_update()
+    if after != raw or tx.strong_etag(after_etag) != etag:
+        raise ValueError('CCRD pointer changed after completion; halt and inspect')
+    return result
+
+
+def observe_pointer(store, pointer_store, *, candidate_plan: dict, description: dict, staging_store,
                     api, capture, observe_activation=activation.observe, observe_consumer=consumer.observe) -> dict:
     """Reconcile exact pointer with fresh activation, source and consumer reads."""
     current = _current(store, 'pointer-intent', 'pointer-claimed'); intent = _intent(store, current)
@@ -205,12 +245,13 @@ def observe_pointer(store, pointer_store, *, candidate_plan: dict, description: 
     if raw != candidate:
         raise ValueError('CCRD pointer is neither exact parent nor intended candidate')
     if (planning.make(parent, description) != candidate_plan or lifecycle.canonical(candidate_plan['manifest']) != candidate
-            or immutable_manifest != candidate or description.get('candidate_identity') !=
-            intent['activation_plan'].get('candidate_description_sha256')):
+            or description.get('candidate_identity') != intent['activation_plan'].get('candidate_description_sha256')):
         raise ValueError('CCRD pointer observation differs from durable transaction intent')
+    _immutable_candidate(staging_store, current, candidate)
     evidence = _pointer_evidence(current, intent, api=api, capture=capture,
                                  observe_activation=observe_activation, observe_consumer=observe_consumer)
-    pointer.validate_evidence(candidate_plan, immutable_manifest=immutable_manifest, evidence=evidence)
+    pointer.validate_evidence(candidate_plan, immutable_manifest=candidate, evidence=evidence)
+    _immutable_candidate(staging_store, current, candidate)
     later, later_etag = pointer_store.read_for_update()
     if later != raw or tx.strong_etag(later_etag) != tx.strong_etag(etag):
         raise ValueError('CCRD pointer changed during acceptance')

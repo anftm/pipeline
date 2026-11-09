@@ -36,7 +36,8 @@ class CoordinatorTests(RecoveryTests):
         consumer = {'generation': plan['generation'], 'cw0': plan['identity']['new_text'],
                     'cw0_bytes_verified': True, 'status_observed_twice': True,
                     'loaded_sources': ['CCRD', 'CW', 'PLA', 'RMRB']}
-        return {'candidate_plan': plan, 'description': self.description, 'immutable_manifest': self.target_manifest,
+        self.store.generation = plan['generation']; self.store.raw_manifest = self.target_manifest
+        return {'candidate_plan': plan, 'description': self.description, 'staging_store': self.store,
                 'api': self.api, 'capture': lambda: source,
                 'observe_activation': lambda *_a, **_k: activation, 'observe_consumer': lambda *_a: consumer}
 
@@ -172,6 +173,22 @@ class CoordinatorTests(RecoveryTests):
         self.assertEqual(tx.load(journal).record['state'], 'pointer-verified')
         self.assertEqual(store.writes, 1)
 
+    def test_pointer_apply_requires_live_staged_manifest_before_claim_and_cas(self):
+        journal = self.ready_for_pointer(); store = PointerMemory(self.pointer)
+        args = self.pointer_args()
+        self.store.raw_manifest = None
+        with self.assertRaisesRegex(ValueError, 'missing or differs'):
+            coord.apply_pointer_once(journal, store, **args)
+        self.assertEqual(tx.load(journal).record['state'], 'pointer-intent')
+        self.assertEqual(store.writes, 0)
+        self.store.raw_manifest = self.target_manifest
+        values = iter([self.target_manifest, b'changed'])
+        self.store.read_manifest = lambda: next(values)
+        with self.assertRaisesRegex(ValueError, 'missing or differs'):
+            coord.apply_pointer_once(journal, store, **args)
+        self.assertEqual(tx.load(journal).record['state'], 'pointer-claimed')
+        self.assertEqual(store.writes, 0)
+
     def test_pointer_source_change_after_claim_stops_cas_and_requires_inspection(self):
         journal = self.ready_for_pointer(); store = PointerMemory(self.pointer)
         args = self.pointer_args(); source = args['capture']()
@@ -196,6 +213,59 @@ class CoordinatorTests(RecoveryTests):
             coord.observe_pointer(journal, store, **args)
         self.assertEqual(tx.load(journal).record['state'], 'pointer-intent')
         self.assertEqual(store.writes, 0)
+
+    def test_finish_requires_exact_live_manifest_pointer_source_and_consumer(self):
+        journal = self.ready_for_pointer(); store = PointerMemory(self.pointer)
+        args = self.pointer_args()
+        coord.apply_pointer_once(journal, store, **args)
+        coord.observe_pointer(journal, store, **args)
+        self.assertEqual(tx.load(journal).record['state'], 'pointer-verified')
+        self.store.generation = self.plan_value['generation']
+        self.store.raw_manifest = self.target_manifest
+        finish_args = {key: value for key, value in args.items() if key != 'immutable_manifest'}
+        finish_args['staging_store'] = self.store
+        first = coord.finish(journal, store, **finish_args)
+        self.assertEqual(first.record['state'], 'complete')
+        self.assertEqual(store.writes, 1)
+        self.assertEqual(tx.audit(journal, first), 7)
+
+    def test_finish_missing_manifest_foreign_generation_or_consumer_fails_closed(self):
+        journal = self.ready_for_pointer(); store = PointerMemory(self.pointer)
+        args = self.pointer_args()
+        coord.apply_pointer_once(journal, store, **args)
+        coord.observe_pointer(journal, store, **args)
+        self.store.generation = 'ccrd-four-' + '0' * 64
+        finish_args = {key: value for key, value in args.items() if key != 'immutable_manifest'}
+        finish_args['staging_store'] = self.store
+        with self.assertRaisesRegex(ValueError, 'different generation'):
+            coord.finish(journal, store, **finish_args)
+        self.store.generation = self.plan_value['generation']; self.store.raw_manifest = None
+        with self.assertRaisesRegex(ValueError, 'missing or differs'):
+            coord.finish(journal, store, **finish_args)
+        self.store.raw_manifest = self.target_manifest
+        finish_args['observe_consumer'] = lambda *_: {'generation': self.plan_value['generation']}
+        with self.assertRaisesRegex(ValueError, 'lacks exact'):
+            coord.finish(journal, store, **finish_args)
+        self.assertEqual(tx.load(journal).record['state'], 'pointer-verified')
+        self.assertEqual(store.writes, 1)
+
+    def test_finish_detects_pointer_etag_change_and_does_not_advance(self):
+        journal = self.ready_for_pointer(); store = PointerMemory(self.pointer)
+        args = self.pointer_args()
+        coord.apply_pointer_once(journal, store, **args)
+        coord.observe_pointer(journal, store, **args)
+        self.store.generation = self.plan_value['generation']; self.store.raw_manifest = self.target_manifest
+        finish_args = {key: value for key, value in args.items() if key != 'immutable_manifest'}
+        finish_args['staging_store'] = self.store
+        original = store.read_for_update; count = []
+        def drift():
+            count.append(True)
+            return original() if len(count) == 1 else (store.raw, '"foreign"')
+        store.read_for_update = drift
+        with self.assertRaisesRegex(ValueError, 'changed during completion'):
+            coord.finish(journal, store, **finish_args)
+        self.assertEqual(tx.load(journal).record['state'], 'pointer-verified')
+        self.assertEqual(store.writes, 1)
 
     def test_wrong_consumer_or_foreign_pointer_stops_before_journal_advance(self):
         journal, planned = self.prepared_transaction(); self.activation_plan_cache = planned
