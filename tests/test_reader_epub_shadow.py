@@ -62,6 +62,40 @@ class ReaderEpubShadowTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'already exists'):
                 subject.build(expected, output, fetch=fetch)
 
+    def test_stage_preview_binds_protection_and_every_file_without_writing(self):
+        source = epub(); expected = plan(source)
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / 'shadow'
+            def fetch(_url, target, _token): target.write_bytes(source)
+            report = subject.build(expected, output, fetch=fetch)
+            staged = subject.staging_plan(expected, report, output)
+            self.assertEqual(staged['remote_writes'], 0)
+            self.assertFalse(staged['index_written'])
+            self.assertFalse(staged['publication_ready'])
+            action = staged['actions'][0]
+            self.assertEqual(action['previous_manifest'], expected['sources'][0]['previous_manifest'])
+            self.assertTrue(action['protection_path'].startswith('reader-index/processing/epub-exact-'))
+            self.assertTrue(all(row['remote'].startswith(action['root'] + '/') for row in action['files']))
+            self.assertGreater(len(action['files']), 1)
+            changed = output / '0' / 'bundle' / 'chapter-manifest.json'
+            changed.write_bytes(changed.read_bytes() + b' ')
+            with self.assertRaisesRegex(ValueError, 'changed after verification'):
+                subject.staging_plan(expected, report, output)
+
+    def test_stage_preview_rejects_plan_or_source_drift(self):
+        source = epub(); expected = plan(source)
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / 'shadow'
+            def fetch(_url, target, _token): target.write_bytes(source)
+            report = subject.build(expected, output, fetch=fetch)
+            report['operation'] = 'a' * 32
+            with self.assertRaisesRegex(ValueError, 'differs from exact plan'):
+                subject.staging_plan(expected, report, output)
+            report['operation'] = expected['operation']
+            (output / '0' / 'source.epub').write_bytes(source + b'changed')
+            with self.assertRaisesRegex(ValueError, 'differs'):
+                subject.staging_plan(expected, report, output)
+
     def test_git_blob_or_lfs_mismatch_rejects_before_parser(self):
         source = epub()
         for proof in ('current-lfs-sha256', 'exact-revision-git-blobs'):
@@ -115,7 +149,8 @@ class ReaderEpubShadowTests(unittest.TestCase):
         self.assertEqual(flow['permissions'], {'contents': 'read'})
         steps = flow['jobs']['shadow']['steps']
         artifact = next(x for x in steps if x.get('uses') == 'actions/upload-artifact@v7')
-        self.assertEqual(artifact['with']['path'], 'output/epub-shadow/report.json')
+        self.assertEqual(artifact['with']['path'].splitlines(),
+                         ['output/epub-shadow/report.json', 'output/epub-shadow/staging-preview.json'])
         commands = '\n'.join(x.get('run', '') for x in steps)
         for forbidden in ('--apply', 'git push', 'workflow run', 'delete'):
             self.assertNotIn(forbidden, commands)

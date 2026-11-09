@@ -40,10 +40,12 @@ jobs:
           set -euo pipefail
           [[ "$SHARD" =~ ^[0-7]$ ]] || exit 1
           python -B scripts/reader_epub_shadow.py --shard "$SHARD" --output output/epub-shadow
-      - name: Preserve only verification report
+      - name: Preserve verification and staging-preview reports only
         uses: actions/upload-artifact@v7
         with:
           name: reader-epub-shadow-report
-          path: output/epub-shadow/report.json
+          path: |
+            output/epub-shadow/report.json
+            output/epub-shadow/staging-preview.json
           if-no-files-found: error
           retention-days: 14

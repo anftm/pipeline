@@ -25,6 +25,7 @@ from huggingface_hub import HfApi, HfFileSystem
 
 try:
     from . import epub_chapters, reader_assets, reader_epub_plan, reader_format_backlog as backlog, search_snapshot
+    from . import reader_lifecycle
     from .report_office_chapter_coverage import verify_bundle_payload
     from .reader_bucket_store import HubBucketStore
 except ImportError:
@@ -33,6 +34,7 @@ except ImportError:
     import reader_epub_plan
     import reader_format_backlog as backlog
     import search_snapshot
+    import reader_lifecycle
     from report_office_chapter_coverage import verify_bundle_payload
     from reader_bucket_store import HubBucketStore
 
@@ -238,10 +240,75 @@ def build(plan, output: Path, *, token=None, fetch=download, parse=run_parser):
         report.append({'key': row['key'], 'source_revision': row['source_revision'], 'reason': row['reason'],
                        'source': identity, 'previous_manifest': row['previous_manifest'],
                        'bundle_version': version, 'chapter_count': len(manifest['chapters']), 'files': files})
-    return {'version': 1, 'kind': 'reader-epub-local-shadow', 'plan_sha256': plan['plan_sha256'],
-            'search_generation': plan['search_generation'], 'reader_generation': plan['reader_generation'],
-            'sources': report, 'remote_writes': 0, 'publication_ready': False, 'external_writers_verified': False}
+    return {'version': 1, 'kind': 'reader-epub-local-shadow', 'operation': plan['operation'],
+            'plan_sha256': plan['plan_sha256'], 'search_generation': plan['search_generation'],
+            'reader_generation': plan['reader_generation'], 'sources': report, 'remote_writes': 0,
+            'publication_ready': False, 'external_writers_verified': False}
 
+
+
+def staging_plan(plan: dict, report: dict, output: Path) -> dict:
+    """Bind every locally verified bundle file to a unique protection record.
+
+    This only generates a local preview. It neither creates a protection nor
+    uploads data or advances an index. Existing Reader routes stay untouched.
+    """
+    _verify_plan(plan)
+    if (not isinstance(report, dict) or report.get('kind') != 'reader-epub-local-shadow'
+            or report.get('operation') != plan['operation'] or report.get('plan_sha256') != plan['plan_sha256']
+            or report.get('search_generation') != plan['search_generation']
+            or report.get('reader_generation') != plan['reader_generation']
+            or report.get('remote_writes') != 0 or report.get('publication_ready') is not False
+            or not isinstance(report.get('sources'), list) or len(report['sources']) != len(plan['sources'])):
+        raise ValueError('EPUB shadow report differs from exact plan')
+    root = output.resolve()
+    if output.is_symlink() or not output.is_dir():
+        raise ValueError('EPUB shadow output must be an ordinary directory')
+    actions, paths = [], set()
+    for number, (source_plan, source_report) in enumerate(zip(plan['sources'], report['sources'])):
+        if (not isinstance(source_report, dict) or source_report.get('key') != source_plan['key']
+                or source_report.get('source_revision') != source_plan['source_revision']
+                or source_report.get('previous_manifest') != source_plan['previous_manifest']):
+            raise ValueError('EPUB shadow source differs from plan')
+        work = root / str(number)
+        if work.is_symlink() or not work.is_dir():
+            raise ValueError('EPUB shadow source directory is invalid')
+        local_source = work / 'source.epub'
+        identity = source_identity(local_source, source_plan)
+        if source_report.get('source') != identity:
+            raise ValueError('EPUB source identity changed after shadow build')
+        bundle = work / 'bundle'
+        if bundle.is_symlink() or not bundle.is_dir():
+            raise ValueError('EPUB shadow bundle directory is invalid')
+        manifest_path = bundle / 'chapter-manifest.json'
+        if (manifest_path.is_symlink() or not manifest_path.is_file()
+                or manifest_path.stat().st_size > 16 * 1024 * 1024):
+            raise ValueError('EPUB shadow manifest is missing or oversized')
+        manifest = json.loads(manifest_path.read_bytes())
+        files, version = _bundle_index(bundle, manifest)
+        if (files != source_report.get('files') or version != source_report.get('bundle_version')
+                or len(manifest['chapters']) != source_report.get('chapter_count')):
+            raise ValueError('EPUB shadow bundle changed after verification')
+        remote_root = f"chapters/ebook/epub/{identity['sha256']}/{version}"
+        if not reader_lifecycle.valid_processing_root(reader_assets.READER_ASSETS_BUCKET, remote_root):
+            raise ValueError('EPUB candidate has invalid processing root')
+        protection = f"reader-index/processing/epub-exact-{plan['operation']}-{number:02d}.json"
+        uploads = []
+        for row in files:
+            remote = remote_root + '/' + row['path']
+            if remote in paths:
+                raise ValueError('EPUB staging plan has duplicate remote objects')
+            paths.add(remote)
+            uploads.append({**row, 'remote': remote})
+        actions.append({'key': source_plan['key'], 'source_revision': source_plan['source_revision'],
+                        'source_sha256': identity['sha256'], 'previous_manifest': source_plan['previous_manifest'],
+                        'root': remote_root, 'protection_path': protection, 'files': uploads})
+    body = {'version': 1, 'kind': 'reader-epub-immutable-staging-preview', 'operation': plan['operation'],
+            'plan_sha256': plan['plan_sha256'], 'search_generation': plan['search_generation'],
+            'reader_generation': plan['reader_generation'], 'actions': actions, 'remote_writes': 0,
+            'index_written': False, 'publication_ready': False, 'external_writers_verified': False}
+    body['staging_sha256'] = hashlib.sha256(search_snapshot.canonical(body)).hexdigest()
+    return body
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
@@ -255,6 +322,7 @@ def main(argv=None):
         report = build(plan, args.output, token=token)
         # Freshly inspect after local conversion. A different selection or source
         # identity cannot be accepted as a reproducible current shadow.
+        stage_preview = staging_plan(plan, report, args.output)
         current = reader_epub_plan.inspect(hub=HubBucketStore(), api=HfApi(token=token), fs=HfFileSystem(token=token),
                                            client=client, shard=args.shard, operation=plan['operation'])
         if current != plan:
@@ -262,6 +330,8 @@ def main(argv=None):
     target = args.output / 'report.json'
     with target.open('x', encoding='utf8') as stream:
         json.dump(report, stream, ensure_ascii=False, sort_keys=True, indent=2);stream.write('\n')
+    with (args.output / 'staging-preview.json').open('x', encoding='utf8') as stream:
+        json.dump(stage_preview, stream, ensure_ascii=False, sort_keys=True, indent=2);stream.write('\n')
     print(json.dumps({'kind': report['kind'], 'plan_sha256': report['plan_sha256'],
                       'sources': len(report['sources']), 'remote_writes': 0, 'publication_ready': False},
                      ensure_ascii=False, sort_keys=True), flush=True)
