@@ -74,6 +74,60 @@ class EpubPlanTests(unittest.TestCase):
         values = list(data());values[0]['formats'][0]['pending_shard_checkpoint'] = 1
         with self.assertRaisesRegex(ValueError, 'unresolved'): self.make(values)
 
+    def test_unmapped_lfs_identity_is_bound_before_source_selection(self):
+        from unittest.mock import Mock
+        values = list(copy.deepcopy(data()))
+        summary, details, corpus, revisions, canonical, shards, shard = values
+        summary['formats'][0].update(not_mapped=1, source_content_changed=0)
+        old = details['rows'][0]
+        details['rows'] = [{'key': old['key'], 'source_revision': NEW, 'state': 'not_mapped', 'recorded_failure': False}]
+        canonical['files'] = []
+        records = subject.backlog.source_records(corpus, revisions)
+        api = Mock()
+        api.get_paths_info.return_value = [{'path':'book.epub', 'lfs':{'sha256':SHA1}, 'blob_id':'c'*40}]
+        bound = subject.bind_unmapped_sources(details, records, api)
+        self.assertNotIn('proof', details['rows'][0])
+        self.assertEqual(bound['rows'][0]['proof'], 'unmapped-lfs-sha256')
+        self.assertEqual(bound['rows'][0]['current_source_sha256'], SHA1)
+        values[1] = bound
+        source = self.make(values)['sources'][0]
+        self.assertEqual(source['proof'], 'unmapped-lfs-sha256')
+        self.assertEqual(source['current_source_sha256'], SHA1)
+        self.assertIsNone(source['previous_manifest'])
+        api.get_paths_info.assert_called_once_with(REPO, ['book.epub'], repo_type='dataset', revision=NEW, expand=True)
+
+    def test_unmapped_unknown_and_ordinary_git_remain_backlog_but_not_selected(self):
+        from unittest.mock import Mock
+        values = list(copy.deepcopy(data()))
+        summary, details, corpus, revisions, canonical, shards, shard = values
+        summary['formats'][0].update(not_mapped=1, source_content_changed=0)
+        details['rows'] = [{'key': details['rows'][0]['key'], 'source_revision':NEW,
+                            'state':'not_mapped', 'recorded_failure':False}]
+        canonical['files'] = []
+        records = subject.backlog.source_records(corpus, revisions)
+        for metadata in ([], [{'path':'book.epub', 'blob_id':'c'*40, 'lfs':None}]):
+            api = Mock();api.get_paths_info.return_value = metadata
+            values[1] = subject.bind_unmapped_sources(details, records, api)
+            with self.subTest(metadata=metadata), self.assertRaisesRegex(ValueError, 'no source with an admissible'):
+                self.make(values)
+        self.assertEqual(summary['formats'][0]['definite_backlog'], 1)
+        api.get_paths_info.return_value = [{'path':'book.epub', 'lfs':{'sha256':'bad'}}]
+        with self.assertRaisesRegex(ValueError, 'malformed source LFS'):
+            subject.bind_unmapped_sources(details, records, api)
+
+    def test_existing_unproven_legacy_unmapped_candidate_is_skipped_not_trusted(self):
+        values = list(copy.deepcopy(data()))
+        summary, details, _, _, canonical, _, _ = values
+        summary['formats'][0].update(not_mapped=1, source_content_changed=0)
+        details['rows'] = [{'key':details['rows'][0]['key'], 'source_revision':NEW,
+                            'state':'not_mapped', 'recorded_failure':False}]
+        canonical['files'] = []
+        with self.assertRaisesRegex(ValueError, 'no source with an admissible'):
+            self.make(values)
+        details['rows'][0].update(proof='unmapped-lfs-sha256', current_source_sha256='wrong')
+        with self.assertRaisesRegex(ValueError, 'invalid unmapped EPUB LFS proof'):
+            self.make(values)
+
     def test_workflow_is_explicitly_readonly_and_bounded(self):
         import yaml
         from pathlib import Path

@@ -138,7 +138,8 @@ def inspect(store,operation,*,hub,api,fs,client,reader):
                     or blob!=source['current_git_blob'] or backlog._blob_identity(old)!=source['previous_git_blob']):
                 raise ValueError('EPUB Git blob identity changed')
         elif source['reason']=='not_mapped':
-            if lfs is None or lfs!=actions[key]['source_sha256']:
+            if (source.get('proof')!='unmapped-lfs-sha256' or lfs is None
+                    or lfs!=source.get('current_source_sha256') or lfs!=actions[key]['source_sha256']):
                 raise ValueError('new EPUB lacks independently verified LFS identity')
         else:raise ValueError('invalid EPUB source proof')
     for repo,revision in sorted(revisions.items()):

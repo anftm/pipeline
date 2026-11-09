@@ -131,7 +131,7 @@ def _intent(raw):
         root=immutable._root(action.get('root'))
         if root.split('/')[3] != action['source_sha256']:
             raise ValueError('EPUB staging root differs from source digest')
-        if source['reason']=='content_changed' and source['proof']=='current-lfs-sha256' and action['source_sha256']!=source['current_source_sha256']:
+        if source['proof'] in {'current-lfs-sha256', 'unmapped-lfs-sha256'} and action['source_sha256']!=source['current_source_sha256']:
             raise ValueError('EPUB staged source digest differs from LFS proof')
         path=f'reader-index/processing/epub-exact-{op}-{number:02d}.json'
         if action.get('protection_path') != path:

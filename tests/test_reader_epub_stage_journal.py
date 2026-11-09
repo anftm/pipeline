@@ -69,6 +69,23 @@ class EpubJournalTests(unittest.TestCase):
         self.preview['staging_sha256']=hashlib.sha256(search_snapshot.canonical({k:v for k,v in self.preview.items() if k!='staging_sha256'})).hexdigest()
         with self.assertRaisesRegex(ValueError,'foreign EPUB staging member'):self.begin()
         self.assertEqual(self.store.puts,[])
+    def test_unmapped_staging_intent_binds_action_digest_to_source_proof(self):
+        import copy
+        new_plan = copy.deepcopy(self.plan);row = new_plan['sources'][0]
+        row.update(reason='not_mapped', proof='unmapped-lfs-sha256', previous_revision=None,
+                   previous_source_sha256=None, previous_manifest=None)
+        new_plan['plan_sha256'] = hashlib.sha256(search_snapshot.canonical({k:v for k,v in new_plan.items() if k!='plan_sha256'})).hexdigest()
+        report = shadow.build(new_plan, Path(self.temp.name)/'unmapped',
+                              fetch=lambda _u,p,_t:p.write_bytes((self.root/'0'/'source.epub').read_bytes()))
+        preview = shadow.staging_plan(new_plan,report,Path(self.temp.name)/'unmapped')
+        action = preview['actions'][0];action['source_sha256']='f'*64
+        action['root'] = action['root'].replace(row['current_source_sha256'], 'f'*64)
+        for item in action['files']:item['remote'] = action['root']+'/'+item['path']
+        preview['staging_sha256'] = hashlib.sha256(search_snapshot.canonical({k:v for k,v in preview.items() if k!='staging_sha256'})).hexdigest()
+        with self.assertRaisesRegex(ValueError, 'staged source digest differs from LFS proof'):
+            subject.begin(self.store,new_plan,preview,WHEN)
+        self.assertEqual(self.store.puts, [])
+
     def test_missing_changed_receipt_or_history_fails_closed(self):
         c=subject.claim(self.store,self.begin());receipt=self.receipt();receipt['outcomes'].pop()
         with self.assertRaisesRegex(ValueError,'coverage differs'):subject.record_staged(self.store,c,receipt)

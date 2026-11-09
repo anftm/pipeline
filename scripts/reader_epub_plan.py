@@ -6,6 +6,7 @@ The resulting plan is for review/simulation; it does not authorize writes.
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import re
@@ -69,6 +70,16 @@ def create(summary, details, corpus, revisions, canonical, shard_indexes, *, sha
         if state == 'not_mapped':
             if key in indexed:
                 raise ValueError('EPUB missing route already has an index entry; inspect handoff')
+            if any(row.get(field) is not None for field in ('previous_revision', 'previous_source_sha256',
+                                                             'previous_git_blob', 'current_git_blob')):
+                raise ValueError('unmapped EPUB has unexpected previous identity')
+            proof = row.get('proof')
+            if proof is not None and (proof != 'unmapped-lfs-sha256'
+                                      or not isinstance(row.get('current_source_sha256'), str)
+                                      or not SHA.fullmatch(row['current_source_sha256'])):
+                raise ValueError('invalid unmapped EPUB LFS proof')
+            if proof is None and row.get('current_source_sha256') is not None:
+                raise ValueError('unmapped EPUB digest has no source proof')
         elif state == 'content_changed':
             previous = indexed.get(key)
             if (not isinstance(previous, dict) or previous.get('source_revision') != row.get('previous_revision')
@@ -102,8 +113,17 @@ def create(summary, details, corpus, revisions, canonical, shard_indexes, *, sha
             raise ValueError('invalid EPUB shard snapshot')
         if any(isinstance(row, dict) and row.get('key') in sources for row in index.get('failures', [])):
             raise ValueError('selected EPUB has a prior failure requiring explicit recovery')
-    selected = [records[key] for key in sorted(sources) if builder.shard_for(key, 8) == shard][:MAX_BATCH]
+    # Missing routes are a definite backlog, but only LFS identities can be
+    # admitted by this staging protocol. Unproven / ordinary-Git missing
+    # sources stay counted and are skipped rather than bound to arbitrary
+    # downloaded bytes. A later protocol can add independent Git-blob proof.
+    selected = [records[key] for key in sorted(sources)
+                if builder.shard_for(key, 8) == shard
+                and (sources[key]['state'] == 'content_changed'
+                     or sources[key].get('proof') == 'unmapped-lfs-sha256')][:MAX_BATCH]
     if not selected:
+        if any(builder.shard_for(key, 8) == shard for key in sources):
+            raise ValueError('requested EPUB shard has backlog but no source with an admissible content proof')
         raise ValueError('requested EPUB shard has no eligible exact sources')
     selection = []
     for source in selected:
@@ -128,6 +148,38 @@ def create(summary, details, corpus, revisions, canonical, shard_indexes, *, sha
     return body
 
 
+def bind_unmapped_sources(details, records, api):
+    """Bind each available unmapped LFS object at its pinned source revision.
+
+    Missing/ordinary Git metadata does not change the backlog count; it just
+    makes that candidate ineligible for this proof format. No bytes are written.
+    """
+    if not isinstance(details, dict) or not isinstance(details.get('rows'), list):
+        raise ValueError('invalid EPUB detail snapshot')
+    result = copy.deepcopy(details)
+    requests = set()
+    for row in result['rows']:
+        if not isinstance(row, dict) or row.get('state') != 'not_mapped':
+            continue
+        source = records.get(row.get('key'))
+        if not source or source.get('extension') != 'epub' or source.get('revision') != row.get('source_revision'):
+            raise ValueError('unmapped EPUB detail differs from pinned source')
+        if any(row.get(name) is not None for name in ('proof', 'current_source_sha256', 'current_git_blob')):
+            raise ValueError('unmapped EPUB detail already contains source proof')
+        requests.add((source['repo'], source['revision'], source['path']))
+    metadata = backlog._metadata(api, requests)
+    for row in result['rows']:
+        if not isinstance(row, dict) or row.get('state') != 'not_mapped':
+            continue
+        source = records[row['key']]
+        value = metadata.get((source['repo'], source['revision'], source['path']))
+        if value is not None:
+            digest = backlog._lfs_identity(value)
+            if digest:
+                row.update(proof='unmapped-lfs-sha256', current_source_sha256=digest)
+    return result
+
+
 def inspect(*, hub, api, fs, client, shard, operation, threshold=100):
     """Recompute and bind a fresh plan; this function performs no remote writes."""
     summary, details = backlog.inspect(hub=hub, api=api, fs=fs, client=client, threshold=threshold, scope='epub')
@@ -139,7 +191,9 @@ def inspect(*, hub, api, fs, client, shard, operation, threshold=100):
     canonical = backlog.matrix.read_json(fs, backlog.READER_BUCKET, root + '/index.json')
     shards = {number: backlog.matrix.read_json(fs, backlog.READER_BUCKET, f'{root}/index-{number:02d}.json')
               for number in range(8)}
-    plan = create(summary, details, corpus, revisions, canonical, shards, shard=shard, operation=operation)
+    records = backlog.source_records(corpus, revisions)
+    bound_details = bind_unmapped_sources(details, records, api)
+    plan = create(summary, bound_details, corpus, revisions, canonical, shards, shard=shard, operation=operation)
     if hub.read_bytes(backlog.SEARCH_BUCKET, backlog.CURRENT) != pointer:
         raise ValueError('search pointer changed during exact EPUB planning')
     reader_pointer, _ = backlog.publication.current(hub)

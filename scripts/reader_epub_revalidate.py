@@ -104,7 +104,8 @@ class LivePlanRevalidator:
                         or blob!=source['current_git_blob'] or backlog._blob_identity(previous)!=source['previous_git_blob']):
                     raise ValueError('EPUB old or current Git blob changed')
             elif source.get('reason')=='not_mapped':
-                if lfs is None or lfs!=action['source_sha256']:
+                if (source.get('proof')!='unmapped-lfs-sha256' or lfs is None
+                        or lfs!=source.get('current_source_sha256') or lfs!=action['source_sha256']):
                     raise ValueError('unmapped EPUB source lacks verifiable LFS content')
             else:raise ValueError('EPUB source proof is invalid')
         for repo,expected in sorted(revisions.items()):

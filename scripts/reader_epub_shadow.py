@@ -110,7 +110,10 @@ def source_identity(path: Path, row: dict) -> dict:
             raise ValueError('unverified EPUB content-change proof')
         if sha == row['previous_source_sha256']:
             raise ValueError('EPUB content is unchanged despite candidate proof')
-    elif row['reason'] != 'not_mapped':
+    elif row['reason'] == 'not_mapped':
+        if row.get('proof') != 'unmapped-lfs-sha256' or sha != row.get('current_source_sha256'):
+            raise ValueError('downloaded unmapped EPUB differs from pinned LFS bytes')
+    else:
         raise ValueError('unsupported EPUB candidate reason')
     return {'sha256': sha, 'git_blob': git, 'bytes': count}
 
@@ -143,8 +146,12 @@ def _safe_receipt(plan):
             else:
                 raise ValueError('EPUB changed-source proof is invalid')
         elif source['reason']=='not_mapped':
-            if any(source[name] is not None for name in fields[5:]):
-                raise ValueError('unmapped EPUB cannot claim prior evidence')
+            if (source['proof'] != 'unmapped-lfs-sha256'
+                    or not isinstance(source['current_source_sha256'], str)
+                    or not re.fullmatch(r'[0-9a-f]{64}', source['current_source_sha256'])
+                    or any(source[name] is not None for name in ('previous_revision', 'previous_source_sha256',
+                        'previous_git_blob', 'current_git_blob', 'previous_manifest'))):
+                raise ValueError('unmapped EPUB lacks exact LFS proof or claims prior evidence')
         else:
             raise ValueError('EPUB source reason is invalid')
         rows.append({field:source[field] for field in fields})

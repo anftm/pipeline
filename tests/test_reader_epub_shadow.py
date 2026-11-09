@@ -115,6 +115,30 @@ class ReaderEpubShadowTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'unchanged'):
                 subject.source_identity(p, row)
 
+    def test_unmapped_requires_pinned_lfs_and_checks_downloaded_bytes_before_parser(self):
+        import copy
+        source = epub();value = plan(source);row = value['sources'][0]
+        row.update(reason='not_mapped', proof='unmapped-lfs-sha256', previous_revision=None,
+                   previous_source_sha256=None, previous_manifest=None)
+        value['plan_sha256'] = hashlib.sha256(search_snapshot.canonical({k:v for k,v in value.items() if k!='plan_sha256'})).hexdigest()
+        with tempfile.TemporaryDirectory() as directory:
+            def fetch(_url, target, _token):target.write_bytes(source)
+            report = subject.build(value, Path(directory)/'out', fetch=fetch)
+            self.assertEqual(report['sources'][0]['source']['sha256'], row['current_source_sha256'])
+        with tempfile.TemporaryDirectory() as directory, patch.object(subject, 'run_parser') as parser:
+            def bad_fetch(_url, target, _token):target.write_bytes(source+b'foreign')
+            with self.assertRaisesRegex(ValueError, 'unmapped EPUB differs'):
+                subject.build(value, Path(directory)/'out', fetch=bad_fetch, parse=parser)
+            parser.assert_not_called()
+        legacy = copy.deepcopy(value);legacy['sources'][0].update(proof=None, current_source_sha256=None)
+        legacy['plan_sha256'] = hashlib.sha256(search_snapshot.canonical({k:v for k,v in legacy.items() if k!='plan_sha256'})).hexdigest()
+        with self.assertRaisesRegex(ValueError, 'unmapped EPUB lacks exact LFS'):
+            subject._verify_plan(legacy)
+        for bad in ('previous_revision', 'previous_source_sha256', 'previous_manifest', 'previous_git_blob', 'current_git_blob'):
+            invalid = copy.deepcopy(value);invalid['sources'][0][bad] = 'f'*40
+            invalid['plan_sha256'] = hashlib.sha256(search_snapshot.canonical({k:v for k,v in invalid.items() if k!='plan_sha256'})).hexdigest()
+            with self.subTest(bad=bad), self.assertRaises(ValueError):subject._verify_plan(invalid)
+
     def test_zip_symlinks_duplicates_encryption_or_limits_fail_before_parser(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
