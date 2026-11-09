@@ -94,7 +94,7 @@ class CcrdSpaceActivationTests(CandidateAssemblyTests):
         result = subject.apply(planned, self.pointer, self.plan_value, self.description, api=self.api, store=self.store,
                                capture=self.capture, observe=lambda: self.observed, candidate_root=self.output,
                                new_text=NEW.encode(), current_manifest=self.pointer, candidate_manifest=self.target_manifest,
-                               confirm_plan_sha256=planned['plan_sha256'], get=self.get)
+                               confirm_plan_sha256=planned['plan_sha256'], get=self.get, before_commit=lambda: None)
         self.assertEqual(result['revision'], NEW_REV); self.assertFalse(result['consumer_verified'])
         self.assertFalse(result['pointer_written']); self.assertFalse(result['external_writers_verified'])
         self.assertEqual(self.api.create_commit.call_count, 1)
@@ -115,7 +115,7 @@ class CcrdSpaceActivationTests(CandidateAssemblyTests):
             subject.apply(planned, self.pointer, self.plan_value, self.description, api=self.api, store=self.store,
                           capture=capture, observe=lambda: self.observed, candidate_root=self.output,
                           new_text=NEW.encode(), current_manifest=self.pointer, candidate_manifest=self.target_manifest,
-                          confirm_plan_sha256=planned['plan_sha256'], get=self.get)
+                          confirm_plan_sha256=planned['plan_sha256'], get=self.get, before_commit=lambda: None)
         self.api.create_commit.assert_not_called()
 
     def test_unknown_commit_response_is_never_retried(self):
@@ -124,8 +124,18 @@ class CcrdSpaceActivationTests(CandidateAssemblyTests):
             subject.apply(planned, self.pointer, self.plan_value, self.description, api=self.api, store=self.store,
                           capture=self.capture, observe=lambda: self.observed, candidate_root=self.output,
                           new_text=NEW.encode(), current_manifest=self.pointer, candidate_manifest=self.target_manifest,
-                          confirm_plan_sha256=planned['plan_sha256'], get=self.get)
+                          confirm_plan_sha256=planned['plan_sha256'], get=self.get, before_commit=lambda: None)
         self.assertEqual(self.api.create_commit.call_count, 1)
+
+    def test_commit_guard_rejected_immediately_before_space_mutation(self):
+        planned = self.activation_plan()
+        def stop(): raise ValueError('write claim changed')
+        with self.assertRaisesRegex(ValueError, 'write claim changed'):
+            subject.apply(planned, self.pointer, self.plan_value, self.description, api=self.api, store=self.store,
+                          capture=self.capture, observe=lambda: self.observed, candidate_root=self.output,
+                          new_text=NEW.encode(), current_manifest=self.pointer, candidate_manifest=self.target_manifest,
+                          confirm_plan_sha256=planned['plan_sha256'], get=self.get, before_commit=stop)
+        self.api.create_commit.assert_not_called()
 
     def test_corrupt_metadata_or_plan_never_commits(self):
         planned = self.activation_plan(); (self.output / subject.metadata.PATHS[0]).write_bytes(b'wrong')
@@ -133,7 +143,7 @@ class CcrdSpaceActivationTests(CandidateAssemblyTests):
             subject.apply(planned, self.pointer, self.plan_value, self.description, api=self.api, store=self.store,
                           capture=self.capture, observe=lambda: self.observed, candidate_root=self.output,
                           new_text=NEW.encode(), current_manifest=self.pointer, candidate_manifest=self.target_manifest,
-                          confirm_plan_sha256=planned['plan_sha256'], get=self.get)
+                          confirm_plan_sha256=planned['plan_sha256'], get=self.get, before_commit=lambda: None)
         self.api.create_commit.assert_not_called()
 
 

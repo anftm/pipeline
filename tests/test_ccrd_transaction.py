@@ -1,7 +1,10 @@
 """CCRD journal records intents, not cross-object atomicity or writer isolation."""
 import hashlib
 import json
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import patch
 
 from scripts import ccrd_lifecycle
 from scripts import ccrd_transaction as tx
@@ -244,7 +247,7 @@ class CcrdTransactionTests(unittest.TestCase):
         next_args = successor_intent(raw)
         pointer = PointerMemory(raw)
         current = tx.begin_next(self.store, terminal, pointer_store=pointer, **next_args, transaction='2' * 32)
-        self.assertEqual(current.record['version'], 2)
+        self.assertEqual(current.record['version'], 3)
         self.assertEqual(current.record['state'], 'prepared')
         self.assertEqual(current.record['previous_transaction'], {'transaction': T, 'record': terminal.head['record'],
                                                                    'sequence': terminal.record['sequence']})
@@ -329,10 +332,10 @@ class CcrdTransactionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'history is missing'):
             tx.audit(self.store, next_record)
 
-    def test_legacy_v1_predecessor_can_link_to_v2_successor(self):
+    def test_legacy_v1_predecessor_can_link_to_v3_successor(self):
         from tests.test_ccrd_pointer_transition import PointerMemory
         c = self.begin()
-        legacy = {k: v for k, v in c.record.items() if k != 'previous_transaction'}
+        legacy = {k: v for k, v in c.record.items() if k not in {'previous_transaction', 'write_claim'}}
         legacy['version'] = 1
         raw = ccrd_lifecycle.canonical(legacy)
         digest = hashlib.sha256(raw).hexdigest()
@@ -345,7 +348,7 @@ class CcrdTransactionTests(unittest.TestCase):
         parent = bytes.fromhex(json.loads(INTENT)['parent_pointer_hex'])
         successor = tx.begin_next(self.store, c, pointer_store=PointerMemory(parent),
                                   **successor_intent(parent), transaction='2' * 32)
-        self.assertEqual(successor.record['version'], 2)
+        self.assertEqual(successor.record['version'], 3)
         self.assertEqual(tx.audit(self.store, successor), 5)
 
     def test_successor_cannot_reuse_any_earlier_transaction_id(self):
@@ -391,6 +394,87 @@ class CcrdTransactionTests(unittest.TestCase):
         self.assertEqual(self.store.writes, count + 1)
         self.assertEqual(tx.audit(self.store, current), 7)
         self.assertEqual(pointer.writes, 0)
+
+    def test_space_pointer_and_rollback_claims_are_single_use_and_auditable(self):
+        c = tx.advance(self.store, self.begin(), 'space-intent')
+        claimed = tx.claim_write(self.store, c, operation='space')
+        self.assertEqual(claimed.record['state'], 'space-claimed')
+        self.assertEqual(claimed.record['write_claim']['operation'], 'space')
+        tx.check_write_claim(self.store, claimed, operation='space')
+        self.assertEqual(ccrd_lifecycle.references(claimed.record, tx._record_key(T, claimed.head['record'])), [])
+        with self.assertRaisesRegex(ValueError, 'already claimed'):
+            tx.claim_write(self.store, claimed, operation='space')
+        with self.assertRaisesRegex(ValueError, 'head changed'):
+            tx.claim_write(self.store, c, operation='space')
+        observed = tx.advance(self.store, claimed, 'space-verified', space_revision=CHILD, evidence=evidence())
+        self.assertIsNone(observed.record['write_claim'])
+        with self.assertRaisesRegex(ValueError, 'head changed'):
+            tx.check_write_claim(self.store, claimed, operation='space')
+        c = tx.advance(self.store, observed, 'pointer-intent')
+        pointer = tx.claim_write(self.store, c, operation='pointer')
+        with self.assertRaisesRegex(ValueError, 'already claimed'):
+            tx.claim_write(self.store, pointer, operation='pointer')
+        c = tx.advance(self.store, pointer, 'pointer-verified')
+        c = tx.advance(self.store, c, 'complete')
+        self.assertEqual(tx.audit(self.store, c), 8)
+        self.assertEqual(c.record['state'], 'complete')
+
+    def test_claimed_space_can_enter_explicit_rollback_and_claim_once(self):
+        c = tx.advance(self.store, self.begin(), 'space-intent')
+        c = tx.claim_write(self.store, c, operation='space')
+        c = tx.advance(self.store, c, 'rollback-intent')
+        self.assertIsNone(c.record['write_claim'])
+        c = tx.claim_write(self.store, c, operation='rollback')
+        with self.assertRaisesRegex(ValueError, 'already claimed'):
+            tx.claim_write(self.store, c, operation='rollback')
+        c = tx.advance(self.store, c, 'rolled-back', space_revision=R, evidence=rollback_evidence())
+        self.assertEqual(tx.audit(self.store, c), 6)
+        self.assertEqual(c.record['state'], 'rolled-back')
+
+    def test_concurrent_space_claims_cannot_both_win(self):
+        c = tx.advance(self.store, self.begin(), 'space-intent')
+        barrier, lock, put = threading.Barrier(2, timeout=5), threading.Lock(), self.store.put_head
+        def cas(raw, etag):
+            barrier.wait()
+            with lock:
+                return put(raw, etag)
+        def attempt(_):
+            try: return tx.claim_write(self.store, c, operation='space')
+            except Exception as error: return error
+        with patch.object(self.store, 'put_head', side_effect=cas), ThreadPoolExecutor(max_workers=2) as pool:
+            outcomes = list(pool.map(attempt, range(2)))
+        self.assertEqual(sum(isinstance(value, tx.Current) for value in outcomes), 1)
+        self.assertEqual(sum(isinstance(value, ValueError) for value in outcomes), 1)
+        self.assertEqual(tx.load(self.store).record['state'], 'space-claimed')
+
+    def test_lost_claim_response_is_reconciled_without_second_cas(self):
+        c = tx.advance(self.store, self.begin(), 'space-intent')
+        self.store.lose_head = True
+        before = self.store.writes
+        claimed = tx.claim_write(self.store, c, operation='space')
+        self.assertEqual(self.store.writes, before + 1)
+        with self.assertRaisesRegex(ValueError, 'already claimed'):
+            tx.claim_write(self.store, tx.load(self.store), operation='space')
+        self.assertEqual(self.store.writes, before + 1)
+        self.assertEqual(tx.load(self.store), claimed)
+
+    def test_claim_rejects_legacy_forgery_and_wrong_operation(self):
+        c = self.begin()
+        legacy = {k: v for k, v in c.record.items() if k not in {'previous_transaction', 'write_claim'}}
+        legacy['version'] = 1
+        raw = ccrd_lifecycle.canonical(legacy); digest = hashlib.sha256(raw).hexdigest()
+        self.store.records[tx._record_key(T, digest)] = raw
+        self.store.head = ccrd_lifecycle.canonical({**c.head, 'record': digest})
+        legacy = tx.advance(self.store, tx.load(self.store), 'space-intent')
+        with self.assertRaisesRegex(ValueError, 'legacy journal'):
+            tx.claim_write(self.store, legacy, operation='space')
+        with self.assertRaisesRegex(ValueError, 'legacy journal'):
+            tx.claim_write(self.store, legacy, operation='unknown')
+        forged = {**legacy.record, 'version': 3, 'write_claim': {'id': 'f' * 32, 'operation': 'space'},
+                  'previous_transaction': None, 'state': 'space-claimed', 'sequence': legacy.record['sequence'] + 1,
+                  'prior': legacy.head['record']}
+        with self.assertRaisesRegex(ValueError, 'immutable identity'):
+            tx._advance(legacy.record, forged, legacy.head['record'])
 
     def test_malformed_or_changed_record_is_rejected(self):
         c = self.begin()

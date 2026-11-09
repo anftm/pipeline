@@ -75,19 +75,9 @@ class S3Pointer:
                           ContentType='application/json', IfMatch=etag)
 
 
-def apply(plan: dict, *, approved_description: dict, expected_parent: bytes,
-          expected_etag: str, store: PointerStore, immutable_manifest: bytes,
-          evidence: dict) -> dict:
-    """CAS once after full manifest, actual activation and consumer evidence.
-
-    Evidence is supplied by independently verified callers; this low-level
-    function is not itself evidence of freshness or external writer fencing.
-    """
-    if not isinstance(expected_parent, bytes) or not 0 < len(expected_parent) <= MAX_POINTER:
-        raise ValueError('invalid expected CCRD parent pointer bytes')
+def validate_evidence(plan: dict, *, immutable_manifest: bytes, evidence: dict) -> bytes:
+    """Validate evidence shape only; the caller must perform fresh real reads."""
     objects._validate(plan)
-    if planning.make(expected_parent, approved_description) != plan:
-        raise ValueError('CCRD pointer plan differs from approved candidate and exact parent')
     replacement = lifecycle.canonical(plan['manifest'])
     if immutable_manifest != replacement or hashlib.sha256(immutable_manifest).hexdigest() != plan['manifest_sha256']:
         raise ValueError('CCRD immutable manifest does not match planned pointer')
@@ -118,6 +108,18 @@ def apply(plan: dict, *, approved_description: dict, expected_parent: bytes,
             or source_observation.get('url') != plan['identity']['source_url']
             or {key: source_observation.get(key) for key in ('bytes', 'sha256')} != source_identity):
         raise ValueError('CCRD pointer transition lacks exact consumer and activation evidence')
+    return replacement
+
+
+def apply(plan: dict, *, approved_description: dict, expected_parent: bytes,
+          expected_etag: str, store: PointerStore, immutable_manifest: bytes,
+          evidence: dict) -> dict:
+    """CAS once; caller must independently verify evidence and durable intent."""
+    if not isinstance(expected_parent, bytes) or not 0 < len(expected_parent) <= MAX_POINTER:
+        raise ValueError('invalid expected CCRD parent pointer bytes')
+    if planning.make(expected_parent, approved_description) != plan:
+        raise ValueError('CCRD pointer plan differs from approved candidate and exact parent')
+    replacement = validate_evidence(plan, immutable_manifest=immutable_manifest, evidence=evidence)
     active, observed_etag = store.read_for_update()
     if active != expected_parent or observed_etag != strong_etag(expected_etag):
         raise ValueError('CCRD pointer identity or ETag changed before CAS')

@@ -1,6 +1,7 @@
 """Recovery orchestration uses durable intents and independently observed bytes."""
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from scripts import ccrd_lifecycle
 from scripts import ccrd_publication_coordinator as coord
@@ -21,6 +22,23 @@ class CoordinatorTests(RecoveryTests):
         self.assertEqual(current.record['state'], 'prepared')
         coord.start_space(journal)
         return journal, planned
+
+    def pointer_args(self):
+        plan = self.plan_value
+        source = {**plan['identity']['new_text'], 'source_stable': True,
+                  'revision': plan['identity']['source_revision'], 'url': plan['identity']['source_url']}
+        activation = {'kind': 'ccrd-space-activation-observation', 'revision': NEW_REV,
+                      'generation': plan['generation'], 'manifest_sha256': plan['manifest_sha256'],
+                      'runtime_observed_twice': True,
+                      'activation': {'kind': 'ccrd-index-activation', 'bucket': ccrd_lifecycle.BUCKET,
+                                     'path': f"generations/{plan['generation']}/manifest.json",
+                                     'sha256': plan['manifest_sha256']}}
+        consumer = {'generation': plan['generation'], 'cw0': plan['identity']['new_text'],
+                    'cw0_bytes_verified': True, 'status_observed_twice': True,
+                    'loaded_sources': ['CCRD', 'CW', 'PLA', 'RMRB']}
+        return {'candidate_plan': plan, 'description': self.description, 'immutable_manifest': self.target_manifest,
+                'api': self.api, 'capture': lambda: source,
+                'observe_activation': lambda *_a, **_k: activation, 'observe_consumer': lambda *_a: consumer}
 
     def test_prepare_checks_live_pointer_before_first_journal_write(self):
         planned = self.activation_plan()
@@ -65,6 +83,36 @@ class CoordinatorTests(RecoveryTests):
         self.assertEqual(tx.audit(journal, current), 5)
         self.assertEqual(pointer.writes, 0)
 
+    def test_space_commit_response_lost_is_reconciled_without_second_commit(self):
+        journal, planned = self.prepared_transaction()
+        self.api.create_commit.side_effect = TimeoutError('lost response')
+        args = {'candidate_plan': self.plan_value, 'description': self.description, 'api': self.api,
+                'staging_store': self.store, 'capture': self.capture, 'observe': lambda: self.observed,
+                'candidate_root': self.output, 'new_text': NEW.encode(), 'current_manifest': self.pointer,
+                'candidate_manifest': self.target_manifest, 'get': self.get}
+        with self.assertRaises(TimeoutError):
+            coord.apply_space_once(journal, **args)
+        self.assertEqual(tx.load(journal).record['state'], 'space-claimed')
+        with self.assertRaisesRegex(ValueError, 'expected state'):
+            coord.apply_space_once(journal, **args)
+        self.api.create_commit.assert_called_once()
+        observed = coord.observe_space(journal, api=self.api, get=self.get, child_of=lambda *_: False)
+        self.assertEqual(observed['status'], 'parent')
+        self.assertFalse(observed['journal_advanced'])
+        self.assertEqual(tx.load(journal).record['state'], 'space-claimed')
+
+    def test_space_stale_claim_is_checked_at_commit_boundary(self):
+        journal, _planned = self.prepared_transaction()
+        args = {'candidate_plan': self.plan_value, 'description': self.description, 'api': self.api,
+                'staging_store': self.store, 'capture': self.capture, 'observe': lambda: self.observed,
+                'candidate_root': self.output, 'new_text': NEW.encode(), 'current_manifest': self.pointer,
+                'candidate_manifest': self.target_manifest, 'get': self.get}
+        with patch.object(coord.tx, 'check_write_claim', side_effect=ValueError('head changed')):
+            with self.assertRaisesRegex(ValueError, 'head changed'):
+                coord.apply_space_once(journal, **args)
+        self.api.create_commit.assert_not_called()
+        self.assertEqual(tx.load(journal).record['state'], 'space-claimed')
+
     def test_uncertain_no_commit_is_observed_without_automatic_replay(self):
         journal, _plan = self.prepared_transaction()
         result = coord.observe_space(journal, api=self.api, get=self.get, child_of=lambda *_: False)
@@ -89,13 +137,65 @@ class CoordinatorTests(RecoveryTests):
         self.assertTrue(result['journal_advanced']); self.assertEqual(tx.load(journal).record['state'], 'space-verified')
         coord.start_pointer(journal); self.assertEqual(tx.load(journal).record['state'], 'pointer-intent')
         store = PointerMemory(self.pointer)
-        parent = coord.observe_pointer(journal, store)
+        pointer_args = self.pointer_args()
+        parent = coord.observe_pointer(journal, store, **pointer_args)
         self.assertEqual(parent['status'], 'parent'); self.assertFalse(parent['journal_advanced'])
         store.raw = ccrd_lifecycle.canonical(self.plan_value['manifest'])
-        candidate = coord.observe_pointer(journal, store)
+        candidate = coord.observe_pointer(journal, store, **pointer_args)
         self.assertEqual(candidate['status'], 'candidate'); self.assertTrue(candidate['journal_advanced'])
         self.assertEqual(tx.load(journal).record['state'], 'pointer-verified')
         self.api.create_commit.assert_not_called()
+
+    def ready_for_pointer(self):
+        journal, planned = self.prepared_transaction(); self.activation_plan_cache = planned
+        self.api.space_info.return_value = SimpleNamespace(sha=NEW_REV)
+        self.api.get_space_runtime.return_value = SimpleNamespace(stage='RUNNING', raw={'sha': NEW_REV})
+        activation = self.pointer_args()['observe_activation']()
+        consumed = self.pointer_args()['observe_consumer']()
+        coord.observe_space(journal, api=self.api, get=self.candidate_get, child_of=lambda *_: True,
+                            observe_activation=lambda *_a, **_k: activation,
+                            observe_consumer=lambda *_a: consumed)
+        coord.start_pointer(journal)
+        return journal
+
+    def test_pointer_cas_lost_response_claims_once_and_reconciles_live_evidence(self):
+        journal = self.ready_for_pointer()
+        store = PointerMemory(self.pointer); store.lost = True
+        result = coord.apply_pointer_once(journal, store, **self.pointer_args())
+        self.assertEqual(result['status'], 'written-response-unknown')
+        self.assertEqual(store.writes, 1)
+        self.assertEqual(tx.load(journal).record['state'], 'pointer-claimed')
+        with self.assertRaisesRegex(ValueError, 'expected state'):
+            coord.apply_pointer_once(journal, store, **self.pointer_args())
+        done = coord.observe_pointer(journal, store, **self.pointer_args())
+        self.assertTrue(done['journal_advanced'])
+        self.assertEqual(tx.load(journal).record['state'], 'pointer-verified')
+        self.assertEqual(store.writes, 1)
+
+    def test_pointer_source_change_after_claim_stops_cas_and_requires_inspection(self):
+        journal = self.ready_for_pointer(); store = PointerMemory(self.pointer)
+        args = self.pointer_args(); source = args['capture']()
+        observations = iter([source, source, {**source, 'revision': 'f' * 40}, {**source, 'revision': 'f' * 40}])
+        args['capture'] = lambda: next(observations)
+        with self.assertRaisesRegex(ValueError, 'lacks exact'):
+            coord.apply_pointer_once(journal, store, **args)
+        self.assertEqual(store.writes, 0)
+        self.assertEqual(tx.load(journal).record['state'], 'pointer-claimed')
+        result = coord.observe_pointer(journal, store, **self.pointer_args())
+        self.assertEqual(result['status'], 'parent')
+        self.assertFalse(result['journal_advanced'])
+        with self.assertRaisesRegex(ValueError, 'expected state'):
+            coord.apply_pointer_once(journal, store, **self.pointer_args())
+
+    def test_pointer_candidate_reconciliation_rejects_stale_live_evidence(self):
+        journal = self.ready_for_pointer(); store = PointerMemory(self.target_manifest)
+        args = self.pointer_args(); original = args['observe_activation']()
+        values = iter([original, {**original, 'revision': 'f' * 40}])
+        args['observe_activation'] = lambda *_a, **_k: next(values)
+        with self.assertRaisesRegex(ValueError, 'changed during'):
+            coord.observe_pointer(journal, store, **args)
+        self.assertEqual(tx.load(journal).record['state'], 'pointer-intent')
+        self.assertEqual(store.writes, 0)
 
     def test_wrong_consumer_or_foreign_pointer_stops_before_journal_advance(self):
         journal, planned = self.prepared_transaction(); self.activation_plan_cache = planned

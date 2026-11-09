@@ -180,7 +180,7 @@ def _local_changes(plan_value: dict, candidate_root: Path, new_text: bytes) -> d
 
 def apply(plan_value: dict, parent_raw: bytes, candidate_plan: dict, description: dict, *, api, store, capture, observe,
           candidate_root: Path, new_text: bytes, current_manifest: bytes, candidate_manifest: bytes,
-          confirm_plan_sha256: str, get=_get) -> dict:
+          confirm_plan_sha256: str, get=_get, before_commit) -> dict:
     if not isinstance(plan_value, dict) or plan_value.get('plan_sha256') != confirm_plan_sha256:
         raise ValueError('exact CCRD Space plan confirmation required')
     expected = {key: value for key, value in plan_value.items() if key != 'plan_sha256'}
@@ -200,8 +200,9 @@ def apply(plan_value: dict, parent_raw: bytes, candidate_plan: dict, description
     _revision(api, plan_value['parent_revision'])
     from huggingface_hub import CommitOperationAdd
     operations = [CommitOperationAdd(path_in_repo=path, path_or_fileobj=value) for path, value in sorted(changes.items())]
-    # Exactly one parent-guarded commit. Any exception may hide a committed
-    # result; the caller must inspect the Space before any recovery or retry.
+    # Exactly one parent-guarded commit. The coordinator must recheck its
+    # durable claim at this boundary; this callback is not an external fence.
+    before_commit()
     commit = api.create_commit(repo_id=SPACE, repo_type='space', parent_commit=plan_value['parent_revision'],
                                commit_message='Update verified CCRD CW source and index activation', operations=operations)
     revision = getattr(commit, 'oid', None)

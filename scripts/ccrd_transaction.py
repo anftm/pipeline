@@ -30,12 +30,13 @@ SHA = re.compile(r'[0-9a-f]{64}\Z')
 REV = re.compile(r'[0-9a-f]{40}\Z')
 GEN = re.compile(r'ccrd-four-[0-9a-f]{64}\Z')
 MAX_BYTES = 256 * 1024
-STATES = {'prepared', 'space-intent', 'space-verified', 'pointer-intent', 'pointer-verified', 'complete',
-          'rollback-intent', 'rolled-back'}
+STATES = {'prepared', 'space-intent', 'space-claimed', 'space-verified', 'pointer-intent', 'pointer-claimed',
+          'pointer-verified', 'complete', 'rollback-intent', 'rollback-claimed', 'rolled-back'}
 STATE_SEQUENCE = {'prepared': {0}, 'space-intent': {1}, 'space-verified': {2},
                   'pointer-intent': {3}, 'pointer-verified': {4}, 'complete': {5},
                   'rollback-intent': {2, 3, 4, 5}, 'rolled-back': {3, 4, 5, 6}}
 MAX_HISTORY_RECORDS = 10_000
+MAX_TRANSACTION_RECORDS = 10
 
 
 class Store(Protocol):
@@ -86,22 +87,24 @@ def _record(raw: bytes) -> dict:
         preview = json.loads(raw)
     except (TypeError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ValueError('invalid CCRD transaction record') from error
-    if isinstance(preview, dict) and preview.get('version') == 2:
+    if isinstance(preview, dict) and preview.get('version') in {2, 3}:
         keys.add('previous_transaction')
+    if isinstance(preview, dict) and preview.get('version') == 3:
+        keys.add('write_claim')
     value = _exact(raw, keys)
-    if (type(value['version']) is not int or value['version'] not in {1, 2} or value['kind'] != 'ccrd-cw0-transaction-record'
+    if (type(value['version']) is not int or value['version'] not in {1, 2, 3} or value['kind'] != 'ccrd-cw0-transaction-record'
             or type(value['sequence']) is not int or not 0 <= value['sequence'] <= 1_000_000
             or not isinstance(value['state'], str) or value['state'] not in STATES):
         raise ValueError('invalid CCRD transaction record')
     _match(value['transaction'], ID, 'transaction ID')
-    if value['version'] == 2 and value['previous_transaction'] is not None:
+    if value['version'] in {2, 3} and value['previous_transaction'] is not None:
         previous = value['previous_transaction']
         if not isinstance(previous, dict) or set(previous) != {'transaction', 'record', 'sequence'}:
             raise ValueError('invalid CCRD previous transaction reference')
         _match(previous['transaction'], ID, 'previous transaction ID')
         _match(previous['record'], SHA, 'previous transaction record')
         if (previous['transaction'] == value['transaction'] or type(previous['sequence']) is not int
-                or not 0 <= previous['sequence'] <= max(max(x) for x in STATE_SEQUENCE.values())):
+                or not 0 <= previous['sequence'] < MAX_TRANSACTION_RECORDS):
             raise ValueError('invalid CCRD previous transaction identity')
     for key in ('parent_sha256', 'candidate_manifest_sha256', 'activation_plan_sha256', 'durable_intent_sha256'):
         _match(value[key], SHA, key)
@@ -117,13 +120,26 @@ def _record(raw: bytes) -> dict:
         _match(value['rollback_evidence_sha256'], SHA, 'rollback evidence digest')
     if value['prior'] is not None:
         _match(value['prior'], SHA, 'prior record')
-    if ((value['sequence'] == 0) != (value['prior'] is None)
-            or value['sequence'] not in STATE_SEQUENCE[value['state']]):
+    if value['version'] in {1, 2}:
+        valid_sequence = value['sequence'] in STATE_SEQUENCE.get(value['state'], set())
+    else:
+        valid_sequence = value['sequence'] < MAX_TRANSACTION_RECORDS
+        claim = value['write_claim']
+        claimed_states = {'space-claimed': 'space', 'pointer-claimed': 'pointer', 'rollback-claimed': 'rollback'}
+        if value['state'] in claimed_states:
+            if (not isinstance(claim, dict) or set(claim) != {'operation', 'id'}
+                    or claim['operation'] != claimed_states[value['state']]):
+                raise ValueError('CCRD write claim does not match state')
+            _match(claim['id'], ID, 'write claim ID')
+        elif claim is not None:
+            raise ValueError('CCRD write claim appears outside a claimed state')
+    if (not valid_sequence or (value['sequence'] == 0) != (value['prior'] is None)
+            or (value['sequence'] == 0) != (value['state'] == 'prepared')):
         raise ValueError('CCRD transaction predecessor or state sequence differs')
-    if value['state'] in {'prepared', 'space-intent'}:
+    if value['state'] in {'prepared', 'space-intent', 'space-claimed'}:
         if value['space_revision'] is not None or value['evidence_sha256'] is not None:
             raise ValueError('CCRD transaction reports Space evidence before activation')
-    elif value['state'] not in {'rollback-intent', 'rolled-back'} and (
+    elif value['state'] not in {'rollback-intent', 'rollback-claimed', 'rolled-back'} and (
             value['space_revision'] is None or value['evidence_sha256'] is None):
         raise ValueError('CCRD transaction lacks Space activation evidence')
     if (value['space_revision'] is None) != (value['evidence_sha256'] is None):
@@ -144,17 +160,36 @@ def _advance(previous: dict, current: dict, previous_digest: str) -> None:
     if (any(previous[key] != current[key] for key in immutable)
             or current['sequence'] != previous['sequence'] + 1 or current['prior'] != previous_digest):
         raise ValueError('CCRD transaction immutable identity or predecessor changed')
-    allowed = {('prepared', 'space-intent'), ('space-intent', 'space-verified'),
-               ('space-verified', 'pointer-intent'), ('pointer-intent', 'pointer-verified'),
-               ('pointer-verified', 'complete'), ('space-intent', 'rollback-intent'),
-               ('space-verified', 'rollback-intent'), ('pointer-intent', 'rollback-intent'),
-               ('pointer-verified', 'rollback-intent'), ('rollback-intent', 'rolled-back')}
-    if (previous['state'], current['state']) not in allowed:
+    pair = (previous['state'], current['state'])
+    if previous['version'] in {1, 2}:
+        allowed = {('prepared', 'space-intent'), ('space-intent', 'space-verified'),
+                   ('space-verified', 'pointer-intent'), ('pointer-intent', 'pointer-verified'),
+                   ('pointer-verified', 'complete'), ('space-intent', 'rollback-intent'),
+                   ('space-verified', 'rollback-intent'), ('pointer-intent', 'rollback-intent'),
+                   ('pointer-verified', 'rollback-intent'), ('rollback-intent', 'rolled-back')}
+    else:
+        allowed = {('prepared', 'space-intent'), ('space-intent', 'space-claimed'),
+                   ('space-intent', 'space-verified'), ('space-claimed', 'space-verified'),
+                   ('space-verified', 'pointer-intent'), ('pointer-intent', 'pointer-claimed'),
+                   ('pointer-intent', 'pointer-verified'), ('pointer-claimed', 'pointer-verified'),
+                   ('pointer-verified', 'complete'), ('space-intent', 'rollback-intent'),
+                   ('space-claimed', 'rollback-intent'), ('space-verified', 'rollback-intent'),
+                   ('pointer-intent', 'rollback-intent'), ('pointer-claimed', 'rollback-intent'),
+                   ('pointer-verified', 'rollback-intent'), ('rollback-intent', 'rollback-claimed'),
+                   ('rollback-intent', 'rolled-back'), ('rollback-claimed', 'rolled-back')}
+    if pair not in allowed:
         raise ValueError('invalid CCRD transaction state transition')
-    if (previous['state'], current['state']) != ('space-intent', 'space-verified') and (
+    if previous['version'] == 3:
+        before, after = previous['write_claim'], current['write_claim']
+        if current['state'] in {'space-claimed', 'pointer-claimed', 'rollback-claimed'}:
+            if before is not None or after is None:
+                raise ValueError('invalid CCRD write claim transition')
+        elif before is not None and after is not None:
+            raise ValueError('invalid CCRD write claim removal')
+    if pair not in {('space-intent', 'space-verified'), ('space-claimed', 'space-verified')} and (
             previous['space_revision'] != current['space_revision'] or previous['evidence_sha256'] != current['evidence_sha256']):
         raise ValueError('CCRD transaction activation evidence changed')
-    if (previous['state'], current['state']) != ('rollback-intent', 'rolled-back') and (
+    if pair not in {('rollback-intent', 'rolled-back'), ('rollback-claimed', 'rolled-back')} and (
             previous['rollback_revision'] != current['rollback_revision']
             or previous['rollback_evidence_sha256'] != current['rollback_evidence_sha256']):
         raise ValueError('CCRD transaction rollback evidence changed')
@@ -165,7 +200,7 @@ def _successor(previous: dict, current: dict, previous_digest: str) -> None:
     reference = current.get('previous_transaction')
     expected = {'transaction': previous['transaction'], 'record': previous_digest, 'sequence': previous['sequence']}
     parent = previous['candidate_manifest_sha256'] if previous['state'] == 'complete' else previous['parent_sha256']
-    if (current['version'] != 2 or current['sequence'] != 0 or current['state'] != 'prepared'
+    if (current['version'] not in {2, 3} or current['sequence'] != 0 or current['state'] != 'prepared'
             or current['prior'] is not None or reference != expected or current['transaction'] == previous['transaction']
             or previous['state'] not in {'complete', 'rolled-back'} or current['parent_sha256'] != parent):
         raise ValueError('invalid CCRD successor transaction or terminal parent')
@@ -493,7 +528,7 @@ def _begin(store: Store, *, parent_sha256: str, candidate_generation: str, candi
                 'parent_space_revision': parent_space_revision}
     _intent(durable_intent, identity)
     if previous is not None:
-        probe = {'version': 2, 'transaction': transaction, 'sequence': 0, 'state': 'prepared', 'prior': None,
+        probe = {'version': 3, 'transaction': transaction, 'sequence': 0, 'state': 'prepared', 'prior': None,
                  'parent_sha256': parent_sha256, 'previous_transaction': {'transaction': previous.record['transaction'],
                  'record': previous.head['record'], 'sequence': previous.record['sequence']}}
         _successor(previous.record, probe, previous.head['record'])
@@ -508,7 +543,7 @@ def _begin(store: Store, *, parent_sha256: str, candidate_generation: str, candi
         else:
             existing = store.read_intent(key)
     if existing != durable_intent: raise ValueError('CCRD durable intent immutable conflict')
-    value = {'version': 2, 'kind': 'ccrd-cw0-transaction-record', 'transaction': transaction,
+    value = {'version': 3, 'kind': 'ccrd-cw0-transaction-record', 'transaction': transaction, 'write_claim': None,
              'previous_transaction': ({'transaction': previous.record['transaction'], 'record': previous.head['record'],
                                        'sequence': previous.record['sequence']} if previous else None),
              'sequence': 0, 'prior': None, 'state': 'prepared', 'parent_sha256': parent_sha256,
@@ -535,6 +570,42 @@ def _store_evidence(store: Store, transaction: str, evidence: bytes) -> str:
     return digest
 
 
+def claim_write(store: Store, current: Current, *, operation: str) -> Current:
+    """Consume one exact mutation opportunity with a unique journal CAS.
+
+    A successful claim does not prove any remote request was sent. If the
+    process dies or its response is uncertain, independently reconcile instead
+    of claiming again. Unknown external writers and in-flight requests are not
+    fenced by this single-object CAS.
+    """
+    states = {'space': ('space-intent', 'space-claimed'), 'pointer': ('pointer-intent', 'pointer-claimed'),
+              'rollback': ('rollback-intent', 'rollback-claimed')}
+    if operation not in states or current.record['version'] != 3:
+        raise ValueError('CCRD write claim is unavailable for this operation or legacy journal')
+    before, after = states[operation]
+    if current.record['state'] != before:
+        raise ValueError('CCRD write opportunity is unavailable or already claimed')
+    active = load(store)
+    if active is None or active.head_raw != current.head_raw or active.etag != current.etag:
+        raise ValueError('CCRD transaction head changed before write claim')
+    audit(store, current)
+    value = {**current.record, 'sequence': current.record['sequence'] + 1,
+             'prior': current.head['record'], 'state': after,
+             'write_claim': {'operation': operation, 'id': uuid.uuid4().hex}}
+    return _commit(store, value, current)
+
+
+def check_write_claim(store: Store, current: Current, *, operation: str) -> None:
+    """Recheck the caller's exact claim immediately before a remote mutation."""
+    claim = current.record.get('write_claim')
+    if not isinstance(claim, dict) or claim.get('operation') != operation:
+        raise ValueError('CCRD mutation is not claimed by this operation')
+    active = load(store)
+    if active is None or active.head_raw != current.head_raw or active.etag != current.etag:
+        raise ValueError('CCRD transaction head changed after write claim')
+    audit(store, active)
+
+
 def advance(store: Store, current: Current, state: str, *, space_revision: str | None = None,
             evidence: bytes | None = None) -> Current:
     """Internal state primitive; callers must independently verify observations.
@@ -546,13 +617,17 @@ def advance(store: Store, current: Current, state: str, *, space_revision: str |
     if active is None or active.head_raw != current.head_raw or active.etag != current.etag:
         raise ValueError('CCRD transaction head changed before advancing')
     audit(store, active)
+    if state in {'space-claimed', 'pointer-claimed', 'rollback-claimed'}:
+        raise ValueError('CCRD claimed states require claim_write')
     value = {**current.record, 'sequence': current.record['sequence'] + 1,
              'prior': current.head['record'], 'state': state}
-    if current.record['state'] == 'space-intent' and state == 'space-verified':
+    if current.record['version'] == 3:
+        value['write_claim'] = None
+    if current.record['state'] in {'space-intent', 'space-claimed'} and state == 'space-verified':
         _activation_evidence(evidence, current.record, space_revision)
         digest = _store_evidence(store, current.record['transaction'], evidence)
         value.update(space_revision=space_revision, evidence_sha256=digest)
-    elif current.record['state'] == 'rollback-intent' and state == 'rolled-back':
+    elif current.record['state'] in {'rollback-intent', 'rollback-claimed'} and state == 'rolled-back':
         _rollback_evidence(evidence, current.record, space_revision)
         digest = _store_evidence(store, current.record['transaction'], evidence)
         value.update(rollback_revision=space_revision, rollback_evidence_sha256=digest)
