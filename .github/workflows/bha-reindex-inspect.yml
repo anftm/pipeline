@@ -1,0 +1,39 @@
+name: BHA · Inspect Index Request Journal
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: update-bha-index
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  inspect:
+    if: github.repository == 'anftm/pipeline'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Install pinned dependencies
+        run: pip install -r scripts/requirements.txt PyYAML==6.0.3
+      - name: Exercise read-only journal contracts
+        run: python -B -m unittest -v tests.test_bha_reindex_journal_inspection
+      - name: Read exact journal and administrative status without mutation
+        env:
+          BHA_REINDEX_TOKEN: ${{ secrets.BHA_REINDEX_TOKEN }}
+          HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+        run: python -B scripts/bha_reindex_journal_inspection.py --output output/bha/index-journal-inspection.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: bha-index-journal-readonly-inspection
+          path: output/bha/index-journal-inspection.json
+          retention-days: 30
+          if-no-files-found: error
