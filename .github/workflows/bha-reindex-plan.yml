@@ -1,0 +1,38 @@
+name: BHA · Inspect Exact Index Update Plan
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: update-bha-index
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  inspect:
+    if: github.repository == 'anftm/pipeline'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Install pinned test dependencies
+        run: pip install -r scripts/requirements.txt PyYAML==6.0.3
+      - name: Exercise read-only index planning contracts
+        run: python -B -m unittest -v tests.test_bha_reindex_plan
+      - name: Inspect exact source and consumer identities without reindexing
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+          BHA_REINDEX_TOKEN: ${{ secrets.BHA_REINDEX_TOKEN }}
+        run: python -B scripts/bha_reindex_plan.py --output output/bha/index-plan.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: bha-index-readonly-plan
+          path: output/bha/index-plan.json
+          retention-days: 30
+          if-no-files-found: error
