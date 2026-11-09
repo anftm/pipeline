@@ -395,6 +395,26 @@ def inspect(*, hub, api, fs, client, threshold=100, observe_search=search_daily.
     epub = classify_epub(records, routes, canonical, shards, api)
     checked = dict(epub)
     checked_extensions = {'epub'}
+    extra_ebook_indexes, extra_ebook_shards = {}, {}
+    for extension in ('mobi', 'azw3', 'fb2', 'chm'):
+        ebook_root = f'chapters/ebook/{extension}'
+        index = matrix.read_json(fs, READER_BUCKET, ebook_root + '/index.json')
+        if not index:
+            continue
+        parts = []
+        for number in range(8):
+            value = matrix.read_json(fs, READER_BUCKET, f'{ebook_root}/index-{number:02d}.json')
+            if value:
+                parts.append((number, value))
+        checked.update(classify_indexed(records, routes, index, parts, api, extensions={extension},
+                                        kind='ebook-chapter-stream-index', route_modes={'e'}))
+        checked_extensions.add(extension)
+        extra_ebook_indexes[extension] = index
+        extra_ebook_shards[extension] = dict(parts)
+    office_extensions = set(FAMILIES['office-chapters'][0])
+    checked.update(classify_indexed(records, routes, canonical, [], api, extensions=office_extensions,
+                                    kind='ebook-chapter-stream-index', route_modes={'e'}))
+    checked_extensions.update(office_extensions)
     image_root = 'pages/image'
     image_canonical = matrix.read_json(fs, READER_BUCKET, image_root + '/index-v2.json')
     image_shards = []
@@ -432,6 +452,18 @@ def inspect(*, hub, api, fs, client, threshold=100, observe_search=search_daily.
         checked_extensions.update(extensions)
         media_indexes[media_kind] = index
         media_shards[media_kind] = dict(parts)
+    document_indexes = {}
+    for family, prefix, index_kind, route_mode in (
+            ('spreadsheet', 'documents/spreadsheet', 'spreadsheet-html-stream-index', 'h'),
+            ('static-pdf', 'documents/pdf', 'static-pdf-stream-index', 'p')):
+        for extension in FAMILIES[family][0]:
+            path = f'{prefix}/{extension}/index.json'
+            index = matrix.read_json(fs, READER_BUCKET, path)
+            if index:
+                checked.update(classify_indexed(records, routes, index, [], api, extensions={extension},
+                                                kind=index_kind, route_modes={route_mode}))
+                checked_extensions.add(extension)
+                document_indexes[path] = index
     web_indexes = {}
     for extension in FAMILIES['web'][0]:
         path = f'documents/web/{extension}/index.json'
@@ -456,6 +488,17 @@ def inspect(*, hub, api, fs, client, threshold=100, observe_search=search_daily.
         latest = matrix.read_json(fs, READER_BUCKET, f'{root}/index-{number:02d}.json')
         if latest != dict(shards).get(number, {}):
             raise ValueError('EPUB shard index changed during backlog inspection')
+    for extension, expected in extra_ebook_indexes.items():
+        ebook_root = f'chapters/ebook/{extension}'
+        if matrix.read_json(fs, READER_BUCKET, ebook_root + '/index.json') != expected:
+            raise ValueError('Reader ebook index changed during backlog inspection')
+        for number in range(8):
+            latest = matrix.read_json(fs, READER_BUCKET, f'{ebook_root}/index-{number:02d}.json')
+            if latest != extra_ebook_shards[extension].get(number, {}):
+                raise ValueError('Reader ebook shard changed during backlog inspection')
+    for path, expected in document_indexes.items():
+        if matrix.read_json(fs, READER_BUCKET, path) != expected:
+            raise ValueError('Reader document index changed during backlog inspection')
     if matrix.read_json(fs, READER_BUCKET, image_root + '/index-v2.json') != image_canonical:
         raise ValueError('Reader image canonical index changed during backlog inspection')
     for number in range(8):
@@ -488,7 +531,7 @@ def inspect(*, hub, api, fs, client, threshold=100, observe_search=search_daily.
                'reader_generation': reader_pointer['generation'], 'threshold': threshold,
                'reader_consumers': receipts, 'formats': summaries, 'remote_writes': 0,
                'dispatches': 0, 'publication_ready': False, 'external_writers_verified': False,
-               'scope': ('published search and pinned Reader projection; exact source content checked for EPUB, images, media and indexed web files; '
+               'scope': ('published search and pinned Reader projection; exact source content checked for indexed ebooks, office, images, media, web, spreadsheets and static PDFs; '
                          'HTML dependencies may change independently and are not checked')}
     details = {'version': 1, 'kind': 'reader-epub-content-backlog',
                'search_generation': summary['search_generation'], 'reader_generation': summary['reader_generation'],

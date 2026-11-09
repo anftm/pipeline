@@ -143,6 +143,25 @@ class ReaderFormatBacklogTests(unittest.TestCase):
         self.assertTrue(report['all_source_identities_checked'])
         self.assertFalse(report['trigger_ready'])
 
+    def test_office_and_non_epub_books_compare_content_against_their_own_route(self):
+        for extension in ('docx', 'mobi', 'chm'):
+            with self.subTest(extension=extension):
+                source = item('updated', extension);key = source['key']
+                entry = {'key': key, 'source_revision': OLD, 'source_sha256': SHA_A,
+                         'source_extension': extension, 'bucket': subject.READER_BUCKET,
+                         'manifest': 'chapters/ebook/' + extension + '/hash/chapter-manifest.json'}
+                route = {'s': 2, 'm': 'e', 'b': subject.READER_BUCKET, 'p': entry['manifest']}
+                canonical = {'version': 1, 'kind': 'ebook-chapter-stream-index', 'files': [entry], 'failures': []}
+                rows = subject.classify_indexed({key: source}, {key: route}, canonical, [],
+                    Metadata({(NEW, 'updated.' + extension): file('updated.' + extension, lfs=SHA_B)}),
+                    extensions={extension}, kind='ebook-chapter-stream-index', route_modes={'e'})
+                self.assertEqual(rows[key]['state'], 'content_changed')
+                result = {r['extension']: r for r in subject.summarize(
+                    {key: source}, {key: route}, rows, threshold=0, checked_extensions={extension})}[extension]
+                self.assertTrue(result['threshold_exceeded'])
+                self.assertEqual(result['source_content_changed'], 1)
+                self.assertFalse(result['trigger_ready'])
+
     def test_malformed_lfs_or_wrong_response_never_becomes_content_proof(self):
         records = {item('book')['key']: item('book')}; entry = row('book')
         index = {'version': 1, 'kind': 'ebook-chapter-stream-index', 'files': [entry], 'failures': []}
