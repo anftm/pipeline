@@ -107,6 +107,18 @@ class IndexDeliveryTests(IndexPreviewTests):
         self.assertEqual(calls,[self.path])
         self.assertEqual(self.checkpoints.read('vomebook/reader-assets-v2',self.path).value,done['intent']['candidate'])
 
+    def test_raw_parent_drift_even_with_same_parsed_json_and_etag_is_rejected(self):
+        current=self.prepare_index();original=self.checkpoints.read
+        def altered(bucket,path):
+            snap=original(bucket,path)
+            if path==self.path:return cas.Snapshot(snap.value,snap.etag,'f'*64)
+            return snap
+        with patch.object(self.checkpoints,'read',side_effect=altered):
+            with self.assertRaisesRegex(ValueError,'exact bytes changed'):
+                self.apply_index(current)
+        self.assertEqual(self.checkpoints.puts,0)
+        self.assertEqual(tx.load(self.index_store,self.plan['operation'])['record']['state'],'prepared')
+
     def test_response_lost_reconciles_without_second_shard_write(self):
         current=self.prepare_index();self.checkpoints.lose=True
         with self.assertRaises(TimeoutError):self.apply_index(current)
@@ -125,7 +137,7 @@ class IndexDeliveryTests(IndexPreviewTests):
         self.assertEqual(pending['record']['state'],'write-intent')
     def test_parent_change_and_unprotected_object_block_before_index_write(self):
         current=self.prepare_index();self.checkpoints.values[self.path]=(self.shard,'"foreign"')
-        with self.assertRaisesRegex(ValueError,'validator changed'):self.apply_index(current)
+        with self.assertRaisesRegex(ValueError,'validator or exact bytes changed'):self.apply_index(current)
         self.assertEqual(self.checkpoints.puts,0)
         self.checkpoints.values[self.path]=(self.shard,'"parent"')
         action=self.preview['actions'][0];self.protections.values.pop(action['protection_path'])

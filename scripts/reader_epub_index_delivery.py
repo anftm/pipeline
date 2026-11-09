@@ -64,7 +64,8 @@ def prepare(index_store,stage_store,operation,*,checkpoints,protections,objects,
         protections=protections,objects=objects,revalidate=revalidate,read_bytes=read_bytes,checkpointed_at=checkpointed_at)
     if checkpoints.read(READER_ASSETS_BUCKET,CANONICAL)!=canonical or checkpoints.read(READER_ASSETS_BUCKET,shard_path)!=shard:
         raise ValueError('EPUB index parent changed during transaction preparation')
-    return tx.begin(index_store,stage,artifact,canonical.value,{} if shard.value is None else shard.value,shard.etag)
+    return tx.begin(index_store,stage,artifact,canonical.value,{} if shard.value is None else shard.value,
+                    shard.etag,shard.raw_sha256)
 
 
 def _expected_raw(candidate):
@@ -75,8 +76,9 @@ def apply_once(index_store,stage_store,current,*,checkpoints,protections,objects
     if current['record']['state']!='prepared':raise ValueError('EPUB index is not prepared; reconcile instead')
     active=_active(index_store,current);stage=_stage(stage_store,active);plan=stage.intent['plan']
     canonical,path,shard=_parents(checkpoints,plan)
-    if hashlib.sha256((shard.etag or 'absent').encode()).hexdigest()!=active['intent']['parent_etag_sha256']:
-        raise ValueError('EPUB shard validator changed before index write')
+    if (hashlib.sha256((shard.etag or 'absent').encode()).hexdigest()!=active['intent']['parent_etag_sha256']
+            or (shard.raw_sha256 or hashlib.sha256(b'absent').hexdigest())!=active['intent']['parent_raw_sha256']):
+        raise ValueError('EPUB shard validator or exact bytes changed before index write')
     new=active['intent']['candidate'];selected=set(s['key'] for s in plan['sources'])
     times={row.get('checkpointed_at') for row in new['files'] if row['key'] in selected}
     if len(times)!=1:raise ValueError('EPUB selected checkpoint time differs')

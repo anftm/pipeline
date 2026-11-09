@@ -13,7 +13,7 @@ from tests.test_reader_epub_stage_journal import MemoryJournal
 class IndexTransactionTests(IndexPreviewTests):
     def setUp(self):
         super().setUp();self.preview_result=self.inspect();self.validate.reset_mock();self.txstore=MemoryJournal()
-    def begin(self):return tx.begin(self.txstore,self.current,self.preview_result,self.canonical,self.shard,'"parent"')
+    def begin(self):return tx.begin(self.txstore,self.current,self.preview_result,self.canonical,self.shard,'"parent"','a'*64)
     def test_durable_intent_claim_and_observation(self):
         prepared=self.begin();self.assertEqual(prepared['record']['state'],'prepared')
         claimed=tx.claim(self.txstore,prepared);self.assertEqual(claimed['record']['state'],'write-intent')
@@ -29,7 +29,7 @@ class IndexTransactionTests(IndexPreviewTests):
         self.assertEqual(tx.load(self.txstore,self.plan['operation']),winner)
         bad=copy.deepcopy(self.preview_result);bad['candidate']['files'][0]['profile']='forged'
         fresh=MemoryJournal()
-        with self.assertRaisesRegex(ValueError,'candidate identity'):tx.begin(fresh,self.current,bad,self.canonical,self.shard,'"parent"')
+        with self.assertRaisesRegex(ValueError,'candidate identity'):tx.begin(fresh,self.current,bad,self.canonical,self.shard,'"parent"','a'*64)
     def test_lost_journal_responses_are_read_once_no_replay(self):
         self.txstore.lose_record=True;self.txstore.lose_head=True
         initial=self.begin();claimed=tx.claim(self.txstore,initial)
@@ -44,7 +44,7 @@ class IndexTransactionTests(IndexPreviewTests):
         self.preview_result['shard_index_sha256']=self.plan['shard_index_sha256']
         self.preview_result['candidate']=candidate
         self.preview_result['candidate_sha256']=tx.digest(candidate)
-        result=tx.begin(self.txstore,self.current,self.preview_result,self.canonical,{},None)
+        result=tx.begin(self.txstore,self.current,self.preview_result,self.canonical,{},None,None)
         self.assertEqual(result['intent']['parent_shard'],{})
         self.assertEqual(result['intent']['parent_etag_sha256'],hashlib.sha256(b'absent').hexdigest())
 
@@ -59,7 +59,7 @@ class IndexTransactionTests(IndexPreviewTests):
         self.current.intent['plan']['shard_index_sha256']=self.plan['shard_index_sha256']
         bad['candidate_sha256']=tx.digest(bad['candidate'])
         with self.assertRaisesRegex(ValueError,'unrelated rows'):
-            tx.begin(MemoryJournal(),self.current,bad,self.canonical,self.shard,'"parent"')
+            tx.begin(MemoryJournal(),self.current,bad,self.canonical,self.shard,'"parent"','a'*64)
 
     def test_staged_observation_requires_exact_bytes_not_boolean(self):
         claimed=tx.claim(self.txstore,self.begin())
@@ -68,6 +68,15 @@ class IndexTransactionTests(IndexPreviewTests):
             with self.subTest(snapshot=snapshot),self.assertRaises(ValueError):
                 tx.record_observed(self.txstore,claimed,snapshot=snapshot)
         self.assertEqual(tx.load(self.txstore,self.plan['operation'])['record']['state'],'write-intent')
+
+    def test_loaded_journal_rejects_parent_bytes_digest_tampering(self):
+        import json
+        prepared=self.begin();intent=copy.deepcopy(prepared['intent'])
+        intent['parent_shard']['files'][0]['source_revision']='e'*40
+        raw=search_snapshot.canonical(intent)
+        with self.assertRaisesRegex(ValueError,'parent identity differs'):
+            tx._intent(raw)
+        self.assertEqual(tx.load(self.txstore,self.plan['operation'])['record']['state'],'prepared')
 
     def test_missing_history_and_changed_intent_fail_closed(self):
         claimed=tx.claim(self.txstore,self.begin())

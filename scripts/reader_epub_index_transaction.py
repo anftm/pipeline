@@ -57,14 +57,15 @@ def _decode(raw):
 def _intent(raw):
     value=_decode(raw)
     keys={'version','kind','operation','stage_record_sha256','stage_intent_sha256','shard','shard_path',
-          'parent_canonical_sha256','parent_shard_sha256','parent_etag_sha256','parent_shard','candidate_sha256','candidate'}
+          'parent_canonical_sha256','parent_shard_sha256','parent_etag_sha256','parent_raw_sha256',
+          'parent_shard','candidate_sha256','candidate'}
     if (set(value)!=keys or type(value['version']) is not int or value['version']!=1
             or value['kind']!='reader-epub-index-intent' or type(value['shard']) is not int
             or not 0<=value['shard']<8 or value['shard_path']!=f"chapters/ebook/epub/index-{value['shard']:02d}.json"):
         raise ValueError('invalid EPUB index intent')
     _id(value['operation'])
     for name in ('stage_record_sha256','stage_intent_sha256','parent_canonical_sha256','parent_shard_sha256',
-                 'parent_etag_sha256','candidate_sha256'):_sha(value[name])
+                 'parent_etag_sha256','parent_raw_sha256','candidate_sha256'):_sha(value[name])
     parent=value['parent_shard']
     candidate=value['candidate']
     if (not isinstance(parent,dict) or digest(parent)!=value['parent_shard_sha256']):
@@ -172,7 +173,7 @@ def _commit(store,operation,record,previous):
     return after
 
 
-def begin(store,stage_current,preview,canonical,shard,shard_etag):
+def begin(store,stage_current,preview,canonical,shard,shard_etag,shard_raw_sha256):
     if stage_current is None or stage_current.record['state']!='staged':raise ValueError('EPUB objects are not staged')
     if shard_etag is not None:
         stage_journal.strong_etag(shard_etag)
@@ -193,6 +194,11 @@ def begin(store,stage_current,preview,canonical,shard,shard_etag):
         raise ValueError('EPUB index parent differs from the staged plan')
     if (shard_etag is None) != (shard == {}):
         raise ValueError('EPUB shard presence and validator are inconsistent')
+    if shard_etag is None:
+        if shard_raw_sha256 is not None:raise ValueError('absent EPUB shard cannot have a raw digest')
+        parent_raw_digest=hashlib.sha256(b'absent').hexdigest()
+    else:
+        parent_raw_digest=_sha(shard_raw_sha256)
     candidate=preview.get('candidate')
     if not isinstance(candidate,dict) or not isinstance(candidate.get('files'),list):
         raise ValueError('EPUB index preview candidate is invalid')
@@ -220,7 +226,7 @@ def begin(store,stage_current,preview,canonical,shard,shard_etag):
             'shard':plan['shard'],'shard_path':f"chapters/ebook/epub/index-{plan['shard']:02d}.json",
             'parent_canonical_sha256':plan['canonical_index_sha256'],'parent_shard_sha256':plan['shard_index_sha256'],
             'parent_etag_sha256':hashlib.sha256((shard_etag or 'absent').encode()).hexdigest(),
-            'parent_shard':shard, 'candidate_sha256':preview.get('candidate_sha256'),'candidate':preview.get('candidate')}
+            'parent_raw_sha256':parent_raw_digest, 'parent_shard':shard, 'candidate_sha256':preview.get('candidate_sha256'),'candidate':preview.get('candidate')}
     raw=search_snapshot.canonical(intent);_intent(raw);sha=hashlib.sha256(raw).hexdigest()
     _create(store,key(operation,'intents',sha),raw)
     record={'version':1,'kind':'reader-epub-index-record','operation':operation,'sequence':0,'state':'prepared',
