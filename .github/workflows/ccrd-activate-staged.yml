@@ -1,0 +1,74 @@
+name: CCRD · Activate Exact Staged Candidate
+run-name: CCRD activate staged run ${{ inputs.stage_run }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      stage_run:
+        description: Exact successful CCRD staging workflow run ID
+        type: string
+        required: true
+      known_writers_coordinated:
+        description: CCRD bucket and Space writers are coordinated; not proof of unknown writers
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: publish-ccrd-index
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  activate:
+    if: github.repository == 'anftm/pipeline'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Install pinned dependencies
+        run: pip install -r scripts/requirements.txt PyYAML==6.0.3
+      - name: Exercise activation and recovery contracts
+        run: python -B -m unittest -v tests.test_ccrd_auto_activate tests.test_ccrd_publication_coordinator tests.test_ccrd_rollback
+      - name: Verify staging workflow run provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STAGE_RUN: ${{ inputs.stage_run }}
+          WRITERS: ${{ inputs.known_writers_coordinated }}
+        run: |
+          set -euo pipefail
+          [[ "$WRITERS" == 'true' && "$STAGE_RUN" =~ ^[0-9]+$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$STAGE_RUN" > "$RUNNER_TEMP/stage-run.json"
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          run = json.loads((Path(os.environ['RUNNER_TEMP']) / 'stage-run.json').read_bytes())
+          if (run.get('status') != 'completed' or run.get('conclusion') != 'success'
+                  or run.get('head_branch') != 'main' or run.get('head_sha') != os.environ['GITHUB_SHA']
+                  or run.get('event') not in {'schedule', 'workflow_dispatch'}
+                  or run.get('path', '').split('@', 1)[0] != '.github/workflows/publish-ccrd-index.yml'):
+              raise SystemExit('staging run is not an exact successful run on this pipeline revision')
+          PY
+      - name: Download exact staged candidate
+        uses: actions/download-artifact@v8
+        with:
+          name: ccrd-staged-candidate
+          path: ${{ runner.temp }}/ccrd-candidate
+          run-id: ${{ inputs.stage_run }}
+          github-token: ${{ github.token }}
+      - name: Verify and request one Space activation
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
+          HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+        run: |
+          set -euo pipefail
+          python -B scripts/ccrd_auto_activate.py --known-writers-coordinated --bundle "$RUNNER_TEMP/ccrd-candidate" \
+            --metadata-root "$RUNNER_TEMP/ccrd-activation-metadata"

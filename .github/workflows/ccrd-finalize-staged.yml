@@ -1,0 +1,99 @@
+name: CCRD · Reconcile Exact Staged Transaction
+run-name: CCRD ${{ inputs.mode }} / transaction ${{ inputs.transaction }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      stage_run:
+        description: Exact successful CCRD staging workflow run ID
+        type: string
+        required: true
+      stage_sha:
+        description: Exact staging workflow Git revision
+        type: string
+        required: true
+      transaction:
+        description: Exact durable CCRD transaction ID
+        type: string
+        required: true
+      mode:
+        description: Perform one explicit action; inspect unknown writes before proceeding
+        type: choice
+        required: true
+        options:
+          - observe-space
+          - start-pointer
+          - apply-pointer
+          - observe-pointer
+          - finish
+          - rollback-start
+          - rollback-apply
+          - rollback-observe
+      known_writers_coordinated:
+        description: CCRD bucket and Space writers are coordinated; not proof of unknown writers
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: publish-ccrd-index
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  reconcile:
+    if: github.repository == 'anftm/pipeline'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Install pinned dependencies
+        run: pip install -r scripts/requirements.txt PyYAML==6.0.3
+      - name: Exercise action and recovery contracts
+        run: python -B -m unittest -v tests.test_ccrd_auto_finalize tests.test_ccrd_publication_coordinator tests.test_ccrd_rollback
+      - name: Verify staging workflow run provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STAGE_RUN: ${{ inputs.stage_run }}
+          STAGE_SHA: ${{ inputs.stage_sha }}
+          TRANSACTION: ${{ inputs.transaction }}
+          WRITERS: ${{ inputs.known_writers_coordinated }}
+        run: |
+          set -euo pipefail
+          [[ "$WRITERS" == 'true' && "$STAGE_RUN" =~ ^[0-9]+$ && "$STAGE_SHA" =~ ^[0-9a-f]{40}$ && "$TRANSACTION" =~ ^[0-9a-f]{32}$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$STAGE_RUN" > "$RUNNER_TEMP/stage-run.json"
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          run = json.loads((Path(os.environ['RUNNER_TEMP']) / 'stage-run.json').read_bytes())
+          if (run.get('status') != 'completed' or run.get('conclusion') != 'success'
+                  or run.get('head_branch') != 'main' or run.get('head_sha') != os.environ['STAGE_SHA']
+                  or run.get('event') not in {'schedule', 'workflow_dispatch'}
+                  or run.get('path', '').split('@', 1)[0] != '.github/workflows/publish-ccrd-index.yml'):
+              raise SystemExit('staging run is not an exact successful CCRD run')
+          PY
+      - name: Download exact staged candidate
+        uses: actions/download-artifact@v8
+        with:
+          name: ccrd-staged-candidate
+          path: ${{ runner.temp }}/ccrd-candidate
+          run-id: ${{ inputs.stage_run }}
+          github-token: ${{ github.token }}
+      - name: Perform one journal-identified action
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
+          HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+          MODE: ${{ inputs.mode }}
+          TRANSACTION: ${{ inputs.transaction }}
+        run: |
+          set -euo pipefail
+          python -B scripts/ccrd_auto_finalize.py --known-writers-coordinated \
+            --bundle "$RUNNER_TEMP/ccrd-candidate" --mode "$MODE" --transaction "$TRANSACTION"

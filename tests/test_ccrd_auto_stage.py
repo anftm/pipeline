@@ -1,6 +1,7 @@
 """Scheduled CCRD candidate work never treats staging as publication."""
 import hashlib
 import json
+import shutil
 import tempfile
 import unittest
 from io import BytesIO
@@ -41,10 +42,14 @@ class AutoStageTests(CandidateAssemblyTests):
             downloads.append(key); path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(b'local fixture')
         def build(_p, _old, _new, **kwargs):
             root = kwargs['output']; root.mkdir()
-            (root / 'description.json').write_text('{}')
-            (root / 'staging-plan.json').write_text(json.dumps({'generation': 'ccrd-four-' + 'a' * 64,
-                                                               'manifest_sha256': 'b' * 64}))
-            return {'generation': 'ccrd-four-' + 'a' * 64, 'remote_writes': 0}
+            shutil.copytree(self.output, root / 'metadata')
+            with patch.object(subject.planning.assembly, '_cw_database',
+                              return_value=(subject.objects._identity(self.candidate), {'seconds': 0.1})):
+                description = self.make()
+            plan = subject.planning.make(self.pointer, description)
+            (root / 'description.json').write_text(json.dumps(description))
+            (root / 'staging-plan.json').write_text(json.dumps(plan))
+            return {'generation': plan['generation'], 'remote_writes': 0}
         store, journal = Mock(), Mock()
         store.parent_pointer.return_value = self.pointer
         with patch.object(subject.local, 'build', side_effect=build) as built, \
@@ -58,6 +63,48 @@ class AutoStageTests(CandidateAssemblyTests):
         self.assertEqual(len(downloads), len(self.manifest['metadata']) + len(self.manifest['archives']) + 1)
         built.assert_called_once(); stage.assert_called_once(); manifest.assert_called_once()
         self.assertTrue(manifest.call_args.kwargs['apply']); self.assertTrue((work / 'report.json').exists())
+        bundle = work / 'bundle'
+        self.assertEqual((bundle / 'parent-pointer.json').read_bytes(), self.pointer)
+        self.assertEqual(json.loads((bundle / 'stage-result.json').read_bytes())['generation'], result['generation'])
+        from scripts import ccrd_auto_activate
+        parent, description, plan, new_text = ccrd_auto_activate._bundle(bundle)
+        self.assertFalse((bundle / 'data').exists())
+        self.assertEqual((parent, new_text), (self.pointer, NEW.encode()))
+        self.assertEqual(description['candidate_identity'], plan['identity']['candidate_description_sha256'])
+        self.assertTrue((work / 'bundle-ready').is_file())
+
+    def test_stage_bundle_survives_downloaded_artifact_without_metadata_or_local_database(self):
+        work = self.root / 'work'; retained = self.root / 'retained'
+        def download(key, _entry, path):
+            path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(b'local fixture')
+        def build(_p, _old, _new, **kwargs):
+            root = kwargs['output']; root.mkdir(); shutil.copytree(self.output, root / 'metadata')
+            with patch.object(subject.planning.assembly, '_cw_database',
+                              return_value=(subject.objects._identity(self.candidate), {'seconds': 0.1})):
+                description = self.make()
+            plan = subject.planning.make(self.pointer, description)
+            (root / 'description.json').write_text(json.dumps(description))
+            (root / 'staging-plan.json').write_text(json.dumps(plan))
+            return {'generation': plan['generation'], 'remote_writes': 0}
+        store = Mock(); store.parent_pointer.return_value = self.pointer
+        with patch.object(subject.local, 'build', side_effect=build), patch.object(subject.tx, 'load', return_value=None), \
+                patch.object(subject.objects, 'stage', return_value={'objects_verified': 70, 'objects_created': 70}), \
+                patch.object(subject.manifests, 'stage_manifest', return_value={'manifest_written': True}):
+            subject.run(work, apply=True, download=download, store_factory=lambda **_k: store,
+                        journal_factory=Mock, **self.inputs())
+        shutil.copytree(work / 'bundle', retained)
+        shutil.rmtree(work)
+        from scripts import ccrd_auto_activate
+        parent, _description, plan, new_text = ccrd_auto_activate._bundle(retained)
+        self.assertEqual(parent, self.pointer); self.assertEqual(new_text, NEW.encode())
+        self.assertEqual(len(list(retained.rglob('*'))), 5)
+        def download_candidate(key, _entry, target):
+            relative = key.removeprefix(f"generations/{plan['generation']}/")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes((self.output / relative).read_bytes())
+        ccrd_auto_activate._materialize_metadata(self.root / 'metadata-recovered', plan, _description,
+                                                download=download_candidate)
+        self.assertEqual(len(list((self.root / 'metadata-recovered').rglob('*.json'))), 2)
 
     def test_changed_source_drift_or_active_transaction_stops_before_stage(self):
         work = self.root / 'work'; args = self.inputs()

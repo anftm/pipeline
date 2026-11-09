@@ -34,6 +34,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: python -B scripts/check_ccrd_four_source.py --output "$RUNNER_TEMP/ccrd-four-source-check.json"
       - name: Build and stage only if the upstream source changed
+        id: stage
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           GITHUB_TOKEN: ${{ github.token }}
@@ -43,6 +44,14 @@ jobs:
           set -euo pipefail
           python -B scripts/ccrd_auto_stage.py --stage --work "$RUNNER_TEMP/ccrd-stage" \
             --report "$RUNNER_TEMP/ccrd-stage-report.json"
+      - name: Preserve exact staged candidate for recovery
+        if: steps.stage.outputs.status == 'staged'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ccrd-staged-candidate
+          path: ${{ runner.temp }}/ccrd-stage/bundle/
+          retention-days: 30
+          if-no-files-found: error
       - name: Preserve stage report
         uses: actions/upload-artifact@v7
         with:

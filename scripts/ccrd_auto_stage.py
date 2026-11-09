@@ -21,6 +21,7 @@ try:
     from . import ccrd_local_candidate as local
     from . import ccrd_source_snapshot as snapshot
     from . import ccrd_space_activation as space
+    from . import ccrd_staging_plan as planning
     from . import ccrd_stage_manifest as manifests
     from . import ccrd_stage_objects as objects
     from . import ccrd_transaction as tx
@@ -32,6 +33,7 @@ except ImportError:
     import ccrd_local_candidate as local
     import ccrd_source_snapshot as snapshot
     import ccrd_space_activation as space
+    import ccrd_staging_plan as planning
     import ccrd_stage_manifest as manifests
     import ccrd_stage_objects as objects
     import ccrd_transaction as tx
@@ -86,6 +88,8 @@ def _source(token: str) -> tuple[bytes, dict]:
 def run(work: Path, *, apply: bool, token: str, read_pointer=_read_pointer, capture=_source,
         download=_download, observe=consumer.observe, get=consumer.get_bytes,
         store_factory=objects.S3Store, journal_factory=journal_s3.S3Store) -> dict:
+    if type(apply) is not bool:
+        raise ValueError('CCRD staging mode must be explicit')
     if not isinstance(work, Path) or work.exists() or work.is_symlink() or not work.parent.is_dir():
         raise ValueError('CCRD work path must be a new directory')
     parent_raw = read_pointer(); parent = json.loads(parent_raw)
@@ -95,7 +99,8 @@ def run(work: Path, *, apply: bool, token: str, read_pointer=_read_pointer, capt
                      for key in ('bytes', 'sha256')}
     upstream, source_info = capture(token)
     actual = {'bytes': len(upstream), 'sha256': hashlib.sha256(upstream).hexdigest()}
-    if any(source_info.get(key) != value for key, value in actual.items()) or source_info.get('source_stable') is not True:
+    if (not isinstance(source_info, dict) or any(source_info.get(key) != value for key, value in actual.items())
+            or source_info.get('source_stable') is not True):
         raise ValueError('CCRD live source capture identity differs')
     prior_consumer = observe(parent['generation'], expected_text)
     if read_pointer() != parent_raw:
@@ -113,6 +118,9 @@ def run(work: Path, *, apply: bool, token: str, read_pointer=_read_pointer, capt
     old = get(consumer.BASE + '/api/download/CW:0', consumer.MAX_TEXT_BYTES)
     if {'bytes': len(old), 'sha256': hashlib.sha256(old).hexdigest()} != expected_text:
         raise ValueError('CCRD parent consumer text differs before building')
+    # Reject incomplete source provenance before allocating or staging files.
+    assembly.preflight.plan(parent_raw, old, upstream, prior_consumer, source_url=source_info.get('url'),
+                            source_revision=source_info.get('revision'), source_observation=source_info)
     if observe(parent['generation'], expected_text) != prior_consumer or read_pointer() != parent_raw:
         raise ValueError('CCRD parent consumer or pointer changed before build')
     entries = [*refs.values(), parent['databases']['CW'], *parent['archives']]
@@ -123,16 +131,21 @@ def run(work: Path, *, apply: bool, token: str, read_pointer=_read_pointer, capt
     prefix = f"generations/{parent['generation']}/"
     for entry in [*refs.values(), *parent['archives']]:
         key = entry['path']
-        if not key.startswith(prefix):
+        if entry.get('bucket') != lifecycle.BUCKET or not key.startswith(prefix):
             raise ValueError('CCRD input is outside exact parent generation')
         relative = key[len(prefix):]; lifecycle.safe_path(relative)
         download(key, entry, metadata_root / relative)
     cw_path = work / 'parent-CW.sqlite3'
-    download(parent['databases']['CW']['path'], parent['databases']['CW'], cw_path)
+    cw_entry = parent['databases']['CW']
+    if cw_entry.get('bucket', lifecycle.BUCKET) != lifecycle.BUCKET:
+        raise ValueError('CCRD CW database is outside the expected bucket')
+    download(cw_entry['path'], cw_entry, cw_path)
     result = local.build(parent_raw, old, upstream, consumer=prior_consumer, source_observation=source_info,
                          parent_metadata=metadata_root, parent_cw=cw_path, output=work / 'candidate')
-    description = json.loads((work / 'candidate/description.json').read_bytes())
-    plan = json.loads((work / 'candidate/staging-plan.json').read_bytes())
+    description = json.loads(local._bounded(work / 'candidate/description.json', assembly.MAX_PLAN))
+    plan = json.loads(local._bounded(work / 'candidate/staging-plan.json', assembly.MAX_PLAN))
+    if planning.make(parent_raw, description) != plan or result.get('generation') != plan['generation']:
+        raise ValueError('CCRD local build output differs from the exact parent and candidate plan')
     current_source, later_source = capture(token)
     if current_source != upstream or later_source != source_info or read_pointer() != parent_raw:
         raise ValueError('CCRD source or parent changed during local build')
@@ -159,6 +172,30 @@ def run(work: Path, *, apply: bool, token: str, read_pointer=_read_pointer, capt
     consumer_capture = lambda: observe(parent['generation'], expected_text)
     staged_manifest = manifests.stage_manifest(plan, approved_description=description, store=store,
                                                 capture=source_capture, observe=consumer_capture, apply=True)
+    # Construct one exact directory so upload/download preserves data/ paths.
+    # A completed marker appears only after all bytes are present and validated.
+    bundle = work / 'bundle'; bundle.mkdir(mode=0o700)
+    for name, raw in (('parent-pointer.json', parent_raw),
+                      ('description.json', lifecycle.canonical(description)),
+                      ('staging-plan.json', lifecycle.canonical(plan)),
+                      ('new-source.txt', upstream),
+                      ('stage-result.json', lifecycle.canonical({
+                          'generation': plan['generation'], 'manifest_sha256': plan['manifest_sha256'],
+                          'candidate_description_sha256': description['candidate_identity']}))):
+        with (bundle / name).open('xb') as output:
+            output.write(raw)
+    # Metadata files can be reconstructed by exact hash from the immutable
+    # generation. Keeping a second copy in Actions artifacts would multiply
+    # large-file retention; only bounded intent and new text are retained.
+    # The candidate is only eligible for handoff while the original source,
+    # pointer and actual consumer still agree; staging remains non-activation.
+    final_raw, final_info = capture(token)
+    if final_raw != upstream or final_info != source_info or read_pointer() != parent_raw:
+        raise ValueError('CCRD source or parent changed during candidate packaging')
+    if observe(parent['generation'], expected_text) != prior_consumer:
+        raise ValueError('CCRD consumer changed during candidate packaging')
+    with (work / 'bundle-ready').open('x', encoding='utf-8') as output:
+        output.write(plan['manifest_sha256'] + '\n')
     return {'kind': 'ccrd-auto-stage', 'status': 'staged', 'parent': parent['generation'],
             'generation': plan['generation'], 'manifest_sha256': plan['manifest_sha256'],
             'objects_verified': staged['objects_verified'], 'objects_created': staged['objects_created'],
@@ -179,6 +216,10 @@ def main(argv=None) -> int:
     args.report.parent.mkdir(parents=True, exist_ok=True)
     with args.report.open('x', encoding='utf-8') as stream:
         json.dump(result, stream, sort_keys=True, ensure_ascii=False); stream.write('\n')
+    output_file = os.environ.get('GITHUB_OUTPUT')
+    if output_file:
+        with open(output_file, 'a', encoding='utf-8') as stream:
+            stream.write('status=' + result['status'] + '\n')
     print(json.dumps(result, ensure_ascii=False, sort_keys=True), flush=True)
     return 0
 
