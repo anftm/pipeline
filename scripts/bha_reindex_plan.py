@@ -73,14 +73,37 @@ def inspect(github_token: str, reindex_token: str, state_path: Path, *, lookup=r
         raise ValueError('BHA parsed identities are incomplete or invalid')
     commits = {key: commit for key, commit, _ in identities}
     trees = {key: tree for key, _, tree in identities}
-    checked_samples = []
+    changed = [int(key) for key in sorted(KEYS, key=int) if trees[key] != before['trees'][key]]
+    checked_samples, deferred_samples = [], []
     if selected_samples is not None:
-        sample_result = samples.observe(github_token, selected_samples, fetch=fetch, lookup=lookup)
-        for row in sample_result['samples']:
-            key = str(row['archive'])
-            if (row['commit'], row['tree']) != (commits[key], trees[key]):
-                raise ValueError('BHA sample differs from captured parsed identity')
-        checked_samples = sample_result['samples']
+        # Source and serving index intentionally differ for changed archives.
+        # Comparing their current article bytes here would block the very
+        # reindex needed to reconcile them. Retain those samples for the
+        # post-index acceptance step instead of weakening the comparison.
+        if (not isinstance(selected_samples, list) or not 1 <= len(selected_samples) <= 16
+                or any(not isinstance(row, dict) or set(row) != {'archive', 'path'}
+                       or type(row['archive']) is not int or not isinstance(row['path'], str)
+                       for row in selected_samples)):
+            raise ValueError('invalid BHA sample selection')
+        for row in selected_samples:
+            samples.sample_path(row['archive'], 'a' * 40, row['path'])
+        if len({(row['archive'], row['path']) for row in selected_samples}) != len(selected_samples):
+            raise ValueError('duplicate BHA sample selection')
+        eligible = [row for row in selected_samples if trees[str(row['archive'])] == before['trees'][str(row['archive'])]]
+        deferred_samples = [row for row in selected_samples if trees[str(row['archive'])] != before['trees'][str(row['archive'])]]
+        if eligible:
+            sample_result = samples.observe(github_token, eligible, fetch=fetch, lookup=lookup)
+            rows = sample_result.get('samples') if isinstance(sample_result, dict) else None
+            if (not isinstance(rows, list) or len(rows) != len(eligible)
+                    or {(row.get('archive'), row.get('path')) for row in rows if isinstance(row, dict)} !=
+                    {(row['archive'], row['path']) for row in eligible}):
+                raise ValueError('BHA live sample results are incomplete')
+            for row in rows:
+                key = str(row['archive'])
+                if ((row['commit'], row['tree']) != (commits[key], trees[key])
+                        or row.get('preview_article_equal') is not True or row.get('exact_title_search_found') is not True):
+                    raise ValueError('BHA sample differs from captured parsed identity')
+            checked_samples = rows
     # Re-read all heads, not just samples: two stable observations do not fence
     # a later change, but avoid planning against a moving snapshot.
     with ThreadPoolExecutor(max_workers=4) as pool:
@@ -91,17 +114,18 @@ def inspect(github_token: str, reindex_token: str, state_path: Path, *, lookup=r
     health_after = samples.health(fetch(samples.BASE + '/api/health', samples.MAX_HEALTH))
     if after != before or health_after != health_before:
         raise ValueError('BHA consumer changed during inspection')
-    changed = [int(key) for key in sorted(KEYS, key=int) if trees[key] != before['trees'][key]]
     baseline_drift = [int(key) for key in sorted(KEYS, key=int) if trees[key] != baseline[key]]
     body = {'version': 1, 'kind': 'bha-reindex-readonly-plan', 'archive_commits': commits,
             'archive_revisions': trees, 'consumer_revisions': before['trees'], 'changed_archives': changed,
             'baseline_drift': baseline_drift, 'consumer_fingerprint': before['fingerprint'],
             'last_job': before['job'], 'document_count': health_before['document_count'],
-            'sample_count': len(checked_samples), 'samples': checked_samples,
+            'sample_count': len(checked_samples), 'samples': checked_samples, 'deferred_samples': deferred_samples,
             'incremental_action': 'review-changes' if changed else 'no-change',
+            'post_index_sample_missing_archives': sorted(set(changed) - {
+                row['archive'] for row in (selected_samples or [])}),
             'full_rebuild': 'not-requested', 'remote_writes': 0, 'reindex_requested': False,
             'publication_ready': False, 'external_writers_verified': False,
-            'scope': 'exact Git commits and trees, reported consumer revisions, selected live samples; not full index bytes'}
+            'scope': 'exact Git commits and trees, reported consumer revisions and eligible live samples; changed archives deferred until reindex'}
     return {**body, 'plan_sha256': hashlib.sha256(search_snapshot.canonical(body)).hexdigest()}
 
 

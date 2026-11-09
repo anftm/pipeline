@@ -72,14 +72,48 @@ class BhaReindexPlanTests(unittest.TestCase):
             self.inspect(lookup=lambda _token, i: (str(i), 'bad', 'a' * 40))
 
     def test_pinned_samples_must_match_exact_sources(self):
-        sample = {'archive': 0, 'commit': 'b' * 40, 'tree': 'a' * 40}
+        selected = [{'archive': 0, 'path': 'pub/publication/abc/abcdef1234.json'}]
+        sample = {**selected[0], 'commit': 'b' * 40, 'tree': 'a' * 40,
+                  'preview_article_equal': True, 'exact_title_search_found': True}
         with patch.object(subject.samples, 'observe', return_value={'samples': [sample]}) as observe:
-            result = self.inspect(selected_samples=[{'archive': 0, 'path': 'fixture'}])
-        self.assertEqual(result['sample_count'], 1); observe.assert_called_once()
+            result = self.inspect(selected_samples=selected)
+        self.assertEqual(result['sample_count'], 1); self.assertEqual(result['deferred_samples'], [])
+        observe.assert_called_once()
         sample['tree'] = 'c' * 40
         with patch.object(subject.samples, 'observe', return_value={'samples': [sample]}):
             with self.assertRaisesRegex(ValueError, 'sample differs'):
-                self.inspect(selected_samples=[{'archive': 0, 'path': 'fixture'}])
+                self.inspect(selected_samples=selected)
+
+    def test_changed_archive_samples_are_deferred_not_compared_to_old_index(self):
+        selected = [{'archive': 0, 'path': 'pub/publication/abc/abcdef1234.json'},
+                    {'archive': 1, 'path': 'pub/publication/abc/abcdef1234.json'}]
+        sample = {**selected[1], 'commit': 'b' * 40, 'tree': 'a' * 40,
+                  'preview_article_equal': True, 'exact_title_search_found': True}
+        def lookup(_token, index): return str(index), 'b' * 40, ('c' * 40 if index == 0 else 'a' * 40)
+        with patch.object(subject.samples, 'observe', return_value={'samples': [sample]}) as observe:
+            result = self.inspect(lookup=lookup, selected_samples=selected)
+        self.assertEqual(result['changed_archives'], [0]); self.assertEqual(result['sample_count'], 1)
+        self.assertEqual(result['deferred_samples'], [selected[0]])
+        self.assertEqual(result['post_index_sample_missing_archives'], [])
+        self.assertEqual(observe.call_args.args[1], [selected[1]])
+        self.assertFalse(result['publication_ready'])
+
+    def test_all_changed_samples_are_deferred_and_malformed_inputs_still_rejected(self):
+        selected = [{'archive': 0, 'path': 'pub/publication/abc/abcdef1234.json'}]
+        def lookup(_token, index): return str(index), 'b' * 40, ('c' * 40 if index == 0 else 'a' * 40)
+        with patch.object(subject.samples, 'observe') as observe:
+            result = self.inspect(lookup=lookup, selected_samples=selected)
+        observe.assert_not_called(); self.assertEqual(result['sample_count'], 0)
+        self.assertEqual(result['deferred_samples'], selected)
+        with patch.object(subject.samples, 'observe', return_value={'samples': [
+                {**selected[0], 'commit': 'b' * 40, 'tree': 'a' * 40,
+                 'preview_article_equal': True, 'exact_title_search_found': True}]}):
+            missing = self.inspect(lookup=lambda _token, i: (str(i), 'b' * 40, 'c' * 40 if i == 2 else 'a' * 40),
+                                   selected_samples=selected)
+        self.assertEqual(missing['post_index_sample_missing_archives'], [2])
+        for invalid in ([], [selected[0], selected[0]], [{'archive': 32, 'path': 'bad'}]):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                self.inspect(lookup=lookup, selected_samples=invalid)
 
     def test_workflow_manual_readonly_no_reindex_secret_exposure(self):
         flow = yaml.load((Path(__file__).resolve().parents[1] / '.github/workflows/bha-reindex-plan.yml').read_text(),
