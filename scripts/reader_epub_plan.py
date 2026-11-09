@@ -130,7 +130,7 @@ def create(summary, details, corpus, revisions, canonical, shard_indexes, *, sha
 
 def inspect(*, hub, api, fs, client, shard, operation, threshold=100):
     """Recompute and bind a fresh plan; this function performs no remote writes."""
-    summary, details = backlog.inspect(hub=hub, api=api, fs=fs, client=client, threshold=threshold)
+    summary, details = backlog.inspect(hub=hub, api=api, fs=fs, client=client, threshold=threshold, scope='epub')
     pointer, _manifest, corpus, revisions, _ = backlog.capture_search(hub)
     search_generation = backlog.search_publication_pointer.decode_pointer(pointer)['desired']
     if search_generation != summary['search_generation']:

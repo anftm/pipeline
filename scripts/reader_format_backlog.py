@@ -368,7 +368,9 @@ def summarize(records: dict, routes: dict, checked_rows: dict, *, threshold: int
 
 
 def inspect(*, hub, api, fs, client, threshold=100, observe_search=search_daily.observe_consumers,
-            get=search_daily.bounded_get):
+            get=search_daily.bounded_get, scope='all'):
+    if scope not in {'all', 'epub'}:
+        raise ValueError('invalid Reader backlog inspection scope')
     pointer_raw, manifest_raw, corpus, revisions, _observed = capture_search(hub, observe=observe_search, get=get)
     records = source_records(corpus, revisions)
     for repo, expected in sorted(revisions.items()):
@@ -397,91 +399,97 @@ def inspect(*, hub, api, fs, client, threshold=100, observe_search=search_daily.
     epub = classify_epub(records, routes, canonical, shards, api)
     checked = dict(epub)
     checked_extensions = {'epub'}
+    image_root = None
+    image_canonical, image_shards = None, []
+    media_indexes, media_shards, document_indexes, web_indexes = {}, {}, {}, {}
     extra_ebook_indexes, extra_ebook_shards = {}, {}
-    for extension in ('mobi', 'azw3', 'fb2', 'chm'):
-        ebook_root = f'chapters/ebook/{extension}'
-        index = matrix.read_json(fs, READER_BUCKET, ebook_root + '/index.json')
-        if not index:
-            continue
-        parts = []
-        for number in range(8):
-            value = matrix.read_json(fs, READER_BUCKET, f'{ebook_root}/index-{number:02d}.json')
-            if value:
-                parts.append((number, value))
-        checked.update(classify_indexed(records, routes, index, parts, api, extensions={extension},
+    text_path, text_index = None, None
+    if scope == 'all':
+        extra_ebook_indexes, extra_ebook_shards = {}, {}
+        for extension in ('mobi', 'azw3', 'fb2', 'chm'):
+            ebook_root = f'chapters/ebook/{extension}'
+            index = matrix.read_json(fs, READER_BUCKET, ebook_root + '/index.json')
+            if not index:
+                continue
+            parts = []
+            for number in range(8):
+                value = matrix.read_json(fs, READER_BUCKET, f'{ebook_root}/index-{number:02d}.json')
+                if value:
+                    parts.append((number, value))
+            checked.update(classify_indexed(records, routes, index, parts, api, extensions={extension},
+                                            kind='ebook-chapter-stream-index', route_modes={'e'}))
+            checked_extensions.add(extension)
+            extra_ebook_indexes[extension] = index
+            extra_ebook_shards[extension] = dict(parts)
+        office_extensions = set(FAMILIES['office-chapters'][0])
+        checked.update(classify_indexed(records, routes, canonical, [], api, extensions=office_extensions,
                                         kind='ebook-chapter-stream-index', route_modes={'e'}))
-        checked_extensions.add(extension)
-        extra_ebook_indexes[extension] = index
-        extra_ebook_shards[extension] = dict(parts)
-    office_extensions = set(FAMILIES['office-chapters'][0])
-    checked.update(classify_indexed(records, routes, canonical, [], api, extensions=office_extensions,
-                                    kind='ebook-chapter-stream-index', route_modes={'e'}))
-    checked_extensions.update(office_extensions)
-    image_root = 'pages/image'
-    image_canonical = matrix.read_json(fs, READER_BUCKET, image_root + '/index-v2.json')
-    image_shards = []
-    for number in range(8):
-        value = matrix.read_json(fs, READER_BUCKET, f'{image_root}/index-v2-{number:02d}.json')
-        if value:
-            image_shards.append((number, value))
-    if not image_canonical or not image_canonical.get('files'):
-        raise ValueError('canonical Reader image index is missing or empty')
-    image_extensions = set(FAMILIES['image'][0])
-    def merge_images(before, parts, _kind, _extensions, count):
-        return finalize_image_index.merge(before, parts, count)
-    checked.update(classify_indexed(records, routes, image_canonical, image_shards, api,
-                                    extensions=image_extensions, kind='image-stream-index',
-                                    route_modes={'i', 'f'}, merge=merge_images))
-    checked_extensions.update(image_extensions)
-    media_indexes = {}
-    media_shards = {}
-    for media_kind in ('audio', 'video', 'swf'):
-        media_root = f'media/{media_kind}'
-        index = matrix.read_json(fs, READER_BUCKET, media_root + '/index.json')
-        # A missing required index cannot be mistaken for a completed empty
-        # inventory. Keep those formats unverified rather than auto-triggering.
-        if not index:
-            continue
-        extensions = {ext for ext in FAMILIES['media'][0]
-                      if (reader_assets.bucket_conversion_contract('', '', ext) or (None, None))[1] == media_kind}
-        parts = []
+        checked_extensions.update(office_extensions)
+        image_root = 'pages/image'
+        image_canonical = matrix.read_json(fs, READER_BUCKET, image_root + '/index-v2.json')
+        image_shards = []
         for number in range(8):
-            value = matrix.read_json(fs, READER_BUCKET, f'{media_root}/index-{number:02d}.json')
+            value = matrix.read_json(fs, READER_BUCKET, f'{image_root}/index-v2-{number:02d}.json')
             if value:
-                parts.append((number, value))
-        checked.update(classify_indexed(records, routes, index, parts, api, extensions=extensions,
-                                        kind='media-stream-index', route_modes={'a', 'v', 'f'}))
-        checked_extensions.update(extensions)
-        media_indexes[media_kind] = index
-        media_shards[media_kind] = dict(parts)
-    document_indexes = {}
-    for family, prefix, index_kind, route_mode in (
-            ('spreadsheet', 'documents/spreadsheet', 'spreadsheet-html-stream-index', 'h'),
-            ('static-pdf', 'documents/pdf', 'static-pdf-stream-index', 'p')):
-        for extension in FAMILIES[family][0]:
-            path = f'{prefix}/{extension}/index.json'
+                image_shards.append((number, value))
+        if not image_canonical or not image_canonical.get('files'):
+            raise ValueError('canonical Reader image index is missing or empty')
+        image_extensions = set(FAMILIES['image'][0])
+        def merge_images(before, parts, _kind, _extensions, count):
+            return finalize_image_index.merge(before, parts, count)
+        checked.update(classify_indexed(records, routes, image_canonical, image_shards, api,
+                                        extensions=image_extensions, kind='image-stream-index',
+                                        route_modes={'i', 'f'}, merge=merge_images))
+        checked_extensions.update(image_extensions)
+        media_indexes = {}
+        media_shards = {}
+        for media_kind in ('audio', 'video', 'swf'):
+            media_root = f'media/{media_kind}'
+            index = matrix.read_json(fs, READER_BUCKET, media_root + '/index.json')
+            # A missing required index cannot be mistaken for a completed empty
+            # inventory. Keep those formats unverified rather than auto-triggering.
+            if not index:
+                continue
+            extensions = {ext for ext in FAMILIES['media'][0]
+                          if (reader_assets.bucket_conversion_contract('', '', ext) or (None, None))[1] == media_kind}
+            parts = []
+            for number in range(8):
+                value = matrix.read_json(fs, READER_BUCKET, f'{media_root}/index-{number:02d}.json')
+                if value:
+                    parts.append((number, value))
+            checked.update(classify_indexed(records, routes, index, parts, api, extensions=extensions,
+                                            kind='media-stream-index', route_modes={'a', 'v', 'f'}))
+            checked_extensions.update(extensions)
+            media_indexes[media_kind] = index
+            media_shards[media_kind] = dict(parts)
+        document_indexes = {}
+        for family, prefix, index_kind, route_mode in (
+                ('spreadsheet', 'documents/spreadsheet', 'spreadsheet-html-stream-index', 'h'),
+                ('static-pdf', 'documents/pdf', 'static-pdf-stream-index', 'p')):
+            for extension in FAMILIES[family][0]:
+                path = f'{prefix}/{extension}/index.json'
+                index = matrix.read_json(fs, READER_BUCKET, path)
+                if index:
+                    checked.update(classify_indexed(records, routes, index, [], api, extensions={extension},
+                                                    kind=index_kind, route_modes={route_mode}))
+                    checked_extensions.add(extension)
+                    document_indexes[path] = index
+        text_path = 'documents/text/index.json'
+        text_index = matrix.read_json(fs, READER_BUCKET, text_path)
+        if text_index:
+            text_extensions = set(FAMILIES['text'][0])
+            checked.update(classify_indexed(records, routes, text_index, [], api, extensions=text_extensions,
+                                            kind='text-stream-index', route_modes={'t', 'k'}))
+            checked_extensions.update(text_extensions)
+        web_indexes = {}
+        for extension in FAMILIES['web'][0]:
+            path = f'documents/web/{extension}/index.json'
             index = matrix.read_json(fs, READER_BUCKET, path)
             if index:
                 checked.update(classify_indexed(records, routes, index, [], api, extensions={extension},
-                                                kind=index_kind, route_modes={route_mode}))
+                                                kind='web-document-stream-index', route_modes={'h'}))
                 checked_extensions.add(extension)
-                document_indexes[path] = index
-    text_path = 'documents/text/index.json'
-    text_index = matrix.read_json(fs, READER_BUCKET, text_path)
-    if text_index:
-        text_extensions = set(FAMILIES['text'][0])
-        checked.update(classify_indexed(records, routes, text_index, [], api, extensions=text_extensions,
-                                        kind='text-stream-index', route_modes={'t', 'k'}))
-        checked_extensions.update(text_extensions)
-    web_indexes = {}
-    for extension in FAMILIES['web'][0]:
-        path = f'documents/web/{extension}/index.json'
-        index = matrix.read_json(fs, READER_BUCKET, path)
-        if index:
-            checked.update(classify_indexed(records, routes, index, [], api, extensions={extension},
-                                            kind='web-document-stream-index', route_modes={'h'}))
-            checked_extensions.add(extension)
-            web_indexes[path] = index
+                web_indexes[path] = index
     summaries = summarize(records, routes, checked, threshold=threshold, checked_extensions=checked_extensions)
     # Fail closed if the exact shared inputs changed. This is a point-in-time
     # observation only: it cannot fence independent writers or ABA changes.
@@ -508,14 +516,15 @@ def inspect(*, hub, api, fs, client, threshold=100, observe_search=search_daily.
     for path, expected in document_indexes.items():
         if matrix.read_json(fs, READER_BUCKET, path) != expected:
             raise ValueError('Reader document index changed during backlog inspection')
-    if matrix.read_json(fs, READER_BUCKET, text_path) != text_index:
-        raise ValueError('Reader text index changed during backlog inspection')
-    if matrix.read_json(fs, READER_BUCKET, image_root + '/index-v2.json') != image_canonical:
-        raise ValueError('Reader image canonical index changed during backlog inspection')
-    for number in range(8):
-        latest = matrix.read_json(fs, READER_BUCKET, f'{image_root}/index-v2-{number:02d}.json')
-        if latest != dict(image_shards).get(number, {}):
-            raise ValueError('Reader image shard changed during backlog inspection')
+    if scope == 'all':
+        if matrix.read_json(fs, READER_BUCKET, text_path) != text_index:
+            raise ValueError('Reader text index changed during backlog inspection')
+        if matrix.read_json(fs, READER_BUCKET, image_root + '/index-v2.json') != image_canonical:
+            raise ValueError('Reader image canonical index changed during backlog inspection')
+        for number in range(8):
+            latest = matrix.read_json(fs, READER_BUCKET, f'{image_root}/index-v2-{number:02d}.json')
+            if latest != dict(image_shards).get(number, {}):
+                raise ValueError('Reader image shard changed during backlog inspection')
     for media_kind, expected in media_indexes.items():
         media_root = f'media/{media_kind}'
         if matrix.read_json(fs, READER_BUCKET, media_root + '/index.json') != expected:
@@ -542,7 +551,9 @@ def inspect(*, hub, api, fs, client, threshold=100, observe_search=search_daily.
                'reader_generation': reader_pointer['generation'], 'threshold': threshold,
                'reader_consumers': receipts, 'formats': summaries, 'remote_writes': 0,
                'dispatches': 0, 'publication_ready': False, 'external_writers_verified': False,
-               'scope': ('published search and pinned Reader projection; exact source content checked for indexed ebooks, office, images, media, text, web, spreadsheets and static PDFs; '
+               'scope': ('published search and pinned Reader projection; exact source content checked for EPUB only'
+                         if scope == 'epub' else
+                         'published search and pinned Reader projection; exact source content checked for indexed ebooks, office, images, media, text, web, spreadsheets and static PDFs; '
                          'HTML/Markdown dependencies may change independently and are not checked')}
     details = {'version': 1, 'kind': 'reader-epub-content-backlog',
                'search_generation': summary['search_generation'], 'reader_generation': summary['reader_generation'],

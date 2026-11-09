@@ -267,6 +267,32 @@ class ReaderFormatBacklogTests(unittest.TestCase):
             self.assertNotIn(forbidden, commands)
         self.assertEqual(flow['concurrency']['queue'], 'max')
 
+    def test_epub_scope_reads_only_epub_checkpoints_not_other_formats(self):
+        from unittest.mock import call
+        pointer = search_publication_pointer.make_pointer('1'*64, None, '2'*32)
+        records = corpus([('a', 'epub'), ('b', 'jpg')])
+        reader_pointer = {'generation': '3'*64}
+        catalog = {'base_sidecar': {'sha256': '4'*64}}
+        index = {'version': 1, 'kind': 'ebook-chapter-stream-index', 'files': [], 'failures': []}
+        mock_hub = Mock()
+        mock_hub.read_bytes.side_effect = lambda bucket, path: pointer if path == subject.CURRENT else b'manifest'
+        api = Mock();api.repo_info.return_value = SimpleNamespace(sha=NEW)
+        fs = Mock()
+        paths = []
+        def read_index(_fs, _bucket, path):
+            paths.append(path)
+            return index if path.endswith('/index.json') else {}
+        epub_row = {item('a')['key']: {'key': item('a')['key'], 'state': 'not_mapped'}}
+        with patch.object(subject, 'capture_search', return_value=(pointer, b'manifest', records, {REPO: NEW}, {})),                 patch.object(subject.publication, 'current', return_value=(reader_pointer, catalog)),                 patch.object(subject.publication, 'pinned_base', return_value={'f': {}}),                 patch.object(subject.publication, 'project_sidecar', return_value={'f': {}}),                 patch.object(subject.publication, 'observe_consumer', return_value={'generation': '3'*64, 'projection_verified': True}),                 patch.object(subject.matrix, 'read_json', side_effect=read_index),                 patch.object(subject, 'classify_epub', return_value=epub_row):
+            summary, details = subject.inspect(hub=mock_hub, api=api, fs=fs, client=Mock(), scope='epub')
+        self.assertEqual(len(details['rows']), 1)
+        self.assertIn('EPUB only', summary['scope'])
+        self.assertTrue(paths)
+        self.assertTrue(all(path.startswith('chapters/ebook/epub/index') for path in paths))
+        self.assertEqual(api.repo_info.call_count, 2)
+        with self.assertRaisesRegex(ValueError, 'invalid Reader backlog inspection scope'):
+            subject.inspect(hub=mock_hub, api=api, fs=fs, client=Mock(), scope='bogus')
+
     def test_unknown_source_blocks_identity_completeness(self):
         source = item('book'); records = {source['key']: source}
         report = {r['extension']: r for r in subject.summarize(records, {},
