@@ -1,0 +1,47 @@
+name: BHA · Plan One Parsed Build
+run-name: BHA parsed build plan / archive ${{ inputs.archive_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      archive_id:
+        description: One archive number from 0 through 31
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: maintain-archive-forks
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  inspect:
+    if: github.repository == 'anftm/pipeline'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Install pinned contract test dependencies
+        run: pip install -r scripts/requirements.txt PyYAML==6.0.3
+      - name: Verify read-only plan contracts
+        run: python -B -m unittest -v tests.test_bha_build_plan
+      - name: Inspect one archive and persist a read-only plan
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+          ARCHIVE_ID: ${{ inputs.archive_id }}
+        run: |
+          set -euo pipefail
+          [[ "$ARCHIVE_ID" =~ ^([0-9]|[12][0-9]|3[01])$ ]]
+          python -B scripts/bha_build_plan.py --archive "$ARCHIVE_ID" --output output/bha/build-plan.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: bha-readonly-build-plan
+          path: output/bha/build-plan.json
+          retention-days: 30
+          if-no-files-found: error
