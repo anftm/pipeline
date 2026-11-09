@@ -42,7 +42,8 @@ class Store:
 
 def live_status(value, *, state='succeeded', job_id=JOB):
     return {'index_status': 'ready', 'switch_pending': False, 'archive_revisions': value['archive_revisions'],
-            'job': {'job_id': job_id, 'state': state, 'mode': 'incremental', 'finished_at': 100,
+            'build_fingerprint': 'd' * 64,
+            'job': {'job_id': job_id, 'state': state, 'mode': 'incremental', 'finished_at': 100, 'changed': True,
                     'target_archive_revisions': value['archive_revisions'], 'changed_archives': value['changed_archives']}}
 
 
@@ -57,14 +58,16 @@ def snapshot_report(trees, *, full_sidecars, expected_generation, not_before):
         raise ValueError('full sidecar verification and exact generation required')
     return {'kind': 'bha-durable-snapshot-observation', 'generation': 'bha-fixture',
             'manifest_sha256': 'f' * 64, 'archive_revisions': trees, 'manifest_verified': True,
+            'document_count': 9, 'build_fingerprint': 'd' * 64,
             'sidecars_verified': True, 'restore_verified': False, 'remote_writes': 0,
             'external_writers_verified': False}
 
 
 def snapshot_health(*_args):
     import json
-    return json.dumps({'bucket_snapshot': {'state': 'published', 'stage': 'complete',
-                                            'snapshot': 'bha-fixture', 'updated_at': 101}}).encode()
+    return json.dumps({'ok': True, 'index_ready': True, 'index_status': 'ready', 'es': True, 'document_count': 9,
+                       'bucket_snapshot': {'state': 'published', 'stage': 'complete',
+                                           'snapshot': 'bha-fixture', 'updated_at': 101}}).encode()
 
 
 class BhaReindexDeliveryTests(unittest.TestCase):
@@ -189,7 +192,10 @@ class BhaReindexDeliveryTests(unittest.TestCase):
 
     def test_snapshot_status_drift_or_pending_does_not_finish(self):
         self.prepare(); self.apply(Mock(return_value={'ok': True, 'status': 'accepted', 'mode': 'incremental', 'job_id': JOB}))
-        pending = lambda *_: b'{"bucket_snapshot":{"state":"pending_publish","stage":"waiting","snapshot":"bha-fixture"}}'
+        import json
+        pending = lambda *_: json.dumps({'ok': True, 'index_ready': True, 'index_status': 'ready', 'es': True,
+                                         'document_count': 9, 'bucket_snapshot': {'state': 'pending_publish',
+                                         'stage': 'waiting', 'snapshot': 'bha-fixture'}}).encode()
         result = delivery.reconcile(self.s, operation=T, token='fixture', status=lambda *_: live_status(self.plan),
                                     verify_samples=lambda: sample_report(self.plan), verify_snapshot=snapshot_report, fetch=pending)
         self.assertEqual(result['status'], 'snapshot-pending'); self.assertFalse(result['journal_advanced'])
@@ -199,6 +205,26 @@ class BhaReindexDeliveryTests(unittest.TestCase):
                                verify_samples=lambda: sample_report(self.plan), verify_snapshot=snapshot_report,
                                fetch=lambda *_: next(healths))
         self.assertEqual(journal.load(self.s).record['state'], 'accepted')
+
+    def test_replaced_job_same_identity_or_mismatched_snapshot_never_finishes(self):
+        self.prepare(); self.apply(Mock(return_value={'ok': True, 'status': 'accepted', 'mode': 'incremental', 'job_id': JOB}))
+        for mutation in ('finished_at', 'changed'):
+            good, changed = live_status(self.plan), live_status(self.plan)
+            changed['job'][mutation] = 101 if mutation == 'finished_at' else False
+            values = iter([good, changed])
+            with self.subTest(mutation=mutation), self.assertRaisesRegex(ValueError, 'consumer changed during acceptance'):
+                delivery.reconcile(self.s, operation=T, token='fixture', status=lambda *_: next(values),
+                                   verify_samples=lambda: sample_report(self.plan), verify_snapshot=snapshot_report,
+                                   fetch=snapshot_health)
+            self.assertEqual(journal.load(self.s).record['state'], 'accepted')
+        for changes in ({'document_count': 8}, {'build_fingerprint': 'e' * 64}):
+            def bad(trees, *, full_sidecars, expected_generation, not_before):
+                return {**snapshot_report(trees, full_sidecars=full_sidecars, expected_generation=expected_generation,
+                                          not_before=not_before), **changes}
+            with self.subTest(changes=changes), self.assertRaisesRegex(ValueError, 'serving identity'):
+                delivery.reconcile(self.s, operation=T, token='fixture', status=lambda *_: live_status(self.plan),
+                                   verify_samples=lambda: sample_report(self.plan), verify_snapshot=bad, fetch=snapshot_health)
+            self.assertEqual(journal.load(self.s).record['state'], 'accepted')
 
     def test_consumer_drift_during_snapshot_verification_never_finishes(self):
         self.prepare(); self.apply(Mock(return_value={'ok': True, 'status': 'accepted', 'mode': 'incremental', 'job_id': JOB}))

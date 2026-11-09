@@ -32,6 +32,12 @@ def _status(token: str) -> dict:
     return access.read_status(token)
 
 
+def _job_matches(job, record, job_id: str) -> bool:
+    return (isinstance(job, dict) and job.get('job_id') == job_id and job.get('mode') == record['mode']
+            and job.get('target_archive_revisions') == record['archive_revisions']
+            and job.get('changed_archives') == record['changed_archives'])
+
+
 def _raw_status(token: str) -> dict:
     """Read status during indexing without treating rebuilding as failure."""
     if not token:
@@ -135,9 +141,7 @@ def reconcile(store, *, operation: str, token: str, status=_raw_status, verify_s
         # No request ID is sent by the current BHA API. Even identical targets
         # could belong to another writer; do not adopt an uncorrelated job.
         return {'status': 'job-uncorrelated', 'journal_advanced': False, 'external_writers_verified': False}
-    if (job_id != current.record['job_id'] or job.get('mode') != current.record['mode']
-            or job.get('target_archive_revisions') != current.record['archive_revisions']
-            or job.get('changed_archives') != current.record['changed_archives']):
+    if job_id != current.record['job_id'] or not _job_matches(job, current.record, job_id):
         raise ValueError('BHA status job does not match the accepted job and targets')
     if job.get('state') in {'accepted', 'running'}:
         return {'status': 'running', 'job_id': job_id, 'journal_advanced': False, 'external_writers_verified': False}
@@ -169,11 +173,10 @@ def reconcile(store, *, operation: str, token: str, status=_raw_status, verify_s
         raise ValueError('BHA consumer samples do not cover all changed archives')
     later = status(token)
     later_job = later.get('job') if isinstance(later, dict) else None
-    if (not isinstance(later, dict) or not isinstance(later_job, dict)
-            or later_job.get('job_id') != job_id or later_job.get('state') != 'succeeded'
-            or later_job.get('mode') != current.record['mode']
-            or later_job.get('target_archive_revisions') != current.record['archive_revisions']
-            or later_job.get('changed_archives') != current.record['changed_archives']
+    if (not isinstance(later, dict) or not _job_matches(later_job, current.record, job_id)
+            or later_job.get('state') != 'succeeded'
+            or later_job.get('finished_at') != job.get('finished_at')
+            or later_job.get('changed') != job.get('changed')
             or later.get('index_status') != 'ready' or later.get('switch_pending') is not False
             or planning._trees(later.get('archive_revisions'), 'consumer trees') != current.record['archive_revisions']):
         raise ValueError('BHA consumer changed during acceptance')
@@ -182,10 +185,16 @@ def reconcile(store, *, operation: str, token: str, status=_raw_status, verify_s
     if verify_snapshot is None or type(job.get('finished_at')) is not int:
         return {'status': 'snapshot-unverified', 'job_id': job_id, 'journal_advanced': False,
                 'external_writers_verified': False}
+    # A successful job that did not switch the serving generation cannot be
+    # paired to a newly published snapshot by timing alone.
+    if job.get('changed') is not True:
+        return {'status': 'snapshot-unverified', 'job_id': job_id, 'journal_advanced': False,
+                'external_writers_verified': False}
     # Match the post-job snapshot reported by the live service *and* full byte
     # hashes; a same-tree snapshot from an earlier full rebuild is insufficient.
     health = consumer_samples._object(fetch(consumer_samples.BASE + '/api/health',
                                               consumer_samples.MAX_HEALTH), 'health')
+    observed_health = consumer_samples.health(json.dumps(health).encode('utf-8'))
     snapshot_status = health.get('bucket_snapshot') if isinstance(health, dict) else None
     if (not isinstance(snapshot_status, dict) or snapshot_status.get('state') != 'published'
             or snapshot_status.get('stage') != 'complete' or not isinstance(snapshot_status.get('snapshot'), str)
@@ -206,22 +215,25 @@ def reconcile(store, *, operation: str, token: str, status=_raw_status, verify_s
         raise ValueError('BHA snapshot evidence is missing, incomplete or differs from target')
     # The hashes do not verify an Elasticsearch restore. Preserve that limit in
     # the terminal result rather than treating a snapshot as a restore test.
-    if snapshot.get('restore_verified') is not False:
-        raise ValueError('BHA snapshot evidence has an unsupported restore claim')
+    if (snapshot.get('restore_verified') is not False
+            or snapshot.get('document_count') != observed_health['document_count']
+            or snapshot.get('build_fingerprint') != later.get('build_fingerprint')):
+        raise ValueError('BHA snapshot evidence has an unsupported restore or serving identity claim')
     health_after = consumer_samples._object(fetch(consumer_samples.BASE + '/api/health',
                                                     consumer_samples.MAX_HEALTH), 'health')
+    after_health = consumer_samples.health(json.dumps(health_after).encode('utf-8'))
     after_snapshot = health_after.get('bucket_snapshot') if isinstance(health_after, dict) else None
-    if (not isinstance(after_snapshot, dict) or after_snapshot.get('state') != 'published'
+    if (after_health != observed_health or not isinstance(after_snapshot, dict) or after_snapshot.get('state') != 'published'
             or after_snapshot.get('stage') != 'complete'
             or after_snapshot.get('snapshot') != snapshot_status['snapshot']):
         raise ValueError('BHA snapshot status changed during acceptance')
     final = status(token)
     final_job = final.get('job') if isinstance(final, dict) else None
-    if (not isinstance(final, dict) or not isinstance(final_job, dict)
-            or final_job.get('job_id') != job_id or final_job.get('state') != 'succeeded'
-            or final_job.get('mode') != current.record['mode']
-            or final_job.get('target_archive_revisions') != current.record['archive_revisions']
-            or final_job.get('changed_archives') != current.record['changed_archives']
+    if (not isinstance(final, dict) or not _job_matches(final_job, current.record, job_id)
+            or final_job.get('state') != 'succeeded'
+            or final_job.get('finished_at') != job.get('finished_at')
+            or final_job.get('changed') != job.get('changed')
+            or final.get('build_fingerprint') != later.get('build_fingerprint')
             or final.get('index_status') != 'ready' or final.get('switch_pending') is not False
             or planning._trees(final.get('archive_revisions'), 'consumer trees') != current.record['archive_revisions']):
         raise ValueError('BHA consumer changed during snapshot acceptance')

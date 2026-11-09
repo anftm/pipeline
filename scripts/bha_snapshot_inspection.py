@@ -99,6 +99,7 @@ def inspect(expected: dict[str, str], *, full_sidecars: bool = False, expected_g
         raise ValueError('BHA durable snapshot changed during inspection')
     return {'kind': 'bha-durable-snapshot-observation', 'generation': generation,
             'manifest_sha256': hashlib.sha256(raw).hexdigest(), 'archive_revisions': target,
+            'build_fingerprint': metadata['build_fingerprint'], 'source_fingerprint': metadata['source_fingerprint'],
             'document_count': value['document_count'], 'sidecars': receipts,
             'manifest_verified': True, 'sidecars_verified': full_sidecars, 'restore_verified': False,
             'remote_writes': 0, 'publication_ready': False, 'external_writers_verified': False,
