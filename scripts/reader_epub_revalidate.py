@@ -39,8 +39,9 @@ class LivePlanRevalidator:
 
     def __call__(self, plan, preview):
         self._check_preview(plan, preview)
-        current = planning.inspect(hub=self.hub, api=self.api, fs=self.fs, client=self.client,
-                                   shard=plan['shard'], operation=plan['operation'])
+        inspect = planning.inspect_one if plan['max_attempts'] == 1 else planning.inspect
+        current = inspect(hub=self.hub, api=self.api, fs=self.fs, client=self.client,
+                          shard=plan['shard'], operation=plan['operation'])
         if current != plan:
             raise ValueError('EPUB source, consumers or checkpoint changed before staging')
         return None

@@ -84,7 +84,8 @@ def inspect(store,operation,*,hub,api,fs,client,reader):
         from . import reader_epub_plan as planning
     except ImportError:
         import reader_epub_plan as planning
-    proof=planning.inspect(hub=hub,api=api,fs=fs,client=client,shard=plan['shard'],operation=operation)
+    inspect=planning.inspect_one if plan['max_attempts']==1 else planning.inspect
+    proof=inspect(hub=hub,api=api,fs=fs,client=client,shard=plan['shard'],operation=operation)
     if proof!=plan:
         raise ValueError('fresh EPUB backlog proof differs from durable plan')
     reader_pointer,catalog=backlog.publication.current(hub)

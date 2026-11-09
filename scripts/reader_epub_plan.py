@@ -157,6 +157,15 @@ def inspect(*, hub, api, fs, client, shard, operation, threshold=100):
     return plan
 
 
+def inspect_one(*, hub, api, fs, client, shard, operation, threshold=100):
+    """Select one content-verified candidate; preserve the same identities."""
+    plan=inspect(hub=hub,api=api,fs=fs,client=client,shard=shard,operation=operation,threshold=threshold)
+    body={**plan,'sources':plan['sources'][:1],'max_attempts':1}
+    body.pop('plan_sha256')
+    body['plan_sha256']=hashlib.sha256(search_snapshot.canonical(body)).hexdigest()
+    return body
+
+
 def main(argv=None):
     import argparse
     import os

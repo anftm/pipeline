@@ -56,6 +56,17 @@ class EpubPlanTests(unittest.TestCase):
             else: values[5].pop(0)
             with self.subTest(change=change), self.assertRaises(ValueError): self.make(values)
 
+    def test_one_source_mode_is_exact_prefix_with_distinct_hash(self):
+        from unittest.mock import patch
+        original=self.make(data())
+        with patch.object(subject,'inspect',return_value=original) as inspect:
+            one=subject.inspect_one(hub='hub',api='api',fs='fs',client='client',shard=original['shard'],
+                                    operation=original['operation'])
+        self.assertEqual(one['sources'],original['sources'][:1])
+        self.assertEqual(one['max_attempts'],1)
+        self.assertNotEqual(one['plan_sha256'],original['plan_sha256'])
+        inspect.assert_called_once()
+
     def test_current_failure_or_unpublished_shard_blocks(self):
         values = list(data()); key = values[1]['rows'][0]['key']
         values[5][values[6]] = {'files': [], 'failures': [{'key': key}]}

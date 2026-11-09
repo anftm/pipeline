@@ -23,6 +23,15 @@ class LiveRevalidationTests(unittest.TestCase):
             self.assertIsNone(self.subject(self.plan,self.preview))
         self.assertEqual(inspect.call_args.kwargs,{'hub':self.hub,'api':self.api,'fs':self.fs,'client':self.client,
                                                     'shard':self.plan['shard'],'operation':self.plan['operation']})
+    def test_one_source_plan_uses_exact_same_mode_during_revalidation(self):
+        self.plan['max_attempts']=1
+        self.plan['plan_sha256']=hashlib.sha256(search_snapshot.canonical({k:v for k,v in self.plan.items() if k!='plan_sha256'})).hexdigest()
+        self.preview=shadow.staging_plan(self.plan,{**self.report,'plan_sha256':self.plan['plan_sha256']},self.root)
+        with patch.object(subject.planning,'inspect_one',return_value=self.plan) as inspect, \
+                patch.object(subject.planning,'inspect') as full:
+            self.assertIsNone(self.subject(self.plan,self.preview))
+        inspect.assert_called_once();full.assert_not_called()
+
     def test_live_plan_or_preview_drift_fails_closed(self):
         for changed in ({**self.plan,'reader_generation':'f'*64},{**self.plan,'sources':[]}):
             with self.subTest(changed=changed),patch.object(subject.planning,'inspect',return_value=changed):

@@ -167,6 +167,14 @@ class ReaderEpubShadowTests(unittest.TestCase):
             value['plan_sha256']=hashlib.sha256(search_snapshot.canonical({k:v for k,v in value.items() if k!='plan_sha256'})).hexdigest()
             with self.subTest(change=change),self.assertRaises(ValueError):subject._verify_plan(value)
 
+    def test_one_source_plan_requires_matching_bound(self):
+        value=plan(epub());value['max_attempts']=1
+        value['plan_sha256']=hashlib.sha256(search_snapshot.canonical({k:v for k,v in value.items() if k!='plan_sha256'})).hexdigest()
+        self.assertIs(subject._verify_plan(value),value)
+        value['max_attempts']=2
+        value['plan_sha256']=hashlib.sha256(search_snapshot.canonical({k:v for k,v in value.items() if k!='plan_sha256'})).hexdigest()
+        with self.assertRaises(ValueError):subject._verify_plan(value)
+
     def test_redirect_host_is_restricted(self):
         subject._check_url('https://huggingface.co/datasets/VoiceOfML/Test/resolve/' + REV + '/book.epub')
         for url in ('http://huggingface.co/a', 'https://evil.example/a', 'https://u:p@huggingface.co/a'):

@@ -36,7 +36,8 @@ def inspect(store,operation,*,hub,api,fs,client,reader):
     if current is None or current.record['state']!='write-intent':
         raise ValueError('EPUB stage has no unresolved write intent')
     plan=current.intent['plan'];preview=current.intent['preview']
-    if planning.inspect(hub=hub,api=api,fs=fs,client=client,shard=plan['shard'],operation=operation)!=plan:
+    inspect_plan=planning.inspect_one if plan['max_attempts']==1 else planning.inspect
+    if inspect_plan(hub=hub,api=api,fs=fs,client=client,shard=plan['shard'],operation=operation)!=plan:
         raise ValueError('EPUB source or Reader state changed before recovery inventory')
     actions=preview['actions'];protect_rows=[]
     for action in actions:
@@ -57,7 +58,7 @@ def inspect(store,operation,*,hub,api,fs,client,reader):
                 'state':'missing' if actual is None else 'verified'}
     with ThreadPoolExecutor(max_workers=readonly.WORKERS) as pool:
         object_rows=list(pool.map(one,files))
-    if planning.inspect(hub=hub,api=api,fs=fs,client=client,shard=plan['shard'],operation=operation)!=plan:
+    if inspect_plan(hub=hub,api=api,fs=fs,client=client,shard=plan['shard'],operation=operation)!=plan:
         raise ValueError('EPUB source or Reader state changed during recovery inventory')
     active=journal.load(store,operation)
     if active is None or active.head_raw!=current.head_raw or active.etag!=current.etag:
