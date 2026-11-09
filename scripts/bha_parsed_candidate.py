@@ -50,6 +50,8 @@ def _env(repo: Path) -> dict[str, str]:
     return {'PATH': os.defpath, 'HOME': '/dev/null', 'LANG': 'C', 'LC_ALL': 'C',
             'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': '/dev/null', 'GIT_TERMINAL_PROMPT': '0',
             'GIT_NO_LAZY_FETCH': '1', 'GIT_OPTIONAL_LOCKS': '0', 'GIT_NO_REPLACE_OBJECTS': '1',
+            'GIT_CONFIG_COUNT': '2', 'GIT_CONFIG_KEY_0': 'protocol.allow', 'GIT_CONFIG_VALUE_0': 'never',
+            'GIT_CONFIG_KEY_1': 'core.hooksPath', 'GIT_CONFIG_VALUE_1': '/dev/null',
             'GIT_OBJECT_DIRECTORY': str(repo / 'objects'), 'GIT_ALTERNATE_OBJECT_DIRECTORIES': ''}
 
 

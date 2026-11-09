@@ -116,8 +116,11 @@ class BhaParsedCandidateTests(unittest.TestCase):
             candidate.inspect(self.git_dir, 0, self.parent)
         alternates.unlink()
         env = candidate._env(self.git_dir)
-        for key in ('GITHUB_TOKEN', 'GH_TOKEN', 'HF_TOKEN', 'GIT_CONFIG_COUNT', 'GIT_DIR'):
+        for key in ('GITHUB_TOKEN', 'GH_TOKEN', 'HF_TOKEN', 'GIT_DIR'):
             self.assertNotIn(key, env)
+        self.assertEqual(env['GIT_CONFIG_COUNT'], '2')
+        self.assertEqual((env['GIT_CONFIG_KEY_0'], env['GIT_CONFIG_VALUE_0']), ('protocol.allow', 'never'))
+        self.assertEqual((env['GIT_CONFIG_KEY_1'], env['GIT_CONFIG_VALUE_1']), ('core.hooksPath', '/dev/null'))
         self.assertEqual(env['GIT_OBJECT_DIRECTORY'], str(self.git_dir / 'objects'))
         self.assertEqual(env['GIT_ALTERNATE_OBJECT_DIRECTORIES'], '')
         self.assertEqual(env['GIT_NO_LAZY_FETCH'], '1')
