@@ -87,7 +87,7 @@ def _verify(plan: dict, description: dict, store: ManifestStore, capture, observ
 
 
 def stage_manifest(plan: dict, *, approved_description: dict, store: ManifestStore,
-                   capture, observe, apply: bool = False) -> dict:
+                   capture, observe, apply: bool = False, before_create=None) -> dict:
     """Re-read every referenced object, then optionally create one immutable manifest."""
     parent, count = _verify(plan, approved_description, store, capture, observe)
     raw = lifecycle.canonical(plan['manifest'])
@@ -103,6 +103,9 @@ def stage_manifest(plan: dict, *, approved_description: dict, store: ManifestSto
     if prior is not None and prior != raw:
         raise ValueError('existing CCRD generation manifest has different bytes')
     if apply and prior is None:
+        if before_create is None:
+            raise ValueError('CCRD manifest creation requires a fresh publication guard')
+        before_create()
         try:
             store.create_manifest(raw)
         except Exception:

@@ -113,7 +113,7 @@ def _local_map(plan: dict, parent_root: Path, candidate_root: Path, candidate_cw
 
 
 def stage(plan: dict, *, approved_description: dict, parent_root: Path, candidate_root: Path,
-          candidate_cw: Path, store: Store) -> dict:
+          candidate_cw: Path, store: Store, before_create) -> dict:
     manifest = _validate(plan)
     parent = store.parent_pointer()
     if staging_plan.make(parent, approved_description) != plan:
@@ -132,6 +132,9 @@ def stage(plan: dict, *, approved_description: dict, parent_root: Path, candidat
         key, path = item['target'], local_files[item['target']]
         observed = store.inspect(key)
         if observed is None:
+            # The caller rechecks live source, journal and parent for each
+            # object. This is not an external-writer fence or cross-object CAS.
+            before_create()
             try:
                 store.create(key, path, expected)
             except Exception:

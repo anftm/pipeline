@@ -165,13 +165,26 @@ def run(work: Path, *, apply: bool, token: str, read_pointer=_read_pointer, capt
     store = store_factory(generation=plan['generation'])
     if store.parent_pointer() != parent_raw:
         raise ValueError('CCRD S3 parent differs from verified parent')
+    # Pin the exact terminal journal head for the duration of this candidate's
+    # writes. The head and pointer are not locks against outside writers.
+    expected_head = None if current is None else (current.head_raw, current.etag)
+    def write_guard():
+        observed = tx.load(journal_store)
+        if (None if observed is None else (observed.head_raw, observed.etag)) != expected_head:
+            raise ValueError('CCRD publication journal changed during staging')
+        raw, info = capture(token)
+        if raw != upstream or info != source_info:
+            raise ValueError('CCRD source changed during staging')
+        if store.parent_pointer() != parent_raw:
+            raise ValueError('CCRD parent pointer changed during staging')
     staged = objects.stage(plan, approved_description=description, parent_root=metadata_root,
                            candidate_root=work / 'candidate/metadata', candidate_cw=work / 'candidate/cw/CW.sqlite3',
-                           store=store)
+                           store=store, before_create=write_guard)
     source_capture = lambda: capture(token)[1]
     consumer_capture = lambda: observe(parent['generation'], expected_text)
     staged_manifest = manifests.stage_manifest(plan, approved_description=description, store=store,
-                                                capture=source_capture, observe=consumer_capture, apply=True)
+                                                capture=source_capture, observe=consumer_capture,
+                                                apply=True, before_create=write_guard)
     # Construct one exact directory so upload/download preserves data/ paths.
     # A completed marker appears only after all bytes are present and validated.
     bundle = work / 'bundle'; bundle.mkdir(mode=0o700)

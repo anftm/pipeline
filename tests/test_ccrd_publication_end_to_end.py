@@ -53,13 +53,15 @@ class CcrdPublicationEndToEndTests(CandidateAssemblyTests):
                            'url': plan['identity']['source_url'], 'source_stable': True}
         parent_consumer = lambda: self.observed
         staged = objects.stage(plan, approved_description=description, parent_root=self.parent,
-                               candidate_root=self.output, candidate_cw=self.candidate, store=staging)
+                               candidate_root=self.output, candidate_cw=self.candidate, store=staging,
+                               before_create=lambda: None)
         self.assertEqual(staged['objects_created'], len(plan['objects']))
         self.assertEqual(staging.creates, len(plan['objects']))
         self.assertFalse(staged['pointer_written'])
         staging.lost_response = True
         manifest = manifest_stage.stage_manifest(plan, approved_description=description, store=staging,
-                                                  capture=capture, observe=parent_consumer, apply=True)
+                                                  capture=capture, observe=parent_consumer, apply=True,
+                                                  before_create=lambda: None)
         self.assertTrue(manifest['manifest_write_response_unknown'])
         self.assertEqual(staging.manifest_creates, 1)
         target = lifecycle.canonical(plan['manifest'])

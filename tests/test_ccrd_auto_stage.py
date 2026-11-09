@@ -106,6 +106,42 @@ class AutoStageTests(CandidateAssemblyTests):
                                                 download=download_candidate)
         self.assertEqual(len(list((self.root / 'metadata-recovered').rglob('*.json'))), 2)
 
+    def test_each_stage_write_guard_rechecks_source_pointer_and_journal(self):
+        work = self.root / 'work'
+        def download(_key, _entry, path):
+            path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(b'fixture')
+        def build(_p, _old, _new, **kwargs):
+            root = kwargs['output']; root.mkdir(); shutil.copytree(self.output, root / 'metadata')
+            with patch.object(subject.planning.assembly, '_cw_database',
+                              return_value=(subject.objects._identity(self.candidate), {'seconds': 0.1})):
+                description = self.make()
+            plan = subject.planning.make(self.pointer, description)
+            (root / 'description.json').write_text(json.dumps(description))
+            (root / 'staging-plan.json').write_text(json.dumps(plan))
+            return {'generation': plan['generation'], 'remote_writes': 0}
+        store, journal = Mock(), Mock()
+        store.parent_pointer.return_value = self.pointer
+        attempts = []
+        def staged(_plan, **kwargs):
+            guard = kwargs['before_create']
+            guard(); attempts.append('first')
+            guard(); attempts.append('second')
+            return {'objects_verified': 70, 'objects_created': 2}
+        original = self.source_observation
+        seen = []
+        def capture(_token):
+            seen.append(True)
+            return (NEW.encode(), original if len(seen) < 4 else {**original, 'revision': 'f' * 40})
+        with patch.object(subject.local, 'build', side_effect=build), patch.object(subject.tx, 'load', return_value=None), \
+                patch.object(subject.objects, 'stage', side_effect=staged), \
+                patch.object(subject.manifests, 'stage_manifest') as publish_manifest:
+            with self.assertRaisesRegex(ValueError, 'source changed during staging'):
+                subject.run(work, apply=True, download=download, store_factory=lambda **_k: store,
+                            journal_factory=lambda: journal, **{**self.inputs(), 'capture': capture})
+        self.assertEqual(attempts, ['first'])
+        publish_manifest.assert_not_called()
+        self.assertFalse((work / 'bundle-ready').exists())
+
     def test_changed_source_drift_or_active_transaction_stops_before_stage(self):
         work = self.root / 'work'; args = self.inputs()
         with patch.object(subject.tx, 'load', return_value=SimpleNamespace(record={'state': 'space-intent'})), \

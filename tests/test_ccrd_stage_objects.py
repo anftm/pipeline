@@ -51,7 +51,8 @@ class StageObjectTests(CandidateAssemblyTests):
 
     def stage(self, value, store):
         return staging.stage(value, approved_description=self.description, parent_root=self.parent,
-                             candidate_root=self.output, candidate_cw=self.candidate, store=store)
+                             candidate_root=self.output, candidate_cw=self.candidate, store=store,
+                             before_create=lambda: None)
 
     def test_all_verified_objects_are_immutable_and_repeat_is_read_only(self):
         value = self.prepare(); store = MemoryStore(self.pointer)
@@ -92,6 +93,19 @@ class StageObjectTests(CandidateAssemblyTests):
         result = self.stage(value, store)
         self.assertEqual(result['objects_created'], len(value['objects']))
         self.assertEqual(store.creates, len(value['objects']))
+
+    def test_staleness_guard_is_checked_before_every_new_object(self):
+        value = self.prepare(); store = MemoryStore(self.pointer); calls = []
+        def guard():
+            calls.append(True)
+            if len(calls) == 2:
+                raise ValueError('source changed')
+        with self.assertRaisesRegex(ValueError, 'source changed'):
+            staging.stage(value, approved_description=self.description, parent_root=self.parent,
+                          candidate_root=self.output, candidate_cw=self.candidate, store=store, before_create=guard)
+        self.assertEqual(store.creates, 1)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(store.pointer, self.pointer)
 
     def test_foreign_existing_bytes_and_moving_parent_fail_closed(self):
         value = self.prepare(); store = MemoryStore(self.pointer)

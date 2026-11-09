@@ -43,7 +43,7 @@ class CcrdStageManifestTests(StageObjectTests):
 
     def run_manifest(self, plan, store, capture, observe, *, apply=False):
         return subject.stage_manifest(plan, approved_description=self.description, store=store,
-                                      capture=capture, observe=observe, apply=apply)
+                                      capture=capture, observe=observe, apply=apply, before_create=lambda: None)
 
     def test_preview_and_conditional_manifest_never_write_pointer(self):
         plan, store, capture, observe = self.prepared()
@@ -60,6 +60,19 @@ class CcrdStageManifestTests(StageObjectTests):
         again = self.run_manifest(plan, store, capture, observe, apply=True)
         self.assertTrue(again['manifest_present']); self.assertFalse(again['manifest_written'])
         self.assertEqual(store.manifest_creates, 1)
+
+    def test_manifest_guard_prevents_creation_after_source_or_journal_drift(self):
+        plan, store, capture, observe = self.prepared()
+        with self.assertRaisesRegex(ValueError, 'requires a fresh publication guard'):
+            subject.stage_manifest(plan, approved_description=self.description, store=store,
+                                   capture=capture, observe=observe, apply=True)
+        self.assertEqual(store.manifest_creates, 0)
+        def stopped(): raise ValueError('journal changed')
+        with self.assertRaisesRegex(ValueError, 'journal changed'):
+            subject.stage_manifest(plan, approved_description=self.description, store=store,
+                                   capture=capture, observe=observe, apply=True, before_create=stopped)
+        self.assertEqual(store.manifest_creates, 0)
+        self.assertIsNone(store.raw_manifest)
 
     def test_missing_target_preserved_database_or_parent_member_blocks_manifest(self):
         for mode in ('target', 'database', 'parent'):
