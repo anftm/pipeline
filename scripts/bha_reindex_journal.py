@@ -73,6 +73,9 @@ def _record(raw):
             or not isinstance(value['mode'], str) or value['mode'] not in {'incremental', 'full'}):
         raise ValueError('invalid BHA journal record')
     _id(value['operation']); _sha(value['plan_sha256'])
+    allowed_sequence = {'prepared': {0}, 'claimed': {1}, 'accepted': {2}, 'verified': {3}, 'failed': {2, 3}}
+    if value['sequence'] not in allowed_sequence[value['state']]:
+        raise ValueError('BHA journal state sequence differs')
     for name in ('archive_commits', 'archive_revisions', 'baseline_revisions'):
         planning._trees(value[name], name)
     if value['baseline_fingerprint'] is not None and (not isinstance(value['baseline_fingerprint'], str)
@@ -101,10 +104,10 @@ def _record(raw):
             raise ValueError('BHA prepared state cannot claim a result')
     else:
         _id(value['claim'])
-        if value['state'] in {'accepted', 'verified'}:
+        if value['state'] in {'accepted', 'verified'} or value['state'] == 'failed' and value['sequence'] == 3:
             _id(value['job_id'])
-        elif value['state'] == 'claimed' and value['job_id'] is not None:
-            raise ValueError('BHA claimed state cannot claim an accepted job')
+        elif value['job_id'] is not None:
+            raise ValueError('BHA unaccepted state cannot claim an accepted job')
         if value['state'] in {'verified', 'failed'}:
             if not isinstance(value['result'], dict): raise ValueError('BHA terminal observation is missing')
         elif value['result'] is not None:
@@ -131,9 +134,10 @@ def _advance(previous: dict, value: dict, prior_digest: str) -> None:
 
 def _successor(previous: dict, value: dict, digest: str) -> None:
     expected = {'operation': previous['operation'], 'record': digest, 'sequence': previous['sequence']}
-    if (previous['state'] not in {'verified', 'failed'} or value['state'] != 'prepared'
+    if (previous['state'] != 'verified' or value['state'] != 'prepared'
             or value['sequence'] != 0 or value['previous_terminal'] != expected
-            or value['operation'] == previous['operation']):
+            or value['operation'] == previous['operation']
+            or value['baseline_revisions'] != previous['archive_revisions']):
         raise ValueError('BHA previous operation is not an exact terminal predecessor')
 
 
@@ -164,14 +168,15 @@ def load(store) -> Current | None:
     return Current(head, raw, etag, value)
 
 
-def audit(store, current: Current, *, maximum: int = 10_000) -> int:
+def _walk_history(store, current: Current, *, maximum: int = 10_000) -> tuple[int, set[str]]:
     if type(maximum) is not int or not 1 <= maximum <= 10_000: raise ValueError('invalid BHA journal audit limit')
-    value, count, visited = current.record, 0, set()
+    value, count, visited, operations = current.record, 0, set(), set()
     while True:
         count += 1
         if count > maximum: raise ValueError('BHA journal history exceeds audit limit')
+        operations.add(value['operation'])
         link = value['previous_terminal'] if value['prior'] is None else None
-        if value['prior'] is None and link is None: return count
+        if value['prior'] is None and link is None: return count, operations
         operation = link['operation'] if link else value['operation']
         digest = link['record'] if link else value['prior']
         key = _record_key(operation, digest)
@@ -183,6 +188,10 @@ def audit(store, current: Current, *, maximum: int = 10_000) -> int:
         if link: _successor(previous, value, digest)
         else: _advance(previous, value, digest)
         value = previous
+
+
+def audit(store, current: Current, *, maximum: int = 10_000) -> int:
+    return _walk_history(store, current, maximum=maximum)[0]
 
 
 def _commit(store, value: dict, previous: Current | None) -> Current:
@@ -222,15 +231,18 @@ def begin(store, plan: dict, *, mode: str, operation: str | None = None) -> Curr
     if digest != plan.get('plan_sha256') or plan.get('publication_ready') is not False or plan.get('remote_writes') != 0:
         raise ValueError('BHA plan hash or read-only status differs')
     previous = load(store)
+    prior_operations = set()
     if previous is not None:
-        audit(store, previous)
+        _count, prior_operations = _walk_history(store, previous)
         # A failed request may still have partial external effects. Do not
         # authorize another request merely because it is terminal.
         if previous.record['state'] != 'verified':
             raise ValueError('BHA journal has unfinished or failed work requiring recovery')
+        if plan.get('consumer_revisions') != previous.record['archive_revisions']:
+            raise ValueError('BHA consumer baseline differs from the last verified index target')
     operation = _id(operation or uuid.uuid4().hex)
-    if previous is not None and operation == previous.record['operation']:
-        raise ValueError('BHA new operation ID must differ')
+    if operation in prior_operations:
+        raise ValueError('BHA new operation ID must differ from all prior operations')
     value = {'version': 1, 'kind': 'bha-reindex-record', 'operation': operation, 'sequence': 0, 'prior': None,
              'previous_terminal': ({'operation': previous.record['operation'], 'record': previous.head['record'],
                                     'sequence': previous.record['sequence']} if previous else None),

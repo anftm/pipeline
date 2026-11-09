@@ -72,6 +72,53 @@ class BhaReindexDeliveryTests(unittest.TestCase):
             self.apply(send)
         send.assert_called_once()
 
+    def test_next_operation_requires_live_consumer_to_match_verified_predecessor(self):
+        self.prepare(); self.apply(Mock(return_value={'ok': True, 'status': 'accepted', 'mode': 'incremental', 'job_id': JOB}))
+        delivery.reconcile(self.s, operation=T, token='fixture', status=lambda *_: live_status(self.plan),
+                           verify_samples=lambda: sample_report(self.plan))
+        before = self.s.writes
+        with self.assertRaisesRegex(ValueError, 'last verified index target'):
+            delivery.prepare(self.s, plan=self.plan, mode='incremental', inspect_live=lambda: self.plan, operation='3' * 32)
+        self.assertEqual(self.s.writes, before)
+        from scripts import search_snapshot
+        next_plan = {**self.plan, 'consumer_revisions': dict(self.plan['archive_revisions']),
+                     'archive_revisions': {**self.plan['archive_revisions'], '1': 'd' * 40},
+                     'changed_archives': [1]}
+        next_plan['plan_sha256'] = hashlib.sha256(search_snapshot.canonical(
+            {key: value for key, value in next_plan.items() if key != 'plan_sha256'})).hexdigest()
+        result = delivery.prepare(self.s, plan=next_plan, mode='incremental', inspect_live=lambda: next_plan, operation='3' * 32)
+        self.assertEqual(result.record['state'], 'prepared')
+        self.assertEqual(result.record['previous_terminal']['operation'], T)
+        self.assertEqual(journal.audit(self.s, result), 5)
+        prior_key = journal._record_key(T, result.record['previous_terminal']['record'])
+        prior_record = journal._record(self.s.records[prior_key])
+        tampered = {**result.record, 'baseline_revisions': self.plan['consumer_revisions']}
+        with self.assertRaisesRegex(ValueError, 'terminal predecessor'):
+            journal._successor(prior_record, tampered, result.record['previous_terminal']['record'])
+
+    def test_journal_rejects_invalid_sequence_and_old_operation_reuse(self):
+        prepared = self.prepare()
+        forged = {**prepared.record, 'state': 'accepted', 'claim': 'a' * 32, 'job_id': JOB}
+        with self.assertRaisesRegex(ValueError, 'state sequence'):
+            journal._record(search_snapshot.canonical(forged))
+        self.apply(Mock(return_value={'ok': True, 'status': 'accepted', 'mode': 'incremental', 'job_id': JOB}))
+        delivery.reconcile(self.s, operation=T, token='fixture', status=lambda *_: live_status(self.plan),
+                           verify_samples=lambda: sample_report(self.plan))
+        next_plan = {**self.plan, 'consumer_revisions': dict(self.plan['archive_revisions']),
+                     'archive_revisions': {**self.plan['archive_revisions'], '1': 'd' * 40}, 'changed_archives': [1]}
+        next_plan['plan_sha256'] = hashlib.sha256(search_snapshot.canonical(
+            {key: value for key, value in next_plan.items() if key != 'plan_sha256'})).hexdigest()
+        second = delivery.prepare(self.s, plan=next_plan, mode='incremental', inspect_live=lambda: next_plan, operation='3' * 32)
+        second = journal.claim(self.s, second); second = journal.accepted(self.s, second, job_id='4' * 32)
+        journal.terminal(self.s, second, state='verified', result={'fixture': True})
+        third = {**next_plan, 'consumer_revisions': dict(next_plan['archive_revisions']),
+                 'archive_revisions': {**next_plan['archive_revisions'], '2': 'e' * 40}, 'changed_archives': [2]}
+        third['plan_sha256'] = hashlib.sha256(search_snapshot.canonical(
+            {key: value for key, value in third.items() if key != 'plan_sha256'})).hexdigest()
+        with self.assertRaisesRegex(ValueError, 'all prior operations'):
+            delivery.prepare(self.s, plan=third, mode='incremental', inspect_live=lambda: third, operation=T)
+        self.assertEqual(journal.load(self.s).record['state'], 'verified')
+
     def test_lost_post_stays_claimed_and_cannot_adopt_uncorrelated_job(self):
         self.prepare(); send = Mock(side_effect=TimeoutError('response lost'))
         with self.assertRaises(TimeoutError): self.apply(send)
