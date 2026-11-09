@@ -1,0 +1,49 @@
+name: Reader/桶 · Plan Exact EPUB Updates
+run-name: EPUB exact update plan / shard ${{ inputs.shard }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      shard:
+        description: EPUB shard to inspect (0-7)
+        type: choice
+        options: ["0", "1", "2", "3", "4", "5", "6", "7"]
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reader-backlog-inspection
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  plan:
+    if: github.repository == 'anftm/pipeline'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Install pinned dependencies
+        run: pip install -r scripts/requirements.txt PyYAML==6.0.3
+      - name: Verify exact EPUB update selection
+        run: python -B -m unittest -v tests.test_reader_format_backlog tests.test_reader_epub_plan
+      - name: Inspect both sites and plan at most three sources
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          SHARD: ${{ inputs.shard }}
+        run: |
+          set -euo pipefail
+          [[ "$SHARD" =~ ^[0-7]$ ]] || exit 1
+          python -B scripts/reader_epub_plan.py --shard "$SHARD" --output output/epub-exact-plan.json
+      - name: Preserve exact plan
+        uses: actions/upload-artifact@v7
+        with:
+          name: reader-epub-exact-plan
+          path: output/epub-exact-plan.json
+          if-no-files-found: error
+          retention-days: 14
