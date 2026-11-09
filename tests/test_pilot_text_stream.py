@@ -772,6 +772,7 @@ class TextStreamPublicationTests(unittest.TestCase):
                     patch.object(stream, "existing_index",
                                  return_value={"version": 1, "kind": "text-stream-index", "files": []}), \
                     patch.object(stream, "build_one", side_effect=build), \
+                    patch.dict(os.environ, {"HF_TOKEN": "fixture-token"}), \
                     patch.object(stream, "publish_checkpoint",
                                  return_value={"version": 1, "kind": "text-stream-index", "files": []}) as publish:
                 self.assertEqual(stream.main(), 0)
