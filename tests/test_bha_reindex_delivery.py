@@ -152,6 +152,22 @@ class BhaReindexDeliveryTests(unittest.TestCase):
             journal.claim(self.s, claimed)
         self.assertEqual(self.s.writes, before + 1)
 
+    def test_remote_error_never_exposes_credential_or_retries_post(self):
+        from urllib.error import URLError
+        secret = 'fixture-secret-never-log'
+        with patch.object(delivery.urllib.request, 'urlopen', side_effect=URLError(secret)) as send:
+            with self.assertRaisesRegex(RuntimeError, 'outcome is unconfirmed') as caught:
+                delivery._post(secret, mode='incremental', payload={})
+        self.assertNotIn(secret, str(caught.exception)); self.assertIsNone(caught.exception.__cause__)
+        send.assert_called_once()
+        with patch.object(delivery.urllib.request, 'urlopen', side_effect=URLError(secret)) as read:
+            with self.assertRaisesRegex(RuntimeError, 'status request failed') as caught:
+                delivery._raw_status(secret)
+        self.assertNotIn(secret, str(caught.exception)); self.assertIsNone(caught.exception.__cause__)
+        read.assert_called_once()
+        for mode in ('', 'invalid'):
+            with self.assertRaises(ValueError): delivery._post(secret, mode=mode, payload={})
+
     def test_s3_store_confines_keys_and_conditional_writes(self):
         backing = Mock(); backing._location.return_value = ('vomebook', 'search-data-v1')
         adapter = journal.S3Store(backing)

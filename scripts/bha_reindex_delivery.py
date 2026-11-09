@@ -39,8 +39,8 @@ def _raw_status(token: str) -> dict:
         with urllib.request.urlopen(request, timeout=30) as response:
             if response.status != 200: raise ValueError('BHA status HTTP response differs')
             raw = response.read(access.MAX_BYTES + 1)
-    except (urllib.error.URLError, OSError, TimeoutError) as error:
-        raise RuntimeError('BHA status request failed') from error
+    except (urllib.error.URLError, OSError, TimeoutError):
+        raise RuntimeError('BHA status request failed') from None
     if len(raw) > access.MAX_BYTES: raise ValueError('BHA status response is oversized')
     value = json.loads(raw)
     if not isinstance(value, dict): raise ValueError('BHA status response is not an object')
@@ -48,15 +48,22 @@ def _raw_status(token: str) -> dict:
 
 
 def _post(token: str, *, mode: str, payload: dict) -> dict:
+    if not isinstance(token, str) or not token or mode not in {'incremental', 'full'}:
+        raise ValueError('existing BHA credential and explicit index mode are required')
     request = urllib.request.Request(URL + ('?full=true' if mode == 'full' else '?full=false'),
                                      data=json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode('utf8'),
                                      method='POST', headers={'Authorization': 'Bearer ' + token,
                                                              'Content-Type': 'application/json',
                                                              'User-Agent': 'pipeline-bha-reindex/1.0'})
-    with urllib.request.urlopen(request, timeout=45) as response:
-        if response.status != 202:
-            raise RuntimeError('BHA reindex request result is unconfirmed')
-        raw = response.read(MAX_RESPONSE + 1)
+    try:
+        with urllib.request.urlopen(request, timeout=45) as response:
+            if response.status != 202:
+                raise RuntimeError('BHA reindex request result is unconfirmed')
+            raw = response.read(MAX_RESPONSE + 1)
+    except (urllib.error.URLError, OSError, TimeoutError):
+        # Underlying exception strings can contain request details. Never echo
+        # them; an unknown result is observed from journal/status, not retried.
+        raise RuntimeError('BHA reindex request outcome is unconfirmed; inspect before recovery') from None
     if len(raw) > MAX_RESPONSE:
         raise ValueError('BHA reindex response is oversized')
     value = json.loads(raw)
