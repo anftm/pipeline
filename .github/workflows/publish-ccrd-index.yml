@@ -1,8 +1,6 @@
-name: CCRD · Monitor Four-Source Text
+name: CCRD · Build and Stage Four-Source Update
 
 on:
-  # Monitoring reads the source, current manifest and consumer; it is not a
-  # publisher and never replaces the four-source generation.
   schedule:
     - cron: '41 */6 * * *'
   workflow_dispatch:
@@ -16,23 +14,41 @@ concurrency:
   queue: max
 
 jobs:
-  inspect:
+  stage:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: '3.11'
-      - run: pip install -r scripts/requirements.txt
+      - name: Install pinned dependencies
+        run: pip install -r scripts/requirements.txt PyYAML==6.0.3
+      - name: Test source, staging and recovery contracts
+        run: |
+          python -B -m unittest -v tests.test_ccrd_auto_stage tests.test_ccrd_local_candidate \
+            tests.test_ccrd_stage_objects tests.test_ccrd_stage_manifest tests.test_ccrd_publication_end_to_end
       - name: Compare upstream text and actual four-source consumer
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           GITHUB_TOKEN: ${{ github.token }}
-        run: python scripts/check_ccrd_four_source.py --output output/ccrd/four-source-check.json
-      - uses: actions/upload-artifact@v7
+        run: python -B scripts/check_ccrd_four_source.py --output "$RUNNER_TEMP/ccrd-four-source-check.json"
+      - name: Build and stage only if the upstream source changed
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
+          HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+        run: |
+          set -euo pipefail
+          python -B scripts/ccrd_auto_stage.py --stage --work "$RUNNER_TEMP/ccrd-stage" \
+            --report "$RUNNER_TEMP/ccrd-stage-report.json"
+      - name: Preserve stage report
+        uses: actions/upload-artifact@v7
         with:
-          name: ccrd-four-source-check
-          path: output/ccrd/four-source-check.json
+          name: ccrd-four-source-stage-report
+          path: |
+            ${{ runner.temp }}/ccrd-stage-report.json
+            ${{ runner.temp }}/ccrd-four-source-check.json
           retention-days: 30
           if-no-files-found: error
