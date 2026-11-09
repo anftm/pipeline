@@ -102,6 +102,17 @@ class S3StagingIntegrationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'source moved'):self.run_stage()
         action=self.preview['actions'][0];self.assertIn(action['protection_path'],self.client.values)
         self.assertTrue(all(k==action['protection_path'] for k in self.client.values))
+    def test_actual_revalidator_executes_at_all_three_stage_boundaries(self):
+        from scripts import reader_epub_revalidate as live
+        from unittest.mock import patch
+        validator=live.LivePlanRevalidator(hub=Mock(),api=Mock(),fs=Mock(),client=Mock())
+        with patch.object(live.planning,'inspect',return_value=self.plan) as inspect:
+            result=stage.stage(self.plan,self.report,self.output,created_at=WHEN,protections=self.protections,
+                               objects=self.objects,revalidate=validator)
+        self.assertEqual(inspect.call_count,3)
+        self.assertEqual(result['verified_objects'],len(self.preview['actions'][0]['files']))
+        self.assertFalse(result['index_written'])
+
     def test_concurrent_conditional_creates_do_not_replace_a_winner(self):
         action=self.preview['actions'][0];item=action['files'][0]
         local=self.output/'0'/'bundle'/item['path'];expected={'sha256':item['sha256'],'bytes':item['bytes']}
