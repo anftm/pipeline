@@ -32,7 +32,7 @@ def _zip_path(base: str, href: str) -> str:
     if parsed.scheme or parsed.netloc:
         raise ValueError("external EPUB resource")
     result = posixpath.normpath(posixpath.join(base, parsed.path))
-    if result.startswith("../") or result == ".." or "\\" in result:
+    if result.startswith(("/", "../")) or result == ".." or "\\" in result:
         raise ValueError("unsafe EPUB resource path")
     return result
 

@@ -9,6 +9,33 @@ from scripts import epub_chapters, reader_assets
 
 
 class EpubTocTests(unittest.TestCase):
+    def test_resource_paths_must_remain_within_epub_root(self):
+        for value in ('/tmp/escape.bin', '%2ftmp/escape.bin', '%2e%2e/%2e%2e/escape.bin',
+                      'sub/../../../escape.bin', 'sub\\escape.bin'):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, 'unsafe EPUB resource path'):
+                epub_chapters._zip_path('O', value)
+        self.assertEqual(epub_chapters._zip_path('O/Text', '../Images/pic.png'), 'O/Images/pic.png')
+        self.assertEqual(epub_chapters._zip_path('O', '../image.png'), 'image.png')
+        for value in ('https://example.invalid/book.css', '//example.invalid/book.css'):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, 'external EPUB resource'):
+                epub_chapters._zip_path('O', value)
+
+    def test_absolute_resource_in_legacy_builder_cannot_write_outside_bundle(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory);source = root/'book.epub';output = root/'bundle'
+            escaped = root/'outside.bin'
+            with zipfile.ZipFile(source, 'w') as archive:
+                archive.writestr('META-INF/container.xml', '<container><rootfiles><rootfile full-path="content.opf"/></rootfiles></container>')
+                archive.writestr('content.opf', '<package><manifest><item id="a" href="book.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="a"/></spine></package>')
+                archive.writestr('book.xhtml', '<html xmlns="http://www.w3.org/1999/xhtml"><body><p>safe chapter</p><img src="' + str(escaped) + '"/></body></html>')
+                archive.writestr(str(escaped), b'absolute path must never be extracted')
+            result = epub_chapters.build_bundle(source, output)
+            self.assertFalse(escaped.exists())
+            chapter = (output/result['chapters'][0]['path']).read_text()
+            self.assertIn('safe chapter', chapter)
+            self.assertNotIn(str(escaped), chapter)
+            self.assertEqual(len(result['chapters']), 1)
+
     def test_search_indexes_visible_literal_references_without_second_decode(self):
         document = ('<html:html xmlns:html="http://www.w3.org/1999/xhtml">'
                     '<html:head><html:title>标题</html:title></html:head><html:body>'
