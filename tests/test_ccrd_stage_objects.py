@@ -140,6 +140,57 @@ class StageObjectTests(CandidateAssemblyTests):
         for key in ('current.json', 'control/ocr-current.json', 'generations/ccrd-four-bad/data/foo'):
             with self.subTest(key=key), self.assertRaises(ValueError): adapter.inspect_preserved(key)
 
+    def test_preserved_large_database_stream_limit_is_read_only_and_separate(self):
+        from io import BytesIO
+        from unittest.mock import Mock
+        backing = Mock(); backing._location.return_value = ('vomebook', 'ccrd-index')
+        client = backing._client.return_value
+        adapter = staging.S3Store(generation='ccrd-four-' + 'a' * 64, store=backing)
+        newspaper = 'indexes/newspapers/RMRB/' + 'b' * 64 + '.sqlite3'
+        local = 'generations/ccrd-old/CCRD.sqlite3'
+        with patch.object(staging, 'MAX_BYTES', 4), patch.object(staging, 'MAX_PRESERVED_DATABASE_BYTES', 12):
+            body = BytesIO(b'12345678')
+            client.get_object.return_value = {'Body': body, 'ContentLength': 8}
+            self.assertEqual(adapter.inspect_preserved(newspaper), {'bytes': 8, 'sha256': hashlib.sha256(b'12345678').hexdigest()})
+            self.assertTrue(body.closed)
+            body = BytesIO(b'12345678')
+            client.get_object.return_value = {'Body': body, 'ContentLength': 8}
+            with self.assertRaisesRegex(ValueError, 'oversized'):
+                adapter.inspect_preserved(local)
+            self.assertTrue(body.closed)
+            body = BytesIO(b'12345678')
+            client.get_object.return_value = {'Body': body, 'ContentLength': 13}
+            with self.assertRaisesRegex(ValueError, 'oversized'):
+                adapter.inspect_preserved(newspaper)
+            self.assertTrue(body.closed)
+            path = self.root / 'oversized'; path.write_bytes(b'12345678')
+            with self.assertRaisesRegex(ValueError, 'bounded'):
+                adapter.create('generations/' + adapter.generation + '/CW.sqlite3', path,
+                               {'bytes': 8, 'sha256': hashlib.sha256(b'12345678').hexdigest()})
+        client.put_object.assert_not_called()
+
+    def test_large_preserved_database_is_hashed_in_bounded_chunks(self):
+        from unittest.mock import Mock
+        class StreamingBody:
+            def __init__(self, size): self.remaining = size; self.max_request = 0; self.closed = False
+            def read(self, amount):
+                self.max_request = max(self.max_request, amount)
+                length = min(amount, self.remaining)
+                self.remaining -= length
+                return b'x' * length
+            def close(self): self.closed = True
+        size = 2 * 1024 * 1024 + 17
+        body = StreamingBody(size)
+        backing = Mock(); backing._location.return_value = ('vomebook', 'ccrd-index')
+        backing._client.return_value.get_object.return_value = {'Body': body, 'ContentLength': size}
+        adapter = staging.S3Store(generation='ccrd-four-' + 'a' * 64, store=backing)
+        digest = hashlib.sha256(b'x' * size).hexdigest()
+        self.assertEqual(adapter.inspect_preserved('indexes/newspapers/RMRB/' + 'b' * 64 + '.sqlite3'),
+                         {'sha256': digest, 'bytes': size})
+        self.assertEqual(body.max_request, 1024 * 1024)
+        self.assertTrue(body.closed)
+        backing._client.return_value.put_object.assert_not_called()
+
     def test_store_refuses_any_other_bucket_or_mutable_root(self):
         generation = 'ccrd-four-' + 'a' * 64
         s = staging.S3Store(generation=generation, store=object())

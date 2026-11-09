@@ -26,6 +26,9 @@ except ImportError:
 
 GEN = re.compile(r'ccrd-four-[0-9a-f]{64}\Z')
 MAX_BYTES = 4 * 1024 * 1024 * 1024
+# Historical newspaper databases can exceed the candidate upload limit.
+# This is a separate read-only streaming ceiling, not a writable allowance.
+MAX_PRESERVED_DATABASE_BYTES = 12 * 1024 * 1024 * 1024
 
 
 class Store(Protocol):
@@ -190,7 +193,9 @@ class S3Store:
             raise ValueError('unexpected CCRD bucket mapping')
         return namespace, name
 
-    def _inspect(self, key: str, namespace: str, name: str) -> dict | None:
+    def _inspect(self, key: str, namespace: str, name: str, *, limit: int | None = None) -> dict | None:
+        if limit is None:
+            limit = MAX_BYTES
         try:
             response = self.store._client(namespace).get_object(Bucket=name, Key=key)
         except Exception as error:
@@ -199,11 +204,11 @@ class S3Store:
                 return None
             raise
         size = response.get('ContentLength')
-        if type(size) is not int or not 0 < size <= MAX_BYTES:
-            raise ValueError('CCRD staged object size is missing or oversized')
-        digest, count = hashlib.sha256(), 0
         body = response['Body']
         try:
+            if type(size) is not int or not 0 < size <= limit:
+                raise ValueError('CCRD staged object size is missing or oversized')
+            digest, count = hashlib.sha256(), 0
             for chunk in iter(lambda: body.read(1024 * 1024), b''):
                 count += len(chunk)
                 if count > size:
@@ -230,7 +235,9 @@ class S3Store:
         namespace, name = self.store._location(lifecycle.BUCKET)
         if (namespace, name) != ('vomebook', 'ccrd-index'):
             raise ValueError('unexpected CCRD bucket mapping')
-        return self._inspect(key, namespace, name)
+        limit = MAX_PRESERVED_DATABASE_BYTES if re.fullmatch(
+            r'indexes/newspapers/(?:RMRB|PLA)/[0-9a-f]{64}\.sqlite3', key) else MAX_BYTES
+        return self._inspect(key, namespace, name, limit=limit)
 
     def read_manifest(self) -> bytes | None:
         namespace, name = self.store._location(lifecycle.BUCKET)
