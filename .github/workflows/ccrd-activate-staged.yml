@@ -1,4 +1,4 @@
-name: CCRD · Activate Exact Staged Candidate
+name: CCRD · Publish Exact Staged Candidate
 run-name: CCRD activate staged run ${{ inputs.stage_run }}
 
 on:
@@ -35,7 +35,7 @@ jobs:
       - name: Install pinned dependencies
         run: pip install -r scripts/requirements.txt PyYAML==6.0.3
       - name: Exercise activation and recovery contracts
-        run: python -B -m unittest -v tests.test_ccrd_auto_activate tests.test_ccrd_publication_coordinator tests.test_ccrd_rollback
+        run: python -B -m unittest -v tests.test_ccrd_release_driver tests.test_ccrd_auto_activate tests.test_ccrd_publication_coordinator tests.test_ccrd_rollback
       - name: Verify staging workflow run provenance
         env:
           GH_TOKEN: ${{ github.token }}
@@ -62,7 +62,7 @@ jobs:
           path: ${{ runner.temp }}/ccrd-candidate
           run-id: ${{ inputs.stage_run }}
           github-token: ${{ github.token }}
-      - name: Verify and request one Space activation
+      - name: Verify, activate and reconcile one candidate
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           GITHUB_TOKEN: ${{ github.token }}
@@ -70,5 +70,5 @@ jobs:
           HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
         run: |
           set -euo pipefail
-          python -B scripts/ccrd_auto_activate.py --known-writers-coordinated --bundle "$RUNNER_TEMP/ccrd-candidate" \
+          python -B scripts/ccrd_release_driver.py --known-writers-coordinated --bundle "$RUNNER_TEMP/ccrd-candidate" \
             --metadata-root "$RUNNER_TEMP/ccrd-activation-metadata"

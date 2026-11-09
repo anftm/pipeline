@@ -99,7 +99,7 @@ class AutoActivateTests(CoordinatorTests):
         self.assertEqual(inputs['known_writers_coordinated']['default'], 'false')
         commands = '\n'.join(step.get('run', '') for step in flow['jobs']['activate']['steps'])
         self.assertIn("run.get('head_sha') != os.environ['GITHUB_SHA']", commands)
-        self.assertIn('scripts/ccrd_auto_activate.py', commands)
+        self.assertIn('scripts/ccrd_release_driver.py', commands)
         self.assertNotIn('git push', commands)
 
     def test_refuses_symlinked_or_oversized_bundle_input(self):
