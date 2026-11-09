@@ -162,6 +162,22 @@ class ReaderFormatBacklogTests(unittest.TestCase):
                 self.assertEqual(result['source_content_changed'], 1)
                 self.assertFalse(result['trigger_ready'])
 
+    def test_text_source_change_counts_separately_from_markdown_dependencies(self):
+        source = item('note', 'md');key = source['key']
+        entry = {'key': key, 'source_revision': OLD, 'source_sha256': SHA_A,
+                 'bucket': subject.READER_BUCKET, 'object': 'documents/text/md/hash/document.md'}
+        route = {'s': 2, 'm': 'k', 'b': subject.READER_BUCKET, 'p': entry['object']}
+        index = {'version': 1, 'kind': 'text-stream-index', 'files': [entry], 'failures': []}
+        rows = subject.classify_indexed({key: source}, {key: route}, index, [],
+            Metadata({(NEW, 'note.md'): file('note.md', lfs=SHA_B)}), extensions={'md'},
+            kind='text-stream-index', route_modes={'t', 'k'})
+        result = {r['extension']: r for r in subject.summarize(
+            {key: source}, {key: route}, rows, threshold=0, checked_extensions={'md'})}['md']
+        self.assertEqual(result['source_content_changed'], 1)
+        self.assertFalse(result['conversion_dependencies_checked'])
+        self.assertIsNone(result['workflow'])
+        self.assertFalse(result['trigger_ready'])
+
     def test_malformed_lfs_or_wrong_response_never_becomes_content_proof(self):
         records = {item('book')['key']: item('book')}; entry = row('book')
         index = {'version': 1, 'kind': 'ebook-chapter-stream-index', 'files': [entry], 'failures': []}

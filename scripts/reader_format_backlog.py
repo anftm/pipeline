@@ -59,6 +59,8 @@ FAMILIES = {
     'office-chapters': (('doc', 'docx', 'odt', 'rtf'), 'reader-office-chapters.yml', 'ebook'),
     'spreadsheet': (('xls', 'xlsx', 'csv', 'ods'), 'reader-spreadsheet-stream.yml', 'html'),
     'web': (('html', 'htm', 'mht', 'mhtml'), 'reader-web-stream.yml', 'html'),
+    # Text has a guarded conversion script but no automatic workflow yet.
+    'text': (('txt', 'md', 'markdown', 'vcf', 'ini'), None, 'text'),
     'static-pdf': (('ppt', 'pptx', 'pps', 'wps', 'ps'), 'reader-static-pdf-stream.yml', 'pdf'),
     'media': (('mp3', 'wav', 'm4a', 'flac', 'mpga', 'ape', 'wma', 'amr', 'aac',
                'mp4', 'mov', 'asx', 'flv', 'f4v', 'rm', 'rmvb', 'mkv', 'avi',
@@ -350,7 +352,7 @@ def summarize(records: dict, routes: dict, checked_rows: dict, *, threshold: int
         unverified = counts['source_identity_unknown'] + counts['route_or_index_mismatch'] + counts['route_unverified']
         verified = (extension in checked_extensions and unverified == 0
                     and counts['pending_shard_checkpoint'] == 0 and counts['recorded_failure_current'] == 0)
-        dependencies_checked = extension not in {'html', 'htm', 'mht', 'mhtml'}
+        dependencies_checked = extension not in {'html', 'htm', 'mht', 'mhtml', 'md', 'markdown'}
         output.append({'extension': extension, 'family': family, 'workflow': workflow,
                        'sources': len(grouped[extension]), 'not_mapped': counts['not_mapped'],
                        'source_content_changed': counts['content_changed'],
@@ -464,6 +466,13 @@ def inspect(*, hub, api, fs, client, threshold=100, observe_search=search_daily.
                                                 kind=index_kind, route_modes={route_mode}))
                 checked_extensions.add(extension)
                 document_indexes[path] = index
+    text_path = 'documents/text/index.json'
+    text_index = matrix.read_json(fs, READER_BUCKET, text_path)
+    if text_index:
+        text_extensions = set(FAMILIES['text'][0])
+        checked.update(classify_indexed(records, routes, text_index, [], api, extensions=text_extensions,
+                                        kind='text-stream-index', route_modes={'t', 'k'}))
+        checked_extensions.update(text_extensions)
     web_indexes = {}
     for extension in FAMILIES['web'][0]:
         path = f'documents/web/{extension}/index.json'
@@ -499,6 +508,8 @@ def inspect(*, hub, api, fs, client, threshold=100, observe_search=search_daily.
     for path, expected in document_indexes.items():
         if matrix.read_json(fs, READER_BUCKET, path) != expected:
             raise ValueError('Reader document index changed during backlog inspection')
+    if matrix.read_json(fs, READER_BUCKET, text_path) != text_index:
+        raise ValueError('Reader text index changed during backlog inspection')
     if matrix.read_json(fs, READER_BUCKET, image_root + '/index-v2.json') != image_canonical:
         raise ValueError('Reader image canonical index changed during backlog inspection')
     for number in range(8):
@@ -531,8 +542,8 @@ def inspect(*, hub, api, fs, client, threshold=100, observe_search=search_daily.
                'reader_generation': reader_pointer['generation'], 'threshold': threshold,
                'reader_consumers': receipts, 'formats': summaries, 'remote_writes': 0,
                'dispatches': 0, 'publication_ready': False, 'external_writers_verified': False,
-               'scope': ('published search and pinned Reader projection; exact source content checked for indexed ebooks, office, images, media, web, spreadsheets and static PDFs; '
-                         'HTML dependencies may change independently and are not checked')}
+               'scope': ('published search and pinned Reader projection; exact source content checked for indexed ebooks, office, images, media, text, web, spreadsheets and static PDFs; '
+                         'HTML/Markdown dependencies may change independently and are not checked')}
     details = {'version': 1, 'kind': 'reader-epub-content-backlog',
                'search_generation': summary['search_generation'], 'reader_generation': summary['reader_generation'],
                'rows': [row for row in sorted(epub.values(), key=lambda x: x['key'])
