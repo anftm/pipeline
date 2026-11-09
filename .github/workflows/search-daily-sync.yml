@@ -64,6 +64,12 @@ jobs:
       - name: Install dependencies
         run: pip install -r scripts/requirements.txt
 
+      - name: Audit terminal publication journal before fetching
+        env:
+          HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+        run: python -B scripts/search_daily_journal.py --output "$RUNNER_TEMP/search-journal-receipt.json"
+
       - name: Generate and verify source directories
         run: python -u scripts/update_dirs.py
         env:
@@ -85,6 +91,13 @@ jobs:
           DIRECTORY_REVISIONS_FILE: ${{ runner.temp }}/search-directory-revisions.json
           SEARCH_BASELINE_FILE: ${{ runner.temp }}/search-published-revisions.json
           FORCE_SYNC: ${{ (inputs.force_sync || inputs.target == 'hf-space') && 'true' || 'false' }}
+
+      - name: Recheck publication journal before staging
+        if: steps.fetch.outputs.data_changed == 'true'
+        env:
+          HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+        run: python -B scripts/search_daily_journal.py --expected "$RUNNER_TEMP/search-journal-receipt.json"
 
       - name: Stage immutable search generation
         id: stage
@@ -133,6 +146,12 @@ jobs:
             echo "candidate=$STAGED_GENERATION published=$PUBLISHED_GENERATION" >&2
             exit 1
           fi
+
+      - name: Verify journal did not change during the run
+        env:
+          HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+        run: python -B scripts/search_daily_journal.py --expected "$RUNNER_TEMP/search-journal-receipt.json"
 
       - name: Verify publication did not change during the run
         run: python -B scripts/search_daily.py inspect --expected-receipt "$RUNNER_TEMP/search-published-receipt.json"

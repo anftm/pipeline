@@ -287,8 +287,16 @@ class DirectorySnapshotTests(unittest.TestCase):
                       steps['Verify published generation and both consumers']['run'])
         self.assertEqual(steps['Verify published generation and both consumers']['id'], 'published')
         self.assertIn('SEARCH_BASELINE_FILE', steps['Fetch and parse']['env'])
+        self.assertLess(job['steps'].index(steps['Audit terminal publication journal before fetching']),
+                        job['steps'].index(steps['Generate and verify source directories']))
+        self.assertLess(job['steps'].index(steps['Generate and verify source directories']),
+                        job['steps'].index(steps['Verify published generation and both consumers']))
         self.assertLess(job['steps'].index(steps['Verify published generation and both consumers']),
                         job['steps'].index(steps['Fetch and parse']))
+        self.assertEqual(steps['Recheck publication journal before staging']['if'], "steps.fetch.outputs.data_changed == 'true'")
+        self.assertLess(job['steps'].index(steps['Recheck publication journal before staging']),
+                        job['steps'].index(steps['Stage immutable search generation']))
+        self.assertIn('search_daily_journal.py --expected', steps['Verify journal did not change during the run']['run'])
         self.assertIn('--expected-receipt "$RUNNER_TEMP/search-published-receipt.json"',
                       steps['Verify publication did not change during the run']['run'])
         handoff = steps['Inspect newly staged candidate without publication']

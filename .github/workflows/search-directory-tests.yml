@@ -7,12 +7,16 @@ on:
       - .github/workflows/search-directory-tests.yml
       - .github/workflows/search-daily-sync.yml
       - scripts/fetch_and_parse.py
+      - scripts/search_daily_journal.py
+      - scripts/search_transition.py
+      - scripts/search_publication_pointer.py
       - scripts/sync_to_space.py
       - scripts/sync_to_pages.py
       - scripts/text_encoding.py
       - scripts/mul.py
       - scripts/update_dirs.py
       - tests/test_fetch_and_parse.py
+      - tests/test_search_daily_journal.py
       - tests/test_search_directory_sync.py
       - tests/test_sync_auth.py
       - tests/test_text_encoding_retirement.py
@@ -33,4 +37,4 @@ jobs:
       - name: Install search and workflow-test dependencies
         run: python -m pip install jieba==0.42.1 PyYAML==6.0.3
       - name: Exercise local Git and LFS, concurrency and source snapshots
-        run: python -B -m unittest tests.test_search_directory_sync tests.test_fetch_and_parse tests.test_sync_auth tests.test_text_encoding_retirement -v
+        run: python -B -m unittest tests.test_search_directory_sync tests.test_fetch_and_parse tests.test_sync_auth tests.test_text_encoding_retirement tests.test_search_daily_journal -v
