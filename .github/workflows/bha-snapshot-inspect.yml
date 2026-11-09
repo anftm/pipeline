@@ -1,0 +1,46 @@
+name: BHA · Inspect Durable Snapshot
+
+on:
+  workflow_dispatch:
+    inputs:
+      full_sidecars:
+        description: Stream and hash the complete snapshot sidecars (several GiB)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: update-bha-index
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  inspect:
+    if: github.repository == 'anftm/pipeline'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Install pinned dependencies
+        run: pip install -r scripts/requirements.txt PyYAML==6.0.3
+      - name: Exercise read-only snapshot contracts
+        run: python -B -m unittest -v tests.test_bha_snapshot_inspection
+      - name: Inspect snapshot without any write
+        env:
+          FULL: ${{ inputs.full_sidecars }}
+        run: |
+          set -euo pipefail
+          args=(--output output/bha/snapshot-inspection.json)
+          if [[ "$FULL" == 'true' ]]; then args+=(--full-sidecars); fi
+          python -B scripts/bha_snapshot_inspection.py "${args[@]}"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: bha-snapshot-readonly-inspection
+          path: output/bha/snapshot-inspection.json
+          retention-days: 30
+          if-no-files-found: error
