@@ -72,6 +72,35 @@ class UnmappedBatchTests(unittest.TestCase):
         artifact=next(x for x in steps if x.get('with',{}).get('path')=='output/export/reader-converted/')
         self.assertEqual(artifact['with']['include-hidden-files'],'true')
 
+    def test_exact_retry_selection_never_converts_other_candidates(self):
+        self.plan['sources'].append({**self.row,'key':self.row['key']+'-other'})
+        with patch.object(conversion,'inspect_unmapped',side_effect=[self.plan,self.plan]):
+            result=subject.run('jpg',hub=Mock(),api=Mock(),fs=Mock(),client=Mock(),start=0,window=100,
+                               output=self.out,only=frozenset({1}),fetch=lambda _u,p,_t:p.write_bytes(self.raw))
+        self.assertEqual(result['converted_sources'],1);self.assertEqual(result['unselected_sources'],1)
+        self.assertEqual(result['rows'][0]['state'],'unselected-local')
+        self.assertFalse((self.out/'item-000').exists())
+        self.assertEqual(subject.export(self.out,self.dest)['converted_sources'],1)
+
+    def test_interrupted_batch_reconciles_only_exact_existing_files(self):
+        with patch.object(conversion,'inspect_unmapped',side_effect=[self.plan,self.plan]):self.run_batch()
+        (self.out/'results.json').unlink()
+        receipt=self.root/'partial.json'
+        with patch.object(conversion,'inspect_unmapped',return_value=self.plan):
+            accepted=subject.reconcile_partial(self.out,hub=Mock(),api=Mock(),fs=Mock(),client=Mock(),destination=receipt)
+        self.assertEqual(accepted['converted_sources'],1);self.assertEqual(accepted['remote_writes'],0)
+        self.assertEqual(subject.export(self.out,self.dest,result_path=receipt)['converted_sources'],1)
+        self.assertFalse((self.out/'results.json').exists())
+
+    def test_interrupted_missing_is_unresolved_and_snapshot_drift_blocks(self):
+        with patch.object(conversion,'inspect_unmapped',side_effect=[self.plan,self.plan]):self.run_batch()
+        (self.out/'item-000/report.json').unlink()
+        with patch.object(conversion,'inspect_unmapped',return_value=self.plan):
+            accepted=subject.reconcile_partial(self.out,hub=Mock(),api=Mock(),fs=Mock(),client=Mock(),destination=self.root/'partial.json')
+        self.assertEqual(accepted['rows'][0]['state'],'unresolved-local');self.assertEqual(accepted['converted_sources'],0)
+        with patch.object(conversion,'inspect_unmapped',return_value={}),self.assertRaisesRegex(ValueError,'changed since'):
+            subject.reconcile_partial(self.out,hub=Mock(),api=Mock(),fs=Mock(),client=Mock(),destination=self.root/'bad.json')
+
     def test_snapshot_drift_and_tampered_file_never_export(self):
         changed={**self.plan,'reader_generation':'c'*64}
         with patch.object(conversion,'inspect_unmapped',side_effect=[self.plan,changed]):
