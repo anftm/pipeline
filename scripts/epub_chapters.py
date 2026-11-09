@@ -62,6 +62,11 @@ def _parse_package_xml(raw: bytes):
     """Parse package XML and repair undeclared prefixes used by old EPUBs."""
     raw = re.sub(rb"\s+xmlns:xmlns\s*=\s*(['\"])[^'\"]*\1", b"", raw,
                  flags=re.IGNORECASE)
+    # Expat treats the commonly generated declaration ``encoding="utf8"``
+    # differently from ``utf-8`` when non-ASCII text follows. Normalize only
+    # that exact XML-declaration spelling; the bytes themselves remain intact.
+    raw = re.sub(rb"^((?:\xef\xbb\xbf)?\s*<\?xml\b[^?]*?\bencoding\s*=\s*['\"])utf8(['\"])",
+                 rb"\1utf-8\2", raw, count=1, flags=re.IGNORECASE)
     try:
         return ET.fromstring(raw)
     except ET.ParseError as error:

@@ -9,6 +9,18 @@ from scripts import epub_chapters, reader_assets
 
 
 class EpubTocTests(unittest.TestCase):
+    def test_utf8_xml_declaration_normalization_handles_unicode_metadata(self):
+        for declaration in (b"<?xml version='1.0' encoding='utf8'?>",
+                            b"<?xml version='1.0' encoding='UTF8'?>",
+                            b"\xef\xbb\xbf<?xml version='1.0' encoding='utf8'?>"):
+            raw=declaration + '<package><title>托洛茨基文集</title></package>'.encode('utf8')
+            with self.subTest(declaration=declaration):
+                self.assertEqual(epub_chapters._parse_package_xml(raw)[0].text, '托洛茨基文集')
+        raw=b"<?xml version='1.0' encoding='utf-8'?><package><title>ok</title></package>"
+        self.assertEqual(epub_chapters._parse_package_xml(raw)[0].text, 'ok')
+        with self.assertRaises(Exception):
+            epub_chapters._parse_package_xml(b"<?xml version='1.0' encoding='utf8'?><broken>")
+
     def test_resource_paths_must_remain_within_epub_root(self):
         for value in ('/tmp/escape.bin', '%2ftmp/escape.bin', '%2e%2e/%2e%2e/escape.bin',
                       'sub/../../../escape.bin', 'sub\\escape.bin'):
