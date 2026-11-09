@@ -1,0 +1,51 @@
+name: Reader/桶 · Inspect EPUB Staging
+run-name: EPUB stage inspection / ${{ inputs.operation }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Exact 32-hex EPUB staging operation to inspect
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reader-backlog-inspection
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  inspect:
+    if: github.repository == 'anftm/pipeline'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Install pinned inspection dependencies
+        run: pip install -r scripts/requirements.txt PyYAML==6.0.3
+      - name: Test journal and read-only inspection
+        run: python -B -m unittest -v tests.test_reader_epub_stage_journal tests.test_reader_epub_stage_readonly
+      - name: Observe exact EPUB stage without writes
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+          OPERATION: ${{ inputs.operation }}
+        run: |
+          set -euo pipefail
+          [[ "$OPERATION" =~ ^[0-9a-f]{32}$ ]] || exit 1
+          python -B scripts/reader_epub_stage_readonly.py --operation "$OPERATION" \
+            --output output/epub-stage-inspection.json
+      - name: Preserve read-only inspection report
+        uses: actions/upload-artifact@v7
+        with:
+          name: reader-epub-stage-inspection
+          path: output/epub-stage-inspection.json
+          if-no-files-found: error
+          retention-days: 30

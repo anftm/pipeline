@@ -155,6 +155,18 @@ class ReaderEpubShadowTests(unittest.TestCase):
         for forbidden in ('--apply', 'git push', 'workflow run', 'delete'):
             self.assertNotIn(forbidden, commands)
 
+    def test_plan_rejects_extra_fields_and_unbound_content_proof(self):
+        import copy
+        for change in ('extra-plan', 'extra-source', 'missing-sha', 'same-sha', 'unknown-proof'):
+            value=copy.deepcopy(plan(epub()))
+            if change=='extra-plan':value['credential']='must-not-be-in-plan'
+            elif change=='extra-source':value['sources'][0]['credential']='must-not-be-in-plan'
+            elif change=='missing-sha':value['sources'][0]['current_source_sha256']=None
+            elif change=='same-sha':value['sources'][0]['current_source_sha256']=value['sources'][0]['previous_source_sha256']
+            else:value['sources'][0]['proof']='unknown'
+            value['plan_sha256']=hashlib.sha256(search_snapshot.canonical({k:v for k,v in value.items() if k!='plan_sha256'})).hexdigest()
+            with self.subTest(change=change),self.assertRaises(ValueError):subject._verify_plan(value)
+
     def test_redirect_host_is_restricted(self):
         subject._check_url('https://huggingface.co/datasets/VoiceOfML/Test/resolve/' + REV + '/book.epub')
         for url in ('http://huggingface.co/a', 'https://evil.example/a', 'https://u:p@huggingface.co/a'):

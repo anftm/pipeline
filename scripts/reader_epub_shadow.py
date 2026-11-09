@@ -115,6 +115,42 @@ def source_identity(path: Path, row: dict) -> dict:
     return {'sha256': sha, 'git_blob': git, 'bytes': count}
 
 
+def _safe_receipt(plan):
+    """Project only immutable, non-secret source identities needed to resume."""
+    fields=('key','repo','path','source_revision','reason','proof','previous_revision',
+            'previous_source_sha256','current_source_sha256','previous_git_blob','current_git_blob','previous_manifest')
+    rows=[]
+    for source in plan['sources']:
+        if not isinstance(source,dict) or set(source)!=set(fields):
+            raise ValueError('EPUB plan source schema differs from the exact selection')
+        if source['reason']=='content_changed':
+            if (not re.fullmatch(r'[0-9a-f]{40}',str(source['previous_revision'] or ''))
+                    or not re.fullmatch(r'[0-9a-f]{64}',str(source['previous_source_sha256'] or ''))
+                    or source['previous_revision']==source['source_revision']
+                    or not isinstance(source['previous_manifest'],str) or not source['previous_manifest']):
+                raise ValueError('EPUB changed-source parent identity is invalid')
+            if source['proof']=='current-lfs-sha256':
+                if (not re.fullmatch(r'[0-9a-f]{64}',str(source['current_source_sha256'] or ''))
+                        or source['current_source_sha256']==source['previous_source_sha256']
+                        or source['previous_git_blob'] is not None or source['current_git_blob'] is not None):
+                    raise ValueError('EPUB changed-source LFS proof is invalid')
+            elif source['proof']=='exact-revision-git-blobs':
+                if (source['current_source_sha256'] is not None
+                        or not re.fullmatch(r'[0-9a-f]{40}',str(source['previous_git_blob'] or ''))
+                        or not re.fullmatch(r'[0-9a-f]{40}',str(source['current_git_blob'] or ''))
+                        or source['previous_git_blob']==source['current_git_blob']):
+                    raise ValueError('EPUB changed-source Git proof is invalid')
+            else:
+                raise ValueError('EPUB changed-source proof is invalid')
+        elif source['reason']=='not_mapped':
+            if any(source[name] is not None for name in fields[5:]):
+                raise ValueError('unmapped EPUB cannot claim prior evidence')
+        else:
+            raise ValueError('EPUB source reason is invalid')
+        rows.append({field:source[field] for field in fields})
+    return rows
+
+
 def _verify_plan(plan):
     if (not isinstance(plan, dict) or plan.get('version') != 1 or plan.get('kind') != 'reader-epub-exact-build-plan'
             or plan.get('publication_ready') is not False or plan.get('remote_writes') != 0
@@ -123,6 +159,14 @@ def _verify_plan(plan):
             or not isinstance(plan.get('sources'), list) or not 1 <= len(plan['sources']) <= 3
             or not re.fullmatch(r'[0-9a-f]{32}', str(plan.get('operation', '')))):
         raise ValueError('invalid exact EPUB shadow plan')
+    allowed={'version','kind','operation','shard','search_generation','reader_generation',
+             'canonical_index_sha256','shard_index_sha256','source_revisions_sha256','profile','max_attempts',
+             'sources','remote_writes','publication_ready','external_writers_verified','plan_sha256'}
+    if (set(plan)!=allowed or type(plan.get('max_attempts')) is not int or plan['max_attempts']!=3
+            or any(not isinstance(plan.get(field),str) or not re.fullmatch(r'[0-9a-f]{64}',plan[field])
+                   for field in ('search_generation','reader_generation','canonical_index_sha256',
+                                 'shard_index_sha256','source_revisions_sha256','plan_sha256'))):
+        raise ValueError('EPUB exact plan schema or identity differs')
     expected = hashlib.sha256(search_snapshot.canonical({k: v for k, v in plan.items() if k != 'plan_sha256'})).hexdigest()
     if expected != plan.get('plan_sha256'):
         raise ValueError('EPUB shadow plan identity differs')
@@ -135,6 +179,7 @@ def _verify_plan(plan):
                 or reader_epub_plan.builder.shard_for(row['key'], 8) != plan['shard']):
             raise ValueError('invalid EPUB shadow source identity')
         keys.add(row['key'])
+    _safe_receipt(plan)
     return plan
 
 
