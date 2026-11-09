@@ -12,13 +12,13 @@ import hashlib
 import json
 from pathlib import Path
 import re
-from datetime import datetime, timedelta
 
 try:
-    from . import reader_epub_immutable as immutable, reader_epub_shadow as shadow, search_snapshot
+    from . import reader_epub_immutable as immutable, reader_epub_shadow as shadow, reader_epub_protection as protection, search_snapshot
 except ImportError:
     import reader_epub_immutable as immutable
     import reader_epub_shadow as shadow
+    import reader_epub_protection as protection
     import search_snapshot
 
 
@@ -70,20 +70,7 @@ class MemoryStore:
 
 
 def _protect_record(plan, action, created_at):
-    if (not isinstance(created_at, str)
-            or not re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z', created_at)):
-        raise ValueError('a fixed UTC intent creation time is required')
-    try:
-        parsed = datetime.fromisoformat(created_at)
-    except ValueError as error:
-        raise ValueError('invalid UTC intent creation time') from error
-    if parsed.utcoffset() != timedelta(0):
-        raise ValueError('intent creation time must be UTC')
-    return {'version': 1, 'kind': 'reader-processing-roots', 'status': 'processing',
-            'operation': 'epub-exact-staging', 'run': {'operation': plan['operation']},
-            'resources': [{'bucket': shadow.reader_assets.READER_ASSETS_BUCKET, 'root': action['root']}],
-            'created_at': created_at, 'updated_at': created_at, 'heartbeat_at': created_at,
-            'release_policy': 'explicit-publisher-handoff', 'plan_sha256': plan['plan_sha256']}
+    return protection.make_record(plan['operation'], plan['plan_sha256'], action['root'], created_at)
 
 
 def _same_or_create(read, create, expected, *, label):
