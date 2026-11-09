@@ -17,7 +17,7 @@ jobs:
   inspect:
     if: github.repository == 'anftm/pipeline'
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -26,7 +26,7 @@ jobs:
       - name: Install pinned Reader dependencies
         run: pip install -r scripts/requirements.txt PyYAML==6.0.3
       - name: Test exact content and threshold decisions
-        run: python -B -m unittest -v tests.test_reader_format_backlog
+        run: python -B -m unittest -v tests.test_reader_format_backlog tests.test_reader_threshold_autobuild
       - name: Inspect published sources and both Reader consumers
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -35,7 +35,56 @@ jobs:
           python -B scripts/reader_format_backlog.py --threshold 100 \
             --output output/reader-backlog/summary.json \
             --epub-details output/reader-backlog/epub-source-details.json
+      - name: Select formats above the conversion threshold
+        id: threshold
+        run: |
+          set -euo pipefail
+          python -B scripts/reader_threshold_autobuild.py decide \
+            --summary output/reader-backlog/summary.json \
+            --output output/reader-backlog/threshold-decision.json
+          formats=$(python -c 'import json; print(json.dumps(json.load(open("output/reader-backlog/threshold-decision.json"))["formats"], separators=(",",":")))')
+          echo "formats=$formats" >> "$GITHUB_OUTPUT"
+      - name: Install media probe tools when needed
+        if: ${{ contains(fromJSON(steps.threshold.outputs.formats), 'mp3') }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+      - name: Build bounded EPUB conversion shadow
+        if: ${{ contains(fromJSON(steps.threshold.outputs.formats), 'epub') }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python -B scripts/reader_threshold_autobuild.py build --extension epub \
+            --summary output/reader-backlog/summary.json --output output/reader-shadow/epub
+      - name: Build bounded JPG conversion shadow
+        if: ${{ always() && steps.threshold.outcome == 'success' && contains(fromJSON(steps.threshold.outputs.formats), 'jpg') }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python -B scripts/reader_threshold_autobuild.py build --extension jpg \
+            --summary output/reader-backlog/summary.json --output output/reader-shadow/jpg
+      - name: Build bounded MP3 conversion shadow
+        if: ${{ always() && steps.threshold.outcome == 'success' && contains(fromJSON(steps.threshold.outputs.formats), 'mp3') }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python -B scripts/reader_threshold_autobuild.py build --extension mp3 \
+            --summary output/reader-backlog/summary.json --output output/reader-shadow/mp3
+      - name: Verify every triggered format completed
+        if: ${{ always() && steps.threshold.outcome == 'success' }}
+        run: |
+          python -B scripts/reader_threshold_autobuild.py verify \
+            --decision output/reader-backlog/threshold-decision.json --output output/reader-shadow
+      - name: Preserve only conversion reports
+        if: ${{ always() && steps.threshold.outcome == 'success' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: reader-threshold-local-builds
+          path: output/reader-shadow/*/report.json
+          if-no-files-found: ignore
+          retention-days: 14
       - name: Preserve diagnostic evidence
+        if: ${{ always() }}
         uses: actions/upload-artifact@v7
         with:
           name: reader-format-backlog
