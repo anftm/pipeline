@@ -1,0 +1,78 @@
+name: CCRD · Verify Exact Staged Candidate
+run-name: CCRD verify staged run ${{ inputs.stage_run }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      stage_run:
+        description: Exact successful CCRD staging workflow run ID
+        type: string
+        required: true
+      stage_sha:
+        description: Exact staging workflow Git revision
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: publish-ccrd-index
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  inspect:
+    if: github.repository == 'anftm/pipeline'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Install pinned dependencies
+        run: pip install -r scripts/requirements.txt PyYAML==6.0.3
+      - name: Exercise read-only verification contracts
+        run: python -B -m unittest -v tests.test_ccrd_stage_readonly
+      - name: Verify staging workflow run provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STAGE_RUN: ${{ inputs.stage_run }}
+          STAGE_SHA: ${{ inputs.stage_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$STAGE_RUN" =~ ^[0-9]+$ && "$STAGE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$STAGE_RUN" > "$RUNNER_TEMP/stage-run.json"
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          run = json.loads((Path(os.environ['RUNNER_TEMP']) / 'stage-run.json').read_bytes())
+          if (run.get('status') != 'completed' or run.get('conclusion') != 'success'
+                  or run.get('head_branch') != 'main' or run.get('head_sha') != os.environ['STAGE_SHA']
+                  or run.get('event') not in {'schedule', 'workflow_dispatch'}
+                  or run.get('path', '').split('@', 1)[0] != '.github/workflows/publish-ccrd-index.yml'):
+              raise SystemExit('staging run is not an exact successful CCRD run')
+          PY
+      - name: Download exact staged candidate
+        uses: actions/download-artifact@v8
+        with:
+          name: ccrd-staged-candidate
+          path: ${{ runner.temp }}/ccrd-candidate
+          run-id: ${{ inputs.stage_run }}
+          github-token: ${{ github.token }}
+      - name: Verify candidate bytes, source and consumer without writes
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python -B scripts/ccrd_stage_readonly.py --bundle "$RUNNER_TEMP/ccrd-candidate" \
+            --output "$RUNNER_TEMP/ccrd-stage-readonly-report.json"
+      - name: Preserve verification report
+        uses: actions/upload-artifact@v7
+        with:
+          name: ccrd-staged-readonly-report
+          path: ${{ runner.temp }}/ccrd-stage-readonly-report.json
+          retention-days: 30
+          if-no-files-found: error
