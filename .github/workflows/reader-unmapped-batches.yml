@@ -1,0 +1,77 @@
+name: Reader/桶 · Convert Image and Media Batches Locally
+run-name: Reader local ${{ inputs.extension }} window / ${{ inputs.start }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      extension:
+        description: Format to convert from the exact unmapped backlog
+        type: choice
+        options: ["jpg", "mp3"]
+        required: true
+      start:
+        description: Starting offset in the pinned eligible source window
+        type: number
+        default: 0
+        required: true
+      window:
+        description: Number of candidates to inspect, maximum 100
+        type: number
+        default: 100
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reader-backlog-inspection
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  convert:
+    if: github.repository == 'anftm/pipeline'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Install pinned Reader dependencies
+        run: pip install -r scripts/requirements.txt PyYAML==6.0.3
+      - name: Install media probe when required
+        if: ${{ inputs.extension == 'mp3' }}
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+      - name: Verify window selection and failure isolation
+        run: python -B -m unittest -v tests.test_reader_threshold_autobuild tests.test_reader_unmapped_batches
+      - name: Convert distinct pinned candidates without bucket writes
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          EXT: ${{ inputs.extension }}
+          START: ${{ inputs.start }}
+          WINDOW: ${{ inputs.window }}
+        run: |
+          set -euo pipefail
+          [[ "$EXT" =~ ^(jpg|mp3)$ && "$START" =~ ^[0-9]+$ && "$WINDOW" =~ ^[0-9]+$ ]] || exit 1
+          python -B scripts/reader_unmapped_batches.py --extension "$EXT" --start "$START" \
+            --window "$WINDOW" --output output/unmapped --export output/export
+      - name: Preserve verified conversion objects, not JPG source files
+        if: ${{ always() && hashFiles('output/export/reader-converted/results.json') != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: reader-unmapped-${{ inputs.extension }}-${{ inputs.start }}
+          path: output/export/reader-converted/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
+      - name: Preserve failure receipts
+        if: ${{ always() && hashFiles('output/unmapped/results.json') != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: reader-unmapped-results-${{ inputs.extension }}-${{ inputs.start }}
+          path: |
+            output/unmapped/plan.json
+            output/unmapped/results.json
+          if-no-files-found: error
+          retention-days: 14

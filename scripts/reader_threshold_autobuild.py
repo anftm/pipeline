@@ -133,10 +133,14 @@ def _file_info(value):
             'identity': lfs or blob}
 
 
-def select_unmapped(extension, records, routes, canonical, shards, api):
+def select_unmapped(extension, records, routes, canonical, shards, api, *, start=0, window=100, limit=MAX_BATCH):
     """Pick exact missing JPG/MP3 sources; ignore old revision churn."""
     if extension not in {'jpg', 'mp3'}:
         raise ValueError('unsupported missing-only conversion format')
+    if (type(start) is not int or not 0 <= start <= 1_000_000
+            or type(window) is not int or not 1 <= window <= 100
+            or type(limit) is not int or not 1 <= limit <= 100):
+        raise ValueError('invalid missing-only candidate window')
     expected_kind = 'image-stream-index' if extension == 'jpg' else 'media-stream-index'
     if not isinstance(canonical, dict) or canonical.get('version') != 1 or canonical.get('kind') != expected_kind:
         raise ValueError('canonical format index is unavailable')
@@ -167,7 +171,7 @@ def select_unmapped(extension, records, routes, canonical, shards, api):
     candidates.sort(key=lambda item: (item['bytes'] <= 0, item['bytes'], item['repo'], item['path']))
     # Bound metadata work and downloads while leaving unverified candidates in
     # the backlog. Missing/oversized/non-content identities are not selected.
-    examined = candidates[:100]
+    examined = candidates[start:start + window]
     requested = {(item['repo'], item['revision'], item['path']) for item in examined}
     metadata = backlog._metadata(api, requested)
     selected = []
@@ -182,7 +186,7 @@ def select_unmapped(extension, records, routes, canonical, shards, api):
         object_keys.add(identity)
         selected.append({**item, 'source_bytes': info['bytes'], 'source_proof': info['proof'],
                          'source_identity': info['identity'], 'shard': reader_stream_index.shard_for(item['key'], 8)})
-        if len(selected) == MAX_BATCH:
+        if len(selected) == limit:
             break
     if not selected:
         raise ValueError('no bounded unmapped source has a verified exact identity')
@@ -273,7 +277,7 @@ def _index_paths(extension):
     raise ValueError('unsupported missing-only format')
 
 
-def inspect_unmapped(extension, *, hub, api, fs, client):
+def inspect_unmapped(extension, *, hub, api, fs, client, start=0, window=100, limit=MAX_BATCH):
     pointer, catalog = backlog.publication.current(hub)
     if not pointer or not catalog.get('base_sidecar'):
         raise ValueError('Reader v3 pointer or pinned base is missing')
@@ -288,7 +292,8 @@ def inspect_unmapped(extension, *, hub, api, fs, client):
     canonical_path, shard_template = _index_paths(extension)
     canonical = backlog.matrix.read_json(fs, backlog.READER_BUCKET, canonical_path)
     shards = {i: backlog.matrix.read_json(fs, backlog.READER_BUCKET, shard_template.format(number=i)) for i in range(8)}
-    selected = select_unmapped(extension, records, routes, canonical, shards, api)
+    selection_args = {} if (start, window, limit) == (0, 100, MAX_BATCH) else {'start':start, 'window':window, 'limit':limit}
+    selected = select_unmapped(extension, records, routes, canonical, shards, api, **selection_args)
     for repo, expected in sorted(revisions.items()):
         info = backlog.retry_read(lambda: api.repo_info(repo, repo_type='dataset', timeout=30))
         if getattr(info, 'sha', None) != expected:
@@ -304,12 +309,15 @@ def inspect_unmapped(extension, *, hub, api, fs, client):
     if any(backlog.matrix.read_json(fs, backlog.READER_BUCKET, shard_template.format(number=i)) != snapshot
            for i, snapshot in shards.items()):
         raise ValueError('Reader format shard changed during shadow selection')
-    return {'version': 1, 'kind': 'reader-unmapped-shadow-plan', 'extension': extension,
-            'search_generation': backlog.search_publication_pointer.decode_pointer(search_raw)['desired'],
-            'reader_generation': pointer['generation'],
-            'canonical_index_sha256': hashlib.sha256(search_snapshot.canonical(canonical)).hexdigest(),
-            'shard_indexes_sha256': {str(i): hashlib.sha256(search_snapshot.canonical(x)).hexdigest() for i,x in shards.items()},
-            'sources': selected, 'remote_writes': 0, 'publication_ready': False}
+    result = {'version': 1, 'kind': 'reader-unmapped-shadow-plan', 'extension': extension,
+              'search_generation': backlog.search_publication_pointer.decode_pointer(search_raw)['desired'],
+              'reader_generation': pointer['generation'],
+              'canonical_index_sha256': hashlib.sha256(search_snapshot.canonical(canonical)).hexdigest(),
+              'shard_indexes_sha256': {str(i): hashlib.sha256(search_snapshot.canonical(x)).hexdigest() for i,x in shards.items()},
+              'sources': selected, 'remote_writes': 0, 'publication_ready': False}
+    if selection_args:
+        result['selection_window'] = {'start':start, 'window':window, 'limit':limit}
+    return result
 
 
 def build_unmapped(plan, output, *, token, fetch=reader_epub_shadow.download, convert=convert_local):
