@@ -1,0 +1,44 @@
+name: Reader/桶 · Inspect Format Backlog
+
+on:
+  schedule:
+    - cron: '19 0 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reader-backlog-inspection
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  inspect:
+    if: github.repository == 'anftm/pipeline'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Install pinned Reader dependencies
+        run: pip install -r scripts/requirements.txt PyYAML==6.0.3
+      - name: Test exact content and threshold decisions
+        run: python -B -m unittest -v tests.test_reader_format_backlog
+      - name: Inspect published sources and both Reader consumers
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          set -euo pipefail
+          python -B scripts/reader_format_backlog.py --threshold 100 \
+            --output output/reader-backlog/summary.json \
+            --epub-details output/reader-backlog/epub-source-details.json
+      - name: Preserve diagnostic evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: reader-format-backlog
+          path: output/reader-backlog/*.json
+          if-no-files-found: error
+          retention-days: 14
