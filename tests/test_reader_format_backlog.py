@@ -103,6 +103,30 @@ class ReaderFormatBacklogTests(unittest.TestCase):
         self.assertTrue(report['threshold_exceeded'])
         self.assertFalse(report['trigger_ready'])
 
+    def test_image_content_uses_image_path_and_preserves_canonical_merge_rules(self):
+        source = item('scan', 'jpg');key = source['key']
+        entry = {'key': key, 'source_revision': OLD, 'source_sha256': SHA_A, 'bucket': subject.READER_BUCKET,
+                 'mode': 'image', 'path': 'pages/image/jpg/hash/document.webp'}
+        route = {'s': 2, 'm': 'i', 'b': subject.READER_BUCKET, 'p': entry['path']}
+        canonical = {'version': 1, 'kind': 'image-stream-index', 'files': [entry]}
+        api = Metadata({(NEW, 'scan.jpg'): file('scan.jpg', lfs=SHA_B)})
+        def image_merge(before, parts, _kind, _extensions, count):
+            return subject.finalize_image_index.merge(before, parts, count)
+        rows = subject.classify_indexed({key: source}, {key: route}, canonical, [], api,
+                                        extensions={'jpg'}, kind='image-stream-index', route_modes={'i', 'f'},
+                                        merge=image_merge)
+        self.assertEqual(rows[key]['state'], 'content_changed')
+        report = {row['extension']: row for row in subject.summarize(
+            {key: source}, {key: route}, rows, threshold=0, checked_extensions={'jpg'})}['jpg']
+        self.assertEqual(report['source_content_changed'], 1)
+        self.assertTrue(report['all_source_identities_checked'])
+        foreign = {'version': 1, 'kind': 'image-stream-index', 'files': [{**entry, 'key': 'other'}]}
+        bad_shard = (reader_stream_index.shard_for('other', 8) + 1) % 8
+        with self.assertRaisesRegex(ValueError, 'duplicate or foreign'):
+            subject.classify_indexed({key: source}, {key: route}, canonical, [(bad_shard, foreign)], api,
+                                     extensions={'jpg'}, kind='image-stream-index', route_modes={'i', 'f'},
+                                     merge=image_merge)
+
     def test_malformed_lfs_or_wrong_response_never_becomes_content_proof(self):
         records = {item('book')['key']: item('book')}; entry = row('book')
         index = {'version': 1, 'kind': 'ebook-chapter-stream-index', 'files': [entry], 'failures': []}

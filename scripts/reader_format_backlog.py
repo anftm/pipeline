@@ -21,13 +21,14 @@ import httpx
 from huggingface_hub import HfApi, HfFileSystem
 
 try:
-    from . import plan_reader_stream_matrix as matrix
+    from . import plan_reader_stream_matrix as matrix, finalize_image_index
     from . import publish_reader_v3 as publication
     from . import reader_assets, reader_lifecycle, reader_route_plan, reader_stream_index
     from . import search_daily, search_generation, search_publication_pointer, search_snapshot
     from .reader_bucket_store import HubBucketStore, retry_read
 except ImportError:
     import plan_reader_stream_matrix as matrix
+    import finalize_image_index
     import publish_reader_v3 as publication
     import reader_assets
     import reader_lifecycle
@@ -194,7 +195,8 @@ def _matches_route(entry, route):
     return False
 
 
-def classify_indexed(records, routes, canonical, shards, api, *, extensions, kind, route_modes, shard_count=8):
+def classify_indexed(records, routes, canonical, shards, api, *, extensions, kind, route_modes, shard_count=8,
+                     merge=reader_stream_index.merge_shards):
     """Compare exact source bytes without treating repository commits as content."""
     source = [value for value in records.values() if value['extension'] in extensions]
     if not isinstance(canonical, dict) or canonical.get('version') != 1 or canonical.get('kind') != kind:
@@ -218,7 +220,7 @@ def classify_indexed(records, routes, canonical, shards, api, *, extensions, kin
                 raise ValueError('duplicate Reader shard ' + field)
     # Do not mistake an index checkpoint not yet merged into the published
     # sidecar for a completed update; report it separately.
-    merged = reader_stream_index.merge_shards(canonical, shards, kind, set(extensions), shard_count)
+    merged = merge(canonical, shards, kind, set(extensions), shard_count)
     entries = {entry['key']: entry for entry in canonical['files']}
     merged_entries = {entry['key']: entry for entry in merged.get('files', [])}
     # Keep each failure observation separately. Merging an old success with a
@@ -393,6 +395,22 @@ def inspect(*, hub, api, fs, client, threshold=100, observe_search=search_daily.
     epub = classify_epub(records, routes, canonical, shards, api)
     checked = dict(epub)
     checked_extensions = {'epub'}
+    image_root = 'pages/image'
+    image_canonical = matrix.read_json(fs, READER_BUCKET, image_root + '/index-v2.json')
+    image_shards = []
+    for number in range(8):
+        value = matrix.read_json(fs, READER_BUCKET, f'{image_root}/index-v2-{number:02d}.json')
+        if value:
+            image_shards.append((number, value))
+    if not image_canonical or not image_canonical.get('files'):
+        raise ValueError('canonical Reader image index is missing or empty')
+    image_extensions = set(FAMILIES['image'][0])
+    def merge_images(before, parts, _kind, _extensions, count):
+        return finalize_image_index.merge(before, parts, count)
+    checked.update(classify_indexed(records, routes, image_canonical, image_shards, api,
+                                    extensions=image_extensions, kind='image-stream-index',
+                                    route_modes={'i', 'f'}, merge=merge_images))
+    checked_extensions.update(image_extensions)
     web_indexes = {}
     for extension in FAMILIES['web'][0]:
         path = f'documents/web/{extension}/index.json'
@@ -417,6 +435,12 @@ def inspect(*, hub, api, fs, client, threshold=100, observe_search=search_daily.
         latest = matrix.read_json(fs, READER_BUCKET, f'{root}/index-{number:02d}.json')
         if latest != dict(shards).get(number, {}):
             raise ValueError('EPUB shard index changed during backlog inspection')
+    if matrix.read_json(fs, READER_BUCKET, image_root + '/index-v2.json') != image_canonical:
+        raise ValueError('Reader image canonical index changed during backlog inspection')
+    for number in range(8):
+        latest = matrix.read_json(fs, READER_BUCKET, f'{image_root}/index-v2-{number:02d}.json')
+        if latest != dict(image_shards).get(number, {}):
+            raise ValueError('Reader image shard changed during backlog inspection')
     for path, expected in web_indexes.items():
         if matrix.read_json(fs, READER_BUCKET, path) != expected:
             raise ValueError('Web source index changed during backlog inspection')
@@ -435,7 +459,7 @@ def inspect(*, hub, api, fs, client, threshold=100, observe_search=search_daily.
                'reader_generation': reader_pointer['generation'], 'threshold': threshold,
                'reader_consumers': receipts, 'formats': summaries, 'remote_writes': 0,
                'dispatches': 0, 'publication_ready': False, 'external_writers_verified': False,
-               'scope': ('published search and pinned Reader projection; exact source content checked for EPUB and indexed web files; '
+               'scope': ('published search and pinned Reader projection; exact source content checked for EPUB, images and indexed web files; '
                          'HTML dependencies may change independently and are not checked')}
     details = {'version': 1, 'kind': 'reader-epub-content-backlog',
                'search_generation': summary['search_generation'], 'reader_generation': summary['reader_generation'],
