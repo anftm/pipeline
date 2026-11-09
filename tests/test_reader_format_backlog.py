@@ -127,6 +127,22 @@ class ReaderFormatBacklogTests(unittest.TestCase):
                                      extensions={'jpg'}, kind='image-stream-index', route_modes={'i', 'f'},
                                      merge=image_merge)
 
+    def test_media_changed_bytes_are_counted_even_when_route_exists(self):
+        source = item('audio', 'mp3');key = source['key']
+        entry = {'key': key, 'source_revision': OLD, 'source_sha256': SHA_A, 'bucket': subject.READER_BUCKET,
+                 'object': 'media/audio/mp3/hash/audio.mp3', 'profile': 'native-media-cdn-v1'}
+        route = {'s': 2, 'm': 'a', 'b': subject.READER_BUCKET, 'p': entry['object']}
+        canonical = {'version': 1, 'kind': 'media-stream-index', 'files': [entry], 'failures': []}
+        rows = subject.classify_indexed({key: source}, {key: route}, canonical, [],
+                                       Metadata({(NEW, 'audio.mp3'): file('audio.mp3', lfs=SHA_B)}),
+                                       extensions={'mp3'}, kind='media-stream-index', route_modes={'a', 'v', 'f'})
+        self.assertEqual(rows[key]['state'], 'content_changed')
+        report = {r['extension']: r for r in subject.summarize(
+            {key: source}, {key: route}, rows, threshold=0, checked_extensions={'mp3'})}['mp3']
+        self.assertEqual(report['source_content_changed'], 1)
+        self.assertTrue(report['all_source_identities_checked'])
+        self.assertFalse(report['trigger_ready'])
+
     def test_malformed_lfs_or_wrong_response_never_becomes_content_proof(self):
         records = {item('book')['key']: item('book')}; entry = row('book')
         index = {'version': 1, 'kind': 'ebook-chapter-stream-index', 'files': [entry], 'failures': []}

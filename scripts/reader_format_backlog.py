@@ -411,6 +411,27 @@ def inspect(*, hub, api, fs, client, threshold=100, observe_search=search_daily.
                                     extensions=image_extensions, kind='image-stream-index',
                                     route_modes={'i', 'f'}, merge=merge_images))
     checked_extensions.update(image_extensions)
+    media_indexes = {}
+    media_shards = {}
+    for media_kind in ('audio', 'video', 'swf'):
+        media_root = f'media/{media_kind}'
+        index = matrix.read_json(fs, READER_BUCKET, media_root + '/index.json')
+        # A missing required index cannot be mistaken for a completed empty
+        # inventory. Keep those formats unverified rather than auto-triggering.
+        if not index:
+            continue
+        extensions = {ext for ext in FAMILIES['media'][0]
+                      if (reader_assets.bucket_conversion_contract('', '', ext) or (None, None))[1] == media_kind}
+        parts = []
+        for number in range(8):
+            value = matrix.read_json(fs, READER_BUCKET, f'{media_root}/index-{number:02d}.json')
+            if value:
+                parts.append((number, value))
+        checked.update(classify_indexed(records, routes, index, parts, api, extensions=extensions,
+                                        kind='media-stream-index', route_modes={'a', 'v', 'f'}))
+        checked_extensions.update(extensions)
+        media_indexes[media_kind] = index
+        media_shards[media_kind] = dict(parts)
     web_indexes = {}
     for extension in FAMILIES['web'][0]:
         path = f'documents/web/{extension}/index.json'
@@ -441,6 +462,14 @@ def inspect(*, hub, api, fs, client, threshold=100, observe_search=search_daily.
         latest = matrix.read_json(fs, READER_BUCKET, f'{image_root}/index-v2-{number:02d}.json')
         if latest != dict(image_shards).get(number, {}):
             raise ValueError('Reader image shard changed during backlog inspection')
+    for media_kind, expected in media_indexes.items():
+        media_root = f'media/{media_kind}'
+        if matrix.read_json(fs, READER_BUCKET, media_root + '/index.json') != expected:
+            raise ValueError('Reader media canonical index changed during backlog inspection')
+        for number in range(8):
+            latest = matrix.read_json(fs, READER_BUCKET, f'{media_root}/index-{number:02d}.json')
+            if latest != media_shards[media_kind].get(number, {}):
+                raise ValueError('Reader media shard changed during backlog inspection')
     for path, expected in web_indexes.items():
         if matrix.read_json(fs, READER_BUCKET, path) != expected:
             raise ValueError('Web source index changed during backlog inspection')
@@ -459,7 +488,7 @@ def inspect(*, hub, api, fs, client, threshold=100, observe_search=search_daily.
                'reader_generation': reader_pointer['generation'], 'threshold': threshold,
                'reader_consumers': receipts, 'formats': summaries, 'remote_writes': 0,
                'dispatches': 0, 'publication_ready': False, 'external_writers_verified': False,
-               'scope': ('published search and pinned Reader projection; exact source content checked for EPUB, images and indexed web files; '
+               'scope': ('published search and pinned Reader projection; exact source content checked for EPUB, images, media and indexed web files; '
                          'HTML dependencies may change independently and are not checked')}
     details = {'version': 1, 'kind': 'reader-epub-content-backlog',
                'search_generation': summary['search_generation'], 'reader_generation': summary['reader_generation'],
