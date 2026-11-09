@@ -169,7 +169,10 @@ def _verify_plan(plan):
     allowed={'version','kind','operation','shard','search_generation','reader_generation',
              'canonical_index_sha256','shard_index_sha256','source_revisions_sha256','profile','max_attempts',
              'sources','remote_writes','publication_ready','external_writers_verified','plan_sha256'}
-    if (set(plan)!=allowed or type(plan.get('max_attempts')) is not int
+    if (set(plan) not in (allowed, allowed | {'selection_offset'})
+            or ('selection_offset' in plan and (type(plan['selection_offset']) is not int
+                                               or not 0 < plan['selection_offset'] <= 100_000))
+            or type(plan.get('max_attempts')) is not int
             or plan['max_attempts'] not in (1,3) or len(plan['sources'])>plan['max_attempts']
             or any(not isinstance(plan.get(field),str) or not re.fullmatch(r'[0-9a-f]{64}',plan[field])
                    for field in ('search_generation','reader_generation','canonical_index_sha256',
