@@ -44,7 +44,8 @@ class SearchRollbackIntegrationTests(unittest.TestCase):
                  pages_receipt=receipt('pages', A), space_receipt=receipt('space', A),
                  pages_default=default_receipt('pages', A), space_default=default_receipt('space', A),
                  transition='1' * 32)
-        with patch.object(space.deploy, 'runtime', return_value={'sha': REV}), \
+        with patch.object(space, '_verify_candidate_sources'), \
+                patch.object(space.deploy, 'runtime', return_value={'sha': REV}), \
                 patch.object(space.deploy, 'variable', side_effect=lambda _api: (variables['generation'], variables['updated_at'])), \
                 patch.object(space.deploy, 'set_generation', side_effect=update_space), \
                 patch.object(pages, '_main', return_value=REV), \
@@ -58,9 +59,9 @@ class SearchRollbackIntegrationTests(unittest.TestCase):
                 patch.object(pages.receipts, 'observe', side_effect=observe):
             space.prepare(store, api=api, expected_revision=REV, operation_id='2' * 32, created_at=TIME)
             with self.assertRaises(TimeoutError):
-                space.apply_once(store, api=api, operation_id='2' * 32)
+                space.apply_once(store, api=api, operation_id='2' * 32, hub=hub)
             with self.assertRaisesRegex(ValueError, 'already claimed'):
-                space.apply_once(store, api=api, operation_id='2' * 32)
+                space.apply_once(store, api=api, operation_id='2' * 32, hub=hub)
             self.assertEqual(space.reconcile(store, api=api, hub=hub, get=None, operation_id='2' * 32)['status'],
                              'candidate-loaded')
             pages.prepare(store, session=session, api=api, hub=hub, get=None, expected_revision=REV,
@@ -160,12 +161,14 @@ class SearchRollbackIntegrationTests(unittest.TestCase):
                  pages_receipt=receipt('pages', A), space_receipt=receipt('space', A),
                  pages_default=default_receipt('pages', A), space_default=default_receipt('space', A),
                  transition='1' * 32)
-        with patch.object(space.deploy, 'runtime'), \
+        with patch.object(space, '_verify_candidate_sources'), \
+                patch.object(space.adoption, 'validate_generation', return_value={}), \
+                patch.object(space.deploy, 'runtime'), \
                 patch.object(space.deploy, 'variable', return_value=(A, TIME)), \
                 patch.object(space.deploy, 'set_generation', side_effect=TimeoutError('unknown')) as send:
             space.prepare(store, api=api, expected_revision=REV, operation_id='2' * 32, created_at=TIME)
             with self.assertRaises(TimeoutError):
-                space.apply_once(store, api=api, operation_id='2' * 32)
+                space.apply_once(store, api=api, operation_id='2' * 32, hub=Mock())
             result = space.reconcile(store, api=api, hub=Mock(), get=None, operation_id='2' * 32)
             self.assertEqual(result['status'], 'parent-configured')
             with self.assertRaisesRegex(ValueError, 'not ready'):

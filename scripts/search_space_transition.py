@@ -18,12 +18,15 @@ try:
     from . import search_consumer_receipts as receipts
     from . import search_space_deploy as deploy
     from . import search_transition as tx
+    from . import fetch_and_parse as fetch, search_snapshot
     from .reader_bucket_store import HubBucketStore
 except ImportError:
     import search_adopt as adoption
     import search_consumer_receipts as receipts
     import search_space_deploy as deploy
     import search_transition as tx
+    import fetch_and_parse as fetch
+    import search_snapshot
     from reader_bucket_store import HubBucketStore
 
 
@@ -58,6 +61,18 @@ def prepare(store, *, api, expected_revision: str, operation_id: str, created_at
                          rollback=rollback)
 
 
+def _verify_candidate_sources(manifest, expected_digest):
+    import hashlib
+    revisions = manifest.get('source_revisions') if isinstance(manifest, dict) else None
+    if (not isinstance(revisions, dict) or set(revisions) != set(fetch.REPOS)
+            or any(not isinstance(sha, str) or not SHA.fullmatch(sha) for sha in revisions.values())
+            or hashlib.sha256(search_snapshot.canonical(revisions)).hexdigest() != expected_digest):
+        raise ValueError('Space candidate source identity differs from the durable intent')
+    token = os.environ.get('HF_TOKEN', '')
+    if {repo: fetch.get_repo_sha(repo, token) for repo in fetch.REPOS} != revisions:
+        raise ValueError('Space candidate sources changed before update')
+
+
 def apply_once(store, *, api, operation_id: str, hub=None) -> dict:
     current = tx.load(store)
     pending = current.record['pending'] if current is not None else None
@@ -66,16 +81,22 @@ def apply_once(store, *, api, operation_id: str, hub=None) -> dict:
         raise ValueError('no exact pending Space operation')
     if store.read_pointer() != search_parent_bytes(current):
         raise ValueError('search desired pointer changed before Space update')
-    if pending['operation'] == 'rollback':
-        if hub is None:
-            raise ValueError('Space rollback requires a fresh target generation check')
-        adoption.validate_generation(hub, current.record['parent_pointer']['desired'])
+    # A durable intent alone does not prove that the candidate objects or
+    # source dataset revisions stayed current until the mutation. Re-read the
+    # exact intended generation immediately before consuming the write claim.
+    if hub is None:
+        raise ValueError('Space update requires a fresh target generation check')
+    target = current.record['parent_pointer']['desired'] if pending['operation'] == 'rollback' else current.record['candidate']
+    manifest = adoption.validate_generation(hub, target)
+    if pending['operation'] == 'apply':
+        _verify_candidate_sources(manifest, current.record['source_revisions_sha256'])
+    if store.read_pointer() != search_parent_bytes(current):
+        raise ValueError('search desired pointer changed during Space preflight')
     # Consume a single durable write opportunity, even if the process crashes
     # before the API call. Unknown outcomes are reconciled, never replayed.
     current = tx.claim_write(store, current, site='space', operation=pending['operation'], operation_id=operation_id)
     tx.check_write_claim(store, current)
     before = pending['config_before']
-    target = current.record['parent_pointer']['desired'] if pending['operation'] == 'rollback' else current.record['candidate']
     deploy.set_generation(api, expected=before['generation'], expected_updated_at=before['updated_at'],
                           target=target, expected_sha=pending['expected_revision'])
     return {'kind': 'search-space-update-request', 'operation': operation_id, 'variable_written': True,

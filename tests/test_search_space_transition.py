@@ -16,6 +16,13 @@ REV, TIME = 'd' * 40, '2026-11-08T00:00:00Z'
 
 
 class SearchSpaceTransitionTests(SearchTransitionTests):
+    def setUp(self):
+        super().setUp()
+        self.source_check = patch.object(subject, '_verify_candidate_sources')
+        self.source_check.start();self.addCleanup(self.source_check.stop)
+        self.manifest_check = patch.object(subject.adoption, 'validate_generation', return_value={})
+        self.manifest_check.start();self.addCleanup(self.manifest_check.stop)
+
     def prepare_space(self):
         current = self.begin(); api = Mock()
         with patch.object(subject.deploy, 'runtime', return_value={'sha': REV, 'stage': 'RUNNING'}), \
@@ -47,19 +54,19 @@ class SearchSpaceTransitionTests(SearchTransitionTests):
     def test_one_shot_apply_requires_exact_pending_intent(self):
         _current, api = self.prepare_space()
         with patch.object(subject.deploy, 'set_generation') as write:
-            result = subject.apply_once(self.s, api=api, operation_id='3' * 32)
+            result = subject.apply_once(self.s, api=api, operation_id='3' * 32, hub=Mock())
         self.assertTrue(result['variable_written']); self.assertFalse(result['loaded_verified']); write.assert_called_once()
         with patch.object(subject.deploy, 'set_generation') as write:
-            with self.assertRaises(ValueError): subject.apply_once(self.s, api=api, operation_id='4' * 32)
+            with self.assertRaises(ValueError): subject.apply_once(self.s, api=api, operation_id='4' * 32, hub=Mock())
             write.assert_not_called()
 
     def test_lost_space_response_is_never_resent_by_a_second_invocation(self):
         _current, api = self.prepare_space()
         with patch.object(subject.deploy, 'set_generation', side_effect=TimeoutError('response lost')) as write:
             with self.assertRaises(TimeoutError):
-                subject.apply_once(self.s, api=api, operation_id='3' * 32)
+                subject.apply_once(self.s, api=api, operation_id='3' * 32, hub=Mock())
             with self.assertRaisesRegex(ValueError, 'already claimed'):
-                subject.apply_once(self.s, api=api, operation_id='3' * 32)
+                subject.apply_once(self.s, api=api, operation_id='3' * 32, hub=Mock())
         write.assert_called_once()
         with patch.object(subject.deploy, 'variable', return_value=(A, TIME)):
             observed = subject.reconcile(self.s, api=api, hub=Mock(), get=lambda *_: b'', operation_id='3' * 32)
@@ -70,7 +77,7 @@ class SearchSpaceTransitionTests(SearchTransitionTests):
         _current, api = self.prepare_space()
         with patch.object(subject.deploy, 'set_generation', side_effect=TimeoutError('response lost')) as send:
             with self.assertRaises(TimeoutError):
-                subject.apply_once(self.s, api=api, operation_id='3' * 32)
+                subject.apply_once(self.s, api=api, operation_id='3' * 32, hub=Mock())
         api.get_space_runtime.return_value = SimpleNamespace(stage='RUNNING', raw={'sha': REV})
         with patch.object(subject.deploy, 'variable', return_value=(B, TIME)), \
                 patch.object(subject.deploy, 'runtime', return_value={'sha': REV}), \
@@ -93,7 +100,7 @@ class SearchSpaceTransitionTests(SearchTransitionTests):
 
         def run():
             try:
-                return subject.apply_once(self.s, api=api, operation_id='3' * 32)
+                return subject.apply_once(self.s, api=api, operation_id='3' * 32, hub=Mock())
             except Exception as error:
                 return error
 
@@ -110,13 +117,42 @@ class SearchSpaceTransitionTests(SearchTransitionTests):
         with patch.object(subject.tx, 'check_write_claim', side_effect=RuntimeError('crash')), \
                 patch.object(subject.deploy, 'set_generation') as send:
             with self.assertRaisesRegex(RuntimeError, 'crash'):
-                subject.apply_once(self.s, api=api, operation_id='3' * 32)
+                subject.apply_once(self.s, api=api, operation_id='3' * 32, hub=Mock())
             send.assert_not_called()
         with patch.object(subject.deploy, 'set_generation') as send:
             with self.assertRaisesRegex(ValueError, 'already claimed'):
-                subject.apply_once(self.s, api=api, operation_id='3' * 32)
+                subject.apply_once(self.s, api=api, operation_id='3' * 32, hub=Mock())
             send.assert_not_called()
         self.assertIsNotNone(subject.tx.load(self.s).record['pending']['write_claim'])
+
+    def test_candidate_source_drift_or_missing_objects_never_claims_or_writes(self):
+        _current, api = self.prepare_space()
+        with patch.object(subject.adoption, 'validate_generation', side_effect=ValueError('object missing')), \
+                patch.object(subject.deploy, 'set_generation') as write:
+            with self.assertRaisesRegex(ValueError, 'object missing'):
+                subject.apply_once(self.s, api=api, operation_id='3' * 32, hub=Mock())
+            write.assert_not_called()
+        with patch.object(subject, '_verify_candidate_sources', side_effect=ValueError('source changed')), \
+                patch.object(subject.deploy, 'set_generation') as write:
+            with self.assertRaisesRegex(ValueError, 'source changed'):
+                subject.apply_once(self.s, api=api, operation_id='3' * 32, hub=Mock())
+            write.assert_not_called()
+        self.assertIsNone(subject.tx.load(self.s).record['pending']['write_claim'])
+
+    def test_exact_source_revision_digest_and_live_heads_are_required(self):
+        import hashlib
+        self.source_check.stop()
+        revisions = {repo: 'a' * 40 for repo in subject.fetch.REPOS}
+        expected = hashlib.sha256(subject.search_snapshot.canonical(revisions)).hexdigest()
+        with patch.object(subject.fetch, 'get_repo_sha', return_value='a' * 40):
+            self.assertIsNone(subject._verify_candidate_sources({'source_revisions': revisions}, expected))
+            with self.assertRaisesRegex(ValueError, 'durable intent'):
+                subject._verify_candidate_sources({'source_revisions': revisions}, 'f' * 64)
+            with self.assertRaisesRegex(ValueError, 'durable intent'):
+                subject._verify_candidate_sources({'source_revisions': {}}, expected)
+        with patch.object(subject.fetch, 'get_repo_sha', return_value='b' * 40):
+            with self.assertRaisesRegex(ValueError, 'sources changed'):
+                subject._verify_candidate_sources({'source_revisions': revisions}, expected)
 
     def test_pending_parent_or_building_does_not_claim_loaded(self):
         _current, api = self.prepare_space()
