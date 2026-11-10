@@ -36,8 +36,11 @@ def inspect(store,operation,*,hub,api,fs,client,reader):
     if current is None or current.record['state']!='write-intent':
         raise ValueError('EPUB stage has no unresolved write intent')
     plan=current.intent['plan'];preview=current.intent['preview']
-    inspect_plan=planning.inspect_one if plan['max_attempts']==1 else planning.inspect
-    selection={'offset':plan['selection_offset']} if 'selection_offset' in plan else {}
+    if plan.get('selection_mode')=='explicit-source-keys-v1':
+        inspect_plan=planning.inspect_explicit;selection={'source_keys':tuple(row['key'] for row in plan['sources'])}
+    else:
+        inspect_plan=planning.inspect_one if plan['max_attempts']==1 else planning.inspect
+        selection={'offset':plan['selection_offset']} if 'selection_offset' in plan else {}
     if inspect_plan(hub=hub,api=api,fs=fs,client=client,shard=plan['shard'],operation=operation,**selection)!=plan:
         raise ValueError('EPUB source or Reader state changed before recovery inventory')
     actions=preview['actions'];protect_rows=[]

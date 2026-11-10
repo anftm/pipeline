@@ -28,7 +28,7 @@ SHA = re.compile(r'[0-9a-f]{64}\Z')
 MAX_BATCH = 3
 
 
-def create(summary, details, corpus, revisions, canonical, shard_indexes, *, shard, operation, offset=0):
+def create(summary, details, corpus, revisions, canonical, shard_indexes, *, shard, operation, offset=0, source_keys=None):
     if (not isinstance(summary, dict) or summary.get('kind') != 'reader-format-backlog'
             or summary.get('version') != 1 or summary.get('remote_writes') != 0
             or summary.get('publication_ready') is not False or summary.get('external_writers_verified') is not False):
@@ -43,11 +43,18 @@ def create(summary, details, corpus, revisions, canonical, shard_indexes, *, sha
         raise ValueError('one valid shard and a unique operation ID are required')
     if type(offset) is not int or not 0 <= offset <= 100_000:
         raise ValueError('invalid EPUB selection offset')
+    if source_keys is not None and (offset != 0 or not isinstance(source_keys, tuple)
+            or not 1 <= len(source_keys) <= MAX_BATCH
+            or any(not isinstance(key, str) or not key for key in source_keys)
+            or list(source_keys) != sorted(set(source_keys))):
+        raise ValueError('invalid explicit EPUB source selection')
     rows = [item for item in summary.get('formats', []) if isinstance(item, dict) and item.get('extension') == 'epub']
     if (len(rows) != 1 or rows[0].get('all_source_identities_checked') is not True
-            or rows[0].get('threshold_exceeded') is not True
-            or type(summary.get('threshold')) is not int
-            or rows[0].get('definite_backlog', -1) <= summary['threshold']):
+            or type(summary.get('threshold')) is not int or summary['threshold'] < 0
+            or type(rows[0].get('definite_backlog')) is not int
+            or type(rows[0].get('threshold_exceeded')) is not bool
+            or rows[0]['threshold_exceeded'] != (rows[0]['definite_backlog'] > summary['threshold'])
+            or (source_keys is None and not rows[0]['threshold_exceeded'])):
         raise ValueError('EPUB source identities are incomplete')
     if (rows[0].get('recorded_failure_current') != 0 or rows[0].get('pending_shard_checkpoint') != 0):
         raise ValueError('EPUB recovery has unresolved failures or unpublished shard checkpoints')
@@ -119,10 +126,16 @@ def create(summary, details, corpus, revisions, canonical, shard_indexes, *, sha
     # admitted by this staging protocol. Unproven / ordinary-Git missing
     # sources stay counted and are skipped rather than bound to arbitrary
     # downloaded bytes. A later protocol can add independent Git-blob proof.
-    selected = [records[key] for key in sorted(sources)
+    eligible = [key for key in sorted(sources)
                 if builder.shard_for(key, 8) == shard
                 and (sources[key]['state'] == 'content_changed'
-                     or sources[key].get('proof') == 'unmapped-lfs-sha256')][offset:offset + MAX_BATCH]
+                     or sources[key].get('proof') == 'unmapped-lfs-sha256')]
+    if source_keys is not None:
+        if not set(source_keys) <= set(eligible):
+            raise ValueError('explicit EPUB source is no longer an eligible content change')
+        selected = [records[key] for key in source_keys]
+    else:
+        selected = [records[key] for key in eligible[offset:offset + MAX_BATCH]]
     if not selected:
         if offset:
             raise ValueError('EPUB selection offset has no eligible sources')
@@ -146,10 +159,13 @@ def create(summary, details, corpus, revisions, canonical, shard_indexes, *, sha
             'canonical_index_sha256': hashlib.sha256(search_snapshot.canonical(canonical)).hexdigest(),
             'shard_index_sha256': hashlib.sha256(search_snapshot.canonical(shard_indexes[shard])).hexdigest(),
             'source_revisions_sha256': hashlib.sha256(search_snapshot.canonical(revisions)).hexdigest(),
-            'profile': builder.EPUB_PROFILE, 'max_attempts': MAX_BATCH, 'sources': selection,
+            'profile': builder.EPUB_PROFILE, 'max_attempts': len(selection) if source_keys is not None else MAX_BATCH,
+            'sources': selection,
             'remote_writes': 0, 'publication_ready': False, 'external_writers_verified': False}
     if offset:
         body['selection_offset'] = offset
+    if source_keys is not None:
+        body['selection_mode'] = 'explicit-source-keys-v1'
     body['plan_sha256'] = hashlib.sha256(search_snapshot.canonical(body)).hexdigest()
     return body
 
@@ -186,7 +202,7 @@ def bind_unmapped_sources(details, records, api):
     return result
 
 
-def _inspect_selection(*, hub, api, fs, client, shard, selections, threshold=100, start=0, max_batches=12):
+def _inspect_selection(*, hub, api, fs, client, shard, selections, threshold=100, start=0, max_batches=12, source_keys=None):
     """Capture one live snapshot and derive disjoint exact plan chunks."""
     summary, details = backlog.inspect(hub=hub, api=api, fs=fs, client=client, threshold=threshold, scope='epub')
     pointer, _manifest, corpus, revisions, _ = backlog.capture_search(hub)
@@ -216,8 +232,10 @@ def _inspect_selection(*, hub, api, fs, client, shard, selections, threshold=100
         raise ValueError('invalid EPUB batch selections')
     if len({op for _, op in selections}) != len(selections) or len({offset for offset, _ in selections}) != len(selections):
         raise ValueError('EPUB batch selections must have distinct operations and offsets')
+    if source_keys is not None and len(selections) != 1:
+        raise ValueError('explicit EPUB selection needs one operation')
     plans = [create(summary, bound_details, corpus, revisions, canonical, shards, shard=shard,
-                    operation=operation, offset=offset) for offset, operation in selections]
+                    operation=operation, offset=offset, source_keys=source_keys) for offset, operation in selections]
     if len({row['key'] for plan in plans for row in plan['sources']}) != sum(len(p['sources']) for p in plans):
         raise ValueError('EPUB batch selections overlap')
     if hub.read_bytes(backlog.SEARCH_BUCKET, backlog.CURRENT) != pointer:
@@ -249,6 +267,21 @@ def inspect_batches(*, hub, api, fs, client, shard, threshold=100, start=0, max_
         raise ValueError('invalid EPUB batch shard')
     return _inspect_selection(hub=hub, api=api, fs=fs, client=client, shard=shard,
                               selections=selections, threshold=threshold, start=start, max_batches=max_batches)
+
+
+def inspect_explicit(*, hub, api, fs, client, shard, operation, source_keys, threshold=100):
+    """Recheck explicit content identities regardless of the current batch threshold.
+
+    This only builds a fresh read-only plan; it neither stages nor authorizes a
+    publication. Sorted source keys are bound into the plan hash and may not
+    fall back to an offset after earlier candidates are completed.
+    """
+    plan = _inspect_selection(hub=hub, api=api, fs=fs, client=client, shard=shard,
+                              selections=[(0, operation)], threshold=threshold, source_keys=source_keys)[0]
+    body = {**plan, 'max_attempts':len(source_keys)}
+    body.pop('plan_sha256')
+    body['plan_sha256'] = hashlib.sha256(search_snapshot.canonical(body)).hexdigest()
+    return body
 
 
 def inspect_one(*, hub, api, fs, client, shard, operation, threshold=100, offset=0):

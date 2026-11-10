@@ -18,6 +18,20 @@ except ImportError:
     import reader_format_backlog as backlog
 
 
+def revalidate_staging_plan(plan, *, hub, api, fs, client):
+    """Re-read the exact stored selection; an artifact is never fresh proof."""
+    shadow._verify_plan(plan)
+    if plan.get('selection_mode') == 'explicit-source-keys-v1':
+        inspect = planning.inspect_explicit
+        selection = {'source_keys':tuple(row['key'] for row in plan['sources'])}
+    else:
+        inspect = planning.inspect_one if plan['max_attempts'] == 1 else planning.inspect
+        selection = {'offset':plan['selection_offset']} if 'selection_offset' in plan else {}
+    current=inspect(hub=hub,api=api,fs=fs,client=client,shard=plan['shard'],operation=plan['operation'],**selection)
+    if current!=plan:raise ValueError('EPUB source, consumers or checkpoint changed before staging')
+    return None
+
+
 class LivePlanRevalidator:
     def __init__(self, *, hub, api, fs, client):
         self.hub, self.api, self.fs, self.client = hub, api, fs, client
@@ -39,13 +53,7 @@ class LivePlanRevalidator:
 
     def __call__(self, plan, preview):
         self._check_preview(plan, preview)
-        inspect = planning.inspect_one if plan['max_attempts'] == 1 else planning.inspect
-        selection = {'offset': plan['selection_offset']} if 'selection_offset' in plan else {}
-        current = inspect(hub=self.hub, api=self.api, fs=self.fs, client=self.client,
-                          shard=plan['shard'], operation=plan['operation'], **selection)
-        if current != plan:
-            raise ValueError('EPUB source, consumers or checkpoint changed before staging')
-        return None
+        return revalidate_staging_plan(plan,hub=self.hub,api=self.api,fs=self.fs,client=self.client)
 
     def after_write(self, plan, preview, candidate):
         """Read pinned sources and both consumers after the shard CAS."""

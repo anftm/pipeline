@@ -169,11 +169,15 @@ def _verify_plan(plan):
     allowed={'version','kind','operation','shard','search_generation','reader_generation',
              'canonical_index_sha256','shard_index_sha256','source_revisions_sha256','profile','max_attempts',
              'sources','remote_writes','publication_ready','external_writers_verified','plan_sha256'}
-    if (set(plan) not in (allowed, allowed | {'selection_offset'})
+    explicit = plan.get('selection_mode') == 'explicit-source-keys-v1'
+    if (set(plan) not in (allowed, allowed | {'selection_offset'}, allowed | {'selection_mode'})
+            or ('selection_mode' in plan and not explicit)
             or ('selection_offset' in plan and (type(plan['selection_offset']) is not int
                                                or not 0 < plan['selection_offset'] <= 100_000))
             or type(plan.get('max_attempts')) is not int
-            or plan['max_attempts'] not in (1,3) or len(plan['sources'])>plan['max_attempts']
+            or (plan['max_attempts'] not in ((1,2,3) if explicit else (1,3)))
+            or len(plan['sources'])>plan['max_attempts']
+            or (explicit and len(plan['sources'])!=plan['max_attempts'])
             or any(not isinstance(plan.get(field),str) or not re.fullmatch(r'[0-9a-f]{64}',plan[field])
                    for field in ('search_generation','reader_generation','canonical_index_sha256',
                                  'shard_index_sha256','source_revisions_sha256','plan_sha256'))):
@@ -191,6 +195,8 @@ def _verify_plan(plan):
             raise ValueError('invalid EPUB shadow source identity')
         keys.add(row['key'])
     _safe_receipt(plan)
+    if explicit and [row['key'] for row in plan['sources']] != sorted(keys):
+        raise ValueError('explicit EPUB source keys are not in canonical order')
     return plan
 
 
@@ -365,6 +371,76 @@ def staging_plan(plan: dict, report: dict, output: Path) -> dict:
             'index_written': False, 'publication_ready': False, 'external_writers_verified': False}
     body['staging_sha256'] = hashlib.sha256(search_snapshot.canonical(body)).hexdigest()
     return body
+
+def bound_staging_plan(plan: dict, report: dict, output: Path, *, validate_source=None) -> dict:
+    """Verify a protected bundle without retaining its native EPUB in the artifact.
+
+    The report's source identity must already be independently tied to the live
+    immutable source by a caller performing fresh network reads. This helper
+    verifies local converted bytes; it does not itself fetch or publish data.
+    """
+    _verify_plan(plan)
+    if not callable(validate_source):
+        raise ValueError('fresh EPUB source revalidation is required')
+    validate_source(plan)
+    if (not isinstance(report,dict) or report.get('kind')!='reader-epub-local-shadow'
+            or report.get('operation')!=plan['operation'] or report.get('plan_sha256')!=plan['plan_sha256']
+            or report.get('search_generation')!=plan['search_generation']
+            or report.get('reader_generation')!=plan['reader_generation'] or report.get('remote_writes')!=0
+            or report.get('publication_ready') is not False or report.get('external_writers_verified') is not False
+            or not isinstance(report.get('sources'),list) or len(report['sources'])!=len(plan['sources'])):
+        raise ValueError('EPUB shadow report differs from exact plan')
+    if output.is_symlink() or not output.is_dir():raise ValueError('EPUB bundle output must be an ordinary directory')
+    root=output.resolve();actions=[];paths=set()
+    for number,(source,observed) in enumerate(zip(plan['sources'],report['sources'])):
+        if (not isinstance(observed,dict) or observed.get('key')!=source['key']
+                or observed.get('source_revision')!=source['source_revision']
+                or observed.get('previous_manifest')!=source['previous_manifest']):
+            raise ValueError('EPUB shadow source differs from plan')
+        identity=observed.get('source')
+        if (not isinstance(identity,dict) or set(identity)!={'sha256','git_blob','bytes'}
+                or not isinstance(identity['sha256'],str) or not re.fullmatch(r'[0-9a-f]{64}',identity['sha256'])
+                or not isinstance(identity['git_blob'],str) or not re.fullmatch(r'[0-9a-f]{40}',identity['git_blob'])
+                or type(identity['bytes']) is not int or not 0<identity['bytes']<=MAX_SOURCE):
+            raise ValueError('invalid EPUB source byte identity')
+        if source['reason']=='content_changed':
+            if identity['sha256']==source['previous_source_sha256']:
+                raise ValueError('EPUB source was not actually changed')
+            if source['proof']=='current-lfs-sha256' and identity['sha256']!=source['current_source_sha256']:
+                raise ValueError('EPUB source differs from pinned LFS proof')
+            if source['proof']=='exact-revision-git-blobs' and identity['git_blob']!=source['current_git_blob']:
+                raise ValueError('EPUB source differs from pinned Git proof')
+        elif identity['sha256']!=source['current_source_sha256']:
+            raise ValueError('unmapped EPUB source differs from pinned LFS proof')
+        work=root/str(number);bundle=work/'bundle'
+        if work.is_symlink() or not work.is_dir() or bundle.is_symlink() or not bundle.is_dir():
+            raise ValueError('EPUB bundle directory is invalid')
+        manifest_path=bundle/'chapter-manifest.json'
+        if manifest_path.is_symlink() or not manifest_path.is_file() or manifest_path.stat().st_size>16*1024*1024:
+            raise ValueError('EPUB manifest is missing or oversized')
+        manifest=json.loads(manifest_path.read_bytes());files,version=_bundle_index(bundle,manifest)
+        if (files!=observed.get('files') or version!=observed.get('bundle_version')
+                or len(manifest['chapters'])!=observed.get('chapter_count')):
+            raise ValueError('EPUB bundle changed after conversion')
+        remote_root=f"chapters/ebook/epub/{identity['sha256']}/{version}"
+        if not reader_lifecycle.valid_processing_root(reader_assets.READER_ASSETS_BUCKET,remote_root):
+            raise ValueError('EPUB candidate has invalid processing root')
+        protection=f"reader-index/processing/epub-exact-{plan['operation']}-{number:02d}.json";uploads=[]
+        for row in files:
+            remote=remote_root+'/'+row['path']
+            if remote in paths:raise ValueError('EPUB staging plan has duplicate remote objects')
+            paths.add(remote);uploads.append({**row,'remote':remote})
+        actions.append({'key':source['key'],'source_revision':source['source_revision'],
+                        'source_sha256':identity['sha256'],'previous_manifest':source['previous_manifest'],
+                        'root':remote_root,'protection_path':protection,'files':uploads})
+    body={'version':1,'kind':'reader-epub-immutable-staging-preview','operation':plan['operation'],
+          'plan_sha256':plan['plan_sha256'],'search_generation':plan['search_generation'],
+          'reader_generation':plan['reader_generation'],'actions':actions,'remote_writes':0,
+          'index_written':False,'publication_ready':False,'external_writers_verified':False}
+    body['staging_sha256']=hashlib.sha256(search_snapshot.canonical(body)).hexdigest()
+    validate_source(plan)
+    return body
+
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)

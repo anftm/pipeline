@@ -32,6 +32,18 @@ class LiveRevalidationTests(unittest.TestCase):
             self.assertIsNone(self.subject(self.plan,self.preview))
         inspect.assert_called_once();full.assert_not_called()
 
+    def test_explicit_source_mode_rechecks_exact_keys_not_offset(self):
+        self.plan['selection_mode']='explicit-source-keys-v1';self.plan['max_attempts']=1
+        self.plan['plan_sha256']=hashlib.sha256(search_snapshot.canonical({k:v for k,v in self.plan.items() if k!='plan_sha256'})).hexdigest()
+        self.preview=shadow.staging_plan(self.plan,{**self.report,'plan_sha256':self.plan['plan_sha256']},self.root)
+        with patch.object(subject.planning,'inspect_explicit',return_value=self.plan) as explicit, \
+                patch.object(subject.planning,'inspect_one') as positional:
+            self.assertIsNone(self.subject(self.plan,self.preview))
+        self.assertEqual(explicit.call_args.kwargs['source_keys'],(self.plan['sources'][0]['key'],))
+        positional.assert_not_called()
+        with patch.object(subject.planning,'inspect_explicit',return_value={}),self.assertRaisesRegex(ValueError,'source, consumers or checkpoint changed'):
+            self.subject(self.plan,self.preview)
+
     def test_live_plan_or_preview_drift_fails_closed(self):
         for changed in ({**self.plan,'reader_generation':'f'*64},{**self.plan,'sources':[]}):
             with self.subTest(changed=changed),patch.object(subject.planning,'inspect',return_value=changed):

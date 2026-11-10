@@ -128,6 +128,53 @@ class EpubPlanTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'invalid unmapped EPUB LFS proof'):
             self.make(values)
 
+    def test_explicit_source_selection_survives_backlog_below_threshold(self):
+        values=list(copy.deepcopy(data()));summary,details,corpus,revisions,canonical,shards,shard=values
+        summary['threshold']=100;summary['formats'][0]['threshold_exceeded']=False
+        key=details['rows'][0]['key']
+        with self.assertRaisesRegex(ValueError,'source identities are incomplete'):
+            subject.create(*values[:6],shard=shard,operation='f'*32)
+        chosen=subject.create(*values[:6],shard=shard,operation='f'*32,source_keys=(key,))
+        self.assertEqual(chosen['sources'][0]['key'],key)
+        self.assertEqual(chosen['selection_mode'],'explicit-source-keys-v1')
+        from scripts import reader_epub_shadow
+        reader_epub_shadow._verify_plan(chosen)
+        with self.assertRaisesRegex(ValueError,'no longer an eligible'):
+            subject.create(*values[:6],shard=shard,operation='f'*32,source_keys=(REPO+'\0other.epub',))
+        for keys in ((),(key,key),('z',key),[key]):
+            with self.subTest(keys=keys),self.assertRaisesRegex(ValueError,'explicit EPUB source selection'):
+                subject.create(*values[:6],shard=shard,operation='f'*32,source_keys=keys)
+        summary['formats'][0]['all_source_identities_checked']=False
+        with self.assertRaisesRegex(ValueError,'source identities are incomplete'):
+            subject.create(*values[:6],shard=shard,operation='f'*32,source_keys=(key,))
+
+    def test_second_one_book_replans_by_key_when_only_one_update_remains(self):
+        from tests.test_reader_epub_batches import sample_plans
+        summary,details,corpus,revisions,canonical,shards,shard=sample_plans()
+        keys=sorted(row['key'] for row in details['rows']);target=keys[-1]
+        first=subject.create(summary,details,corpus,revisions,canonical,shards,shard=shard,operation='f'*32,source_keys=(target,))
+        details['rows']=[row for row in details['rows'] if row['key']==target]
+        summary['threshold']=100;summary['formats'][0].update(source_content_changed=1,definite_backlog=1,threshold_exceeded=False)
+        canonical['files'][0]['manifest']='already-published-a-different-row'
+        later=subject.create(summary,details,corpus,revisions,canonical,shards,shard=shard,operation='f'*32,source_keys=(target,))
+        self.assertEqual(first['sources'],later['sources'])
+        self.assertNotEqual(first['canonical_index_sha256'],later['canonical_index_sha256'])
+        self.assertNotEqual(first['plan_sha256'],later['plan_sha256'])
+
+    def test_explicit_selection_does_not_move_when_other_rows_disappear(self):
+        from tests.test_reader_epub_batches import sample_plans
+        summary,details,corpus,revisions,canonical,shards,shard=sample_plans()
+        key=sorted(row['key'] for row in details['rows'])[4]
+        original=subject.create(summary,details,corpus,revisions,canonical,shards,shard=shard,operation='f'*32,source_keys=(key,))
+        removed=sorted(row['key'] for row in details['rows'])[0]
+        details['rows']=[r for r in details['rows'] if r['key']!=removed]
+        summary['formats'][0]['source_content_changed']-=1;summary['formats'][0]['definite_backlog']-=1
+        # Simulate an already-current source by retaining it in the corpus and
+        # canonical index but excluding it from the definite backlog details.
+        later=subject.create(summary,details,corpus,revisions,canonical,shards,shard=shard,operation='f'*32,source_keys=(key,))
+        self.assertEqual(original['sources'],later['sources'])
+        self.assertEqual(original['selection_mode'],later['selection_mode'])
+
     def test_workflow_is_explicitly_readonly_and_bounded(self):
         import yaml
         from pathlib import Path

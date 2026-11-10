@@ -84,8 +84,11 @@ def inspect(store,operation,*,hub,api,fs,client,reader):
         from . import reader_epub_plan as planning
     except ImportError:
         import reader_epub_plan as planning
-    inspect=planning.inspect_one if plan['max_attempts']==1 else planning.inspect
-    selection={'offset':plan['selection_offset']} if 'selection_offset' in plan else {}
+    if plan.get('selection_mode')=='explicit-source-keys-v1':
+        inspect=planning.inspect_explicit;selection={'source_keys':tuple(row['key'] for row in plan['sources'])}
+    else:
+        inspect=planning.inspect_one if plan['max_attempts']==1 else planning.inspect
+        selection={'offset':plan['selection_offset']} if 'selection_offset' in plan else {}
     proof=inspect(hub=hub,api=api,fs=fs,client=client,shard=plan['shard'],operation=operation,**selection)
     if proof!=plan:
         raise ValueError('fresh EPUB backlog proof differs from durable plan')
