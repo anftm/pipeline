@@ -48,7 +48,14 @@ class LivePlanRevalidator:
         return None
 
     def after_write(self, plan, preview, candidate):
-        """Read the pinned sources and both consumers with the candidate shard in place."""
+        """Read pinned sources and both consumers after the shard CAS."""
+        return self._after_index_write(plan,preview,candidate,canonical_candidate=None)
+
+    def after_canonical(self, plan, preview, canonical_candidate, shard_candidate):
+        """Check the actual canonical candidate while both sites retain old routes."""
+        return self._after_index_write(plan,preview,shard_candidate,canonical_candidate=canonical_candidate)
+
+    def _after_index_write(self, plan, preview, candidate, *, canonical_candidate):
         self._check_preview(plan,preview)
         raw_pointer, manifest_raw, corpus, revisions, _ = backlog.capture_search(self.hub)
         pointer=backlog.search_publication_pointer.decode_pointer(raw_pointer)
@@ -64,8 +71,11 @@ class LivePlanRevalidator:
         shard_path=f"chapters/ebook/epub/index-{plan['shard']:02d}.json"
         canonical=backlog.matrix.read_json(self.fs,backlog.READER_BUCKET,canonical_path)
         shard=backlog.matrix.read_json(self.fs,backlog.READER_BUCKET,shard_path)
-        if (hashlib.sha256(search_snapshot.canonical(canonical)).hexdigest()!=plan['canonical_index_sha256']
-                or shard!=candidate or candidate.get('checkpoint_operation')!=plan['operation']):
+        if (shard!=candidate or candidate.get('checkpoint_operation')!=plan['operation']
+                or (canonical_candidate is None
+                    and hashlib.sha256(search_snapshot.canonical(canonical)).hexdigest()!=plan['canonical_index_sha256'])
+                or (canonical_candidate is not None
+                    and (canonical!=canonical_candidate or canonical.get('checkpoint_operation')!=plan['operation']))):
             raise ValueError('EPUB canonical or candidate shard differs after write')
         old={row['key']:row for row in canonical.get('files',[])}
         changed={row['key']:row for row in candidate.get('files',[])}
@@ -77,16 +87,26 @@ class LivePlanRevalidator:
                     or row.get('source_sha256')!=action['source_sha256']
                     or row.get('source_revision')!=source['source_revision']):
                 raise ValueError('EPUB candidate row differs from staged content')
-            if (previous is None)!=(source['previous_manifest'] is None):
-                raise ValueError('EPUB canonical source changed after shard write')
-            if previous is not None:
-                if (previous.get('manifest')!=source['previous_manifest']
-                        or previous.get('source_revision')!=source['previous_revision']
-                        or previous.get('source_sha256')!=source['previous_source_sha256']
-                        or not backlog._matches_route(previous,routes.get(source['key']))):
-                    raise ValueError('EPUB old route or source changed after shard write')
-            elif source['key'] in routes:
-                raise ValueError('new EPUB acquired a Reader route during staging')
+            if canonical_candidate is not None:
+                if previous!=row:
+                    raise ValueError('EPUB canonical selected row differs from observed shard')
+                if source['previous_manifest'] is not None:
+                    old_route={'bucket':backlog.READER_BUCKET,'manifest':source['previous_manifest']}
+                    if not backlog._matches_route(old_route,routes.get(source['key'])):
+                        raise ValueError('EPUB old Reader route changed after canonical write')
+                elif source['key'] in routes:
+                    raise ValueError('new EPUB acquired a Reader route during staging')
+            else:
+                if (previous is None)!=(source['previous_manifest'] is None):
+                    raise ValueError('EPUB canonical source changed after shard write')
+                if previous is not None:
+                    if (previous.get('manifest')!=source['previous_manifest']
+                            or previous.get('source_revision')!=source['previous_revision']
+                            or previous.get('source_sha256')!=source['previous_source_sha256']
+                            or not backlog._matches_route(previous,routes.get(source['key']))):
+                        raise ValueError('EPUB old route or source changed after shard write')
+                elif source['key'] in routes:
+                    raise ValueError('new EPUB acquired a Reader route during staging')
             requests.add((source['repo'],source['source_revision'],source['path']))
             if source.get('proof')=='exact-revision-git-blobs':
                 requests.add((source['repo'],source['previous_revision'],source['path']))
