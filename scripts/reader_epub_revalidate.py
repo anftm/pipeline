@@ -32,6 +32,92 @@ def revalidate_staging_plan(plan, *, hub, api, fs, client):
     return None
 
 
+class LiveStagingRevalidator:
+    """Recompute the complete EPUB admission gate before each member write.
+
+    Reuses one Search/Reader capture, but *does not* reduce the old planner's
+    all-source identity, failure, or all-eight-shard checks to selected sources.
+    An earlier targeted-only experiment was unsafe for unrelated pending work.
+    Like the original read-only checks, this does not fence external writers,
+    delayed requests, cross-object races or ABA.
+    """
+    def __init__(self, *, hub, api, fs, client):
+        self.hub, self.api, self.fs, self.client = hub, api, fs, client
+
+    def __call__(self, plan, preview):
+        LivePlanRevalidator._check_preview(plan, preview)
+        if plan.get('selection_mode') != 'explicit-source-keys-v1':
+            raise ValueError('EPUB member revalidation requires explicit source identity')
+        try:
+            from . import reader_epub_stage_journal as journal
+        except ImportError:
+            import reader_epub_stage_journal as journal
+        journal._intent(search_snapshot.canonical({
+            'version': 1, 'kind': 'reader-epub-staging-intent',
+            'operation': plan['operation'], 'created_at': '2000-01-01T00:00:00Z',
+            'plan': plan, 'preview': preview,
+        }))
+        raw_pointer, manifest_raw, corpus, revisions, _ = backlog.capture_search(self.hub)
+        search_generation = backlog.search_publication_pointer.decode_pointer(raw_pointer)['desired']
+        records = backlog.source_records(corpus, revisions)
+        for repo, expected in sorted(revisions.items()):
+            info = backlog.retry_read(lambda: self.api.repo_info(repo, repo_type='dataset', timeout=30))
+            if getattr(info, 'sha', None) != expected:
+                raise ValueError('dataset head changed before EPUB member staging')
+        reader_pointer, catalog = backlog.publication.current(self.hub)
+        if reader_pointer is None or not catalog.get('base_sidecar'):
+            raise ValueError('Reader pinned projection unavailable before EPUB member staging')
+        base = backlog.publication.pinned_base(self.hub, catalog, {})
+        routes = backlog.publication.project_sidecar(base, catalog)['f']
+        for surface in ('pages', 'hf'):
+            receipt = backlog.publication.observe_consumer(self.hub, surface, self.client)
+            if receipt.get('generation') != reader_pointer['generation'] or receipt.get('projection_verified') is not True:
+                raise ValueError('Reader consumer changed before EPUB member staging')
+        root = 'chapters/ebook/epub'
+        canonical = backlog.matrix.read_json(self.fs, backlog.READER_BUCKET, root + '/index.json')
+        shards = {number: backlog.matrix.read_json(self.fs, backlog.READER_BUCKET, f'{root}/index-{number:02d}.json')
+                  for number in range(8)}
+        # In particular, do not ignore an unrelated current failure, a pending
+        # shard checkpoint, or an unknown/mismatched source elsewhere in EPUB.
+        checked = backlog.classify_epub(records, routes, canonical,
+                                         [(number, index) for number, index in shards.items() if index], self.api)
+        formats = backlog.summarize(records, routes, checked, threshold=100, checked_extensions={'epub'})
+        summary = {'version': 1, 'kind': 'reader-format-backlog', 'search_generation': search_generation,
+                   'reader_generation': reader_pointer['generation'], 'threshold': 100, 'formats': formats,
+                   'remote_writes': 0, 'publication_ready': False, 'external_writers_verified': False}
+        details = {'version': 1, 'kind': 'reader-epub-content-backlog', 'search_generation': search_generation,
+                   'reader_generation': reader_pointer['generation'],
+                   'rows': [row for row in sorted(checked.values(), key=lambda item: item['key'])
+                            if row['state'] in {'content_changed', 'not_mapped', 'source_identity_unknown', 'route_or_index_mismatch'}
+                            or row.get('pending_shard_checkpoint') or row.get('recorded_failure')],
+                   'remote_writes': 0, 'publication_ready': False}
+        details = planning.bind_unmapped_sources(details, records, self.api)
+        fresh = planning.create(summary, details, corpus, revisions, canonical, shards, shard=plan['shard'],
+                                operation=plan['operation'], source_keys=tuple(item['key'] for item in plan['sources']))
+        if fresh != plan:
+            raise ValueError('EPUB source, consumers or checkpoint changed before member staging')
+        if (self.hub.read_bytes(backlog.SEARCH_BUCKET, backlog.CURRENT) != raw_pointer
+                or self.hub.read_bytes(backlog.SEARCH_BUCKET, f'generations/{search_generation}/manifest.json') != manifest_raw
+                or backlog.publication.current(self.hub)[0] != reader_pointer
+                or backlog.matrix.read_json(self.fs, backlog.READER_BUCKET, root + '/index.json') != canonical):
+            raise ValueError('search or Reader roots changed during EPUB member check')
+        for number, before in shards.items():
+            if backlog.matrix.read_json(self.fs, backlog.READER_BUCKET, f'{root}/index-{number:02d}.json') != before:
+                raise ValueError('EPUB shard changed during member check')
+        for repo, expected in sorted(revisions.items()):
+            info = backlog.retry_read(lambda: self.api.repo_info(repo, repo_type='dataset', timeout=30))
+            if getattr(info, 'sha', None) != expected:
+                raise ValueError('dataset head changed during EPUB member staging')
+        for surface in ('pages', 'hf'):
+            receipt = backlog.publication.observe_consumer(self.hub, surface, self.client)
+            if receipt.get('generation') != reader_pointer['generation'] or receipt.get('projection_verified') is not True:
+                raise ValueError('Reader consumer changed during EPUB member staging')
+        if (backlog.publication.current(self.hub)[0] != reader_pointer
+                or self.hub.read_bytes(backlog.SEARCH_BUCKET, backlog.CURRENT) != raw_pointer):
+            raise ValueError('search or Reader pointer changed at final member acceptance')
+        return None
+
+
 class LivePlanRevalidator:
     def __init__(self, *, hub, api, fs, client):
         self.hub, self.api, self.fs, self.client = hub, api, fs, client
