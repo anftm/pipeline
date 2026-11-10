@@ -33,12 +33,15 @@ def _write(path, value):
         json.dump(value,stream,ensure_ascii=False,sort_keys=True,indent=2);stream.write('\n')
 
 
-def run(extension, *, hub, api, fs, client, start, window, output, token=None, fetch=None, convert=None, only=None):
+def run(extension, *, hub, api, fs, client, start, window, output, token=None, fetch=None, convert=None,
+        only=None, include_content_aliases=False):
     if output.exists() or output.is_symlink():raise ValueError('unmapped conversion output already exists')
     if extension=='mp3' and not shutil.which('ffprobe'):
         raise ValueError('MP3 conversion requires ffprobe')
-    plan=conversion.inspect_unmapped(extension,hub=hub,api=api,fs=fs,client=client,
-                                     start=start,window=window,limit=100)
+    if type(include_content_aliases) is not bool:raise ValueError('invalid content alias mode')
+    selection={'start':start,'window':window,'limit':100}
+    if include_content_aliases:selection['include_content_aliases']=True
+    plan=conversion.inspect_unmapped(extension,hub=hub,api=api,fs=fs,client=client,**selection)
     if not plan.get('sources') or len(plan['sources'])>100:raise ValueError('unmapped conversion plan out of bounds')
     if only is not None and (not isinstance(only, frozenset) or not only
                              or any(type(i) is not int or not 0<=i<len(plan['sources']) for i in only)):
@@ -63,8 +66,7 @@ def run(extension, *, hub, api, fs, client, start, window, output, token=None, f
                          'output':None,'error_type':type(error).__name__})
     error_type=None
     try:
-        later=conversion.inspect_unmapped(extension,hub=hub,api=api,fs=fs,client=client,
-                                           start=start,window=window,limit=100)
+        later=conversion.inspect_unmapped(extension,hub=hub,api=api,fs=fs,client=client,**selection)
         verified=later==plan
     except Exception as error:
         verified=False;error_type=type(error).__name__
@@ -98,7 +100,12 @@ def reconcile_partial(output, *, hub, api, fs, client, destination):
     selection=plan.get('selection_window')
     if not isinstance(selection,dict) or set(selection)!={'start','window','limit'} or selection['limit']!=100:
         raise ValueError('partial unmapped selection window is invalid')
-    later=conversion.inspect_unmapped(plan['extension'],hub=hub,api=api,fs=fs,client=client,**selection)
+    mode=plan.get('selection_mode')
+    if mode not in (None,'source-keys-include-content-aliases-v1'):
+        raise ValueError('unknown unmapped selection mode')
+    selection_args=dict(selection)
+    if mode is not None:selection_args['include_content_aliases']=True
+    later=conversion.inspect_unmapped(plan['extension'],hub=hub,api=api,fs=fs,client=client,**selection_args)
     if later!=plan:raise ValueError('unmapped source, Reader or index changed since partial conversion')
     rows=[]
     for number,source in enumerate(plan['sources']):
@@ -167,6 +174,8 @@ def main(argv=None):
     parser.add_argument('--start',type=int,default=0);parser.add_argument('--window',type=int,default=100)
     parser.add_argument('--output',type=Path,required=True);parser.add_argument('--export',type=Path,required=True)
     parser.add_argument('--only',default='',help='comma-separated indexes within the selected window')
+    parser.add_argument('--include-content-aliases',action='store_true',
+                        help='select distinct source keys even when source bytes match')
     args=parser.parse_args(argv);token=os.environ.get('HF_TOKEN')
     if args.only and (not all(x.isascii() and x.isdigit() for x in args.only.split(','))
                       or len(set(args.only.split(',')))!=len(args.only.split(','))):
@@ -174,7 +183,8 @@ def main(argv=None):
     only=frozenset(int(x) for x in args.only.split(',')) if args.only else None
     with httpx.Client(timeout=90,follow_redirects=True) as client:
         result=run(args.extension,hub=HubBucketStore(),api=HfApi(token=token),fs=HfFileSystem(token=token),
-                   client=client,start=args.start,window=args.window,output=args.output,token=token,only=only)
+                   client=client,start=args.start,window=args.window,output=args.output,token=token,only=only,
+                   include_content_aliases=args.include_content_aliases)
     printed=export(args.output,args.export);print(json.dumps(printed,sort_keys=True),flush=True)
     return 1 if result['failed_sources'] else 0
 

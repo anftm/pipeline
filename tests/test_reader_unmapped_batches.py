@@ -101,6 +101,39 @@ class UnmappedBatchTests(unittest.TestCase):
         with patch.object(conversion,'inspect_unmapped',return_value={}),self.assertRaisesRegex(ValueError,'changed since'):
             subject.reconcile_partial(self.out,hub=Mock(),api=Mock(),fs=Mock(),client=Mock(),destination=self.root/'bad.json')
 
+    def test_alias_mode_revalidates_same_mode_and_exports_each_distinct_source(self):
+        second={**self.row,'key':self.row['repo']+'\0second.jpg','path':'second.jpg'}
+        self.plan['sources'].append(second)
+        self.plan['selection_mode']='source-keys-include-content-aliases-v1'
+        with patch.object(conversion,'inspect_unmapped',side_effect=[self.plan,self.plan]) as inspect:
+            result=subject.run('jpg',hub=Mock(),api=Mock(),fs=Mock(),client=Mock(),start=0,window=100,
+                               output=self.out,include_content_aliases=True,
+                               fetch=lambda _u,p,_t:p.write_bytes(self.raw))
+        self.assertEqual(result['converted_sources'],2)
+        self.assertEqual([r['key'] for r in result['rows']],[self.row['key'],second['key']])
+        self.assertEqual([call.kwargs['include_content_aliases'] for call in inspect.call_args_list],[True,True])
+        self.assertEqual(subject.export(self.out,self.dest)['converted_sources'],2)
+        self.assertEqual((self.dest/'reader-converted/item-000/document.webp').read_bytes(),
+                         (self.dest/'reader-converted/item-001/document.webp').read_bytes())
+        receipt=self.root/'alias-recovery.json'
+        with patch.object(conversion,'inspect_unmapped',return_value=self.plan) as inspect:
+            recovered=subject.reconcile_partial(self.out,hub=Mock(),api=Mock(),fs=Mock(),client=Mock(),destination=receipt)
+        self.assertTrue(inspect.call_args.kwargs['include_content_aliases'])
+        self.assertEqual(recovered['converted_sources'],2)
+
+    def test_alias_snapshot_cannot_silently_downgrade_or_accept_unknown_mode(self):
+        self.plan['selection_mode']='source-keys-include-content-aliases-v1'
+        downgraded={k:v for k,v in self.plan.items() if k!='selection_mode'}
+        with patch.object(conversion,'inspect_unmapped',side_effect=[self.plan,downgraded]):
+            with self.assertRaisesRegex(ValueError,'changed during'):
+                subject.run('jpg',hub=Mock(),api=Mock(),fs=Mock(),client=Mock(),start=0,window=100,
+                            output=self.out,include_content_aliases=True,fetch=lambda _u,p,_t:p.write_bytes(self.raw))
+        self.assertFalse(self.dest.exists())
+        self.plan['selection_mode']='unexpected'
+        (self.out/'plan.json').write_text(json.dumps(self.plan),encoding='utf8')
+        with self.assertRaisesRegex(ValueError,'unknown unmapped selection mode'):
+            subject.reconcile_partial(self.out,hub=Mock(),api=Mock(),fs=Mock(),client=Mock(),destination=self.root/'bad.json')
+
     def test_snapshot_drift_and_tampered_file_never_export(self):
         changed={**self.plan,'reader_generation':'c'*64}
         with patch.object(conversion,'inspect_unmapped',side_effect=[self.plan,changed]):

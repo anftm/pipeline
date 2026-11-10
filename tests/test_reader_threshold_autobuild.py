@@ -83,6 +83,25 @@ class ThresholdBuildTests(unittest.TestCase):
             self.assertEqual(len(subject.select_unmapped('jpg',records,{},canonical,shards,Mock())),1)
         shards.pop(0)
         with self.assertRaisesRegex(ValueError,'all eight'):subject.select_unmapped('jpg',records,{},canonical,shards,Mock())
+    def test_explicit_alias_mode_keeps_distinct_source_keys_not_just_content(self):
+        records={source(i)['key']:source(i) for i in range(4)}
+        canonical={'version':1,'kind':'image-stream-index','files':[]}
+        shards={i:{} for i in range(8)}
+        def metadata(_api,requests):
+            return {(repo,revision,path):SimpleNamespace(path=path,size=5,lfs={'sha256':'a'*64},blob_id=None)
+                    for repo,revision,path in requests}
+        with patch.object(subject.backlog,'_metadata',side_effect=metadata):
+            legacy=subject.select_unmapped('jpg',records,{},canonical,shards,Mock(),start=0,window=4,limit=4)
+            aliases=subject.select_unmapped('jpg',records,{},canonical,shards,Mock(),start=0,window=4,limit=4,
+                                            include_content_aliases=True)
+            bounded=subject.select_unmapped('jpg',records,{},canonical,shards,Mock(),start=0,window=4,limit=2,
+                                            include_content_aliases=True)
+        self.assertEqual(len(legacy),1);self.assertEqual(len(aliases),4);self.assertEqual(len(bounded),2)
+        self.assertEqual({row['key'] for row in aliases},set(records))
+        self.assertEqual({row['source_identity'] for row in aliases},{'a'*64})
+        with self.assertRaisesRegex(ValueError,'must be explicit'):
+            subject.select_unmapped('jpg',records,{},canonical,shards,Mock(),include_content_aliases='yes')
+
     def test_real_local_jpg_conversion_checks_source_and_produces_webp(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);buf=io.BytesIO();Image.new('RGB',(16,9),'blue').save(buf,'JPEG');raw=buf.getvalue()

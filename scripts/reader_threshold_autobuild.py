@@ -133,10 +133,13 @@ def _file_info(value):
             'identity': lfs or blob}
 
 
-def select_unmapped(extension, records, routes, canonical, shards, api, *, start=0, window=100, limit=MAX_BATCH):
+def select_unmapped(extension, records, routes, canonical, shards, api, *, start=0, window=100, limit=MAX_BATCH,
+                    include_content_aliases=False):
     """Pick exact missing JPG/MP3 sources; ignore old revision churn."""
     if extension not in {'jpg', 'mp3'}:
         raise ValueError('unsupported missing-only conversion format')
+    if type(include_content_aliases) is not bool:
+        raise ValueError('content alias selection must be explicit')
     if (type(start) is not int or not 0 <= start <= 1_000_000
             or type(window) is not int or not 1 <= window <= 100
             or type(limit) is not int or not 1 <= limit <= 100):
@@ -181,7 +184,11 @@ def select_unmapped(extension, records, routes, canonical, shards, api, *, start
         if info is None or info['path'] != item['path']:
             continue
         identity = (info['proof'], info['identity'])
-        if identity in object_keys:
+        # A content digest may be shared, but it does not establish that all
+        # distinct source paths already have Reader routes. The legacy monitor
+        # keeps its small content-deduplicated shadow; explicit bounded batch
+        # callers can instead retain a separate receipt for every source key.
+        if identity in object_keys and not include_content_aliases:
             continue
         object_keys.add(identity)
         selected.append({**item, 'source_bytes': info['bytes'], 'source_proof': info['proof'],
@@ -277,7 +284,8 @@ def _index_paths(extension):
     raise ValueError('unsupported missing-only format')
 
 
-def inspect_unmapped(extension, *, hub, api, fs, client, start=0, window=100, limit=MAX_BATCH):
+def inspect_unmapped(extension, *, hub, api, fs, client, start=0, window=100, limit=MAX_BATCH,
+                     include_content_aliases=False):
     pointer, catalog = backlog.publication.current(hub)
     if not pointer or not catalog.get('base_sidecar'):
         raise ValueError('Reader v3 pointer or pinned base is missing')
@@ -293,6 +301,10 @@ def inspect_unmapped(extension, *, hub, api, fs, client, start=0, window=100, li
     canonical = backlog.matrix.read_json(fs, backlog.READER_BUCKET, canonical_path)
     shards = {i: backlog.matrix.read_json(fs, backlog.READER_BUCKET, shard_template.format(number=i)) for i in range(8)}
     selection_args = {} if (start, window, limit) == (0, 100, MAX_BATCH) else {'start':start, 'window':window, 'limit':limit}
+    if type(include_content_aliases) is not bool:
+        raise ValueError('content alias selection must be explicit')
+    if include_content_aliases:
+        selection_args = {'start':start, 'window':window, 'limit':limit, 'include_content_aliases':True}
     selected = select_unmapped(extension, records, routes, canonical, shards, api, **selection_args)
     for repo, expected in sorted(revisions.items()):
         info = backlog.retry_read(lambda: api.repo_info(repo, repo_type='dataset', timeout=30))
@@ -317,6 +329,8 @@ def inspect_unmapped(extension, *, hub, api, fs, client, start=0, window=100, li
               'sources': selected, 'remote_writes': 0, 'publication_ready': False}
     if selection_args:
         result['selection_window'] = {'start':start, 'window':window, 'limit':limit}
+    if include_content_aliases:
+        result['selection_mode'] = 'source-keys-include-content-aliases-v1'
     return result
 
 
