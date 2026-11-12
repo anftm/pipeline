@@ -274,6 +274,12 @@ class DirectorySnapshotTests(unittest.TestCase):
         self.assertEqual(job['if'], "inputs.target != 'directories'")
         self.assertEqual(job['env']['TARGET'], "${{ inputs.target || 'all' }}")
         steps = {step.get('name'): step for step in job['steps'] if step.get('name')}
+        install = steps['Install dependencies']
+        self.assertEqual(install['run'], 'pip install -r scripts/requirements.txt requests==2.32.5')
+        self.assertNotIn('if', install)
+        self.assertNotIn('continue-on-error', install)
+        self.assertLess(job['steps'].index(install),
+                        job['steps'].index(steps['Inspect newly staged candidate without publication']))
         directory = steps['Generate and verify source directories']
         self.assertEqual(directory['run'], 'python -u scripts/update_dirs.py')
         self.assertNotIn('if', directory)
