@@ -1,13 +1,14 @@
 """Verify the exact historical processing-retirement receipt, without mutating it.
 
 An absent upload protection is not itself a handoff.  This verifier is limited
-to the one completed, independently identified collector transaction whose
-verified deletion batches and original handoff records it checks below.
+to completed, independently identified collector transactions whose exact
+verified deletion batches and original handoff evidence it checks below.
 It never recreates, deletes, or modifies processing records or source assets.
 """
 from __future__ import annotations
 
 import base64
+from dataclasses import dataclass
 import hashlib
 import json
 from pathlib import PurePosixPath
@@ -39,12 +40,17 @@ def _digest(value):
 
 
 def load_receipt(raw, *, expected_sha256=RECEIPT_SHA256, expected_plan=PLAN_SHA256):
+    """Preserve the original receipt's strict unreferenced-collection contract."""
+    return _load_receipt(raw, expected_sha256, expected_plan, 'unreferenced')
+
+
+def _load_receipt(raw, expected_sha256, expected_plan, expected_scope):
     """Authenticate the complete transaction and exact verified batch set."""
     if _hash(raw) != expected_sha256:
         raise ValueError('historical processing receipt checksum mismatch')
     value = json.loads(raw)
     if (value.get('applied') is not True or value.get('complete') is not True
-            or value.get('reader_only') is not True or value.get('scope') != 'unreferenced'
+            or value.get('reader_only') is not True or value.get('scope') != expected_scope
             or value.get('plan_sha256') != expected_plan):
         raise ValueError('historical processing receipt is not a completed transaction')
     targets = value.get('targets')
@@ -79,6 +85,68 @@ def load_receipt(raw, *, expected_sha256=RECEIPT_SHA256, expected_plan=PLAN_SHA2
             raise ValueError('invalid or duplicate historical processing retirement')
         by_path[row['path']] = row
     return by_path
+
+
+@dataclass(frozen=True)
+class ReceiptIdentity:
+    path: str
+    sha256: str
+    plan_sha256: str
+    scope: str
+    legacy: bool = False
+
+
+# Oldest to newest: a later exact deletion wins when a producer reused a name.
+# Review additions against completed stored bytes, never a latest-receipt alias.
+# 43730121335: exact remote bytes read back 2026-11-15, preserved in the test
+# fixture collection-43730121335.json. All 88 processing rows are direct releases.
+RECEIPT_REGISTRY = (
+    ReceiptIdentity(RECEIPT_PATH, RECEIPT_SHA256, PLAN_SHA256, 'unreferenced', legacy=True),
+    ReceiptIdentity('reader-index/gc/43730121335/collection.json',
+                    '03c2f25f70deb8e336f4480d8304eebb0e7925eeb3620f999053ab84c62060a0',
+                    'a9c4e3c0f5fce8c33e061a55a08da436ca94e086e8a5b444aadc70ab16969530',
+                    'retired-assets'),
+)
+
+
+class VerifiedReceipt:
+    """Keep each retired path bound to the transaction that authenticated it."""
+
+    def __init__(self, raw, identity):
+        if identity not in RECEIPT_REGISTRY:
+            raise ValueError('unregistered historical processing receipt')
+        self.identity = identity
+        self.rows = (load_receipt(raw) if identity.legacy else
+                     _load_receipt(raw, identity.sha256, identity.plan_sha256, identity.scope))
+        if not identity.legacy:
+            for row in self.rows.values():
+                if (row.get('supersession') is not None
+                        or row.get('operation') != 'reader-stream-upload'
+                        or not re.fullmatch(r'[0-9a-f]{32}', str(row.get('generation', '')))
+                        or not isinstance(row.get('run'), dict)
+                        or not isinstance(row.get('released_at'), str)):
+                    raise ValueError('completed processing receipt lacks direct release metadata')
+
+    def verify_owner(self, path, entry, accepted_sidecar, new_sidecar):
+        row = self.rows[path]
+        if self.identity.legacy:
+            return verify_owner(path, entry, row, accepted_sidecar, new_sidecar)
+        # Generation/run/release metadata belong to this exact completed receipt,
+        # not the old catalog. No synthetic record or rewritten generation.
+        if path not in entry.get('processing_roots', []):
+            raise ValueError('historical processing owner changed')
+        verify_owner_identity(path, entry, row)
+        _, roots = stream_identity(entry)
+        resources = [{'bucket': ASSETS, 'root': root} for root in sorted(roots)]
+        lifecycle.validate_processing_handoff({'resources': resources}, entry)
+        _route_covers(accepted_sidecar, entry, resources)
+        _route_covers(new_sidecar, entry, resources)
+        return 'verified-retirement-digest'
+
+    def validate_archived_record(self, path, record, raw):
+        if not self.identity.legacy:
+            raise ValueError('completed processing receipt has no archived original')
+        return validate_archived_record(path, self.rows[path], record, raw)
 
 
 def _route_covers(sidecar, entry, resources):

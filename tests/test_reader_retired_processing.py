@@ -2,6 +2,7 @@ import base64
 import copy
 import hashlib
 import json
+from pathlib import Path
 import unittest
 from unittest.mock import patch
 
@@ -9,6 +10,13 @@ from scripts import build_reader_assets_v2_sidecar as sidecar
 from scripts import reader_gc_retirement as retirement
 from scripts import reader_lifecycle as lifecycle
 from scripts import reader_retired_processing as history
+
+
+def receipt_fixture(path):
+    if path == history.RECEIPT_PATH:
+        return b'proof'  # Legacy receipt authentication is mocked in guard unit tests.
+    return (Path(__file__).parent / 'fixtures' / 'reader_retired_processing' /
+            'collection-43730121335.json').read_bytes()
 
 
 class HistoricalProcessingEvidenceTests(unittest.TestCase):
@@ -144,11 +152,12 @@ class HistoricalProcessingEvidenceTests(unittest.TestCase):
         class Store:
             def list_files(self, *_):
                 return set()
-            def read_bytes(self, *_):
-                return b'proof'
+            def read_bytes(self, bucket, path):
+                return receipt_fixture(path)
         pointer = {'generation': 'g'}
         catalog = {'base_sidecar': {'x': 1}}
         with patch.object(history, 'load_receipt', return_value={}), \
+             patch.object(history, 'RECEIPT_REGISTRY', history.RECEIPT_REGISTRY[:1]), \
              patch('scripts.publish_reader_v3.current', return_value=(pointer, catalog)):
             with self.assertRaisesRegex(ValueError, 'lack exact'):
                 sidecar.historical_processing_guard([{'files': [self.entry]}], self.sidecar, Store(), None)
@@ -166,8 +175,8 @@ class HistoricalProcessingEvidenceTests(unittest.TestCase):
         class Store:
             def list_files(self, *_):
                 return set()
-            def read_bytes(self, *_):
-                return b'proof'
+            def read_bytes(self, bucket, path):
+                return receipt_fixture(path)
         pointer, catalog = {'generation': 'g'}, {'base_sidecar': {'x': 1}}
         with patch.object(history, 'load_receipt', return_value={self.path: self.row}), \
              patch('scripts.publish_reader_v3.current', return_value=(pointer, catalog)), \
@@ -190,8 +199,8 @@ class HistoricalProcessingEvidenceTests(unittest.TestCase):
         class Store:
             def list_files(self, *_):
                 return set()
-            def read_bytes(self, *_):
-                return b'proof'
+            def read_bytes(self, bucket, path):
+                return receipt_fixture(path)
         pointer, catalog = {'generation': 'g'}, {'base_sidecar': {'x': 1}}
         new = {'v': 1, 'f': {self.entry['key']: {'b': history.ASSETS, 'p': 'documents/web/html/other'}}}
         with patch.object(history, 'load_receipt', return_value={self.path: self.row}), \
@@ -227,6 +236,156 @@ class HistoricalProcessingEvidenceTests(unittest.TestCase):
         history.verify_owner_identity(path, entry, row, resources)
         with self.assertRaisesRegex(ValueError, 'identity'):
             history.verify_owner_identity(path, entry, row)
+
+
+class CompletedProcessingReceiptTests(unittest.TestCase):
+    """Observed GC bytes and minimal owner/route fields read back on 2026-11-15."""
+
+    def setUp(self):
+        fixtures = Path(__file__).parent / 'fixtures' / 'reader_retired_processing'
+        self.raw = (fixtures / 'collection-43730121335.json').read_bytes()
+        self.identity = history.RECEIPT_REGISTRY[1]
+        self.proof = history.VerifiedReceipt(self.raw, self.identity)
+        self.owners = json.loads((fixtures / 'owners-43730121335.json').read_bytes())
+        self.entries = [owner['entry'] for owner in self.owners]
+        self.before = {'v': 1, 'f': {owner['entry']['key']: owner['accepted'] for owner in self.owners}}
+        self.after = {'v': 1, 'f': {owner['entry']['key']: owner['proposed'] for owner in self.owners}}
+
+    def test_exact_completed_receipt_covers_all_88_observed_owners(self):
+        self.assertEqual(len(self.proof.rows), 88)
+        self.assertEqual(len({row['generation'] for row in self.proof.rows.values()}), 5)
+        self.assertEqual({p for entry in self.entries for p in entry['processing_roots']},
+                         self.proof.rows.keys())
+        for entry in self.entries:
+            path = entry['processing_roots'][0]
+            with self.subTest(path=path):
+                self.assertEqual(self.proof.verify_owner(path, entry, self.before, self.after),
+                                 'verified-retirement-digest')
+                self.assertNotIn('supersession', self.proof.rows[path])
+                with self.assertRaisesRegex(ValueError, 'lacks original evidence'):
+                    history.verify_owner(path, entry, self.proof.rows[path], self.before, self.after)
+
+    def test_wrong_receipt_and_unregistered_identity_fail(self):
+        with self.assertRaisesRegex(ValueError, 'checksum'):
+            history.VerifiedReceipt(self.raw + b' ', self.identity)
+        with self.assertRaisesRegex(ValueError, 'checksum'):
+            history.VerifiedReceipt(self.raw, history.RECEIPT_REGISTRY[0])
+        from dataclasses import replace
+        with self.assertRaisesRegex(ValueError, 'unregistered'):
+            history.VerifiedReceipt(self.raw, replace(self.identity, path='reader-index/gc/other/collection.json'))
+
+    def test_corrupt_plan_and_incomplete_batch_fail_even_with_matching_raw_hash(self):
+        # Authenticate deliberately mutated fixtures to exercise the independent
+        # plan/batch checks beneath the production registry's exact byte pin.
+        for mutation in ('target', 'batch', 'complete', 'scope', 'plan'):
+            body = json.loads(self.raw)
+            if mutation == 'target':
+                body['targets'][0]['path'] += '-foreign'
+            elif mutation == 'batch':
+                body['batches'][0]['status'] = 'accepted'
+            elif mutation == 'complete':
+                body['complete'] = False
+            elif mutation == 'scope':
+                body['scope'] = 'unreferenced'
+            else:
+                body['plan_sha256'] = 'f' * 64
+            raw = retirement.encode(body)
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                history._load_receipt(raw, hashlib.sha256(raw).hexdigest(),
+                                      self.identity.plan_sha256, self.identity.scope)
+        with self.assertRaisesRegex(ValueError, 'completed transaction'):
+            history.load_receipt(self.raw, expected_sha256=self.identity.sha256,
+                                 expected_plan=self.identity.plan_sha256)
+
+    def test_wrong_owner_missing_membership_and_either_route_fail(self):
+        entry = self.entries[0]
+        path = entry['processing_roots'][0]
+        for changed in ({**entry, 'key': 'foreign\0source'}, {**entry, 'processing_roots': []},
+                        {**entry, 'root': 'media/audio/aac/' + 'f' * 64}):
+            with self.subTest(changed=changed), self.assertRaisesRegex(ValueError, 'identity|owner'):
+                self.proof.verify_owner(path, changed, self.before, self.after)
+        for before, after in (({'f': {}}, self.after), (self.before, {'f': {}})):
+            with self.assertRaisesRegex(ValueError, 'owner is absent'):
+                self.proof.verify_owner(path, entry, before, after)
+        foreign = copy.deepcopy(self.after)
+        foreign['f'][entry['key']] = {'b': 'foreign/assets', 'p': entry.get('manifest') or entry['object']}
+        with self.assertRaisesRegex(ValueError, 'not covered'):
+            self.proof.verify_owner(path, entry, self.before, foreign)
+        with self.assertRaisesRegex(ValueError, 'no archived original'):
+            self.proof.validate_archived_record(path, {}, b'{}')
+
+    def test_guard_binds_mixed_receipts_and_never_writes_missing_records(self):
+        old = HistoricalProcessingEvidenceTests()
+        old.setUp()
+        entries = [*self.entries, old.entry]
+        before = {'v': 1, 'f': {**self.before['f'], **old.sidecar['f']}}
+        after = {'v': 1, 'f': {**self.after['f'], **old.sidecar['f']}}
+        raw = self.raw
+        reads = []
+        class Store:
+            def list_files(self, *_):
+                return set()
+            def read_bytes(self, bucket, path):
+                reads.append(path)
+                return raw if path == history.RECEIPT_REGISTRY[1].path else b'old receipt'
+        pointer = {'generation': 'current'}
+        # The MHT deterministic name occurs in both real receipts, with different
+        # release generations/digests. A newer proof must win without falling back.
+        reused = next(e['processing_roots'][0] for e in self.entries if e['key'].endswith('.mht'))
+        with patch.object(history, 'load_receipt', return_value={old.path: old.row, reused: {}}), \
+             patch('scripts.publish_reader_v3.current', return_value=(pointer, {'base_sidecar': {'p': 1}})), \
+             patch('scripts.publish_reader_v3.pinned_base', return_value=before), \
+             patch('scripts.publish_reader_v3.project_sidecar', return_value=before), \
+             patch('scripts.publish_reader_v3.observe_consumer', return_value={
+                 'generation': 'current', 'projection_verified': True}):
+            guard, stats, missing = sidecar.historical_processing_guard(
+                [{'files': entries}], after, Store(), None)
+        self.assertEqual(reads, [identity.path for identity in reversed(history.RECEIPT_REGISTRY)])
+        self.assertEqual(stats['verified_retirements'], 89)
+        self.assertEqual(stats['evidence'], {'archived-original': 1, 'verified-retirement-digest': 88})
+        self.assertEqual(sidecar.release_processing_roots([{'files': entries}], 'f' * 32,
+            lambda _: self.fail('missing record fetched'), lambda *_: self.fail('missing record recreated'),
+            absent=missing, retired=guard), 0)
+        changed = {**self.entries[0], 'key': 'foreign\0source'}
+        with self.assertRaisesRegex(FileNotFoundError, 'newly missing'):
+            guard(changed['processing_roots'][0], [changed])
+        with self.assertRaisesRegex(FileNotFoundError, 'newly missing'):
+            guard('reader-index/processing/stream-upload-' + 'f' * 32 + '.json', [self.entries[0]])
+
+    def test_guard_never_falls_back_when_new_receipt_or_owner_proof_fails(self):
+        raw = self.raw
+        class Store:
+            def list_files(self, *_):
+                return set()
+            def read_bytes(self, bucket, path):
+                if path != history.RECEIPT_REGISTRY[1].path:
+                    raise AssertionError('older receipt was tried after newer evidence failed')
+                return raw
+        store = Store()
+        with patch.object(store, 'read_bytes', return_value=raw + b' '), \
+             self.assertRaisesRegex(ValueError, 'checksum'):
+            sidecar.historical_processing_guard([{'files': self.entries}], self.after, store, None)
+        pointer = {'generation': 'current'}
+        with patch('scripts.publish_reader_v3.current', return_value=(pointer, {'base_sidecar': {'p': 1}})), \
+             patch('scripts.publish_reader_v3.pinned_base', return_value=self.before), \
+             patch('scripts.publish_reader_v3.project_sidecar', return_value=self.before), \
+             patch('scripts.publish_reader_v3.observe_consumer', return_value={
+                 'generation': 'current', 'projection_verified': True}), \
+             self.assertRaisesRegex(ValueError, 'owner is absent'):
+            sidecar.historical_processing_guard([{'files': self.entries}], {'f': {}}, store, None)
+
+    def test_guard_unknown_absence_is_not_covered_by_either_receipt(self):
+        raw = self.raw
+        class Store:
+            def list_files(self, *_):
+                return set()
+            def read_bytes(self, bucket, path):
+                return raw if path == history.RECEIPT_REGISTRY[1].path else b'old receipt'
+        entry = {**self.entries[0], 'processing_roots': [
+            'reader-index/processing/stream-upload-' + 'f' * 32 + '.json']}
+        with patch.object(history, 'load_receipt', return_value={}), \
+             self.assertRaisesRegex(ValueError, 'lack exact'):
+            sidecar.historical_processing_guard([{'files': [entry]}], self.after, Store(), None)
 
 
 if __name__ == '__main__':

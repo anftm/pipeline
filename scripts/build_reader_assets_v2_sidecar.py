@@ -120,9 +120,16 @@ def historical_processing_guard(indexes, new_sidecar, store, client):
     missing = set(owners) - present
     if not missing:
         return None, {'missing': 0, 'verified_retirements': 0}, set()
-    receipt_raw = store.read_bytes(ASSETS_BUCKET, history.RECEIPT_PATH)
-    receipt = history.load_receipt(receipt_raw)
-    if not missing <= receipt.keys():
+    proofs = {}
+    # Deterministic names can be reused by later uploads. Prefer the latest
+    # explicitly registered deletion; never retry an older proof on failure.
+    for identity in reversed(history.RECEIPT_REGISTRY):
+        receipt = history.VerifiedReceipt(store.read_bytes(ASSETS_BUCKET, identity.path), identity)
+        for path in (missing - proofs.keys()) & receipt.rows.keys():
+            proofs[path] = receipt
+        if missing <= proofs.keys():
+            break
+    if not missing <= proofs.keys():
         raise ValueError('missing processing roots lack exact historical retirement evidence')
     pointer, catalog = publication.current(store)
     if not pointer or not catalog.get('base_sidecar'):
@@ -137,23 +144,26 @@ def historical_processing_guard(indexes, new_sidecar, store, client):
     counts = {}
     overrides = {}
     for path in sorted(missing):
+        proof = proofs[path]
         for entry in owners[path]:
             try:
-                evidence = history.verify_owner(path, entry, receipt[path], before, new_sidecar)
+                evidence = proof.verify_owner(path, entry, before, new_sidecar)
             except ValueError:
+                if not proof.identity.legacy:
+                    raise
                 # A single producer may have protected more than the resource
                 # visible to the consumer (for example a CHM fallback that was
                 # deliberately removed). If the collector saved the original
                 # bytes, retain that released record as a virtual protection for
                 # this handoff; do not fabricate or remotely recreate anything.
                 import base64
-                row = receipt[path]
+                row = proof.rows[path]
                 try:
                     raw = base64.b64decode(row['supersession']['original_record_base64'], validate=True)
                     record = json.loads(raw)
                 except (KeyError, TypeError, ValueError):
                     raise ValueError('missing processing owner has no original record for safe handoff') from None
-                history.validate_archived_record(path, row, record, raw)
+                proof.validate_archived_record(path, record, raw)
                 history.verify_owner_identity(path, entry, row, record['resources'])
                 reader_lifecycle.validate_processing_handoff(record, entry)
                 if path in overrides and overrides[path] != record:
@@ -167,10 +177,10 @@ def historical_processing_guard(indexes, new_sidecar, store, client):
             raise FileNotFoundError('unverified or newly missing processing root: ' + path)
         for entry in current_owners:
             if path in overrides:
-                history.verify_owner_identity(path, entry, receipt[path], overrides[path]['resources'])
+                history.verify_owner_identity(path, entry, proofs[path].rows[path], overrides[path]['resources'])
                 reader_lifecycle.validate_processing_handoff(overrides[path], entry)
             else:
-                history.verify_owner(path, entry, receipt[path], before, new_sidecar)
+                proofs[path].verify_owner(path, entry, before, new_sidecar)
 
     def recovered_record(path, current_owners):
         verify_retired(path, current_owners)
