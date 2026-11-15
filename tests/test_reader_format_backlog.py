@@ -102,6 +102,7 @@ class ReaderFormatBacklogTests(unittest.TestCase):
         self.assertEqual(report['source_content_changed'], 1)
         self.assertTrue(report['threshold_exceeded'])
         self.assertFalse(report['trigger_ready'])
+        self.assertFalse(report['conversion_dependencies_checked'])
 
     def test_image_content_uses_image_path_and_preserves_canonical_merge_rules(self):
         source = item('scan', 'jpg');key = source['key']
@@ -204,22 +205,73 @@ class ReaderFormatBacklogTests(unittest.TestCase):
             subject.classify_epub({source['key']: source}, {source['key']: route(entry)}, index,
                                   [(number, shard), (number, shard)], Metadata({}))
 
-    def test_threshold_strictly_above_100_and_old_mapped_routes_not_claimed_current(self):
-        records = {item(str(n))['key']: item(str(n)) for n in range(101)}
+    def test_default_threshold_9_10_11_for_each_format(self):
+        for extension in subject.EXTENSIONS:
+            for count in (9, 10, 11):
+                with self.subTest(extension=extension, count=count):
+                    records = {item(str(n), extension)['key']: item(str(n), extension) for n in range(count)}
+                    rows = {key: {'state': 'not_mapped'} for key in records}
+                    rows[item('0', extension)['key']] = {'state': 'content_changed'}
+                    report = {r['extension']: r for r in subject.summarize(
+                        records, {}, rows, checked_extensions={extension})}[extension]
+                    self.assertEqual(report['definite_backlog'], count)
+                    self.assertEqual(report['not_mapped'], count - 1)
+                    self.assertEqual(report['source_content_changed'], 1)
+                    self.assertEqual(report['threshold_exceeded'], count >= 10)
+                    self.assertTrue(report['all_source_identities_checked'])
+                    self.assertFalse(report['trigger_ready'])
+
+    def test_custom_threshold_remains_inclusive(self):
+        source = item('book'); records = {source['key']: source}
+        rows = {source['key']: {'state': 'not_mapped'}}
+        for threshold, expected in ((0, True), (1, True), (2, False)):
+            with self.subTest(threshold=threshold):
+                report = {r['extension']: r for r in subject.summarize(
+                    records, {}, rows, threshold=threshold)}['epub']
+                self.assertEqual(report['threshold_exceeded'], expected)
+        for threshold in (-1, True, 1.5):
+            with self.subTest(threshold=threshold), self.assertRaises(ValueError):
+                subject.summarize(records, {}, rows, threshold=threshold)
+
+    def test_old_mapped_routes_without_checked_index_are_not_claimed_current(self):
+        for extension in subject.EXTENSIONS:
+            with self.subTest(extension=extension):
+                source = item('mapped', extension)
+                report = {r['extension']: r for r in subject.summarize(
+                    {source['key']: source}, {source['key']: {'s': 2}}, {},
+                    checked_extensions=set())}[extension]
+                self.assertEqual(report['mapped_content_not_checked'], 1)
+                self.assertEqual(report['source_content_unchanged'], 0)
+                self.assertEqual(report['definite_backlog'], 0)
+                self.assertFalse(report['all_source_identities_checked'])
+                self.assertFalse(report['trigger_ready'])
+
+    def test_unknown_checkpoint_and_failure_do_not_hide_at_threshold(self):
+        records = {item(str(n))['key']: item(str(n)) for n in range(11)}
         rows = {key: {'state': 'not_mapped'} for key in records}
-        other = item('image', 'jpg'); records[other['key']] = other
-        rows[item('0')['key']] = {'state': 'content_changed'}
-        report = {r['extension']: r for r in subject.summarize(records, {other['key']: {'s': 2}}, rows)}
-        self.assertEqual(report['epub']['definite_backlog'], 101)
-        self.assertTrue(report['epub']['threshold_exceeded'])
-        self.assertTrue(report['epub']['all_source_identities_checked'])
-        self.assertFalse(report['epub']['trigger_ready'])
-        self.assertEqual(report['jpg']['mapped_content_not_checked'], 1)
-        self.assertFalse(report['jpg']['all_source_identities_checked'])
-        del records[item('100')['key']]; del rows[item('100')['key']]
-        r = {x['extension']: x for x in subject.summarize(records, {}, rows)}['epub']
-        self.assertEqual(r['definite_backlog'], 100)
-        self.assertFalse(r['threshold_exceeded'])
+        for extra in ({'state': 'source_identity_unknown'}, {'state': 'route_or_index_mismatch'},
+                      {'state': 'same_revision', 'pending_shard_checkpoint': True},
+                      {'state': 'same_revision', 'recorded_failure': True}):
+            with self.subTest(extra=extra):
+                rows[item('10')['key']] = extra
+                report = {r['extension']: r for r in subject.summarize(records, {}, rows)}['epub']
+                self.assertEqual(report['definite_backlog'], 10)
+                self.assertTrue(report['threshold_exceeded'])
+                self.assertFalse(report['all_source_identities_checked'])
+                self.assertFalse(report['trigger_ready'])
+
+    def test_unchanged_html_and_markdown_do_not_prove_dependencies_complete(self):
+        for extension in ('html', 'htm', 'mht', 'mhtml', 'md', 'markdown'):
+            with self.subTest(extension=extension):
+                source = item('page', extension)
+                report = {r['extension']: r for r in subject.summarize(
+                    {source['key']: source}, {}, {source['key']: {'state': 'same_revision'}},
+                    checked_extensions={extension})}[extension]
+                self.assertEqual(report['source_content_unchanged'], 1)
+                self.assertEqual(report['definite_backlog'], 0)
+                self.assertTrue(report['all_source_identities_checked'])
+                self.assertFalse(report['conversion_dependencies_checked'])
+                self.assertFalse(report['trigger_ready'])
 
     def test_source_payload_rejects_missing_revision_and_duplicate_key(self):
         source = corpus([('a', 'epub')])
@@ -262,7 +314,7 @@ class ReaderFormatBacklogTests(unittest.TestCase):
         self.assertEqual(set(flow['on']), {'schedule', 'workflow_dispatch'})
         self.assertEqual(flow['permissions'], {'contents': 'read'})
         commands = '\n'.join(step.get('run', '') for step in flow['jobs']['inspect']['steps'])
-        self.assertIn('scripts/reader_format_backlog.py --threshold 100', commands)
+        self.assertRegex(commands, r'scripts/reader_format_backlog\.py --threshold 10(?:\s|$)')
         for forbidden in ('--apply', 'workflow run', 'git push', 'delete', 'OCR'):
             self.assertNotIn(forbidden, commands)
         self.assertEqual(flow['concurrency']['queue'], 'max')
@@ -286,12 +338,58 @@ class ReaderFormatBacklogTests(unittest.TestCase):
         with patch.object(subject, 'capture_search', return_value=(pointer, b'manifest', records, {REPO: NEW}, {})),                 patch.object(subject.publication, 'current', return_value=(reader_pointer, catalog)),                 patch.object(subject.publication, 'pinned_base', return_value={'f': {}}),                 patch.object(subject.publication, 'project_sidecar', return_value={'f': {}}),                 patch.object(subject.publication, 'observe_consumer', return_value={'generation': '3'*64, 'projection_verified': True}),                 patch.object(subject.matrix, 'read_json', side_effect=read_index),                 patch.object(subject, 'classify_epub', return_value=epub_row):
             summary, details = subject.inspect(hub=mock_hub, api=api, fs=fs, client=Mock(), scope='epub')
         self.assertEqual(len(details['rows']), 1)
+        self.assertEqual(summary['threshold'], 10)
         self.assertIn('EPUB only', summary['scope'])
         self.assertTrue(paths)
         self.assertTrue(all(path.startswith('chapters/ebook/epub/index') for path in paths))
         self.assertEqual(api.repo_info.call_count, 2)
         with self.assertRaisesRegex(ValueError, 'invalid Reader backlog inspection scope'):
             subject.inspect(hub=mock_hub, api=api, fs=fs, client=Mock(), scope='bogus')
+
+    def test_all_scope_missing_indexes_leave_mapped_sources_unverified(self):
+        pointer = search_publication_pointer.make_pointer('1'*64, None, '2'*32)
+        extensions = ('mobi', 'mp3', 'xlsx', 'pptx', 'txt', 'html')
+        payload = corpus([('mapped', extension) for extension in extensions])
+        reader_pointer = {'generation': '3'*64}
+        routes = {item('mapped', extension)['key']: {'s': 2} for extension in extensions}
+        ebook_index = {'version': 1, 'kind': 'ebook-chapter-stream-index', 'files': [], 'failures': []}
+        image_index = {'version': 1, 'kind': 'image-stream-index', 'files': [{'key': 'historical-image'}]}
+        hub = Mock()
+        hub.read_bytes.side_effect = lambda bucket, path: pointer if path == subject.CURRENT else b'manifest'
+        api = Mock(); api.repo_info.return_value = SimpleNamespace(sha=NEW)
+        def read_index(_fs, _bucket, path):
+            return {'chapters/ebook/epub/index.json': ebook_index,
+                    'pages/image/index-v2.json': image_index}.get(path, {})
+        with patch.object(subject, 'capture_search', return_value=(pointer, b'manifest', payload, {REPO: NEW}, {})), \
+                patch.object(subject.publication, 'current', return_value=(reader_pointer, {'base_sidecar': {'sha256': '4'*64}})), \
+                patch.object(subject.publication, 'pinned_base', return_value={'f': routes}), \
+                patch.object(subject.publication, 'project_sidecar', return_value={'f': routes}), \
+                patch.object(subject.publication, 'observe_consumer', return_value={'generation': '3'*64, 'projection_verified': True}), \
+                patch.object(subject.matrix, 'read_json', side_effect=read_index):
+            summary, _details = subject.inspect(hub=hub, api=api, fs=Mock(), client=Mock())
+        self.assertEqual(summary['threshold'], 10)
+        self.assertEqual(summary['remote_writes'], 0)
+        self.assertFalse(summary['publication_ready'])
+        reports = {row['extension']: row for row in summary['formats']}
+        for extension in extensions:
+            with self.subTest(extension=extension):
+                report = reports[extension]
+                self.assertEqual(report['sources'], 1)
+                self.assertEqual(report['mapped_content_not_checked'], 1)
+                self.assertEqual(report['source_content_unchanged'], 0)
+                self.assertFalse(report['all_source_identities_checked'])
+                self.assertFalse(report['trigger_ready'])
+        self.assertFalse(reports['html']['conversion_dependencies_checked'])
+
+    def test_cli_default_threshold_is_ten(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output, details = Path(directory)/'summary.json', Path(directory)/'details.json'
+            with patch.object(subject, 'inspect', return_value=({}, {})) as inspect, \
+                    patch.object(subject, 'HubBucketStore'), patch.object(subject, 'HfApi'), \
+                    patch.object(subject, 'HfFileSystem'), patch.object(subject.httpx, 'Client'), \
+                    patch('builtins.print'):
+                self.assertEqual(subject.main(['--output', str(output), '--epub-details', str(details)]), 0)
+            self.assertEqual(inspect.call_args.kwargs['threshold'], 10)
 
     def test_unknown_source_blocks_identity_completeness(self):
         source = item('book'); records = {source['key']: source}

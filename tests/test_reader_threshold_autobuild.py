@@ -17,15 +17,15 @@ GEN='a'*64
 
 
 def summary(counts=None):
-    counts=counts or {'epub':101,'jpg':100,'mp3':0}
+    counts=counts or {'epub':10,'jpg':9,'mp3':0}
     rows=[]
     for ext,family in [('epub','ebook'),('jpg','image'),('mp3','media')]:
         n=counts.get(ext,0)
         rows.append({'extension':ext,'family':family,'not_mapped':n,'source_content_changed':0,'definite_backlog':n,
-                     'threshold_exceeded':n>100,'all_source_identities_checked':True,
+                     'threshold_exceeded':n>=10,'all_source_identities_checked':True,
                      'conversion_dependencies_checked':True,'source_identity_unknown':0,
                      'pending_shard_checkpoint':0,'recorded_failure_current':0})
-    return {'version':1,'kind':'reader-format-backlog','threshold':100,'remote_writes':0,'dispatches':0,
+    return {'version':1,'kind':'reader-format-backlog','threshold':10,'remote_writes':0,'dispatches':0,
             'publication_ready':False,'external_writers_verified':False,'reader_generation':GEN,
             'search_generation':'b'*64,'reader_consumers':{'pages':{'generation':GEN,'projection_verified':True},
                      'hf':{'generation':GEN,'projection_verified':True}},'formats':rows}
@@ -37,12 +37,44 @@ def source(i,ext='jpg',size=5):
 
 
 class ThresholdBuildTests(unittest.TestCase):
-    def test_only_strictly_more_than_100_triggers(self):
+    def test_threshold_9_10_11_for_each_supported_format(self):
+        self.assertEqual(subject.PRODUCTION_THRESHOLD,10)
+        self.assertEqual(subject.SUPPORTED,{'epub','jpg','mp3'})
         self.assertEqual(subject.decision(summary()),['epub'])
-        self.assertEqual(subject.decision(summary({'epub':100,'jpg':101,'mp3':150})),['jpg','mp3'])
+        for extension in sorted(subject.SUPPORTED):
+            for count in (9,10,11):
+                with self.subTest(extension=extension,count=count):
+                    self.assertEqual(subject.decision(summary({extension:count})),
+                                     [extension] if count>=10 else [])
         self.assertEqual(subject.decision(summary({'epub':0,'jpg':0,'mp3':0})),[])
+
+    def test_every_existing_gate_still_blocks_at_exact_threshold(self):
+        for extension in sorted(subject.SUPPORTED):
+            for field,value in (('all_source_identities_checked',False),
+                                ('conversion_dependencies_checked',False),
+                                ('source_identity_unknown',1),('pending_shard_checkpoint',1),
+                                ('recorded_failure_current',1)):
+                with self.subTest(extension=extension,field=field):
+                    report=summary({extension:10})
+                    next(row for row in report['formats'] if row['extension']==extension)[field]=value
+                    self.assertEqual(subject.decision(report),[])
+                    self.assertEqual(subject.blocked(report),[extension])
+                    with tempfile.TemporaryDirectory() as directory:
+                        root=Path(directory)
+                        result=subject.write_decision(report,root/'decision.json')
+                        self.assertEqual(result['threshold'],10)
+                        with self.assertRaisesRegex(ValueError,'blocked='+extension):
+                            subject.verify_completion(result,root)
+
+    def test_legacy_threshold_flag_must_match_inclusive_boundary(self):
+        for count in (9,10,11):
+            with self.subTest(count=count):
+                value=summary({'epub':count})
+                value['formats'][0]['threshold_exceeded']=count<10
+                with self.assertRaisesRegex(ValueError,'threshold identity'):
+                    subject.decision(value)
     def test_unverified_or_unsupported_format_is_blocked_not_faked_success(self):
-        value=summary({'epub':101,'jpg':101,'mp3':101})
+        value=summary({'epub':10,'jpg':10,'mp3':10})
         value['formats'][0]['source_identity_unknown']=1
         value['formats'][0]['all_source_identities_checked']=False
         value['formats'].append({'extension':'pptx','threshold_exceeded':True})
@@ -51,12 +83,14 @@ class ThresholdBuildTests(unittest.TestCase):
         value['reader_consumers']['pages']['projection_verified']=False
         with self.assertRaisesRegex(ValueError,'both Reader consumers'):subject.decision(value)
     def test_threshold_and_generation_cannot_be_forged(self):
-        value=summary();value['formats'][0]['definite_backlog']=100
+        value=summary();value['formats'][0]['definite_backlog']=9
         with self.assertRaisesRegex(ValueError,'threshold identity'):subject.decision(value)
         value=summary();value['formats'].append(dict(value['formats'][0]))
         with self.assertRaisesRegex(ValueError,'duplicate'):subject.decision(value)
-        value=summary();value['threshold']=True
-        with self.assertRaises(ValueError):subject.decision(value)
+        for threshold in (True,9,11,100):
+            with self.subTest(threshold=threshold):
+                value=summary();value['threshold']=threshold
+                with self.assertRaises(ValueError):subject.decision(value)
     def test_select_unmapped_excludes_existing_routes_shards_and_failures(self):
         records={source(i)['key']:source(i) for i in range(8)}
         keys=list(records);canonical={'version':1,'kind':'image-stream-index',

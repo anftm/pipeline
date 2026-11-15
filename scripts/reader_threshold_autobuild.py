@@ -1,4 +1,4 @@
-"""Automatically build bounded Reader conversion shadows above a backlog threshold.
+"""Automatically build bounded Reader conversion shadows at a backlog threshold.
 
 This stage performs no bucket or site mutation. A trigger binds the actual
 published source and both Reader consumers, recomputes the backlog, chooses a
@@ -36,7 +36,7 @@ except ImportError:
 
 MAX_BATCH = 3
 MAX_SOURCE_BYTES = 16 * 1024 * 1024
-PRODUCTION_THRESHOLD = 100
+PRODUCTION_THRESHOLD = 10
 SUPPORTED = {'epub', 'jpg', 'mp3'}
 
 
@@ -72,7 +72,7 @@ def decision(summary):
         values = (row.get('not_mapped'), row.get('source_content_changed'), row.get('definite_backlog'))
         if (any(type(v) is not int or v < 0 for v in values)
                 or values[0] + values[1] != values[2]
-                or row.get('threshold_exceeded') is not (values[2] > PRODUCTION_THRESHOLD)):
+                or row.get('threshold_exceeded') is not (values[2] >= PRODUCTION_THRESHOLD)):
             raise ValueError('Reader backlog threshold identity differs')
         if row.get('extension') != extension or row.get('family') != {'epub':'ebook','jpg':'image','mp3':'media'}[extension]:
             raise ValueError('Reader format classification differs')

@@ -320,7 +320,7 @@ def classify_epub(records, routes, canonical, shards, api):
                             kind='ebook-chapter-stream-index', route_modes={'e'})
 
 
-def summarize(records: dict, routes: dict, checked_rows: dict, *, threshold: int = 100,
+def summarize(records: dict, routes: dict, checked_rows: dict, *, threshold: int = 10,
               checked_extensions=frozenset({'epub'})) -> list[dict]:
     if type(threshold) is not int or threshold < 0:
         raise ValueError('threshold must be nonnegative')
@@ -361,13 +361,14 @@ def summarize(records: dict, routes: dict, checked_rows: dict, *, threshold: int
                        'mapped_content_not_checked': counts['mapped_content_not_checked'],
                        'recorded_failure_current': counts['recorded_failure_current'],
                        'pending_shard_checkpoint': counts['pending_shard_checkpoint'],
-                       'definite_backlog': actionable, 'threshold_exceeded': actionable > threshold,
+                       # Keep the legacy field name; reaching the threshold now qualifies.
+                       'definite_backlog': actionable, 'threshold_exceeded': actionable >= threshold,
                        'all_source_identities_checked': verified,
                        'conversion_dependencies_checked': dependencies_checked, 'trigger_ready': False})
     return output
 
 
-def inspect(*, hub, api, fs, client, threshold=100, observe_search=search_daily.observe_consumers,
+def inspect(*, hub, api, fs, client, threshold=10, observe_search=search_daily.observe_consumers,
             get=search_daily.bounded_get, scope='all'):
     if scope not in {'all', 'epub'}:
         raise ValueError('invalid Reader backlog inspection scope')
@@ -568,7 +569,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', required=True, type=Path)
     parser.add_argument('--epub-details', required=True, type=Path)
-    parser.add_argument('--threshold', type=int, default=100)
+    parser.add_argument('--threshold', type=int, default=10)
     args = parser.parse_args(argv)
     if args.output.resolve() == args.epub_details.resolve() or any(
             path.exists() or path.is_symlink() for path in (args.output, args.epub_details)):
