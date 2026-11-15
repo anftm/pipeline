@@ -1,12 +1,98 @@
 """The daily guard never equates a desired pointer with loaded consumers."""
+import io
 import json
 import unittest
-from unittest.mock import patch
+import urllib.error
+from unittest.mock import MagicMock, call, patch
 
 from scripts import search_daily
 from scripts.search_publication_pointer import make_pointer
 from tests.test_search_adopt import SearchAdoptionTests
 from tests.test_search_artifact_store import MemoryStore
+
+
+class BoundedGetTests(unittest.TestCase):
+    url = search_daily.BUCKET_RESOLVE + "published/current.json"
+
+    def response(self, status=200, raw=b"{}"):
+        response = MagicMock(status=status)
+        response.__enter__.return_value = response
+        response.read.return_value = raw
+        return response
+
+    def test_http_503_recovers_on_third_attempt(self):
+        errors = [urllib.error.HTTPError(self.url, 503, "unavailable", {}, io.BytesIO())
+                  for _ in range(2)]
+        response = self.response()
+        with patch.object(search_daily.urllib.request, "urlopen", side_effect=[*errors, response]) as get, \
+                patch.object(search_daily.time, "sleep") as sleep:
+            self.assertEqual(search_daily.bounded_get(self.url, 2), b"{}")
+        self.assertEqual(get.call_count, 3)
+        self.assertEqual(get.call_args_list, [get.call_args_list[0]] * 3)
+        self.assertEqual(get.call_args.args[0].get_method(), "GET")
+        self.assertEqual(get.call_args.kwargs, {"timeout": 40})
+        response.read.assert_called_once_with(3)
+        self.assertTrue(all(error.fp.closed for error in errors))
+        self.assertEqual(sleep.call_args_list, [call(0.5), call(1.0)])
+
+    def test_http_503_exhaustion_preserves_final_error(self):
+        errors = [urllib.error.HTTPError(self.url, 503, "unavailable", {}, io.BytesIO())
+                  for _ in range(3)]
+        with patch.object(search_daily.urllib.request, "urlopen", side_effect=errors) as get, \
+                patch.object(search_daily.time, "sleep") as sleep:
+            with self.assertRaises(urllib.error.HTTPError) as raised:
+                search_daily.bounded_get(self.url)
+        self.assertIs(raised.exception, errors[-1])
+        self.assertEqual(get.call_count, 3)
+        self.assertEqual(sleep.call_args_list, [call(0.5), call(1.0)])
+        errors[-1].close()
+
+    def test_permanent_http_errors_are_not_retried(self):
+        for status in (400, 401, 403, 404, 422, 501):
+            error = urllib.error.HTTPError(self.url, status, "rejected", {}, io.BytesIO())
+            with self.subTest(status=status), \
+                    patch.object(search_daily.urllib.request, "urlopen", side_effect=error) as get, \
+                    patch.object(search_daily.time, "sleep") as sleep:
+                with self.assertRaises(urllib.error.HTTPError) as raised:
+                    search_daily.bounded_get(self.url)
+                self.assertIs(raised.exception, error)
+                get.assert_called_once()
+                sleep.assert_not_called()
+            error.close()
+
+    def test_oversized_response_is_not_retried(self):
+        response = self.response(raw=b"1234")
+        with patch.object(search_daily.urllib.request, "urlopen", return_value=response) as get, \
+                patch.object(search_daily.time, "sleep") as sleep:
+            with self.assertRaisesRegex(ValueError, "oversized search response"):
+                search_daily.bounded_get(self.url, 3)
+        get.assert_called_once()
+        response.read.assert_called_once_with(4)
+        response.__exit__.assert_called_once()
+        sleep.assert_not_called()
+
+    def test_only_exact_200_is_accepted(self):
+        for status in (201, 204, 206, 302):
+            response = self.response(status=status)
+            with self.subTest(status=status), \
+                    patch.object(search_daily.urllib.request, "urlopen", return_value=response) as get, \
+                    patch.object(search_daily.time, "sleep") as sleep:
+                with self.assertRaisesRegex(RuntimeError, f"search metadata HTTP {status}"):
+                    search_daily.bounded_get(self.url)
+                get.assert_called_once()
+                response.read.assert_not_called()
+                sleep.assert_not_called()
+
+    def test_returned_503_response_is_also_bounded(self):
+        response = self.response(status=503)
+        with patch.object(search_daily.urllib.request, "urlopen", return_value=response) as get, \
+                patch.object(search_daily.time, "sleep") as sleep:
+            with self.assertRaisesRegex(RuntimeError, "search metadata HTTP 503"):
+                search_daily.bounded_get(self.url)
+        self.assertEqual(get.call_count, 3)
+        self.assertEqual(response.__exit__.call_count, 3)
+        response.read.assert_not_called()
+        self.assertEqual(sleep.call_args_list, [call(0.5), call(1.0)])
 
 
 class SearchDailyTests(SearchAdoptionTests):

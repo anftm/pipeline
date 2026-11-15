@@ -449,9 +449,12 @@ class FormatProducerRegressionTests(unittest.TestCase):
                 else:
                     self.assertIn('== "schedule" ||', commands)
                 self.assertIn(f"needs.{job}.result == 'success'", workflow["jobs"]["finalize"]["if"])
-                # An empty plan must not rebuild the sidecar or dispatch unify:
-                # `skipped` is deliberately not accepted any more.
-                self.assertNotIn(f"needs.{job}.result == 'skipped'", workflow["jobs"]["finalize"]["if"])
+                # An ordinary empty plan must not rebuild the sidecar or dispatch unify.
+                # Ebook recovery explicitly skips both jobs via finalize_only instead.
+                from tests.test_reader_format_workflow_automation import inputs_for, job_runs
+                needs = {key: {'result': 'success'} for key in workflow['jobs']['finalize']['needs']}
+                needs[job]['result'] = 'skipped'
+                self.assertFalse(job_runs(workflow['jobs']['finalize'], inputs_for(workflow, apply=True), needs))
                 self.assertNotIn("!= 'cancelled'", workflow["jobs"]["finalize"]["if"])
                 self.assertEqual(workflow["jobs"]["finalize"]["concurrency"]["group"], "reader-sidecar")
 

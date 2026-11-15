@@ -100,7 +100,7 @@ class ProducerAutomationTests(unittest.TestCase):
                       SEARCH_GENERATION=GENERATION, EXPECTED_SHA=SHA, DEFER_UNIFY='true',
                       GITHUB_REF='refs/heads/main', GITHUB_SHA=SHA, GITHUB_WORKFLOW_SHA=SHA,
                       GITHUB_REPOSITORY='anftm/pipeline', LOCAL_SHA=SHA, REMOTE_SHA=SHA,
-                      REMOTE_STATUS='0',
+                      REMOTE_STATUS='0', FINALIZE_ONLY='false',
                       GITHUB_WORKFLOW_REF=f'anftm/pipeline/.github/workflows/reader-{name}.yml@refs/heads/main')
         values.update(env)
         stubs = '''git() { [[ "$*" == 'rev-parse HEAD' ]] || return 99; echo "$LOCAL_SHA"; }
@@ -127,7 +127,7 @@ gh() {
             triggers = config.get('on', config.get(True))
             self.assertEqual(set(triggers), {'workflow_dispatch'})
             schema = triggers['workflow_dispatch']['inputs']
-            self.assertLessEqual(len(schema), 10)
+            self.assertLessEqual(len(schema), 11 if name == 'ebook-stream' else 10)
             for key, kind, default in (('automation_id', 'string', ''), ('defer_unify', 'boolean', False),
                                        ('search_generation', 'string', ''), ('expected_sha', 'string', '')):
                 self.assertEqual(schema[key]['type'], kind)
@@ -408,6 +408,98 @@ gh() {
                         for step in active:
                             if 'scripts/finalize_' in step.get('run', ''):
                                 self.assertNotIn('if', step)
+
+    def test_ebook_finalize_only_skips_producers_and_requires_apply(self):
+        config = workflow('ebook-stream')
+        schema = config.get('on', config.get(True))['workflow_dispatch']['inputs']
+        self.assertEqual(schema['finalize_only']['type'], 'boolean')
+        self.assertIs(schema['finalize_only']['default'], False)
+        self.assertIs(schema['finalize_only']['required'], False)
+        jobs = config['jobs']
+        self.assertEqual(set(jobs), {'plan', 'ebook-stream', 'finalize'})
+        self.assertEqual(config['concurrency'], {'group': 'reader-ebooks',
+                                                'cancel-in-progress': False, 'queue': 'max'})
+        for finalize_only, apply, plan, producer in itertools.product(
+                (False, True), (False, True), ('success', 'skipped', 'failure', 'cancelled'),
+                ('success', 'skipped', 'failure', 'cancelled')):
+            values = inputs_for(config, finalize_only=finalize_only, apply=apply)
+            # No matrix is produced when planning is skipped; it must never be parsed.
+            needs = {'plan': {'result': plan, 'outputs': {
+                'matrix': '' if finalize_only else '{"include":[{}]}'}},
+                'ebook-stream': {'result': producer}}
+            with self.subTest(finalize_only=finalize_only, apply=apply, plan=plan, producer=producer):
+                self.assertEqual(job_runs(jobs['plan'], values, needs), not finalize_only)
+                self.assertEqual(job_runs(jobs['ebook-stream'], values, needs),
+                                 not finalize_only and apply and plan == 'success')
+                expected = apply and (plan == producer == ('skipped' if finalize_only else 'success'))
+                self.assertEqual(job_runs(jobs['finalize'], values, needs), expected)
+
+    def test_ebook_finalize_only_gate_rejects_automation_invalid_inputs_and_stale_main(self):
+        config = workflow('ebook-stream')
+        gate = next(step for step in config['jobs']['finalize']['steps'] if step.get('name') == GATE)
+        values = inputs_for(config, finalize_only=True, apply=True, extension='epub')
+        env = {key: str(expression(value, inputs=values, vars={}, github={
+            'event_name': 'workflow_dispatch', 'token': ''})).lower()
+               for key, value in gate['env'].items()}
+        for extension in ('all', 'epub', 'mobi', 'azw3', 'fb2'):
+            result = self.shell(gate['run'] + '\necho writes-allowed', 'ebook-stream',
+                                **{**env, 'EXTENSION': extension})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('writes-allowed', result.stdout)
+        invalid = [{key: value} for key, value in (
+            ('APPLY', 'false'), ('EVENT_NAME', 'workflow_run'),
+            ('AUTOMATION_ID', AUTO_ID), ('SEARCH_GENERATION', GENERATION),
+            ('EXPECTED_SHA', SHA), ('DEFER_UNIFY', 'true'),
+            ('GITHUB_REF', 'refs/heads/feature'), ('GITHUB_REF', 'refs/tags/main'),
+            ('GITHUB_WORKFLOW_REF', 'anftm/pipeline/.github/workflows/other.yml@refs/heads/main'),
+            ('GITHUB_WORKFLOW_SHA', 'b' * 40), ('LOCAL_SHA', 'b' * 40),
+            ('REMOTE_SHA', 'b' * 40), ('REMOTE_SHA', ''), ('REMOTE_STATUS', '1'))]
+        invalid += [{'EXTENSION': value} for value in ('', 'chm', 'EPUB', 'epub,mobi', 'epub\n', '$(exit 0)')]
+        invalid += [{'AUTOMATION_ID': AUTO_ID, 'SEARCH_GENERATION': GENERATION,
+                     'EXPECTED_SHA': SHA, 'DEFER_UNIFY': 'true', 'AUTOMATION_ENABLED': 'true'}]
+        for overrides in invalid:
+            with self.subTest(overrides=overrides):
+                result = self.shell(gate['run'] + '\necho writes-allowed', 'ebook-stream',
+                                    **{**env, **overrides})
+                self.assertNotEqual(result.returncode, 0, result.stderr)
+                self.assertNotIn('writes-allowed', result.stdout)
+
+    def test_ebook_finalize_only_reuses_canonical_sidecar_and_unify_in_order(self):
+        config = workflow('ebook-stream')
+        job = config['jobs']['finalize']
+        self.assertEqual(job['concurrency'], {'group': 'reader-sidecar',
+                                            'cancel-in-progress': False, 'queue': 'max'})
+        steps = job['steps']
+        gate_index = next(i for i, step in enumerate(steps) if step.get('name') == GATE)
+        operations = steps[gate_index + 1:]
+        self.assertEqual(len(operations), 3)
+        self.assertFalse(any('download-artifact' in step.get('uses', '') for step in steps))
+        for extension, failed in itertools.product(('epub', 'all'), ('', 'merge', 'sidecar')):
+            values = inputs_for(config, finalize_only=True, apply=True, extension=extension)
+            script = '''python() {
+  printf '%s\\n' "$*"
+  case "$1:$FAILED" in
+    scripts/finalize_ebook_indexes.py:merge|scripts/build_reader_assets_v2_sidecar.py:sidecar) return 1 ;;
+  esac
+}
+gh() { printf '%s\\n' "$*"; }
+'''
+            for step in operations:
+                self.assertNotIn('continue-on-error', step)
+                self.assertTrue(expression(step.get('if', 'true'), inputs=values))
+                script += step['run'] + '\n'
+            result = self.shell(script, 'ebook-stream', EXTENSION=extension, FAILED=failed)
+            expected = ['scripts/finalize_ebook_indexes.py ' + (
+                '--extension epub' if extension == 'epub' else
+                '--extension epub --extension mobi --extension azw3 --extension fb2')]
+            if failed != 'merge':
+                expected.append('scripts/build_reader_assets_v2_sidecar.py --apply')
+            if not failed:
+                expected += ['workflow run reader-v3-publish.yml --repo anftm/pipeline --ref main '
+                             '-f operation=unify -f apply=true',
+                             'central v3 unify dispatched; current reader-sidecar lock will be released when this producer exits']
+            self.assertEqual(result.returncode == 0, not failed, result.stderr)
+            self.assertEqual(result.stdout.splitlines(), expected)
 
     def test_execute_media_workflow_arguments_with_precise_extension(self):
         config = workflow('media-stream')

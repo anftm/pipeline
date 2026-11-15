@@ -235,13 +235,28 @@ class GitHub:
                                      'X-GitHub-Api-Version': '2022-11-28'})
 
     def request(self, method, path, **kwargs):
-        response = self.session.request(method, 'https://api.github.com/repos/' + self.repository + path,
-                                        timeout=30, allow_redirects=False, **kwargs)
-        if not 200 <= response.status_code < 300:
-            if method == 'POST' and response.status_code in {400, 401, 403, 404, 405, 409, 422}:
-                raise DispatchRejected('GitHub POST rejected: ' + str(response.status_code))
-            raise RuntimeError('GitHub ' + method + ' returned ' + str(response.status_code))
-        return response.json() if response.status_code != 204 else None
+        import requests
+        for attempt in range(3):
+            try:
+                response = self.session.request(method, 'https://api.github.com/repos/' + self.repository + path,
+                                                timeout=30, allow_redirects=False, **kwargs)
+            except requests.exceptions.SSLError:
+                raise
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout,
+                    requests.exceptions.ChunkedEncodingError):
+                if method != 'GET' or attempt == 2:
+                    raise
+            else:
+                if (method == 'GET' and response.status_code in {429, 500, 502, 503, 504}
+                        and attempt < 2):
+                    response.close()
+                else:
+                    if not 200 <= response.status_code < 300:
+                        if method == 'POST' and response.status_code in {400, 401, 403, 404, 405, 409, 422}:
+                            raise DispatchRejected('GitHub POST rejected: ' + str(response.status_code))
+                        raise RuntimeError('GitHub ' + method + ' returned ' + str(response.status_code))
+                    return response.json() if response.status_code != 204 else None
+            time.sleep(0.5 * (2 ** attempt))
 
     def check_main(self, expected_sha):
         if self.local_head and self.local_head() != expected_sha:

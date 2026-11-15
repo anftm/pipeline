@@ -51,6 +51,11 @@ on:
         required: true
         default: false
         type: boolean
+      finalize_only:
+        description: Finalize existing shard indexes without conversion (manual, current main, apply required)
+        required: false
+        default: false
+        type: boolean
       apply:
         description: Convert and publish ebook chapter streams
         required: true
@@ -68,6 +73,7 @@ concurrency:
 
 jobs:
   plan:
+    if: inputs.finalize_only != true
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     outputs:
@@ -86,14 +92,24 @@ jobs:
           SEARCH_GENERATION: ${{ inputs.search_generation }}
           EXPECTED_SHA: ${{ inputs.expected_sha }}
           DEFER_UNIFY: ${{ inputs.defer_unify }}
+          FINALIZE_ONLY: ${{ inputs.finalize_only }}
+          APPLY: ${{ inputs.apply }}
+          EXTENSION: ${{ inputs.extension }}
+          EVENT_NAME: ${{ github.event_name }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          if [[ -z "$AUTOMATION_ID$SEARCH_GENERATION$EXPECTED_SHA" && "$DEFER_UNIFY" != 'true' ]]; then exit 0; fi
-          [[ "$SEARCH_GENERATION" =~ ^[0-9a-f]{64}$ && "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ && "$DEFER_UNIFY" == 'true' ]]
-          [[ "$EXPECTED_SHA" == "$GITHUB_SHA" ]]
-          [[ "$AUTOMATION_ID" =~ ^[0-9a-f]{32}$ ]] || { echo 'automation_id must be 32 lowercase hex characters' >&2; exit 1; }
-          [[ "$AUTOMATION_ENABLED" == 'true' ]]
+          if [[ "$FINALIZE_ONLY" == 'true' ]]; then
+            [[ "$EVENT_NAME" == 'workflow_dispatch' && "$APPLY" == 'true' ]]
+            [[ -z "$AUTOMATION_ID$SEARCH_GENERATION$EXPECTED_SHA" && "$DEFER_UNIFY" != 'true' ]]
+            [[ "$EXTENSION" =~ ^(all|epub|mobi|azw3|fb2)$ ]]
+          else
+            if [[ -z "$AUTOMATION_ID$SEARCH_GENERATION$EXPECTED_SHA" && "$DEFER_UNIFY" != 'true' ]]; then exit 0; fi
+            [[ "$SEARCH_GENERATION" =~ ^[0-9a-f]{64}$ && "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ && "$DEFER_UNIFY" == 'true' ]]
+            [[ "$EXPECTED_SHA" == "$GITHUB_SHA" ]]
+            [[ "$AUTOMATION_ID" =~ ^[0-9a-f]{32}$ ]] || { echo 'automation_id must be 32 lowercase hex characters' >&2; exit 1; }
+            [[ "$AUTOMATION_ENABLED" == 'true' ]]
+          fi
           [[ "$GITHUB_REF" == 'refs/heads/main' ]]
           [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/reader-ebook-stream.yml@refs/heads/main" ]]
           [[ "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]
@@ -166,7 +182,7 @@ jobs:
   ebook-stream:
     needs: plan
     if: >-
-      inputs.apply == true &&
+      inputs.finalize_only != true && inputs.apply == true &&
       fromJSON(needs.plan.outputs.matrix).include[0] != null
     runs-on: ubuntu-24.04
     timeout-minutes: 360
@@ -220,8 +236,9 @@ jobs:
   finalize:
     needs: [plan, ebook-stream]
     if: >-
-      always() && needs.plan.result == 'success' &&
-      inputs.apply == true && needs.ebook-stream.result == 'success'
+      always() && inputs.apply == true &&
+      ((inputs.finalize_only == true && needs.plan.result == 'skipped' && needs.ebook-stream.result == 'skipped') ||
+       (inputs.finalize_only != true && needs.plan.result == 'success' && needs.ebook-stream.result == 'success'))
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     concurrency:

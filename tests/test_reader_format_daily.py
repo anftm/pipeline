@@ -9,7 +9,9 @@ from pathlib import Path
 from types import SimpleNamespace
 import tempfile
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
+
+import requests
 
 from scripts import reader_format_daily as subject
 
@@ -919,6 +921,119 @@ class GitHubTests(unittest.TestCase):
     def api(self):
         session = Mock(); session.headers = {}
         return subject.GitHub('fake-token', session=session)
+
+    def test_get_503_recovers_on_third_attempt(self):
+        api = self.api()
+        unavailable = Mock(status_code=503)
+        success = Mock(status_code=200)
+        success.json.return_value = {'object': {'sha': HEAD}}
+        api.session.request.side_effect = [unavailable, unavailable, success]
+        with patch.object(subject.time, 'sleep') as sleep:
+            api.check_main(HEAD)
+        self.assertEqual(api.session.request.call_args_list, [
+            call('GET', 'https://api.github.com/repos/anftm/pipeline/git/ref/heads/main',
+                 timeout=30, allow_redirects=False)] * 3)
+        self.assertEqual(unavailable.close.call_count, 2)
+        unavailable.json.assert_not_called()
+        self.assertEqual(sleep.call_args_list, [call(0.5), call(1.0)])
+
+    def test_get_503_exhausts_three_attempts(self):
+        api = self.api()
+        api.session.request.return_value = Mock(status_code=503)
+        with patch.object(subject.time, 'sleep') as sleep:
+            with self.assertRaisesRegex(RuntimeError, 'GitHub GET returned 503'):
+                api.request('GET', '/actions/runs', params={'per_page': 1})
+        self.assertEqual(api.session.request.call_count, 3)
+        self.assertEqual(api.session.request.call_args_list, [api.session.request.call_args_list[0]] * 3)
+        self.assertEqual(api.session.request.call_args.kwargs['params'], {'per_page': 1})
+        self.assertEqual(sleep.call_args_list, [call(0.5), call(1.0)])
+
+    def test_get_transport_errors_recover_or_exhaust(self):
+        for kind in (requests.exceptions.ConnectionError, requests.exceptions.Timeout,
+                     requests.exceptions.ChunkedEncodingError):
+            for recover in (True, False):
+                with self.subTest(kind=kind, recover=recover):
+                    api = self.api()
+                    error = kind('transport failed')
+                    success = Mock(status_code=200)
+                    success.json.return_value = {'id': 123}
+                    api.session.request.side_effect = [error, error, success if recover else error]
+                    with patch.object(subject.time, 'sleep') as sleep:
+                        if recover:
+                            self.assertEqual(api.get_run(123), {'id': 123})
+                        else:
+                            with self.assertRaises(kind) as raised:
+                                api.get_run(123)
+                            self.assertIs(raised.exception, error)
+                    self.assertEqual(api.session.request.call_count, 3)
+                    self.assertEqual(sleep.call_args_list, [call(0.5), call(1.0)])
+
+    def test_permanent_get_failures_are_not_retried(self):
+        for status in (301, 400, 401, 403, 404, 422, 501):
+            with self.subTest(status=status):
+                api = self.api()
+                api.session.request.return_value = Mock(status_code=status)
+                with patch.object(subject.time, 'sleep') as sleep:
+                    with self.assertRaisesRegex(RuntimeError, 'GitHub GET returned ' + str(status)):
+                        api.get_run(123)
+                api.session.request.assert_called_once()
+                sleep.assert_not_called()
+        for error in (requests.exceptions.SSLError('certificate verification failed'),
+                      requests.exceptions.InvalidURL('invalid URL')):
+            with self.subTest(error=type(error)):
+                api = self.api()
+                api.session.request.side_effect = error
+                with patch.object(subject.time, 'sleep') as sleep:
+                    with self.assertRaises(type(error)):
+                        api.get_run(123)
+                api.session.request.assert_called_once()
+                sleep.assert_not_called()
+
+    def test_get_payload_and_identity_failures_are_not_retried(self):
+        for invalid_json in (True, False):
+            with self.subTest(invalid_json=invalid_json):
+                api = self.api()
+                response = Mock(status_code=200)
+                response.json.return_value = {'object': {'sha': 'b' * 40}}
+                if invalid_json:
+                    response.json.side_effect = ValueError('invalid JSON')
+                api.session.request.return_value = response
+                with patch.object(subject.time, 'sleep') as sleep:
+                    with self.assertRaisesRegex(ValueError if invalid_json else RuntimeError,
+                                                'invalid JSON' if invalid_json else 'differs from expected HEAD'):
+                        api.check_main(HEAD)
+                api.session.request.assert_called_once()
+                sleep.assert_not_called()
+
+    def test_post_statuses_are_never_retried(self):
+        for status in (204, 302, 400, 401, 403, 404, 405, 409, 422, 429, 500, 502, 503, 504):
+            with self.subTest(status=status):
+                api = self.api()
+                api.session.request.return_value = Mock(status_code=status)
+                with patch.object(subject.time, 'sleep') as sleep:
+                    if status == 204:
+                        self.assertIsNone(api.dispatch('reader-ebook-stream.yml', {}))
+                    else:
+                        with self.assertRaises(RuntimeError) as raised:
+                            api.dispatch('reader-ebook-stream.yml', {})
+                        expected = subject.DispatchRejected if status in {400, 401, 403, 404, 405, 409, 422} else RuntimeError
+                        self.assertIs(type(raised.exception), expected)
+                api.session.request.assert_called_once()
+                sleep.assert_not_called()
+
+    def test_ambiguous_post_transport_errors_are_never_retried(self):
+        for kind in (requests.exceptions.ConnectionError, requests.exceptions.Timeout,
+                     requests.exceptions.ChunkedEncodingError):
+            with self.subTest(kind=kind):
+                api = self.api()
+                error = kind('dispatch outcome unknown')
+                api.session.request.side_effect = error
+                with patch.object(subject.time, 'sleep') as sleep:
+                    with self.assertRaises(kind) as raised:
+                        api.dispatch('reader-ebook-stream.yml', {})
+                self.assertIs(raised.exception, error)
+                api.session.request.assert_called_once()
+                sleep.assert_not_called()
 
     def test_dispatch_uses_main_and_makes_one_post(self):
         api = self.api(); api.session.request.side_effect = TimeoutError('unknown')

@@ -9,6 +9,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -38,13 +40,23 @@ def bounded_get(url: str, limit: int = MAX_JSON) -> bytes:
     if not 0 < limit <= MAX_CORPUS:
         raise ValueError("invalid search read limit")
     request = urllib.request.Request(url, headers={"User-Agent": "Vomebook-Daily-Search/1.0", "Cache-Control": "no-cache"})
-    with urllib.request.urlopen(request, timeout=40) as response:
-        if response.status != 200:
-            raise RuntimeError(f"search metadata HTTP {response.status}")
-        raw = response.read(limit + 1)
-    if len(raw) > limit:
-        raise ValueError("oversized search response")
-    return raw
+    retryable = {429, 500, 502, 503, 504}
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(request, timeout=40) as response:
+                if response.status != 200:
+                    if response.status not in retryable or attempt == 2:
+                        raise RuntimeError(f"search metadata HTTP {response.status}")
+                else:
+                    raw = response.read(limit + 1)
+                    if len(raw) > limit:
+                        raise ValueError("oversized search response")
+                    return raw
+        except urllib.error.HTTPError as exc:
+            if exc.code not in retryable or attempt == 2:
+                raise
+            exc.close()
+        time.sleep(0.5 * (2 ** attempt))
 
 
 def inspect_published(*, get=bounded_get) -> dict:
