@@ -3,6 +3,8 @@
 prepare returns immutable candidate bytes, not publication or retirement
 permission. Each history uses its own pinned base. ACKs, retention, promotion
 records, the current pointer and retirement journals are never written.
+Discovery covers promotion records only, not retirement aliases or a complete
+history inventory. Every returned plan is incomplete and disallows apply.
 """
 import copy
 import gzip
@@ -36,18 +38,22 @@ def _available(store, ref, raw):
 
 
 def prepare(store, mapping, audited_proof=None, *, api=None, promotion_paths=None):
-    """Plan selected histories (default: all non-current promotion records).
+    """Plan histories referenced by non-current promotion records only.
 
     mapping is the exact audited old->new PDF scope, with no hard-coded count.
     api defaults to store.api. A supplied audit or current-finalization plan is
     checked against a fresh exact-copy audit; it cannot bypass copy checks.
     promotion_paths optionally selects historical promotion paths explicitly.
-    Candidates contain catalog_raw/packed bytes and their immutable references;
-    an eventual apply must revalidate evidence and enforce its own ACK gates.
+    Candidates contain catalog_raw/packed bytes and their immutable references.
+    Retirement aliases are not inventoried, even with default discovery. These
+    plans never establish complete history coverage or allow apply. Future
+    integration must resolve that inventory, revalidate evidence and gate ACKs.
     """
     mapping = copy.deepcopy(redirects.validated({redirects.FIELD: mapping}))
     if not mapping:
         raise ValueError('an audited PDF mapping is required')
+    if any(part in {'.', '..'} for pair in mapping.items() for path in pair for part in path.split('/')):
+        raise ValueError('dot segments are unsupported in PDF mapping paths')
     api = api if api is not None else getattr(store, 'api', None)
     if api is None:
         raise ValueError('a bucket API is required for the exact-copy audit')
@@ -88,6 +94,8 @@ def prepare(store, mapping, audited_proof=None, *, api=None, promotion_paths=Non
             raise ValueError('unknown historical promotion resource reference')
         old_ref = refs[0]
         original = publication.validate_catalog(publication.read_index(store, old_ref))
+        if 'rollback_target' in original:
+            raise ValueError('historical catalog with an existing rollback_target is unsupported')
         if original['generation'] != generation or not original.get('base_sidecar'):
             raise ValueError('historical catalog requires its own generation and pinned base')
         base = publication.pinned_base(store, original, {})
@@ -149,5 +157,10 @@ def prepare(store, mapping, audited_proof=None, *, api=None, promotion_paths=Non
     return {'version': 1, 'kind': 'reader-derived-pdf-history-replacement-plan',
             'mapping': mapping, 'audit': snapshot, 'old_pointer': pointer,
             'selected_old_bundles': roots, 'evidence_resources': evidence,
+            'discovery_scope': 'promotion-records-only',
+            'discovery_mode': 'listed' if promotion_paths is None else 'explicit',
+            'history_inventory_complete': False,
+            'unsupported_alias_inventory': {'retirement_aliases': 'not-inspected'},
+            'apply_allowed': False,
             'replacements': replacements, 'applied': False, 'consumer_acks_created': False,
             'deletion_authorized': False, 'objects_deleted': False}

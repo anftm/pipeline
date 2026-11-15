@@ -167,6 +167,64 @@ class HistoryReplacementTests(unittest.TestCase):
         self.assertEqual(self.store.objects, before)
         self.assertEqual(self.store.writes, [])
 
+    def test_existing_rollback_target_rejects_without_losing_prior_history(self):
+        for target in ('a' * 64, None):
+            for rewritten in (False, True):
+                with self.subTest(target=target, rewritten=rewritten):
+                    self.paths = []
+                    base = redirects.rewrite(self.base, {OLD: NEW})[0] if rewritten else self.base
+                    catalog, _ = self.history(base, rollback_target=target)
+                    self.assertNotEqual(catalog['generation'], target)
+                    before = copy.deepcopy(self.store.objects)
+                    with self.assertRaisesRegex(ValueError, 'existing rollback_target'):
+                        self.prepare()
+                    self.assertEqual(self.store.objects, before)
+                    self.assertEqual(self.store.writes, [])
+
+    def test_dot_segment_namespaces_reject_before_audit_or_store_reads(self):
+        for namespace in ('.', '..'):
+            old = f'derived/{namespace}/' + 'b' * 32 + '/document.pdf'
+            mapping = {old: NEW}
+            # The shared regex accepts these; the planner must be stricter.
+            self.assertEqual(redirects.validated({redirects.FIELD: mapping}), mapping)
+            with self.subTest(namespace=namespace), patch.object(audit, 'audit') as scan, \
+                    patch.object(self.store, 'read_bytes') as read:
+                with self.assertRaisesRegex(ValueError, 'dot segments'):
+                    replacement.prepare(self.store, mapping)
+                scan.assert_not_called()
+                read.assert_not_called()
+        self.assertEqual(self.store.writes, [])
+
+    def test_promotion_only_discovery_never_claims_complete_history_or_allows_apply(self):
+        self.history()
+        # An unexamined retirement root must not be reported as an empty alias
+        # inventory. No schema assumption or attempt to expand discovery here.
+        alias_path = 'reader-index/v3/retirement.json'
+        self.store.objects[audit.ASSETS, alias_path] = b'not inspected by this planner'
+        before = copy.deepcopy(self.store.objects)
+        for explicit in (False, True):
+            for paths in (self.paths, []):
+                with self.subTest(explicit=explicit, paths=paths), \
+                        patch.object(self.store, 'list_files', create=True, return_value=paths) as listing, \
+                        patch.object(self.store, 'read_bytes', wraps=self.store.read_bytes) as read:
+                    plan = replacement.prepare(self.store, {OLD: NEW},
+                        promotion_paths=paths if explicit else None)
+                    self.assertEqual(plan['discovery_scope'], 'promotion-records-only')
+                    self.assertEqual(plan['discovery_mode'], 'explicit' if explicit else 'listed')
+                    self.assertFalse(plan['history_inventory_complete'])
+                    self.assertEqual(plan['unsupported_alias_inventory'],
+                                     {'retirement_aliases': 'not-inspected'})
+                    self.assertFalse(plan['apply_allowed'])
+                    self.assertFalse(plan['applied'])
+                    self.assertFalse(plan['deletion_authorized'])
+                    if explicit:
+                        listing.assert_not_called()
+                    else:
+                        listing.assert_called_once_with(audit.ASSETS, (replacement.PROMOTIONS,))
+                    self.assertNotIn((audit.ASSETS, alias_path), [call.args for call in read.call_args_list])
+        self.assertEqual(self.store.objects, before)
+        self.assertEqual(self.store.writes, [])
+
     def test_wrong_bucket_and_unsupported_selected_bundle_references_reject(self):
         root = OLD.rsplit('/', 1)[0]
         for mode in ('wrong-bucket', 'unknown-path', 'manifest', 'bundle-root', 'catalog', 'override'):
