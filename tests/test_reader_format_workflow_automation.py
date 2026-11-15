@@ -210,6 +210,41 @@ gh() {
                             '--expected-sha', SHA, '--revisions', 'state/commits.json']
                 self.assertEqual(result.stdout.splitlines(), expected + (['snapshot-allowed'] if status == '0' else []))
 
+    def test_build_rechecks_published_sources_after_artifact_before_first_write(self):
+        for name in NAMES:
+            config = workflow(name)
+            jobs = config['jobs']
+            plan_guard = next(step for step in jobs['plan']['steps'] if
+                              step.get('name') == 'Bind automatic batch to published search sources')
+            build = next(job for job in jobs.values() if any(
+                'tar -xzf' in step.get('run', '') for step in job['steps']))
+            steps = build['steps']
+            unpack = next(i for i, step in enumerate(steps) if 'tar -xzf' in step.get('run', ''))
+            first_write = next(i for i, step in enumerate(steps) if '--apply' in step.get('run', ''))
+            self.assertEqual(steps[unpack + 1]['name'], GATE)
+            guard = steps[unpack + 2]
+            self.assertEqual(guard, plan_guard)
+            self.assertEqual(first_write, unpack + 3)
+            self.assertEqual(build['concurrency']['group'], 'reader-sidecar')
+            if 'finalize' in jobs:
+                self.assertFalse(any('guard-source' in step.get('run', '')
+                                     for step in jobs['finalize']['steps']))
+            for automatic in (False, True):
+                values = inputs_for(config, automation_id=AUTO_ID if automatic else '')
+                for status in ('0', '1'):
+                    script = 'python() { printf "%s\\n" "$@"; return "$GUARD_STATUS"; };\n'
+                    if expression(guard['if'], inputs=values):
+                        script += guard['run']
+                    script += '\necho conversion-started\n'
+                    result = self.shell(script, name, GUARD_STATUS=status)
+                    allowed = not automatic or status == '0'
+                    self.assertEqual(result.returncode == 0, allowed, result.stderr)
+                    self.assertEqual('conversion-started' in result.stdout, allowed)
+                    if automatic:
+                        self.assertEqual(result.stdout.splitlines()[:8], [
+                            'scripts/reader_format_daily.py', 'guard-source', '--generation', GENERATION,
+                            '--expected-sha', SHA, '--revisions', 'state/commits.json'])
+
     def test_all_inline_shell_is_valid_bash(self):
         for name in NAMES:
             for job in workflow(name)['jobs'].values():
@@ -272,7 +307,10 @@ gh() {
                         self.assertEqual(dispatch[0] in active, not defer)
                         self.assertTrue(any('build_reader_assets_v2_sidecar.py --apply' in step.get('run', '')
                                             for step in active))
-                        self.assertEqual([step for step in steps if step not in active], dispatch if defer else [])
+                        skipped = list(dispatch) if defer else []
+                        if not automation_id:
+                            skipped += [step for step in steps if 'guard-source' in step.get('run', '')]
+                        self.assertCountEqual([step for step in steps if step not in active], skipped)
                         for step in active:
                             if 'scripts/finalize_' in step.get('run', ''):
                                 self.assertNotIn('if', step)

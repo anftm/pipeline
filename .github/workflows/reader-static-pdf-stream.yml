@@ -99,7 +99,8 @@ jobs:
           # Static PDF selection does not use source sizes.
           SKIP_SIZES: "true"
         run: python scripts/fetch_and_parse.py
-      - name: Bind automatic batch to published search sources
+      - &source-guard
+        name: Bind automatic batch to published search sources
         if: inputs.automation_id != ''
         env:
           GH_TOKEN: ${{ github.token }}
@@ -169,6 +170,7 @@ jobs:
           path: output
       - run: tar -xzf output/static-pdf-plan.tgz
       - *automation-gate
+      - *source-guard
       - name: Convert and publish static PDF
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}

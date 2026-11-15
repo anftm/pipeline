@@ -107,7 +107,8 @@ jobs:
           FORCE_SYNC: "true"
           SKIP_SIZES: ${{ inputs.max_source_bytes != '' && inputs.max_source_bytes != '0' && 'false' || 'true' }}
         run: python scripts/fetch_and_parse.py
-      - name: Bind automatic batch to published search sources
+      - &source-guard
+        name: Bind automatic batch to published search sources
         if: inputs.automation_id != ''
         env:
           GH_TOKEN: ${{ github.token }}
@@ -183,6 +184,7 @@ jobs:
           path: output
       - run: tar -xzf output/ebook-plan.tgz
       - *automation-gate
+      - *source-guard
       - name: Build and publish ebook chapter streams
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}

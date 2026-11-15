@@ -102,7 +102,8 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           FORCE_SYNC: "true"
         run: python scripts/fetch_and_parse.py
-      - name: Bind automatic batch to published search sources
+      - &source-guard
+        name: Bind automatic batch to published search sources
         if: inputs.automation_id != ''
         env:
           GH_TOKEN: ${{ github.token }}
@@ -169,6 +170,7 @@ jobs:
           path: output
       - run: tar -xzf output/image-plan.tgz
       - *automation-gate
+      - *source-guard
       - name: Build single-image WebP assets
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
