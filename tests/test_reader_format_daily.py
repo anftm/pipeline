@@ -178,8 +178,11 @@ class DailyTests(unittest.TestCase):
         self.assertEqual(result['batches'], 2)
         self.assertEqual(len(self.api.posts), 4)
         self.assertEqual(self.api.posts[0][0], 'reader-web-stream.yml')
-        # A new plan cannot claim freshness of existing mappings from zero source drift.
-        self.assertEqual(subject.plan(data[-1])['formats']['html']['state'], 'blocked')
+        # Zero known source backlog is complete, while dependency freshness stays unknown.
+        final = subject.plan(data[-1])['formats']['html']
+        self.assertEqual(final['state'], 'complete')
+        self.assertEqual(final['dependency_freshness'], 'unknown')
+        self.assertTrue(final['warnings'])
 
     def test_web_pending_or_failure_after_conversion_still_blocks(self):
         for index, changes in enumerate(({'pending_shard_checkpoint': 1}, {'recorded_failure_current': 1})):
@@ -194,11 +197,13 @@ class DailyTests(unittest.TestCase):
                 self.assertIn('html', result['blocked'])
                 self.assertEqual(len(self.api.posts), 2)
 
-    def test_zero_web_backlog_requires_this_run_to_have_triggered_first_conversion(self):
+    def test_zero_web_backlog_keeps_warning_without_blocking_known_work(self):
         data = summary(0, 'html', conversion_dependencies_checked=False)
         self.refresh.side_effect = [data]
         result = self.controller().run(data)
-        self.assertEqual(result['formats']['html']['state'], 'blocked')
+        self.assertEqual(result['formats']['html']['state'], 'complete')
+        self.assertEqual(result['formats']['html']['dependency_freshness'], 'unknown')
+        self.assertTrue(result['formats']['html']['warnings'])
         self.assertFalse(self.api.posts)
 
     def test_real_md_48_new_39_changed_dispatches_and_drains_known_changes(self):

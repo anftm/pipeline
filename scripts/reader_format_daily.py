@@ -136,9 +136,11 @@ def dependency_report(row):
 
 def blockers(row, *, source_changes_triggered=False, first_conversion_triggered=False):
     reasons = [field for field in UNCERTAIN if row[field]]
-    if row['all_source_identities_checked'] is not True:
+    if row['sources'] and row['all_source_identities_checked'] is not True:
         reasons.append('all_source_identities_checked is not true')
-    if (row['sources'] and row['conversion_dependencies_checked'] is not True
+    dependency_only_unknown = (row['definite_backlog'] == 0
+                               and (FORMATS[row['extension']][0] == 'web' or row['extension'] in {'md', 'markdown'}))
+    if (row['sources'] and row['conversion_dependencies_checked'] is not True and not dependency_only_unknown
             and not explicit_source_changes(row, triggered=source_changes_triggered or first_conversion_triggered)):
         reasons.append('conversion_dependencies_checked is not true')
     if FORMATS[row['extension']][1] is None:
