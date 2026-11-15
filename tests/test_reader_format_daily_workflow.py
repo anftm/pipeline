@@ -7,6 +7,7 @@ ROOT = Path(__file__).parents[1]
 
 class DailyFormatWorkflowTests(unittest.TestCase):
     def test_daily_success_triggers_independent_controller_with_exact_source_job(self):
+        self.assertIn('requests==2.32.5', (ROOT / 'scripts/requirements.txt').read_text().splitlines())
         raw = (ROOT / '.github/workflows/reader-format-daily.yml').read_text()
         w = yaml.load(raw, Loader=yaml.BaseLoader)
         self.assertEqual(w['on']['workflow_run'], {'workflows': ['搜索 · Daily Sync', '搜索 · Resume Daily Publication'], 'types': ['completed']})
