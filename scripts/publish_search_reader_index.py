@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Publish the compact Reader Assets sidecar to HF Search and GitHub Pages."""
+"""Trigger a Pages rebuild for the Reader Assets sidecar fetched from the bucket."""
 
 import base64
 import gzip
+import hashlib
 import json
 import os
-import shutil
 import subprocess
 import tempfile
 import time
@@ -25,6 +25,29 @@ except ImportError:
     from reader_bucket_store import HubBucketStore
 
 SIDECAR_NAME = "reader_assets.json.gz"
+REFRESH_PATH = ".github/reader-assets-refresh.json"
+
+
+def refresh_marker(source: Path) -> str:
+    """Identify normalized sidecar JSON; this trigger is not a consumer receipt."""
+    sidecar = json.loads(gzip.decompress(source.read_bytes()))
+    if (not isinstance(sidecar, dict) or type(sidecar.get("v")) is not int
+            or sidecar["v"] != 1 or not isinstance(sidecar.get("f"), dict)):
+        raise ValueError("invalid Reader Assets sidecar schema")
+    canonical = json.dumps(sidecar, ensure_ascii=False, sort_keys=True,
+                           separators=(",", ":"), allow_nan=False).encode("utf-8")
+    marker = {"sidecar_schema": sidecar["v"],
+              "sidecar_sha256": hashlib.sha256(canonical).hexdigest()}
+    if "v3" in sidecar:
+        if not isinstance(sidecar["v3"], dict):
+            raise ValueError("invalid Reader Assets v3 metadata")
+        if "generation" in sidecar["v3"]:
+            generation = sidecar["v3"]["generation"]
+            if (not isinstance(generation, str) or len(generation) != 64
+                    or any(c not in "0123456789abcdef" for c in generation)):
+                raise ValueError("invalid Reader Assets v3 generation")
+            marker["v3_generation"] = generation
+    return json.dumps(marker, sort_keys=True, indent=2) + "\n"
 
 
 def synchronize_pinned_base(*, dry_run: bool) -> bool:
@@ -84,26 +107,28 @@ def publish_to_pages(source: Path, pages_repo: str, token: str, *, dry_run: bool
 def _publish_to_pages_once(source: Path, pages_repo: str, token: str) -> None:
     # Each retry uses a fresh private clone and changes only this generated file.
     # An accepted push whose response was lost becomes a no-op; never force push.
+    marker = refresh_marker(source)
     with tempfile.TemporaryDirectory(prefix="reader-index-pages-") as root:
         auth = git_auth_env(token)
-        ret, out, err = run(["git", "clone", "--depth", "1", f"https://github.com/{pages_repo}.git", root], env=auth)
+        ret, out, err = run(["git", "clone", "--depth", "1", "--branch", "main",
+                             f"https://github.com/{pages_repo}.git", root], env=auth)
         if ret:
             raise RuntimeError(f"Pages clone failed: {err or out}")
-        target = Path(root) / "data" / SIDECAR_NAME
+        target = Path(root) / REFRESH_PATH
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source, target)
-        run(["git", "config", "user.name", "github-actions[bot]"], cwd=root)
-        run(["git", "config", "user.email", "github-actions[bot]@users.noreply.github.com"], cwd=root)
-        ret, out, err = run(["git", "add", "--", f"data/{SIDECAR_NAME}"], cwd=root)
+        target.write_text(marker, encoding="utf-8")
+        ret, out, err = run(["git", "add", "--", REFRESH_PATH], cwd=root)
         if ret:
             raise RuntimeError(f"Pages add failed: {err or out}")
-        ret, status, err = run(["git", "status", "--porcelain", "--", f"data/{SIDECAR_NAME}"], cwd=root)
+        ret, status, err = run(["git", "status", "--porcelain", "--", REFRESH_PATH], cwd=root)
         if ret:
             raise RuntimeError(f"Pages status failed: {err}")
         if not status:
             return
-        ret, out, err = run(["git", "commit", "--only", "-m", "chore: update reader assets index",
-                             "--", f"data/{SIDECAR_NAME}"], cwd=root)
+        identity = {"GIT_AUTHOR_NAME": "vomebook", "GIT_AUTHOR_EMAIL": "vomebook@gmail.com",
+                    "GIT_COMMITTER_NAME": "vomebook", "GIT_COMMITTER_EMAIL": "vomebook@gmail.com"}
+        ret, out, err = run(["git", "commit", "--only", "-m", "chore: refresh reader assets build",
+                             "--", REFRESH_PATH], cwd=root, env=identity)
         if ret:
             raise RuntimeError(f"Pages commit failed: {err or out}")
         ret, out, err = run(["git", "push"], cwd=root, env=auth)
@@ -158,7 +183,7 @@ def main() -> int:
     finally:
         if temporary_source:
             source.unlink(missing_ok=True)
-    print("validated reader assets index" if args.dry_run else "published reader assets index to GitHub Pages")
+    print("validated reader assets index" if args.dry_run else "published Reader Assets build trigger to GitHub Pages")
     return 0
 
 

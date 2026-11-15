@@ -281,7 +281,7 @@ class RouteControlTests(unittest.TestCase):
         self.assertEqual(catalog[control.FIELD], [KEY])
         self.assertNotIn(KEY, current['f'])
 
-    def test_pages_git_publication_uses_filtered_pinned_generation_and_keeps_other_files(self):
+    def test_pages_git_trigger_identifies_filtered_pinned_generation_and_keeps_other_files(self):
         result = self.remove()
         pointer, catalog, projected = projection(self.store)
         data = gzip.compress(publication.encode(projected), mtime=0)
@@ -292,27 +292,31 @@ class RouteControlTests(unittest.TestCase):
                 return subprocess.run(['git', *args], cwd=cwd, check=True, capture_output=True, text=True)
             git('init', '--bare', '--initial-branch=main', str(remote))
             git('init', '--initial-branch=main', str(seed))
-            git('config', 'user.name', 'Fixture', cwd=seed)
-            git('config', 'user.email', 'fixture@example.test', cwd=seed)
-            (seed / 'data').mkdir()
-            (seed / 'data' / 'other.txt').write_text('unchanged')
+            git('config', 'user.name', 'vomebook', cwd=seed)
+            git('config', 'user.email', 'vomebook@gmail.com', cwd=seed)
+            (seed / '.gitignore').write_text('/data/\n')
+            (seed / 'other.txt').write_text('unchanged')
             git('add', '.', cwd=seed); git('commit', '-m', 'initial', cwd=seed)
             git('remote', 'add', 'origin', str(remote), cwd=seed); git('push', '-u', 'origin', 'main', cwd=seed)
             output.write_bytes(data)
             real_run = pages_publication.run
             def local_run(args, cwd=None, env=None):
                 if args[:4] == ['git', 'clone', '--depth', '1']:
-                    args = ['git', 'clone', '--depth', '1', str(remote), args[-1]]
+                    args = [*args[:-2], remote.as_uri(), args[-1]]
                 return real_run(args, cwd=cwd, env=env)
             with patch.object(pages_publication, 'run', side_effect=local_run):
                 pages_publication.publish_to_pages(output, 'fixture/site', 'dummy', dry_run=False)
-            deployed = gzip.decompress(subprocess.check_output(
-                ['git', '--git-dir', str(remote), 'show', 'main:data/reader_assets.json.gz']))
-            actual = json.loads(deployed)
-            self.assertNotIn(KEY, actual['f'])
-            self.assertEqual(actual['f'][OTHER], self.base['f'][OTHER])
-            self.assertEqual(actual['v3']['generation'], result['generation'])
-            self.assertEqual(git('--git-dir', str(remote), 'show', 'main:data/other.txt').stdout, 'unchanged')
+            marker = json.loads(git('--git-dir', str(remote), 'show',
+                                    'main:.github/reader-assets-refresh.json').stdout)
+            self.assertNotIn(KEY, projected['f'])
+            self.assertEqual(projected['f'][OTHER], self.base['f'][OTHER])
+            self.assertEqual(marker, {
+                'sidecar_schema': 1,
+                'sidecar_sha256': hashlib.sha256(publication.encode(projected)).hexdigest(),
+                'v3_generation': result['generation'],
+            })
+            self.assertEqual(git('--git-dir', str(remote), 'ls-tree', '-r', '--name-only', 'main', '--', 'data').stdout, '')
+            self.assertEqual(git('--git-dir', str(remote), 'show', 'main:other.txt').stdout, 'unchanged')
             self.assertEqual(publication.current(self.store)[0], pointer)
 
     def test_existing_withdraw_keeps_suppression(self):

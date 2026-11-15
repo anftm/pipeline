@@ -3199,28 +3199,33 @@ class PublicationTests(unittest.TestCase):
 
 
 class SearchIndexPublicationTests(unittest.TestCase):
-    def test_pages_publish_copies_only_sidecar_and_pushes(self):
+    def test_pages_publish_commits_only_refresh_marker_and_pushes(self):
         commands = []
 
         def fake_run(args, cwd=None, env=None):
             commands.append((list(args), cwd, env))
-            if args[:2] == ["git", "clone"]:
-                Path(args[-1], "data").mkdir(parents=True, exist_ok=True)
-                return 0, "", ""
             if args[:3] == ["git", "status", "--porcelain"]:
-                return 0, " M data/reader_assets.json.gz", ""
+                marker = json.loads(Path(cwd, publish_search_reader_index.REFRESH_PATH).read_text())
+                self.assertEqual(marker["sidecar_schema"], 1)
+                self.assertFalse(Path(cwd, "data").exists())
+                return 0, " M .github/reader-assets-refresh.json", ""
             return 0, "", ""
 
         with tempfile.TemporaryDirectory() as root:
             source = Path(root) / "reader_assets.json.gz"
-            source.write_bytes(b"gzip")
+            source.write_bytes(gzip.compress(b'{"v":1,"f":{}}'))
             with patch.object(publish_search_reader_index, "run", side_effect=fake_run):
                 publish_search_reader_index.publish_to_pages(
                     source, "vomebook/search", "token", dry_run=False
                 )
         argv = [item[0] for item in commands]
-        self.assertIn(["git", "add", "--", "data/reader_assets.json.gz"], argv)
-        commit = next(args for args in argv if args[:2] == ["git", "commit"])
+        self.assertIn(["git", "add", "--", ".github/reader-assets-refresh.json"], argv)
+        commit, _, identity = next(item for item in commands if item[0][:2] == ["git", "commit"])
+        self.assertEqual(commit[-2:], ["--", ".github/reader-assets-refresh.json"])
+        self.assertEqual(identity, {
+            "GIT_AUTHOR_NAME": "vomebook", "GIT_AUTHOR_EMAIL": "vomebook@gmail.com",
+            "GIT_COMMITTER_NAME": "vomebook", "GIT_COMMITTER_EMAIL": "vomebook@gmail.com",
+        })
         self.assertNotIn("skip ci", " ".join(commit).lower())
         self.assertEqual(argv[-1], ["git", "push"])
 
