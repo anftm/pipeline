@@ -12,7 +12,7 @@ on:
         default: ''
       operation:
         type: choice
-        options: [inspect, unify, ack, retire, withdraw, reset-documents, remove-route, restore-route, verify-route, migrate-derived, resume-derived, redirect-derived, finalize-derived-redirects, reconcile-derived-index, reconcile-sidecar, compact-legacy-history, publish-generation, verify-generation]
+        options: [inspect, unify, ack, retire, withdraw, reset-documents, remove-route, restore-route, verify-route, migrate-derived, resume-derived, redirect-derived, finalize-derived-redirects, replace-derived-history, reconcile-derived-index, reconcile-sidecar, compact-legacy-history, publish-generation, verify-generation]
         default: inspect
       resource_json:
         description: 'Migration requires root identities; optional read-only check_s3=true; apply/resume require external_writers_stopped=true'
@@ -84,13 +84,16 @@ jobs:
       - name: Test completed PDF redirect finalization
         if: inputs.operation == 'finalize-derived-redirects'
         run: python -B -m unittest tests.test_reader_page_redirect_retirement
+      - name: Test exact PDF history replacement
+        if: inputs.operation == 'replace-derived-history'
+        run: python -B -m unittest tests.test_reader_page_history_inventory tests.test_reader_page_history_replacement tests.test_reader_page_history_publish tests.test_reader_page_history_store
       - name: Verify and execute the central v3 operation
         id: operation
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_INPUT_TOKEN: ${{ secrets.HF_INPUT_TOKEN }}
-          HF_S3_ACCESS_KEY_ID: ${{ contains(fromJSON('["migrate-derived","resume-derived","redirect-derived","finalize-derived-redirects","reconcile-derived-index","reconcile-sidecar","compact-legacy-history","unify","remove-route","restore-route"]'), inputs.operation) && secrets.HF_S3_ACCESS_KEY_ID || '' }}
-          HF_S3_SECRET_ACCESS_KEY: ${{ contains(fromJSON('["migrate-derived","resume-derived","redirect-derived","finalize-derived-redirects","reconcile-derived-index","reconcile-sidecar","compact-legacy-history","unify","remove-route","restore-route"]'), inputs.operation) && secrets.HF_S3_SECRET_ACCESS_KEY || '' }}
+          HF_S3_ACCESS_KEY_ID: ${{ contains(fromJSON('["migrate-derived","resume-derived","redirect-derived","finalize-derived-redirects","replace-derived-history","reconcile-derived-index","reconcile-sidecar","compact-legacy-history","unify","remove-route","restore-route"]'), inputs.operation) && secrets.HF_S3_ACCESS_KEY_ID || '' }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ contains(fromJSON('["migrate-derived","resume-derived","redirect-derived","finalize-derived-redirects","replace-derived-history","reconcile-derived-index","reconcile-sidecar","compact-legacy-history","unify","remove-route","restore-route"]'), inputs.operation) && secrets.HF_S3_SECRET_ACCESS_KEY || '' }}
           GH_TOKEN: ${{ github.token }}
           GC_PRODUCER_TOKENS_JSON: ${{ secrets.GC_PRODUCER_TOKENS_JSON }}
           GC_AMBROSSEE_MAINTENANCE_TOKEN: ${{ secrets.GC_AMBROSSEE_MAINTENANCE_20261102 }}
@@ -117,7 +120,7 @@ jobs:
           args=("$OPERATION" --output output/v3/publication.json)
           case "$OPERATION" in
             withdraw|remove-route|restore-route|verify-route) args+=(--resource-json "$RESOURCE_JSON" --expected-parent "$EXPECTED_PARENT") ;;
-            migrate-derived|resume-derived|redirect-derived|finalize-derived-redirects|reconcile-derived-index|reconcile-sidecar|compact-legacy-history) args+=(--resource-json "$RESOURCE_JSON") ;;
+            migrate-derived|resume-derived|redirect-derived|finalize-derived-redirects|replace-derived-history|reconcile-derived-index|reconcile-sidecar|compact-legacy-history) args+=(--resource-json "$RESOURCE_JSON") ;;
             publish-generation|verify-generation) args+=(--expected-parent "$EXPECTED_PARENT" --wait-seconds 1200) ;;
             unify|reset-documents) args+=(--resource-json "$RESOURCE_JSON") ;;
             retire) ;;

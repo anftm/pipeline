@@ -827,7 +827,7 @@ def main():
     parser.add_argument("command", choices=("withdraw", "ack", "ack-all", "acknowledge-legacy",
                                             "compact-legacy", "inspect", "project", "retire",
                                             "unify", "reset-documents", "remove-route", "restore-route", "verify-route",
-                                            "migrate-derived", "resume-derived", "redirect-derived", "finalize-derived-redirects", "reconcile-derived-index", "reconcile-sidecar", "compact-legacy-history", "publish-generation", "verify-generation", "check-page-window"))
+                                            "migrate-derived", "resume-derived", "redirect-derived", "finalize-derived-redirects", "replace-derived-history", "reconcile-derived-index", "reconcile-sidecar", "compact-legacy-history", "publish-generation", "verify-generation", "check-page-window"))
     parser.add_argument("--resource-json")
     parser.add_argument("--expected-parent", default="none")
     parser.add_argument("--apply", action="store_true")
@@ -927,6 +927,44 @@ def main():
                                 expected_catalog=options['catalog_sha256'],
                                 expected_generation=options['v3_generation'])
         report = finalize.apply(store, api, plan) if args.apply else finalize.report(plan, applied=False)
+    elif args.command == 'replace-derived-history':
+        import httpx
+        try:
+            from . import reader_page_history_publish as history
+            from .reader_page_history_store import ConditionalPageHistoryStore
+        except ImportError:
+            import reader_page_history_publish as history
+            from reader_page_history_store import ConditionalPageHistoryStore
+        from huggingface_hub import HfApi
+        options = json.loads(args.resource_json or '{}')
+        if not isinstance(options, dict) or set(options) != {'mapping', 'v3_generation'}:
+            raise ValueError('replace-derived-history requires exact mapping and current v3 identity')
+        generation = options['v3_generation']
+        def observe_history_consumers(target_store, expected):
+            with httpx.Client(timeout=60, follow_redirects=True) as client:
+                receipts = {surface: observe_consumer(target_store, surface, client)
+                            for surface in ('hf', 'pages')}
+            if any(receipt.get('generation') != expected for receipt in receipts.values()):
+                raise ValueError('history replacement consumer generation changed')
+            return receipts
+        if args.apply:
+            assert_writer(store)
+            store = ConditionalPageHistoryStore(store)
+        api = HfApi(token=os.environ.get('HF_TOKEN'))
+        plan = history.prepare(store, options['mapping'], api=api,
+                               current_ack_verified_generation=generation,
+                               observe_consumers=observe_history_consumers)
+        if args.apply:
+            report = history.apply(store, plan, api=api,
+                                   current_ack_verified_generation=generation,
+                                   observe_consumers=observe_history_consumers)
+        else:
+            report = {'kind': 'reader-derived-pdf-history-preview', 'applied': False,
+                      'generation': generation,
+                      'replacement_count': len(plan['replacement_plan']['replacements']),
+                      'before_sha256': hashlib.sha256(plan['before']).hexdigest() if plan['before'] else None,
+                      'after_sha256': hashlib.sha256(plan['after']).hexdigest(),
+                      'deletion_authorized': False}
     elif args.command == 'reconcile-derived-index':
         try:
             from . import reader_page_reconcile as reconcile
@@ -1153,6 +1191,8 @@ def main():
         args.output.write_bytes(encode(report))
     else:
         print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+    if args.command == 'replace-derived-history' and args.apply and report.get('outcome') != 'applied':
+        raise RuntimeError('history publication outcome requires inspection; do not retry')
 
 
 if __name__ == "__main__":
