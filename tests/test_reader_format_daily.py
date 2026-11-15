@@ -1,6 +1,10 @@
 """Daily dispatch safety and completion, with no remote mutations."""
+from contextlib import nullcontext
 import copy
+import hashlib
+import io
 import json
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 import tempfile
@@ -46,6 +50,7 @@ class FakeAPI:
         self.main = HEAD
         self.mutate = lambda run: None
         self.head_checks = 0
+        self.artifact_generation = READER
 
     def check_main(self, expected):
         self.head_checks += 1
@@ -73,6 +78,12 @@ class FakeAPI:
         return [run for run in self.runs if run['display_title'] == operation['run_name']]
 
     def get_run(self, run_id): return next(run for run in self.runs if run['id'] == run_id)
+
+    def publication_report(self, operation, expected_sha):
+        assert operation['workflow'] == subject.PUBLISH
+        assert expected_sha == HEAD
+        return {'generation': self.artifact_generation, 'verification': receipt(self.artifact_generation),
+                'artifact_id': 99, 'run_id': operation['run_id'], 'run_attempt': 1}
 
 
 class DailyTests(unittest.TestCase):
@@ -178,10 +189,47 @@ class DailyTests(unittest.TestCase):
         after = summary(0); after['reader_generation'] = NEXT
         self.refresh.side_effect = [summary(10), after]
         self.verify.return_value = receipt(NEXT)
+        self.api.artifact_generation = NEXT
         result = self.controller().run(summary())
         self.assertEqual(result['reader_generation'], NEXT)
         self.assertEqual(result['formats']['epub']['state'], 'complete')
         self.assertNotIn('error', result)
+
+    def test_artifact_failure_never_falls_back_to_current_pointer(self):
+        self.api.publication_report = Mock(side_effect=RuntimeError('artifact mismatch'))
+        result = self.controller().run(summary())
+        self.assertIn('artifact mismatch', result['error'])
+        self.verify.assert_not_called()
+        self.assertEqual(self.refresh.call_count, 1)
+        self.assertEqual(len(self.api.posts), 2)
+        self.assertEqual(result['formats']['epub']['state'], 'blocked')
+
+    def test_live_callback_uses_artifact_generation_as_expected_target(self):
+        from scripts import publish_reader_v3 as publication, reader_format_backlog as backlog
+        with patch.object(backlog, 'HubBucketStore'), patch('huggingface_hub.HfApi'), \
+                patch('huggingface_hub.HfFileSystem'), patch('httpx.Client'), \
+                patch.object(publication, 'current', side_effect=AssertionError('must not choose current')), \
+                patch.object(publication, 'verify_generation', return_value=receipt(READER)) as verify:
+            _refresh, callback = subject.live_callbacks()
+            self.assertEqual(callback(READER, 60)['generation'], READER)
+            self.assertEqual(verify.call_args.args[2], READER)
+            self.assertEqual(verify.call_args.kwargs['timeout_seconds'], 60)
+
+    def test_foreign_live_generation_cannot_replace_artifact_generation(self):
+        self.verify.return_value = receipt(NEXT)
+        result = self.controller().run(summary())
+        self.assertIn('strict verify-generation', result['error'])
+        self.assertEqual(self.verify.call_args.args[0], READER)
+        self.assertEqual(self.refresh.call_count, 1)
+        self.assertEqual(result['formats']['epub']['state'], 'blocked')
+
+    def test_foreign_generation_after_live_verify_blocks_refresh_acceptance(self):
+        after = summary(0); after['reader_generation'] = NEXT
+        self.refresh.side_effect = [summary(10), after]
+        result = self.controller().run(summary())
+        self.assertIn('Reader generation changed', result['error'])
+        self.assertEqual(result['formats']['epub']['state'], 'blocked')
+        self.assertEqual(result['operations'][-1]['publication_artifact']['generation'], READER)
 
     def test_drift_and_zero_progress_stop(self):
         cases = []
@@ -335,6 +383,129 @@ class DailyTests(unittest.TestCase):
                 patch.object(subject, 'live_callbacks', side_effect=AssertionError('no Hub')), patch('builtins.print'):
             self.assertEqual(subject.main(['plan', '--summary', str(source), '--output', str(output)]), 0)
         self.assertEqual(json.loads(output.read_text())['formats']['epub']['state'], 'triggered')
+
+
+def publication_zip(publication=None, verification=None, extra=()):
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr('publication.json', json.dumps(publication or {'applied': True, 'generation': READER}))
+        archive.writestr('format-automation-verification.json', json.dumps(verification or receipt()))
+        for name, data in extra:
+            archive.writestr(name, data)
+    return output.getvalue()
+
+
+class PublicationArtifactTests(unittest.TestCase):
+    def setUp(self):
+        self.operation = {'workflow': subject.PUBLISH, 'run_id': 7, 'run_name': 'reader-auto/' + 'f'*32,
+                          'automation_id': 'f'*32}
+        self.run = {'id': 7, 'head_sha': HEAD, 'head_branch': 'main', 'event': 'workflow_dispatch',
+                    'run_attempt': 1, 'path': '.github/workflows/' + subject.PUBLISH,
+                    'display_title': self.operation['run_name'], 'status': 'completed', 'conclusion': 'success',
+                    'run_started_at': '2026-11-15T10:00:00Z'}
+        self.raw = publication_zip()
+        self.artifact = {'id': 99, 'name': subject.PUBLICATION_ARTIFACT, 'expired': False,
+                         'size_in_bytes': len(self.raw), 'digest': 'sha256:' + hashlib.sha256(self.raw).hexdigest(),
+                         'workflow_run': {'id': 7, 'head_sha': HEAD, 'head_branch': 'main'},
+                         'created_at': '2026-11-15T10:01:00Z'}
+        session = Mock(); session.headers = {}
+        self.api = subject.GitHub('fake', session=session)
+        self.api.get_run = Mock(side_effect=lambda _id: copy.deepcopy(self.run))
+        self.api.request = Mock(side_effect=lambda _method, path, **_kwargs:
+                                copy.deepcopy(self.run) if path.endswith('/attempts/1') else
+                                {'total_count': 1, 'artifacts': [copy.deepcopy(self.artifact)]})
+        self.api.download_artifact = Mock(side_effect=lambda _id: self.raw)
+
+    def report(self): return self.api.publication_report(self.operation, HEAD)
+
+    def replace_zip(self, raw):
+        self.raw = raw
+        self.artifact.update(size_in_bytes=len(raw), digest='sha256:' + hashlib.sha256(raw).hexdigest())
+
+    def test_exact_run_artifact_and_attempt_are_bound(self):
+        result = self.report()
+        self.assertEqual(result['generation'], READER)
+        self.assertEqual(result['run_id'], 7)
+        self.assertEqual(result['run_attempt'], 1)
+        self.assertEqual(result['artifact_id'], 99)
+        self.assertEqual(result['automation_id'], self.operation['automation_id'])
+        self.api.download_artifact.assert_called_once_with(99)
+        self.assertEqual(self.api.get_run.call_count, 2)
+        self.assertEqual(self.api.request.call_args_list[0].args[1], '/actions/runs/7/attempts/1')
+        self.assertEqual(self.api.request.call_args_list[1].args[1], '/actions/runs/7/artifacts')
+
+    def test_report_generation_mismatch_and_incomplete_consumers(self):
+        for verification in (receipt(NEXT), {**receipt(), 'complete': False},
+                             {**receipt(), 'complete': 'true'}, {**receipt(), 'consumers': {}}):
+            with self.subTest(verification=verification):
+                self.replace_zip(publication_zip(verification=verification))
+                with self.assertRaisesRegex(RuntimeError, 'strict verify-generation'): self.report()
+        self.replace_zip(publication_zip(publication={'applied': False, 'generation': READER}))
+        with self.assertRaisesRegex(RuntimeError, 'did not apply'): self.report()
+
+    def test_foreign_replayed_expired_and_oversized_artifacts(self):
+        original = copy.deepcopy(self.artifact)
+        for change in ({'workflow_run': {'id': 8, 'head_sha': HEAD, 'head_branch': 'main'}},
+                       {'workflow_run': {'id': 7, 'head_sha': 'b'*40, 'head_branch': 'main'}},
+                       {'created_at': '2026-11-15T09:59:59Z'}, {'expired': True},
+                       {'size_in_bytes': subject.MAX_ARCHIVE + 1}):
+            with self.subTest(change=change):
+                self.artifact = {**original, **change}
+                with self.assertRaisesRegex(RuntimeError, 'publication artifact'): self.report()
+        self.api.download_artifact.assert_not_called()
+
+    def test_rerun_or_replaced_run_after_download_rejected(self):
+        for change in ({'run_attempt': 2}, {'id': 8}, {'head_sha': 'b'*40}):
+            with self.subTest(change=change):
+                self.api.get_run.side_effect = [self.run, {**self.run, **change}]
+                with self.assertRaises(RuntimeError): self.report()
+
+    def test_digest_missing_or_changed_rejected(self):
+        for digest in (None, 'sha256:' + '0'*64):
+            self.artifact['digest'] = digest
+            with self.assertRaisesRegex(RuntimeError, 'digest'): self.report()
+
+    def test_missing_duplicate_or_incomplete_inventory_rejected(self):
+        for inventory in ({'total_count': 0, 'artifacts': []},
+                          {'total_count': 2, 'artifacts': [self.artifact, self.artifact]},
+                          {'total_count': 101, 'artifacts': [self.artifact]}):
+            self.api.request.side_effect = [self.run, inventory]
+            with self.assertRaises(RuntimeError): self.report()
+        self.api.download_artifact.assert_not_called()
+
+    def test_archive_paths_symlinks_duplicates_and_bombs_rejected(self):
+        symlink = zipfile.ZipInfo('link.json'); symlink.external_attr = 0o120777 << 16
+        for name, data in (('../publication.json', '{}'), ('/other.json', '{}'),
+                           ('dir/other.json', '{}'), ('dir\\other.json', '{}'),
+                           ('publication.json', '{}'), (symlink, 'publication.json'),
+                           ('big.json', 'x' * (subject.MAX_REPORT + 1))):
+            with self.subTest(name=name):
+                with self.assertWarns(UserWarning) if name == 'publication.json' else nullcontext():
+                    raw = publication_zip(extra=[(name, data)])
+                with self.assertRaises(ValueError): subject.read_publication_archive(raw)
+        with patch.object(subject, 'MAX_EXPANDED', 1):
+            with self.assertRaisesRegex(ValueError, 'expands'): subject.read_publication_archive(self.raw)
+        with patch.object(subject, 'MAX_ARCHIVE', 1):
+            with self.assertRaisesRegex(ValueError, 'size'): subject.read_publication_archive(self.raw)
+        output = io.BytesIO()
+        with zipfile.ZipFile(output, 'w') as archive: archive.writestr('publication.json', '{}')
+        with self.assertRaisesRegex(ValueError, 'missing'): subject.read_publication_archive(output.getvalue())
+
+    def test_download_bounds_and_never_sends_token_to_storage(self):
+        redirect = Mock(status_code=302, headers={'Location': 'https://test.blob.core.windows.net/signed'})
+        redirect.__enter__ = Mock(return_value=redirect); redirect.__exit__ = Mock(return_value=False)
+        self.api.session.request.return_value = redirect
+        download = Mock(status_code=200, headers={})
+        download.__enter__ = Mock(return_value=download); download.__exit__ = Mock(return_value=False)
+        download.iter_content.return_value = [b'123', b'456']
+        with patch('requests.get', return_value=download) as get, patch.object(subject, 'MAX_ARCHIVE', 5):
+            with self.assertRaisesRegex(ValueError, 'oversized'): subject.GitHub.download_artifact(self.api, 99)
+            self.assertNotIn('headers', get.call_args.kwargs)
+            self.assertFalse(get.call_args.kwargs['allow_redirects'])
+        for url in ('http://test.blob.core.windows.net/a', 'https://evil.test/a',
+                    'https://user:pass@test.blob.core.windows.net/a'):
+            redirect.headers['Location'] = url
+            with self.assertRaisesRegex(RuntimeError, 'host'): subject.GitHub.download_artifact(self.api, 99)
 
 
 class SourceGuardTests(unittest.TestCase):

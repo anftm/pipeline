@@ -14,6 +14,8 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -22,6 +24,8 @@ import signal
 import subprocess
 import time
 import uuid
+from urllib.parse import urlsplit
+import zipfile
 
 
 REPOSITORY = 'anftm/pipeline'
@@ -29,6 +33,10 @@ PUBLISH = 'reader-v3-publish.yml'
 THRESHOLD = 10
 MAX_BATCHES = 20
 MAX_SECONDS = 5 * 60 * 60
+PUBLICATION_ARTIFACT = 'v3-publication-report'
+MAX_ARCHIVE = 8 * 1024 * 1024
+MAX_EXPANDED = 16 * 1024 * 1024
+MAX_REPORT = 2 * 1024 * 1024
 SHA = re.compile(r'[0-9a-f]{40}\Z')
 GENERATION = re.compile(r'[0-9a-f]{64}\Z')
 OPERATION_ID = re.compile(r'[0-9a-f]{32}\Z')
@@ -239,6 +247,122 @@ class GitHub:
     def get_run(self, run_id):
         return self.request('GET', '/actions/runs/' + str(run_id))
 
+    def download_artifact(self, artifact_id):
+        import requests
+        url = f'https://api.github.com/repos/{self.repository}/actions/artifacts/{artifact_id}/zip'
+        with self.session.request('GET', url, timeout=30, allow_redirects=False, stream=True) as response:
+            if response.status_code != 302:
+                raise RuntimeError('artifact download did not return a signed redirect')
+            location = response.headers.get('Location', '')
+        target = urlsplit(location)
+        if (target.scheme != 'https' or target.username or target.password or target.port not in (None, 443)
+                or not target.hostname or not target.hostname.endswith(
+                    ('.blob.core.windows.net', '.actions.githubusercontent.com'))):
+            raise RuntimeError('unexpected artifact download host')
+        # Signed storage URL gets no GitHub credentials and cannot redirect again.
+        with requests.get(location, timeout=30, allow_redirects=False, stream=True) as response:
+            if response.status_code != 200:
+                raise RuntimeError('artifact download failed')
+            if int(response.headers.get('Content-Length', '0')) > MAX_ARCHIVE:
+                raise ValueError('artifact archive is oversized')
+            raw = bytearray()
+            for chunk in response.iter_content(64 * 1024):
+                raw.extend(chunk)
+                if len(raw) > MAX_ARCHIVE:
+                    raise ValueError('artifact archive is oversized')
+        return bytes(raw)
+
+    def publication_report(self, operation, expected_sha):
+        if operation.get('workflow') != PUBLISH or type(operation.get('run_id')) is not int:
+            raise ValueError('publication artifact requires the recorded v3 run')
+        run_id = operation['run_id']
+
+        def check(run):
+            validate_run(run, operation, expected_sha)
+            if run['id'] != run_id or run.get('status') != 'completed' or run.get('conclusion') != 'success':
+                raise RuntimeError('publication run changed or did not succeed')
+            return run
+
+        run = check(self.get_run(run_id))
+        check(self.request('GET', f'/actions/runs/{run_id}/attempts/1'))
+        inventory = self.request('GET', f'/actions/runs/{run_id}/artifacts', params={'per_page': 100})
+        artifacts, total = inventory.get('artifacts'), inventory.get('total_count')
+        if (not isinstance(artifacts, list) or type(total) is not int
+                or total != len(artifacts) or total > 100):
+            raise RuntimeError('publication artifact inventory incomplete')
+        matches = [item for item in artifacts if item.get('name') == PUBLICATION_ARTIFACT]
+        if len(matches) != 1:
+            raise RuntimeError('requires one unique v3-publication-report artifact')
+        artifact = matches[0]
+        origin = artifact.get('workflow_run', {})
+        if (type(artifact.get('id')) is not int or artifact['id'] <= 0
+                or artifact.get('expired') is not False
+                or type(artifact.get('size_in_bytes')) is not int
+                or not 0 < artifact['size_in_bytes'] <= MAX_ARCHIVE
+                or origin.get('id') != run_id or origin.get('head_sha') != expected_sha
+                or origin.get('head_branch') != 'main'
+                or datetime.fromisoformat(artifact['created_at'].replace('Z', '+00:00'))
+                   < datetime.fromisoformat(run['run_started_at'].replace('Z', '+00:00'))):
+            raise RuntimeError('foreign, replayed, expired or oversized publication artifact')
+        raw = self.download_artifact(artifact['id'])
+        digest = 'sha256:' + hashlib.sha256(raw).hexdigest()
+        if artifact.get('digest') != digest:
+            raise RuntimeError('publication artifact digest differs or is missing')
+        publication, verification = read_publication_archive(raw)
+        generation = publication.get('generation')
+        if publication.get('applied') is not True:
+            raise RuntimeError('publication report did not apply unify')
+        validate_verification(verification, generation)
+        check(self.get_run(run_id))  # A rerun during download invalidates attempt 1.
+        return {'generation': generation, 'verification': verification,
+                'artifact_id': artifact['id'], 'artifact_digest': digest,
+                'run_id': run_id, 'run_attempt': 1, 'automation_id': operation['automation_id']}
+
+
+def read_publication_archive(raw):
+    if not isinstance(raw, bytes) or not 0 < len(raw) <= MAX_ARCHIVE:
+        raise ValueError('invalid publication archive size')
+    reports = {}
+    required = {'publication.json', 'format-automation-verification.json'}
+    with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+        members = archive.infolist()
+        if not 1 <= len(members) <= 32 or sum(item.file_size for item in members) > MAX_EXPANDED:
+            raise ValueError('publication archive expands beyond limits')
+        seen = set()
+        for item in members:
+            name = item.filename
+            # upload-artifact uploads output/v3/*.json with a flat archive root.
+            if (not re.fullmatch(r'[A-Za-z0-9_-]+\.json', name) or name in seen
+                    or item.orig_filename != name or item.is_dir() or item.flag_bits & 1
+                    or (item.external_attr >> 16) & 0o170000 not in (0, 0o100000)
+                    or not 0 < item.file_size <= MAX_REPORT):
+                raise ValueError('unsafe, duplicate or oversized publication archive member')
+            seen.add(name)
+            if name in required:
+                with archive.open(item) as stream:
+                    payload = stream.read(MAX_REPORT + 1)
+                if len(payload) != item.file_size or len(payload) > MAX_REPORT:
+                    raise ValueError('publication report size differs')
+                value = json.loads(payload)
+                if not isinstance(value, dict):
+                    raise ValueError('publication report must be an object')
+                reports[name] = value
+    if set(reports) != required:
+        raise ValueError('publication or automation verification report missing')
+    return reports['publication.json'], reports['format-automation-verification.json']
+
+
+def validate_verification(receipt, generation):
+    if (not isinstance(generation, str) or not GENERATION.fullmatch(generation)
+            or not isinstance(receipt, dict) or receipt.get('generation') != generation
+            or receipt.get('complete') is not True
+            or not isinstance(receipt.get('consumers'), dict)
+            or any(not isinstance(receipt['consumers'].get(surface), dict)
+                   or receipt['consumers'][surface].get('generation') != generation
+                   or receipt['consumers'][surface].get('projection_verified') is not True
+                   for surface in ('hf', 'pages'))):
+        raise RuntimeError('strict verify-generation did not confirm both consumers for the publication generation')
+
 
 def validate_run(run, operation, expected_sha):
     if (run.get('display_title') != operation['run_name'] or run.get('head_sha') != expected_sha
@@ -394,15 +518,15 @@ class Controller:
                         search_generation=summary['search_generation']), ext, 'producer')
                     self.dispatch(PUBLISH, {'operation': 'unify', 'apply': 'true',
                                             'automation_id': self.new_id()}, ext, 'unify')
-                    receipt = self.verify(self.remaining())
+                    operation = self.result['operations'][-1]
+                    evidence = self.api.publication_report(operation, self.expected_sha)
+                    generation = evidence['generation']
+                    validate_verification(evidence['verification'], generation)
+                    operation['publication_artifact'] = evidence
+                    self.checkpoint()
+                    receipt = self.verify(generation, self.remaining())
                     self.remaining()
-                    generation = receipt.get('generation')
-                    if (receipt.get('complete') is not True or not isinstance(generation, str)
-                            or not GENERATION.fullmatch(generation)
-                            or any(receipt.get('consumers', {}).get(surface, {}).get('generation') != generation
-                                   or receipt.get('consumers', {}).get(surface, {}).get('projection_verified') is not True
-                                   for surface in ('hf', 'pages'))):
-                        raise RuntimeError('strict verify-generation did not confirm both consumers')
+                    validate_verification(receipt, generation)
                     current = self.fresh(summary)
                     if current['reader_generation'] != generation:
                         raise RuntimeError('Reader generation changed after verification')
@@ -477,12 +601,9 @@ def live_callbacks():
         with httpx.Client(timeout=30, follow_redirects=True) as client:
             return backlog.inspect(hub=hub, api=api, fs=fs, client=client, threshold=10, scope='all')[0]
 
-    def verify(remaining):
+    def verify(generation, remaining):
         with httpx.Client(timeout=min(30, remaining), follow_redirects=True) as client:
-            pointer, _catalog = publication.current(hub)
-            if not pointer:
-                raise RuntimeError('Reader has no current generation')
-            return publication.verify_generation(hub, client, pointer['generation'],
+            return publication.verify_generation(hub, client, generation,
                                                  timeout_seconds=min(1200, int(remaining)))
     return refresh, verify
 
