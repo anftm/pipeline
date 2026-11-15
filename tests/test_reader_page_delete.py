@@ -12,6 +12,8 @@ from unittest.mock import Mock, patch
 import os
 
 from scripts import reader_page_delete as deletion, reader_gc_graph as graph
+from scripts.reader_bucket_store import HubBucketStore
+from scripts.reader_gc_store import CollectionStore
 
 
 PATHS = ['derived/generation/' + 'a' * 32 + '/document.pdf',
@@ -134,6 +136,38 @@ class DeleteTests(unittest.TestCase):
         self.consumers.assert_called_once()
         self.intent.assert_called_once()
         self.assertEqual(self.intent.call_args.args[0]['plan_sha256'], deletion.plan_id(self.plan))
+
+    def test_real_storage_adapters_use_configured_hub_api_for_all_exact_reads(self):
+        for adapter in (CollectionStore, HubBucketStore):
+            with self.subTest(adapter=adapter.__name__), patch.dict(os.environ, {
+                    'HF_TOKEN': 'fixture-page-token', 'HF_INPUT_TOKEN': 'fixture-input-token',
+                    'HF_S3_ACCESS_KEY_ID': 'fixture', 'HF_S3_SECRET_ACCESS_KEY': 'fixture',
+                    }, clear=True):
+                store = adapter()
+                api = store.writer.api if isinstance(store, CollectionStore) else store.api
+                self.assertEqual(api.token, 'fixture-page-token')
+                files = FakeApi()
+                response = Mock()
+                response.json.return_value = {}
+                session = Mock()
+                def delete(*args, **kwargs):
+                    files.files.clear()
+                    return response
+                session.post.side_effect = delete
+                with patch.object(api, 'get_bucket_paths_info', side_effect=files.get_bucket_paths_info) as info, \
+                     patch('scripts.reader_page_delete.collector.verify_roots'), \
+                     patch('huggingface_hub.utils.get_session', return_value=session):
+                    result = deletion.apply_exact(store, api, self.ref, self.report, self.plan,
+                        deletion.plan_id(self.plan), fence=self.fence, check_consumers=self.consumers,
+                        check_chm_window=self.chm, persist_intent=self.intent, confirm_external_writers=True)
+                self.assertTrue(result['verified_absent'])
+                self.assertEqual(info.call_count, 3)
+                for call in info.call_args_list:
+                    self.assertEqual(call.args, (deletion.BUCKET, sorted(PATHS)))
+                    self.assertEqual(call.kwargs, {})
+                session.post.assert_called_once()
+                self.assertEqual(session.post.call_args.kwargs['headers']['authorization'],
+                                 'Bearer fixture-page-token')
 
     def test_changed_nested_manifest_after_intent_never_sends_delete(self):
         manifest = (deletion.BUCKET, 'objects/live/reading-manifest.json')

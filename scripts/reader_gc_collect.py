@@ -467,6 +467,7 @@ def collect(store, fence, reference_graph, report, catalog, *, grace_days=0, lim
             chm_guard(store)
         fence.check()
         verify_roots(store, reference_graph, frozenset(selected))
+        verify_graph_documents(store, reference_graph)
         last_barrier[0] = time.monotonic()
     def save():
         if checkpoint:

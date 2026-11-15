@@ -31,6 +31,23 @@ class Store(MemoryStore):
         return super().list_files(bucket, prefixes)
 
 
+class VersionedStore(Store):
+    """Expose current ETags separately from the graph's read-time identities."""
+
+    def __init__(self):
+        super().__init__()
+        self.read_etags = {}
+
+    def read_bytes(self, bucket, path):
+        raw = super().read_bytes(bucket, path)
+        self.read_etags[bucket, path] = '"' + hashlib.sha256(raw).hexdigest() + '"'
+        return raw
+
+    def list_exact_versions(self, bucket, paths):
+        return {path: '"' + hashlib.sha256(self.objects[bucket][path]).hexdigest() + '"'
+                for path in paths if path in self.objects[bucket]}
+
+
 class StreamingStore(Store):
     """Adds the streaming/digest interface used by the publishing receipt path."""
 
@@ -69,6 +86,74 @@ class ReaderGcCollectTests(unittest.TestCase):
         store.list_exact_versions.return_value = {key[1]: '"old"'}
         with self.assertRaisesRegex(RuntimeError, 'nested graph document'):
             collector.verify_graph_documents(store, reference)
+
+    def nested_manifest_fixture(self, adapter=Store, targets=1):
+        store = adapter()
+        manifest = 'objects/live/document-manifest.json'
+        paths = [f'objects/orphan/{i}/document.pdf' for i in range(targets)]
+        store.put(ASSETS, 'reader-index/pinned.json', {
+            'resources': [{'bucket': PDF, 'path': manifest}]})
+        store.put(PDF, manifest, {'kind': 'static-pdf-stream', 'resources': []})
+        for path in paths:
+            store.put(PDF, path, b'orphan')
+        reference = graph.ReferenceGraph(store)
+        report = reference.build()
+        self.assertTrue(report['graph_complete'], report['blockers'])
+        self.assertIn((PDF, manifest), reference.loaded_digests)
+        self.assertNotIn((PDF, manifest), reference.root_hashes)
+        self.assertEqual(report['buckets'][PDF]['candidates'], paths)
+        return store, manifest, paths, reference, report
+
+    def test_collect_rechecks_nested_documents_after_plan_checkpoint(self):
+        for adapter in (Store, VersionedStore):
+            for mutation in ('unchanged', 'changed', 'missing'):
+                with self.subTest(adapter=adapter.__name__, mutation=mutation):
+                    store, manifest, paths, reference, report = self.nested_manifest_fixture(adapter)
+                    def checkpoint(result):
+                        if result['batches']:
+                            return
+                        if mutation == 'changed':
+                            store.put(PDF, manifest, {'kind': 'static-pdf-stream',
+                                'resources': [{'bucket': PDF, 'path': paths[0]}]})
+                        elif mutation == 'missing':
+                            store.objects[PDF].pop(manifest, None)
+                    with patch.object(store, 'delete', wraps=store.delete) as delete:
+                        if mutation == 'unchanged':
+                            result = collector.collect(store, Mock(), reference, report, {}, apply=True,
+                                                       checkpoint=checkpoint)
+                            self.assertTrue(result['complete'])
+                            self.assertEqual(result['confirmed_deleted_objects'], 1)
+                            delete.assert_called_once_with(PDF, paths)
+                        else:
+                            with self.assertRaises((RuntimeError, FileNotFoundError)):
+                                collector.collect(store, Mock(), reference, report, {}, apply=True,
+                                                  checkpoint=checkpoint)
+                            delete.assert_not_called()
+                            self.assertIn(paths[0], store.objects[PDF])
+
+    def test_collect_rechecks_nested_documents_at_periodic_and_post_delete_barriers(self):
+        for targets in (1, 2):
+            with self.subTest(targets=targets):
+                store, manifest, paths, reference, report = self.nested_manifest_fixture(targets=targets)
+                clock = [0.0]
+                snapshots = []
+                original_delete = store.delete
+                def delete_and_change(bucket, batch):
+                    original_delete(bucket, batch)
+                    store.put(PDF, manifest, {'kind': 'static-pdf-stream',
+                        'resources': [{'bucket': PDF, 'path': paths[-1]}]})
+                    clock[0] += 61
+                with patch.object(store, 'delete', side_effect=delete_and_change) as delete, \
+                     patch.object(collector.time, 'monotonic', side_effect=lambda: clock[0]):
+                    with self.assertRaisesRegex(RuntimeError, 'nested graph document changed'):
+                        collector.collect(store, Mock(), reference, report, {}, apply=True, batch_size=1,
+                            checkpoint=lambda result: snapshots.append(json.loads(json.dumps(result))))
+                delete.assert_called_once_with(PDF, paths[:1])
+                if targets == 2:
+                    self.assertIn(paths[1], store.objects[PDF])
+                self.assertFalse(snapshots[-1]['complete'])
+                self.assertEqual(snapshots[-1]['confirmed_deleted_objects'], 0)
+                self.assertEqual([entry['status'] for entry in snapshots[-1]['batches']], ['accepted'])
 
     def test_root_recheck_discards_stale_nested_listing_versions(self):
         store = Store()

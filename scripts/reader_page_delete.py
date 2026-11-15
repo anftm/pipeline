@@ -139,7 +139,8 @@ def apply_exact(store, api, reference, fresh_report, plan, expected_hash, *, fen
         if any(bucket == BUCKET and (ref == parent or ref.startswith(parent + '/'))
                for bucket, ref in reference.references):
             raise RuntimeError('candidate bundle has a referenced sibling: ' + path)
-    observed = {item.path: item for item in api.get_bucket_paths_info(BUCKET, paths, token=store.token(BUCKET))}
+    # Both storage modes supply a Hub API configured for the page bucket.
+    observed = {item.path: item for item in api.get_bucket_paths_info(BUCKET, paths)}
     for item in plan['targets']:
         current = observed.get(item['path'])
         if current is None or current.xet_hash != item['xet_hash'] or current.size != item['bytes']:
@@ -160,7 +161,7 @@ def apply_exact(store, api, reference, fresh_report, plan, expected_hash, *, fen
     check_chm_window()
     fence.check()
     check_plan(plan, expected_hash)
-    latest = {item.path: item for item in api.get_bucket_paths_info(BUCKET, paths, token=store.token(BUCKET))}
+    latest = {item.path: item for item in api.get_bucket_paths_info(BUCKET, paths)}
     for item in plan['targets']:
         observed = latest.get(item['path'])
         if observed is None or observed.xet_hash != item['xet_hash'] or observed.size != item['bytes']:
@@ -185,7 +186,7 @@ def apply_exact(store, api, reference, fresh_report, plan, expected_hash, *, fen
             raise RuntimeError('delete outcome may be partial; re-plan before retry')
     finally:
         response.close()
-    remaining = list(api.get_bucket_paths_info(BUCKET, paths, token=store.token(BUCKET)))
+    remaining = list(api.get_bucket_paths_info(BUCKET, paths))
     if remaining:
         raise RuntimeError('some paths remain or were recreated; re-plan before retry')
     return {'kind': 'pdf-page-exact-delete-result', 'plan_sha256': expected_hash,
