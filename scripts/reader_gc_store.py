@@ -6,7 +6,7 @@ except ImportError:
 
 
 class CollectionStore(S3BucketStore):
-    deletion_buckets = {'vomebook/reader-assets-v2', 'vomebook/pdf-pages-v2', 'melsm/pdf-archive-v2'}
+    deletion_buckets = {'vomebook/reader-assets-v2', 'vomebook/pdf-pages-v2'}
     def __init__(self):
         super().__init__()
         self.writer = HubBucketStore()
