@@ -500,8 +500,19 @@ class ReferenceGraph:
                     return
                 bucket, explicit = context, True
             for key, item in value.items():
+                if key == "processing_roots":
+                    # Canonical indexes still need these records at the next
+                    # publisher handoff. Keep existing metadata even after its
+                    # resources were released; missing historical records use
+                    # the publisher's verified retirement receipts instead.
+                    if isinstance(item, list):
+                        for path in item:
+                            if (isinstance(path, str) and path.startswith("reader-index/processing/")
+                                    and path in self.files.get(READER_ASSETS_BUCKET, set())):
+                                self.mark(READER_ASSETS_BUCKET, path)
+                    continue
                 if key in {"orphans", "source_url", "source_path", "source", "error",
-                           "processing_roots", "observations", "components"}:
+                           "observations", "components"}:
                     continue
                 # Raw OCR text is not a path. A structured text resource,
                 # however, can itself carry an exact cross-bucket reference.

@@ -867,6 +867,54 @@ class ReaderGcGraphTests(unittest.TestCase):
         report = gc.ReferenceGraph(store).build()
         self.assertEqual(report["buckets"][PDF]["candidates"], [])
 
+    def test_canonical_processing_reference_keeps_released_metadata_only(self):
+        for index_bucket in (ASSETS, PDF):
+            with self.subTest(index_bucket=index_bucket):
+                store = MemoryStore()
+                path = 'reader-index/processing/stream-upload-' + 'a' * 32 + '.json'
+                orphan = 'documents/text/txt/old/document.txt'
+                store.put(ASSETS, path, {
+                    'kind': 'reader-processing-roots', 'status': 'released', 'generation': 'current',
+                    'resources': [{'bucket': ASSETS, 'root': orphan.rsplit('/', 1)[0]}]})
+                store.put(ASSETS, orphan, b'old')
+                store.put(ASSETS, 'reader-index/reader_catalog.json', {
+                    'version': 1, 'kind': 'reader-catalog', 'current': {'generation': 'current'},
+                    'generations': {'current': {'generation': 'current', 'status': 'current',
+                                                'references': []}}})
+                index = 'documents/text/txt/index.json'
+                store.put(index_bucket, index, {'files': [{'bucket': index_bucket,
+                                                          'processing_roots': [path]}]})
+                graph = gc.ReferenceGraph(store)
+                report = graph.build()
+                self.assertTrue(report['graph_complete'], report['blockers'])
+                self.assertIn((ASSETS, path), graph.direct[(index_bucket, index)])
+                self.assertIn((ASSETS, path), graph.references)
+                self.assertNotIn(path, report['buckets'][ASSETS]['candidates'])
+                self.assertEqual(report['processing_retirements'], [])
+                self.assertIn(orphan, report['buckets'][ASSETS]['candidates'])
+                # Removing the canonical owner makes the released row collectible.
+                store.put(index_bucket, index, {'files': []})
+                report = gc.ReferenceGraph(store).build()
+                self.assertTrue(report['graph_complete'], report['blockers'])
+                self.assertIn(path, report['buckets'][ASSETS]['candidates'])
+                self.assertEqual([entry['path'] for entry in report['processing_retirements']], [path])
+
+    def test_absent_canonical_processing_reference_is_not_recreated_or_traversed(self):
+        store = MemoryStore()
+        path = 'reader-index/processing/office-chapters-' + 'a' * 32 + '.json'
+        store.put(ASSETS, 'chapters/ebook/epub/index.json', {'files': [{'processing_roots': [path]}]})
+        store.put(ASSETS, 'reader-index/v3/retirement.json', {
+            'version': 1, 'kind': 'reader-v3-retirement', 'resources': [],
+            'retired_paths': [path], 'replacement_acks': {'hf': True, 'pages': True}})
+        before = {bucket: dict(objects) for bucket, objects in store.objects.items()}
+        graph = gc.ReferenceGraph(store)
+        report = graph.build()
+        self.assertTrue(report['graph_complete'], report['blockers'])
+        self.assertEqual(report['missing'], [])
+        self.assertNotIn((ASSETS, path), graph.references)
+        self.assertNotIn((ASSETS, path), graph.seen)
+        self.assertEqual(store.objects, before)
+
     def test_gc_observation_requires_two_pass_grace_and_never_deletes(self):
         store = MemoryStore()
         orphan = "objects/orphan/document.pdf"

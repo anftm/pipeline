@@ -632,6 +632,36 @@ class ReaderGcCollectTests(unittest.TestCase):
         for status in ['processing', 'uploaded', 'failed']:
             self.assertIn(f'reader-index/processing/{status}.json', store.objects[ASSETS])
 
+    def test_canonical_processing_owner_survives_collection_and_next_publish(self):
+        store = Store()
+        catalog, generation = reader_lifecycle.catalog_generation({'v': 1, 'f': {}})
+        store.put(ASSETS, collector.CATALOG, catalog)
+        root = 'documents/text/txt/' + 'a' * 64
+        kept = 'reader-index/processing/stream-upload-' + 'b' * 32 + '.json'
+        retired = 'reader-index/processing/stream-upload-' + 'c' * 32 + '.json'
+        record = reader_lifecycle.release_processing(reader_lifecycle.processing_record(
+            [{'bucket': ASSETS, 'root': root}], 'reader-stream-upload', {}), generation)
+        for path in (kept, retired):
+            store.put(ASSETS, path, record)
+        owner = {'path': root + '/document.txt', 'processing_roots': [kept]}
+        store.put(ASSETS, owner['path'], b'current')
+        store.put(ASSETS, 'documents/text/txt/index.json', {'files': [owner]})
+        original = store.read_bytes(ASSETS, kept)
+        reference = graph.ReferenceGraph(store)
+        scanned = reference.build()
+        self.assertTrue(scanned['graph_complete'], scanned['blockers'])
+        result = collector.collect(store, Mock(), reference, scanned, catalog, apply=True)
+        self.assertEqual(result['targets'], [{'bucket': ASSETS, 'path': retired}])
+        self.assertEqual(result['confirmed_deleted_objects'], 1)
+        self.assertEqual([entry['path'] for entry in result['processing_retirements']], [retired])
+        self.assertNotIn(retired, store.objects[ASSETS])
+        self.assertEqual(store.read_bytes(ASSETS, kept), original)
+        self.assertEqual(reader_lifecycle.processing_handoffs(
+            [owner], 'd' * 32, lambda path: json.loads(store.read_bytes(ASSETS, path))), {})
+        report = graph.ReferenceGraph(store).build()
+        self.assertTrue(report['graph_complete'], report['blockers'])
+        self.assertNotIn(kept, report['buckets'][ASSETS]['candidates'])
+
     def test_retirement_writes_nothing_without_a_current_acknowledgment(self):
         store = Store()
         sidecar = {'v': 1, 'f': {}}
