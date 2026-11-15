@@ -6,6 +6,7 @@ objects can be deleted. No other bucket, URL, path or prefix is accepted.
 """
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime
 
@@ -56,6 +57,16 @@ class S3SearchGCStore:
                             'mtime': modified.timestamp()})
 
     @staticmethod
+    def _mismatch(message, key, expected, observed):
+        # Emit only normalized object identity, never raw S3 responses, headers,
+        # client configuration or credentials. Preserve strict equality checks.
+        def identity(item):
+            return None if item is None else {field: item.get(field)
+                                              for field in ('key', 'etag', 'size', 'mtime')}
+        detail = {'key': key, 'expected': identity(expected), 'observed': identity(observed)}
+        return ValueError(message + ': ' + json.dumps(detail, ensure_ascii=True, sort_keys=True))
+
+    @staticmethod
     def _missing(error):
         code, status = s3_error_code(error)
         return status == 404 or str(code) in {'404', 'NoSuchKey', 'NotFound'}
@@ -101,7 +112,7 @@ class S3SearchGCStore:
                 raise ValueError('listed key disappeared before read')
             return None
         if expected is not None and observed != expected:
-            raise ValueError('S3 metadata changed before read')
+            raise self._mismatch('S3 metadata changed before read', key, expected, observed)
         if observed['size'] > gc.MAX_JSON:
             raise ValueError('S3 JSON exceeds read cap')
         # Payload objects are inspected by HEAD only in GC, never downloaded.
@@ -110,8 +121,9 @@ class S3SearchGCStore:
         response = self.client.get_object(Bucket=self.bucket, Key=key, IfMatch=observed['etag'])
         body = response['Body']
         try:
-            if self._meta(key, response) != observed:
-                raise ValueError('S3 GET metadata differs from HEAD')
+            received = self._meta(key, response)
+            if received != observed:
+                raise self._mismatch('S3 GET metadata differs from HEAD', key, observed, received)
             raw = body.read(gc.MAX_JSON + 1)
         finally:
             body.close()
@@ -129,7 +141,8 @@ class S3SearchGCStore:
     def delete(self, item):
         gc.metadata(item)
         gc.payload_key(item['key'])
-        if self.head(item['key']) != item:
-            raise ValueError('S3 delete identity changed')
+        observed = self.head(item['key'])
+        if observed != item:
+            raise self._mismatch('S3 delete identity changed', item['key'], item, observed)
         # Exactly one request. Caller performs readback and stops on ANY exception.
         self.client.delete_object(Bucket=self.bucket, Key=item['key'], IfMatch=item['etag'])
