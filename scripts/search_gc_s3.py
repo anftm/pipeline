@@ -7,6 +7,7 @@ objects can be deleted. No other bucket, URL, path or prefix is accepted.
 from __future__ import annotations
 
 import json
+import math
 import re
 from datetime import datetime
 
@@ -52,9 +53,15 @@ class S3SearchGCStore:
         modified = response.get('LastModified')
         if not isinstance(modified, datetime) or modified.tzinfo is None:
             raise ValueError('S3 metadata requires timezone-aware LastModified')
+        # LIST exposes fractional seconds; HTTP HEAD/GET Last-Modified has
+        # whole-second precision. Compare all three at that common precision.
+        # GC age thresholds include one extra second to avoid early deletion.
+        # Same-second recreation of identical bytes still requires the declared
+        # writer coordination; different contents remain guarded by IfMatch.
+        modified_seconds = math.floor(gc.timestamp(modified.timestamp()))
         return gc.metadata({'key': key, 'etag': response.get('ETag'),
                             'size': response.get('Size' if listing else 'ContentLength'),
-                            'mtime': modified.timestamp()})
+                            'mtime': modified_seconds})
 
     @staticmethod
     def _mismatch(message, key, expected, observed):

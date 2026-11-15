@@ -125,7 +125,7 @@ class SearchGCTests(unittest.TestCase):
         return gc.mark(self.s, run_id=run, now=self.s.now, known_writers_coordinated=True)
 
     def sweep(self, run='200', key='gc/plans/100.json'):
-        self.s.now = max(self.s.now, NOW + gc.DAY)
+        self.s.now = max(self.s.now, NOW + gc.MARK_DELAY)
         return gc.sweep(self.s, plan_key=key, run_id=run, now=self.s.now, known_writers_coordinated=True)
 
     def test_retention_current_previous_newest_two_and_young(self):
@@ -189,7 +189,7 @@ class SearchGCTests(unittest.TestCase):
 
     def test_age_mark_delay_and_same_run_attempt(self):
         self.mark()
-        for now in (NOW, NOW + gc.DAY - 0.001):
+        for now in (NOW, NOW + gc.DAY - 0.001, NOW + gc.DAY, NOW + gc.MARK_DELAY - 0.001):
             with self.assertRaisesRegex(ValueError, '24h'):
                 gc.sweep(self.s, plan_key='gc/plans/100.json', run_id='200', now=now,
                          known_writers_coordinated=True)
@@ -308,9 +308,9 @@ class SearchGCTests(unittest.TestCase):
         self.s.generation('fresh1', gc.DAY)
         self.s.generation('fresh2', gc.DAY)
         self.assertIn(self.old, gc.graph(self.s, NOW)['manifests'])
-        self.assertNotIn(self.old, gc.graph(self.s, NOW)['protected'])
-        self.s.meta[self.old]['mtime'] += 0.001
         self.assertIn(self.old, gc.graph(self.s, NOW)['protected'])
+        self.assertIn(self.old, gc.graph(self.s, NOW + 0.999)['protected'])
+        self.assertNotIn(self.old, gc.graph(self.s, NOW + 1)['protected'])
 
     def test_coordination_required_and_mark_unknown_never_retried(self):
         for fn in (gc.mark, gc.sweep, gc.auto):
@@ -325,7 +325,7 @@ class SearchGCTests(unittest.TestCase):
 
     def test_auto_one_action_and_empty_skip_cli_preview(self):
         self.assertEqual(gc.auto(self.s, run_id='100', now=NOW, known_writers_coordinated=True)['status'], 'marked')
-        self.s.now += gc.DAY
+        self.s.now += gc.MARK_DELAY
         result = gc.auto(self.s, run_id='200', now=self.s.now, known_writers_coordinated=True)
         self.assertEqual(result['status'], 'complete')
         self.assertNotIn('gc/plans/200.json', self.s.files)
@@ -380,7 +380,7 @@ class SearchGCTests(unittest.TestCase):
                 second = self.mark(run='300')['plan']
                 self.assertFalse(second['manifests'])
                 self.assertTrue(leftover <= second['orphan_objects'].keys())
-                self.s.now += gc.DAY
+                self.s.now += gc.MARK_DELAY
                 self.sweep(run='400', key='gc/plans/300.json')
                 self.assertTrue(refs.isdisjoint(self.s.files))
                 self.assertEqual(len(self.s.deletes), len(set(self.s.deletes)))
@@ -392,7 +392,7 @@ class SearchGCTests(unittest.TestCase):
             return create(key, raw)
         self.s.create = advancing_create
         self.mark()
-        self.s.now = NOW + gc.DAY + 1
+        self.s.now = NOW + gc.MARK_DELAY + 1
         self.s.fail_delete = self.old
         with self.assertRaises(TimeoutError):
             self.sweep()
@@ -404,8 +404,26 @@ class SearchGCTests(unittest.TestCase):
         create = self.s.create
         self.s.create = advancing_create
         self.mark()
-        self.s.now = NOW + gc.DAY + 1
+        self.s.now = NOW + gc.MARK_DELAY + 1
         self.assertEqual(self.sweep()['status'], 'complete')
+
+    def test_orphan_retention_and_mark_selection_include_precision_margin(self):
+        raw = b'boundary-orphan'
+        key = object_key(hashlib.sha256(raw).hexdigest())
+        self.s.put(key, raw, 7 * gc.DAY)
+        for now in (NOW, NOW + 0.999):
+            self.assertNotIn(key, gc.plan(self.s, run_id='100', now=now)['objects'])
+        value = gc.plan(self.s, run_id='100', now=NOW + 1)
+        self.assertIn(key, value['orphan_objects'])
+        gc.validate_plan(value)
+        value['created_at'] = NOW + 0.999
+        with self.assertRaisesRegex(ValueError, 'old orphan evidence'):
+            gc.validate_plan(value)
+        self.mark()
+        self.assertIsNone(gc.oldest_plan(self.s, run_id='200', now=NOW + gc.DAY))
+        self.assertIsNone(gc.oldest_plan(self.s, run_id='200', now=NOW + gc.MARK_DELAY - 0.001))
+        self.assertEqual(gc.oldest_plan(self.s, run_id='200', now=NOW + gc.MARK_DELAY),
+                         'gc/plans/100.json')
 
     def test_three_live_generations_preview_explains_retention_and_skip(self):
         self.s = MemoryStore()
@@ -420,7 +438,7 @@ class SearchGCTests(unittest.TestCase):
         self.assertIn('current-previous', retained[previous])
         self.assertIn('current-desired', retained[current])
         self.assertIn('newest-at-least-two-including-ties', retained[current])
-        self.assertIn('age-less-than-seven-days', retained[newest])
+        self.assertIn('age-less-than-seven-days-plus-one-second-margin', retained[newest])
         self.assertEqual(result['plan']['objects'], {})
 
     def test_orphan_unknown_partial_next_run_absent_and_recreated_identity(self):
@@ -455,7 +473,7 @@ class SearchGCTests(unittest.TestCase):
         self.s.generation('fresh-two', 0)
         second = self.mark(run='300')['plan']
         self.assertEqual(set(second['manifests']), {self.staged, self.newest})
-        self.s.now += gc.DAY
+        self.s.now += gc.MARK_DELAY
         if second_stopped:
             self.s.fail_delete = next(iter(second['manifests']))
             with self.assertRaises(TimeoutError):

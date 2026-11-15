@@ -57,6 +57,48 @@ class S3GCTests(unittest.TestCase):
         self.assertEqual(self.client.list_objects_v2.call_args_list[1].kwargs,
                          {'Bucket': 'search-data-v1', 'MaxKeys': 1000, 'ContinuationToken': 'next'})
 
+    def test_fractional_list_matches_integral_http_head_and_get(self):
+        # Exact discrepancy observed in preview 43691116382.
+        listed = {'Key': self.key, 'ETag': '"exact"', 'Size': 2,
+                  'LastModified': datetime.fromtimestamp(1794376476.731, timezone.utc)}
+        response = {**self.response, 'LastModified': datetime.fromtimestamp(1794376476, timezone.utc)}
+        self.client.list_objects_v2.return_value = {'IsTruncated': False, 'Contents': [listed]}
+        self.client.head_object.return_value = response
+        self.client.get_object.return_value = {**response, 'Body': io.BytesIO(b'{}')}
+        item = list(self.store.inventory())[0]
+        self.assertEqual(item['mtime'], 1794376476)
+        self.assertIs(type(item['mtime']), int)
+        self.assertEqual(self.store.head(self.key), item)
+        self.assertEqual(self.store.read(self.key, item), b'{}')
+        self.store.delete(item)
+        self.client.get_object.assert_called_once_with(Bucket='search-data-v1', Key=self.key, IfMatch='"exact"')
+        self.client.delete_object.assert_called_once_with(Bucket='search-data-v1', Key=self.key, IfMatch='"exact"')
+
+    def test_seconds_normalization_keeps_all_identity_checks_strict(self):
+        listed = self.store._meta(self.key, {**self.response, 'Size': 2,
+                                            'LastModified': self.when.replace(microsecond=731000)}, listing=True)
+        changes = ({'LastModified': datetime.fromtimestamp(self.when.timestamp() + 1, timezone.utc)},
+                   {'LastModified': datetime.fromtimestamp(self.when.timestamp() - 0.001, timezone.utc)},
+                   {'ETag': '"different"'}, {'ETag': '"EXACT"'}, {'ContentLength': 3})
+        for changed in changes:
+            with self.subTest(changed=changed):
+                self.client.head_object.return_value = {**self.response, **changed}
+                with self.assertRaisesRegex(ValueError, 'metadata changed before read'):
+                    self.store.read(self.key, listed)
+                with self.assertRaisesRegex(ValueError, 'delete identity changed'):
+                    self.store.delete(listed)
+        self.client.head_object.return_value = self.response
+        with self.assertRaisesRegex(ValueError, 'metadata changed before read'):
+            self.store.read(self.key, {**listed, 'key': 'generations/' + 'b' * 64 + '/manifest.json'})
+        self.client.get_object.assert_not_called()
+        self.client.delete_object.assert_not_called()
+        for changed in changes:
+            body = io.BytesIO(b'{}')
+            self.client.get_object.return_value = {**self.response, **changed, 'Body': body}
+            with self.assertRaisesRegex(ValueError, 'GET metadata differs from HEAD'):
+                self.store.read(self.key, listed)
+            self.assertTrue(body.closed)
+
     def test_incomplete_malformed_and_repeated_token_listing_fails(self):
         for response in ({}, {'IsTruncated': True}, {'IsTruncated': False, 'Contents': [{}]}):
             self.client.list_objects_v2.side_effect = None

@@ -32,8 +32,10 @@ except ImportError:
     from reader_page_cas import strong_etag
 
 DAY = 86400
-RETENTION = 7 * DAY
-MARK_DELAY = DAY
+# S3 metadata uses HTTP whole-second precision. Waiting one extra second
+# covers the discarded fraction for payload retention and the mark grace period.
+RETENTION = 7 * DAY + 1
+MARK_DELAY = DAY + 1
 MAX_MANIFESTS = 2
 MAX_OBJECTS = 100
 MAX_BYTES = 128 * 1024 * 1024
@@ -187,7 +189,7 @@ def graph(store, now):
         if entry['meta']['mtime'] >= cutoff:
             retained.setdefault(key, []).append('newest-at-least-two-including-ties')
         if now - entry['meta']['mtime'] < RETENTION:
-            retained.setdefault(key, []).append('age-less-than-seven-days')
+            retained.setdefault(key, []).append('age-less-than-seven-days-plus-one-second-margin')
     protected.update(retained)
     journal.verify_unchanged(observation, journal.inspect(view))
     if decode_pointer(view.read_pointer()) != pointer:
@@ -448,7 +450,7 @@ def sweep(store, *, plan_key=None, run_id, now, run_attempt='1', known_writers_c
         raise ValueError('same run/rerun cannot sweep its mark')
     timestamp(now)
     if plan_meta is None or now - max(value['created_at'], plan_meta['mtime']) < MARK_DELAY:
-        raise ValueError('mark must be at least 24h old')
+        raise ValueError('mark must be at least 24h old plus one second precision margin')
     current = graph(store, now)
     unexpected = set(value['manifest_inventory']) - set(current['manifests']) - set(value['manifests'])
     if unexpected:
