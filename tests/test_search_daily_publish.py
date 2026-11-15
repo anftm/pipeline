@@ -11,6 +11,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import httpx
+
 from scripts import search_daily_publish as subject
 from scripts import search_generation, search_artifact_store, search_adopt
 from scripts import search_transition as tx, search_snapshot
@@ -271,6 +273,52 @@ class DailyPublishTests(unittest.TestCase):
         self.assertEqual(self.remote.calls, ['space-write', 'pages-dispatch', 'default-write'])
         self.assertEqual(self.store.pointer_writes, 1)
         self.assertEqual(sum(e['kind'] == 'search-daily-publish-unknown' for e in self.events), 3)
+
+    def test_space_httpx_read_timeout_after_effect_reconciles_without_replay(self):
+        original = self.remote.add_space_variable
+        def write(*args, **kwargs):
+            original(*args, **kwargs)
+            raise httpx.ReadTimeout('Space response lost')
+        self.remote.add_space_variable = write
+        result = self.run_publish()
+        self.assertEqual(result['state'], 'complete')
+        self.assertEqual(self.remote.space_generation, self.candidate)
+        self.assertEqual(self.remote.calls, ['space-write', 'pages-dispatch', 'default-write'])
+        self.assertEqual(self.store.pointer_writes, 1)
+        unknown = [e for e in self.events if e['kind'] == 'search-daily-publish-unknown']
+        self.assertEqual(len(unknown), 1)
+        self.assertEqual(unknown[0]['error_type'], 'ReadTimeout')
+
+    def test_space_httpx_read_timeout_without_effect_blocks_without_replay(self):
+        self.remote.no_effect = {'space'}
+        original = self.remote.add_space_variable
+        def write(*args, **kwargs):
+            original(*args, **kwargs)
+            raise httpx.ReadTimeout('Space write outcome unknown')
+        self.remote.add_space_variable = write
+        with self.assertRaisesRegex(subject.Blocked, 'space-parent-configured'):
+            self.run_publish(timeout_seconds=6)
+        current = tx.load(self.store)
+        self.assertTrue(current.record['pending']['write_claim'])
+        self.assertEqual(current.record['observed']['space']['generation'], self.parent)
+        self.assertEqual(self.remote.space_generation, self.parent)
+        self.assertEqual(self.remote.calls, ['space-write'])
+        self.assertEqual(self.store.pointer_writes, 0)
+        self.assertEqual(self.elapsed, 6)
+        unknown = [e for e in self.events if e['kind'] == 'search-daily-publish-unknown']
+        self.assertEqual(len(unknown), 1)
+        self.assertEqual(unknown[0]['error_type'], 'ReadTimeout')
+
+    def test_httpx_read_timeout_during_observation_is_not_retried(self):
+        def read(*args, **kwargs):
+            raise httpx.ReadTimeout('Space runtime read failed')
+        self.remote.get_space_runtime = read
+        with self.assertRaisesRegex(httpx.ReadTimeout, 'Space runtime read failed'):
+            self.run_publish()
+        self.assertEqual(self.elapsed, 0)
+        self.assertEqual(self.store.head, self.initial_head)
+        self.assertFalse(self.remote.calls)
+        self.assertFalse(self.events)
 
     def test_parent_without_progress_blocks_and_second_start_refuses_resume(self):
         self.remote.loss = self.remote.no_effect = {'space'}

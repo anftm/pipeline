@@ -15,6 +15,7 @@ import secrets
 import time
 from datetime import UTC, datetime
 
+import httpx
 import requests
 
 try:
@@ -47,7 +48,8 @@ def _emit(event):
 
 # Only write calls use this classification. Read/validation failures propagate;
 # an uncertain write is observed, never retried, even with a consumed claim.
-UNKNOWN_WRITE = (OSError, requests.RequestException, RuntimeError)
+# huggingface_hub 1.x uses httpx; its transport failures are not OSError.
+UNKNOWN_WRITE = (OSError, requests.RequestException, httpx.TransportError, RuntimeError)
 WAIT_STAGES = {'RUNNING_BUILDING', 'BUILDING', 'APP_STARTING'}
 
 
