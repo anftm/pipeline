@@ -210,6 +210,100 @@ gh() {
                             '--expected-sha', SHA, '--revisions', 'state/commits.json']
                 self.assertEqual(result.stdout.splitlines(), expected + (['snapshot-allowed'] if status == '0' else []))
 
+    def test_actionable_filter_order_failure_and_artifact_handoff(self):
+        extensions = dict(zip(NAMES, ('png', 'mp3', 'epub', 'docx', 'html', 'xlsx', 'pptx', 'chm')))
+        for name in NAMES:
+            config = workflow(name)
+            jobs = config['jobs']
+            steps = jobs['plan']['steps']
+            fetch = next(i for i, step in enumerate(steps) if 'fetch_and_parse.py' in step.get('run', ''))
+            guard, filtering, planning = steps[fetch + 1:fetch + 4]
+            self.assertIn('guard-source', guard['run'])
+            self.assertEqual(filtering['name'], 'Select actionable sources for automatic batch')
+            self.assertIn('plan_reader_stream_matrix.py' if name != 'chm-repair' else 'pilot_epub_chapters.py',
+                          planning['run'])
+            self.assertNotIn('continue-on-error', filtering)
+            self.assertEqual(filtering['env'], {'HF_TOKEN': '${{ secrets.HF_TOKEN }}',
+                'EXTENSION': 'chm' if name == 'chm-repair' else '${{ inputs.extension }}',
+                'SEARCH_GENERATION': '${{ inputs.search_generation }}'})
+            archive = next(step for step in steps if 'tar -czf' in step.get('run', ''))
+            self.assertGreater(steps.index(archive), steps.index(planning))
+            build = next(job for job in jobs.values() if any(
+                'tar -xzf' in step.get('run', '') for step in job['steps']))
+            unpack = next(step for step in build['steps'] if 'tar -xzf' in step.get('run', ''))
+            self.assertFalse(any('fetch_and_parse.py' in step.get('run', '') for step in build['steps']))
+            # The real YAML shell and tar commands run locally; only the helper is stubbed.
+            stub = '''python() {
+  printf '%s\\n' "$@" > helper-args
+  if [[ "$FILTER_STATUS" != missing ]]; then
+    printf '%s' "$FILTERED" > output/reader-actionable.json
+  fi
+  if [[ "$FILTER_STATUS" == fail ]]; then return 1; fi
+}
+'''
+            for automatic, status, extension in (
+                (True, 'ok', extensions[name]), (True, 'fail', extensions[name]),
+                (True, 'missing', extensions[name]), (False, 'fail', extensions[name]),
+                (True, 'ok', 'all'), (True, 'ok', '')):
+                if name == 'chm-repair' and extension in ('', 'all'):
+                    continue
+                with self.subTest(name=name, auto=automatic, status=status, extension=extension), \
+                        tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    (root / 'output').mkdir()
+                    (root / 'state').mkdir()
+                    original = '[{"File":"unchanged"},{"File":"actionable"}]'
+                    filtered = '[{"File":"actionable"}]'
+                    revisions = json.dumps({'VoiceOfML/Test': SHA})
+                    (root / 'output/search_data.json').write_text(original)
+                    (root / 'state/commits.json').write_text(revisions)
+                    # Supply planner reports for the actual YAML archive command.
+                    for filename in archive['run'].split()[3:]:
+                        if filename not in ('output/search_data.json', 'state/commits.json'):
+                            (root / filename).write_text('{}')
+                    values = inputs_for(config, automation_id=AUTO_ID if automatic else '', extension=extension)
+                    enabled = expression(filtering['if'], inputs=values)
+                    self.assertEqual(bool(enabled), automatic)
+                    script = stub + (filtering['run'] if enabled else '')
+                    script += '\nprintf planned > planned\n' + archive['run']
+                    env = dict(os.environ, EXTENSION=extension, SEARCH_GENERATION=GENERATION,
+                               FILTER_STATUS=status, FILTERED=filtered)
+                    result = subprocess.run(['bash', '-e', '-o', 'pipefail', '-c', script],
+                                            cwd=root, env=env, capture_output=True, text=True, timeout=5)
+                    allowed = not automatic or (status == 'ok' and extension not in ('', 'all'))
+                    self.assertEqual(result.returncode == 0, allowed, result.stderr)
+                    self.assertEqual((root / 'planned').exists(), allowed)
+                    self.assertEqual((root / 'output/search_data.json').read_text(),
+                                     filtered if automatic and allowed else original)
+                    self.assertEqual((root / 'state/commits.json').read_text(), revisions)
+                    helper_called = automatic and extension not in ('', 'all')
+                    self.assertEqual((root / 'helper-args').exists(), helper_called)
+                    if helper_called:
+                        self.assertEqual((root / 'helper-args').read_text().splitlines(), [
+                            'scripts/reader_format_sources.py', '--extension', extension,
+                            '--generation', GENERATION, '--search-data', 'output/search_data.json',
+                            '--revisions', 'state/commits.json', '--output', 'output/reader-actionable.json'])
+                    if allowed:
+                        restored = root / 'restored'
+                        restored.mkdir()
+                        # Use the same artifact basename/path the build job downloads.
+                        (restored / 'output').mkdir()
+                        artifact = archive['run'].split()[2]
+                        (restored / artifact).write_bytes((root / artifact).read_bytes())
+                        extracted = subprocess.run(['bash', '-e', '-c', unpack['run']], cwd=restored,
+                                                   capture_output=True, text=True, timeout=5)
+                        self.assertEqual(extracted.returncode, 0, extracted.stderr)
+                        self.assertEqual((restored / 'output/search_data.json').read_text(),
+                                         filtered if automatic else original)
+                        self.assertEqual((restored / 'state/commits.json').read_text(), revisions)
+                    else:
+                        self.assertFalse((root / archive['run'].split()[2]).exists())
+                        needs = {key: {'result': 'failure' if key == 'plan' else 'success',
+                                      'outputs': {'matrix': '{"include":[{}]}', 'count': '1'}} for key in jobs}
+                        for job_name, job in jobs.items():
+                            if job_name != 'plan':
+                                self.assertFalse(job_runs(job, inputs_for(config, apply=True), needs))
+
     def test_build_rechecks_published_sources_after_artifact_before_first_write(self):
         for name in NAMES:
             config = workflow(name)

@@ -114,6 +114,19 @@ jobs:
           python scripts/reader_format_daily.py guard-source \
             --generation "$SEARCH_GENERATION" --expected-sha "$EXPECTED_SHA" \
             --revisions state/commits.json
+      - name: Select actionable sources for automatic batch
+        if: inputs.automation_id != ''
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          EXTENSION: ${{ inputs.extension }}
+          SEARCH_GENERATION: ${{ inputs.search_generation }}
+        run: |
+          set -euo pipefail
+          [[ -n "$EXTENSION" && "$EXTENSION" != 'all' ]]
+          python scripts/reader_format_sources.py --extension "$EXTENSION" \
+            --generation "$SEARCH_GENERATION" --search-data output/search_data.json \
+            --revisions state/commits.json --output output/reader-actionable.json
+          mv output/reader-actionable.json output/search_data.json
       - name: Plan pending ordinary image workers
         id: matrix
         env:
