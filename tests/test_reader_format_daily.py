@@ -954,6 +954,12 @@ class GitHubTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'bounded reads'):
             api.runs(status='queued')
         self.assertEqual(api.request.call_count, 3)
+        api.request = Mock(side_effect=[
+            {'total_count': 101, 'workflow_runs': [{'id': n} for n in range(100)]},
+            {'total_count': 100, 'workflow_runs': []},
+            {'total_count': 1, 'workflow_runs': [{'id': 900}]}])
+        self.assertEqual(api.runs(status='in_progress'), [{'id': 900}])
+        self.assertEqual([call.kwargs['params']['page'] for call in api.request.call_args_list], [1, 2, 1])
 
     def test_active_detection_includes_pending_and_excludes_parent(self):
         api = self.api()
