@@ -289,6 +289,86 @@ def validate_plan(value):
     return value
 
 
+def verified_results(store, items):
+    """Bind historical results to their immutable attempt and exact marked plan.
+
+    These are audit evidence, not tombstones: only a matching manifest identity
+    with a delete request and an absent readback can explain a later missing key.
+    An `absent` event alone never proves who retired a manifest.
+    """
+    for key, item in items.items():
+        if not key.startswith('gc/results/'):
+            continue
+        result = decode(store.read(key, item))
+        fields = {'version', 'kind', 'run_id', 'run_attempt', 'plan_key', 'plan_sha256',
+                  'created_at', 'status', 'events', 'cancelled_manifests',
+                  'known_writers_declared_coordinated', 'global_lock'}
+        if result.get('status') == 'stopped':
+            fields.add('error_type')
+        if (set(result) != fields or result['version'] != 1 or result['kind'] != 'search-gc-result'
+                or result['status'] not in {'complete', 'stopped'}
+                or result['known_writers_declared_coordinated'] is not True or result['global_lock'] is not False):
+            raise ValueError('malformed GC result evidence')
+        run_identity(result['run_id'])
+        run_identity(result['run_attempt'])
+        timestamp(result['created_at'])
+        if key != f"gc/results/{result['run_id']}.json":
+            raise ValueError('GC result run identity mismatch')
+        plan_key = result['plan_key']
+        match = GC_RE.fullmatch(plan_key) if isinstance(plan_key, str) else None
+        if not match or match[1] != 'plans' or plan_key not in items:
+            raise ValueError('GC result plan evidence is missing')
+        raw = store.read(plan_key, items[plan_key])
+        value = validate_plan(decode(raw))
+        if (value['run_id'] != match[2] or value['run_id'] == result['run_id']
+                or hashlib.sha256(raw).hexdigest() != result['plan_sha256']
+                or result['created_at'] - max(value['created_at'], items[plan_key]['mtime']) < MARK_DELAY):
+            raise ValueError('GC result plan identity or age mismatch')
+        attempt_key = f"gc/attempts/{result['run_id']}.json"
+        if attempt_key not in items:
+            raise ValueError('GC result attempt evidence is missing')
+        attempt = {k: v for k, v in result.items() if k != 'error_type'}
+        attempt.update(status='started', events=[])
+        if decode(store.read(attempt_key, items[attempt_key])) != attempt:
+            raise ValueError('GC result differs from immutable attempt')
+        cancelled = result['cancelled_manifests']
+        if (not isinstance(cancelled, list) or any(not isinstance(k, str) for k in cancelled)
+                or len(set(cancelled)) != len(cancelled) or not set(cancelled) <= value['manifests'].keys()
+                or not isinstance(result['events'], list)):
+            raise ValueError('invalid GC result events or cancellations')
+        seen = set()
+        for event in result['events']:
+            if not isinstance(event, dict) or not isinstance(event.get('key'), str):
+                raise ValueError('invalid GC result event')
+            target, status = event['key'], event.get('status')
+            expected_fields = {'key', 'status'}
+            if status in {'deleted', 'present', 'unknown'}:
+                expected_fields.add('readback')
+            if (set(event) != expected_fields or target in seen or target in cancelled
+                    or target not in (value['manifests'].keys() | value['objects'].keys())
+                    or status not in {'deleted', 'present', 'unknown', 'absent',
+                                      'retained-reference', 'retained-changed'}):
+                raise ValueError('invalid GC result event binding')
+            seen.add(target)
+            if status == 'deleted' and event['readback'] is not None:
+                raise ValueError('GC deleted event lacks absent readback')
+            if status in {'unknown', 'present'} and result['status'] != 'stopped':
+                raise ValueError('GC unknown result cannot be complete')
+        yield result, value
+
+
+def explained_retirements(store, items, missing):
+    explained = set()
+    for result, value in verified_results(store, items):
+        for event in result['events']:
+            key = event['key']
+            entry = value['manifests'].get(key)
+            if (key in missing and entry is not None and entry['meta'] == missing[key]
+                    and event['status'] in {'deleted', 'unknown'} and event['readback'] is None):
+                explained.add(key)
+    return explained
+
+
 def coordinated(declared):
     if declared is not True:
         raise ValueError('apply requires --known-writers-coordinated: all stage/promotions/adopt/GC '
@@ -372,7 +452,10 @@ def sweep(store, *, plan_key=None, run_id, now, run_attempt='1', known_writers_c
     current = graph(store, now)
     unexpected = set(value['manifest_inventory']) - set(current['manifests']) - set(value['manifests'])
     if unexpected:
-        raise ValueError('unexpected missing manifest outside planned retirement')
+        missing = {key: value['manifest_inventory'][key] for key in unexpected}
+        unexpected -= explained_retirements(store, current['items'], missing)
+        if unexpected:
+            raise ValueError('unexpected missing manifest outside planned retirement')
     approved = {}
     for key, entry in value['manifests'].items():
         if key not in current['manifests']:
@@ -421,13 +504,9 @@ def sweep(store, *, plan_key=None, run_id, now, run_attempt='1', known_writers_c
 def oldest_plan(store, *, run_id, now):
     items = inventory(store)
     finished = set()
-    for key, item in items.items():
-        if key.startswith('gc/results/'):
-            result = decode(store.read(key, item))
-            if result.get('kind') != 'search-gc-result' or result.get('status') not in {'complete', 'stopped'}:
-                raise ValueError('malformed GC result')
-            if result['status'] == 'complete':
-                finished.add(result['plan_key'])
+    for result, _value in verified_results(store, items):
+        if result['status'] == 'complete':
+            finished.add(result['plan_key'])
     for key in sorted(items, key=lambda k: (items[k]['mtime'], k)):
         if key.startswith('gc/plans/'):
             value = validate_plan(decode(store.read(key, items[key])))

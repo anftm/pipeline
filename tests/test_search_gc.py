@@ -443,6 +443,111 @@ class SearchGCTests(unittest.TestCase):
         self.assertIn(orphan, self.s.files)
         self.assertEqual(self.s.deletes.count(orphan), 1)
 
+    def interleaved_plans(self, second_stopped=False):
+        first = self.mark()['plan']
+        self.s.fail_delete = self.old
+        with self.assertRaises(TimeoutError):
+            self.sweep()
+        self.s.fail_delete = None
+        # A's stopped sweep removed its manifest, leaving its objects. B can
+        # now retire manifests which were protected when A captured inventory.
+        self.s.generation('fresh-one', 0)
+        self.s.generation('fresh-two', 0)
+        second = self.mark(run='300')['plan']
+        self.assertEqual(set(second['manifests']), {self.staged, self.newest})
+        self.s.now += gc.DAY
+        if second_stopped:
+            self.s.fail_delete = next(iter(second['manifests']))
+            with self.assertRaises(TimeoutError):
+                self.sweep(run='400', key='gc/plans/300.json')
+            self.s.fail_delete = None
+        else:
+            self.sweep(run='400', key='gc/plans/300.json')
+        return first, second
+
+    def test_oldest_stopped_plan_recovers_after_another_completed_retirement(self):
+        first, second = self.interleaved_plans()
+        result = gc.auto(self.s, run_id='500', now=self.s.now, known_writers_coordinated=True)
+        self.assertEqual(result['plan_key'], 'gc/plans/100.json')
+        self.assertEqual(result['status'], 'complete')
+        self.assertTrue(set(first['objects']).isdisjoint(self.s.files))
+        self.assertTrue(set(second['manifests']).isdisjoint(self.s.files))
+        self.assertEqual(len(self.s.deletes), len(set(self.s.deletes)))
+        self.assertIsNone(gc.oldest_plan(self.s, run_id='600', now=self.s.now))
+
+    def test_two_stopped_plans_recover_in_order_after_interleaved_retirements(self):
+        first, second = self.interleaved_plans(second_stopped=True)
+        for run, key in (('500', 'gc/plans/100.json'), ('600', 'gc/plans/300.json')):
+            result = gc.auto(self.s, run_id=run, now=self.s.now, known_writers_coordinated=True)
+            self.assertEqual(result['plan_key'], key)
+            self.assertEqual(result['status'], 'complete')
+        self.assertTrue((set(first['objects']) | set(second['objects'])).isdisjoint(self.s.files))
+        self.assertEqual(len(self.s.deletes), len(set(self.s.deletes)))
+
+    def test_other_plan_evidence_never_excuses_unexplained_missing_manifest(self):
+        mutations = ('no-result', 'no-attempt', 'no-plan', 'hash', 'run', 'attempt',
+                     'no-event', 'absent-only', 'present-readback', 'different-etag',
+                     'different-size', 'different-mtime', 'not-selected', 'cancelled')
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                self.setUp()
+                self.interleaved_plans(second_stopped=True)
+                result_key, plan_key = 'gc/results/400.json', 'gc/plans/300.json'
+                result = json.loads(self.s.files[result_key])
+                retired = result['events'][0]['key']
+                if mutation.startswith('no-') and mutation != 'no-event':
+                    key = {'no-result': result_key, 'no-attempt': 'gc/attempts/400.json',
+                           'no-plan': plan_key}[mutation]
+                    self.s.remove(key)
+                elif mutation in {'different-etag', 'different-size', 'different-mtime'}:
+                    # Change the old observer's exact identity. A valid deletion
+                    # of the same key in B does not prove removal of this version.
+                    original = json.loads(self.s.files['gc/plans/100.json'])
+                    field = mutation.removeprefix('different-')
+                    original['manifest_inventory'][retired][field] = (
+                        '"another"' if field == 'etag' else original['manifest_inventory'][retired][field] + 1)
+                    self.s.files['gc/plans/100.json'] = gc.canonical(original)
+                    # Keep A's own result/attempt internally bound so failure
+                    # specifically exercises the cross-plan exact identity check.
+                    digest = hashlib.sha256(self.s.files['gc/plans/100.json']).hexdigest()
+                    for key in ('gc/results/200.json', 'gc/attempts/200.json'):
+                        evidence = json.loads(self.s.files[key])
+                        evidence['plan_sha256'] = digest
+                        self.s.files[key] = gc.canonical(evidence)
+                else:
+                    if mutation == 'hash':
+                        result['plan_sha256'] = '0' * 64
+                    elif mutation == 'run':
+                        result['run_id'] = '999'
+                    elif mutation == 'attempt':
+                        result['run_attempt'] = '2'
+                    elif mutation == 'no-event':
+                        result['events'] = []
+                    elif mutation == 'absent-only':
+                        result['events'][0] = {'key': retired, 'status': 'absent'}
+                    elif mutation == 'present-readback':
+                        result['events'][0]['readback'] = {'key': retired}
+                    elif mutation == 'not-selected':
+                        value = json.loads(self.s.files[plan_key])
+                        result['events'][0]['key'] = next(iter(value['objects']))
+                    elif mutation == 'cancelled':
+                        result['cancelled_manifests'] = [retired]
+                    self.s.files[result_key] = gc.canonical(result)
+                before = (list(self.s.deletes), list(self.s.writes))
+                with self.assertRaises(ValueError):
+                    self.sweep(run='500')
+                self.assertEqual((self.s.deletes, self.s.writes), before)
+
+    def test_auto_rejects_unbound_complete_result_instead_of_skipping_plan(self):
+        self.interleaved_plans()
+        result = json.loads(self.s.files['gc/results/400.json'])
+        result['plan_key'] = 'gc/plans/100.json'
+        self.s.files['gc/results/400.json'] = gc.canonical(result)
+        before = list(self.s.deletes)
+        with self.assertRaisesRegex(ValueError, 'plan identity'):
+            gc.auto(self.s, run_id='500', now=self.s.now, known_writers_coordinated=True)
+        self.assertEqual(self.s.deletes, before)
+
     def test_journal_change_between_delete_requests_stops_before_next_delete(self):
         self.s.generation('also-old', 31 * gc.DAY)
         self.mark()
