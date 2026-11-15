@@ -1,0 +1,81 @@
+name: 搜索 · Resume Daily Publication
+run-name: Resume search transaction / ${{ inputs.transaction }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      transaction:
+        description: Exact existing transaction ID; never starts a new publication
+        required: true
+        type: string
+      generation:
+        description: Exact candidate generation already bound in the journal
+        required: true
+        type: string
+      expected_parent:
+        description: Exact parent generation already bound in the journal
+        required: true
+        type: string
+      pages_revision:
+        description: Exact reviewed Pages revision for this transition
+        required: true
+        type: string
+      space_revision:
+        description: Exact reviewed Space revision for this transition
+        required: true
+        type: string
+      known_writers_coordinated:
+        description: Known writers remain coordinated; this declaration is not a global lock
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+concurrency:
+  group: daily-sync
+  cancel-in-progress: false
+  queue: max
+jobs:
+  resume:
+    if: github.repository == 'anftm/pipeline'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Require exact current main and coordinated writers
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ENABLED: ${{ vars.SEARCH_AUTOMATION_ENABLED }}
+          WRITERS: ${{ inputs.known_writers_coordinated }}
+        run: |
+          set -euo pipefail
+          [[ "$ENABLED" == true && "$WRITERS" == true ]]
+          [[ "$GITHUB_REF" == refs/heads/main ]]
+          [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/search-daily-resume.yml@refs/heads/main" ]]
+          [[ "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          [[ "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" == "$GITHUB_SHA" ]]
+      - name: Install dependencies
+        run: pip install -r scripts/requirements.txt requests==2.32.5 PyYAML==6.0.3
+      - name: Verify publication and recovery contracts
+        run: python -B -m unittest -v tests.test_search_daily_publish tests.test_search_transition tests.test_search_finalize_transition
+      - name: Resume only the existing exact transaction
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          PAGES_TOKEN: ${{ secrets.PAGES_TOKEN }}
+          HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+          TRANSACTION: ${{ inputs.transaction }}
+          GENERATION: ${{ inputs.generation }}
+          EXPECTED_PARENT: ${{ inputs.expected_parent }}
+          PAGES_REVISION: ${{ inputs.pages_revision }}
+          SPACE_REVISION: ${{ inputs.space_revision }}
+        run: |
+          set -euo pipefail
+          python -B scripts/search_daily_publish.py --resume-transaction "$TRANSACTION" \
+            --generation "$GENERATION" --expected-parent "$EXPECTED_PARENT" \
+            --pages-revision "$PAGES_REVISION" --space-revision "$SPACE_REVISION" \
+            --known-writers-coordinated --timeout-seconds 3600
