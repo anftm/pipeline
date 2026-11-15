@@ -336,7 +336,7 @@ class SearchGCTests(unittest.TestCase):
         before = list(self.s.writes)
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / 'report.json'
-            with patch('scripts.search_gc_s3.S3SearchGCStore', return_value=self.s), patch.object(gc.time, 'time', return_value=self.s.now), patch('builtins.print'):
+            with patch('scripts.search_gc_s3.S3SearchGCStore', return_value=self.s), patch('scripts.search_gc_roots.live_roots', return_value={}), patch.object(gc.time, 'time', return_value=self.s.now), patch('builtins.print'):
                 self.assertEqual(gc.main(['--mode', 'preview', '--run-id', '400', '--run-attempt', '2',
                                           '--output', str(output)]), 0)
             report = json.loads(output.read_bytes())

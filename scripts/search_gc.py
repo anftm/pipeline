@@ -180,8 +180,18 @@ def graph(store, now):
     for role in ('desired', 'previous'):
         if pointer[role] is not None:
             retained.setdefault(f"generations/{pointer[role]}/manifest.json", []).append('current-' + role)
+    root_provider = getattr(store, 'consumer_roots', None)
+    consumer_roots = root_provider() if root_provider is not None else {}
+    if not isinstance(consumer_roots, dict):
+        raise ValueError('invalid consumer roots')
+    for label, generation in consumer_roots.items():
+        if not isinstance(label, str) or not isinstance(generation, str) or not re.fullmatch(r'[0-9a-f]{64}', generation):
+            raise ValueError('invalid consumer root generation')
+        key = f'generations/{generation}/manifest.json'
+        protected.add(key)
+        retained.setdefault(key, []).append('consumer-' + label)
     if not protected <= manifests.keys():
-        raise ValueError('current/previous manifest is missing')
+        raise ValueError('current/previous or consumer manifest is missing')
     newest = sorted((entry['meta']['mtime'] for entry in manifests.values()), reverse=True)
     cutoff = newest[min(1, len(newest) - 1)]
     # Protect ties too: an arbitrary key order must not evict a newest generation.
@@ -192,6 +202,8 @@ def graph(store, now):
             retained.setdefault(key, []).append('age-less-than-seven-days-plus-one-second-margin')
     protected.update(retained)
     journal.verify_unchanged(observation, journal.inspect(view))
+    if root_provider is not None and root_provider() != consumer_roots:
+        raise ValueError('consumer roots changed during inventory')
     if decode_pointer(view.read_pointer()) != pointer:
         raise ValueError('pointer changed during inventory')
     return {'items': items, 'manifests': manifests, 'refs': refs,
@@ -556,6 +568,11 @@ def main(argv=None):
     except ImportError:
         from search_gc_s3 import S3SearchGCStore
     store = S3SearchGCStore()
+    try:
+        from .search_gc_roots import live_roots
+    except ImportError:
+        from search_gc_roots import live_roots
+    store.consumer_roots = live_roots
     kwargs = {'run_id': args.run_id or '1', 'run_attempt': args.run_attempt, 'now': time.time()}
     if args.mode == 'preview':
         result = {'status': 'preview', 'remote_writes': 0, 'plan': plan(store, **kwargs)}
