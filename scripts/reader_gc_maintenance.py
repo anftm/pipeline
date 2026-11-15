@@ -436,17 +436,72 @@ def restore(path, *, expected_owner=None, expected_maintenance_id=None):
     kick_restored(path, state)
 
 
-def run(path, *, limit=0, apply=True, scope='unreferenced', isolated_callback=None,
+def validate_collection(scope, resume_run, *, limit, apply, isolated_callback):
+    """Reject malformed exact requests before recovery or producer isolation."""
+    if scope not in {'unreferenced', 'retired-assets', 'page-plan', 'page-apply'}:
+        raise ValueError('invalid automatic collection scope')
+    if not isinstance(resume_run, str):
+        raise ValueError('resume_run must be a JSON string')
+    if scope not in {'page-plan', 'page-apply'}:
+        if resume_run:
+            raise ValueError('resume_run is only supported for exact page scopes')
+        return apply
+    if type(limit) is not int or limit != 0 or isolated_callback is not None:
+        raise ValueError('exact page scopes require limit=0 and no isolated callback')
+
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError('duplicate page configuration key')
+            result[key] = value
+        return result
+
+    def invalid_constant(value):
+        raise ValueError('invalid JSON constant in page configuration')
+
+    config = json.loads(resume_run, object_pairs_hook=unique_object,
+                        parse_constant=invalid_constant)
+    if not isinstance(config, dict):
+        raise ValueError('page configuration must be a JSON object')
+    if scope == 'page-plan':
+        if set(config) != {'paths'}:
+            raise ValueError('page-plan requires exactly paths')
+        try:
+            from .reader_page_delete import validate_paths
+        except ImportError:
+            from reader_page_delete import validate_paths
+        validate_paths(config['paths'])
+        return False
+    if set(config) != {'plan_run', 'plan_sha256', 'external_writers_stopped'}:
+        raise ValueError('page-apply requires exactly plan_run, plan_sha256 and external_writers_stopped')
+    plan_run = config['plan_run']
+    if (type(plan_run) not in (int, str) or not re.fullmatch(r'[1-9][0-9]*', str(plan_run))
+            or not isinstance(config['plan_sha256'], str)
+            or not re.fullmatch(r'[0-9a-f]{64}', config['plan_sha256'])
+            or config['external_writers_stopped'] is not True or apply is not True):
+        raise ValueError('page-apply requires a positive plan run, SHA256, stopped writers and apply=true')
+    return True
+
+
+def run(path, *, limit=0, apply=True, scope='unreferenced', resume_run='', isolated_callback=None,
         suppress_resume_dispatch=False, preserve_queued_runs=False, require_callback_commit=False,
         allow_staged_handoff=False):
-    if scope not in {'unreferenced', 'retired-assets'}:
-        raise ValueError('invalid automatic collection scope')
+    apply = validate_collection(scope, resume_run, limit=limit, apply=apply,
+                                isolated_callback=isolated_callback)
     central = load_config()["publisher_repository"]
     recover(path)
     if path.exists() and not json.loads(path.read_text()).get("restored"):
         raise RuntimeError("unfinished maintenance journal requires restoration first")
     state = {"version": 1, "kind": "reader-maintenance-journal", "repositories": {},
              "maintenance_id": uuid.uuid4().hex, "started_at": datetime.now(timezone.utc).isoformat()}
+    if isolated_callback is None:
+        inputs = {"apply": str(apply).lower(), "grace_days": "0", "scope": scope,
+                  "reader_only": "true", "auto_resume": "true", "limit": str(limit),
+                  "maintenance_id": state['maintenance_id']}
+        if scope in {'page-plan', 'page-apply'}:
+            inputs.update(resume_run=resume_run, auto_resume='false')
+        state['collector_inputs'] = inputs
     if durable_store() is not None:
         # New durable windows record their exact v1 scope before isolation.
         # Recovery of journals without this field remains unchanged.
@@ -567,9 +622,7 @@ def run(path, *, limit=0, apply=True, scope='unreferenced', isolated_callback=No
         state["dispatch_requested"] = True
         journal(path, state)
         api(central, "actions/workflows/reader-gc-collect.yml/dispatches", method="POST", body={
-            "ref": "main", "inputs": {"apply": str(apply).lower(), "grace_days": "0",
-                                      "scope": scope, "reader_only": "true", "auto_resume": "true",
-                                      "limit": str(limit), "maintenance_id": identifier}})
+            "ref": "main", "inputs": state['collector_inputs']})
         deadline = time.monotonic() + 360 * 60
         while True:
             runs = pages(central, "actions/workflows/reader-gc-collect.yml/runs", "workflow_runs")
@@ -631,7 +684,9 @@ if __name__ == "__main__":
     parser.add_argument('--expected-maintenance-id', help='Require this exact durable maintenance window')
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--plan-only", action="store_true")
-    parser.add_argument('--scope', choices=['unreferenced', 'retired-assets'], default='unreferenced')
+    parser.add_argument('--scope', choices=['unreferenced', 'retired-assets', 'page-plan', 'page-apply'],
+                        default='unreferenced')
+    parser.add_argument('--resume-run', default='', help='Exact JSON configuration for page-plan/page-apply')
     arguments = parser.parse_args()
     if arguments.limit < 0:
         parser.error("limit must be non-negative")
@@ -651,7 +706,7 @@ if __name__ == "__main__":
         # not demonstrably isolated, so preserving work can block collection but
         # never grants deletion authority.
         run(arguments.journal, limit=arguments.limit, apply=not arguments.plan_only,
-            scope=arguments.scope, preserve_queued_runs=True)
+            scope=arguments.scope, resume_run=arguments.resume_run, preserve_queued_runs=True)
     else:
         restore(arguments.journal, expected_owner=arguments.expected_owner,
                 expected_maintenance_id=arguments.expected_maintenance_id)

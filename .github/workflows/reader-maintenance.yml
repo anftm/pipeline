@@ -20,10 +20,14 @@ on:
         default: false
         type: boolean
       scope:
-        description: Journaled retired assets, or a full sweep for older unjournaled objects
+        description: Retired assets, a full sweep, or an exact page plan/apply
         type: choice
-        options: [retired-assets, unreferenced]
+        options: [retired-assets, unreferenced, page-plan, page-apply]
         default: retired-assets
+      resume_run:
+        description: Exact JSON for page-plan (paths) or page-apply (plan_run, plan_sha256, external_writers_stopped)
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -53,7 +57,7 @@ jobs:
           python-version: '3.11'
       - run: pip install -r scripts/requirements.txt PyYAML==6.0.3
       - name: Verify maintenance activation and deletion barriers
-        run: python -B -m unittest tests.test_reader_gc_activation tests.test_reader_gc_collect tests.test_reader_page_delete
+        run: python -B -m unittest tests.test_reader_gc_activation tests.test_reader_gc_maintenance tests.test_reader_gc_collect tests.test_reader_page_delete
       - name: Verify every producer credential before isolation
         env:
           GC_PRODUCER_TOKENS_JSON: ${{ secrets.GC_PRODUCER_TOKENS_JSON }}
@@ -66,11 +70,12 @@ jobs:
           LIMIT: ${{ inputs.limit || '0' }}
           PLAN_ONLY: ${{ inputs.plan_only || 'false' }}
           SCOPE: ${{ inputs.scope || 'retired-assets' }}
+          RESUME_RUN: ${{ inputs.resume_run || '' }}
           EVENT_NAME: ${{ github.event_name }}
         run: |
           [[ "$LIMIT" =~ ^[0-9]+$ ]] || exit 1
           if [[ "$EVENT_NAME" == schedule && "$(date -u +%u)" == 1 ]]; then SCOPE=unreferenced; fi
-          args=(run --journal output/maintenance/journal.json --limit "$LIMIT" --scope "$SCOPE")
+          args=(run --journal output/maintenance/journal.json --limit "$LIMIT" --scope "$SCOPE" --resume-run "$RESUME_RUN")
           if [[ "$PLAN_ONLY" == "true" ]]; then args+=(--plan-only); fi
           python -u scripts/reader_gc_maintenance.py "${args[@]}"
       - name: Recover recorded producer state after an interrupted orchestration

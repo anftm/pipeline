@@ -4,6 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 import ast
+from contextlib import contextmanager
 from unittest.mock import Mock, patch
 
 from scripts import reader_gc_maintenance as maintenance
@@ -21,6 +22,7 @@ class MaintenanceTests(unittest.TestCase):
         keywords = {item.arg: item.value for item in calls[0].keywords}
         self.assertIsInstance(keywords.get('preserve_queued_runs'), ast.Constant)
         self.assertIs(keywords['preserve_queued_runs'].value, True)
+        self.assertEqual(ast.unparse(keywords['resume_run']), 'arguments.resume_run')
 
     def setUp(self):
         # These are offline fixtures. A production Actions environment may set
@@ -31,6 +33,187 @@ class MaintenanceTests(unittest.TestCase):
         store = patch.object(maintenance, '_STORE', None)
         store.start()
         self.addCleanup(store.stop)
+
+    def test_invalid_exact_requests_fail_before_recovery_or_isolation(self):
+        plan = json.dumps({'paths': ['derived/book/file.pdf']})
+        apply = {'plan_run': '123', 'plan_sha256': 'a' * 64, 'external_writers_stopped': True}
+        cases = [
+            {'scope': 'unknown'},
+            *({'scope': scope, 'resume_run': value}
+              for scope in ('unreferenced', 'retired-assets') for value in ('123', '{}', ' ')),
+            *({'scope': scope, 'resume_run': value}
+              for scope in ('page-plan', 'page-apply')
+              for value in ('', '{', 'null', '[]', 'true', '1', '{}', None, {})),
+            *({'scope': 'page-plan', 'resume_run': json.dumps(value)} for value in (
+                {'paths': [], 'extra': 1}, {'paths': []}, {'paths': 'derived/a'},
+                {'paths': ['derived/a', 'derived/a']}, {'paths': ['derived/../a']},
+                {'paths': ['reader-index/a']}, {'paths': [None]},
+                {'paths': ['objects/a\\b']}, {'paths': ['objects/a\n']},
+                {'paths': [f'objects/{n}' for n in range(1001)]})),
+            {'scope': 'page-plan', 'resume_run': '{"paths":[],"paths":["derived/a"]}'},
+            {'scope': 'page-plan', 'resume_run': '{"paths":[NaN]}'},
+            *({'scope': 'page-apply', 'resume_run': json.dumps({**apply, key: value})}
+              for key, values in (
+                  ('plan_run', (0, -1, True, 1.5, '', '0', '01', '+1', '1.0', ' 1', '١', [], None)),
+                  ('plan_sha256', ('a' * 63, 'a' * 65, 'A' * 64, 'g' * 64, 123, None)),
+                  ('external_writers_stopped', (False, 'true', 1, None))) for value in values),
+            {'scope': 'page-apply', 'resume_run': json.dumps({**apply, 'extra': 1})},
+            {'scope': 'page-apply', 'resume_run': json.dumps({k: v for k, v in apply.items() if k != 'plan_run'})},
+            *({'scope': 'page-apply', 'resume_run': json.dumps(apply), 'apply': value}
+              for value in (False, 1, 'true')),
+            *({'scope': scope, 'resume_run': config, **option}
+              for scope, config in (('page-plan', plan), ('page-apply', json.dumps(apply)))
+              for option in ({'limit': 1}, {'limit': -1}, {'limit': False},
+                             {'isolated_callback': Mock()})),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'journal.json'
+            for options in cases:
+                with self.subTest(options=options), patch.object(maintenance, 'recover') as recover, \
+                     patch.object(maintenance, 'preflight') as preflight, \
+                     patch.object(maintenance, 'api') as api, \
+                     patch.object(maintenance, 'durable_store') as store:
+                    with self.assertRaises(ValueError):
+                        maintenance.run(path, **options)
+                    recover.assert_not_called()
+                    preflight.assert_not_called()
+                    api.assert_not_called()
+                    store.assert_not_called()
+                    self.assertFalse(path.exists())
+
+    @contextmanager
+    def collector_window(self, *, conclusion='success', visible=True, dispatch_error=False):
+        from scripts import reader_gc_chm_window
+        blobs = {}
+        class Store:
+            def read_bytes(self, bucket, key):
+                if (bucket, key) not in blobs:
+                    raise FileNotFoundError(key)
+                return blobs[bucket, key]
+            def put_bytes(self, bucket, key, raw):
+                blobs[bucket, key] = raw
+        store = Store()
+        state = {'active': True, 'visible': visible, 'dispatches': [], 'drained': False,
+                 'collector_status': 'completed'}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'journal.json'
+            def api(repo, request, *, method='GET', body=None):
+                if request == 'actions/workflows/1':
+                    return {'state': 'active' if state['active'] else 'disabled_manually'}
+                if request.endswith('/disable'):
+                    state['active'] = False
+                    return {}
+                if request.endswith('/enable'):
+                    state['active'] = True
+                    return {}
+                if request == 'actions/workflows/reader-gc-collect.yml/dispatches':
+                    self.assertEqual(method, 'POST')
+                    self.assertFalse(state['active'])
+                    self.assertTrue(state['drained'])
+                    guard.assert_called_once_with(store)
+                    self.assertEqual(json.loads(path.read_text())['collector_inputs'], body['inputs'])
+                    self.assertTrue(json.loads(path.read_text())['dispatch_requested'])
+                    state['dispatches'].append(body)
+                    if dispatch_error:
+                        raise maintenance.MaintenanceAPIError(repo, request, method, None)
+                    return {}
+                if request == 'actions/runs/123':
+                    return {'id': 123, 'status': state['collector_status'], 'conclusion': conclusion}
+                raise AssertionError((request, method))
+            def pages(repo, request, field):
+                if request == 'actions/runs?status=in_progress' and not state['drained']:
+                    state['drained'] = True
+                    return [{'path': '.github/workflows/pdf-account-worker.yml', 'status': 'in_progress'}]
+                if request == 'actions/workflows/reader-gc-collect.yml/runs' and state['visible']:
+                    return [{'id': 123, 'status': 'completed', 'conclusion': conclusion,
+                             'display_title': json.loads(path.read_text())['maintenance_id']}]
+                return []
+            inventory = {'central/repo': {'permission': {}, 'workflows': [
+                {'id': 1, 'state': 'active', 'path': '.github/workflows/pdf-account-worker.yml'}],
+                'cancelled': []}}
+            binding = {'version': 1, 'sha256': 'a' * 64, 'repositories': ['central/repo']}
+            with patch.object(maintenance, 'load_config', return_value={'publisher_repository': 'central/repo'}), \
+                 patch.object(maintenance, 'journal_binding', return_value=binding), \
+                 patch.object(maintenance, 'preflight', return_value=inventory), \
+                 patch.object(maintenance, 'durable_store', return_value=store), \
+                 patch.object(maintenance, 'api', side_effect=api), \
+                 patch.object(maintenance, 'pages', side_effect=pages), \
+                 patch.object(maintenance.time, 'sleep'), \
+                 patch.object(reader_gc_chm_window, 'require_clear') as guard:
+                yield path, state
+
+    def test_exact_scopes_forward_one_collector_and_restore(self):
+        from scripts import reader_page_delete
+        cases = [('page-plan', {'paths': ['objects/z', 'derived/a']}, 'false'),
+                 *[('page-apply', {'plan_run': run, 'plan_sha256': 'a' * 64,
+                                  'external_writers_stopped': True}, 'true') for run in ('123', 123)]]
+        for scope, config, apply in cases:
+            raw = json.dumps(config, indent=2)
+            with self.subTest(scope=scope, config=config), self.collector_window() as (path, state), \
+                 patch.object(reader_page_delete, 'validate_paths', wraps=reader_page_delete.validate_paths) as validate:
+                maintenance.run(path, scope=scope, resume_run=raw, preserve_queued_runs=True)
+                saved = json.loads(path.read_text())
+                self.assertEqual(state['dispatches'], [{'ref': 'main', 'inputs': {
+                    'apply': apply, 'grace_days': '0', 'scope': scope, 'reader_only': 'true',
+                    'auto_resume': 'false', 'resume_run': raw, 'limit': '0',
+                    'maintenance_id': saved['maintenance_id']}}])
+                self.assertTrue(saved['collected'])
+                self.assertTrue(saved['restored'])
+                self.assertTrue(state['active'])
+                if scope == 'page-plan':
+                    validate.assert_called_once_with(config['paths'])
+                else:
+                    validate.assert_not_called()
+
+    def test_normal_scopes_keep_existing_dispatch_inputs(self):
+        for scope in ('unreferenced', 'retired-assets'):
+            with self.subTest(scope=scope), self.collector_window() as (path, state):
+                maintenance.run(path, scope=scope, limit=7, apply=False, preserve_queued_runs=True)
+                saved = json.loads(path.read_text())
+                self.assertEqual(state['dispatches'], [{'ref': 'main', 'inputs': {
+                    'apply': 'false', 'grace_days': '0', 'scope': scope, 'reader_only': 'true',
+                    'auto_resume': 'true', 'limit': '7', 'maintenance_id': saved['maintenance_id']}}])
+                self.assertTrue(saved['restored'])
+                self.assertTrue(state['active'])
+
+    def test_exact_collector_failure_restores_producers(self):
+        with self.collector_window(conclusion='failure') as (path, state):
+            with self.assertRaisesRegex(RuntimeError, 'collector failed'):
+                maintenance.run(path, scope='page-plan', resume_run='{"paths":["derived/a"]}')
+            self.assertEqual(len(state['dispatches']), 1)
+            self.assertTrue(json.loads(path.read_text())['restored'])
+            self.assertTrue(state['active'])
+
+    def test_exact_unknown_dispatch_stays_isolated_until_terminal_readback(self):
+        with self.collector_window(visible=False, dispatch_error=True) as (path, state):
+            with self.assertRaisesRegex(RuntimeError, 'dispatch outcome unknown'):
+                maintenance.run(path, scope='page-apply', resume_run=json.dumps({
+                    'plan_run': '123', 'plan_sha256': 'a' * 64, 'external_writers_stopped': True}))
+            with self.assertRaisesRegex(RuntimeError, 'dispatch outcome unknown'):
+                maintenance.restore(path)
+            self.assertFalse(state['active'])
+            self.assertFalse(json.loads(path.read_text()).get('restored'))
+            state['visible'] = True
+            state['collector_status'] = 'in_progress'
+            with self.assertRaisesRegex(RuntimeError, 'collector still active'):
+                maintenance.restore(path)
+            self.assertFalse(state['active'])
+            state['collector_status'] = 'completed'
+            maintenance.restore(path)
+            self.assertTrue(state['active'])
+            self.assertTrue(json.loads(path.read_text())['restored'])
+            self.assertEqual(len(state['dispatches']), 1)
+
+    def test_dispatch_post_timeout_is_not_retried(self):
+        import subprocess
+        with patch.object(maintenance, 'token_for', return_value='offline'), \
+             patch.object(maintenance.subprocess, 'run', side_effect=subprocess.TimeoutExpired('gh', 120)) as post, \
+             patch.object(maintenance.time, 'sleep') as sleep:
+            with self.assertRaises(maintenance.MaintenanceAPIError):
+                maintenance.api('central/repo', 'actions/workflows/reader-gc-collect.yml/dispatches',
+                                method='POST', body={'ref': 'main'})
+            post.assert_called_once()
+            sleep.assert_not_called()
 
     def test_isolated_callback_restores_producers_and_does_not_dispatch_collector(self):
         state = {'active': True}
