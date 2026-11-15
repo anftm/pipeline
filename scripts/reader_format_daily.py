@@ -105,11 +105,34 @@ def validate_summary(summary):
     return indexed
 
 
-def blockers(row):
+def first_conversion_web(row, *, triggered=False):
+    """Only new web sources; converter captures dependencies on first conversion.
+
+    A triggered first-conversion batch may reach zero without claiming that
+    dependencies of already mapped sources have been checked for freshness.
+    """
+    return (FORMATS[row['extension']][0] == 'web'
+            and row['source_content_changed'] == 0
+            and (row['not_mapped'] > 0 or triggered)
+            and row['all_source_identities_checked'] is True
+            and not any(row[field] for field in UNCERTAIN))
+
+
+def dependency_report(row):
+    checked = row['conversion_dependencies_checked'] is True
+    return {'conversion_dependencies_checked': checked,
+            'dependency_freshness': 'checked' if checked else 'unknown',
+            'warnings': ([] if checked else [
+                'Existing mapped source dependencies were not checked for freshness; '
+                'first conversion captures dependencies but does not refresh older mappings.'])}
+
+
+def blockers(row, *, first_conversion_triggered=False):
     reasons = [field for field in UNCERTAIN if row[field]]
     if row['all_source_identities_checked'] is not True:
         reasons.append('all_source_identities_checked is not true')
-    if row['conversion_dependencies_checked'] is not True:
+    if (row['conversion_dependencies_checked'] is not True
+            and not first_conversion_web(row, triggered=first_conversion_triggered)):
         reasons.append('conversion_dependencies_checked is not true')
     if FORMATS[row['extension']][1] is None:
         reasons.append('no automatic workflow')
@@ -127,7 +150,10 @@ def plan(summary):
         state = ('blocked' if reasons else 'triggered' if row['definite_backlog'] >= THRESHOLD
                  else 'complete' if row['definite_backlog'] == 0 else 'below_threshold')
         decisions[ext] = {'state': state, 'reasons': reasons,
-                          'counts': {key: row[key] for key in COUNTS}, 'workflow': FORMATS[ext][1]}
+                          'counts': {key: row[key] for key in COUNTS}, 'workflow': FORMATS[ext][1],
+                          'completion_scope': ('first_conversion_only' if not row['conversion_dependencies_checked']
+                                               and first_conversion_web(row) else 'definite_backlog'),
+                          **dependency_report(row)}
     return {'version': 1, 'kind': 'reader-format-daily', 'mode': 'plan',
             'search_generation': summary['search_generation'], 'reader_generation': summary['reader_generation'],
             'formats': decisions, 'blocked': {ext: row['reasons'] for ext, row in decisions.items()
@@ -476,6 +502,8 @@ class Controller:
                     self.result['blocked'].pop(ext, None)
             else:
                 self.result['formats'][ext]['counts'] = decision['counts']
+                for field in ('conversion_dependencies_checked', 'dependency_freshness', 'warnings'):
+                    self.result['formats'][ext][field] = decision[field]
         self.result['reader_generation'] = summary['reader_generation']
 
     def run(self, summary):
@@ -501,7 +529,8 @@ class Controller:
                     row = validate_summary(current)[ext]
                     decision = self.result['formats'][ext]
                     decision['counts'] = {key: row[key] for key in COUNTS}
-                    reasons = blockers(row)
+                    reasons = blockers(row, first_conversion_triggered=
+                                       decision['completion_scope'] == 'first_conversion_only')
                     if reasons:
                         decision.update(state='blocked', reasons=reasons)
                         self.result['blocked'][ext] = reasons
@@ -542,7 +571,8 @@ class Controller:
             # newly observed failures/pending checkpoints elsewhere in the inventory.
             final_rows = validate_summary(current)
             for ext in triggered:
-                reasons = blockers(final_rows[ext])
+                reasons = blockers(final_rows[ext], first_conversion_triggered=
+                                   self.result['formats'][ext]['completion_scope'] == 'first_conversion_only')
                 if final_rows[ext]['definite_backlog']:
                     reasons.append('triggered format still has definite backlog')
                 if reasons:

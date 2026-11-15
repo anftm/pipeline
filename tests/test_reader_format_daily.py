@@ -127,6 +127,76 @@ class DailyTests(unittest.TestCase):
                 self.assertEqual(result['formats']['epub']['state'], 'blocked')
                 self.assertIn('epub', result['blocked'])
 
+    def test_new_web_sources_trigger_without_claiming_dependencies_checked(self):
+        for ext in subject.FAMILIES['web'][0].split():
+            for count in (9, 10, 11):
+                with self.subTest(ext=ext, count=count):
+                    data = summary(count, ext, conversion_dependencies_checked=False)
+                    before = copy.deepcopy(data)
+                    decision = subject.plan(data)['formats'][ext]
+                    self.assertEqual(decision['state'], 'triggered' if count >= 10 else 'below_threshold')
+                    self.assertEqual(decision['completion_scope'], 'first_conversion_only')
+                    self.assertFalse(decision['conversion_dependencies_checked'])
+                    self.assertEqual(decision['dependency_freshness'], 'unknown')
+                    self.assertTrue(decision['warnings'])
+                    self.assertEqual(data, before)
+
+    def test_new_web_exception_never_hides_changed_unknown_pending_or_failure(self):
+        changes = ({'not_mapped': 9, 'source_content_changed': 1},
+                   {'source_identity_unknown': 1, 'source_content_unchanged': 19},
+                   {'mapped_content_not_checked': 1, 'source_content_unchanged': 19},
+                   {'pending_shard_checkpoint': 1}, {'recorded_failure_current': 1},
+                   {'all_source_identities_checked': False})
+        for extra in changes:
+            with self.subTest(extra=extra):
+                data = summary(10, 'html', conversion_dependencies_checked=False, **extra)
+                decision = subject.plan(data)['formats']['html']
+                self.assertEqual(decision['state'], 'blocked')
+                self.assertIn('conversion_dependencies_checked is not true', decision['reasons'])
+        for ext in subject.FAMILIES['text'][0].split():
+            decision = subject.plan(summary(10, ext, conversion_dependencies_checked=False))['formats'][ext]
+            self.assertEqual(decision['state'], 'blocked')
+            self.assertIn('no automatic workflow', decision['reasons'])
+
+    def test_web_first_conversion_drains_to_zero_with_unknown_dependency_freshness(self):
+        data = [summary(n, 'html', conversion_dependencies_checked=False) for n in (10, 9, 0)]
+        self.refresh.side_effect = data
+        result = self.controller().run(data[0])
+        decision = result['formats']['html']
+        self.assertEqual(decision['state'], 'complete')
+        self.assertEqual(decision['counts']['definite_backlog'], 0)
+        self.assertEqual(decision['completion_scope'], 'first_conversion_only')
+        self.assertEqual(decision['dependency_freshness'], 'unknown')
+        self.assertFalse(decision['conversion_dependencies_checked'])
+        self.assertTrue(decision['warnings'])
+        self.assertNotIn('html', result['blocked'])
+        self.assertEqual(result['batches'], 2)
+        self.assertEqual(len(self.api.posts), 4)
+        self.assertEqual(self.api.posts[0][0], 'reader-web-stream.yml')
+        # A new plan cannot claim freshness of existing mappings from zero source drift.
+        self.assertEqual(subject.plan(data[-1])['formats']['html']['state'], 'blocked')
+
+    def test_web_changed_or_pending_after_first_conversion_still_blocks(self):
+        for index, changes in enumerate(({'not_mapped': 8, 'source_content_changed': 1},
+                                         {'pending_shard_checkpoint': 1}, {'recorded_failure_current': 1})):
+            with self.subTest(changes=changes):
+                self.journal = Path(self.temp.name) / str(index)
+                self.api = FakeAPI(self.journal)
+                before = summary(10, 'html', conversion_dependencies_checked=False)
+                after = summary(9, 'html', conversion_dependencies_checked=False, **changes)
+                self.refresh.side_effect = [before, after]
+                result = self.controller().run(before)
+                self.assertEqual(result['formats']['html']['state'], 'blocked')
+                self.assertIn('html', result['blocked'])
+                self.assertEqual(len(self.api.posts), 2)
+
+    def test_zero_web_backlog_requires_this_run_to_have_triggered_first_conversion(self):
+        data = summary(0, 'html', conversion_dependencies_checked=False)
+        self.refresh.side_effect = [data]
+        result = self.controller().run(data)
+        self.assertEqual(result['formats']['html']['state'], 'blocked')
+        self.assertFalse(self.api.posts)
+
     def test_changed_sources_count_toward_ten_without_trusting_trigger_ready(self):
         data = summary(10, not_mapped=2, source_content_changed=8, trigger_ready=False, threshold_exceeded=False)
         self.assertEqual(subject.plan(data)['formats']['epub']['state'], 'triggered')
