@@ -161,6 +161,11 @@ def graph(store, now):
     view = JournalView(store)
     observation = journal.inspect(view)
     pointer = decode_pointer(view.read_pointer())
+    root_provider = getattr(store, 'consumer_roots', None)
+    consumer_roots = root_provider() if root_provider is not None else {'revisions': {}, 'generations': {}}
+    if (not isinstance(consumer_roots, dict) or set(consumer_roots) != {'revisions', 'generations'}
+            or not isinstance(consumer_roots['revisions'], dict) or not isinstance(consumer_roots['generations'], dict)):
+        raise ValueError('invalid consumer roots')
     items = inventory(store)
     manifests, refs = {}, {}
     for key, item in items.items():
@@ -180,11 +185,7 @@ def graph(store, now):
     for role in ('desired', 'previous'):
         if pointer[role] is not None:
             retained.setdefault(f"generations/{pointer[role]}/manifest.json", []).append('current-' + role)
-    root_provider = getattr(store, 'consumer_roots', None)
-    consumer_roots = root_provider() if root_provider is not None else {}
-    if not isinstance(consumer_roots, dict):
-        raise ValueError('invalid consumer roots')
-    for label, generation in consumer_roots.items():
+    for label, generation in consumer_roots['generations'].items():
         if not isinstance(label, str) or not isinstance(generation, str) or not re.fullmatch(r'[0-9a-f]{64}', generation):
             raise ValueError('invalid consumer root generation')
         key = f'generations/{generation}/manifest.json'

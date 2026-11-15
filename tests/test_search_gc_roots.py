@@ -23,8 +23,8 @@ class RootsTests(unittest.TestCase):
             if url.endswith('/config/search-data.json'):
                 return json.dumps({'generation': '4' * 64}).encode()
             if url.endswith('/api/search-data-generation'):
-                return json.dumps({'generation': g, 'surface': 'space', 'verified': True}).encode()
-            return json.dumps({'generation': g, 'version': 1, 'kind': 'search-snapshot-local'}).encode()
+                return json.dumps({'generation': g, 'surface': 'space', 'verified': True, 'records': 1, 'files': 1, 'api_generation': 'api:test'}).encode()
+            return json.dumps({'generation': g, 'version': 1, 'kind': 'search-snapshot-local', 'record_count': 1, 'files': {'pages': {'search_data.json.gz': {}}, 'space': {'search_data.json.gz': {}}}, 'objects': {'pages': {'search_data.json.gz': {}}, 'space': {'search_data.json.gz': {}}}}).encode()
         return session, api, get
 
     def test_current_exact_build_and_test_pins_and_live_defaults(self):
@@ -34,7 +34,7 @@ class RootsTests(unittest.TestCase):
             seen.append(url)
             return get(url)
         result = roots.collect(session=session, api=api, get=capture)
-        self.assertEqual(set(result.values()), {'1' * 64, '2' * 64, '3' * 64, '4' * 64})
+        self.assertEqual(set(result['generations'].values()), {'1' * 64, '2' * 64, '3' * 64, '4' * 64})
         self.assertTrue(any('/' + 'a' * 40 + '/config/' in url for url in seen))
         self.assertTrue(any('/resolve/' + 'b' * 40 + '/Dockerfile' in url for url in seen))
 
@@ -43,8 +43,18 @@ class RootsTests(unittest.TestCase):
         for replacement in [b'ARG SEARCH_DATA_GENERATION=""\n', b'ARG SEARCH_DATA_GENERATION=' + b'2' * 64 + b'\nARG SEARCH_DATA_GENERATION=' + b'3' * 64 + b'\n']:
             with self.assertRaises(ValueError):
                 roots.collect(session=session, api=api, get=lambda u: replacement if u.endswith('/Dockerfile') else get(u))
+        indented = ('ARG SEARCH_DATA_GENERATION=' + '2' * 64 + '\n ARG SEARCH_DATA_GENERATION=' + '5' * 64 + '\n').encode()
+        with self.assertRaises(ValueError):
+            roots.collect(session=session, api=api, get=lambda u: indented if u.endswith('/Dockerfile') else get(u))
+        multiline = ('ARG SEARCH_DATA_GENERATION=' + '2' * 64 + '\nENV OTHER=1 ' + chr(92) + '\n SEARCH_DATA_GENERATION=' + '5' * 64 + '\n').encode()
+        with self.assertRaises(ValueError):
+            roots.collect(session=session, api=api, get=lambda u: multiline if u.endswith('/Dockerfile') else get(u))
         with self.assertRaises(OSError):
             roots.collect(session=session, api=api, get=lambda u: (_ for _ in ()).throw(OSError('network')))
+        for bad in ({'generation': '1' * 64, 'surface': 'space', 'verified': True},
+                    {'generation': '1' * 64, 'surface': 'space', 'verified': True, 'records': True, 'files': 1, 'api_generation': 'api:x'}):
+            with self.assertRaises(ValueError):
+                roots.collect(session=session, api=api, get=lambda u: json.dumps(bad).encode() if u.endswith('/api/search-data-generation') else get(u))
 
     def test_revision_drift_rejected(self):
         session, api, get = self.fixtures()
@@ -63,7 +73,7 @@ class RootsTests(unittest.TestCase):
         s.publish(current, prev)
         mark = gc.mark(s, run_id='100', now=NOW, known_writers_coordinated=True)
         self.assertIn(old, mark['plan']['manifests'])
-        s.consumer_roots = lambda: {'build-pin': old.split('/')[1]}
+        s.consumer_roots = lambda: {'revisions': {'space_sha': 'a' * 40}, 'generations': {'build-pin': old.split('/')[1]}}
         s.now += gc.MARK_DELAY
         result = gc.sweep(s, plan_key=mark['plan_key'], run_id='200', now=s.now, known_writers_coordinated=True)
         self.assertIn(old, result['cancelled_manifests'])
@@ -75,10 +85,11 @@ class RootsTests(unittest.TestCase):
         prev = s.generation('prev', 30 * gc.DAY)
         current = s.generation('current', 20 * gc.DAY)
         s.publish(current, prev)
-        s.consumer_roots = lambda: {'pin': 'f' * 64}
+        s.consumer_roots = lambda: {'revisions': {}, 'generations': {'pin': 'f' * 64}}
         with self.assertRaisesRegex(ValueError, 'consumer manifest'):
             gc.plan(s, run_id='1', now=NOW)
-        observations = iter([{'pin': current.split('/')[1]}, {'pin': prev.split('/')[1]}])
+        observations = iter([{'revisions': {'sha': 'a' * 40}, 'generations': {'pin': current.split('/')[1]}},
+                             {'revisions': {'sha': 'b' * 40}, 'generations': {'pin': current.split('/')[1]}}])
         s.consumer_roots = lambda: next(observations)
         with self.assertRaisesRegex(ValueError, 'roots changed'):
             gc.plan(s, run_id='1', now=NOW)

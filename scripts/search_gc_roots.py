@@ -54,9 +54,21 @@ def collect(*, session, api, get=public_get):
     def loaded():
         pages = json.loads(get('https://vomebook.github.io/search/data/generation-manifest.json'))
         space = json.loads(get('https://voiceofml-search.hf.space/api/search-data-generation'))
-        if (pages.get('kind') != 'search-snapshot-local' or pages.get('version') != 1
-                or space.get('verified') is not True or space.get('surface') != 'space'):
+        if (not isinstance(pages, dict) or not isinstance(space, dict)
+                or pages.get('kind') != 'search-snapshot-local' or type(pages.get('version')) is not int
+                or pages['version'] != 1 or type(pages.get('record_count')) is not int or pages['record_count'] < 1
+                or not isinstance(pages.get('files'), dict) or set(pages['files']) != {'pages', 'space'}
+                or not isinstance(pages.get('objects'), dict) or set(pages['objects']) != {'pages', 'space'}
+                or space.get('verified') is not True or space.get('surface') != 'space'
+                or type(space.get('records')) is not int or space['records'] < 1
+                or type(space.get('files')) is not int or space['files'] < 1
+                or not isinstance(space.get('api_generation'), str) or not space['api_generation'].startswith('api:')):
             raise ValueError('consumer generation is not verified')
+        for group in ('files', 'objects'):
+            for surface in ('pages', 'space'):
+                members = pages[group][surface]
+                if not isinstance(members, dict) or not members or not isinstance(members.get('search_data.json.gz'), dict):
+                    raise ValueError('invalid loaded Pages surface members')
         return {'pages_loaded': generation(pages.get('generation')),
                 'space_loaded': generation(space.get('generation'))}
 
@@ -68,15 +80,19 @@ def collect(*, session, api, get=public_get):
     prefix = 'https://huggingface.co/spaces/' + SPACE + '/resolve/' + before['space_sha'] + '/'
     docker = get(prefix + 'Dockerfile').decode('utf8')
     prepare = get(prefix + 'scripts/data/prepare_test_data.mjs').decode('utf8')
+    logical_docker = re.sub(r'\\\r?\n', ' ', docker)
+    relevant = [line for line in logical_docker.splitlines()
+                if re.match(r'^\s*(?:ARG|ENV)\b', line, re.I) and 'SEARCH_DATA_GENERATION' in line]
     declarations = re.findall(r'^ARG SEARCH_DATA_GENERATION=["\']?([0-9a-f]{64})["\']?\s*$', docker, re.M)
     defaults = re.findall(r'^export const DEFAULT_GENERATION = ["\']([0-9a-f]{64})["\'];\s*$', prepare, re.M)
-    if len(declarations) != 1 or len(defaults) != 1:
+    if len(relevant) != 1 or len(declarations) != 1 or len(defaults) != 1:
         raise ValueError('unknown or ambiguous Space build/test generation declarations')
     pins['space-build-default'] = generation(declarations[0])
     pins['space-test-default'] = generation(defaults[0])
     if config() != before or loaded() != actual:
         raise ValueError('consumer configuration or loaded roots changed during GC observation')
-    return {**pins, **{k: before[k] for k in ('pages_default', 'space_default')}, **actual}
+    return {'revisions': {k: before[k] for k in ('pages_sha', 'space_sha')},
+            'generations': {**pins, **{k: before[k] for k in ('pages_default', 'space_default')}, **actual}}
 
 
 def live_roots():
