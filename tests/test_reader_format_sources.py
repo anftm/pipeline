@@ -1,6 +1,8 @@
 """Automatic batches must progress past revision churn to actionable source keys."""
+import base64
 import copy
 from contextlib import ExitStack
+import hashlib
 import json
 from pathlib import Path
 import tempfile
@@ -10,6 +12,8 @@ from unittest.mock import Mock, patch
 
 from scripts import reader_format_sources as subject
 from scripts import reader_assets, reader_stream_index, search_publication_pointer
+from scripts import pilot_text_stream as text, pilot_web_stream as web
+from scripts import convert_reader_assets as converter
 
 backlog = subject.backlog
 REPO, OTHER = 'VoiceOfML/Test', 'VoiceOfML/Other'
@@ -61,6 +65,8 @@ class SourcesTests(unittest.TestCase):
         self.metadata[(REPO, NEW, path)] = metadata
         if ext in {'docx', 'epub'}:
             index_path, kind, mode = 'chapters/ebook/epub/index.json', 'ebook-chapter-stream-index', 'e'
+        elif ext in {'md', 'markdown'}:
+            index_path, kind, mode = 'documents/text/index.json', 'text-stream-index', 'k'
         elif ext == 'xlsx':
             index_path, kind, mode = 'documents/spreadsheet/xlsx/index.json', 'spreadsheet-html-stream-index', 'h'
         else:
@@ -141,18 +147,103 @@ class SourcesTests(unittest.TestCase):
         self.output = self.root / 'pending.json'
         self.assertEqual(self.prepare('epub')['selected_records'], 0)
 
-    def test_web_new_sources_only_without_claiming_dependency_freshness(self):
-        for ext in ('html', 'mhtml'):
-            self.add('new', ext)
-            self.add('changed', ext, 'changed')
-            self.add('unchanged', ext, 'unchanged')
+    def test_real_48_new_39_changed_filter_keeps_only_known_source_changes(self):
+        extensions = ('md', 'markdown', 'html', 'htm', 'mhtml', 'mht')
+        for ext in extensions:
+            for state, count in (('new', 48), ('changed', 39), ('unchanged', 13)):
+                for number in range(count):
+                    self.add(f'{state}-{number:02d}', ext, state)
         self.write_source()
-        for ext in ('html', 'mhtml'):
-            self.output = self.root / (ext + '.json')
-            self.assertEqual(self.prepare(ext)['selected_records'], 1)
-            self.assertEqual(json.loads(self.output.read_text())['rc'], [[0, 'new', ext, 0, 1, 0]])
         summary, _ = backlog.inspect(hub=self.hub, api=self.api, fs=Mock(), client=Mock())
-        self.assertFalse(next(r for r in summary['formats'] if r['extension'] == 'html')['conversion_dependencies_checked'])
+        for ext in extensions:
+            with self.subTest(ext=ext):
+                row = next(row for row in summary['formats'] if row['extension'] == ext)
+                self.assertEqual((row['not_mapped'], row['source_content_changed']), (48, 39))
+                self.assertEqual(row['source_content_unchanged'], 13)
+                self.assertTrue(row['all_source_identities_checked'])
+                self.assertFalse(row['conversion_dependencies_checked'])
+                self.output = self.root / (ext + '.json')
+                self.assertEqual(self.prepare(ext)['selected_records'], 87)
+                decoded = reader_assets.decode_search_payload(json.loads(self.output.read_text()))
+                self.assertEqual({r['File'] for r in decoded},
+                                 {f'new-{n:02d}' for n in range(48)} | {f'changed-{n:02d}' for n in range(39)})
+                selected = (text.select_records(self.output, self.pins, ext, all_markdown_repos=True)
+                            if ext in {'md', 'markdown'} else web.select_records(self.output, self.pins, ext))
+                self.assertEqual(len(selected), 87)
+                self.assertTrue(all(item['revision'] == NEW for item in selected))
+
+    def test_changed_markdown_and_html_builds_recapture_current_dependencies(self):
+        for ext in ('md', 'markdown', 'html', 'htm'):
+            self.add('changed', ext, 'changed')
+        self.write_source()
+        for ext in ('md', 'markdown', 'html', 'htm'):
+            with self.subTest(ext=ext):
+                self.output = self.root / (ext + '.json')
+                self.prepare(ext)
+                markdown = ext in {'md', 'markdown'}
+                selected = (text.select_records(self.output, self.pins, ext, all_markdown_repos=True)
+                            if markdown else web.select_records(self.output, self.pins, ext))
+                item = selected[0]
+                builds = []
+                for revision in (OLD, NEW):
+                    image = b'\x89PNG\r\n\x1a\n' + revision.encode()
+                    raw = ((f'# Changed {revision}\n![figure](figure.png)\n') if markdown else
+                           f'<p>Changed {revision}</p><img src="figure.png">').encode()
+                    urls = []
+                    def download(url, target, *args, **kwargs):
+                        urls.append(url)
+                        data = image if url.endswith('.png') else raw
+                        target.write_bytes(data)
+                        return hashlib.sha256(data).hexdigest(), len(data)
+                    with patch.object(text if markdown else converter,
+                                      'download' if markdown else 'download_source', side_effect=download), \
+                            patch.object(web, 'download_source', side_effect=download):
+                        builder = text if markdown else web
+                        entry, files = builder.build_one({**item, 'revision': revision},
+                            self.root / (ext + revision), None, backlog.READER_BUCKET)
+                    output = Path(files[entry['object']]).read_bytes()
+                    self.assertIn(base64.b64encode(image), output)
+                    self.assertEqual(entry['source_sha256'], hashlib.sha256(raw).hexdigest())
+                    self.assertTrue(all('/' + revision + '/' in url for url in urls))
+                    self.assertEqual(len(urls), 2)
+                    builds.append(entry)
+                self.assertNotEqual(builds[0]['object'], builds[1]['object'])
+                self.assertEqual(builds[1]['source_revision'], NEW)
+
+    def test_dependency_read_errors_fail_build_and_strict_web_batch(self):
+        item = {'repo': REPO, 'path': 'changed.html', 'extension': 'html', 'revision': NEW}
+        def download(url, target, **kwargs):
+            data = b'<p>Changed body</p><img src="figure.png">' if url.endswith('.html') else b'PNG'
+            target.write_bytes(data)
+            return hashlib.sha256(data).hexdigest(), len(data)
+        original_read = Path.read_bytes
+        def read(path):
+            if 'html-resources' in path.parts:
+                raise OSError('dependency read failed')
+            return original_read(path)
+        with patch.object(converter, 'download_source', side_effect=download), \
+                patch.object(web, 'download_source', side_effect=download), \
+                patch.object(Path, 'read_bytes', read), \
+                patch.object(reader_stream_index, 'read_index', return_value=self.index('web-document-stream-index')), \
+                patch.object(reader_stream_index, 'publish_checkpoint') as checkpoint:
+            with self.assertRaisesRegex(OSError, 'dependency read failed'):
+                web.build_one(item, self.root / 'failed-web', None, backlog.READER_BUCKET)
+            status = reader_stream_index.run_documents([item], bucket=backlog.READER_BUCKET,
+                token=None, limit=10, retry_failures=False, strict=True, apply=False,
+                prefix='documents/web', kind='web-document-stream-index', build=web.build_one,
+                work=self.root / 'strict-web')
+            self.assertEqual(status, 1)
+            self.assertEqual(checkpoint.call_args.args[3], [])
+            self.assertEqual(len(checkpoint.call_args.args[4]), 1)
+            self.assertEqual(checkpoint.call_args.args[5], {})
+        def markdown_download(url, target, token, **kwargs):
+            if url.endswith('.png'):
+                raise OSError('dependency read failed')
+            target.write_bytes(b'# Changed body\n![figure](figure.png)\n')
+        with patch.object(text, 'download', side_effect=markdown_download):
+            with self.assertRaisesRegex((ValueError, OSError), 'dependency read failed'):
+                text.build_one({**item, 'path': 'changed.md', 'extension': 'md'},
+                               self.root / 'failed-md', None, backlog.READER_BUCKET)
 
     def test_full_inventory_and_pins_must_match_before_any_output(self):
         self.add('new')

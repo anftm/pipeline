@@ -135,15 +135,14 @@ class DailyTests(unittest.TestCase):
                     before = copy.deepcopy(data)
                     decision = subject.plan(data)['formats'][ext]
                     self.assertEqual(decision['state'], 'triggered' if count >= 10 else 'below_threshold')
-                    self.assertEqual(decision['completion_scope'], 'first_conversion_only')
+                    self.assertEqual(decision['completion_scope'], 'explicit_source_changes')
                     self.assertFalse(decision['conversion_dependencies_checked'])
                     self.assertEqual(decision['dependency_freshness'], 'unknown')
                     self.assertTrue(decision['warnings'])
                     self.assertEqual(data, before)
 
-    def test_new_web_exception_never_hides_changed_unknown_pending_or_failure(self):
-        changes = ({'not_mapped': 9, 'source_content_changed': 1},
-                   {'source_identity_unknown': 1, 'source_content_unchanged': 19},
+    def test_source_change_exception_never_hides_unknown_pending_or_failure(self):
+        changes = ({'source_identity_unknown': 1, 'source_content_unchanged': 19},
                    {'mapped_content_not_checked': 1, 'source_content_unchanged': 19},
                    {'pending_shard_checkpoint': 1}, {'recorded_failure_current': 1},
                    {'all_source_identities_checked': False})
@@ -159,10 +158,10 @@ class DailyTests(unittest.TestCase):
             self.assertEqual(decision['state'], 'triggered')
             self.assertEqual(decision['workflow'], 'reader-text-stream.yml')
             if dependent:
-                self.assertEqual(decision['completion_scope'], 'first_conversion_only')
+                self.assertEqual(decision['completion_scope'], 'explicit_source_changes')
                 changed = subject.plan(summary(10, ext, not_mapped=9, source_content_changed=1,
                                                conversion_dependencies_checked=False))['formats'][ext]
-                self.assertEqual(changed['state'], 'blocked')
+                self.assertEqual(changed['state'], 'triggered')
 
     def test_web_first_conversion_drains_to_zero_with_unknown_dependency_freshness(self):
         data = [summary(n, 'html', conversion_dependencies_checked=False) for n in (10, 9, 0)]
@@ -171,7 +170,7 @@ class DailyTests(unittest.TestCase):
         decision = result['formats']['html']
         self.assertEqual(decision['state'], 'complete')
         self.assertEqual(decision['counts']['definite_backlog'], 0)
-        self.assertEqual(decision['completion_scope'], 'first_conversion_only')
+        self.assertEqual(decision['completion_scope'], 'explicit_source_changes')
         self.assertEqual(decision['dependency_freshness'], 'unknown')
         self.assertFalse(decision['conversion_dependencies_checked'])
         self.assertTrue(decision['warnings'])
@@ -182,9 +181,8 @@ class DailyTests(unittest.TestCase):
         # A new plan cannot claim freshness of existing mappings from zero source drift.
         self.assertEqual(subject.plan(data[-1])['formats']['html']['state'], 'blocked')
 
-    def test_web_changed_or_pending_after_first_conversion_still_blocks(self):
-        for index, changes in enumerate(({'not_mapped': 8, 'source_content_changed': 1},
-                                         {'pending_shard_checkpoint': 1}, {'recorded_failure_current': 1})):
+    def test_web_pending_or_failure_after_conversion_still_blocks(self):
+        for index, changes in enumerate(({'pending_shard_checkpoint': 1}, {'recorded_failure_current': 1})):
             with self.subTest(changes=changes):
                 self.journal = Path(self.temp.name) / str(index)
                 self.api = FakeAPI(self.journal)
@@ -202,6 +200,68 @@ class DailyTests(unittest.TestCase):
         result = self.controller().run(data)
         self.assertEqual(result['formats']['html']['state'], 'blocked')
         self.assertFalse(self.api.posts)
+
+    def test_real_md_48_new_39_changed_dispatches_and_drains_known_changes(self):
+        for ext in ('md', 'markdown', *subject.FAMILIES['web'][0].split()):
+            with self.subTest(ext=ext):
+                self.journal = Path(self.temp.name) / ext
+                self.api = FakeAPI(self.journal)
+                states = [summary(new + changed, ext, sources=100, not_mapped=new,
+                                  source_content_changed=changed, source_content_unchanged=100-new-changed,
+                                  conversion_dependencies_checked=False)
+                          for new, changed in ((48, 39), (0, 39), (0, 9), (0, 0))]
+                self.refresh.side_effect = states
+                result = self.controller().run(states[0])
+                decision = result['formats'][ext]
+                self.assertEqual(result['status'], 'complete')
+                self.assertEqual(decision['state'], 'complete')
+                self.assertEqual(decision['counts']['definite_backlog'], 0)
+                self.assertEqual(decision['completion_scope'], 'explicit_source_changes')
+                self.assertFalse(decision['conversion_dependencies_checked'])
+                self.assertEqual(decision['dependency_freshness'], 'unknown')
+                self.assertIn('Dependency-only changes to unchanged sources are not counted', decision['warnings'][0])
+                self.assertIn('known source changes only', decision['warnings'][0])
+                self.assertEqual(result['batches'], 3)
+                for workflow, inputs in self.api.posts[::2]:
+                    self.assertEqual(workflow, subject.FORMATS[ext][1])
+                    self.assertEqual(inputs['extension'], ext)
+                    self.assertEqual(inputs['expected_sha'], HEAD)
+
+    def test_mixed_source_changes_threshold_and_uncertainty(self):
+        for ext in ('md', 'markdown', *subject.FAMILIES['web'][0].split()):
+            for count in (9, 10):
+                with self.subTest(ext=ext, count=count):
+                    data = summary(count, ext, not_mapped=count-1, source_content_changed=1,
+                                   conversion_dependencies_checked=False)
+                    self.assertEqual(subject.plan(data)['formats'][ext]['state'],
+                                     'triggered' if count == 10 else 'below_threshold')
+            for field in (*subject.UNCERTAIN, 'all_source_identities_checked'):
+                data = summary(10, ext, not_mapped=2, source_content_changed=8,
+                               conversion_dependencies_checked=False)
+                row = next(row for row in data['formats'] if row['extension'] == ext)
+                row[field] = False if field == 'all_source_identities_checked' else 1
+                if field in ('source_identity_unknown', 'mapped_content_not_checked'):
+                    row['source_content_unchanged'] -= 1
+                self.assertEqual(subject.plan(data)['formats'][ext]['state'], 'blocked')
+
+    def test_empty_dependent_formats_warn_but_do_not_block_the_round(self):
+        before, after = summary(10), summary(0)
+        dependent = {'md', 'markdown', *subject.FAMILIES['web'][0].split()}
+        for data in (before, after):
+            for row in data['formats']:
+                if row['extension'] in dependent:
+                    row['conversion_dependencies_checked'] = False
+        self.refresh.side_effect = [before, after]
+        result = self.controller().run(before)
+        self.assertEqual(result['status'], 'complete')
+        self.assertEqual(len(self.api.posts), 2)
+        for ext in dependent:
+            decision = result['formats'][ext]
+            self.assertEqual(decision['state'], 'complete')
+            self.assertEqual(decision['completion_scope'], 'no_sources')
+            self.assertEqual(decision['dependency_freshness'], 'unknown')
+            self.assertFalse(decision['conversion_dependencies_checked'])
+            self.assertTrue(decision['warnings'])
 
     def test_changed_sources_count_toward_ten_without_trusting_trigger_ready(self):
         data = summary(10, not_mapped=2, source_content_changed=8, trigger_ready=False, threshold_exceeded=False)
@@ -517,17 +577,32 @@ class ContinuationTests(unittest.TestCase):
         self.assertEqual(result['status'], 'continuation_required')
         self.assertEqual(len(self.api.posts), 2)
 
-    def test_web_completion_scope_survives_continuation(self):
-        before, after, final = [summary(n, 'html', conversion_dependencies_checked=False) for n in (10, 9, 0)]
-        self.refresh.side_effect = [before, after]
-        previous = self.controller(parent_run_id='100', max_batches=1).run(before)
-        self.assertEqual(previous['status'], 'continuation_required')
-        self.journal = Path(self.temp.name) / 'next-journal'; self.api = FakeAPI(self.journal)
-        self.refresh.side_effect = [after, final]
-        result = self.controller(parent_run_id='101', continuation=previous).run(after)
-        self.assertEqual(result['formats']['html']['state'], 'complete')
-        self.assertEqual(result['formats']['html']['dependency_freshness'], 'unknown')
-        self.assertNotIn('html', result['blocked'])
+    def test_source_change_and_legacy_scopes_survive_continuation(self):
+        for ext in ('md', 'html'):
+            for scope in ('explicit_source_changes', 'first_conversion_only'):
+                with self.subTest(ext=ext, scope=scope):
+                    self.journal = Path(self.temp.name) / (ext + scope)
+                    self.api = FakeAPI(self.journal)
+                    before, after, final = [summary(n, ext, not_mapped=0, source_content_changed=n,
+                                                   conversion_dependencies_checked=False) for n in (10, 9, 0)]
+                    self.refresh.side_effect = [before, after]
+                    previous = self.controller(parent_run_id='100', max_batches=1).run(before)
+                    self.assertEqual(previous['status'], 'continuation_required')
+                    previous['formats'][ext]['completion_scope'] = scope
+                    subject.validate_continuation(previous, HEAD, 100)
+                    with self.assertRaises(ValueError):
+                        subject.validate_continuation(previous, 'b' * 40, 100)
+                    self.journal = Path(self.temp.name) / ('next-' + ext + scope)
+                    self.api = FakeAPI(self.journal)
+                    self.refresh.side_effect = [after, final]
+                    result = self.controller(parent_run_id='101', continuation=previous).run(after)
+                    self.assertEqual(result['status'], 'complete')
+                    self.assertEqual(result['formats'][ext]['state'], 'complete')
+                    self.assertEqual(result['formats'][ext]['completion_scope'], scope)
+                    self.assertEqual(result['formats'][ext]['dependency_freshness'], 'unknown')
+                    self.assertFalse(result['formats'][ext]['conversion_dependencies_checked'])
+                    self.assertEqual(self.api.posts[0][1]['expected_sha'], HEAD)
+                    self.assertNotIn(ext, result['blocked'])
 
     def test_drift_or_unresolved_receipts_refuse_continuation(self):
         previous = self.prepared()
@@ -865,11 +940,17 @@ class GitHubTests(unittest.TestCase):
 
     def test_active_detection_includes_pending_and_excludes_parent(self):
         api = self.api()
+        api.request = Mock(return_value={'total_count': 1, 'jobs': [{'id': 100}]})
         api.runs = Mock(return_value=[{'id': 1, 'path': '.github/workflows/reader-format-daily.yml', 'status': 'in_progress'},
                                      {'id': 2, 'path': '.github/workflows/reader-ebook-stream.yml', 'status': 'pending'},
                                      {'id': 3, 'path': '.github/workflows/search-daily-sync.yml', 'status': 'queued'}])
         self.assertEqual({r['id'] for r in api.active_children('1')}, {2, 3})
         self.assertIn('pending', [call.kwargs['status'] for call in api.runs.call_args_list])
+        api.request = Mock(return_value={'total_count': 0, 'jobs': []})
+        self.assertEqual({r['id'] for r in api.active_children('1')}, {2})
+        api.request = Mock(side_effect=RuntimeError('unavailable'))
+        with self.assertRaisesRegex(RuntimeError, 'unavailable'):
+            api.active_children('1')
 
 
 if __name__ == '__main__':

@@ -107,15 +107,18 @@ def validate_summary(summary):
     return indexed
 
 
-def first_conversion_web(row, *, triggered=False):
-    """Only new web sources; converter captures dependencies on first conversion.
+# Accept durable receipts produced before the source-change policy was widened.
+SOURCE_CHANGE_SCOPES = frozenset({'explicit_source_changes', 'first_conversion_only'})
 
-    A triggered first-conversion batch may reach zero without claiming that
-    dependencies of already mapped sources have been checked for freshness.
+
+def explicit_source_changes(row, *, triggered=False):
+    """New and proven-changed sources recapture dependencies during conversion.
+
+    Completion covers known source changes only. Dependency-only changes to
+    unchanged mapped sources remain uncounted and are never implicitly retried.
     """
     return ((FORMATS[row['extension']][0] == 'web' or row['extension'] in {'md', 'markdown'})
-            and row['source_content_changed'] == 0
-            and (row['not_mapped'] > 0 or triggered)
+            and (row['definite_backlog'] > 0 or triggered)
             and row['all_source_identities_checked'] is True
             and not any(row[field] for field in UNCERTAIN))
 
@@ -125,16 +128,18 @@ def dependency_report(row):
     return {'conversion_dependencies_checked': checked,
             'dependency_freshness': 'checked' if checked else 'unknown',
             'warnings': ([] if checked else [
-                'Existing mapped source dependencies were not checked for freshness; '
-                'first conversion captures dependencies but does not refresh older mappings.'])}
+                'Mapped unchanged sources have unknown external dependency freshness. '
+                'Dependency-only changes to unchanged sources are not counted or refreshed; '
+                'conversion recaptures dependencies only for new or proven-changed sources. '
+                'Completion covers known source changes only, not all dependency changes.'])}
 
 
-def blockers(row, *, first_conversion_triggered=False):
+def blockers(row, *, source_changes_triggered=False, first_conversion_triggered=False):
     reasons = [field for field in UNCERTAIN if row[field]]
     if row['all_source_identities_checked'] is not True:
         reasons.append('all_source_identities_checked is not true')
-    if (row['conversion_dependencies_checked'] is not True
-            and not first_conversion_web(row, triggered=first_conversion_triggered)):
+    if (row['sources'] and row['conversion_dependencies_checked'] is not True
+            and not explicit_source_changes(row, triggered=source_changes_triggered or first_conversion_triggered)):
         reasons.append('conversion_dependencies_checked is not true')
     if FORMATS[row['extension']][1] is None:
         reasons.append('no automatic workflow')
@@ -153,8 +158,9 @@ def plan(summary):
                  else 'complete' if row['definite_backlog'] == 0 else 'below_threshold')
         decisions[ext] = {'state': state, 'reasons': reasons,
                           'counts': {key: row[key] for key in COUNTS}, 'workflow': FORMATS[ext][1],
-                          'completion_scope': ('first_conversion_only' if not row['conversion_dependencies_checked']
-                                               and first_conversion_web(row) else 'definite_backlog'),
+                          'completion_scope': ('no_sources' if row['sources'] == 0 else
+                                               'explicit_source_changes' if not row['conversion_dependencies_checked']
+                                               and explicit_source_changes(row) else 'definite_backlog'),
                           **dependency_report(row)}
     return {'version': 1, 'kind': 'reader-format-daily', 'mode': 'plan',
             'search_generation': summary['search_generation'], 'reader_generation': summary['reader_generation'],
@@ -266,6 +272,10 @@ class GitHub:
                         and (name.startswith(('reader-', 'search-daily-', 'search-promotion-'))
                              or name == 'pdf-account-worker.yml')
                         and row.get('status') != 'completed'):
+                    if row.get('status') == 'queued':
+                        jobs = self.request('GET', f'/actions/runs/{row["id"]}/jobs', params={'per_page': 1})
+                        if isinstance(jobs, dict) and jobs.get('total_count') == 0 and jobs.get('jobs') == []:
+                            continue
                     active[row['id']] = row
         return list(active.values())
 
@@ -489,8 +499,8 @@ def validate_continuation(result, expected_sha, previous_run_id):
         raise ValueError('invalid continuation format queue')
     for ext in triggered:
         decision = result['formats'][ext]
-        reasons = blockers(rows[ext], first_conversion_triggered=
-                           decision['completion_scope'] == 'first_conversion_only')
+        reasons = blockers(rows[ext], source_changes_triggered=
+                           decision['completion_scope'] in SOURCE_CHANGE_SCOPES)
         if reasons or bool(rows[ext]['definite_backlog']) != (ext in pending):
             raise ValueError('continuation contains blocked or inconsistent triggered formats')
     if any(rows[ext][field] for ext in FORMATS for field in UNCERTAIN):
@@ -757,8 +767,8 @@ class Controller:
                 row = validate_summary(current)[ext]
                 decision = self.result['formats'][ext]
                 decision['counts'] = {key: row[key] for key in COUNTS}
-                reasons = blockers(row, first_conversion_triggered=
-                                   decision['completion_scope'] == 'first_conversion_only')
+                reasons = blockers(row, source_changes_triggered=
+                                   decision['completion_scope'] in SOURCE_CHANGE_SCOPES)
                 if reasons:
                     decision.update(state='blocked', reasons=reasons)
                     self.result['blocked'][ext] = reasons
@@ -794,8 +804,8 @@ class Controller:
                 if after['definite_backlog'] >= row['definite_backlog']:
                     raise RuntimeError('zero progress: source backlog did not decrease for ' + ext)
                 self.batch_durations.append(self.clock() - started)
-                reasons = blockers(after, first_conversion_triggered=
-                                   decision['completion_scope'] == 'first_conversion_only')
+                reasons = blockers(after, source_changes_triggered=
+                                   decision['completion_scope'] in SOURCE_CHANGE_SCOPES)
                 if reasons:
                     decision.update(state='blocked', reasons=reasons)
                     self.result['blocked'][ext] = reasons
@@ -807,8 +817,8 @@ class Controller:
             # newly observed failures/pending checkpoints elsewhere in the inventory.
             final_rows = validate_summary(current)
             for ext in triggered:
-                reasons = blockers(final_rows[ext], first_conversion_triggered=
-                                   self.result['formats'][ext]['completion_scope'] == 'first_conversion_only')
+                reasons = blockers(final_rows[ext], source_changes_triggered=
+                                   self.result['formats'][ext]['completion_scope'] in SOURCE_CHANGE_SCOPES)
                 if final_rows[ext]['definite_backlog']:
                     reasons.append('triggered format still has definite backlog')
                 if reasons:

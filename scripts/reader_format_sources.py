@@ -18,9 +18,6 @@ except ImportError:
     import reader_format_backlog as backlog
 
 
-DEPENDENT_EXTENSIONS = frozenset({'html', 'htm', 'mht', 'mhtml', 'md', 'markdown'})
-
-
 def _identities(records):
     # Fetch uses SKIP_SIZES; publication also normalizes retired OCR flags.
     # Neither affects the exact repo/path/extension/revision inventory.
@@ -61,10 +58,9 @@ def prepare(*, extension, generation, search_data, revisions, output, hub, api, 
             continue
         if row.get('key') != key or row.get('source_revision') != record['revision']:
             raise ValueError('classified source differs from pinned record')
-        # The converter captures dependencies for a new source. A mapped source
-        # cannot be promised fresh based on the main file's identity alone.
-        if extension in DEPENDENT_EXTENSIONS and row['state'] != 'not_mapped':
-            continue
+        # New and proven-changed main files recapture current dependencies in
+        # the converter. Unchanged sources remain excluded: their dependency
+        # freshness was not established by the main-file identity check.
         selected.append(record)
 
     requests = {(record['repo'], record['revision'], record['path']) for record in selected}
