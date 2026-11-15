@@ -1,0 +1,99 @@
+name: Reader/桶 · Daily Format Conversion
+run-name: Reader format backlog / ${{ github.event_name }}
+
+on:
+  workflow_run:
+    workflows: ['搜索 · Daily Sync', '搜索 · Resume Daily Publication']
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: Process every triggered format through verified Reader publication
+        type: boolean
+        default: false
+      known_writers_coordinated:
+        description: Known Reader producers and external writers are coordinated
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: write
+concurrency:
+  group: reader-format-daily
+  cancel-in-progress: false
+  queue: max
+jobs:
+  formats:
+    if: >-
+      github.repository == 'anftm/pipeline' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    env:
+      READER_AUTOMATION_ENABLED: ${{ vars.READER_FORMAT_AUTOMATION_ENABLED }}
+      REQUESTED_APPLY: ${{ github.event_name == 'workflow_run' || inputs.apply }}
+      WRITERS: ${{ github.event_name == 'workflow_run' || inputs.known_writers_coordinated }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Verify current code and successful source sync
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN: ${{ github.event.workflow_run.id }}
+          SOURCE_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          SOURCE_WORKFLOW: ${{ github.event.workflow_run.name }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF" == refs/heads/main && "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          [[ "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" == "$GITHUB_SHA" ]]
+          if [[ "$GITHUB_EVENT_NAME" == workflow_run ]]; then
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN/attempts/$SOURCE_ATTEMPT/jobs?per_page=100" > "$RUNNER_TEMP/source-jobs.json"
+            python - <<'PY'
+          import json, os
+          from pathlib import Path
+          data = json.loads((Path(os.environ['RUNNER_TEMP']) / 'source-jobs.json').read_text())
+          jobs = data.get('jobs')
+          if not isinstance(jobs, list) or data.get('total_count') != len(jobs):
+              raise SystemExit('Incomplete source job observation')
+          expected_job = {'搜索 · Daily Sync': 'sync', '搜索 · Resume Daily Publication': 'resume'}.get(os.environ['SOURCE_WORKFLOW'])
+          sync = [job for job in jobs if job.get('name') == expected_job]
+          if expected_job is None or len(sync) != 1 or sync[0].get('conclusion') != 'success':
+              raise SystemExit('A successful full search sync is required; directory-only runs cannot trigger conversion')
+          PY
+          fi
+      - name: Install pinned dependencies
+        run: pip install -r scripts/requirements.txt requests==2.32.5 PyYAML==6.0.3
+      - name: Verify format automation contracts
+        run: python -B -m unittest -v tests.test_reader_format_backlog tests.test_reader_format_daily tests.test_reader_format_workflow_automation tests.test_reader_format_daily_workflow
+      - name: Observe exact published format backlog
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python -B scripts/reader_format_backlog.py --threshold 10 \
+            --output output/format-daily/summary.json --epub-details output/format-daily/epub-details.json
+          python -B scripts/reader_format_daily.py plan --summary output/format-daily/summary.json \
+            --output output/format-daily/decision.json
+      - name: Convert and publish triggered formats to completion
+        if: env.REQUESTED_APPLY == 'true' && env.READER_AUTOMATION_ENABLED == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          set -euo pipefail
+          [[ "$WRITERS" == true ]]
+          python -B scripts/reader_format_daily.py run --summary output/format-daily/summary.json \
+            --output output/format-daily/result.json --journal output/format-daily/operations.jsonl \
+            --expected-sha "$GITHUB_SHA" --enabled --known-writers-verified --max-batches 20 --timeout-seconds 18000
+      - name: Preserve exact decisions and operation evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: reader-format-daily-${{ github.run_id }}
+          path: output/format-daily/
+          if-no-files-found: warn
+          retention-days: 14

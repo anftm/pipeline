@@ -1,11 +1,15 @@
 name: Reader/桶 · Publish v3 Reading Generation
-run-name: v3 ${{ inputs.operation || github.event_name }} / ${{ (inputs.apply || github.event_name != 'workflow_dispatch') && 'apply' || 'verify' }}
+run-name: ${{ inputs.automation_id && format('reader-auto/{0}', inputs.automation_id) || format('v3 {0} / {1}', inputs.operation || github.event_name, (inputs.apply || github.event_name != 'workflow_dispatch') && 'apply' || 'verify') }}
 
 on:
   # Retirement is an explicit operation: restoring the publisher must not
   # automatically advance old GC/retirement journals on a schedule.
   workflow_dispatch:
     inputs:
+      automation_id:
+        description: Optional exact format automation operation ID
+        type: string
+        default: ''
       operation:
         type: choice
         options: [inspect, unify, ack, retire, withdraw, reset-documents, remove-route, restore-route, verify-route, migrate-derived, resume-derived, redirect-derived, reconcile-derived-index, reconcile-sidecar, compact-legacy-history, publish-generation, verify-generation]
@@ -38,6 +42,11 @@ concurrency:
 
 jobs:
   publish:
+    # Do not race the search publication's exact Pages/default observations.
+    concurrency:
+      group: daily-sync
+      cancel-in-progress: false
+      queue: max
     if: >-
       github.repository == 'anftm/pipeline' &&
       (vars.READER_V3_AUTO_PAUSED != 'true' ||
@@ -52,6 +61,21 @@ jobs:
         with:
           python-version: '3.11'
       - run: pip install -r scripts/requirements.txt
+      - name: Guard automatic format publication
+        if: inputs.automation_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AUTOMATION_ID: ${{ inputs.automation_id }}
+          ENABLED: ${{ vars.READER_FORMAT_AUTOMATION_ENABLED }}
+          OPERATION: ${{ inputs.operation }}
+          APPLY: ${{ inputs.apply }}
+        run: |
+          set -euo pipefail
+          [[ "$AUTOMATION_ID" =~ ^[0-9a-f]{32}$ && "$ENABLED" == true ]]
+          [[ "$OPERATION" == unify && "$APPLY" == true ]]
+          [[ "$GITHUB_REF" == refs/heads/main && "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          [[ "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" == "$GITHUB_SHA" ]]
       - name: Guard original document and legacy reference contracts
         run: python -m unittest tests.test_direct_document_policy tests.test_reader_storage_contract
       - name: Test page migration and fence
@@ -139,7 +163,15 @@ jobs:
           RESOURCE_JSON: ${{ inputs.resource_json }}
           EXPECTED_PARENT: ${{ inputs.expected_parent }}
           REDIRECT_AUDITED: ${{ steps.operation.outputs.redirect_audited }}
+          AUTOMATION_ID: ${{ inputs.automation_id }}
         run: |
+          if [[ -n "$AUTOMATION_ID" ]]; then
+            generation=$(jq -r '.generation' output/v3/publication.json)
+            python scripts/publish_reader_v3.py verify-generation --expected-parent "$generation" \
+              --wait-seconds 1200 --output output/v3/format-automation-verification.json
+            echo "complete=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if [[ "$OPERATION" == unify && "$REDIRECT_AUDITED" == true ]]; then
             generation=$(jq -r '.generation' output/v3/publication.json)
             python scripts/publish_reader_v3.py verify-generation --expected-parent "$generation" \

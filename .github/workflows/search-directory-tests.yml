@@ -31,6 +31,17 @@ on:
       - tests/test_search_gc_roots.py
       - .github/workflows/search-daily-resume.yml
       - tests/test_search_daily_resume_workflow.py
+      - scripts/reader_format_daily.py
+      - scripts/reader_format_backlog.py
+      - scripts/reader_threshold_autobuild.py
+      - tests/test_reader_format_daily.py
+      - tests/test_reader_format_daily_workflow.py
+      - tests/test_reader_format_workflow_automation.py
+      - .github/workflows/reader-format-daily.yml
+      - .github/workflows/reader-*-stream.yml
+      - .github/workflows/reader-office-chapters.yml
+      - .github/workflows/reader-chm-repair.yml
+      - .github/workflows/reader-v3-publish.yml
       - tests/test_sync_auth.py
       - tests/test_text_encoding_retirement.py
   workflow_dispatch:
@@ -50,4 +61,4 @@ jobs:
       - name: Install search and workflow-test dependencies
         run: python -m pip install jieba==0.42.1 PyYAML==6.0.3 requests==2.32.5 boto3==1.43.123 huggingface_hub==1.33.0
       - name: Exercise local Git and LFS, concurrency and source snapshots
-        run: python -B -m unittest tests.test_search_directory_sync tests.test_fetch_and_parse tests.test_sync_auth tests.test_text_encoding_retirement tests.test_search_daily_journal tests.test_search_automation_workflows tests.test_search_daily_publish tests.test_search_gc tests.test_search_gc_s3 tests.test_search_gc_roots tests.test_search_daily_resume_workflow -v
+        run: python -B -m unittest tests.test_search_directory_sync tests.test_fetch_and_parse tests.test_sync_auth tests.test_text_encoding_retirement tests.test_search_daily_journal tests.test_search_automation_workflows tests.test_search_daily_publish tests.test_search_gc tests.test_search_gc_s3 tests.test_search_gc_roots tests.test_search_daily_resume_workflow tests.test_reader_format_daily tests.test_reader_format_daily_workflow tests.test_reader_format_workflow_automation -v
