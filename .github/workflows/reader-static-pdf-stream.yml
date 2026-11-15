@@ -1,11 +1,31 @@
 name: Reader/桶 · Build Static PDF Streams
-run-name: Static PDF ${{ inputs.apply == true && 'apply' || 'plan' }} (${{ inputs.extension || 'all' }})
+run-name: ${{ inputs.automation_id && format('reader-auto/{0}', inputs.automation_id) || format('Static PDF {0} ({1})', inputs.apply == true && 'apply' || 'plan', inputs.extension || 'all') }}
 
 on:
   # Resume with reviewed, bounded manual batches; scheduled unlimited writes
   # must not restart merely because this workflow is re-enabled.
   workflow_dispatch:
     inputs:
+      automation_id:
+        description: Optional controller correlation ID (32 lowercase hex characters)
+        required: false
+        default: ""
+        type: string
+      search_generation:
+        description: Published search generation for the automatic batch (64 lowercase hex)
+        required: false
+        default: ""
+        type: string
+      expected_sha:
+        description: Controller pipeline main commit (40 lowercase hex)
+        required: false
+        default: ""
+        type: string
+      defer_unify:
+        description: Let the controller unify and verify after canonical indexes and sidecar finish
+        required: false
+        default: false
+        type: boolean
       extension:
         description: Static PDF format, or all
         required: true
@@ -49,6 +69,29 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install -r scripts/requirements.txt
+      - &automation-gate
+        name: Validate automation and current main
+        env:
+          AUTOMATION_ID: ${{ inputs.automation_id }}
+          AUTOMATION_ENABLED: ${{ vars.READER_FORMAT_AUTOMATION_ENABLED }}
+          SEARCH_GENERATION: ${{ inputs.search_generation }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          DEFER_UNIFY: ${{ inputs.defer_unify }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$AUTOMATION_ID$SEARCH_GENERATION$EXPECTED_SHA" && "$DEFER_UNIFY" != 'true' ]]; then exit 0; fi
+          [[ "$SEARCH_GENERATION" =~ ^[0-9a-f]{64}$ && "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ && "$DEFER_UNIFY" == 'true' ]]
+          [[ "$EXPECTED_SHA" == "$GITHUB_SHA" ]]
+          [[ "$AUTOMATION_ID" =~ ^[0-9a-f]{32}$ ]] || { echo 'automation_id must be 32 lowercase hex characters' >&2; exit 1; }
+          [[ "$AUTOMATION_ENABLED" == 'true' ]]
+          [[ "$GITHUB_REF" == 'refs/heads/main' ]]
+          [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/reader-static-pdf-stream.yml@refs/heads/main" ]]
+          [[ "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]
+          local_sha=$(git rev-parse HEAD)
+          [[ "$local_sha" == "$GITHUB_SHA" ]]
+          remote_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)
+          [[ "$remote_sha" == "$GITHUB_SHA" ]]
       - name: Fetch source metadata once
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -56,6 +99,17 @@ jobs:
           # Static PDF selection does not use source sizes.
           SKIP_SIZES: "true"
         run: python scripts/fetch_and_parse.py
+      - name: Bind automatic batch to published search sources
+        if: inputs.automation_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          SEARCH_GENERATION: ${{ inputs.search_generation }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          python scripts/reader_format_daily.py guard-source \
+            --generation "$SEARCH_GENERATION" --expected-sha "$EXPECTED_SHA" \
+            --revisions state/commits.json
       - name: Plan pending static PDF workers
         id: matrix
         env:
@@ -114,6 +168,7 @@ jobs:
           name: reader-static-pdf-plan
           path: output
       - run: tar -xzf output/static-pdf-plan.tgz
+      - *automation-gate
       - name: Convert and publish static PDF
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -143,6 +198,7 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install -r scripts/requirements.txt
+      - *automation-gate
       - name: Rebuild canonical Reader sidecar
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -150,6 +206,7 @@ jobs:
           HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
         run: python scripts/build_reader_assets_v2_sidecar.py --apply
       - name: Unify sidecar through the central v3 writer
+        if: inputs.defer_unify != true
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

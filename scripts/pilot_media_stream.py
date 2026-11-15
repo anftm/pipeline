@@ -38,6 +38,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--search-data", type=Path, default=Path("output/search_data.json"))
     parser.add_argument("--revisions", type=Path, default=Path("state/commits.json"))
     parser.add_argument("--kind", choices=("audio", "video", "swf"), required=True)
+    parser.add_argument("--extension", choices=("all", *sorted(MEDIA_EXTENSIONS)), default="all",
+                        help="filter source extension within the selected media kind")
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--shard-count", type=int, default=1)
     parser.add_argument("--shard-index", type=int, default=0)
@@ -56,12 +58,15 @@ def shard_for(key: str, count: int) -> int:
     return int.from_bytes(hashlib.sha256(key.encode()).digest()[:8], "big") % count
 
 
-def select_records(path: Path, revisions: dict, kind: str) -> list[dict]:
+def select_records(path: Path, revisions: dict, kind: str, extension: str = "all") -> list[dict]:
+    if extension != "all" and extension not in MEDIA_EXTENSIONS:
+        raise ValueError(f"unsupported media extension: {extension}")
+    wanted_extension = extension
     records = decode_search_payload(json.loads(path.read_text(encoding="utf-8")))
     selected = []
     for record in records:
         extension = str(record.get("Extension") or "").lower().lstrip(".")
-        if extension not in MEDIA_EXTENSIONS:
+        if extension not in MEDIA_EXTENSIONS or (wanted_extension != "all" and extension != wanted_extension):
             continue
         contract = bucket_conversion_contract(
             str(record.get("Repo") or ""), relative_path(record), extension,
@@ -137,7 +142,8 @@ def main() -> int:
     previous = {**previous, **{field: [e for e in previous.get(field, [])
                   if shard_for(e["key"], args.shard_count) == args.shard_index] for field in ("files", "failures")}}
     completed = completed_revisions(previous, args.retry_failures)
-    candidates = [item for item in select_records(args.search_data, revisions, args.kind)
+    candidates = [item for item in select_records(args.search_data, revisions, args.kind,
+                                                 getattr(args, "extension", "all"))
                   if shard_for(f"{item['repo']}\0{item['path']}", args.shard_count) == args.shard_index]
     failed_keys = {entry['key'] for entry in previous.get('failures', [])}
     reuse = {**previous, 'files': [entry for entry in previous.get('files', []) if entry['key'] not in failed_keys]}

@@ -15,10 +15,12 @@ try:
     from .reader_assets import bucket_conversion_contract, decode_search_payload, relative_path
     from .reader_stream_index import merge_shards, reusable_entry, unchanged_sources, validate_index
     from .reader_bucket_store import retry_read
+    from .pilot_media_stream import MEDIA_EXTENSIONS
 except ImportError:
     from reader_assets import bucket_conversion_contract, decode_search_payload, relative_path
     from reader_stream_index import merge_shards, reusable_entry, unchanged_sources, validate_index
     from reader_bucket_store import retry_read
+    from pilot_media_stream import MEDIA_EXTENSIONS
 
 
 KINDS = {
@@ -39,6 +41,8 @@ def args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--kind", choices=KINDS)
     p.add_argument("--extension", action="append", dest="extensions")
+    p.add_argument("--media-extension", choices=("all", *sorted(MEDIA_EXTENSIONS)), default="all",
+                   help="filter media source extension; --extension still selects audio/video/swf")
     p.add_argument("--search-data", type=Path, default=Path("output/search_data.json"))
     p.add_argument("--revisions", type=Path, default=Path("state/commits.json"))
     p.add_argument("--bucket", default="vomebook/reader-assets-v2")
@@ -68,7 +72,10 @@ def source_extension(record: dict) -> str:
     return str(record.get("Extension") or "").lower().lstrip(".")
 
 
-def selected_records(path: Path, revisions: dict, kind: str, wanted: set[str]) -> list[dict]:
+def selected_records(path: Path, revisions: dict, kind: str, wanted: set[str],
+                     media_extension: str = "all") -> list[dict]:
+    if media_extension != "all" and (kind != "media" or media_extension not in MEDIA_EXTENSIONS):
+        raise ValueError(f"unsupported media extension for {kind}: {media_extension}")
     records = decode_search_payload(json.loads(path.read_text(encoding="utf-8")))
     result = []
     for record in records:
@@ -82,6 +89,8 @@ def selected_records(path: Path, revisions: dict, kind: str, wanted: set[str]) -
             # The image worker verifies the pinned source length before upload.
             continue
         if kind == "media":
+            if ext not in MEDIA_EXTENSIONS or (media_extension != "all" and ext != media_extension):
+                continue
             contract = bucket_conversion_contract(repo, rel, ext, int(record.get("Size") or 0))
             media_kind = contract[1] if contract else ("swf" if ext == "swf" else "")
             # Media worker names are audio/video/swf, while source extensions vary.
@@ -147,7 +156,8 @@ def main() -> int:
     if invalid:
         raise ValueError(f"unsupported extensions: {sorted(invalid)}")
     revisions = json.loads(a.revisions.read_text(encoding="utf-8"))
-    records = selected_records(a.search_data, revisions, a.kind, wanted)
+    records = selected_records(a.search_data, revisions, a.kind, wanted,
+                               getattr(a, "media_extension", "all"))
     token = os.environ.get("HF_TOKEN")
     fs = HfFileSystem(token=token)
     chapter_profile = None

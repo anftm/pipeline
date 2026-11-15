@@ -1,0 +1,387 @@
+"""Execute producer YAML guards/branches and media filtering without remote writes."""
+from __future__ import annotations
+
+import contextlib
+import io
+import itertools
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest.mock import patch
+
+import yaml
+
+from scripts import pilot_media_stream as media
+from scripts import plan_reader_stream_matrix as planner
+
+ROOT = Path(__file__).resolve().parents[1]
+NAMES = ('image-stream', 'media-stream', 'ebook-stream', 'office-chapters',
+         'web-stream', 'spreadsheet-stream', 'static-pdf-stream', 'chm-repair')
+SHA = 'a' * 40
+AUTO_ID = '0123456789abcdef' * 2
+GENERATION = 'c' * 64
+GATE = 'Validate automation and current main'
+
+
+def workflow(name):
+    return yaml.safe_load((ROOT / f'.github/workflows/reader-{name}.yml').read_text())
+
+
+def inputs_for(config, **overrides):
+    values = {key: value.get('default', '') for key, value in
+              config.get('on', config.get(True))['workflow_dispatch']['inputs'].items()}
+    return {**values, **overrides}
+
+
+class Context(dict):
+    def __getattr__(self, key):
+        return self.get(key, '')
+
+
+class Array(list):
+    def __getitem__(self, key):
+        return super().__getitem__(key) if key < len(self) else None
+
+
+def context(value):
+    if isinstance(value, dict):
+        return Context({key: context(item) for key, item in value.items()})
+    if isinstance(value, list):
+        return Array(context(item) for item in value)
+    return value
+
+
+def expression(text, **values):
+    """Evaluate the small Actions expression subset used by these producer YAMLs.
+
+    Split quoted strings first so operators/literals inside run names stay literal.
+    Job dependency success is applied separately, as by Actions.
+    """
+    text = text.strip()
+    if text.startswith('${{'):
+        text = text[3:-2].strip()
+    parts = re.split(r"('(?:[^']|'')*')", text)
+    for index in range(0, len(parts), 2):
+        part = parts[index].replace('&&', ' and ').replace('||', ' or ')
+        for old, new in (('true', 'True'), ('false', 'False'), ('null', 'None')):
+            part = re.sub(r'\b' + old + r'\b', new, part)
+        # Actions permits hyphens in job identifiers; Python attributes do not.
+        part = re.sub(r'needs\.([\w-]+)', r'needs["\1"]', part)
+        parts[index] = part
+    return eval(''.join(parts), {'__builtins__': {}}, {
+        **{key: context(value) for key, value in values.items()},
+        'always': lambda: True,
+        'fromJSON': lambda value: context(json.loads(value)),
+        'format': lambda template, *args: template.format(*args),
+    })
+
+
+def needs_for(job):
+    needs = job.get('needs', [])
+    return [needs] if isinstance(needs, str) else needs
+
+
+def job_runs(job, inputs, needs):
+    condition = job.get('if', 'true')
+    if 'always()' not in condition and any(needs[key]['result'] != 'success' for key in needs_for(job)):
+        return False
+    return bool(expression(condition, inputs=inputs, needs=needs,
+                           github={'repository': 'anftm/pipeline'}))
+
+
+class ProducerAutomationTests(unittest.TestCase):
+    def shell(self, script, name, **env):
+        values = dict(os.environ, AUTOMATION_ID=AUTO_ID, AUTOMATION_ENABLED='true',
+                      SEARCH_GENERATION=GENERATION, EXPECTED_SHA=SHA, DEFER_UNIFY='true',
+                      GITHUB_REF='refs/heads/main', GITHUB_SHA=SHA, GITHUB_WORKFLOW_SHA=SHA,
+                      GITHUB_REPOSITORY='anftm/pipeline', LOCAL_SHA=SHA, REMOTE_SHA=SHA,
+                      REMOTE_STATUS='0',
+                      GITHUB_WORKFLOW_REF=f'anftm/pipeline/.github/workflows/reader-{name}.yml@refs/heads/main')
+        values.update(env)
+        stubs = '''git() { [[ "$*" == 'rev-parse HEAD' ]] || return 99; echo "$LOCAL_SHA"; }
+gh() {
+  [[ "$*" == 'api repos/anftm/pipeline/git/ref/heads/main --jq .object.sha' ]] || return 99
+  echo "$REMOTE_SHA"
+  return "$REMOTE_STATUS"
+}
+'''
+        return subprocess.run(['bash', '-e', '-o', 'pipefail', '-c', stubs + script],
+                              env=values, capture_output=True, text=True, timeout=5)
+
+    def test_input_shape_and_actual_manual_automatic_run_names(self):
+        labels = {'image-stream': 'Reader/桶 · Build Image WebP Assets',
+                  'media-stream': 'Media streams {mode} (all)',
+                  'ebook-stream': 'Ebook chapters {mode} (all)',
+                  'office-chapters': 'Office chapters {mode}',
+                  'web-stream': 'Web streams {mode} (all)',
+                  'spreadsheet-stream': 'Spreadsheet streams {mode} (all)',
+                  'static-pdf-stream': 'Static PDF {mode} (all)',
+                  'chm-repair': 'CHM source-text repair / {mode}'}
+        for name in NAMES:
+            config = workflow(name)
+            triggers = config.get('on', config.get(True))
+            self.assertEqual(set(triggers), {'workflow_dispatch'})
+            schema = triggers['workflow_dispatch']['inputs']
+            self.assertLessEqual(len(schema), 10)
+            for key, kind, default in (('automation_id', 'string', ''), ('defer_unify', 'boolean', False),
+                                       ('search_generation', 'string', ''), ('expected_sha', 'string', '')):
+                self.assertEqual(schema[key]['type'], kind)
+                self.assertIs(schema[key]['required'], False)
+                self.assertEqual(schema[key]['default'], default)
+            for apply in (False, True):
+                with self.subTest(name=name, apply=apply):
+                    values = inputs_for(config, apply=apply)
+                    self.assertEqual(expression(config['run-name'], inputs=values),
+                                     labels[name].format(mode='apply' if apply else 'plan'))
+                    values['automation_id'] = AUTO_ID
+                    self.assertEqual(expression(config['run-name'], inputs=values), f'reader-auto/{AUTO_ID}')
+
+    def test_execute_every_gate_for_manual_auto_disabled_bad_id_and_stale_main(self):
+        invalid = [{'AUTOMATION_ENABLED': value} for value in ('', 'false', 'TRUE')]
+        invalid += [{'AUTOMATION_ID': value} for value in
+                    ('a' * 31, 'a' * 33, 'A' * 32, 'g' * 32, ' ' + AUTO_ID, AUTO_ID + '\n', '$(exit 0)')]
+        invalid += [{'SEARCH_GENERATION': value} for value in ('c' * 63, 'c' * 65, 'C' * 64, GENERATION + '\n')]
+        invalid += [{'EXPECTED_SHA': value} for value in ('a' * 39, 'a' * 41, 'A' * 40, 'b' * 40, SHA + '\n')]
+        # Any partial automatic tuple must fail, even if automation_id is omitted.
+        for present in itertools.product((False, True), repeat=4):
+            if all(present) or not any(present):
+                continue
+            invalid.append({key: value if enabled else ('false' if key == 'DEFER_UNIFY' else '')
+                            for (key, value), enabled in zip((('AUTOMATION_ID', AUTO_ID),
+                                ('SEARCH_GENERATION', GENERATION), ('EXPECTED_SHA', SHA),
+                                ('DEFER_UNIFY', 'true')), present)})
+        invalid += [{key: value} for key, value in (
+            ('GITHUB_REF', 'refs/heads/feature'), ('GITHUB_REF', 'refs/tags/main'),
+            ('GITHUB_WORKFLOW_REF', 'anftm/pipeline/.github/workflows/other.yml@refs/heads/main'),
+            ('GITHUB_WORKFLOW_SHA', 'b' * 40), ('LOCAL_SHA', 'b' * 40),
+            ('REMOTE_SHA', 'b' * 40), ('REMOTE_SHA', ''), ('REMOTE_STATUS', '1'))]
+        for name in NAMES:
+            for job_name, job in workflow(name)['jobs'].items():
+                for step in job['steps']:
+                    if step.get('name') != GATE:
+                        continue
+                    with self.subTest(name=name, job=job_name):
+                        self.assertNotIn('if', step)
+                        self.assertNotIn('continue-on-error', step)
+                        self.assertEqual(step['env']['AUTOMATION_ID'], '${{ inputs.automation_id }}')
+                        self.assertEqual(step['env']['AUTOMATION_ENABLED'], '${{ vars.READER_FORMAT_AUTOMATION_ENABLED }}')
+                        self.assertEqual(step['env']['GH_TOKEN'], '${{ github.token }}')
+                        for key, value in (('SEARCH_GENERATION', 'search_generation'),
+                                           ('EXPECTED_SHA', 'expected_sha'), ('DEFER_UNIFY', 'defer_unify')):
+                            self.assertEqual(step['env'][key], '${{ inputs.' + value + ' }}')
+                        self.assertEqual(self.shell(step['run'], name).returncode, 0)
+                        self.assertEqual(self.shell(step['run'], name, AUTOMATION_ID='',
+                                                    SEARCH_GENERATION='', EXPECTED_SHA='', DEFER_UNIFY='false',
+                                                    AUTOMATION_ENABLED='', GITHUB_REF='refs/heads/manual',
+                                                    REMOTE_STATUS='99').returncode, 0)
+                        for env in invalid:
+                            with self.subTest(env=env):
+                                self.assertNotEqual(self.shell(step['run'], name, **env).returncode, 0)
+
+    def test_source_guard_runs_after_fetch_before_planning_and_snapshot_and_fails_closed(self):
+        for name in NAMES:
+            config = workflow(name)
+            steps = config['jobs']['plan']['steps']
+            fetch = next(i for i, step in enumerate(steps) if 'fetch_and_parse.py' in step.get('run', ''))
+            guard = steps[fetch + 1]
+            self.assertEqual(guard['name'], 'Bind automatic batch to published search sources')
+            self.assertFalse(expression(guard['if'], inputs=inputs_for(config)))
+            self.assertTrue(expression(guard['if'], inputs=inputs_for(config, automation_id=AUTO_ID)))
+            self.assertEqual(guard['env'], {'GH_TOKEN': '${{ github.token }}',
+                                           'HF_TOKEN': '${{ secrets.HF_TOKEN }}',
+                                           'SEARCH_GENERATION': '${{ inputs.search_generation }}',
+                                           'EXPECTED_SHA': '${{ inputs.expected_sha }}'})
+            self.assertNotIn('continue-on-error', guard)
+            for step in steps[:fetch + 1]:
+                self.assertNotIn('tar -czf', step.get('run', ''))
+                self.assertNotIn('plan_reader_stream_matrix.py', step.get('run', ''))
+                self.assertNotIn('pilot_epub_chapters.py', step.get('run', ''))
+            script = ('python() { printf "%s\\n" "$@"; return "$GUARD_STATUS"; };\n' +
+                      guard['run'] + '\necho snapshot-allowed\n')
+            for status in ('0', '1'):
+                result = self.shell(script, name, GUARD_STATUS=status)
+                self.assertEqual(result.returncode, int(status), result.stderr)
+                expected = ['scripts/reader_format_daily.py', 'guard-source', '--generation', GENERATION,
+                            '--expected-sha', SHA, '--revisions', 'state/commits.json']
+                self.assertEqual(result.stdout.splitlines(), expected + (['snapshot-allowed'] if status == '0' else []))
+
+    def test_all_inline_shell_is_valid_bash(self):
+        for name in NAMES:
+            for job in workflow(name)['jobs'].values():
+                for step in job['steps']:
+                    if 'run' in step:
+                        result = subprocess.run(['bash', '-n'], input=step['run'], capture_output=True,
+                                                text=True, timeout=5)
+                        self.assertEqual(result.returncode, 0, f'{name}: {result.stderr}')
+
+    def test_dependency_and_write_guards_cannot_bypass_plan(self):
+        for name in NAMES:
+            config = workflow(name)
+            jobs = config['jobs']
+            plan_steps = jobs['plan']['steps']
+            gate_index = next(i for i, step in enumerate(plan_steps) if step.get('name') == GATE)
+            fetch_index = next(i for i, step in enumerate(plan_steps) if 'fetch_and_parse.py' in step.get('run', ''))
+            self.assertLess(gate_index, fetch_index)
+            for job_name, job in jobs.items():
+                self.assertNotIn('continue-on-error', job)
+                if job_name == 'plan':
+                    continue
+                with self.subTest(name=name, job=job_name):
+                    self.assertIn('plan', needs_for(job))
+                    needs = {key: {'result': 'success', 'outputs': {
+                        'matrix': '{"include":[{"extension":"mp3","shard":0}]}', 'count': '1'}} for key in jobs}
+                    self.assertTrue(job_runs(job, inputs_for(config, apply=True), needs))
+                    self.assertFalse(job_runs(job, inputs_for(config, apply=False), needs))
+                    for dependency in needs_for(job):
+                        for result in ('failure', 'cancelled', 'skipped'):
+                            needs[dependency]['result'] = result
+                            self.assertFalse(job_runs(job, inputs_for(config, apply=True), needs))
+                        needs[dependency]['result'] = 'success'
+                    if 'strategy' in job or job_name == 'rebuild':
+                        needs['plan']['outputs'] = {'matrix': '{"include":[]}', 'count': '0'}
+                        self.assertFalse(job_runs(job, inputs_for(config, apply=True), needs))
+                    writes = [i for i, step in enumerate(job['steps']) if any(
+                        marker in step.get('run', '') for marker in ('--apply', 'scripts/finalize_'))]
+                    if not writes:
+                        continue
+                    self.assertEqual(job['concurrency'], {'group': 'reader-sidecar',
+                                                         'cancel-in-progress': False, 'queue': 'max'})
+                    gate = next(i for i, step in enumerate(job['steps']) if step.get('name') == GATE)
+                    self.assertLess(gate, min(writes))
+                    self.assertTrue(any(step.get('uses', '').startswith('actions/checkout@')
+                                        for step in job['steps'][:gate]))
+
+    def test_defer_only_skips_dispatch_after_canonical_and_sidecar(self):
+        for name in NAMES:
+            config = workflow(name)
+            job = config['jobs'].get('finalize', config['jobs'].get('rebuild'))
+            steps = job['steps']
+            dispatch = [step for step in steps if 'gh workflow run' in step.get('run', '')]
+            self.assertEqual(len(dispatch), 1)
+            self.assertIs(steps[-1], dispatch[0])
+            for automation_id in ('', AUTO_ID):
+                for defer in (False, True):
+                    values = inputs_for(config, apply=True, automation_id=automation_id, defer_unify=defer)
+                    active = [step for step in steps if expression(step.get('if', 'true'), inputs=values)]
+                    with self.subTest(name=name, auto=automation_id, defer=defer):
+                        self.assertEqual(dispatch[0] in active, not defer)
+                        self.assertTrue(any('build_reader_assets_v2_sidecar.py --apply' in step.get('run', '')
+                                            for step in active))
+                        self.assertEqual([step for step in steps if step not in active], dispatch if defer else [])
+                        for step in active:
+                            if 'scripts/finalize_' in step.get('run', ''):
+                                self.assertNotIn('if', step)
+
+    def test_execute_media_workflow_arguments_with_precise_extension(self):
+        config = workflow('media-stream')
+        schema = config.get('on', config.get(True))['workflow_dispatch']['inputs']
+        self.assertEqual(set(schema['extension']['options']), media.MEDIA_EXTENSIONS | {'all'})
+        self.assertFalse(schema['extension']['required'])
+        self.assertEqual(schema['extension']['default'], 'all')
+        for extension in ('all', 'mp3', 'asx', 'swf'):
+            for job_name, script_name, expected_kind, option in (
+                ('plan', 'plan_reader_stream_matrix.py', 'media', '--media-extension'),
+                ('media', 'pilot_media_stream.py', 'audio', '--extension')):
+                step = next(step for step in config['jobs'][job_name]['steps'] if
+                            f'python scripts/{script_name}' in step.get('run', ''))
+                values = inputs_for(config, apply=True, extension=extension)
+                env = {key: str(expression(value, inputs=values, matrix={'extension': 'audio', 'shard': 0},
+                                           secrets={})).lower() for key, value in step['env'].items()}
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    (root / 'output').mkdir()
+                    (root / 'output/media-matrix.json').write_text('{"include":[]}')
+                    env = {**os.environ, **env}
+                    env['GITHUB_OUTPUT'] = str(root / 'github-output')
+                    result = subprocess.run(['bash', '-e', '-o', 'pipefail', '-c',
+                        'python() { printf "%s\\n" "$@"; };\n' + step['run']], cwd=root,
+                        env=env, capture_output=True, text=True, timeout=5)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    args = result.stdout.splitlines()
+                    self.assertEqual(args[0], f'scripts/{script_name}')
+                    self.assertEqual(args[args.index('--kind') + 1], expected_kind)
+                    self.assertEqual(args[args.index(option) + 1], extension)
+                    if job_name == 'media':
+                        self.assertIn('--strict', args)
+                        self.assertIn('--apply', args)
+
+
+class MediaExtensionTests(unittest.TestCase):
+    def fixture(self, root):
+        source = root / 'search.json'
+        source.write_text(json.dumps([{'Repo': 'VoiceOfML/Test', 'Folder': [], 'File': f'clip-{ext}',
+                                      'Extension': ext, 'Size': 100}
+                                     for ext in sorted(media.MEDIA_EXTENSIONS | {'unknown'})]))
+        revisions = root / 'revisions.json'
+        revisions.write_text(json.dumps({'VoiceOfML/Test': SHA}))
+        return source, revisions
+
+    def test_planner_and_pilot_filter_each_supported_source_extension(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source, revisions = self.fixture(Path(directory))
+            revision_map = json.loads(revisions.read_text())
+            for extension in sorted(media.MEDIA_EXTENSIONS):
+                planned = planner.selected_records(source, revision_map, 'media', {'audio', 'video', 'swf'}, extension)
+                self.assertEqual(len(planned), 1, extension)
+                selected = []
+                for kind in ('audio', 'video', 'swf'):
+                    selected.extend(media.select_records(source, revision_map, kind, extension))
+                self.assertEqual([item['extension'] for item in selected], [extension])
+                self.assertEqual(planned[0]['key'], f"{selected[0]['repo']}\0{selected[0]['path']}")
+            self.assertEqual(media.select_records(source, revision_map, 'video', 'mp3'), [])
+            self.assertEqual(planner.selected_records(source, revision_map, 'media', {'video'}, 'mp3'), [])
+            self.assertGreater(len(media.select_records(source, revision_map, 'audio')), 1)
+            self.assertEqual(len(planner.selected_records(source, revision_map, 'media', {'audio', 'video', 'swf'})),
+                             len(media.MEDIA_EXTENSIONS))
+
+    def test_unknown_extensions_fail_cli_and_selection_before_io(self):
+        for extension in ('unknown', 'audio', 'MP3', '.mp3', 'mp3,wav'):
+            with self.subTest(extension=extension), contextlib.redirect_stderr(io.StringIO()):
+                with patch.object(sys, 'argv', ['pilot', '--kind', 'audio', '--extension', extension]):
+                    with self.assertRaises(SystemExit) as raised:
+                        media.parse_args()
+                    self.assertEqual(raised.exception.code, 2)
+                with patch.object(sys, 'argv', ['planner', '--kind', 'media', '--output', 'unused',
+                                              '--media-extension', extension]):
+                    with self.assertRaises(SystemExit) as raised:
+                        planner.args()
+                    self.assertEqual(raised.exception.code, 2)
+                with self.assertRaises(ValueError):
+                    media.select_records(Path('missing'), {}, 'audio', extension)
+                with self.assertRaises(ValueError):
+                    planner.selected_records(Path('missing'), {}, 'media', {'audio'}, extension)
+
+    def test_real_cli_main_filters_before_limit_reuse_and_checkpoint(self):
+        with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(directory)
+            source, revisions = self.fixture(root)
+            output = root / 'matrix.json'
+            with patch.object(sys, 'argv', ['planner', '--kind', 'media', '--extension', 'all',
+                    '--media-extension', 'mp3', '--search-data', str(source), '--revisions', str(revisions),
+                    '--shard-count', '1', '--output', str(output)]), \
+                    patch.object(planner, 'HfFileSystem'), patch.object(planner, 'read_json', return_value={}):
+                self.assertEqual(planner.main(), 0)
+            self.assertEqual(json.loads(output.read_text()), {'include': [{'extension': 'audio', 'shard': 0}]})
+            other = {'key': 'VoiceOfML/Test\0old.wav', 'source_revision': 'old', 'extension': 'wav'}
+            previous = {'files': [other], 'failures': []}
+            with patch.object(sys, 'argv', ['pilot', '--kind', 'audio', '--extension', 'mp3', '--limit', '1',
+                    '--search-data', str(source), '--revisions', str(revisions), '--apply', '--strict']), \
+                    patch.object(media, 'existing_index', return_value=previous), \
+                    patch.object(media, 'unchanged_sources', return_value=set()) as reuse, \
+                    patch.object(media, 'build_one', return_value=({}, {})) as build, \
+                    patch.object(media, 'publish_checkpoint', return_value=previous) as checkpoint:
+                self.assertEqual(media.main(), 0)
+            self.assertEqual([item['extension'] for item in reuse.call_args.args[0]], ['mp3'])
+            self.assertEqual(build.call_args.args[0]['extension'], 'mp3')
+            self.assertEqual(checkpoint.call_count, 1)
+            self.assertIn(other, checkpoint.call_args.args[2]['files'])
+            self.assertTrue(checkpoint.call_args.kwargs['apply'])
+
+
+if __name__ == '__main__':
+    unittest.main()
