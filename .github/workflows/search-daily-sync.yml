@@ -10,8 +10,12 @@ on:
         description: Rebuild and publish even when source revisions are unchanged
         type: boolean
         default: false
+      known_writers_coordinated:
+        description: Known writers were audited/coordinated externally; this declaration is not proof of isolation
+        type: boolean
+        default: false
       target:
-        description: "all/hf-space: stage changed search data and verify both sites; directories: source directories only"
+        description: "all/hf-space: publish changed search data and verify both sites; directories: source directories only"
         type: choice
         default: all
         options:
@@ -40,6 +44,17 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: '3.11'
+      - &current-main
+        name: Require current main workflow and checkout
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF" == 'refs/heads/main' ]]
+          [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/search-daily-sync.yml@refs/heads/main" ]]
+          [[ "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          [[ "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" == "$GITHUB_SHA" ]]
       - name: Update generated directories
         run: python scripts/update_dirs.py
         env:
@@ -48,13 +63,18 @@ jobs:
   sync:
     if: inputs.target != 'directories'
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 120
     env:
+      # Opt-in records an operator declaration after an external writer audit.
+      # Neither this variable nor concurrency proves external writer isolation.
+      PUBLICATION_AUTHORIZED: ${{ vars.SEARCH_AUTOMATION_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && inputs.known_writers_coordinated) }}
       TARGET: ${{ inputs.target || 'all' }}
 
     steps:
       - name: Checkout pipeline repo
         uses: actions/checkout@v7
+
+      - *current-main
 
       - name: Setup Python
         uses: actions/setup-python@v7
@@ -62,7 +82,10 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install -r scripts/requirements.txt requests==2.32.5
+        run: pip install -r scripts/requirements.txt requests==2.32.5 PyYAML==6.0.3
+
+      - name: Verify automation and transition safety before writes
+        run: python -B -m unittest tests.test_search_automation_workflows tests.test_search_daily_publish tests.test_search_transition -v
 
       - name: Audit terminal publication journal before fetching
         env:
@@ -134,29 +157,118 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      - name: Fail closed when a new generation awaits promotion
-        if: steps.fetch.outputs.data_changed == 'true'
-        env:
-          STAGED_GENERATION: ${{ steps.stage.outputs.generation }}
-          PUBLISHED_GENERATION: ${{ steps.published.outputs.generation }}
+      - name: Fail closed when publication is not authorized
+        if: steps.fetch.outputs.data_changed == 'true' && steps.stage.outputs.generation != steps.published.outputs.generation
         run: |
           set -euo pipefail
-          if [[ "$STAGED_GENERATION" != "$PUBLISHED_GENERATION" ]]; then
-            echo "A new immutable search generation is staged but not yet promoted." >&2
-            echo "candidate=$STAGED_GENERATION published=$PUBLISHED_GENERATION" >&2
+          if [[ "$PUBLICATION_AUTHORIZED" != 'true' ]]; then
+            echo 'Staging only: new generation is not published. After auditing/coordinating known writers, enable SEARCH_AUTOMATION_ENABLED=true or explicitly declare coordination in a manual run.' >&2
+            echo 'The opt-in declaration does not prove external writer isolation.' >&2
             exit 1
           fi
 
+      - name: Recheck current main immediately before publication
+        if: steps.fetch.outputs.data_changed == 'true' && steps.stage.outputs.generation != steps.published.outputs.generation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF" == 'refs/heads/main' ]]
+          [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/search-daily-sync.yml@refs/heads/main" ]]
+          [[ "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          [[ "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" == "$GITHUB_SHA" ]]
+
+      - name: Resolve exact Pages main and running Space revisions
+        id: revisions
+        if: steps.fetch.outputs.data_changed == 'true' && steps.stage.outputs.generation != steps.published.outputs.generation
+        env:
+          PAGES_TOKEN: ${{ secrets.PAGES_TOKEN }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python - <<'PY'
+          import os, re
+          import requests
+          from huggingface_hub import HfApi
+          response = requests.get(
+              'https://api.github.com/repos/vomebook/search/git/ref/heads/main',
+              headers={'Authorization': 'Bearer ' + os.environ['PAGES_TOKEN'],
+                       'Accept': 'application/vnd.github+json'}, timeout=30)
+          response.raise_for_status()
+          pages = response.json()['object']['sha']
+          api = HfApi(token=os.environ['HF_TOKEN'])
+          space = api.space_info('VoiceOfML/Search', timeout=30).sha
+          runtime = api.get_space_runtime('VoiceOfML/Search')
+          if not all(isinstance(sha, str) and re.fullmatch(r'[0-9a-f]{40}', sha) for sha in (pages, space)):
+              raise SystemExit('Expected exact Pages main and Space repository revisions')
+          if runtime.stage != 'RUNNING' or runtime.raw.get('sha') != space:
+              raise SystemExit('Space must be RUNNING at its exact repository revision')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+              output.write(f'pages_revision={pages}\nspace_revision={space}\n')
+          PY
+
+      - name: Publish staged generation in this job
+        id: publish
+        if: steps.fetch.outputs.data_changed == 'true' && steps.stage.outputs.generation != steps.published.outputs.generation
+        timeout-minutes: 75
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          PAGES_TOKEN: ${{ secrets.PAGES_TOKEN }}
+          HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+          GENERATION: ${{ steps.stage.outputs.generation }}
+          EXPECTED_PARENT: ${{ steps.published.outputs.generation }}
+          PAGES_REVISION: ${{ steps.revisions.outputs.pages_revision }}
+          SPACE_REVISION: ${{ steps.revisions.outputs.space_revision }}
+        run: |
+          set -euo pipefail
+          [[ "$PUBLICATION_AUTHORIZED" == 'true' ]]
+          python -B scripts/search_daily_publish.py \
+            --generation "$GENERATION" --expected-parent "$EXPECTED_PARENT" \
+            --pages-revision "$PAGES_REVISION" --space-revision "$SPACE_REVISION" \
+            --known-writers-coordinated --timeout-seconds 3600
+
+      - name: Verify fresh publication receipt and terminal journal
+        if: steps.fetch.outputs.data_changed == 'true' && steps.stage.outputs.generation != steps.published.outputs.generation
+        env:
+          HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+          GENERATION: ${{ steps.stage.outputs.generation }}
+        run: |
+          set -euo pipefail
+          python -B scripts/search_daily.py inspect --receipt-output "$RUNNER_TEMP/search-final-receipt.json"
+          python -B scripts/search_daily_journal.py --output "$RUNNER_TEMP/search-final-journal.json"
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          base = Path(os.environ['RUNNER_TEMP'])
+          receipt = json.loads((base / 'search-final-receipt.json').read_bytes())
+          journal = json.loads((base / 'search-final-journal.json').read_bytes())
+          source = json.loads((base / 'search-directory-revisions.json').read_bytes())
+          if (receipt['generation'] != os.environ['GENERATION']
+                  or journal['generation'] != receipt['generation']
+                  or journal['state'] != 'complete'
+                  or journal['transition'] != receipt['transition']
+                  or journal['pointer_transition'] != receipt['transition']
+                  or receipt['both_consumers_observed'] is not True
+                  or receipt['source_revisions'] != source):
+              raise SystemExit('Fresh publication, terminal journal and source revisions do not agree')
+          print('Both sites and the terminal journal confirm the staged source snapshot')
+          PY
+
       - name: Verify journal did not change during the run
+        if: steps.fetch.outputs.data_changed != 'true' || steps.stage.outputs.generation == steps.published.outputs.generation
         env:
           HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
           HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
         run: python -B scripts/search_daily_journal.py --expected "$RUNNER_TEMP/search-journal-receipt.json"
 
       - name: Verify publication did not change during the run
+        if: steps.fetch.outputs.data_changed != 'true' || steps.stage.outputs.generation == steps.published.outputs.generation
         run: python -B scripts/search_daily.py inspect --expected-receipt "$RUNNER_TEMP/search-published-receipt.json"
 
       - name: Verify source revisions are fully published
+        if: steps.fetch.outputs.data_changed != 'true' || steps.stage.outputs.generation == steps.published.outputs.generation
         env:
           PUBLISHED_REVISIONS: ${{ steps.published.outputs.source_revisions }}
           SOURCE_REVISIONS_FILE: ${{ runner.temp }}/search-directory-revisions.json

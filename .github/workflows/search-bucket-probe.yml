@@ -13,8 +13,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: search-bucket-probe
+  group: daily-sync
   cancel-in-progress: false
+  queue: max
 
 jobs:
   probe:

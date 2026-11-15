@@ -266,16 +266,19 @@ class DirectorySnapshotTests(unittest.TestCase):
         self.assertEqual([step.get('uses') for step in manual['steps'][:2]],
                          ['actions/checkout@v7', 'actions/setup-python@v7'])
         self.assertEqual(manual['steps'][1]['with']['python-version'], '3.11')
-        self.assertEqual(manual['steps'][2]['run'], 'python scripts/update_dirs.py')
-        self.assertEqual(manual['steps'][2]['env'], {'HF_TOKEN': '${{ secrets.HF_TOKEN }}'})
-        self.assertEqual(len(manual['steps']), 3)
+        self.assertEqual(manual['steps'][2]['name'], 'Require current main workflow and checkout')
+        self.assertIn('GITHUB_WORKFLOW_SHA', manual['steps'][2]['run'])
+        self.assertIn('git/ref/heads/main', manual['steps'][2]['run'])
+        self.assertEqual(manual['steps'][3]['run'], 'python scripts/update_dirs.py')
+        self.assertEqual(manual['steps'][3]['env'], {'HF_TOKEN': '${{ secrets.HF_TOKEN }}'})
+        self.assertEqual(len(manual['steps']), 4)
         self.assertFalse(any('if' in step or 'continue-on-error' in step for step in manual['steps']))
         job = workflow['jobs']['sync']
         self.assertEqual(job['if'], "inputs.target != 'directories'")
         self.assertEqual(job['env']['TARGET'], "${{ inputs.target || 'all' }}")
         steps = {step.get('name'): step for step in job['steps'] if step.get('name')}
         install = steps['Install dependencies']
-        self.assertEqual(install['run'], 'pip install -r scripts/requirements.txt requests==2.32.5')
+        self.assertEqual(install['run'], 'pip install -r scripts/requirements.txt requests==2.32.5 PyYAML==6.0.3')
         self.assertNotIn('if', install)
         self.assertNotIn('continue-on-error', install)
         self.assertLess(job['steps'].index(install),
@@ -315,10 +318,27 @@ class DirectorySnapshotTests(unittest.TestCase):
         self.assertEqual(artifact['with']['if-no-files-found'], 'error')
         self.assertLess(job['steps'].index(steps['Stage immutable search generation']), job['steps'].index(handoff))
         self.assertLess(job['steps'].index(handoff), job['steps'].index(artifact))
-        self.assertLess(job['steps'].index(artifact), job['steps'].index(steps['Fail closed when a new generation awaits promotion']))
-        self.assertEqual(steps['Fail closed when a new generation awaits promotion']['if'], "steps.fetch.outputs.data_changed == 'true'")
-        self.assertIn('STAGED_GENERATION', steps['Fail closed when a new generation awaits promotion']['env'])
-        self.assertIn('PUBLISHED_GENERATION', steps['Fail closed when a new generation awaits promotion']['env'])
+        gate = steps['Fail closed when publication is not authorized']
+        publish = steps['Publish staged generation in this job']
+        fresh = steps['Verify fresh publication receipt and terminal journal']
+        self.assertLess(job['steps'].index(artifact), job['steps'].index(gate))
+        self.assertEqual(gate['if'], new_candidate)
+        self.assertIn('PUBLICATION_AUTHORIZED', gate['run'])
+        self.assertIn('exit 1', gate['run'])
+        self.assertEqual(publish['if'], new_candidate)
+        self.assertLess(job['steps'].index(gate), job['steps'].index(publish))
+        self.assertIn('--expected-parent "$EXPECTED_PARENT"', publish['run'])
+        self.assertEqual(publish['env']['GENERATION'], '${{ steps.stage.outputs.generation }}')
+        self.assertEqual(publish['env']['EXPECTED_PARENT'], '${{ steps.published.outputs.generation }}')
+        self.assertEqual(fresh['if'], new_candidate)
+        self.assertLess(job['steps'].index(publish), job['steps'].index(fresh))
+        self.assertIn('search_daily.py inspect --receipt-output', fresh['run'])
+        self.assertIn('search_daily_journal.py --output', fresh['run'])
+        unchanged = "steps.fetch.outputs.data_changed != 'true' || steps.stage.outputs.generation == steps.published.outputs.generation"
+        for name in ('Verify journal did not change during the run',
+                     'Verify publication did not change during the run',
+                     'Verify source revisions are fully published'):
+            self.assertEqual(steps[name]['if'], unchanged)
         self.assertIn('SOURCE_REVISIONS_FILE', steps['Verify source revisions are fully published']['env'])
         for retired in ('Sync to HF Space', 'Sync to GitHub Pages', 'Deploy GitHub Pages', 'Commit updated state'):
             self.assertNotIn(retired, steps)

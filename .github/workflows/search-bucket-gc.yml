@@ -1,0 +1,93 @@
+name: 搜索 · Bucket GC
+run-name: Search bucket GC / ${{ inputs.mode || 'auto' }}
+
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Preview or bounded GC; auto handles at most one old plan or creates one mark
+        type: choice
+        default: preview
+        options: [preview, auto, mark, sweep]
+      known_writers_coordinated:
+        description: Known writers were audited/coordinated externally; this declaration is not proof of isolation
+        type: boolean
+        default: false
+      plan_key:
+        description: Optional exact plan key for manual sweep only
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: daily-sync
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  gc:
+    if: github.repository == 'anftm/pipeline' && (github.event_name == 'workflow_dispatch' || vars.SEARCH_AUTOMATION_ENABLED == 'true')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      MODE: ${{ inputs.mode || 'auto' }}
+      SEARCH_AUTOMATION_ENABLED: ${{ vars.SEARCH_AUTOMATION_ENABLED }}
+      # Schedule opt-in is an operator declaration after external writer audit.
+      # Neither the variable nor this concurrency group proves writer isolation.
+      KNOWN_WRITERS_COORDINATED: ${{ (github.event_name == 'schedule' && vars.SEARCH_AUTOMATION_ENABLED == 'true') || inputs.known_writers_coordinated }}
+      PLAN_KEY: ${{ github.event_name == 'workflow_dispatch' && inputs.plan_key || '' }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Install GC dependencies
+        run: pip install huggingface_hub==1.33.0 boto3==1.43.123 requests==2.32.5 PyYAML==6.0.3 jieba==0.42.1
+      - name: Verify GC and automation safety before writes
+        run: python -B -m unittest tests.test_search_gc tests.test_search_gc_s3 tests.test_search_automation_workflows -v
+      - name: Require opt-in and current main before GC writes
+        if: env.MODE != 'preview'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$SEARCH_AUTOMATION_ENABLED" == 'true' ]]
+          [[ "$KNOWN_WRITERS_COORDINATED" == 'true' ]]
+          [[ "$GITHUB_REF" == 'refs/heads/main' ]]
+          [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/search-bucket-gc.yml@refs/heads/main" ]]
+          [[ "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          [[ "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" == "$GITHUB_SHA" ]]
+          echo 'Operator coordination declared; external writer isolation is not proven by this gate.'
+      - name: Run bounded search bucket GC
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+        run: |
+          set -euo pipefail
+          args=(--mode "$MODE" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT"
+                --output "$RUNNER_TEMP/search-bucket-gc.json")
+          if [[ "$MODE" != 'preview' ]]; then
+            [[ "$SEARCH_AUTOMATION_ENABLED" == 'true' && "$KNOWN_WRITERS_COORDINATED" == 'true' ]]
+            args+=(--known-writers-coordinated)
+          fi
+          if [[ -n "$PLAN_KEY" ]]; then
+            [[ "$GITHUB_EVENT_NAME" == 'workflow_dispatch' && "$MODE" == 'sweep' ]]
+            args+=(--plan-key "$PLAN_KEY")
+          fi
+          # The GC script retains current/previous and generations for >=7 days;
+          # sweep requires a mark aged >=24 hours. Auto processes at most one plan.
+          python -B scripts/search_gc.py "${args[@]}"
+      - name: Upload GC evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: search-bucket-gc-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/search-bucket-gc.json
+          if-no-files-found: warn
+          retention-days: 14
