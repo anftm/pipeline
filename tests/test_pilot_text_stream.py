@@ -845,6 +845,87 @@ class TextStreamPublicationTests(unittest.TestCase):
                             self.assertEqual(entry["embedded_image_paths"], ["book/images/a.png"])
                             self.assertTrue(all("/" + "a" * 40 + "/book/" in url for url in urls))
 
+    def test_other_repository_markdown_main_plans_and_attempts_bounded_batch(self):
+        for extension in ("md", "markdown"):
+            with self.subTest(extension=extension), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                source = root / "source.json"
+                source.write_text(json.dumps([{"Repo": "Other/Books", "Folder": [],
+                    "File": f"book-{number:02d}", "Extension": extension} for number in range(87)]))
+                revisions = root / "revisions.json"
+                revisions.write_text(json.dumps({"Other/Books": "a" * 40}))
+                args = SimpleNamespace(search_data=source, revisions=revisions, extensions=[extension],
+                    all_markdown_repos=True, limit=10, checkpoint_size=10, bucket=stream.TARGET_BUCKET,
+                    apply=False, plan_only=True, force=False, retry_failures=False,
+                    encoding_overrides=None, report=root / "report.json")
+                objects = {stream.ROOT + "/index.json": json.dumps({
+                    "version": 1, "kind": "text-stream-index", "files": []}).encode()}
+                downloads = []
+                def download(url, target, token):
+                    downloads.append(url)
+                    # One unsupported local dependency must be a recorded failure,
+                    # not an omitted source or an apparently successful conversion.
+                    target.write_bytes(b"![bad](image.svg)\n" if url.endswith(f"book-03.{extension}")
+                                       else ("# Complete body " + url.rsplit("/", 1)[-1]).encode())
+                def read(remote, token, bucket):
+                    if remote not in objects:
+                        raise FileNotFoundError(remote)
+                    return objects[remote]
+                def upload(bucket, additions, token):
+                    for local, remote in additions:
+                        objects[remote] = Path(local).read_bytes()
+                with patch.object(stream, "parse_args", return_value=args), \
+                        patch.object(stream, "download", side_effect=download), \
+                        patch.object(stream, "read_bytes", side_effect=read), \
+                        patch.object(stream, "read_json", side_effect=lambda remote, token, bucket: json.loads(read(remote, token, bucket))), \
+                        patch.object(stream, "batch_bucket_files_with_retry", side_effect=upload), \
+                        patch.dict(os.environ, {"HF_TOKEN": "test", "GITHUB_OUTPUT": str(root / "outputs")}):
+                    self.assertEqual(stream.main(), 0)
+                    plan = json.loads(args.report.read_text())
+                    self.assertEqual((plan["sources"], plan["pending"], plan["selected"]), (87, 87, 10))
+                    self.assertEqual(downloads, [])
+                    args.plan_only, args.apply = False, True
+                    self.assertEqual(stream.main(), 1)
+                report = json.loads(args.report.read_text())
+                self.assertEqual((report["attempted"], report["published"], report["unattempted"]), (10, 9, 77))
+                self.assertEqual(len(downloads), 10)
+                self.assertEqual(len(report["failures"]), 1)
+                failure = report["failures"][0]
+                self.assertEqual(failure["key"], f"Other/Books\0book-03.{extension}")
+                self.assertIn("unsupported image type", failure["error"])
+                index = json.loads(objects[stream.ROOT + "/index.json"])
+                self.assertEqual(len(index["files"]), 9)
+                self.assertEqual(index["failures"], [failure])
+                for entry in index["files"]:
+                    self.assertEqual(entry["profile"], stream.MARKDOWN_IMAGE_PROFILE)
+                    self.assertTrue(objects[entry["object"]].startswith(codecs.BOM_UTF8 + b"# Complete body"))
+
+    def test_pending_index_states_across_every_native_text_extension(self):
+        for extension in sorted(stream.SUPPORTED_EXTENSIONS):
+            item = {"repo": "Other/Books", "path": "book." + extension,
+                    "extension": extension, "revision": "a" * 40}
+            entry = {"key": "Other/Books\0" + item["path"], "source_revision": item["revision"],
+                     "profile": stream.expected_profile(item), "source_sha256": "b" * 64, "source_bytes": 17}
+            ledger = {**entry, "profile": PROFILE, "source_encoding": "utf-8"}
+            cases = [
+                ("missing", {}, True),
+                ("current", {"files": [entry]}, False),
+                ("changed revision", {"files": [{**entry, "source_revision": "c" * 40}]}, True),
+                ("old profile", {"files": [{**entry, "profile": "old"}]}, True),
+                ("current failure", {"failures": [entry]}, False),
+                ("old failure", {"failures": [{**entry, "source_revision": "c" * 40}]}, True),
+                ("unmapped ledger", {"verified_utf8": [ledger]}, True),
+                ("stale ledger", {"files": [{**entry, "source_revision": "c" * 40,
+                    "source_sha256": "d" * 64}], "verified_utf8": [ledger]}, True),
+                ("matching ledger", {"files": [{**entry, "source_revision": "c" * 40}],
+                    "verified_utf8": [ledger]}, extension in {"md", "markdown"}),
+            ]
+            for label, previous, pending in cases:
+                with self.subTest(extension=extension, state=label):
+                    self.assertEqual(stream.pending_records([item], previous), [item] if pending else [])
+                    self.assertEqual(stream.pending_records([item], previous, force=True), [item])
+            self.assertEqual(stream.pending_records([item], {"failures": [entry]}, retry_failures=True), [item])
+
     def test_workers_build_concurrently_and_publish_one_checkpoint(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
