@@ -24,7 +24,8 @@ except ImportError:
     from reader_page_cas import strong_etag
 
 
-BUCKET = 'vomebook/search-data-v1'
+BUCKET = 'vomebook/bha-data'
+LEGACY_BUCKET = 'vomebook/search-data-v1'
 HEAD = 'bha-reindex/head.json'
 ROOT = 'bha-reindex/operations/'
 ID = re.compile(r'[0-9a-f]{32}\Z')
@@ -295,7 +296,11 @@ def terminal(store, current: Current, *, state: str, result: dict) -> Current:
 
 
 class S3Store:
-    """Conditional head and immutable records, confined to the BHA namespace."""
+    """BHA-owned writes; the legacy namespace permits only an exact head read.
+
+    Legacy history requires explicit recovery, never an automatic namespace
+    switch. The absence check is not a fence against legacy external writers.
+    """
     def __init__(self, store=None):
         if store is None:
             from botocore.config import Config
@@ -304,14 +309,17 @@ class S3Store:
                 request_checksum_calculation='when_required', response_checksum_validation='when_required'))
         self.store = store
 
-    def _client(self):
-        namespace, bucket = self.store._location(BUCKET)
-        if (namespace, bucket) != ('vomebook', 'search-data-v1'):
+    def _client(self, *, legacy=False):
+        namespace, bucket = self.store._location(LEGACY_BUCKET if legacy else BUCKET)
+        if (namespace, bucket) != ('vomebook', 'search-data-v1' if legacy else 'bha-data'):
             raise ValueError('unexpected BHA journal bucket mapping')
         return self.store._client(namespace), bucket
 
-    def _get(self, key):
-        client, bucket = self._client()
+    def _get(self, key, *, legacy=False):
+        if not isinstance(key, str) or (key != HEAD and (legacy or not re.fullmatch(
+                r'bha-reindex/operations/[0-9a-f]{32}/records/[0-9a-f]{64}\.json', key))):
+            raise ValueError('BHA journal key outside allowlist')
+        client, bucket = self._client(legacy=legacy)
         try: response = client.get_object(Bucket=bucket, Key=key)
         except Exception as error:
             from botocore.exceptions import ClientError
@@ -326,14 +334,25 @@ class S3Store:
         if len(raw) != length: raise ValueError('BHA journal object is truncated')
         return raw, strong_etag(response.get('ETag'))
 
+    def _require_no_legacy_head(self):
+        try:
+            raw, _etag = self._get(HEAD, legacy=True)
+        except Exception as error:
+            raise RuntimeError('BHA legacy journal head absence is unknown; recovery required') from error
+        if raw is not None:
+            raise ValueError('BHA legacy journal head exists; explicit recovery required')
+
     def read_head(self):
+        self._require_no_legacy_head()
         raw, etag = self._get(HEAD)
         if raw is not None: _head(raw)
         return raw, etag
 
     def write_head(self, raw, etag):
-        _head(raw); client, bucket = self._client()
+        _head(raw)
         condition = {'IfNoneMatch': '*'} if etag is None else {'IfMatch': strong_etag(etag)}
+        if etag is None: self._require_no_legacy_head()
+        client, bucket = self._client()
         client.put_object(Bucket=bucket, Key=HEAD, Body=raw, ContentType='application/json', **condition)
 
     def read_record(self, key):

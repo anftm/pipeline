@@ -40,11 +40,16 @@ class Store:
         if self.lose_head: raise TimeoutError('lost response')
 
 
+def receipt(value, *, mode='incremental', operation=T, job_id=JOB):
+    return {'ok': True, 'status': 'accepted', 'job_id': job_id, 'mode': mode, 'operation_id': operation,
+            'target_archive_commits': value['archive_commits'],
+            'target_archive_revisions': value['archive_revisions'], 'changed_archives': value['changed_archives']}
+
+
 def live_status(value, *, state='succeeded', job_id=JOB):
     return {'index_status': 'ready', 'switch_pending': False, 'archive_revisions': value['archive_revisions'],
             'build_fingerprint': 'd' * 64,
-            'job': {'job_id': job_id, 'state': state, 'mode': 'incremental', 'finished_at': 100, 'changed': True,
-                    'target_archive_revisions': value['archive_revisions'], 'changed_archives': value['changed_archives']}}
+            'job': {**receipt(value, job_id=job_id), 'state': state, 'finished_at': 100, 'changed': True}}
 
 
 def sample_report(value):
@@ -73,12 +78,17 @@ def snapshot_health(*_args):
 class BhaReindexDeliveryTests(unittest.TestCase):
     def setUp(self): self.s = Store(); self.plan = plan()
     def prepare(self): return delivery.prepare(self.s, plan=self.plan, mode='incremental', inspect_live=lambda: self.plan, operation=T)
-    def apply(self, post): return delivery.apply_once(self.s, operation=T, token='fixture', inspect_live=lambda: self.plan, post=post)
+    def apply(self, post=None):
+        if post is None: post = Mock(return_value=receipt(self.plan))
+        return delivery.apply_once(self.s, operation=T, token='fixture', inspect_live=lambda: self.plan, post=post)
 
     def test_accept_verify_and_next_operation_are_separate(self):
         initial = self.prepare(); self.assertEqual(initial.record['state'], 'prepared')
-        send = Mock(return_value={'ok': True, 'status': 'accepted', 'mode': 'incremental', 'job_id': JOB})
+        send = Mock(return_value=receipt(self.plan))
         result = self.apply(send); self.assertEqual(result['state'], 'accepted'); send.assert_called_once()
+        self.assertEqual(send.call_args.kwargs['payload'], {
+            'operation_id': T, 'archive_commits': self.plan['archive_commits'],
+            'archive_revisions': self.plan['archive_revisions'], 'changed_archives': [0]})
         running = delivery.reconcile(self.s, operation=T, token='fixture', status=lambda *_: live_status(self.plan, state='running'))
         self.assertEqual(running['status'], 'running'); self.assertFalse(running['journal_advanced'])
         done = delivery.reconcile(self.s, operation=T, token='fixture', status=lambda *_: live_status(self.plan),
@@ -92,7 +102,7 @@ class BhaReindexDeliveryTests(unittest.TestCase):
         send.assert_called_once()
 
     def test_next_operation_requires_live_consumer_to_match_verified_predecessor(self):
-        self.prepare(); self.apply(Mock(return_value={'ok': True, 'status': 'accepted', 'mode': 'incremental', 'job_id': JOB}))
+        self.prepare(); self.apply()
         delivery.reconcile(self.s, operation=T, token='fixture', status=lambda *_: live_status(self.plan),
                            verify_samples=lambda: sample_report(self.plan), verify_snapshot=snapshot_report,
                            fetch=snapshot_health)
@@ -121,7 +131,7 @@ class BhaReindexDeliveryTests(unittest.TestCase):
         forged = {**prepared.record, 'state': 'accepted', 'claim': 'a' * 32, 'job_id': JOB}
         with self.assertRaisesRegex(ValueError, 'state sequence'):
             journal._record(search_snapshot.canonical(forged))
-        self.apply(Mock(return_value={'ok': True, 'status': 'accepted', 'mode': 'incremental', 'job_id': JOB}))
+        self.apply()
         delivery.reconcile(self.s, operation=T, token='fixture', status=lambda *_: live_status(self.plan),
                            verify_samples=lambda: sample_report(self.plan), verify_snapshot=snapshot_report,
                            fetch=snapshot_health)
@@ -145,9 +155,124 @@ class BhaReindexDeliveryTests(unittest.TestCase):
         with self.assertRaises(TimeoutError): self.apply(send)
         self.assertEqual(journal.load(self.s).record['state'], 'claimed')
         with self.assertRaisesRegex(ValueError, 'not in exact prepared'): self.apply(send)
-        result = delivery.reconcile(self.s, operation=T, token='fixture', status=lambda *_: live_status(self.plan))
+        legacy = live_status(self.plan); legacy['job'].pop('operation_id')
+        result = delivery.reconcile(self.s, operation=T, token='fixture', status=lambda *_: legacy)
         self.assertEqual(result['status'], 'job-uncorrelated'); self.assertFalse(result['journal_advanced'])
         self.assertEqual(journal.load(self.s).record['state'], 'claimed'); send.assert_called_once()
+
+    def test_lost_response_recovers_exact_operation_without_another_post(self):
+        for state in ('accepted', 'running', 'succeeded', 'failed'):
+            with self.subTest(state=state):
+                self.s = Store(); self.prepare()
+                send = Mock(side_effect=TimeoutError('response lost'))
+                with self.assertRaises(TimeoutError): self.apply(send)
+                samples, snapshot = Mock(), Mock()
+                result = delivery.reconcile(self.s, operation=T, token='fixture',
+                                            status=lambda *_: live_status(self.plan, state=state),
+                                            verify_samples=samples, verify_snapshot=snapshot)
+                self.assertEqual(result['status'], 'accepted'); self.assertTrue(result['journal_advanced'])
+                current = journal.load(self.s)
+                self.assertEqual(current.record['state'], 'accepted'); self.assertEqual(current.record['job_id'], JOB)
+                self.assertEqual(journal.audit(self.s, current), 3)
+                samples.assert_not_called(); snapshot.assert_not_called()
+                with self.assertRaisesRegex(ValueError, 'not in exact prepared'): self.apply(send)
+                send.assert_called_once()
+                if state == 'succeeded':
+                    done = delivery.reconcile(self.s, operation=T, token='fixture', status=lambda *_: live_status(self.plan),
+                                              verify_samples=lambda: sample_report(self.plan),
+                                              verify_snapshot=snapshot_report, fetch=snapshot_health)
+                    self.assertEqual(done['status'], 'verified')
+                elif state == 'failed':
+                    done = delivery.reconcile(self.s, operation=T, token='fixture',
+                                              status=lambda *_: live_status(self.plan, state='failed'))
+                    self.assertEqual(done['status'], 'failed')
+
+    def test_recovery_requires_every_identity_field_and_valid_job(self):
+        mutations = [('operation_id', None), ('operation_id', '3' * 32), ('mode', 'full'),
+                     ('target_archive_commits', {**self.plan['archive_commits'], '31': C}),
+                     ('target_archive_revisions', {**self.plan['archive_revisions'], '31': C}),
+                     ('target_archive_commits', {}), ('target_archive_revisions', {}),
+                     ('changed_archives', []), ('changed_archives', [False]),
+                     ('job_id', None), ('job_id', 'invalid'), ('state', 'unknown')]
+        mutations += [(key, None) for key in ('mode', 'target_archive_commits',
+                                             'target_archive_revisions', 'changed_archives')]
+        self.prepare(); send = Mock(side_effect=TimeoutError('response lost'))
+        with self.assertRaises(TimeoutError): self.apply(send)
+        before = self.s.writes
+        for key, value in mutations:
+            with self.subTest(key=key, value=value):
+                data = live_status(self.plan); data['job'][key] = value
+                result = delivery.reconcile(self.s, operation=T, token='fixture', status=lambda *_: data)
+                self.assertEqual(result['status'], 'job-uncorrelated')
+                self.assertFalse(result['journal_advanced']); self.assertEqual(self.s.writes, before)
+        send.assert_called_once()
+
+    def test_mismatched_or_legacy_acceptance_response_stays_claimed(self):
+        for key in ('operation_id', 'mode', 'target_archive_commits', 'target_archive_revisions',
+                    'changed_archives', 'job_id'):
+            with self.subTest(key=key):
+                self.s = Store(); self.prepare()
+                wrong = receipt(self.plan); wrong.pop(key)
+                send = Mock(return_value=wrong)
+                with self.assertRaisesRegex(ValueError, 'operation and targets'): self.apply(send)
+                self.assertEqual(journal.load(self.s).record['state'], 'claimed')
+                with self.assertRaisesRegex(ValueError, 'not in exact prepared'): self.apply(send)
+                send.assert_called_once()
+
+    def test_full_no_change_recovery_preserves_mode(self):
+        self.plan = plan(changed=False)
+        delivery.prepare(self.s, plan=self.plan, mode='full', inspect_live=lambda: self.plan, operation=T)
+        send = Mock(side_effect=TimeoutError('response lost'))
+        with self.assertRaises(TimeoutError): self.apply(send)
+        data = live_status(self.plan, state='running')
+        result = delivery.reconcile(self.s, operation=T, token='fixture', status=lambda *_: data)
+        self.assertEqual(result['status'], 'job-uncorrelated')
+        data['job']['mode'] = 'full'
+        result = delivery.reconcile(self.s, operation=T, token='fixture', status=lambda *_: data)
+        self.assertEqual(result['status'], 'accepted'); send.assert_called_once()
+
+    def test_full_no_change_reused_operation_cannot_adopt_baseline_job(self):
+        self.plan = plan(changed=False)
+        data = live_status(self.plan)
+        data['job']['mode'] = 'full'
+        self.plan['last_job'] = dict(data['job'])
+        self.plan['plan_sha256'] = hashlib.sha256(search_snapshot.canonical(
+            {key: value for key, value in self.plan.items() if key != 'plan_sha256'})).hexdigest()
+        self.assertIsNone(journal.load(self.s))
+        prepared = delivery.prepare(self.s, plan=self.plan, mode='full', inspect_live=lambda: self.plan, operation=T)
+        self.assertEqual(prepared.record['baseline_job']['operation_id'], T)
+        # The POST was never accepted; its outcome is unknown to the caller.
+        # Status still exposes the pre-request job with exactly matching targets.
+        send = Mock(side_effect=TimeoutError('request not accepted'))
+        with self.assertRaises(TimeoutError): self.apply(send)
+        claimed = journal.load(self.s); before = self.s.writes
+        result = delivery.reconcile(self.s, operation=T, token='fixture', status=lambda *_: data)
+        self.assertEqual(result['status'], 'job-uncorrelated')
+        self.assertFalse(result['journal_advanced'])
+        self.assertEqual(journal.load(self.s), claimed)
+        self.assertEqual(claimed.record['state'], 'claimed')
+        self.assertEqual(self.s.writes, before)
+        with self.assertRaisesRegex(ValueError, 'not in exact prepared'): self.apply(send)
+        send.assert_called_once()
+        # A different backend job can still be correlated against this baseline.
+        data['job']['job_id'] = '3' * 32
+        result = delivery.reconcile(self.s, operation=T, token='fixture', status=lambda *_: data)
+        self.assertEqual(result['status'], 'accepted')
+        self.assertEqual(journal.load(self.s).record['job_id'], '3' * 32)
+        send.assert_called_once()
+
+    def test_accepted_job_correlation_must_remain_exact_during_verification(self):
+        self.prepare(); self.apply()
+        for key, value in (('operation_id', '3' * 32), ('target_archive_commits', {})):
+            for drift_at in (0, 1, 2):
+                with self.subTest(key=key, drift_at=drift_at):
+                    statuses = [live_status(self.plan) for _ in range(3)]
+                    statuses[drift_at]['job'][key] = value
+                    with self.assertRaises(ValueError):
+                        delivery.reconcile(self.s, operation=T, token='fixture', status=Mock(side_effect=statuses),
+                                           verify_samples=lambda: sample_report(self.plan),
+                                           verify_snapshot=snapshot_report, fetch=snapshot_health)
+                    self.assertEqual(journal.load(self.s).record['state'], 'accepted')
 
     def test_source_fingerprint_drift_and_noop_incremental_block_before_post(self):
         self.prepare(); send = Mock()
@@ -161,7 +286,7 @@ class BhaReindexDeliveryTests(unittest.TestCase):
         self.assertIsNone(other.head)
 
     def test_failed_and_wrong_or_incomplete_receipts_never_prove_success(self):
-        self.prepare(); self.apply(Mock(return_value={'ok': True, 'status': 'accepted', 'mode': 'incremental', 'job_id': JOB}))
+        self.prepare(); self.apply()
         with self.assertRaisesRegex(ValueError, 'does not match'):
             delivery.reconcile(self.s, operation=T, token='fixture', status=lambda *_: live_status(self.plan, job_id='3' * 32))
         with self.assertRaisesRegex(ValueError, 'sample verification'):
@@ -175,7 +300,7 @@ class BhaReindexDeliveryTests(unittest.TestCase):
             delivery.prepare(self.s, plan=self.plan, mode='incremental', inspect_live=lambda: self.plan, operation='4' * 32)
 
     def test_successful_job_without_full_snapshot_evidence_stays_pending(self):
-        self.prepare(); self.apply(Mock(return_value={'ok': True, 'status': 'accepted', 'mode': 'incremental', 'job_id': JOB}))
+        self.prepare(); self.apply()
         result = delivery.reconcile(self.s, operation=T, token='fixture', status=lambda *_: live_status(self.plan),
                                     verify_samples=lambda: sample_report(self.plan))
         self.assertEqual(result['status'], 'snapshot-unverified'); self.assertFalse(result['journal_advanced'])
@@ -191,7 +316,7 @@ class BhaReindexDeliveryTests(unittest.TestCase):
             self.assertEqual(journal.load(self.s).record['state'], 'accepted')
 
     def test_snapshot_status_drift_or_pending_does_not_finish(self):
-        self.prepare(); self.apply(Mock(return_value={'ok': True, 'status': 'accepted', 'mode': 'incremental', 'job_id': JOB}))
+        self.prepare(); self.apply()
         import json
         pending = lambda *_: json.dumps({'ok': True, 'index_ready': True, 'index_status': 'ready', 'es': True,
                                          'document_count': 9, 'bucket_snapshot': {'state': 'pending_publish',
@@ -207,7 +332,7 @@ class BhaReindexDeliveryTests(unittest.TestCase):
         self.assertEqual(journal.load(self.s).record['state'], 'accepted')
 
     def test_replaced_job_same_identity_or_mismatched_snapshot_never_finishes(self):
-        self.prepare(); self.apply(Mock(return_value={'ok': True, 'status': 'accepted', 'mode': 'incremental', 'job_id': JOB}))
+        self.prepare(); self.apply()
         for mutation in ('finished_at', 'changed'):
             good, changed = live_status(self.plan), live_status(self.plan)
             changed['job'][mutation] = 101 if mutation == 'finished_at' else False
@@ -227,7 +352,7 @@ class BhaReindexDeliveryTests(unittest.TestCase):
             self.assertEqual(journal.load(self.s).record['state'], 'accepted')
 
     def test_consumer_drift_during_snapshot_verification_never_finishes(self):
-        self.prepare(); self.apply(Mock(return_value={'ok': True, 'status': 'accepted', 'mode': 'incremental', 'job_id': JOB}))
+        self.prepare(); self.apply()
         good = live_status(self.plan); foreign = live_status(self.plan); foreign['job']['job_id'] = '3' * 32
         values = iter([good, good, foreign])
         with self.assertRaisesRegex(ValueError, 'consumer changed during snapshot'):
@@ -240,12 +365,12 @@ class BhaReindexDeliveryTests(unittest.TestCase):
         unchanged = plan(changed=False); other = Store()
         current = delivery.prepare(other, plan=unchanged, mode='full', inspect_live=lambda: unchanged, operation='4' * 32)
         self.assertEqual(current.record['mode'], 'full')
-        send = Mock(return_value={'ok': True, 'status': 'accepted', 'mode': 'full', 'job_id': JOB})
+        send = Mock(return_value=receipt(unchanged, mode='full', operation='4' * 32))
         delivery.apply_once(other, operation='4' * 32, token='fixture', inspect_live=lambda: unchanged, post=send)
         self.assertEqual(send.call_args.kwargs['mode'], 'full')
         self.assertEqual(send.call_args.kwargs['payload']['changed_archives'], [])
         send.assert_called_once()
-        self.prepare(); self.apply(Mock(return_value={'ok': True, 'status': 'accepted', 'mode': 'incremental', 'job_id': JOB}))
+        self.prepare(); self.apply()
         sample = sample_report(self.plan); sample['samples'][0]['archive'] = 1; sample['samples'][0]['tree'] = A
         with self.assertRaisesRegex(ValueError, 'cover all changed'):
             delivery.reconcile(self.s, operation=T, token='fixture', status=lambda *_: live_status(self.plan),
@@ -253,7 +378,7 @@ class BhaReindexDeliveryTests(unittest.TestCase):
         self.assertEqual(journal.load(self.s).record['state'], 'accepted')
 
     def test_changed_or_missing_job_targets_cannot_be_accepted(self):
-        self.prepare(); self.apply(Mock(return_value={'ok': True, 'status': 'accepted', 'mode': 'incremental', 'job_id': JOB}))
+        self.prepare(); self.apply()
         status = live_status(self.plan); status['job']['target_archive_revisions'] = {}
         with self.assertRaisesRegex(ValueError, 'job and targets'):
             delivery.reconcile(self.s, operation=T, token='fixture', status=lambda *_: status)
@@ -299,10 +424,13 @@ class BhaReindexDeliveryTests(unittest.TestCase):
             with self.assertRaises(ValueError): delivery._post(secret, mode=mode, payload={})
 
     def test_s3_store_confines_keys_and_conditional_writes(self):
-        backing = Mock(); backing._location.return_value = ('vomebook', 'search-data-v1')
+        backing = Mock(); backing._location.side_effect = lambda bucket: tuple(bucket.split('/'))
         adapter = journal.S3Store(backing)
         head = search_snapshot.canonical({'version': 1, 'kind': 'bha-reindex-head', 'operation': T, 'record': 'f' * 64, 'sequence': 0})
-        adapter.write_head(head, None)
+        with patch.object(adapter, '_get', return_value=(None, None)) as read:
+            adapter.write_head(head, None)
+        read.assert_called_once_with(journal.HEAD, legacy=True)
+        self.assertEqual(backing._client.return_value.put_object.call_args.kwargs['Bucket'], 'bha-data')
         self.assertEqual(backing._client.return_value.put_object.call_args.kwargs['IfNoneMatch'], '*')
         adapter.write_head(head, '"etag"')
         self.assertEqual(backing._client.return_value.put_object.call_args.kwargs['IfMatch'], '"etag"')

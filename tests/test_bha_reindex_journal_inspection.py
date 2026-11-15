@@ -31,9 +31,8 @@ class BhaJournalInspectionTests(unittest.TestCase):
         self.assertEqual(journal.load(self.store).record['state'], 'claimed')
 
     def test_accepted_job_is_correlated_but_not_accepted_as_consumer_proof(self):
-        delivery.prepare(self.store, plan=self.plan, mode='incremental', inspect_live=lambda: self.plan, operation=T)
-        delivery.apply_once(self.store, operation=T, token='fixture', inspect_live=lambda: self.plan,
-                            post=lambda *_a, **_k: {'ok': True, 'status': 'accepted', 'mode': 'incremental', 'job_id': JOB})
+        current = delivery.prepare(self.store, plan=self.plan, mode='incremental', inspect_live=lambda: self.plan, operation=T)
+        journal.accepted(self.store, journal.claim(self.store, current), job_id=JOB)
         result = subject.inspect(self.store, 'fixture', read_status=lambda *_: self.status)
         self.assertTrue(result['job_matches_journal']); self.assertEqual(result['journal']['state'], 'accepted')
         self.assertFalse(result['publication_ready']); self.assertEqual(journal.load(self.store).record['state'], 'accepted')

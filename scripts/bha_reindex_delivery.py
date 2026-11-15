@@ -33,9 +33,13 @@ def _status(token: str) -> dict:
 
 
 def _job_matches(job, record, job_id: str) -> bool:
-    return (isinstance(job, dict) and job.get('job_id') == job_id and job.get('mode') == record['mode']
+    return (isinstance(job, dict) and isinstance(job_id, str) and journal.ID.fullmatch(job_id) is not None
+            and job.get('job_id') == job_id and job.get('operation_id') == record['operation']
+            and job.get('mode') == record['mode']
+            and job.get('target_archive_commits') == record['archive_commits']
             and job.get('target_archive_revisions') == record['archive_revisions']
-            and job.get('changed_archives') == record['changed_archives'])
+            and job.get('changed_archives') == record['changed_archives']
+            and all(type(value) is int for value in job['changed_archives']))
 
 
 def _raw_status(token: str) -> dict:
@@ -108,14 +112,15 @@ def apply_once(store, *, operation: str, token: str, inspect_live, post=_post) -
         raise ValueError('BHA live source or consumer changed before request')
     claimed = journal.claim(store, current)
     journal.check_claim(store, claimed)
-    payload = {'archive_commits': current.record['archive_commits'], 'archive_revisions': current.record['archive_revisions'],
+    payload = {'operation_id': operation,
+               'archive_commits': current.record['archive_commits'], 'archive_revisions': current.record['archive_revisions'],
                'changed_archives': current.record['changed_archives']}
     # One POST only. A timeout may have enqueued the job; reconciliation reads
     # actual status and never sends this request again.
     result = post(token, mode=current.record['mode'], payload=payload)
     if (result.get('ok') is not True or result.get('status') != 'accepted'
-            or result.get('mode') != current.record['mode']):
-        raise ValueError('BHA response does not confirm the requested mode')
+            or not _job_matches(result, current.record, result.get('job_id'))):
+        raise ValueError('BHA response does not confirm the requested operation and targets')
     updated = journal.accepted(store, claimed, job_id=result.get('job_id'))
     return {'kind': 'bha-reindex-request', 'operation': operation, 'job_id': updated.record['job_id'],
             'state': updated.record['state'], 'consumer_verified': False, 'external_writers_verified': False}
@@ -138,9 +143,17 @@ def reconcile(store, *, operation: str, token: str, status=_raw_status, verify_s
         return {'status': 'job-unknown', 'journal_advanced': False, 'external_writers_verified': False}
     job_id = job.get('job_id')
     if current.record['state'] == 'claimed':
-        # No request ID is sent by the current BHA API. Even identical targets
-        # could belong to another writer; do not adopt an uncorrelated job.
-        return {'status': 'job-uncorrelated', 'journal_advanced': False, 'external_writers_verified': False}
+        # Identical trees alone never identify the request. Legacy jobs without
+        # an operation ID remain blocked; recovery only records acceptance.
+        # A reused operation must not adopt the job observed before this POST.
+        baseline_job = current.record['baseline_job']
+        if (not _job_matches(job, current.record, job_id)
+                or isinstance(baseline_job, dict) and job_id == baseline_job.get('job_id')
+                or job.get('state') not in {'accepted', 'running', 'succeeded', 'failed'}):
+            return {'status': 'job-uncorrelated', 'journal_advanced': False, 'external_writers_verified': False}
+        recovered = journal.accepted(store, current, job_id=job_id)
+        return {'status': 'accepted', 'job_id': job_id, 'sequence': recovered.record['sequence'],
+                'journal_advanced': True, 'external_writers_verified': False}
     if job_id != current.record['job_id'] or not _job_matches(job, current.record, job_id):
         raise ValueError('BHA status job does not match the accepted job and targets')
     if job.get('state') in {'accepted', 'running'}:
