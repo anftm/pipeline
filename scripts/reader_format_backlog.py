@@ -369,7 +369,13 @@ def summarize(records: dict, routes: dict, checked_rows: dict, *, threshold: int
 
 
 def inspect(*, hub, api, fs, client, threshold=10, observe_search=search_daily.observe_consumers,
-            get=search_daily.bounded_get, scope='all'):
+            get=search_daily.bounded_get, scope='all', details_out=None):
+    """Return the legacy pair; optionally expose the accepted full capture.
+
+    details_out is populated only after all final pin checks succeed. Its rows
+    contain every checked key, including unchanged sources; absent keys remain
+    unverified (for example when a format's canonical index is missing).
+    """
     if scope not in {'all', 'epub'}:
         raise ValueError('invalid Reader backlog inspection scope')
     pointer_raw, manifest_raw, corpus, revisions, _observed = capture_search(hub, observe=observe_search, get=get)
@@ -562,6 +568,8 @@ def inspect(*, hub, api, fs, client, threshold=10, observe_search=search_daily.o
                         if row['state'] in {'content_changed', 'not_mapped', 'source_identity_unknown', 'route_or_index_mismatch'}
                         or row.get('pending_shard_checkpoint') or row.get('recorded_failure')],
                'remote_writes': 0, 'publication_ready': False}
+    if details_out is not None:
+        details_out.update(corpus=corpus, source_revisions=revisions, records=records, rows=checked)
     return summary, details
 
 
