@@ -263,7 +263,148 @@ class DailyPublishTests(unittest.TestCase):
         self.assertEqual(len({p['operation_id'] for p in pending}), 4)
         self.assertEqual(sum(p['write_claim'] is not None for p in pending), 3)
         self.assertGreater(tx.audit_history(self.store, tx.load(self.store)), len(own))
-        self.assertFalse(result['resume_supported'])
+        self.assertTrue(result['resume_supported'])
+        self.assertEqual(result['resume_scope'], subject.RESUME_SCOPE)
+
+    def interrupt_space_starting(self):
+        original = self.remote.add_space_variable
+        def write(*args, **kwargs):
+            original(*args, **kwargs)
+            self.remote.stages = ['RUNNING_APP_STARTING']
+        self.remote.add_space_variable = write
+        # Reproduce the production failure with the previous stage vocabulary.
+        with patch.object(subject, 'WAIT_STAGES', subject.WAIT_STAGES - {'RUNNING_APP_STARTING'}), \
+                self.assertRaisesRegex(ValueError, 'runtime is unavailable: RUNNING_APP_STARTING'):
+            self.run_publish()
+        current = tx.load(self.store)
+        self.assertEqual(current.record['sequence'], 14)
+        self.assertEqual(current.record['state'], 'applying')
+        self.assertTrue(current.record['pending']['write_claim'])
+        self.assertEqual(self.remote.calls, ['space-write'])
+        return current
+
+    def test_running_app_starting_waits_on_normal_path(self):
+        original = self.remote.add_space_variable
+        def write(*args, **kwargs):
+            original(*args, **kwargs)
+            self.remote.stages = ['RUNNING_APP_STARTING']
+        self.remote.add_space_variable = write
+        result = self.run_publish()
+        self.assertEqual(result['state'], 'complete')
+        self.assertEqual(self.elapsed, 5)
+        self.assertEqual(self.remote.calls, ['space-write', 'pages-dispatch', 'default-write'])
+
+    def test_explicit_resume_after_starting_failure_observes_without_space_rewrite(self):
+        interrupted = self.interrupt_space_starting()
+        transaction = interrupted.record['transition']
+        # Pages has no pending intent yet; a new explicit current SHA can be bound.
+        self.remote.pages_sha = 'f' * 40
+        result = self.run_publish(resume_transaction=transaction, pages_revision=self.remote.pages_sha)
+        self.assertEqual(result['transaction'], transaction)
+        self.assertEqual(result['state'], 'complete')
+        self.assertEqual(self.elapsed, 5)
+        self.assertEqual(self.remote.calls, ['space-write', 'pages-dispatch', 'default-write'])
+        self.assertEqual(self.store.pointer_writes, 1)
+        self.assertTrue(any(e['kind'] == 'search-daily-publish-resume' and
+                            e['operation'] == interrupted.record['pending']['operation_id'] for e in self.events))
+        records = [json.loads(raw) for raw in self.store.records.values()]
+        space_claims = [r['pending'] for r in records if r['transition'] == transaction and r['pending']
+                        and r['pending']['site'] == 'space' and r['pending'].get('write_claim')]
+        self.assertEqual(space_claims, [interrupted.record['pending']])
+
+    def test_resume_rejects_foreign_identity_or_revision_without_mutation(self):
+        interrupted = self.interrupt_space_starting()
+        self.remote.stages = []
+        for changes in ({'resume_transaction': 'f' * 32}, {'resume_transaction': ''},
+                        {'resume_transaction': 'invalid'}, {'generation': 'f' * 64},
+                        {'expected_parent': 'f' * 64}, {'space_revision': 'f' * 40},
+                        {'pages_revision': 'f' * 40}):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                self.run_publish(**{'resume_transaction': interrupted.record['transition'], **changes})
+            self.assertEqual(tx.load(self.store), interrupted)
+            self.assertEqual(self.remote.calls, ['space-write'])
+
+    def test_resume_cannot_replace_pending_sha_even_if_live_space_matches_new_sha(self):
+        interrupted = self.interrupt_space_starting()
+        self.remote.stages = []
+        self.remote.space_sha = self.remote.runtime_sha = 'f' * 40
+        with self.assertRaisesRegex(ValueError, 'pending operation differs from bound site revision'):
+            self.run_publish(resume_transaction=interrupted.record['transition'], space_revision='f' * 40)
+        self.assertEqual(tx.load(self.store), interrupted)
+        self.assertEqual(self.remote.calls, ['space-write'])
+
+    def test_resume_rejects_corrupt_candidate_before_reconciliation(self):
+        interrupted = self.interrupt_space_starting()
+        manifest = json.loads(self.remote.objects[f'generations/{self.candidate}/manifest.json'])
+        self.remote.objects[manifest['objects']['pages']['search_data.json.gz']['object']] = b'bad'
+        with self.assertRaisesRegex(ValueError, 'readback mismatch'):
+            self.run_publish(resume_transaction=interrupted.record['transition'])
+        self.assertEqual(tx.load(self.store), interrupted)
+        self.assertEqual(self.remote.calls, ['space-write'])
+
+    def test_cli_resume_passes_exact_transaction_into_real_chain(self):
+        interrupted = self.interrupt_space_starting()
+        transaction = interrupted.record['transition']
+        self.remote.stages = []
+        self.remote.headers = {}
+        real_publish = subject.publish
+        output = []
+        def offline_publish(**kwargs):
+            self.assertEqual(kwargs['resume_transaction'], transaction)
+            return real_publish(**kwargs, get=self.remote.public_get, emit=self.events.append)
+        with patch.dict(os.environ, {'PAGES_TOKEN': 'offline-test'}), \
+                patch.object(subject.tx, 'S3TransitionStore', return_value=self.store), \
+                patch.object(subject, 'S3SearchPointerStore', return_value=self.store), \
+                patch.object(subject.space, 'HubBucketStore', return_value=self.remote), \
+                patch.object(subject.requests, 'Session', return_value=self.remote), \
+                patch('huggingface_hub.HfApi', return_value=self.remote), \
+                patch.object(subject, 'publish', side_effect=offline_publish), \
+                patch.object(subject, '_emit', side_effect=output.append):
+            self.assertEqual(subject.main(self.cli_args() + ['--resume-transaction', transaction]), 0)
+        self.assertEqual(output[-1]['state'], 'complete')
+        self.assertEqual(output[-1]['transaction'], transaction)
+        self.assertEqual(self.remote.calls, ['space-write', 'pages-dispatch', 'default-write'])
+
+    def test_resume_rejects_source_drift_before_reconciliation(self):
+        interrupted = self.interrupt_space_starting()
+        self.remote.stages = []
+        with patch.object(subject.promotion_intent.preflight.fetch, 'get_repo_sha', return_value='f' * 40), \
+                self.assertRaisesRegex(ValueError, 'candidate sources changed'):
+            self.run_publish(resume_transaction=interrupted.record['transition'])
+        self.assertEqual(tx.load(self.store), interrupted)
+        self.assertEqual(self.remote.calls, ['space-write'])
+        self.assertEqual(self.store.pointer_writes, 0)
+
+    def test_resume_unknown_parent_still_blocks_without_replay(self):
+        interrupted = self.interrupt_space_starting()
+        self.remote.stages = []
+        self.remote.space_generation = self.remote.loaded_space = self.parent
+        with self.assertRaisesRegex(subject.Blocked, 'space-parent-configured'):
+            self.run_publish(resume_transaction=interrupted.record['transition'], timeout_seconds=6)
+        self.assertEqual(tx.load(self.store), interrupted)
+        self.assertEqual(self.remote.calls, ['space-write'])
+        self.assertEqual(self.store.pointer_writes, 0)
+
+    def test_resume_rejects_other_journal_states_and_unclaimed_space(self):
+        # Even an exact completed transaction is outside this narrow recovery.
+        terminal = tx.load(self.store)
+        with self.assertRaisesRegex(ValueError, 'only a claimed Space apply'):
+            self.run_publish(resume_transaction=terminal.record['transition'], generation=self.parent,
+                             expected_parent=terminal.record['parent_pointer']['desired'])
+        original = subject.space.prepare
+        class Interrupted(Exception):
+            pass
+        def prepare(*args, **kwargs):
+            original(*args, **kwargs)
+            raise Interrupted()
+        with patch.object(subject.space, 'prepare', side_effect=prepare), self.assertRaises(Interrupted):
+            self.run_publish()
+        unclaimed = tx.load(self.store)
+        self.assertIsNone(unclaimed.record['pending']['write_claim'])
+        with self.assertRaisesRegex(ValueError, 'only a claimed Space apply'):
+            self.run_publish(resume_transaction=unclaimed.record['transition'])
+        self.assertEqual(tx.load(self.store), unclaimed)
+        self.assertFalse(self.remote.calls)
 
     def test_all_lost_write_responses_are_observed_without_replay(self):
         self.remote.loss = {'space', 'pages', 'default'}

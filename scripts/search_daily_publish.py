@@ -1,8 +1,10 @@
 """Start one daily publication using the existing durable transition journal.
 
-Start-only: any unfinished journal, including this candidate from an earlier
-process, requires explicit operator reconciliation. The caller must serialize
-the entire run and coordinate other writers. No local receipt is recovery state.
+New starts require a terminal journal. Explicit --resume-transaction supports
+only an applying Space operation with a consumed claim, before Pages begins;
+all other interrupted states require separate operator reconciliation. The
+caller must serialize the entire run and coordinate other writers. No local
+receipt is recovery state.
 The timeout bounds orchestration/polling, not an in-flight adapter HTTP call.
 """
 from __future__ import annotations
@@ -50,12 +52,13 @@ def _emit(event):
 # an uncertain write is observed, never retried, even with a consumed claim.
 # huggingface_hub 1.x uses httpx; its transport failures are not OSError.
 UNKNOWN_WRITE = (OSError, requests.RequestException, httpx.TransportError, RuntimeError)
-WAIT_STAGES = {'RUNNING_BUILDING', 'BUILDING', 'APP_STARTING'}
+WAIT_STAGES = {'RUNNING_BUILDING', 'BUILDING', 'APP_STARTING', 'RUNNING_APP_STARTING'}
+RESUME_SCOPE = 'claimed-space-apply-before-pages'
 
 
 def publish(*, generation, expected_parent, pages_revision, space_revision,
             known_writers_coordinated, timeout_seconds, store, pointer_store, hub,
-            session, api, get=daily.bounded_get, revision=None,
+            session, api, get=daily.bounded_get, revision=None, resume_transaction=None,
             clock=time.monotonic, sleep=time.sleep, emit=_emit):
     """Run the normal path once; injected adapters/clocks support offline tests."""
     _generation(generation)
@@ -68,6 +71,8 @@ def publish(*, generation, expected_parent, pages_revision, space_revision,
         raise ValueError('known writer coordination must be explicitly declared')
     if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
         raise ValueError('timeout must be finite and positive')
+    if resume_transaction is not None:
+        tx._id(resume_transaction)
     revision = revision or promotion_intent.preflight.fetch.get_repo_sha
     deadline = clock() + timeout_seconds
     transaction = None
@@ -180,25 +185,58 @@ def publish(*, generation, expected_parent, pages_revision, space_revision,
                 raise ValueError('site reconciliation did not durably accept the candidate')
             wait(site + '-' + result['status'])
 
-    # A terminal, audited parent is mandatory. This is deliberately not resume.
-    baseline = daily_journal.inspect(store)
-    if baseline['generation'] != expected_parent:
-        raise ValueError('terminal journal differs from expected parent')
-    parent_raw = store.read_pointer()
-    identities()
-    daily_journal.verify_unchanged(baseline, daily_journal.inspect(store))
-    operation = secrets.token_hex(16)
-    promotion_intent.prepare(generation, store=store, transaction_id=operation, **common)
-    transaction = operation
-    if current().record['state'] != 'prepared':
-        raise ValueError('new daily publication is not prepared')
-    emit({'kind': 'search-daily-publish-start', 'transaction': transaction, 'candidate': generation,
-          'expected_parent': expected_parent, 'pages_revision': pages_revision, 'space_revision': space_revision,
-          'resume_supported': False, 'external_writers_verified': False})
+    if resume_transaction is None:
+        # Normal starts never adopt unfinished work implicitly.
+        baseline = daily_journal.inspect(store)
+        if baseline['generation'] != expected_parent:
+            raise ValueError('terminal journal differs from expected parent')
+        parent_raw = store.read_pointer()
+        identities()
+        daily_journal.verify_unchanged(baseline, daily_journal.inspect(store))
+        operation = secrets.token_hex(16)
+        promotion_intent.prepare(generation, store=store, transaction_id=operation, **common)
+        transaction = operation
+        if current().record['state'] != 'prepared':
+            raise ValueError('new daily publication is not prepared')
+        emit({'kind': 'search-daily-publish-start', 'transaction': transaction, 'candidate': generation,
+              'expected_parent': expected_parent, 'pages_revision': pages_revision, 'space_revision': space_revision,
+              'resume_scope': RESUME_SCOPE, 'external_writers_verified': False})
 
-    operation = secrets.token_hex(16)
-    step(space.prepare, api=api, expected_revision=space_revision, operation_id=operation, created_at=_now())
-    write_once(space.apply_once, claim_operation=operation, api=api, hub=hub, operation_id=operation)
+        operation = secrets.token_hex(16)
+        step(space.prepare, api=api, expected_revision=space_revision, operation_id=operation, created_at=_now())
+        write_once(space.apply_once, claim_operation=operation, api=api, hub=hub, operation_id=operation)
+    else:
+        existing = tx.load(store)
+        if (existing is None or existing.record['transition'] != resume_transaction
+                or existing.record['candidate'] != generation
+                or existing.record['parent_pointer']['desired'] != expected_parent):
+            raise ValueError('resume transaction/candidate/parent identity mismatch')
+        transaction = resume_transaction
+        parent_raw = search_snapshot.canonical(existing.record['parent_pointer'])
+        record = current().record  # Audit history, exact pointer and pending SHA.
+        pending = record['pending']
+        if (record['state'] != 'applying' or not pending
+                or pending['site'] != 'space' or pending['operation'] != 'apply'
+                or not pending.get('write_claim')
+                or any(record[k][site]['generation'] != expected_parent
+                       for k in ('observed', 'defaults') for site in ('space', 'pages'))):
+            raise ValueError('resume supports only a claimed Space apply before Pages')
+        operation = pending['operation_id']
+        # Revalidate immutable objects and live source heads against the durable
+        # digest before any reconciliation can advance this interrupted run.
+        manifest = space.adoption.validate_generation(hub, generation)
+        space._verify_candidate_sources(manifest, record['source_revisions_sha256'])
+        if {repo: revision(repo, os.environ.get('HF_TOKEN', ''))
+                for repo in promotion_intent.preflight.fetch.REPOS} != manifest['source_revisions']:
+            raise ValueError('resume source revisions differ from candidate')
+        identities()
+        if current().head_raw != existing.head_raw:
+            raise ValueError('resume journal changed during preflight')
+        emit({'kind': 'search-daily-publish-resume', 'transaction': transaction, 'candidate': generation,
+              'operation': operation, 'expected_parent': expected_parent, 'pages_revision': pages_revision,
+              'space_revision': space_revision, 'resume_scope': RESUME_SCOPE,
+              'external_writers_verified': False})
+        # Never prepare or apply this operation again, regardless of visibility.
     await_site('space', operation, space.reconcile, api=api, hub=hub, get=get)
 
     operation = secrets.token_hex(16)
@@ -266,7 +304,7 @@ def publish(*, generation, expected_parent, pages_revision, space_revision,
     identities()
     return {'kind': 'search-daily-publish-complete', 'generation': generation, 'transaction': transaction,
             'state': 'complete', 'published': published, 'journal': journal,
-            'resume_supported': False, 'external_writers_verified': False}
+            'resume_supported': True, 'resume_scope': RESUME_SCOPE, 'external_writers_verified': False}
 
 
 def main(argv=None):
@@ -275,6 +313,7 @@ def main(argv=None):
         parser.add_argument('--' + name, required=True)
     parser.add_argument('--known-writers-coordinated', action='store_true')
     parser.add_argument('--timeout-seconds', type=float, default=1800)
+    parser.add_argument('--resume-transaction', help='exact existing transaction; only claimed Space apply before Pages')
     args = parser.parse_args(argv)
     token = os.environ.get('PAGES_TOKEN', '')
     if not token:
@@ -289,7 +328,7 @@ def main(argv=None):
                          api=HfApi(token=os.environ.get('HF_TOKEN')))
     except Blocked as error:
         _emit({'kind': 'search-daily-publish-blocked', 'status': 'blocked', 'reason': str(error),
-               'journal_retained': True, 'resume_supported': False})
+               'journal_retained': True, 'resume_scope': RESUME_SCOPE})
         return 2
     _emit(result)
     return 0
