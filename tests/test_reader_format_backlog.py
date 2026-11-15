@@ -176,7 +176,7 @@ class ReaderFormatBacklogTests(unittest.TestCase):
             {key: source}, {key: route}, rows, threshold=0, checked_extensions={'md'})}['md']
         self.assertEqual(result['source_content_changed'], 1)
         self.assertFalse(result['conversion_dependencies_checked'])
-        self.assertIsNone(result['workflow'])
+        self.assertEqual(result['workflow'], 'reader-text-stream.yml')
         self.assertFalse(result['trigger_ready'])
 
     def test_malformed_lfs_or_wrong_response_never_becomes_content_proof(self):

@@ -154,9 +154,15 @@ class DailyTests(unittest.TestCase):
                 self.assertEqual(decision['state'], 'blocked')
                 self.assertIn('conversion_dependencies_checked is not true', decision['reasons'])
         for ext in subject.FAMILIES['text'][0].split():
-            decision = subject.plan(summary(10, ext, conversion_dependencies_checked=False))['formats'][ext]
-            self.assertEqual(decision['state'], 'blocked')
-            self.assertIn('no automatic workflow', decision['reasons'])
+            dependent = ext in {'md', 'markdown'}
+            decision = subject.plan(summary(10, ext, conversion_dependencies_checked=not dependent))['formats'][ext]
+            self.assertEqual(decision['state'], 'triggered')
+            self.assertEqual(decision['workflow'], 'reader-text-stream.yml')
+            if dependent:
+                self.assertEqual(decision['completion_scope'], 'first_conversion_only')
+                changed = subject.plan(summary(10, ext, not_mapped=9, source_content_changed=1,
+                                               conversion_dependencies_checked=False))['formats'][ext]
+                self.assertEqual(changed['state'], 'blocked')
 
     def test_web_first_conversion_drains_to_zero_with_unknown_dependency_freshness(self):
         data = [summary(n, 'html', conversion_dependencies_checked=False) for n in (10, 9, 0)]
@@ -228,7 +234,7 @@ class DailyTests(unittest.TestCase):
                 self.assertEqual(inputs['retry_failed' if family == 'chm' else 'retry_failures'], 'false')
                 if family != 'chm': self.assertEqual(inputs['extension'], ext)
                 if family == 'media': self.assertIn(inputs['kind'], ('audio', 'video', 'swf'))
-        self.assertEqual(len({value[1] for value in subject.FORMATS.values() if value[1]}), 8)
+        self.assertEqual(len({value[1] for value in subject.FORMATS.values() if value[1]}), 9)
 
     def test_triggered_format_drains_10_to_9_to_1_to_zero(self):
         self.refresh.side_effect = [summary(n) for n in (10, 9, 1, 0)]
@@ -245,9 +251,8 @@ class DailyTests(unittest.TestCase):
             self.assertEqual(unify[0], subject.PUBLISH)
             self.assertEqual(set(unify[1]), {'operation', 'apply', 'automation_id'})
             self.assertEqual(unify[1]['operation'], 'unify')
-        # Text has no workflow and is explicitly blocked, never silently complete.
-        self.assertEqual(result['status'], 'blocked')
-        self.assertIn('txt', result['blocked'])
+        self.assertEqual(result['status'], 'complete')
+        self.assertNotIn('txt', result['blocked'])
 
     def test_nine_initially_does_not_dispatch(self):
         self.refresh.side_effect = [summary(9)]
@@ -401,9 +406,12 @@ class DailyTests(unittest.TestCase):
                        {'timeout_seconds': 18001}, {'timeout_seconds': 0}, {'run_attempt': 2}):
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError): self.controller(**kwargs)
         self.refresh.side_effect = [summary(10), summary(9)]
-        result = self.controller(max_batches=1).run(summary())
-        self.assertIn('batch budget exhausted', result['error'])
+        result = self.controller(max_batches=1, parent_run_id='100').run(summary())
+        self.assertEqual(result['status'], 'continuation_required')
+        self.assertEqual(result['remaining_formats'], ['epub'])
         self.assertEqual(result['formats']['epub']['counts']['definite_backlog'], 9)
+        self.assertEqual(result['formats']['epub']['state'], 'continuation_required')
+        self.assertEqual(result['current_summary'], summary(9))
         self.assertEqual(len(self.api.posts), 2)
 
     def test_refresh_over_budget_prevents_dispatch(self):
@@ -453,6 +461,204 @@ class DailyTests(unittest.TestCase):
                 patch.object(subject, 'live_callbacks', side_effect=AssertionError('no Hub')), patch('builtins.print'):
             self.assertEqual(subject.main(['plan', '--summary', str(source), '--output', str(output)]), 0)
         self.assertEqual(json.loads(output.read_text())['formats']['epub']['state'], 'triggered')
+
+
+class ContinuationTests(unittest.TestCase):
+    setUp = DailyTests.setUp
+    controller = DailyTests.controller
+
+    def prepared(self, **kwargs):
+        self.refresh.side_effect = [summary(10), summary(9)]
+        return self.controller(parent_run_id='100', max_batches=1, **kwargs).run(summary())
+
+    def test_resume_below_threshold_preserves_trigger_and_drains(self):
+        previous = self.prepared()
+        self.assertEqual(previous['status'], 'continuation_required')
+        subject.validate_continuation(previous, HEAD, 100)
+        self.journal = Path(self.temp.name) / 'next-journal'
+        self.api = FakeAPI(self.journal)
+        self.refresh.side_effect = [summary(9), summary(0)]
+        result = self.controller(parent_run_id='101', continuation=previous).run(summary(9))
+        self.assertEqual(result['status'], 'complete')
+        self.assertEqual(result['continued_from_run_id'], '100')
+        self.assertEqual(result['accepted_continuation_id'], previous['continuation']['id'])
+        self.assertEqual(result['formats']['epub']['state'], 'complete')
+        self.assertEqual(len(self.api.posts), 2)
+
+    def test_round_robin_and_queue_rotation_across_budget(self):
+        def inventory(epub, jpg, mp3, md):
+            data = summary(epub)
+            for ext, count in (('jpg', jpg), ('mp3', mp3), ('md', md)):
+                row = next(row for row in data['formats'] if row['extension'] == ext)
+                row.update(sources=30, not_mapped=count, definite_backlog=count,
+                           source_content_unchanged=30-count)
+            return data
+        states = [inventory(10, 10, 10, 10), inventory(9, 10, 10, 10), inventory(9, 9, 10, 10)]
+        self.refresh.side_effect = states
+        result = self.controller(parent_run_id='100', max_batches=2).run(states[0])
+        self.assertEqual(result['status'], 'continuation_required')
+        self.assertEqual([inputs['extension'] for _, inputs in self.api.posts[::2]], ['epub', 'jpg'])
+        self.assertEqual(result['remaining_formats'], ['mp3', 'md', 'epub', 'jpg'])
+        self.journal = Path(self.temp.name) / 'next-journal'; self.api = FakeAPI(self.journal)
+        self.refresh.side_effect = [states[-1], inventory(9, 9, 9, 10)]
+        resumed = self.controller(parent_run_id='101', continuation=result, max_batches=1).run(states[-1])
+        self.assertEqual(resumed['status'], 'continuation_required')
+        self.assertEqual(self.api.posts[0][1]['extension'], 'mp3')
+        self.assertEqual(resumed['remaining_formats'], ['md', 'epub', 'jpg', 'mp3'])
+
+    def test_safe_time_boundary_yields_but_unknown_dispatch_does_not(self):
+        def refresh():
+            if self.api.posts:
+                self.clock.now = 45
+                return summary(9)
+            return summary(10)
+        self.refresh.side_effect = refresh
+        result = self.controller(parent_run_id='100').run(summary())
+        self.assertEqual(result['status'], 'continuation_required')
+        self.assertEqual(len(self.api.posts), 2)
+
+    def test_web_completion_scope_survives_continuation(self):
+        before, after, final = [summary(n, 'html', conversion_dependencies_checked=False) for n in (10, 9, 0)]
+        self.refresh.side_effect = [before, after]
+        previous = self.controller(parent_run_id='100', max_batches=1).run(before)
+        self.assertEqual(previous['status'], 'continuation_required')
+        self.journal = Path(self.temp.name) / 'next-journal'; self.api = FakeAPI(self.journal)
+        self.refresh.side_effect = [after, final]
+        result = self.controller(parent_run_id='101', continuation=previous).run(after)
+        self.assertEqual(result['formats']['html']['state'], 'complete')
+        self.assertEqual(result['formats']['html']['dependency_freshness'], 'unknown')
+        self.assertNotIn('html', result['blocked'])
+
+    def test_drift_or_unresolved_receipts_refuse_continuation(self):
+        previous = self.prepared()
+        for edit in (lambda data: data.update(expected_sha='b'*40),
+                     lambda data: data['operations'][0].update(status='dispatch_unknown'),
+                     lambda data: data['operations'][-1]['verification'].update(generation=NEXT),
+                     lambda data: data.update(remaining_formats=[]),
+                     lambda data: data['current_summary']['formats'][0].update(pending_shard_checkpoint=1)):
+            data = copy.deepcopy(previous); edit(data)
+            with self.assertRaises((ValueError, RuntimeError)): subject.validate_continuation(data, HEAD, 100)
+        self.journal = Path(self.temp.name) / 'next-journal'; self.api = FakeAPI(self.journal)
+        changed = summary(9); changed['search_generation'] = NEXT
+        self.refresh.side_effect = [changed]
+        result = self.controller(parent_run_id='101', continuation=previous).run(changed)
+        self.assertEqual(result['status'], 'blocked')
+        self.assertIn('search_generation changed', result['error'])
+        self.assertFalse(self.api.posts)
+
+    def test_pending_elsewhere_blocks_safe_continuation(self):
+        before = summary(10); after = summary(9)
+        for data in (before, after):
+            row = next(row for row in data['formats'] if row['extension'] == 'jpg')
+            row.update(sources=1, source_content_unchanged=1, pending_shard_checkpoint=1)
+        self.refresh.side_effect = [before, after]
+        result = self.controller(parent_run_id='100', max_batches=1).run(before)
+        self.assertEqual(result['status'], 'blocked')
+        self.assertIn('pending', result['error'])
+
+    def api_for_continuation(self, previous):
+        def run(identifier, **changes):
+            return {'id': identifier, 'name': subject.DAILY_NAME, 'path': '.github/workflows/' + subject.DAILY,
+                    'event': 'workflow_dispatch', 'head_branch': 'main', 'head_sha': HEAD,
+                    'run_attempt': 1, 'status': 'completed', 'conclusion': 'success',
+                    'display_title': 'reader-format-continuation/' + previous['continuation']['id'],
+                    'run_started_at': '2026-11-15T10:00:00Z', **changes}
+        parent, child = run(100), run(101, status='in_progress', conclusion=None)
+        operations = {op['run_id']: {'id': op['run_id'], 'display_title': op['run_name'],
+                      'path': '.github/workflows/' + op['workflow'], 'event': 'workflow_dispatch',
+                      'head_branch': 'main', 'head_sha': HEAD, 'run_attempt': 1,
+                      'status': 'completed', 'conclusion': 'success'} for op in previous['operations']}
+        session = Mock(); session.headers = {}
+        api = subject.GitHub('fake', session=session)
+        api.get_run = Mock(side_effect=lambda identifier: copy.deepcopy({100: parent, 101: child, **operations}[identifier]))
+        api.request = Mock(return_value=parent)
+        api.find_operation = Mock(return_value=[child])
+        api.check_main = Mock()
+        output = io.BytesIO()
+        with zipfile.ZipFile(output, 'w') as archive:
+            for name in ('result.json', 'operations.jsonl'):
+                archive.writestr(name, json.dumps(previous))
+        api.report_artifact = Mock(return_value=(output.getvalue(), {'id': 55}, 'sha256:' + 'a'*64))
+        return api, parent, child, operations
+
+    def test_continuation_artifact_binds_parent_success_unique_child_and_operation_attempts(self):
+        previous = self.prepared()
+        api, parent, child, operations = self.api_for_continuation(previous)
+        loaded = api.continuation_report(100, previous['continuation']['id'], HEAD, '101')
+        self.assertEqual(loaded, previous)
+        self.assertEqual(api.report_artifact.call_args.args[1], 'reader-format-daily-100')
+        for obj, field, value in ((parent, 'conclusion', 'failure'), (parent, 'run_attempt', 2),
+                                  (parent, 'head_sha', 'b'*40), (parent, 'event', 'push'),
+                                  (child, 'run_attempt', 2), (operations[1], 'run_attempt', 2)):
+            old = obj[field]; obj[field] = value
+            with self.subTest(field=field, value=value), self.assertRaises((ValueError, RuntimeError)):
+                api.continuation_report(100, previous['continuation']['id'], HEAD, '101')
+            obj[field] = old
+        api.find_operation.return_value = [child, child]
+        with self.assertRaisesRegex(RuntimeError, 'unique'):
+            api.continuation_report(100, previous['continuation']['id'], HEAD, '101')
+
+    def test_artifact_result_journal_mismatch_or_wrong_continuation_id_rejected(self):
+        previous = self.prepared()
+        api, _parent, _child, _operations = self.api_for_continuation(previous)
+        with self.assertRaisesRegex(ValueError, 'ID differs'):
+            api.continuation_report(100, '0'*32, HEAD, '101')
+        output = io.BytesIO()
+        with zipfile.ZipFile(output, 'w') as archive:
+            archive.writestr('result.json', json.dumps(previous))
+            archive.writestr('operations.jsonl', json.dumps({**previous, 'status': 'complete'}))
+        api.report_artifact.return_value = (output.getvalue(), {'id': 55}, 'digest')
+        with self.assertRaisesRegex(ValueError, 'journal differ'):
+            api.continuation_report(100, previous['continuation']['id'], HEAD, '101')
+
+    def test_preexisting_continuation_is_observed_without_another_post(self):
+        previous = self.prepared()
+        api, parent, child, _operations = self.api_for_continuation(previous)
+        parent.update(status='in_progress', conclusion=None)
+        api.dispatch = Mock()
+        result = subject.continue_dispatch(api=api, result=previous,
+                    journal=Path(self.temp.name)/'dispatch.json', expected_sha=HEAD,
+                    current_run_id='100', clock=self.clock, sleep=self.clock.sleep)
+        self.assertEqual(result['status'], 'observed')
+        self.assertEqual(result['run_id'], child['id'])
+        api.dispatch.assert_not_called()
+
+    def test_continuation_dispatch_unknown_posts_once_and_does_not_wait_for_child(self):
+        previous = self.prepared()
+        api, parent, child, _operations = self.api_for_continuation(previous)
+        parent.update(status='in_progress', conclusion=None)
+        api.find_operation.side_effect = [[], [child]]
+        api.active_children = Mock(return_value=[])
+        api.dispatch = Mock(side_effect=TimeoutError('accepted but response lost'))
+        journal = Path(self.temp.name) / 'dispatch.json'
+        result = subject.continue_dispatch(api=api, result=previous, journal=journal, expected_sha=HEAD,
+                                          current_run_id='100', clock=self.clock, sleep=self.clock.sleep)
+        self.assertEqual(result['status'], 'observed')
+        self.assertEqual(result['run_id'], 101)
+        api.dispatch.assert_called_once_with(subject.DAILY,
+            {'apply': 'true', 'known_writers_coordinated': 'true', 'continuation_run_id': '100',
+             'continuation_id': previous['continuation']['id']})
+        api.find_operation.side_effect = None; api.find_operation.return_value = []
+        result = subject.continue_dispatch(api=api, result=previous, journal=journal, expected_sha=HEAD,
+                                          current_run_id='100', clock=self.clock, sleep=self.clock.sleep,
+                                          timeout_seconds=1)
+        self.assertEqual(result['status'], 'dispatch_unknown')
+        self.assertEqual(api.dispatch.call_count, 1)
+
+    def test_definitive_continuation_rejection_fails_without_retry(self):
+        previous = self.prepared()
+        for code in (403, 422):
+            api, parent, _child, _operations = self.api_for_continuation(previous)
+            parent.update(status='in_progress', conclusion=None)
+            api.find_operation = Mock(return_value=[])
+            api.active_children = Mock(return_value=[])
+            api.dispatch = Mock(side_effect=subject.DispatchRejected(str(code)))
+            journal = Path(self.temp.name) / ('rejected-' + str(code) + '.json')
+            with self.assertRaises(subject.DispatchRejected):
+                subject.continue_dispatch(api=api, result=previous, journal=journal,
+                    expected_sha=HEAD, current_run_id='100', clock=self.clock, sleep=self.clock.sleep)
+            api.dispatch.assert_called_once()
+            self.assertEqual(json.loads(journal.read_text())['status'], 'dispatch_rejected')
 
 
 def publication_zip(publication=None, verification=None, extra=()):

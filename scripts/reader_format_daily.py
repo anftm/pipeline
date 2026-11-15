@@ -30,6 +30,8 @@ import zipfile
 
 REPOSITORY = 'anftm/pipeline'
 PUBLISH = 'reader-v3-publish.yml'
+DAILY = 'reader-format-daily.yml'
+DAILY_NAME = 'Reader/桶 · Daily Format Conversion'
 THRESHOLD = 10
 MAX_BATCHES = 20
 MAX_SECONDS = 5 * 60 * 60
@@ -51,7 +53,7 @@ FAMILIES = {
     'static-pdf': ('ppt pptx pps wps ps', 'reader-static-pdf-stream.yml', 10),
     'media': ('mp3 wav m4a flac mpga ape wma amr aac mp4 mov asx flv f4v rm rmvb mkv avi mpg mpeg mts ts wmv swf',
               'reader-media-stream.yml', 3),
-    'text': ('txt md markdown vcf ini', None, 0),
+    'text': ('txt md markdown vcf ini', 'reader-text-stream.yml', 10),
 }
 FORMATS = {ext: (family, workflow, limit) for family, (exts, workflow, limit) in FAMILIES.items()
            for ext in exts.split()}
@@ -111,7 +113,7 @@ def first_conversion_web(row, *, triggered=False):
     A triggered first-conversion batch may reach zero without claiming that
     dependencies of already mapped sources have been checked for freshness.
     """
-    return (FORMATS[row['extension']][0] == 'web'
+    return ((FORMATS[row['extension']][0] == 'web' or row['extension'] in {'md', 'markdown'})
             and row['source_content_changed'] == 0
             and (row['not_mapped'] > 0 or triggered)
             and row['all_source_identities_checked'] is True
@@ -207,6 +209,10 @@ class WallTimeout(BaseException):
     """Not swallowed by Hub/network retries; handled at the controller boundary."""
 
 
+class DispatchRejected(RuntimeError):
+    """A definitive client rejection cannot be reported as an accepted continuation."""
+
+
 class GitHub:
     """No POST retries. Every ambiguous dispatch is resolved only by observation."""
     def __init__(self, token, *, repository=REPOSITORY, session=None, local_head=None):
@@ -224,6 +230,8 @@ class GitHub:
         response = self.session.request(method, 'https://api.github.com/repos/' + self.repository + path,
                                         timeout=30, allow_redirects=False, **kwargs)
         if not 200 <= response.status_code < 300:
+            if method == 'POST' and response.status_code in {400, 401, 403, 404, 405, 409, 422}:
+                raise DispatchRejected('GitHub POST rejected: ' + str(response.status_code))
             raise RuntimeError('GitHub ' + method + ' returned ' + str(response.status_code))
         return response.json() if response.status_code != 204 else None
 
@@ -311,14 +319,27 @@ class GitHub:
 
         run = check(self.get_run(run_id))
         check(self.request('GET', f'/actions/runs/{run_id}/attempts/1'))
+        raw, artifact, digest = self.report_artifact(run, PUBLICATION_ARTIFACT, expected_sha)
+        publication, verification = read_publication_archive(raw)
+        generation = publication.get('generation')
+        if publication.get('applied') is not True:
+            raise RuntimeError('publication report did not apply unify')
+        validate_verification(verification, generation)
+        check(self.get_run(run_id))  # A rerun during download invalidates attempt 1.
+        return {'generation': generation, 'verification': verification,
+                'artifact_id': artifact['id'], 'artifact_digest': digest,
+                'run_id': run_id, 'run_attempt': 1, 'automation_id': operation['automation_id']}
+
+    def report_artifact(self, run, name, expected_sha):
+        run_id = run['id']
         inventory = self.request('GET', f'/actions/runs/{run_id}/artifacts', params={'per_page': 100})
         artifacts, total = inventory.get('artifacts'), inventory.get('total_count')
         if (not isinstance(artifacts, list) or type(total) is not int
                 or total != len(artifacts) or total > 100):
             raise RuntimeError('publication artifact inventory incomplete')
-        matches = [item for item in artifacts if item.get('name') == PUBLICATION_ARTIFACT]
+        matches = [item for item in artifacts if item.get('name') == name]
         if len(matches) != 1:
-            raise RuntimeError('requires one unique v3-publication-report artifact')
+            raise RuntimeError('requires one unique ' + name + ' artifact')
         artifact = matches[0]
         origin = artifact.get('workflow_run', {})
         if (type(artifact.get('id')) is not int or artifact['id'] <= 0
@@ -334,22 +355,53 @@ class GitHub:
         digest = 'sha256:' + hashlib.sha256(raw).hexdigest()
         if artifact.get('digest') != digest:
             raise RuntimeError('publication artifact digest differs or is missing')
-        publication, verification = read_publication_archive(raw)
-        generation = publication.get('generation')
-        if publication.get('applied') is not True:
-            raise RuntimeError('publication report did not apply unify')
-        validate_verification(verification, generation)
-        check(self.get_run(run_id))  # A rerun during download invalidates attempt 1.
-        return {'generation': generation, 'verification': verification,
-                'artifact_id': artifact['id'], 'artifact_digest': digest,
-                'run_id': run_id, 'run_attempt': 1, 'automation_id': operation['automation_id']}
+        return raw, artifact, digest
+
+    def continuation_report(self, previous_run_id, continuation_id, expected_sha, current_run_id):
+        run = self.get_run(previous_run_id)
+        validate_daily_run(run, expected_sha, completed=True)
+        if run['id'] != previous_run_id:
+            raise ValueError('continuation parent run ID differs')
+        attempt = self.request('GET', f'/actions/runs/{previous_run_id}/attempts/1')
+        validate_daily_run(attempt, expected_sha, completed=True)
+        if attempt['id'] != previous_run_id:
+            raise ValueError('continuation attempt run ID differs')
+        raw, artifact, digest = self.report_artifact(run, f'reader-format-daily-{previous_run_id}', expected_sha)
+        reports = read_report_archive(raw, {'result.json', 'operations.jsonl'})
+        result = reports['result.json']
+        if result != reports['operations.jsonl']:
+            raise ValueError('continuation result and durable operation journal differ')
+        validate_continuation(result, expected_sha, previous_run_id)
+        continuation = result['continuation']
+        if continuation['id'] != continuation_id:
+            raise ValueError('continuation ID differs from the recorded parent intent')
+        matches = self.find_operation(continuation_operation(continuation))
+        if len(matches) != 1 or str(matches[0]['id']) != str(current_run_id):
+            raise RuntimeError('continuation must be the unique run for its recorded intent')
+        validate_run(matches[0], continuation_operation(continuation), expected_sha)
+        current = self.get_run(matches[0]['id'])
+        validate_daily_run(current, expected_sha)
+        validate_run(current, continuation_operation(continuation), expected_sha)
+        # Artifact receipts cannot authorize replay of any producer or publisher.
+        for operation in result['operations']:
+            observed = self.get_run(operation['run_id'])
+            validate_run(observed, operation, expected_sha)
+            if observed['id'] != operation['run_id'] or observed.get('conclusion') != 'success' or observed.get('status') != 'completed':
+                raise RuntimeError('continuation operation is unresolved or was rerun')
+        validate_daily_run(self.get_run(previous_run_id), expected_sha, completed=True)
+        self.check_main(expected_sha)
+        return result
 
 
 def read_publication_archive(raw):
+    reports = read_report_archive(raw, {'publication.json', 'format-automation-verification.json'})
+    return reports['publication.json'], reports['format-automation-verification.json']
+
+
+def read_report_archive(raw, required):
     if not isinstance(raw, bytes) or not 0 < len(raw) <= MAX_ARCHIVE:
         raise ValueError('invalid publication archive size')
     reports = {}
-    required = {'publication.json', 'format-automation-verification.json'}
     with zipfile.ZipFile(io.BytesIO(raw)) as archive:
         members = archive.infolist()
         if not 1 <= len(members) <= 32 or sum(item.file_size for item in members) > MAX_EXPANDED:
@@ -358,7 +410,7 @@ def read_publication_archive(raw):
         for item in members:
             name = item.filename
             # upload-artifact uploads output/v3/*.json with a flat archive root.
-            if (not re.fullmatch(r'[A-Za-z0-9_-]+\.json', name) or name in seen
+            if (not re.fullmatch(r'[A-Za-z0-9_-]+\.jsonl?', name) or name in seen
                     or item.orig_filename != name or item.is_dir() or item.flag_bits & 1
                     or (item.external_attr >> 16) & 0o170000 not in (0, 0o100000)
                     or not 0 < item.file_size <= MAX_REPORT):
@@ -375,7 +427,7 @@ def read_publication_archive(raw):
                 reports[name] = value
     if set(reports) != required:
         raise ValueError('publication or automation verification report missing')
-    return reports['publication.json'], reports['format-automation-verification.json']
+    return reports
 
 
 def validate_verification(receipt, generation):
@@ -399,10 +451,146 @@ def validate_run(run, operation, expected_sha):
         raise RuntimeError('child run identity/attempt differs from the dispatch contract')
 
 
+def validate_daily_run(run, expected_sha, *, completed=False):
+    if (run.get('name') != DAILY_NAME or run.get('path') != '.github/workflows/' + DAILY
+            or run.get('event') not in {'workflow_dispatch', 'workflow_run'}
+            or run.get('head_branch') != 'main' or run.get('head_sha') != expected_sha
+            or type(run.get('id')) is not int or type(run.get('run_attempt')) is not int
+            or run['run_attempt'] != 1
+            or (completed and (run.get('status') != 'completed' or run.get('conclusion') != 'success'))):
+        raise RuntimeError('daily run identity, attempt or successful completion differs')
+
+
+def continuation_operation(continuation):
+    return {'workflow': DAILY, 'run_name': 'reader-format-continuation/' + continuation['id'],
+            'created_after': continuation['created_after']}
+
+
+def validate_continuation(result, expected_sha, previous_run_id):
+    if (result.get('kind') != 'reader-format-daily' or result.get('status') != 'continuation_required'
+            or result.get('expected_sha') != expected_sha
+            or str(result.get('parent_run_id')) != str(previous_run_id)
+            or not str(previous_run_id).isdigit() or int(previous_run_id) <= 0
+            or result.get('error')):
+        raise ValueError('invalid continuation result identity or status')
+    continuation = result.get('continuation', {})
+    if (not OPERATION_ID.fullmatch(continuation.get('id', ''))
+            or continuation.get('state') != 'prepared'
+            or not isinstance(continuation.get('created_after'), str)):
+        raise ValueError('invalid continuation intent')
+    rows = validate_summary(result['current_summary'])
+    for field in ('search_generation', 'reader_generation'):
+        if result.get(field) != result['current_summary'][field]:
+            raise ValueError('continuation generation differs from saved summary')
+    pending, triggered = result.get('remaining_formats'), result.get('triggered_formats')
+    if (not isinstance(pending, list) or not pending or len(set(pending)) != len(pending)
+            or not isinstance(triggered, list) or len(set(triggered)) != len(triggered)
+            or not set(pending) <= set(triggered) or not set(triggered) <= set(FORMATS)):
+        raise ValueError('invalid continuation format queue')
+    for ext in triggered:
+        decision = result['formats'][ext]
+        reasons = blockers(rows[ext], first_conversion_triggered=
+                           decision['completion_scope'] == 'first_conversion_only')
+        if reasons or bool(rows[ext]['definite_backlog']) != (ext in pending):
+            raise ValueError('continuation contains blocked or inconsistent triggered formats')
+    if any(rows[ext][field] for ext in FORMATS for field in UNCERTAIN):
+        raise ValueError('continuation contains pending, failure or unknown source state')
+    operations = result.get('operations')
+    if (not isinstance(operations, list) or not operations or len(operations) % 2
+            or len(operations) != 2 * result.get('batches', -1)):
+        raise ValueError('continuation has incomplete operation pairs')
+    ids, run_ids = set(), set()
+    for index, operation in enumerate(operations):
+        identifier = operation.get('automation_id', '')
+        ext = operation.get('extension')
+        expected_workflow = PUBLISH if index % 2 else FORMATS.get(ext, (None, None))[1]
+        if (not OPERATION_ID.fullmatch(identifier) or identifier in ids
+                or type(operation.get('run_id')) is not int or operation['run_id'] in run_ids
+                or operation.get('run_name') != 'reader-auto/' + identifier
+                or ext not in triggered or expected_workflow is None
+                or operation.get('workflow') != expected_workflow
+                or operation.get('phase') != ('unify' if index % 2 else 'producer')
+                or operation.get('expected_sha') != expected_sha
+                or operation.get('status') != 'completed' or operation.get('conclusion') != 'success'):
+            raise ValueError('continuation contains unresolved or duplicate operations')
+        ids.add(identifier); run_ids.add(operation['run_id'])
+        if index % 2:
+            if ext != operations[index - 1]['extension']:
+                raise ValueError('continuation operation pair differs')
+            evidence = operation['publication_artifact']
+            if evidence.get('run_id') != operation['run_id'] or evidence.get('run_attempt') != 1:
+                raise ValueError('continuation publication receipt run differs')
+            validate_verification(evidence['verification'], evidence['generation'])
+            validate_verification(operation['verification'], evidence['generation'])
+    if operations[-1]['verification']['generation'] != result['reader_generation']:
+        raise ValueError('continuation Reader generation differs from final publication')
+    if result.get('operation_ids') != [operation['automation_id'] for operation in operations]:
+        raise ValueError('continuation operation IDs differ')
+
+
+def continue_dispatch(*, api, result, journal, expected_sha, current_run_id,
+                      clock=time.monotonic, sleep=time.sleep, timeout_seconds=120):
+    """One POST, observe only thereafter; never wait for a queued continuation to finish."""
+    if str(current_run_id) != str(result.get('parent_run_id')):
+        raise ValueError('continue-dispatch must run inside the originating daily run')
+    validate_continuation(result, expected_sha, current_run_id)
+    api.check_main(expected_sha)
+    run = api.get_run(int(current_run_id))
+    validate_daily_run(run, expected_sha)
+    if run['id'] != int(current_run_id) or run.get('status') != 'in_progress':
+        raise ValueError('continue-dispatch requires the current in-progress daily run')
+    continuation = result['continuation']
+    operation = continuation_operation(continuation)
+    journal = Path(journal)
+    posted = journal.exists()
+    if posted:
+        saved = json.loads(journal.read_text(encoding='utf8'))
+        if saved.get('continuation_id') != continuation['id'] or saved.get('expected_sha') != expected_sha:
+            raise ValueError('continuation dispatch journal identity differs')
+    else:
+        saved = {'continuation_id': continuation['id'], 'expected_sha': expected_sha,
+                 'parent_run_id': current_run_id, 'status': 'observe_before_dispatch'}
+    deadline = clock() + timeout_seconds
+    while True:
+        matches = api.find_operation(operation)
+        if len(matches) > 1:
+            raise RuntimeError('duplicate continuation run-name')
+        if matches:
+            validate_run(matches[0], operation, expected_sha)
+            saved.update(status='observed', run_id=matches[0]['id'])
+            save(journal, saved)
+            return saved
+        if not posted:
+            if api.active_children(current_run_id):
+                raise RuntimeError('active child prevents continuation dispatch')
+            api.check_main(expected_sha)
+            saved['status'] = 'dispatch_intent'
+            save(journal, saved, exclusive=True)
+            posted = True
+            try:
+                api.dispatch(DAILY, {'apply': 'true', 'known_writers_coordinated': 'true',
+                                    'continuation_run_id': str(current_run_id),
+                                    'continuation_id': continuation['id']})
+                saved['status'] = 'dispatched'
+            except DispatchRejected as error:
+                saved.update(status='dispatch_rejected', error=str(error))
+                save(journal, saved)
+                raise
+            except Exception as error:
+                saved.update(status='dispatch_unknown', error=type(error).__name__)
+            save(journal, saved)
+        remaining = deadline - clock()
+        if remaining <= 0:
+            saved['status'] = 'dispatch_unknown'
+            save(journal, saved)
+            return saved
+        sleep(min(5, remaining))
+
+
 class Controller:
     def __init__(self, *, api, refresh, verify, journal, expected_sha, enabled=False,
                  known_writers=False, parent_run_id=None, run_attempt=1,
-                 max_batches=MAX_BATCHES, timeout_seconds=MAX_SECONDS,
+                 max_batches=MAX_BATCHES, timeout_seconds=MAX_SECONDS, continuation=None,
                  clock=time.monotonic, sleep=time.sleep, new_id=lambda: uuid.uuid4().hex):
         if not isinstance(expected_sha, str) or not SHA.fullmatch(expected_sha):
             raise ValueError('expected SHA must be the exact pipeline HEAD')
@@ -418,6 +606,9 @@ class Controller:
         self.parent_run_id, self.max_batches = parent_run_id, max_batches
         self.clock, self.sleep, self.new_id = clock, sleep, new_id
         self.deadline = clock() + timeout_seconds
+        self.finish_reserve = min(60, timeout_seconds * 0.02)
+        self.continuation = continuation
+        self.batch_durations = []
         self.result = None
 
     def remaining(self):
@@ -506,6 +697,16 @@ class Controller:
                     self.result['formats'][ext][field] = decision[field]
         self.result['reader_generation'] = summary['reader_generation']
 
+    def prepare_continuation(self, current, queue):
+        self.result.update(status='continuation_required', remaining_formats=list(queue),
+                           current_summary=current,
+                           continuation={'id': self.new_id(), 'state': 'prepared',
+                                         'created_after': (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()})
+        for ext in queue:
+            self.result['formats'][ext]['state'] = 'continuation_required'
+        validate_continuation(self.result, self.expected_sha, self.parent_run_id)
+        self.checkpoint()
+
     def run(self, summary):
         self.result = plan(summary)
         self.result.update(mode='run', status='running', expected_sha=self.expected_sha,
@@ -523,50 +724,85 @@ class Controller:
             if current['reader_generation'] != summary['reader_generation']:
                 raise RuntimeError('Reader generation changed before first dispatch')
             triggered = [ext for ext, item in self.result['formats'].items() if item['state'] == 'triggered']
+            queue = sorted(triggered, key=lambda ext: (ext != 'epub', FORMATS[ext][0] == 'text', ext))
+            if self.continuation is not None:
+                previous = self.continuation
+                validate_continuation(previous, self.expected_sha, previous['parent_run_id'])
+                for field in ('search_generation', 'reader_generation'):
+                    if current[field] != previous[field]:
+                        raise RuntimeError('continuation ' + field + ' changed')
+                baseline = validate_summary(previous['current_summary'])
+                rows = validate_summary(current)
+                if any(rows[ext] != baseline[ext] for ext in rows):
+                    raise RuntimeError('continuation source inventory or counts changed')
+                triggered = previous['triggered_formats']
+                queue = list(previous['remaining_formats'])
+                for ext in triggered:
+                    self.result['formats'][ext]['completion_scope'] = previous['formats'][ext]['completion_scope']
+                    self.result['formats'][ext]['state'] = 'triggered' if ext in queue else 'complete'
+                    self.result['blocked'].pop(ext, None)
+                self.result['continued_from_run_id'] = previous['parent_run_id']
+                self.result['accepted_continuation_id'] = previous['continuation']['id']
+            self.result['triggered_formats'] = triggered
             self.update_counts(current, triggered)
-            for ext in triggered:
-                while True:
-                    row = validate_summary(current)[ext]
-                    decision = self.result['formats'][ext]
-                    decision['counts'] = {key: row[key] for key in COUNTS}
-                    reasons = blockers(row, first_conversion_triggered=
-                                       decision['completion_scope'] == 'first_conversion_only')
-                    if reasons:
-                        decision.update(state='blocked', reasons=reasons)
-                        self.result['blocked'][ext] = reasons
-                        break
-                    if row['definite_backlog'] == 0:
-                        decision['state'] = 'complete'
-                        break
-                    if self.result['batches'] >= self.max_batches:
-                        raise RuntimeError('batch budget exhausted with definite backlog remaining')
-                    self.result['batches'] += 1
-                    producer_id = self.new_id()
-                    self.dispatch(FORMATS[ext][1], producer_inputs(
-                        ext, producer_id, expected_sha=self.expected_sha,
-                        search_generation=summary['search_generation']), ext, 'producer')
-                    self.dispatch(PUBLISH, {'operation': 'unify', 'apply': 'true',
-                                            'automation_id': self.new_id()}, ext, 'unify')
-                    operation = self.result['operations'][-1]
-                    evidence = self.api.publication_report(operation, self.expected_sha)
-                    generation = evidence['generation']
-                    validate_verification(evidence['verification'], generation)
-                    operation['publication_artifact'] = evidence
-                    self.checkpoint()
-                    receipt = self.verify(generation, self.remaining())
-                    self.remaining()
-                    validate_verification(receipt, generation)
-                    current = self.fresh(summary)
-                    if current['reader_generation'] != generation:
-                        raise RuntimeError('Reader generation changed after verification')
-                    after = validate_summary(current)[ext]
-                    decision['counts'] = {key: after[key] for key in COUNTS}
-                    self.update_counts(current, triggered)
-                    self.result['operations'][-1]['verification'] = receipt
-                    self.checkpoint()
-                    if after['definite_backlog'] >= row['definite_backlog']:
-                        raise RuntimeError('zero progress: source backlog did not decrease for ' + ext)
-                    # Once triggered, continue below ten until zero, subject to all guards.
+            while queue:
+                # Yield only between fully published, refreshed batches. A timeout
+                # with a running child or unknown POST remains blocked for observation.
+                reserve = max(self.batch_durations, default=0) * 1.5 + self.finish_reserve
+                if self.result['batches'] and (self.result['batches'] >= self.max_batches
+                                               or self.remaining() <= reserve):
+                    self.prepare_continuation(current, queue)
+                    return self.result
+                ext = queue.pop(0)
+                row = validate_summary(current)[ext]
+                decision = self.result['formats'][ext]
+                decision['counts'] = {key: row[key] for key in COUNTS}
+                reasons = blockers(row, first_conversion_triggered=
+                                   decision['completion_scope'] == 'first_conversion_only')
+                if reasons:
+                    decision.update(state='blocked', reasons=reasons)
+                    self.result['blocked'][ext] = reasons
+                    continue
+                if row['definite_backlog'] == 0:
+                    decision['state'] = 'complete'
+                    continue
+                started = self.clock()
+                self.result['batches'] += 1
+                producer_id = self.new_id()
+                self.dispatch(FORMATS[ext][1], producer_inputs(
+                    ext, producer_id, expected_sha=self.expected_sha,
+                    search_generation=summary['search_generation']), ext, 'producer')
+                self.dispatch(PUBLISH, {'operation': 'unify', 'apply': 'true',
+                                        'automation_id': self.new_id()}, ext, 'unify')
+                operation = self.result['operations'][-1]
+                evidence = self.api.publication_report(operation, self.expected_sha)
+                generation = evidence['generation']
+                validate_verification(evidence['verification'], generation)
+                operation['publication_artifact'] = evidence
+                self.checkpoint()
+                receipt = self.verify(generation, self.remaining())
+                self.remaining()
+                validate_verification(receipt, generation)
+                current = self.fresh(summary)
+                if current['reader_generation'] != generation:
+                    raise RuntimeError('Reader generation changed after verification')
+                after = validate_summary(current)[ext]
+                decision['counts'] = {key: after[key] for key in COUNTS}
+                self.update_counts(current, triggered)
+                operation['verification'] = receipt
+                self.checkpoint()
+                if after['definite_backlog'] >= row['definite_backlog']:
+                    raise RuntimeError('zero progress: source backlog did not decrease for ' + ext)
+                self.batch_durations.append(self.clock() - started)
+                reasons = blockers(after, first_conversion_triggered=
+                                   decision['completion_scope'] == 'first_conversion_only')
+                if reasons:
+                    decision.update(state='blocked', reasons=reasons)
+                    self.result['blocked'][ext] = reasons
+                elif after['definite_backlog']:
+                    queue.append(ext)  # Round robin, including backlog below ten.
+                else:
+                    decision['state'] = 'complete'
             # Recheck previously drained formats too: a later batch cannot hide
             # newly observed failures/pending checkpoints elsewhere in the inventory.
             final_rows = validate_summary(current)
@@ -584,10 +820,11 @@ class Controller:
             self.result['blocked']['controller'] = [self.result['error']]
         finally:
             for ext, decision in self.result['formats'].items():
-                if decision['state'] == 'triggered':
+                if (decision['state'] == 'triggered' or
+                        (decision['state'] == 'continuation_required' and self.result['status'] != 'continuation_required')):
                     decision.update(state='blocked', reasons=['interrupted with backlog remaining'])
                     self.result['blocked'][ext] = decision['reasons']
-            if self.result['blocked']:
+            if self.result['blocked'] and self.result['status'] != 'continuation_required':
                 self.result['status'] = 'blocked'
             self.checkpoint()
         return self.result
@@ -705,7 +942,10 @@ def wall_timeout(seconds):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=('plan', 'run', 'observe', 'guard-source'))
+    parser.add_argument('command', choices=('plan', 'run', 'observe', 'guard-source', 'continue-dispatch'))
+    parser.add_argument('--result', type=Path)
+    parser.add_argument('--continuation-run-id', type=int)
+    parser.add_argument('--continuation-id')
     parser.add_argument('--summary', type=Path)
     parser.add_argument('--generation')
     parser.add_argument('--revisions', type=Path)
@@ -735,11 +975,30 @@ def main(argv=None):
         return 0
     if args.output is None:
         parser.error('--output is required')
-    paths = [path.resolve() for path in (args.summary, args.output, args.journal) if path is not None]
+    paths = [path.resolve() for path in (args.summary, args.output, args.journal, args.result) if path is not None]
     if len(set(paths)) != len(paths) or args.output.exists() or args.output.is_symlink():
         parser.error('summary, journal and new output must be distinct paths')
+    if args.command == 'continue-dispatch':
+        if (args.result is None or args.journal is None or args.expected_sha is None
+                or not args.enabled or not args.known_writers_verified
+                or os.environ.get('GITHUB_RUN_ATTEMPT', '1') != '1'
+                or not os.environ.get('GITHUB_RUN_ID') or local_head() != args.expected_sha):
+            parser.error('continue-dispatch requires current first-attempt run, result, journal, exact SHA and gates')
+        api = GitHub(os.environ.get('GH_TOKEN') or os.environ.get('GITHUB_TOKEN'), local_head=local_head)
+        result = continue_dispatch(api=api, result=json.loads(args.result.read_text(encoding='utf8')),
+                                   journal=args.journal, expected_sha=args.expected_sha,
+                                   current_run_id=os.environ['GITHUB_RUN_ID'])
+        save(args.output, result, exclusive=True)
+        print(json.dumps(result, sort_keys=True))
+        # Unknown dispatch must leave the parent successful so an accepted queued
+        # continuation can validate it. Never retry a POST on an unknown response.
+        return 0
     if args.command != 'observe' and args.summary is None:
         parser.error('--summary is required (the parent must inspect first)')
+    if bool(args.continuation_run_id) != bool(args.continuation_id):
+        parser.error('both continuation inputs are required')
+    if args.continuation_id and (args.command != 'run' or not OPERATION_ID.fullmatch(args.continuation_id)):
+        parser.error('continuation inputs require run and a 32hex ID')
     if args.command == 'plan':
         result = plan(json.loads(args.summary.read_text(encoding='utf8')))
     else:
@@ -748,13 +1007,18 @@ def main(argv=None):
         if local_head() != args.expected_sha:
             parser.error('--expected-sha must equal local pipeline HEAD')
         api = GitHub(os.environ.get('GH_TOKEN') or os.environ.get('GITHUB_TOKEN'), local_head=local_head)
+        continuation = None
+        if args.continuation_run_id:
+            continuation = api.continuation_report(args.continuation_run_id, args.continuation_id,
+                                                   args.expected_sha, os.environ.get('GITHUB_RUN_ID'))
         refresh, verify = live_callbacks() if args.command == 'run' else (None, None)
         controller = Controller(api=api, refresh=refresh, verify=verify, journal=args.journal,
                                 expected_sha=args.expected_sha, enabled=args.enabled,
                                 known_writers=args.known_writers_verified,
                                 parent_run_id=os.environ.get('GITHUB_RUN_ID'),
                                 run_attempt=int(os.environ.get('GITHUB_RUN_ATTEMPT', '1')),
-                                max_batches=args.max_batches, timeout_seconds=args.timeout_seconds)
+                                max_batches=args.max_batches, timeout_seconds=args.timeout_seconds,
+                                continuation=continuation)
         with wall_timeout(args.timeout_seconds):
             result = (controller.observe() if args.command == 'observe' else
                       controller.run(json.loads(args.summary.read_text(encoding='utf8'))))

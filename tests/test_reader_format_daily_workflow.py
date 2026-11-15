@@ -24,9 +24,15 @@ class DailyFormatWorkflowTests(unittest.TestCase):
         self.assertIn("env.READER_AUTOMATION_ENABLED == 'true'", apply['if'])
         self.assertIn('--enabled --known-writers-verified', apply['run'])
         self.assertIn('--max-batches 20', apply['run'])
+        self.assertIn('--continuation-run-id', apply['run'])
         self.assertIn('--expected-sha "$GITHUB_SHA"', apply['run'])
         self.assertLess(steps.index(inspect), steps.index(apply))
-        self.assertEqual(steps[-1]['if'], 'always()')
+        evidence = next(s for s in steps if s.get('name') == 'Preserve exact decisions and operation evidence')
+        continuation = next(s for s in steps if s.get('name') == 'Queue verified continuation after publishing its evidence')
+        self.assertEqual(evidence['if'], 'always()')
+        self.assertLess(steps.index(evidence), steps.index(continuation))
+        self.assertIn('continue-dispatch', continuation['run'])
+        self.assertEqual(continuation['if'], "steps.convert.outputs.status == 'continuation_required'")
 
     def test_automatic_unify_requires_exact_generation_verification_without_gc(self):
         raw = (ROOT / '.github/workflows/reader-v3-publish.yml').read_text()

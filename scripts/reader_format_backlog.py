@@ -59,8 +59,8 @@ FAMILIES = {
     'office-chapters': (('doc', 'docx', 'odt', 'rtf'), 'reader-office-chapters.yml', 'ebook'),
     'spreadsheet': (('xls', 'xlsx', 'csv', 'ods'), 'reader-spreadsheet-stream.yml', 'html'),
     'web': (('html', 'htm', 'mht', 'mhtml'), 'reader-web-stream.yml', 'html'),
-    # Text has a guarded conversion script but no automatic workflow yet.
-    'text': (('txt', 'md', 'markdown', 'vcf', 'ini'), None, 'text'),
+    # Native text enters the same guarded format automation; never OCR output.
+    'text': (('txt', 'md', 'markdown', 'vcf', 'ini'), 'reader-text-stream.yml', 'text'),
     'static-pdf': (('ppt', 'pptx', 'pps', 'wps', 'ps'), 'reader-static-pdf-stream.yml', 'pdf'),
     'media': (('mp3', 'wav', 'm4a', 'flac', 'mpga', 'ape', 'wma', 'amr', 'aac',
                'mp4', 'mov', 'asx', 'flv', 'f4v', 'rm', 'rmvb', 'mkv', 'avi',

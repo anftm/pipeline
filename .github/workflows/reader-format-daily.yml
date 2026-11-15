@@ -1,5 +1,5 @@
 name: Reader/桶 · Daily Format Conversion
-run-name: Reader format backlog / ${{ github.event_name }}
+run-name: ${{ inputs.continuation_id && format('reader-format-continuation/{0}', inputs.continuation_id) || format('Reader format backlog / {0}', github.event_name) }}
 
 on:
   workflow_run:
@@ -7,6 +7,14 @@ on:
     types: [completed]
   workflow_dispatch:
     inputs:
+      continuation_run_id:
+        description: Previous successful run with a fully verified continuation result
+        type: string
+        default: ''
+      continuation_id:
+        description: Exact continuation ID recorded by the previous run
+        type: string
+        default: ''
       apply:
         description: Process every triggered format through verified Reader publication
         type: boolean
@@ -69,7 +77,7 @@ jobs:
       - name: Install pinned dependencies
         run: pip install -r scripts/requirements.txt requests==2.32.5 PyYAML==6.0.3
       - name: Verify format automation contracts
-        run: python -B -m unittest -v tests.test_reader_format_backlog tests.test_reader_format_daily tests.test_reader_format_workflow_automation tests.test_reader_format_daily_workflow
+        run: python -B -m unittest -v tests.test_reader_format_backlog tests.test_reader_format_daily tests.test_reader_format_workflow_automation tests.test_reader_format_daily_workflow tests.test_reader_format_sources tests.test_reader_text_automation
       - name: Observe exact published format backlog
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -79,21 +87,47 @@ jobs:
           python -B scripts/reader_format_daily.py plan --summary output/format-daily/summary.json \
             --output output/format-daily/decision.json
       - name: Convert and publish triggered formats to completion
+        id: convert
         if: env.REQUESTED_APPLY == 'true' && env.READER_AUTOMATION_ENABLED == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          CONTINUATION_RUN_ID: ${{ inputs.continuation_run_id }}
+          CONTINUATION_ID: ${{ inputs.continuation_id }}
         run: |
           set -euo pipefail
           [[ "$WRITERS" == true ]]
-          python -B scripts/reader_format_daily.py run --summary output/format-daily/summary.json \
-            --output output/format-daily/result.json --journal output/format-daily/operations.jsonl \
-            --expected-sha "$GITHUB_SHA" --enabled --known-writers-verified --max-batches 20 --timeout-seconds 18000
+          args=(run --summary output/format-daily/summary.json --output output/format-daily/result.json
+                --journal output/format-daily/operations.jsonl --expected-sha "$GITHUB_SHA"
+                --enabled --known-writers-verified --max-batches 20 --timeout-seconds 18000)
+          if [[ -n "$CONTINUATION_RUN_ID" || -n "$CONTINUATION_ID" ]]; then
+            args+=(--continuation-run-id "$CONTINUATION_RUN_ID" --continuation-id "$CONTINUATION_ID")
+          fi
+          python -B scripts/reader_format_daily.py "${args[@]}"
+          status=$(python -c 'import json; print(json.load(open("output/format-daily/result.json"))["status"])')
+          echo "status=$status" >> "$GITHUB_OUTPUT"
       - name: Preserve exact decisions and operation evidence
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: reader-format-daily-${{ github.run_id }}
           path: output/format-daily/
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Queue verified continuation after publishing its evidence
+        if: steps.convert.outputs.status == 'continuation_required'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python -B scripts/reader_format_daily.py continue-dispatch \
+            --result output/format-daily/result.json --journal output/format-continuation-dispatch.json \
+            --output output/format-continuation-result.json --expected-sha "$GITHUB_SHA" \
+            --enabled --known-writers-verified
+      - name: Preserve continuation dispatch outcome
+        if: always() && steps.convert.outputs.status == 'continuation_required'
+        uses: actions/upload-artifact@v7
+        with:
+          name: reader-format-continuation-${{ github.run_id }}
+          path: output/format-continuation-*.json
           if-no-files-found: warn
           retention-days: 14
