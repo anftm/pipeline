@@ -59,7 +59,7 @@ RESUME_SCOPE = 'claimed-space-apply-before-pages'
 def publish(*, generation, expected_parent, pages_revision, space_revision,
             known_writers_coordinated, timeout_seconds, store, pointer_store, hub,
             session, api, get=daily.bounded_get, revision=None, resume_transaction=None,
-            reviewed_space_successor=None, reviewed_space_test_path=None,
+            reviewed_space_successor=None, reviewed_space_test_path=None, reviewed_space_path=None,
             clock=time.monotonic, sleep=time.sleep, emit=_emit):
     """Run the normal path once; injected adapters/clocks support offline tests."""
     _generation(generation)
@@ -74,10 +74,11 @@ def publish(*, generation, expected_parent, pages_revision, space_revision,
         raise ValueError('timeout must be finite and positive')
     if resume_transaction is not None:
         tx._id(resume_transaction)
-    if reviewed_space_successor is not None or reviewed_space_test_path is not None:
+    if reviewed_space_successor is not None or reviewed_space_test_path is not None or reviewed_space_path is not None:
         if (resume_transaction is None or not isinstance(reviewed_space_successor, str)
-                or not space.SHA.fullmatch(reviewed_space_successor) or not reviewed_space_test_path):
-            raise ValueError('reviewed Space successor and exact test path require explicit resume')
+                or not space.SHA.fullmatch(reviewed_space_successor)
+                or not (reviewed_space_test_path or reviewed_space_path)):
+            raise ValueError('reviewed Space successor and exact paths require explicit resume')
     runtime_revision = reviewed_space_successor or space_revision
     revision = revision or promotion_intent.preflight.fetch.get_repo_sha
     deadline = clock() + timeout_seconds
@@ -238,7 +239,8 @@ def publish(*, generation, expected_parent, pages_revision, space_revision,
             raise ValueError('resume source revisions differ from candidate')
         if reviewed_space_successor is not None:
             space.verify_reviewed_successor(expected_revision=space_revision,
-                                            successor=reviewed_space_successor, test_path=reviewed_space_test_path)
+                                            successor=reviewed_space_successor, test_path=reviewed_space_test_path,
+                                            reviewed_paths=reviewed_space_path)
         identities()
         if current().head_raw != existing.head_raw:
             raise ValueError('resume journal changed during preflight')
@@ -248,7 +250,8 @@ def publish(*, generation, expected_parent, pages_revision, space_revision,
               'external_writers_verified': False})
         # Never prepare or apply this operation again, regardless of visibility.
     successor_options = ({'reviewed_successor': reviewed_space_successor,
-                          'reviewed_test_path': reviewed_space_test_path} if reviewed_space_successor else {})
+                          'reviewed_test_path': reviewed_space_test_path,
+                          'reviewed_paths': reviewed_space_path} if reviewed_space_successor else {})
     await_site('space', operation, space.reconcile, api=api, hub=hub, get=get, **successor_options)
 
     operation = secrets.token_hex(16)
@@ -326,8 +329,10 @@ def main(argv=None):
     parser.add_argument('--known-writers-coordinated', action='store_true')
     parser.add_argument('--timeout-seconds', type=float, default=1800)
     parser.add_argument('--resume-transaction', help='exact existing transaction; only claimed Space apply before Pages')
-    parser.add_argument('--reviewed-space-successor', help='reviewed direct single-parent successor SHA; resume only')
-    parser.add_argument('--reviewed-space-test-path', help='one exact reviewed tests/*.py path; no wildcard')
+    parser.add_argument('--reviewed-space-successor', help='reviewed SHA within 31 single-parent successors; resume only')
+    parser.add_argument('--reviewed-space-test-path', help='legacy exact reviewed tests Python path; no wildcard')
+    parser.add_argument('--reviewed-space-path', action='append',
+                        help='repeat for each manually reviewed tests Python or static/reader mjs path; exact diff required')
     args = parser.parse_args(argv)
     token = os.environ.get('PAGES_TOKEN', '')
     if not token:

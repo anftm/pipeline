@@ -380,6 +380,8 @@ class DailyPublishTests(unittest.TestCase):
         target.parent.mkdir(parents=True)
         target.write_text('assert True\n')
         (root / 'app.py').write_text('print("app")\n')
+        (root / 'static/reader').mkdir(parents=True)
+        (root / 'static/reader/example.mjs').write_text('export const value = 1;\n')
         git('add', '.')
         git('commit', '--quiet', '-m', 'parent')
         old = git('rev-parse', 'HEAD')
@@ -419,9 +421,9 @@ class DailyPublishTests(unittest.TestCase):
             (root / 'app.py').write_text('print("changed")\n')
             git('commit', '--quiet', '-am', 'runtime change')
             runtime_change = git('rev-parse', 'HEAD')
-            with self.assertRaisesRegex(ValueError, 'single-parent successor'):
+            with self.assertRaisesRegex(ValueError, 'outside the exact reviewed allowlist'):
                 subject.space.verify_reviewed_successor(expected_revision=old, successor=runtime_change, test_path=path)
-            with self.assertRaisesRegex(ValueError, 'outside the exact reviewed file'):
+            with self.assertRaisesRegex(ValueError, 'outside the exact reviewed allowlist'):
                 subject.space.verify_reviewed_successor(expected_revision=new, successor=runtime_change, test_path=path)
             git('reset', '--hard', new)
             git('update-index', '--chmod=+x', path)
@@ -434,8 +436,110 @@ class DailyPublishTests(unittest.TestCase):
         root, git, old, new, path = self.successor_repo()
         merge = git('commit-tree', git('rev-parse', new + '^{tree}'), '-p', old, '-p', new, '-m', 'merge')
         with patch.object(subject.space, 'SPACE_GIT_URL', str(root)), \
-                self.assertRaisesRegex(ValueError, 'single-parent successor'):
+                self.assertRaisesRegex(ValueError, 'single-parent chain'):
             subject.space.verify_reviewed_successor(expected_revision=old, successor=merge, test_path=path)
+
+    def three_path_successor_repo(self):
+        root, git, old, first, path = self.successor_repo()
+        reader = 'static/reader/example.mjs'
+        added = 'tests/reader/browser/test_added.py'
+        (root / reader).write_text('export const value = 2;\n')
+        (root / added).write_text('assert True\n')
+        git('add', '.')
+        git('commit', '--quiet', '-m', 'reviewed Reader edit and new test')
+        new = git('rev-parse', 'HEAD')
+        return root, git, old, first, new, [path, reader, added]
+
+    def test_two_commit_three_path_proof_and_complete_resume_write_once(self):
+        root, git, old, first, new, paths = self.three_path_successor_repo()
+        self.remote.space_sha = self.remote.runtime_sha = old
+        with patch(__name__ + '.SPACE_SHA', old), patch.object(subject.space, 'SPACE_GIT_URL', str(root)):
+            proof = subject.space.verify_reviewed_successor(expected_revision=old, successor=new, reviewed_paths=paths)
+            self.assertEqual(proof['chain'], [old, first, new])
+            added = next(f for f in proof['files'] if f['path'] == paths[2])
+            self.assertIsNone(added['before_blob'])
+            self.assertIsNone(added['before_mode'])
+            self.assertEqual(added['after_mode'], '100644')
+            interrupted = self.interrupt_space_starting()
+            self.remote.stages = []
+            self.remote.space_sha = self.remote.runtime_sha = new
+            real_publish = subject.publish
+            output = []
+            self.remote.headers = {}
+            def offline_publish(**kwargs):
+                self.assertEqual(kwargs['reviewed_space_path'], paths)
+                return real_publish(**kwargs, get=self.remote.public_get, emit=self.events.append)
+            args = self.cli_args() + ['--resume-transaction', interrupted.record['transition'],
+                                      '--reviewed-space-successor', new]
+            for path in paths:
+                args += ['--reviewed-space-path', path]
+            with patch.dict(os.environ, {'PAGES_TOKEN': 'offline-test'}), \
+                    patch.object(subject.tx, 'S3TransitionStore', return_value=self.store), \
+                    patch.object(subject, 'S3SearchPointerStore', return_value=self.store), \
+                    patch.object(subject.space, 'HubBucketStore', return_value=self.remote), \
+                    patch.object(subject.requests, 'Session', return_value=self.remote), \
+                    patch('huggingface_hub.HfApi', return_value=self.remote), \
+                    patch.object(subject, 'publish', side_effect=offline_publish), \
+                    patch.object(subject, '_emit', side_effect=output.append):
+                self.assertEqual(subject.main(args), 0)
+            result = output[-1]
+        self.assertEqual(result['state'], 'complete')
+        self.assertEqual(self.remote.calls, ['space-write', 'pages-dispatch', 'default-write'])
+        self.assertEqual(self.store.pointer_writes, 1)
+        witnesses = [json.loads(raw)['details']['reviewed_space_successor'] for raw in self.store.receipts.values()
+                     if 'reviewed_space_successor' in json.loads(raw).get('details', {})]
+        self.assertEqual(witnesses, [proof])
+        self.assertEqual(interrupted.record['pending']['expected_revision'], old)
+
+    def test_reviewed_allowlist_rejects_missing_extra_and_forbidden_paths(self):
+        root, git, old, first, new, paths = self.three_path_successor_repo()
+        with patch.object(subject.space, 'SPACE_GIT_URL', str(root)):
+            for allow in (paths[:-1], paths + ['tests/not_changed.py'], paths + [paths[0]]):
+                with self.subTest(allow=allow), self.assertRaises(ValueError):
+                    subject.space.verify_reviewed_successor(expected_revision=old, successor=new, reviewed_paths=allow)
+            for forbidden in ('backend/app.py', 'scripts/test.py', 'Dockerfile', 'requirements.txt',
+                              'static/app.mjs', 'config.py', 'tests/*.py', 'static/reader/../app.mjs'):
+                with self.subTest(path=forbidden), self.assertRaises(ValueError):
+                    subject.space.verify_reviewed_successor(expected_revision=old, successor=new,
+                                                           reviewed_paths=paths + [forbidden])
+            (root / 'backend').mkdir()
+            (root / 'backend/app.py').write_text('changed = True\n')
+            git('add', '.')
+            git('commit', '--quiet', '-m', 'backend change')
+            backend = git('rev-parse', 'HEAD')
+            with self.assertRaisesRegex(ValueError, 'outside the exact reviewed allowlist'):
+                subject.space.verify_reviewed_successor(expected_revision=old, successor=backend, reviewed_paths=paths)
+
+    def test_reviewed_chain_rejects_unrelated_ancestor_and_more_than_31_successors(self):
+        root, git, old, new, path = self.successor_repo()
+        with patch.object(subject.space, 'SPACE_GIT_URL', str(root)):
+            with self.assertRaisesRegex(ValueError, 'single-parent chain'):
+                subject.space.verify_reviewed_successor(expected_revision='f' * 40, successor=new, test_path=path)
+            for i in range(31):
+                (root / path).write_text('assert ' + str(i + 2) + '\n')
+                git('commit', '--quiet', '-am', 'reviewed test change')
+            latest = git('rev-parse', 'HEAD')
+            with self.assertRaisesRegex(ValueError, 'within 31 successors'):
+                subject.space.verify_reviewed_successor(expected_revision=old, successor=latest, test_path=path)
+            allowed = subject.space.verify_reviewed_successor(expected_revision=new, successor=latest, test_path=path)
+            self.assertEqual(len(allowed['chain']), 32)
+
+    def test_added_test_must_be_regular_100644_and_new_reader_file_is_rejected(self):
+        root, git, old, first, new, paths = self.three_path_successor_repo()
+        with patch.object(subject.space, 'SPACE_GIT_URL', str(root)):
+            git('update-index', '--chmod=+x', paths[2])
+            git('commit', '--quiet', '-m', 'executable added test')
+            with self.assertRaisesRegex(ValueError, 'regular 100644'):
+                subject.space.verify_reviewed_successor(expected_revision=old, successor=git('rev-parse', 'HEAD'),
+                                                       reviewed_paths=paths)
+            git('reset', '--hard', new)
+            extra = 'static/reader/added.mjs'
+            (root / extra).write_text('export const added = 1;\n')
+            git('add', '.')
+            git('commit', '--quiet', '-m', 'new reader file')
+            with self.assertRaisesRegex(ValueError, 'only regular 100644 tests may be added'):
+                subject.space.verify_reviewed_successor(expected_revision=old, successor=git('rev-parse', 'HEAD'),
+                                                       reviewed_paths=paths + [extra])
 
     def test_reviewed_successor_drift_during_consumer_observation_keeps_claim_pending(self):
         root, git, old, new, path = self.successor_repo()

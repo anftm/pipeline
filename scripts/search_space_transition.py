@@ -118,21 +118,32 @@ def search_parent_bytes(current: tx.Current) -> bytes:
 SPACE_GIT_URL = 'https://huggingface.co/spaces/VoiceOfML/Search'
 
 
-def verify_reviewed_successor(*, expected_revision, successor, test_path) -> dict:
-    """Verify Git ancestry and the exact reviewed file; never checkout or run it.
+def verify_reviewed_successor(*, expected_revision, successor, test_path=None, reviewed_paths=None) -> dict:
+    """Verify a bounded single-parent chain and the exact manually reviewed diff.
 
-    Hub commit lists omit parents and its tree API omits modes. Read actual Git
-    objects instead; blob IDs also bind LFS pointers. Operator review remains
-    necessary: a tests/ path alone does not prove that code is never imported.
+    Read Git objects, including modes and LFS pointer IDs, without checkout.
+    These path restrictions do not replace manual review of each invocation.
     """
     if (not isinstance(successor, str) or not SHA.fullmatch(successor)
             or not SHA.fullmatch(expected_revision) or successor == expected_revision):
         raise ValueError('reviewed Space successor requires two distinct exact SHAs')
-    if (not isinstance(test_path, str) or not test_path.startswith('tests/')
-            or not test_path.endswith('.py') or str(PurePosixPath(test_path)) != test_path
-            or any(part in {'', '.', '..'} for part in test_path.split('/'))
-            or any(ord(char) < 32 for char in test_path) or any(char in test_path for char in '\\*?[]')):
-        raise ValueError('reviewed Space test path must be one exact tests Python file')
+    if reviewed_paths is not None and not isinstance(reviewed_paths, (list, tuple)):
+        raise ValueError('reviewed Space paths must be an explicit list')
+    paths = list(reviewed_paths or [])
+    if test_path is not None:
+        if not isinstance(test_path, str) or not test_path.startswith('tests/') or not test_path.endswith('.py'):
+            raise ValueError('legacy reviewed test path must be a tests Python file')
+        paths.append(test_path)
+    if not paths or any(not isinstance(path, str) for path in paths) or len(paths) != len(set(paths)):
+        raise ValueError('reviewed Space paths must be nonempty and unique')
+    for path in paths:
+        if (not isinstance(path, str)
+                or not ((path.startswith('tests/') and path.endswith('.py'))
+                        or (path.startswith('static/reader/') and path.endswith('.mjs')))
+                or str(PurePosixPath(path)) != path
+                or any(part in {'', '.', '..'} for part in path.split('/'))
+                or any(ord(char) < 32 for char in path) or any(char in path for char in '\\*?[]')):
+            raise ValueError('reviewed Space path must be an exact tests Python or static/reader mjs file')
     with tempfile.TemporaryDirectory(prefix='search-space-successor-') as directory:
         def git(*args):
             return subprocess.run(['git', '-C', directory, '-c', 'credential.helper=',
@@ -140,12 +151,19 @@ def verify_reviewed_successor(*, expected_revision, successor, test_path) -> dic
                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120,
                                   env={**os.environ, 'GIT_TERMINAL_PROMPT': '0', 'GIT_LFS_SKIP_SMUDGE': '1'}).stdout
         git('init', '--bare', '--quiet')
-        git('fetch', '--quiet', '--no-tags', '--depth=2', SPACE_GIT_URL, successor)
-        commit = git('cat-file', 'commit', successor)
-        parents = [line[7:].decode('ascii') for line in commit.split(b'\n\n', 1)[0].splitlines()
-                   if line.startswith(b'parent ')]
-        if parents != [expected_revision]:
-            raise ValueError('reviewed Space successor is not a direct single-parent successor')
+        git('fetch', '--quiet', '--no-tags', '--depth=32', SPACE_GIT_URL, successor)
+        chain = [successor]
+        for _ in range(31):
+            commit = git('cat-file', 'commit', chain[-1])
+            parents = [line[7:].decode('ascii') for line in commit.split(b'\n\n', 1)[0].splitlines()
+                       if line.startswith(b'parent ')]
+            if len(parents) != 1:
+                raise ValueError('reviewed Space successor requires a single-parent chain')
+            chain.append(parents[0])
+            if parents[0] == expected_revision:
+                break
+        else:
+            raise ValueError('expected Space ancestor not reached within 31 successors')
 
         def tree(sha):
             raw = git('ls-tree', '-r', '-z', '--full-tree', sha)
@@ -160,24 +178,32 @@ def verify_reviewed_successor(*, expected_revision, successor, test_path) -> dic
             return raw, entries
         before_raw, before = tree(expected_revision)
         after_raw, after = tree(successor)
-        path = test_path.encode('utf8')
         changed = {key for key in before.keys() | after.keys() if before.get(key) != after.get(key)}
-        if changed != {path} or path not in before or path not in after:
-            raise ValueError('Space successor changes paths outside the exact reviewed file')
-        old_mode, old_type, old_blob = before[path].split()
-        new_mode, new_type, new_blob = after[path].split()
-        if (old_mode != new_mode or old_mode not in {b'100644', b'100755'}
-                or old_type != b'blob' or new_type != b'blob' or old_blob == new_blob):
-            raise ValueError('reviewed Space file must remain a regular file with unchanged mode')
+        if changed != {path.encode('utf8') for path in paths}:
+            raise ValueError('Space successor changes paths outside the exact reviewed allowlist')
+        files = []
+        for path in sorted(paths):
+            key = path.encode('utf8')
+            if key not in after:
+                raise ValueError('reviewed Space file deletion is not allowed')
+            new_mode, new_type, new_blob = after[key].split()
+            old_mode, old_type, old_blob = before[key].split() if key in before else (None, None, None)
+            if (new_type != b'blob' or new_mode not in {b'100644', b'100755'}
+                    or (key in before and (old_mode != new_mode or old_type != b'blob'))
+                    or (key not in before and (not path.startswith('tests/') or new_mode != b'100644'))):
+                raise ValueError('reviewed Space files require unchanged mode; only regular 100644 tests may be added')
+            files.append({'path': path, 'before_blob': old_blob.decode('ascii') if old_blob else None,
+                          'after_blob': new_blob.decode('ascii'),
+                          'before_mode': old_mode.decode('ascii') if old_mode else None,
+                          'after_mode': new_mode.decode('ascii')})
         return {'expected_revision': expected_revision, 'successor': successor, 'reviewed_test_path': test_path,
-                'single_parent': expected_revision, 'before_tree_sha256': hashlib.sha256(before_raw).hexdigest(),
-                'after_tree_sha256': hashlib.sha256(after_raw).hexdigest(),
-                'before_blob': old_blob.decode('ascii'), 'after_blob': new_blob.decode('ascii'),
-                'mode': old_mode.decode('ascii')}
+                'chain': list(reversed(chain)), 'files': files,
+                'before_tree_sha256': hashlib.sha256(before_raw).hexdigest(),
+                'after_tree_sha256': hashlib.sha256(after_raw).hexdigest()}
 
 
 def reconcile(store, *, api, hub, get, operation_id: str,
-              reviewed_successor=None, reviewed_test_path=None) -> dict:
+              reviewed_successor=None, reviewed_test_path=None, reviewed_paths=None) -> dict:
     current = tx.load(store)
     pending = current.record['pending'] if current is not None else None
     if (current is None or not isinstance(pending, dict) or pending.get('site') != 'space'
@@ -188,11 +214,12 @@ def reconcile(store, *, api, hub, get, operation_id: str,
         raise ValueError('search desired pointer changed before Space reconciliation')
     expected_revision = pending['expected_revision']
     witness = None
-    if reviewed_successor is not None or reviewed_test_path is not None:
+    if reviewed_successor is not None or reviewed_test_path is not None or reviewed_paths is not None:
         if pending['operation'] != 'apply' or not pending.get('write_claim'):
             raise ValueError('reviewed successor requires a consumed Space apply claim')
         witness = verify_reviewed_successor(expected_revision=expected_revision,
-                                            successor=reviewed_successor, test_path=reviewed_test_path)
+                                            successor=reviewed_successor, test_path=reviewed_test_path,
+                                            reviewed_paths=reviewed_paths)
         expected_revision = reviewed_successor
         deploy.runtime(api, expected_sha=expected_revision)
     configured, updated = deploy.variable(api)
