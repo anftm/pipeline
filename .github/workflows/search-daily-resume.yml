@@ -24,6 +24,14 @@ on:
         description: Exact reviewed Space revision for this transition
         required: true
         type: string
+      reviewed_space_successor:
+        description: Optional exact separately reviewed Space descendant; original Space revision remains bound
+        type: string
+        default: ''
+      reviewed_space_paths:
+        description: JSON array of exact reviewed Reader/test paths changed by the successor
+        type: string
+        default: '[]'
       known_writers_coordinated:
         description: Known writers remain coordinated; this declaration is not a global lock
         type: boolean
@@ -73,9 +81,24 @@ jobs:
           EXPECTED_PARENT: ${{ inputs.expected_parent }}
           PAGES_REVISION: ${{ inputs.pages_revision }}
           SPACE_REVISION: ${{ inputs.space_revision }}
+          REVIEWED_SPACE_SUCCESSOR: ${{ inputs.reviewed_space_successor }}
+          REVIEWED_SPACE_PATHS: ${{ inputs.reviewed_space_paths }}
         run: |
           set -euo pipefail
-          python -B scripts/search_daily_publish.py --resume-transaction "$TRANSACTION" \
-            --generation "$GENERATION" --expected-parent "$EXPECTED_PARENT" \
-            --pages-revision "$PAGES_REVISION" --space-revision "$SPACE_REVISION" \
-            --known-writers-coordinated --timeout-seconds 3600
+          args=(--resume-transaction "$TRANSACTION" --generation "$GENERATION"
+                --expected-parent "$EXPECTED_PARENT" --pages-revision "$PAGES_REVISION"
+                --space-revision "$SPACE_REVISION" --known-writers-coordinated --timeout-seconds 3600)
+          if [[ -n "$REVIEWED_SPACE_SUCCESSOR" ]]; then
+            args+=(--reviewed-space-successor "$REVIEWED_SPACE_SUCCESSOR")
+            python - <<'PY' > "$RUNNER_TEMP/reviewed-space-paths"
+          import json, os
+          values = json.loads(os.environ['REVIEWED_SPACE_PATHS'])
+          if not isinstance(values, list) or not values or any(not isinstance(v, str) or '\n' in v or '\r' in v for v in values):
+              raise SystemExit('Exact reviewed path array required')
+          print('\n'.join(values))
+          PY
+            while IFS= read -r path; do args+=(--reviewed-space-path "$path"); done < "$RUNNER_TEMP/reviewed-space-paths"
+          else
+            [[ "$REVIEWED_SPACE_PATHS" == '[]' ]]
+          fi
+          python -B scripts/search_daily_publish.py "${args[@]}"
