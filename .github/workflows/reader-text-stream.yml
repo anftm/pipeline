@@ -1,0 +1,217 @@
+name: Reader/桶 · Build Native Text Streams
+run-name: ${{ inputs.automation_id && format('reader-auto/{0}', inputs.automation_id) || format('Text streams {0} ({1})', inputs.apply == true && 'apply' || 'plan', inputs.extension || 'all') }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      automation_id:
+        description: Optional controller correlation ID (32 lowercase hex characters)
+        required: false
+        default: ""
+        type: string
+      search_generation:
+        description: Published search generation for the automatic batch (64 lowercase hex)
+        required: false
+        default: ""
+        type: string
+      expected_sha:
+        description: Controller pipeline main commit (40 lowercase hex)
+        required: false
+        default: ""
+        type: string
+      defer_unify:
+        description: Let the controller unify and verify after canonical indexes and sidecar finish
+        required: false
+        default: false
+        type: boolean
+      extension:
+        description: Native text format, or all
+        required: true
+        default: all
+        type: choice
+        options: [all, txt, md, markdown, vcf, ini]
+      limit:
+        description: Maximum attempts; apply requires 1-10, plan allows 0
+        required: true
+        default: "1"
+        type: string
+      apply:
+        description: Convert and publish native text streams
+        required: true
+        default: false
+        type: boolean
+      retry_failures:
+        description: Retry previously recorded failures
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: reader-text
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      count: ${{ steps.plan.outputs.count }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - run: pip install -r scripts/requirements.txt
+      - &automation-gate
+        name: Validate automation and current main
+        env:
+          AUTOMATION_ID: ${{ inputs.automation_id }}
+          AUTOMATION_ENABLED: ${{ vars.READER_FORMAT_AUTOMATION_ENABLED }}
+          SEARCH_GENERATION: ${{ inputs.search_generation }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          DEFER_UNIFY: ${{ inputs.defer_unify }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$AUTOMATION_ID$SEARCH_GENERATION$EXPECTED_SHA" && "$DEFER_UNIFY" != 'true' ]]; then exit 0; fi
+          [[ "$SEARCH_GENERATION" =~ ^[0-9a-f]{64}$ && "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ && "$DEFER_UNIFY" == 'true' ]]
+          [[ "$EXPECTED_SHA" == "$GITHUB_SHA" ]]
+          [[ "$AUTOMATION_ID" =~ ^[0-9a-f]{32}$ ]] || { echo 'automation_id must be 32 lowercase hex characters' >&2; exit 1; }
+          [[ "$AUTOMATION_ENABLED" == 'true' ]]
+          [[ "$GITHUB_REF" == 'refs/heads/main' ]]
+          [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/reader-text-stream.yml@refs/heads/main" ]]
+          [[ "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]
+          local_sha=$(git rev-parse HEAD)
+          [[ "$local_sha" == "$GITHUB_SHA" ]]
+          remote_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)
+          [[ "$remote_sha" == "$GITHUB_SHA" ]]
+      - name: Fetch source metadata once
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          FORCE_SYNC: "true"
+          SKIP_SIZES: "true"
+        run: python scripts/fetch_and_parse.py
+      - &source-guard
+        name: Bind automatic batch to published search sources
+        if: inputs.automation_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          SEARCH_GENERATION: ${{ inputs.search_generation }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          python scripts/reader_format_daily.py guard-source \
+            --generation "$SEARCH_GENERATION" --expected-sha "$EXPECTED_SHA" \
+            --revisions state/commits.json
+      - name: Select actionable sources for automatic batch
+        if: inputs.automation_id != ''
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          EXTENSION: ${{ inputs.extension }}
+          SEARCH_GENERATION: ${{ inputs.search_generation }}
+        run: |
+          set -euo pipefail
+          [[ -n "$EXTENSION" && "$EXTENSION" != 'all' ]]
+          python scripts/reader_format_sources.py --extension "$EXTENSION" \
+            --generation "$SEARCH_GENERATION" --search-data output/search_data.json \
+            --revisions state/commits.json --output output/reader-actionable.json
+          mv output/reader-actionable.json output/search_data.json
+      - name: Plan pending native text
+        id: plan
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          EXTENSION: ${{ inputs.extension || 'all' }}
+          LIMIT: ${{ inputs.limit || '1' }}
+          APPLY: ${{ inputs.apply }}
+          RETRY_FAILURES: ${{ inputs.retry_failures }}
+        run: |
+          set -euo pipefail
+          [[ "$LIMIT" =~ ^[0-9]+$ ]] || { echo 'limit must be non-negative' >&2; exit 1; }
+          if [[ "$APPLY" == 'true' && ! "$LIMIT" =~ ^([1-9]|10)$ ]]; then
+            echo 'apply requires 1-10 attempts' >&2; exit 1
+          fi
+          args=(--extension "$EXTENSION" --limit "$LIMIT" --all-markdown-repos --plan-only)
+          if [[ "$RETRY_FAILURES" == 'true' ]]; then args+=(--retry-failures); fi
+          python scripts/pilot_text_stream.py "${args[@]}"
+          python -c 'import json, os; report = json.load(open("output/text-stream-report.json")); print("count=" + str(report["selected"]), file=open(os.environ["GITHUB_OUTPUT"], "a"))'
+      - run: tar -czf output/text-plan.tgz output/search_data.json state/commits.json output/text-stream-report.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: reader-text-plan
+          path: output/text-plan.tgz
+          retention-days: 1
+
+  text-stream:
+    needs: plan
+    if: inputs.apply == true && fromJSON(needs.plan.outputs.count) > 0
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    concurrency:
+      group: reader-sidecar
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - run: pip install -r scripts/requirements.txt
+      - uses: actions/download-artifact@v8
+        with:
+          name: reader-text-plan
+          path: output
+      - run: tar -xzf output/text-plan.tgz
+      - *automation-gate
+      - *source-guard
+      - name: Build and publish native text streams
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+          EXTENSION: ${{ inputs.extension || 'all' }}
+          LIMIT: ${{ inputs.limit || '1' }}
+          RETRY_FAILURES: ${{ inputs.retry_failures }}
+        run: |
+          set -euo pipefail
+          [[ "$LIMIT" =~ ^([1-9]|10)$ ]] || { echo 'apply requires 1-10 attempts' >&2; exit 1; }
+          args=(--extension "$EXTENSION" --limit "$LIMIT" --all-markdown-repos --apply)
+          if [[ "$RETRY_FAILURES" == 'true' ]]; then args+=(--retry-failures); fi
+          python scripts/pilot_text_stream.py "${args[@]}"
+
+  finalize:
+    needs: [plan, text-stream]
+    if: >-
+      always() && needs.plan.result == 'success' &&
+      inputs.apply == true && needs.text-stream.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    concurrency:
+      group: reader-sidecar
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - run: pip install -r scripts/requirements.txt
+      - *automation-gate
+      - name: Rebuild canonical Reader sidecar
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+        run: python scripts/build_reader_assets_v2_sidecar.py --apply
+      - name: Unify sidecar through the central v3 writer
+        if: inputs.defer_unify != true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run reader-v3-publish.yml --repo "$GITHUB_REPOSITORY" --ref main \
+            -f operation=unify -f apply=true
+          echo "central v3 unify dispatched; current reader-sidecar lock will be released when this producer exits"

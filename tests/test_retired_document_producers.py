@@ -42,6 +42,23 @@ class RetiredDocumentProducerTests(unittest.TestCase):
                     run = step.get('run', '')
                     for script in scripts:
                         with self.subTest(workflow=path.name, job=name, script=script):
+                            if (script == 'pilot_text_stream.py' and path.name == 'reader-text-stream.yml'
+                                    and name in {'plan', 'text-stream'}
+                                    and step.get('name') in {'Plan pending native text', 'Build and publish native text streams'}):
+                                gate = next(s for s in job['steps'] if s.get('name') == 'Validate automation and current main')
+                                guard = next(s for s in job['steps'] if 'guard-source' in s.get('run', ''))
+                                self.assertLess(job['steps'].index(gate), job['steps'].index(step))
+                                self.assertLess(job['steps'].index(guard), job['steps'].index(step))
+                                self.assertNotIn('continue-on-error', step)
+                                self.assertIn('--all-markdown-repos', run)
+                                if name == 'plan':
+                                    self.assertIn('--plan-only', run)
+                                    self.assertNotIn('--apply', run)
+                                else:
+                                    self.assertIn('--apply', run)
+                                    self.assertEqual(job['concurrency']['group'], 'reader-sidecar')
+                                    self.assertIn('inputs.apply == true', job['if'])
+                                continue
                             self.assertNotIn('scripts/' + script, run)
 
     def test_worker_is_an_inert_inventory_sentinel(self):
@@ -144,7 +161,7 @@ class RetiredDocumentProducerTests(unittest.TestCase):
         self.assertIn('reader-ocr-audit.yml', DOCUMENT_PRODUCERS)
         self.assertIn('reader-ocr-language-audit.yml', DOCUMENT_PRODUCERS)
 
-    def test_remote_normalized_text_publisher_is_not_scheduled_or_runnable(self):
+    def test_historical_normalized_text_publisher_remains_retired(self):
         self.assertFalse((ROOT / 'reader-publish-text.yml').exists())
         from scripts.reader_gc_fence import producer_path
         self.assertTrue(producer_path('.github/workflows/reader-publish-text.yml'))
@@ -161,7 +178,7 @@ class RetiredDocumentProducerTests(unittest.TestCase):
         callers = ('reader-chm-repair.yml', 'reader-ebook-stream.yml', 'reader-office-chapters.yml',
                    'reader-web-stream.yml', 'reader-static-pdf-stream.yml', 'reader-spreadsheet-stream.yml',
                    'reader-image-stream.yml', 'reader-media-stream.yml',
-                   'reader-chapter-search-repair.yml')
+                   'reader-chapter-search-repair.yml', 'reader-text-stream.yml')
         for name in callers:
             with self.subTest(workflow=name):
                 text = (ROOT / name).read_text()

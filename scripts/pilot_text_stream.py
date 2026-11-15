@@ -40,14 +40,13 @@ SUPPORTED_EXTENSIONS = {"txt", "md", "markdown", "vcf", "ini"}
 MAX_SOURCE_BYTES = 512 * 1024 * 1024
 CHECKPOINT_BYTES = 64 * 1024 * 1024
 MARKDOWN_IMAGE_PROFILE = "strict-utf8-bom-v1-markdown-images-v1"
-# Inline Markdown image embedding is deliberately limited to the Marxists
-# Library. Other repositories keep their existing Markdown mappings; they are
-# not selected for this publisher.
+# Preserve the historical manual scope unless the guarded workflow explicitly
+# opts into all repositories. Every selected Markdown uses resource validation.
 MARKDOWN_INLINE_REPOS = frozenset({"VoiceOfML/Marxists-Library"})
 
 
 class Utf8SourceUnchanged(Exception):
-    """An already valid UTF-8 original does not need a new derivative."""
+    """Source and derivative content identities match the existing mapping."""
     def __init__(self, metadata: dict):
         super().__init__("source is already strict UTF-8; existing mapping retained")
         self.metadata = metadata
@@ -58,6 +57,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--search-data", type=Path, default=Path("output/search_data.json"))
     parser.add_argument("--revisions", type=Path, default=Path("state/commits.json"))
     parser.add_argument("--extension", action="append", dest="extensions")
+    parser.add_argument("--all-markdown-repos", action="store_true",
+                        help="include Markdown from every pinned repository with strict resource validation")
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--bucket", default=TARGET_BUCKET)
     parser.add_argument("--checkpoint-size", type=int, default=64)
@@ -119,7 +120,8 @@ def decode_text(raw: bytes) -> str:
     return normalize_utf8(raw)[0].decode("utf-8-sig")
 
 
-def select_records(path: Path, revisions: dict, extension: str | set[str]) -> list[dict]:
+def select_records(path: Path, revisions: dict, extension: str | set[str], *,
+                   all_markdown_repos: bool = False) -> list[dict]:
     records = decode_search_payload(json.loads(path.read_text(encoding="utf-8")))
     selected = []
     wanted = SUPPORTED_EXTENSIONS if extension == "all" else ({extension} if isinstance(extension, str) else extension)
@@ -129,7 +131,7 @@ def select_records(path: Path, revisions: dict, extension: str | set[str]) -> li
         if ext not in SUPPORTED_EXTENSIONS or ext not in wanted:
             continue
         repo = str(record.get("Repo") or "")
-        if ext in {"md", "markdown"} and repo not in MARKDOWN_INLINE_REPOS:
+        if ext in {"md", "markdown"} and not all_markdown_repos and repo not in MARKDOWN_INLINE_REPOS:
             continue
         revision = str(revisions.get(repo) or "")
         rel = relative_path(record)
@@ -203,7 +205,7 @@ def encoding_options(value) -> dict:
 
 
 def build_one(item: dict, work: Path, token: str | None, bucket: str,
-              encoding: str | dict | None = None, *, skip_utf8: bool = False,
+              encoding: str | dict | None = None, *, skip_utf8: dict | bool = False,
               expected_sha256: str | None = None) -> tuple[dict, dict[str, str]]:
     work.mkdir(parents=True, exist_ok=True)
     source = work / "source"
@@ -245,12 +247,6 @@ def build_one(item: dict, work: Path, token: str | None, bucket: str,
             metadata["embedded_images"] = len(embedded_images)
             metadata["embedded_image_bytes"] = sum(image.bytes for image in embedded_images)
             metadata["embedded_image_paths"] = [image.path for image in embedded_images]
-    if (skip_utf8 and item["extension"] not in {"md", "markdown"}
-            and metadata["source_encoding"] in {"utf-8", "utf-8-sig"}
-            and not {"removed_prefix_byte", "reviewed_source_repair"}.intersection(metadata)):
-        raise Utf8SourceUnchanged({"key": f"{item['repo']}\0{item['path']}",
-            "source_revision": item["revision"], "source_sha256": source_digest,
-            "source_bytes": len(raw), "source_encoding": metadata["source_encoding"]})
     if len(normalized) > MAX_SOURCE_BYTES:
         raise ValueError("UTF-8 output exceeds the Reader document limit")
     output_digest = hashlib.sha256(normalized).hexdigest()
@@ -262,6 +258,19 @@ def build_one(item: dict, work: Path, token: str | None, bucket: str,
     # identical document bytes under a different metadata contract.
     manifest_name = f"{profile}-document-manifest.json"
     manifest_path = f"{root}/{manifest_name}"
+    # A mapped UTF-8 file can still have changed. Reuse only when both the
+    # downloaded source and its normalized derivative match the mapping.
+    identity = {"key": f"{item['repo']}\0{item['path']}",
+                "source_sha256": source_digest, "source_bytes": len(raw),
+                "sha256": output_digest, "bytes": len(normalized), "profile": profile,
+                "bucket": bucket, "object": object_path, "manifest": manifest_path}
+    if (isinstance(skip_utf8, dict) and all(skip_utf8.get(k) == v for k, v in identity.items())
+            and item["extension"] not in {"md", "markdown"}
+            and metadata["source_encoding"] in {"utf-8", "utf-8-sig"}
+            and not {"removed_prefix_byte", "reviewed_source_repair"}.intersection(metadata)):
+        raise Utf8SourceUnchanged({"key": identity["key"],
+            "source_revision": item["revision"], "source_sha256": source_digest,
+            "source_bytes": len(raw), "source_encoding": metadata["source_encoding"]})
     output = work / f"document.{output_ext}"
     output.write_bytes(normalized)
     manifest = {
@@ -288,6 +297,7 @@ def build_one(item: dict, work: Path, token: str | None, bucket: str,
     return {
         "key": f"{item['repo']}\0{item['path']}", "repo": item["repo"], "path": item["path"],
         "extension": ext, "source_revision": item["revision"], "source_sha256": source_digest,
+        "source_bytes": len(raw),
         "mode": "document-stream", "bucket": bucket, "object": object_path,
         "manifest": manifest_path, "bytes": len(normalized), "sha256": output_digest,
         **metadata, "profile": profile,
@@ -307,8 +317,13 @@ def pending_records(records: list[dict], previous: dict, *, force=False, retry_f
     for entry in previous.get("failures", []):
         if isinstance(entry, dict):
             failed[(entry.get("key"), entry.get("profile"))] = entry.get("source_revision")
+    mappings = {entry.get("key"): entry for entry in previous.get("files", []) if isinstance(entry, dict)}
     for entry in previous.get("verified_utf8", []):
-        if valid_utf8_checkpoint(entry):
+        # Historical UTF-8 ledgers were allowed to retain stale mappings.
+        # Such a ledger must not hide changed or still-unmapped content.
+        mapping = mappings.get(entry.get("key"), {}) if isinstance(entry, dict) else {}
+        if (valid_utf8_checkpoint(entry) and all(mapping.get(field) == entry[field]
+                for field in ("source_sha256", "source_bytes", "profile"))):
             completed[(entry["key"], PROFILE)] = entry["source_revision"]
     pending = []
     for item in records:
@@ -407,7 +422,8 @@ def main() -> int:
         encoding_options(value)
     revisions = json.loads(args.revisions.read_text(encoding="utf-8"))
     previous = existing_index(args.bucket, token)
-    records = select_records(args.search_data, revisions, wanted)
+    all_markdown_repos = getattr(args, "all_markdown_repos", False)
+    records = select_records(args.search_data, revisions, wanted, all_markdown_repos=all_markdown_repos)
     selection_path = getattr(args, "selection", None)
     selection = json.loads(selection_path.read_text(encoding="utf-8")) if selection_path else {}
     if (not isinstance(selection, dict) or len(selection) > 256 or
@@ -427,7 +443,7 @@ def main() -> int:
     if args.limit:
         selected = selected[:args.limit]
     report = {"profile": PROFILE, "markdown_profile": MARKDOWN_IMAGE_PROFILE,
-              "markdown_inline_repos": sorted(MARKDOWN_INLINE_REPOS),
+              "markdown_inline_repos": "all" if all_markdown_repos else sorted(MARKDOWN_INLINE_REPOS),
               "apply": args.apply, "plan_only": args.plan_only,
               "search_data_sha256": hashlib.sha256(args.search_data.read_bytes()).hexdigest(),
               "revisions_sha256": hashlib.sha256(args.revisions.read_bytes()).hexdigest(),
@@ -446,7 +462,7 @@ def main() -> int:
         print(json.dumps(report, ensure_ascii=False), flush=True)
         return 0
     cursor = 0
-    mapped = {entry.get("key") for entry in previous.get("files", []) if isinstance(entry, dict)}
+    mapped = {entry.get("key"): entry for entry in previous.get("files", []) if isinstance(entry, dict)}
 
     def staged_bytes(work: Path) -> int:
         if not work.exists():
@@ -469,7 +485,7 @@ def main() -> int:
                     # source has no mapping yet; without one it stays unreadable.
                     try:
                         entry, files = build_one(item, work, token, args.bucket, overrides.get(key),
-                                                 skip_utf8=key in mapped, expected_sha256=selection.get(key))
+                                                 skip_utf8=mapped.get(key, False), expected_sha256=selection.get(key))
                     except Utf8SourceUnchanged as unchanged:
                         return {"kind": "unchanged", "metadata": unchanged.metadata,
                                 "staged": staged_bytes(work)}
@@ -516,7 +532,7 @@ def main() -> int:
                 report["attempted"] = cursor
                 report["converted"] += len(entries)
                 report["converted_sources"].extend({key:entry[key] for key in
-                    ("key", "source_revision", "source_sha256", "source_encoding", "encoding_decision",
+                    ("key", "source_revision", "source_sha256", "source_bytes", "source_encoding", "encoding_decision",
                      "object", "manifest", "sha256", "bytes", "characters", "preserved_controls", "source_roundtrip_verified",
                       "removed_prefix_byte", "reviewed_source_repair", "replaced_source_span", "retained_source", "normalization_recipe",
                       "profile", "embedded_images", "embedded_image_bytes", "embedded_image_paths")

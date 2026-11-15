@@ -422,13 +422,19 @@ class TextStreamPublicationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, \
              patch.object(stream, "download", side_effect=lambda url, target, token:target.write_bytes(raw)):
             root = Path(directory)
+            mapping, _ = stream.build_one(item, root / "original", None, stream.TARGET_BUCKET)
             with self.assertRaises(stream.Utf8SourceUnchanged) as caught:
-                stream.build_one(item, root / "unchanged", None, stream.TARGET_BUCKET, skip_utf8=True)
+                stream.build_one(item, root / "unchanged", None, stream.TARGET_BUCKET, skip_utf8=mapping)
             self.assertEqual(caught.exception.metadata["source_sha256"], hashlib.sha256(raw).hexdigest())
             self.assertFalse((root / "unchanged/document.md").exists())
             with self.assertRaisesRegex(ValueError, "approved selection"):
                 stream.build_one(item, root / "mismatch", None, stream.TARGET_BUCKET,
-                                  skip_utf8=True, expected_sha256="0" * 64)
+                                  skip_utf8=mapping, expected_sha256="0" * 64)
+            # A legacy boolean or incomplete identity cannot authorize reuse.
+            for incomplete in (True, {"source_sha256": mapping["source_sha256"]}):
+                entry, _ = stream.build_one(item, root / "incomplete", None, stream.TARGET_BUCKET,
+                                            skip_utf8=incomplete)
+                self.assertEqual(entry["source_bytes"], len(raw))
 
     def test_reviewed_control_override_is_bound_to_original_bytes_and_reported(self):
         item = {"repo": "VoiceOfML/Test", "path": "reviewed.txt", "extension": "txt", "revision": "a" * 40}
@@ -648,7 +654,9 @@ class TextStreamPublicationTests(unittest.TestCase):
         key = "VoiceOfML/Test\0readme.txt"
         checked = {"key": key, "source_revision": "a" * 40, "source_sha256": "b" * 64,
                    "source_bytes": 17, "source_encoding": "utf-8"}
-        previous = {"version": 1, "kind": "text-stream-index", "files": [{"key": key, "object": "old.txt"}]}
+        previous = {"version": 1, "kind": "text-stream-index", "files": [{
+            "key": key, "object": "old.txt", "source_sha256": checked["source_sha256"],
+            "source_bytes": checked["source_bytes"], "profile": PROFILE}]}
         stored, uploads = [copy.deepcopy(previous)], []
         def put(bucket, additions, token):
             for local, remote in additions:
@@ -722,7 +730,10 @@ class TextStreamPublicationTests(unittest.TestCase):
             args = SimpleNamespace(search_data=source, revisions=revisions, extensions=["txt"], limit=0,
                 checkpoint_size=64, bucket=stream.TARGET_BUCKET, apply=True, plan_only=False,
                 force=False, retry_failures=False, encoding_overrides=None, report=root / "report.json")
-            previous = {"version": 1, "kind": "text-stream-index", "files": [{"key": key, "object": "documents/text/txt/x/document.txt"}]}
+            item = {"repo": "VoiceOfML/Test", "path": "readme.txt", "extension": "txt", "revision": "b" * 40}
+            with patch.object(stream, "download", side_effect=lambda url, target, token: target.write_bytes(b"# Existing UTF-8\n")):
+                mapping, _ = stream.build_one(item, root / "old", None, stream.TARGET_BUCKET)
+            previous = {"version": 1, "kind": "text-stream-index", "files": [mapping]}
             with patch.object(stream, "parse_args", return_value=args), \
                  patch.object(stream, "existing_index", return_value=previous), \
                  patch.object(stream, "download", side_effect=lambda url, target, token: target.write_bytes(b"# Existing UTF-8\n")), \
@@ -732,6 +743,107 @@ class TextStreamPublicationTests(unittest.TestCase):
                 entries, failures, uploads = publish.call_args.args[1:4]
                 self.assertEqual((entries, failures, uploads), ([], [], {}))
                 self.assertEqual(len(publish.call_args.kwargs["unchanged_utf8"]), 1)
+
+    def test_changed_utf8_remaps_with_real_conversion_and_verified_publication(self):
+        self.run_native_publication(changed=True)
+
+    def test_identical_utf8_keeps_mapping_and_checkpoints_new_revision(self):
+        self.run_native_publication(changed=False)
+
+    def run_native_publication(self, *, changed):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            item = {"repo": "VoiceOfML/Test", "path": "readme.txt", "extension": "txt", "revision": "b" * 40}
+            old_raw = b"Original complete UTF-8 body\r\n"
+            raw = b"Changed complete UTF-8 body\r\n" if changed else old_raw
+            with patch.object(stream, "download", side_effect=lambda url, target, token: target.write_bytes(old_raw)):
+                old, files = stream.build_one(item, root / "old", None, stream.TARGET_BUCKET)
+            objects = {remote: Path(local).read_bytes() for remote, local in files.items()}
+            untouched = {"key": "VoiceOfML/Test\0other.txt", "object": "other.txt"}
+            previous = {"version": 1, "kind": "text-stream-index", "files": [old, untouched]}
+            if changed:
+                # Reproduce a historical skip ledger that hid a stale mapping.
+                previous["verified_utf8"] = [{"key": old["key"], "source_revision": "a" * 40,
+                    "source_sha256": hashlib.sha256(raw).hexdigest(), "source_bytes": len(raw),
+                    "source_encoding": "utf-8", "profile": PROFILE}]
+            objects[stream.ROOT + "/index.json"] = json.dumps(previous).encode()
+            source = root / "source.json"
+            source.write_text(json.dumps([{"Repo": item["repo"], "File": "readme", "Extension": "txt", "Folder": []}]))
+            revisions = root / "revisions.json"
+            revisions.write_text(json.dumps({item["repo"]: "a" * 40}))
+            args = SimpleNamespace(search_data=source, revisions=revisions, extensions=["txt"], limit=1,
+                checkpoint_size=1, bucket=stream.TARGET_BUCKET, apply=True, plan_only=False,
+                force=False, retry_failures=False, encoding_overrides=None, report=root / "report.json")
+            events = []
+            def read(remote, token, bucket):
+                events.append(("read", remote))
+                if remote not in objects:
+                    raise FileNotFoundError(remote)
+                return objects[remote]
+            def upload(bucket, additions, token):
+                for local, remote in additions:
+                    events.append(("write", remote))
+                    objects[remote] = Path(local).read_bytes()
+            with patch.object(stream, "parse_args", return_value=args), \
+                    patch.object(stream, "download", side_effect=lambda url, target, token: target.write_bytes(raw)), \
+                    patch.object(stream, "read_bytes", side_effect=read), \
+                    patch.object(stream, "read_json", side_effect=lambda remote, token, bucket: json.loads(read(remote, token, bucket))), \
+                    patch.object(stream, "batch_bucket_files_with_retry", side_effect=upload), \
+                    patch.dict(os.environ, {"HF_TOKEN": "test", "GITHUB_OUTPUT": str(root / "outputs")}):
+                self.assertEqual(stream.main(), 0)
+            result = json.loads(objects[stream.ROOT + "/index.json"])
+            entry = next(row for row in result["files"] if row["key"] == old["key"])
+            self.assertIn(untouched, result["files"])
+            report = json.loads(args.report.read_text())
+            self.assertEqual(report["published"], int(changed))
+            if changed:
+                self.assertNotEqual(entry["object"], old["object"])
+                self.assertEqual(entry["source_revision"], "a" * 40)
+                self.assertEqual(entry["source_sha256"], hashlib.sha256(raw).hexdigest())
+                self.assertEqual(entry["source_bytes"], len(raw))
+                self.assertEqual(objects[entry["object"]], codecs.BOM_UTF8 + raw)
+                self.assertEqual(result["verified_utf8"], [])
+                protection = entry["processing_roots"][0]
+                index_write = events.index(("write", stream.ROOT + "/index.json"))
+                for remote in (entry["object"], entry["manifest"]):
+                    write = events.index(("write", remote))
+                    self.assertLess(events.index(("write", protection)), write)
+                    self.assertLess(write, events.index(("read", remote), write))
+                    self.assertLess(events.index(("read", remote), write), index_write)
+                self.assertIn(entry["object"].rsplit("/", 1)[0], objects[protection].decode())
+                self.assertEqual(events[-1], ("read", stream.ROOT + "/index.json"))
+            else:
+                self.assertEqual(entry, old)
+                self.assertEqual(result["verified_utf8"][0]["source_revision"], "a" * 40)
+                self.assertEqual([path for event, path in events if event == "write"], [stream.ROOT + "/index.json"])
+
+    def test_other_repository_markdown_is_selected_and_resources_validated(self):
+        for ext in ("md", "markdown"):
+            for bad in (False, True):
+                with self.subTest(extension=ext, bad=bad), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    source = root / "source.json"
+                    source.write_text(json.dumps([{"Repo": "Other/Books", "Folder": ["book"],
+                                                   "File": "readme", "Extension": ext}]))
+                    selected = stream.select_records(source, {"Other/Books": "a" * 40}, ext,
+                                                     all_markdown_repos=True)
+                    self.assertEqual(len(selected), 1)
+                    raw = b"![figure](../escape.png)\n" if bad else b"# Body\n![figure](images/a.png)\n"
+                    image = b"\x89PNG\r\n\x1a\nfixture"
+                    urls = []
+                    def download(url, target, token, max_bytes=None):
+                        urls.append(url)
+                        target.write_bytes(image if url.endswith(".png") else raw)
+                    with patch.object(stream, "download", side_effect=download):
+                        if bad:
+                            with self.assertRaisesRegex(ValueError, "Markdown resource error"):
+                                stream.build_one(selected[0], root / "build", None, stream.TARGET_BUCKET)
+                        else:
+                            entry, files = stream.build_one(selected[0], root / "build", None, stream.TARGET_BUCKET)
+                            self.assertEqual(entry["source_bytes"], len(raw))
+                            self.assertIn(b"data:image/png;base64,", Path(files[entry["object"]]).read_bytes())
+                            self.assertEqual(entry["embedded_image_paths"], ["book/images/a.png"])
+                            self.assertTrue(all("/" + "a" * 40 + "/book/" in url for url in urls))
 
     def test_workers_build_concurrently_and_publish_one_checkpoint(self):
         with tempfile.TemporaryDirectory() as directory:
