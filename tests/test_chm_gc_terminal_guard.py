@@ -23,6 +23,19 @@ class Store:
 
 
 class GcTerminalGuardTests(unittest.TestCase):
+    def test_moving_control_read_restarts_full_verification_only(self):
+        with patch.object(guard, '_verify_once', side_effect=[guard.MovingReleaseControls('changed'), True]) as check:
+            self.assertTrue(guard.verify(object()))
+            self.assertEqual(check.call_count, 2)
+        with patch.object(guard, '_verify_once', side_effect=guard.MovingReleaseControls('changed')) as check:
+            with self.assertRaises(guard.MovingReleaseControls):
+                guard.verify(object())
+            self.assertEqual(check.call_count, 3)
+        with patch.object(guard, '_verify_once', side_effect=RuntimeError('invalid evidence')) as check:
+            with self.assertRaisesRegex(RuntimeError, 'invalid evidence'):
+                guard.verify(object())
+            self.assertEqual(check.call_count, 1)
+
     @classmethod
     def setUpClass(cls):
         cls.rows = guard.preflight.chm.preview.load_inventory(Path(__file__).resolve().parents[1] /

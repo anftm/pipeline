@@ -576,8 +576,9 @@ def run(path, *, limit=0, apply=True, scope='unreferenced', isolated_callback=No
             matching = [task for task in runs if identifier in task.get("display_title", "")]
             if matching:
                 task = matching[0]
-                state["collector_run_id"] = task["id"]
-                journal(path, state)
+                if state.get("collector_run_id") != task["id"]:
+                    state["collector_run_id"] = task["id"]
+                    journal(path, state)
                 if task["status"] == "completed":
                     if task["conclusion"] != "success":
                         raise RuntimeError("collector failed; restoring producers")

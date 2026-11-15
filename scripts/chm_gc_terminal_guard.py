@@ -180,7 +180,20 @@ def validate_gc_snapshot(marker_raw, history_raw, current_raw, evidence_raw, sub
     return True
 
 
+class MovingReleaseControls(RuntimeError):
+    """A read-only verification overlapped a durable maintenance update."""
+
+
 def verify(store, *, candidate_marker=None):
+    for attempt in range(3):
+        try:
+            return _verify_once(store, candidate_marker=candidate_marker)
+        except MovingReleaseControls:
+            if attempt == 2:
+                raise
+
+
+def _verify_once(store, *, candidate_marker=None):
     # Archive is mandatory because a future maintenance window may replace the
     # mutable current cursor. Exact archive SHA is linked from the GC marker.
     marker_path = PREFIX + 'gc-release.json'
@@ -268,6 +281,6 @@ def verify(store, *, candidate_marker=None):
     if (marker_after != existing_marker
             or store.read_bytes(ASSETS, maintenance.DURABLE_JOURNAL) != current_raw
             or store.read_bytes(ASSETS, history_path) != history_raw):
-        raise RuntimeError('CHM GC release controls changed during verification')
+        raise MovingReleaseControls('CHM GC release controls changed during verification')
     assert_bucket_available(store)
     return True
