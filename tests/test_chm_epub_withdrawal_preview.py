@@ -175,7 +175,8 @@ class ChmWithdrawalPreviewTests(unittest.TestCase):
         from unittest.mock import patch
         current = 'a' * 64
         old = 'b' * 64
-        pointer = {'generation': current, 'catalog': {'path': f'reader-index/v3/generations/{current}/catalog.json'}}
+        pointer = {'generation': current, 'catalog': publication.metadata(publication.ASSETS,
+                   f'reader-index/v3/generations/{current}/catalog.json', b'{}')}
         def promotion(generation, created):
             return json.dumps({'kind': 'reader-reading-promotion', 'generation': generation,
                                'created_at': created, 'retention_days': 30,
@@ -670,6 +671,116 @@ class ChmWithdrawalPreviewTests(unittest.TestCase):
         self.assertEqual(accepted['generations'][self.generation]['replacement_acks'], {'hf': True, 'pages': True})
         with self.assertRaisesRegex(ValueError, 'moved'):
             preflight.acknowledge_base_catalog(result['catalog'], 'not-current')
+
+
+class ReaderV3RetirementTests(unittest.TestCase):
+    def setUp(self):
+        self.objects = {}
+        self.writes = []
+        catalog = {'version': 3, 'kind': 'reader-reading-catalog', 'files': {}}
+        self.generation = publication.text.digest(catalog)
+        catalog['generation'] = self.generation
+        raw = publication.encode(catalog)
+        self.current = publication.metadata(publication.ASSETS,
+            f'reader-index/v3/generations/{self.generation}/catalog.json', raw)
+        self.objects[self.current['path']] = raw
+        self.objects[publication.POINTER] = publication.encode({
+            'version': 1, 'kind': 'reader-reading-pointer',
+            'generation': self.generation, 'catalog': self.current})
+        self.old = 'b' * 64
+        for generation in (self.generation, self.old):
+            self.objects[f'reader-index/v3/promotions/{generation}.json'] = publication.encode({
+                'kind': 'reader-reading-promotion', 'generation': generation,
+                'created_at': '2026-01-01T00:00:00Z', 'retention_days': 30,
+                'acks': {'hf': True, 'pages': True}})
+        self.replacement = publication.metadata(publication.ASSETS,
+            'reader-index/v3/generations/' + 'c' * 64 + '/catalog.json', b'{}')
+        self.objects[self.replacement['path']] = b'{}'
+        self.state = {'version': 1, 'kind': 'reader-v3-retirement',
+            'retired_paths': ['reader-index/v3/promotions/' + 'd' * 64 + '.json'],
+            'resources': [self.replacement],
+            'rollback_replacements': {self.old: self.replacement},
+            'retired_inputs': {'prior-input': {'sha256': 'e' * 64, 'bytes': 123}},
+            'retired_input_roots': {'prior-root': {'pages': 2, 'unchanged': True}}}
+        objects, writes = self.objects, self.writes
+        class Store:
+            def read_bytes(self, bucket, path):
+                if bucket != publication.ASSETS or path not in objects:
+                    raise FileNotFoundError(path)
+                return objects[path]
+            def list_files(self, bucket, prefixes):
+                return {path for path in objects if bucket == publication.ASSETS and path.startswith(prefixes)}
+            def put_bytes(self, bucket, path, raw):
+                writes.append((bucket, path))
+                objects[path] = raw
+        self.store = Store()
+
+    def retire(self, *, apply=True):
+        from unittest.mock import patch
+        with patch.object(publication, 'assert_writer'):
+            return reader_v3_retirement.run(self.store, apply=apply,
+                now=datetime(2026, 10, 30, tzinfo=timezone.utc))
+
+    def test_ordinary_retirement_preserves_replacement_pins_aliases_and_inputs(self):
+        for already_current in (False, True):
+            with self.subTest(already_current=already_current):
+                state = copy.deepcopy(self.state)
+                state['resources'].append(copy.deepcopy(self.replacement))
+                if already_current:
+                    state['resources'].extend([self.current, copy.deepcopy(self.current)])
+                self.objects[reader_v3_retirement.STATE] = publication.encode(state)
+                before = dict(self.objects)
+                self.retire(apply=False)
+                self.assertEqual(self.objects, before)
+                report = self.retire()
+                after = json.loads(self.objects[reader_v3_retirement.STATE])
+                self.assertEqual(after['resources'], [self.replacement, self.current])
+                for key in ('rollback_replacements', 'retired_inputs', 'retired_input_roots'):
+                    self.assertEqual(after[key], state[key])
+                self.assertEqual(after['retired_paths'], sorted(state['retired_paths'] + [
+                    f'reader-index/v3/promotions/{self.old}.json',
+                    f'reader-index/v3/generations/{self.old}/catalog.json']))
+                self.assertEqual(after['replacement_generation'], self.generation)
+                self.assertEqual(after['replacement_acks'], {'hf': True, 'pages': True})
+                self.assertEqual(report['released_input_objects'], 1)
+                self.assertEqual(report['released_input_pages'], 2)
+                self.retire()
+                self.assertEqual(json.loads(self.objects[reader_v3_retirement.STATE]), after)
+                self.assertEqual({path: raw for path, raw in self.objects.items()
+                                  if path != reader_v3_retirement.STATE},
+                                 {path: raw for path, raw in before.items()
+                                  if path != reader_v3_retirement.STATE})
+
+    def test_invalid_pins_and_conflicting_identities_block_before_write(self):
+        invalid = [None, {}, 'invalid', {**self.replacement, 'bucket': 'foreign'},
+            {**self.replacement, 'path': 'reader-index/v3/../catalog.json'},
+            {**self.replacement, 'sha256': 'invalid'},
+            {**self.replacement, 'bytes': 0}]
+        cases = [None, {}, 'invalid'] + [[ref] for ref in invalid]
+        for ref in (self.replacement, self.current):
+            for field, value in (('sha256', 'f' * 64), ('bytes', ref['bytes'] + 1)):
+                cases.append([ref, {**ref, field: value}])
+                if ref == self.current:
+                    cases.append([{**ref, field: value}])
+        for resources in cases:
+            for apply in (False, True):
+                with self.subTest(resources=resources, apply=apply):
+                    self.objects[reader_v3_retirement.STATE] = publication.encode(
+                        {**self.state, 'resources': resources})
+                    before = dict(self.objects)
+                    with self.assertRaises(ValueError):
+                        self.retire(apply=apply)
+                    self.assertEqual(self.writes, [])
+                    self.assertEqual(self.objects, before)
+
+    def test_missing_resources_adds_current_pin(self):
+        state = copy.deepcopy(self.state)
+        del state['resources']
+        self.objects[reader_v3_retirement.STATE] = publication.encode(state)
+        self.retire()
+        after = json.loads(self.objects[reader_v3_retirement.STATE])
+        self.assertEqual(after['resources'], [self.current])
+        self.assertEqual(after['rollback_replacements'], state['rollback_replacements'])
 
 
 if __name__ == '__main__':

@@ -25,6 +25,18 @@ def run(store, *, apply=False, now=None):
         state = {"version": 1, "kind": "reader-v3-retirement", "retired_paths": [], "resources": []}
     if state.get("kind") != "reader-v3-retirement" or state.get("version") != 1:
         raise ValueError("invalid retirement state")
+    resources = state.get("resources", [])
+    if not isinstance(resources, list):
+        raise ValueError("invalid retirement resources")
+    pinned = {}
+    for ref in resources + [pointer["catalog"]]:
+        publication.index_resource(ref)
+        key = (ref["bucket"], ref["path"])
+        prior = pinned.get(key)
+        if prior is not None and (prior["sha256"], prior["bytes"]) != (ref["sha256"], ref["bytes"]):
+            raise ValueError("conflicting retirement resource identity")
+        if prior is None:
+            pinned[key] = ref
     retired = set(state["retired_paths"])
     inputs = dict(state.get("retired_inputs", {}))
     now = now or datetime.now(timezone.utc)
@@ -66,7 +78,7 @@ def run(store, *, apply=False, now=None):
     # These old records are not revoked here; GC applies its own current gates.
     roots = dict(state.get("retired_input_roots", {}))
     state.update(retired_paths=sorted(retired), replacement_generation=pointer["generation"],
-                 resources=[pointer["catalog"]], replacement_acks=history["acks"], retired_inputs=inputs,
+                 resources=list(pinned.values()), replacement_acks=history["acks"], retired_inputs=inputs,
                  retired_input_roots=roots)
     if apply:
         publication.assert_writer(store)
