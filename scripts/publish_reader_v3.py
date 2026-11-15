@@ -827,7 +827,7 @@ def main():
     parser.add_argument("command", choices=("withdraw", "ack", "ack-all", "acknowledge-legacy",
                                             "compact-legacy", "inspect", "project", "retire",
                                             "unify", "reset-documents", "remove-route", "restore-route", "verify-route",
-                                            "migrate-derived", "resume-derived", "redirect-derived", "finalize-derived-redirects", "replace-derived-history", "reconcile-derived-index", "reconcile-sidecar", "compact-legacy-history", "publish-generation", "verify-generation", "check-page-window"))
+                                            "migrate-derived", "resume-derived", "redirect-derived", "finalize-derived-redirects", "replace-derived-history", "refresh-reader-consumers", "reconcile-derived-index", "reconcile-sidecar", "compact-legacy-history", "publish-generation", "verify-generation", "check-page-window"))
     parser.add_argument("--resource-json")
     parser.add_argument("--expected-parent", default="none")
     parser.add_argument("--apply", action="store_true")
@@ -965,6 +965,32 @@ def main():
                       'before_sha256': hashlib.sha256(plan['before']).hexdigest() if plan['before'] else None,
                       'after_sha256': hashlib.sha256(plan['after']).hexdigest(),
                       'deletion_authorized': False}
+    elif args.command == 'refresh-reader-consumers':
+        import httpx
+        try:
+            from . import reader_page_consumer_refresh as refresh
+            from .reader_page_consumer_store import ConditionalConsumerStore
+        except ImportError:
+            import reader_page_consumer_refresh as refresh
+            from reader_page_consumer_store import ConditionalConsumerStore
+        options = json.loads(args.resource_json or '{}')
+        if not isinstance(options, dict) or set(options) != {'v3_generation', 'old_root_sha256'}:
+            raise ValueError('refresh-reader-consumers requires exact current generation and old root digest')
+        if args.apply:
+            assert_writer(store)
+            store = ConditionalConsumerStore(store)
+        with httpx.Client(timeout=120, follow_redirects=True) as client:
+            plan = refresh.prepare(store, client, current_generation=options['v3_generation'],
+                                   old_root_sha256=options['old_root_sha256'])
+            if args.apply:
+                report = refresh.apply(store, plan, client, current_generation=options['v3_generation'],
+                                       old_root_sha256=options['old_root_sha256'])
+            else:
+                report = {'kind': 'reader-page-consumer-refresh-preview', 'applied': False,
+                          'current_generation': options['v3_generation'],
+                          'before_sha256': hashlib.sha256(plan['before']).hexdigest(),
+                          'after_sha256': hashlib.sha256(plan['after']).hexdigest(),
+                          'deletion_authorized': False}
     elif args.command == 'reconcile-derived-index':
         try:
             from . import reader_page_reconcile as reconcile
@@ -1191,7 +1217,7 @@ def main():
         args.output.write_bytes(encode(report))
     else:
         print(json.dumps(report, ensure_ascii=False, sort_keys=True))
-    if args.command == 'replace-derived-history' and args.apply and report.get('outcome') != 'applied':
+    if args.command in {'replace-derived-history', 'refresh-reader-consumers'} and args.apply and report.get('outcome') != 'applied':
         raise RuntimeError('history publication outcome requires inspection; do not retry')
 
 
