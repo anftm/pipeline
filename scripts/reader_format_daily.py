@@ -251,19 +251,27 @@ class GitHub:
 
     def runs(self, workflow=None, **params):
         path = '/actions/' + ('workflows/' + workflow + '/' if workflow else '') + 'runs'
-        result = {}
-        for page in range(1, 11):
-            data = self.request('GET', path, params={**params, 'per_page': 100, 'page': page})
-            rows, total = data.get('workflow_runs'), data.get('total_count')
-            if not isinstance(rows, list) or type(total) is not int or total > 1000:
-                raise RuntimeError('run inventory incomplete or exceeds observation bound')
-            for row in rows:
-                result[row['id']] = row
-            if page * 100 >= total:
-                if len(result) != total:
-                    raise RuntimeError('run inventory changed or is incomplete')
-                return list(result.values())
-        raise RuntimeError('run inventory pagination incomplete')
+        # Status-filtered inventories can move while paginating. Restart only
+        # this read, at most three times; no POST or incomplete inventory escapes.
+        for _attempt in range(3):
+            result = {}
+            expected_total = None
+            for page in range(1, 11):
+                data = self.request('GET', path, params={**params, 'per_page': 100, 'page': page})
+                rows, total = data.get('workflow_runs'), data.get('total_count')
+                if not isinstance(rows, list) or type(total) is not int or not 0 <= total <= 1000:
+                    raise RuntimeError('run inventory incomplete or exceeds observation bound')
+                if expected_total is None:
+                    expected_total = total
+                elif expected_total != total:
+                    break
+                for row in rows:
+                    result[row['id']] = row
+                if page * 100 >= total:
+                    if len(result) == total:
+                        return list(result.values())
+                    break
+        raise RuntimeError('run inventory changed or is incomplete after bounded reads')
 
     def active_children(self, parent_run_id=None):
         active = {}

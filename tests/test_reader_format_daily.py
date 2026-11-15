@@ -943,6 +943,18 @@ class GitHubTests(unittest.TestCase):
         api.request = Mock(return_value={'total_count': 1001, 'workflow_runs': []})
         with self.assertRaisesRegex(RuntimeError, 'inventory'): api.runs()
 
+    def test_changed_run_inventory_restarts_reads_but_never_accepts_truncation(self):
+        api = self.api()
+        api.request = Mock(side_effect=[{'total_count': 2, 'workflow_runs': [{'id': 1}]},
+                                       {'total_count': 1, 'workflow_runs': [{'id': 2}]}])
+        self.assertEqual(api.runs(status='in_progress'), [{'id': 2}])
+        self.assertEqual(api.request.call_count, 2)
+        self.assertTrue(all(call.args[0] == 'GET' for call in api.request.call_args_list))
+        api.request = Mock(return_value={'total_count': 2, 'workflow_runs': [{'id': 1}]})
+        with self.assertRaisesRegex(RuntimeError, 'bounded reads'):
+            api.runs(status='queued')
+        self.assertEqual(api.request.call_count, 3)
+
     def test_active_detection_includes_pending_and_excludes_parent(self):
         api = self.api()
         api.request = Mock(return_value={'total_count': 1, 'jobs': [{'id': 100}]})
