@@ -272,6 +272,8 @@ class AutomationWorkflowTests(unittest.TestCase):
         self.assertIn('tests.test_search_gc_s3', runs)
         self.assertIn('boto3==1.43.123', runs)
         self.assertIn('requests==2.32.5', runs)
+        install = named_steps(ci, 'tests')['Install search and workflow-test dependencies']['run']
+        self.assertIn('huggingface_hub==1.33.0', install.split())
 
 
 if __name__ == '__main__':
