@@ -9,6 +9,7 @@ from botocore.config import Config
 from botocore.exceptions import ClientError
 
 from scripts import reader_page_history_store as history
+from scripts import reader_page_history_publish as publish
 from scripts import publish_reader_v3 as publication
 
 
@@ -156,6 +157,23 @@ class HistoryStoreTests(unittest.TestCase):
                 self.client.get_object.side_effect = [response(raw)]
                 self.store.immutable_put(ASSETS, path, raw)
                 self.client.put_object.assert_not_called()
+
+    def test_intent_namespace_matches_publisher_and_rejects_old_root_before_io(self):
+        self.assertEqual(history.INTENTS, 'reader-index/gc/pdf-history-replacements/')
+        self.assertEqual(history.INTENTS, publish.INTENTS)
+        path, raw = intent()
+        ref = publication.metadata(ASSETS, path, raw)
+        self.client.get_object.side_effect = [error(), response(raw)]
+        self.primary.read_bytes.return_value = raw
+        publish._immutable(self.store, ref, raw)
+        self.client.put_object.assert_called_once_with(Bucket='reader-assets-v2', Key=path,
+            Body=raw, ContentType='application/json', IfNoneMatch='*')
+        self.s3.reset_mock()
+        old_path = ('reader-index/v3/history-replacements/derived-pdf-intents/' +
+                    hashlib.sha256(raw).hexdigest() + '.json')
+        with self.assertRaisesRegex(ValueError, 'outside allowlist'):
+            self.store.immutable_put(ASSETS, old_path, raw)
+        self.s3._location.assert_not_called()
 
     def test_existing_immutable_conflict_is_never_overwritten(self):
         for path, raw in (snapshot(), catalog(), intent()):

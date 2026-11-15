@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from scripts import reader_page_history_publish as publish
 from scripts import reader_page_history_inventory as inventory
+from scripts import reader_gc_graph as graph
 from scripts import reader_page_history_replacement as replacement
 from scripts import publish_reader_v3 as publication, reader_page_audit as audit
 from scripts import reader_page_migrate as migration, reader_page_redirects as redirects
@@ -170,6 +171,25 @@ class HistoryPublishTests(unittest.TestCase):
         for flag in ('graph_complete', 'fully_unreferenced', 'consumer_acks_created',
                      'canonical_indexes_changed', 'objects_deleted', 'deletion_authorized'):
             self.assertFalse(result[flag])
+
+    def test_intent_is_retained_audit_not_graph_root_but_successors_are_roots(self):
+        plan = self.prepare()
+        result = self.apply(plan)
+        path = result['intent_ref']['path']
+        raw = self.store.read_bytes(audit.ASSETS, path)
+        self.assertEqual(path, 'reader-index/gc/pdf-history-replacements/' +
+                         finalization._sha(raw) + '.json')
+        # The audit deliberately preserves old references. Its retained audit
+        # namespace must not reintroduce them into the live root traversal.
+        intent = json.loads(raw)
+        self.assertEqual(intent['reviewed_plan']['replacement_plan']['evidence_resources'],
+                         plan['replacement_plan']['evidence_resources'])
+        self.assertTrue(path.startswith(graph.RETAINED_PREFIXES))
+        self.assertFalse(graph.is_root(path, audit.ASSETS))
+        for item in plan['replacement_plan']['replacements']:
+            if item['candidate_required']:
+                self.assertTrue(graph.is_root(item['catalog_ref']['path'], audit.ASSETS))
+                self.assertFalse(item['catalog_ref']['path'].startswith(graph.RETAINED_PREFIXES))
 
     def test_caller_plan_mutation_during_callbacks_cannot_contradict_intent(self):
         for phase in ('writer', 'stage', 'observation'):
@@ -674,7 +694,9 @@ class HistoryPublishTests(unittest.TestCase):
 
     def test_immutable_allowlist_rejects_canonical_and_misaddressed_writes(self):
         for path in (audit.SIDECAR, publication.POINTER, publish.RETIREMENT,
-                     publish.INTENTS + 'a' * 64 + '.json'):
+                     publish.INTENTS + 'a' * 64 + '.json',
+                     'reader-index/v3/history-replacements/derived-pdf-intents/' +
+                     finalization._sha(b'{}') + '.json'):
             raw = b'{}'
             with self.subTest(path=path), self.assertRaises(ValueError):
                 publish._immutable(self.store, publication.metadata(audit.ASSETS, path, raw), raw)

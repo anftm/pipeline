@@ -29,7 +29,7 @@ except ImportError:
 
 RETIREMENT = 'reader-index/v3/retirement.json'
 PREFIX = 'reader-index/v3/history-replacements/derived-pdf/'
-INTENTS = 'reader-index/v3/history-replacements/derived-pdf-intents/'
+INTENTS = 'reader-index/gc/pdf-history-replacements/'
 
 
 def _conflict(error):

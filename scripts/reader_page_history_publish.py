@@ -38,7 +38,8 @@ except ImportError:
     import reader_page_migrate as migration
 
 RETIREMENT = inventory.RETIREMENT
-INTENTS = 'reader-index/v3/history-replacements/derived-pdf-intents/'
+# Retained audit evidence must not become a graph root through its old refs.
+INTENTS = 'reader-index/gc/pdf-history-replacements/'
 ACKED = {'hf': True, 'pages': True}
 
 
