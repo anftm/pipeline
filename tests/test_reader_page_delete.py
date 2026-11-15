@@ -3,7 +3,7 @@ import io
 import json
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 import yaml
 from datetime import datetime, timedelta, timezone
@@ -63,6 +63,112 @@ class DeleteTests(unittest.TestCase):
         self.ref.files.pop(graph.ccrd_lifecycle.BUCKET)
         with self.assertRaisesRegex(RuntimeError, 'four-bucket'):
             deletion.candidate_plan(self.ref, self.report, self.api, PATHS)
+
+    def diagnostic_graph(self):
+        ref = graph.ReferenceGraph(Mock())
+        manifest = PATHS[0].rsplit('/', 1)[0] + '/derived-manifest.json'
+        index = (graph.READER_ASSETS_BUCKET, 'reader-index/index.json')
+        nested = (graph.READER_ASSETS_BUCKET, 'reader-index/snapshots/live/reader_assets.json.gz')
+        for bucket in graph.BUCKETS:
+            ref.set_inventory(bucket, set(PATHS + [manifest]) if bucket == deletion.BUCKET else set())
+        ref.files[index[0]].update([index[1], nested[1]])
+        ref.root_hashes[index] = 'a' * 64
+        ref.origin = index
+        ref.mark(*nested)
+        ref.origin = nested
+        ref.mark(deletion.BUCKET, PATHS[0])
+        # The manifest was discovered by bundle expansion, then references itself.
+        ref.origin = (deletion.BUCKET, manifest)
+        ref.mark(deletion.BUCKET, manifest)
+        ref.origin = None
+        return ref, manifest, index, nested
+
+    def test_blocked_bundle_origins_lead_to_index_not_only_self_manifest(self):
+        ref, manifest, index, nested = self.diagnostic_graph()
+        missing = 'derived/missing/document.pdf'
+        paths = [manifest, PATHS[0], PATHS[1], missing]
+        report = copy.deepcopy(self.report)
+        report['buckets'][deletion.BUCKET]['candidates'] = [PATHS[1]]
+        # A root file in a broad folder must not become a bundle-origin match.
+        broad = (deletion.BUCKET, 'derived/index.json')
+        ref.direct[index].add(broad)
+        ref.trees.add((deletion.BUCKET, 'derived'))
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / 'blocked-references.json'
+            with self.assertRaisesRegex(ValueError, 'not an unreferenced exact graph candidate'):
+                deletion.candidate_plan(ref, report, self.api, paths, blocked_report_path=output)
+            data = json.loads(output.read_text())
+        targets = {item['path']: item for item in data['targets']}
+        self.assertEqual(set(targets), set(paths))
+        target = targets[manifest]
+        self.assertTrue(target['present'])
+        self.assertTrue(target['referenced'])
+        self.assertTrue(target['managed'])
+        self.assertFalse(target['candidate'])
+        self.assertIn(manifest.rsplit('/', 1)[0], target['covering_trees'])
+        sibling = next(item for item in target['origins'] if item['origin']['path'] == nested[1])
+        self.assertEqual(sibling['relation'], 'bundle')
+        self.assertEqual(sibling['reference']['path'], PATHS[0])
+        self.assertEqual([n['path'] for n in sibling['root_chain']['paths']], [index[1], nested[1]])
+        own = next(item for item in target['origins'] if item['origin']['path'] == manifest)
+        self.assertEqual(own['relation'], 'direct')
+        self.assertEqual(own['root_chain']['paths'][0]['path'], index[1])
+        self.assertFalse(any(item['reference']['path'] == broad[1] for item in target['origins']))
+        self.assertEqual(targets[missing], {'path': missing, 'present': False, 'candidate': False,
+            'referenced': False, 'managed': True, 'covering_trees': ['derived'], 'origins': []})
+        self.assertTrue(targets[PATHS[1]]['candidate'])
+        self.assertFalse(data['deletion_authorized'])
+
+    def test_cli_candidate_rejection_writes_diagnostic_without_plan(self):
+        self.ref, manifest, _, _ = self.diagnostic_graph()
+        self.ref.build = Mock(return_value=self.report)
+        store = Mock(api=self.api)
+        with tempfile.TemporaryDirectory() as directory, \
+             patch('scripts.reader_page_delete.HubBucketStore', return_value=store), \
+             patch('scripts.reader_page_delete.GitHubProducerFence', return_value=self.fence), \
+             patch('scripts.reader_page_delete.assert_workflow_context'), \
+             patch('scripts.reader_page_delete.graph.ReferenceGraph', return_value=self.ref), \
+             patch('scripts.reader_page_delete.reader_gc_chm_window.require_clear'), \
+             patch('scripts.reader_page_delete.collector.observe_projections'), \
+             patch('scripts.reader_page_delete.collector.verify_roots'), \
+             redirect_stdout(io.StringIO()) as stdout, redirect_stderr(io.StringIO()) as stderr:
+            root = Path(directory)
+            paths, plan = root / 'paths.json', root / 'page-plan/plan.json'
+            paths.write_text(json.dumps([manifest]))
+            status = deletion.main(['plan', '--paths', str(paths), '--plan', str(plan), '--storage', 'hub'])
+            self.assertEqual(status, 1)
+            self.assertFalse(plan.exists())
+            self.assertEqual(stdout.getvalue(), '')
+            data = json.loads((plan.parent / 'blocked-references.json').read_text())
+            self.assertEqual(stderr.getvalue().strip(), data['error'])
+            self.assertIn('not an unreferenced exact graph candidate: ' + manifest, data['error'])
+            store.put_bytes.assert_not_called()
+
+    def test_diagnostic_write_failure_preserves_candidate_error(self):
+        ref, manifest, _, _ = self.diagnostic_graph()
+        with tempfile.TemporaryDirectory() as directory, redirect_stderr(io.StringIO()) as stderr:
+            output = Path(directory) / 'file'
+            output.write_text('not a directory')
+            with self.assertRaisesRegex(ValueError, 'not an unreferenced exact graph candidate: ' + manifest):
+                deletion.candidate_plan(ref, self.report, self.api, [manifest],
+                                        blocked_report_path=output / 'blocked-references.json')
+            self.assertIn('Could not write blocked references', stderr.getvalue())
+
+    def test_unreferenced_plan_unchanged_with_diagnostics_enabled(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / 'blocked-references.json'
+            result = deletion.candidate_plan(self.ref, self.report, self.api, PATHS,
+                                            clock=self.now, blocked_report_path=output)
+            self.assertEqual(result, self.plan)
+            self.assertFalse(output.exists())
+
+    def test_root_chain_cycle_is_bounded_and_unresolved(self):
+        ref, manifest, _, nested = self.diagnostic_graph()
+        ref.root_hashes.clear()
+        ref.direct[nested].add(nested)
+        data = deletion.blocked_references(ref, self.report, [manifest], ValueError('blocked'))
+        self.assertTrue(data['targets'][0]['origins'])
+        self.assertTrue(all(item['root_chain']['paths'] == [] for item in data['targets'][0]['origins']))
 
     def test_plan_expiry_tamper_and_invalid_paths_stop(self):
         self.assertEqual(deletion.check_plan(self.plan, deletion.plan_id(self.plan),

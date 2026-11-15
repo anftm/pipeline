@@ -15,6 +15,7 @@ outside the exact supplied paths are retained.
 from __future__ import annotations
 
 import argparse
+from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -63,7 +64,79 @@ def validate_paths(paths):
     return sorted(paths)
 
 
-def candidate_plan(reference, graph_report, api, paths, *, clock=None):
+def blocked_references(reference, graph_report, paths, error):
+    """Explain current direct/bundle facts; this is not a mark-order trace."""
+    direct = defaultdict(set)
+    bundles = defaultdict(set)
+    trees = reference.trees
+    for origin, refs in reference.direct.items():
+        for bucket, path in refs:
+            direct[bucket, path].add(origin)
+            parent = path.rsplit('/', 1)[0] if '/' in path else ''
+            # Match mark's bundle rule: root documents do not protect siblings.
+            if (bucket != graph.ccrd_lifecycle.BUCKET and parent
+                    and not graph.is_root(path) and (bucket, parent) in trees):
+                bundles[bucket, parent].add((origin, (bucket, path)))
+
+    def node(ref):
+        return {'bucket': ref[0], 'path': ref[1]}
+
+    def covering(ref):
+        bucket, path = ref
+        parts = path.split('/')
+        return [(bucket, '/'.join(parts[:i])) for i in range(1, len(parts) + 1)
+                if (bucket, '/'.join(parts[:i])) in trees]
+
+    def incoming(ref):
+        edges = {(origin, ref, 'direct') for origin in direct.get(ref, ())}
+        for tree in covering(ref):
+            edges.update((origin, sibling, 'bundle') for origin, sibling in bundles.get(tree, ())
+                         if sibling != ref)
+        return sorted(edges)
+
+    def root_chain(start):
+        # Bound cycles and large shared bundles; report unresolved provenance honestly.
+        queue = deque([(start, [start])])
+        seen = {start}
+        truncated = False
+        while queue:
+            current, chain = queue.popleft()
+            if current in reference.root_hashes:
+                return {'paths': [node(ref) for ref in reversed(chain)], 'truncated': truncated}
+            if len(chain) >= 16:
+                truncated = True
+                continue
+            for origin, _, _ in incoming(current):
+                if origin in seen:
+                    continue
+                if len(seen) >= 256:
+                    truncated = True
+                    continue
+                seen.add(origin)
+                queue.append((origin, chain + [origin]))
+        return {'paths': [], 'truncated': truncated}
+
+    allowed = set(graph_report.get('buckets', {}).get(BUCKET, {}).get('candidates', []))
+    chains = {}
+    targets = []
+    for path in paths:
+        ref = (BUCKET, path)
+        origins = []
+        for origin, source, relation in incoming(ref):
+            if origin not in chains:
+                chains[origin] = root_chain(origin)
+            origins.append({'origin': node(origin), 'reference': node(source),
+                            'relation': relation, 'root_chain': chains[origin]})
+        targets.append({'path': path, 'present': path in reference.files.get(BUCKET, set()),
+                        'candidate': path in allowed, 'referenced': ref in reference.references,
+                        'managed': path.startswith(graph.managed_prefixes(BUCKET)),
+                        'covering_trees': [tree[1] for tree in covering(ref)], 'origins': origins})
+    return {'version': 1, 'kind': 'pdf-page-blocked-references', 'bucket': BUCKET,
+            'error': f'{type(error).__name__}: {error}', 'graph_complete': graph_report['graph_complete'],
+            'deletion_authorized': False, 'targets': targets}
+
+
+def candidate_plan(reference, graph_report, api, paths, *, clock=None, blocked_report_path=None):
     selected = validate_paths(paths)
     if (not isinstance(graph_report, dict) or graph_report.get('graph_complete') is not True
             or graph_report.get('blockers') or set(reference.files) != set(graph.BUCKETS)):
@@ -73,7 +146,15 @@ def candidate_plan(reference, graph_report, api, paths, *, clock=None):
     for path in selected:
         if (path not in allowed or path not in reference.files.get(BUCKET, set())
                 or (BUCKET, path) in reference.references):
-            raise ValueError('requested path is not an unreferenced exact graph candidate: ' + path)
+            error = ValueError('requested path is not an unreferenced exact graph candidate: ' + path)
+            if blocked_report_path is not None:
+                try:
+                    diagnostic = blocked_references(reference, graph_report, selected, error)
+                    blocked_report_path.parent.mkdir(parents=True, exist_ok=True)
+                    blocked_report_path.write_bytes(encode(diagnostic) + b'\n')
+                except Exception as diagnostic_error:
+                    print(f'Could not write blocked references: {diagnostic_error}', file=sys.stderr)
+            raise error
     info = {item.path: item for item in api.get_bucket_paths_info(BUCKET, selected)}
     if set(info) != set(selected):
         raise RuntimeError('a candidate disappeared during planning')
@@ -251,7 +332,8 @@ def main(argv=None):
             reader_gc_chm_window.require_clear(store)
             collector.verify_roots(store, reference)
             if args.command == 'plan':
-                result = candidate_plan(reference, report, api, paths)
+                result = candidate_plan(reference, report, api, paths,
+                                        blocked_report_path=args.plan.parent / 'blocked-references.json')
                 args.plan.parent.mkdir(parents=True, exist_ok=True)
                 args.plan.write_bytes(encode(result) + b'\n')
                 print(json.dumps({'plan_sha256': plan_id(result), 'objects': len(result['targets']),
