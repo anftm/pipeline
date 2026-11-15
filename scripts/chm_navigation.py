@@ -193,7 +193,13 @@ def repair_epub(path, root, mapping):
                 order.append(n)
         fragment = urllib.parse.unquote(node['fragment'])
         if fragment:
-            found = [n for n in candidates if fragment in ids[n]]
+            found = []
+            for target in mapped:
+                name, _, section_id = target.partition('#')
+                anchor = (section_id + '--' + fragment
+                          if re.fullmatch('chm-page-[0-9]+', section_id) else fragment)
+                if anchor in ids[name]:
+                    found.append(name + '#' + urllib.parse.quote(anchor, safe='!$&\'()*+,;=:@/?'))
             if not found:
                 # Retain exact source targets when a converter renamed anchors.
                 original = HTML.document_fromstring(decode(root / source))
@@ -201,8 +207,8 @@ def repair_epub(path, root, mapping):
                 if anchors:
                     raise ValueError('converted anchor missing: ' + source + '#' + fragment)
                 issues.append({'kind': 'missing_source_anchor', 'href': node['href']})
-                return candidates[0]
-            return found[0] + '#' + urllib.parse.quote(fragment, safe='!$&\'()*+,;=:@/?')
+                return mapped[0]
+            return found[0]
         return mapped[0]
     for node, depth in flatten(structure['nodes']):
         resolved[id(node)] = destination(node)
@@ -377,7 +383,7 @@ def add_recovered_pages(path, recovered, checks, selected, mapping):
     return sorted(selected)
 
 
-def repair_conversion(source, target, work):
+def repair_conversion(source, target, work, source_sections=None):
     """Post-conversion gate: every original directory target needs a mapping."""
     try:
         from . import recover_chm, chm_resources
@@ -404,14 +410,50 @@ def repair_conversion(source, target, work):
             by_base.setdefault(posixpath.basename(name).casefold(),[]).append(name)
             original=re.sub(r'_split_\d+(?=\.[^.]+$)','',posixpath.basename(name),flags=re.I)
             if original!=posixpath.basename(name):by_split.setdefault(original.casefold(),[]).append(name)
+        items={i.get('id'):absolute(i.get('href')) for i in manifest}
+        spine_names=list(dict.fromkeys(items[ref.get('idref')] for ref in package.find('{*}spine')))
+        sections={}
+        for name in spine_names:
+            if name not in documents:
+                continue
+            for section in documents[name].xpath('//*[@id]'):
+                section_id=section.get('id')
+                if re.fullmatch('chm-page-[0-9]+',section_id):
+                    sections.setdefault(section_id,[]).append(name+'#'+section_id)
         mapping={}
+        owners=[]
+        def assign(original, targets):
+            # Every inference (path, split name, label or text) claims its actual
+            # subtree. Equal or nested regions cannot prove two distinct pages,
+            # even when their text matches (their images may differ).
+            regions=[]
+            for target in targets:
+                region=mapped_region(target, documents)
+                if region is None:
+                    raise ValueError('unverifiable converted CHM target: '+original+' -> '+target)
+                for owner, claimed in owners:
+                    if owner!=original and (region is claimed or claimed in region.iterancestors()
+                                            or region in claimed.iterancestors()):
+                        raise ValueError('ambiguous converted CHM target reuse: '+owner+' / '+original)
+                regions.append(region)
+            mapping[original]=targets
+            owners.extend((original,region) for region in regions)
+        # Fallback ordinals belong to the producer's actual ordered inventory.
+        # Never reconstruct them from HHC order or a differently sorted inventory.
+        for name, section_id in (source_sections or {}).items():
+            values=sections.get(section_id,[])
+            if len(values)!=1:
+                raise ValueError('missing or ambiguous converted CHM section: '+name+'#'+section_id)
+            assign(name,values)
         for name in source_pages:
+            if name in mapping:
+                continue
             found,_,_=output_paths.resolve('',name)
-            if found:mapping[name]=[found];continue
+            if found:assign(name,[found]);continue
             short=posixpath.basename(name).casefold()
             if counts[short]==1:
                 candidates=by_base.get(short,[]) or sorted(by_split.get(short,[]))
-                if candidates:mapping[name]=candidates
+                if candidates:assign(name,candidates)
         ncx=next((absolute(i.get('href')) for i in manifest if i.get('media-type')=='application/x-dtbncx+xml'),None)
         source_labels={};output_labels={}
         for node,depth in flatten(structure['nodes']):
@@ -424,44 +466,44 @@ def repair_conversion(source, target, work):
                 if href:
                     parts=urllib.parse.urlsplit(href)
                     name=posixpath.normpath(posixpath.join(posixpath.dirname(ncx),urllib.parse.unquote(parts.path)))
-                    if name in documents:output_labels.setdefault(title,set()).add(name)
-        # Names inferred from labels/merged-page ordinals need content evidence.
-        source_text = None
+                    if name in documents:
+                        destination=name+('#'+parts.fragment if parts.fragment else '')
+                        output_labels.setdefault(title,set()).add(destination)
+        # Inferred names need evidence from the specific target, not the EPUB.
+        source_inventory = recover_chm.source_pages(root, work)
+        source_text = {p['path']:re.sub(r'\s+','',p['expected']) for p in source_inventory}
+        text_cache = {}
         def matches_source(original, names):
-            nonlocal source_text
-            if source_text is None:
-                source_text = {p['path']:p['expected'] for p in recover_chm.source_pages(root,work)}
+            key=tuple(names)
+            if key not in text_cache:
+                text_cache[key]=mapped_text(names, documents)
             expected=source_text.get(original,'')
-            actual=''.join(re.sub(r'\s+','',''.join(documents[n].find('{*}body').itertext()))
-                           for n in names if documents[n].find('{*}body') is not None)
-            return bool(expected) and expected in actual
+            return bool(expected) and expected in text_cache[key]
         for title,originals in source_labels.items():
             outputs=output_labels.get(title,set())
             if len(originals)==len(outputs)==1:
                 original=next(iter(originals));name=next(iter(outputs))
                 if original not in mapping:
                     unsplit=re.sub(r'_split_\d+(?=\.[^.]+$)','',posixpath.basename(name),flags=re.I)
-                    names=sorted(by_split.get(unsplit.casefold(),[])) or [name]
-                    if matches_source(original,names):mapping[original]=names
-        ordered=[]
-        for node,depth in flatten(structure['nodes']):
-            if node['source'] and node['source'] not in ordered:ordered.append(node['source'])
-        ordered.extend(n for n in source_pages if n not in ordered)
-        sections={}
-        items={i.get('id'):absolute(i.get('href')) for i in manifest}
-        for ref in package.find('{*}spine'):
-            name=items[ref.get('idref')]
-            for section in documents.get(name,()).xpath('//*[@id]') if name in documents else []:
-                id=section.get('id')
-                if re.fullmatch('chm-page-[0-9]+',id):sections.setdefault(id,[]).append(name+'#'+id)
-        for index,name in enumerate(ordered):
-            if name not in mapping and 'chm-page-'+str(index) in sections:
-                values=sections['chm-page-'+str(index)]
-                if matches_source(name,[v.split('#',1)[0] for v in values]):mapping[name]=values
-        # Calibre may produce a structurally valid EPUB while misdecoding legacy
-        # CHM charsets. Compare mapped pages and substantial unmapped pages with
-        # our charset-aware source extraction before accepting the conversion.
-        source_inventory = recover_chm.source_pages(root, work)
+                    names=([name] if '#' in name else sorted(by_split.get(unsplit.casefold(),[])) or [name])
+                    if not matches_source(original,names):
+                        raise ValueError('unverifiable converted CHM chapter boundary: '+original+' -> '+name)
+                    assign(original,names)
+        # Native Calibre output can rename unlisted pages. Accept a unique text
+        # match in the reading spine, recording a concrete target for later gates.
+        # Generated sections remain separate candidates even in a merged member.
+        section_members={v.split('#',1)[0] for values in sections.values() for v in values}
+        candidates=[[v] for values in sections.values() for v in values]
+        candidates.extend([name] for name in spine_names if name in documents and name not in section_members)
+        for page in source_inventory:
+            name=page['path']
+            if name not in mapping:
+                matches=[values for values in candidates if matches_source(name,values)
+                         and source_text[name]==text_cache[tuple(values)]]
+                if len(matches)==1:
+                    assign(name,matches[0])
+        # Calibre may produce a valid EPUB with misdecoded or omitted text.
+        # Every nonempty source page must pass against its mapped section(s).
         mismatches = source_text_mismatches(source_inventory, mapping, documents)
         if mismatches:
             detail = ", ".join(f"{name} ({expected}/{actual} chars)"
@@ -473,30 +515,41 @@ def repair_conversion(source, target, work):
     return {'navigation':navigation_report,'images':images,'links':links}
 
 
+def mapped_region(target, documents):
+    """Resolve a unique body/fragment subtree; a bare heading proves no siblings."""
+    name, sep, fragment = target.partition('#')
+    document = documents.get(name)
+    if document is None:
+        return None
+    body = document.find('{*}body')
+    if body is None or not sep:
+        return body
+    nodes = body.xpath('descendant-or-self::*[@id=$fragment or @name=$fragment]',
+                       fragment=urllib.parse.unquote(fragment))
+    return nodes[0] if len(nodes) == 1 else None
+
+
+def mapped_text(targets, documents):
+    """Read only mapped bodies or fragment subtrees, never neighbouring sections."""
+    parts = []
+    for target in targets:
+        region = mapped_region(target, documents)
+        if region is None:
+            return ''
+        parts.append(re.sub(r'\s+', '', ''.join(region.itertext())))
+    return ''.join(parts)
+
+
 def source_text_mismatches(source_pages, mapping, documents):
-    """Return source pages whose text is altered, lost, or omitted from the EPUB."""
+    """Return source pages whose text is altered, lost, or omitted from their targets."""
     mismatches = []
-    whole_epub = ''.join(
-        re.sub(r'\s+', '', ''.join(body.itertext()))
-        for document in documents.values()
-        if (body := document.find('{*}body')) is not None
-    )
     for page in source_pages:
         source = page.get('path')
         expected = re.sub(r'\s+', '', page.get('expected') or '')
         targets = mapping.get(source, [])
         if not expected:
             continue
-        actual_parts = []
-        for target in targets:
-            name = target.split('#', 1)[0]
-            document = documents.get(name)
-            if document is None:
-                continue
-            body = document.find('{*}body')
-            if body is not None:
-                actual_parts.append(re.sub(r'\s+', '', ''.join(body.itertext())))
-        actual = ''.join(actual_parts)
-        if expected not in actual and expected not in whole_epub and (targets or len(expected) >= 512):
+        actual = mapped_text(targets, documents)
+        if expected not in actual:
             mismatches.append((source, len(expected), len(actual)))
     return mismatches

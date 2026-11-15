@@ -36,7 +36,7 @@ on:
         default: false
         type: boolean
       retry_failed:
-        description: Explicitly retry sources that failed the v9 conversion
+        description: Explicitly retry sources that failed the current conversion profile
         required: true
         default: false
         type: boolean

@@ -1082,7 +1082,7 @@ def convert_chm(source: Path, target: Path, work: Path) -> None:
         initial_error = exc
     source_html = work / "chm-fallback.html"
     try:
-        convert_chm_to_html(source, source_html, work)
+        source_sections = convert_chm_to_html(source, source_html, work)
     except Exception:
         raise initial_error
     target.unlink(missing_ok=True)
@@ -1093,7 +1093,7 @@ def convert_chm(source: Path, target: Path, work: Path) -> None:
     sanitize_chm_epub(target, work)
     if target.exists():
         try:
-            repair_conversion(source, target, work)
+            repair_conversion(source, target, work, source_sections=source_sections)
         except ValueError:
             # Dynamic menu templates can hide chapters from Calibre entirely.
             # The recovery path parses static data and verifies every page's text.
@@ -1106,8 +1106,8 @@ def convert_chm(source: Path, target: Path, work: Path) -> None:
     validate_chm_epub(target)
 
 
-def convert_chm_to_html(source: Path, target: Path, work: Path) -> None:
-    """Extract CHM pages and merge their sanitized text into one HTML document."""
+def convert_chm_to_html(source: Path, target: Path, work: Path) -> dict[str, str]:
+    """Merge CHM pages and return their exact source-path to section-ID mapping."""
     try:
         listing = command_output(["7z", "l", "-slt", str(source)], timeout_seconds=CHM_COMMAND_TIMEOUT_SECONDS)
     except ReaderConversionCommandError:
@@ -1129,7 +1129,7 @@ def convert_chm_to_html(source: Path, target: Path, work: Path) -> None:
         )
     except (subprocess.TimeoutExpired, OSError):
         pass
-    pages = sorted(path for path in extracted.rglob("*") if path.is_file() and path.suffix.lower() in {".htm", ".html"})
+    pages = sorted(path for path in extracted.rglob("*") if path.is_file() and path.suffix.lower() in {".htm", ".html", ".xhtml"})
     text_pages = sorted(path for path in extracted.rglob("*") if path.is_file() and path.suffix.lower() == ".txt")
     mhtml = sorted(path for path in extracted.rglob("*") if path.is_file() and path.suffix.lower() in {".mht", ".mhtml"})
     hhc = sorted(path for path in extracted.rglob("*") if path.is_file() and path.suffix.lower() == ".hhc")
@@ -1151,7 +1151,7 @@ def convert_chm_to_html(source: Path, target: Path, work: Path) -> None:
             raise RuntimeError("CHM MHTML source exceeds size limit")
         converted = work / f"chm-mhtml-{index:04d}.html"
         mhtml_to_html(path, converted)
-        documents.append((converted.name, decode_html_source(converted)))
+        documents.append((path.relative_to(extracted).as_posix(), decode_html_source(converted)))
     if not documents:
         raise RuntimeError("CHM contains no HTML pages")
 
@@ -1263,6 +1263,7 @@ def convert_chm_to_html(source: Path, target: Path, work: Path) -> None:
     body = "".join(body_parts)
     target.write_text(f"<!doctype html><meta charset=\"utf-8\"><main>{body}</main>", encoding="utf-8")
     validate_html_content(target)
+    return {path: f"chm-page-{index}" for index, (path, _) in enumerate(documents)}
 
 
 def detect_caj_family(source: Path) -> str:
