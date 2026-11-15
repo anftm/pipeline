@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Collect unreferenced current-bucket objects during a drained maintenance window."""
+"""Collect unreferenced objects in the two Reader-owned buckets during maintenance."""
 from __future__ import annotations
 
 import argparse
@@ -58,15 +58,6 @@ def catalog_acknowledged(store, identity):
             or current.get("catalog_sha256") != identity["digest"]):
         return False, "stale-acknowledgment-receipt"
     return True, "workflow-receipt"
-
-
-def reject_unaccepted_ccrd_collection(store) -> None:
-    """New cross-domain publication is report-only until its deletion tier is accepted."""
-    paths = store.list_files(graph.ccrd_lifecycle.BUCKET, ('control/', 'text/exports/', 'releases/ocr-'))
-    if paths:
-        raise RuntimeError(
-            'four-bucket OCR-library collection is report-only; '
-            'use reader-gc-ccrd.yml for the separate CCRD OCR deletion tier')
 
 
 def observe_ccrd_projection(store, client):
@@ -388,17 +379,22 @@ def verify_graph_documents(store, reference_graph):
                 list(pool.map(verify, sorted(paths)))
 
 
+def validate_resume_ownership(resume):
+    # Reject even absent external targets: an old journal cannot confer
+    # deletion authority or count another owner's objects as reclaimed.
+    if any(entry['bucket'] not in graph.READER_BUCKETS for entry in resume['targets']):
+        raise ValueError('saved collection plan targets a bucket outside Reader ownership')
+
+
 def collect(store, fence, reference_graph, report, catalog, *, grace_days=0, limit=0,
-             batch_size=500, apply=False, checkpoint=None, reader_only=False,
+             batch_size=500, apply=False, checkpoint=None, reader_only=True,
              workers=1, resume=None, retirement_roots=None, chm_guard=None):
     if not report["graph_complete"]:
         raise RuntimeError("reference graph is incomplete; no object deletion is authorized")
-    if reader_only and set(reference_graph.files) != set(graph.BUCKETS):
-        raise RuntimeError("reader-only deletion requires the complete four-bucket reference closure")
+    if set(reference_graph.files) != set(graph.BUCKETS):
+        raise RuntimeError("Reader deletion requires the complete four-bucket reference closure")
     if apply:
         reader_gc_chm_window.require_clear(store)
-    if apply and not reader_only:
-        reject_unaccepted_ccrd_collection(store)
     # Persist observations for every candidate even when this window has a small
     # deletion budget. Applying a limit here used to reset/lose later candidates.
     state, retention = graph.plan_retention(graph.read_gc_state(store), report, grace_days, 0)
@@ -406,7 +402,9 @@ def collect(store, fence, reference_graph, report, catalog, *, grace_days=0, lim
     snapshots = retired_snapshots(catalog)
     eligible.update((ASSETS, path) for path in snapshots if path in reference_graph.files.get(ASSETS, set())
                     and (ASSETS, path) not in reference_graph.references)
-    excluded = {ref for ref in eligible if reader_only and ref[0] not in graph.READER_BUCKETS}
+    # reader_only is retained for saved-plan compatibility, never as permission
+    # to collect Archive/BHA or CCRD objects observed by the reference graph.
+    excluded = {ref for ref in eligible if ref[0] not in graph.READER_BUCKETS}
     eligible -= excluded
     if retirement_roots is not None:
         eligible = {ref for ref in eligible if retirement.within(*ref, retirement_roots)
@@ -414,6 +412,7 @@ def collect(store, fence, reference_graph, report, catalog, *, grace_days=0, lim
                     or ref[0] == ASSETS and ref[1] in snapshots}
     selected = sorted(eligible)[:limit] if limit else sorted(eligible)
     if resume:
+        validate_resume_ownership(resume)
         previous = sorted((entry['bucket'], entry['path']) for entry in resume['targets'])
         if (resume.get('plan_sha256') != hashlib.sha256(encode(previous)).hexdigest()
                 or resume.get('reader_only') != reader_only):
@@ -472,7 +471,7 @@ def collect(store, fence, reference_graph, report, catalog, *, grace_days=0, lim
     def save():
         if checkpoint:
             checkpoint(result)
-    for bucket in graph.BUCKETS:
+    for bucket in graph.READER_BUCKETS:
         paths = [path for b, path in selected if b == bucket]
         if not paths:
             continue
@@ -545,8 +544,8 @@ def main():
     parser.add_argument("--grace-days", type=int, default=0)
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--retired-snapshots-only", action="store_true")
-    parser.add_argument("--reader-only", action="store_true",
-                        help="Delete only the original Reader buckets; keep every four-domain reference")
+    parser.add_argument("--reader-only", action="store_true", default=True,
+                        help="Always delete only reader-assets-v2 and pdf-pages-v2; retain all external references")
     parser.add_argument("--storage", choices=("hub", "s3"), default="hub")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument('--workers', type=int, default=4)
@@ -570,8 +569,6 @@ def main():
     if args.apply:
         reader_gc_chm_window.require_clear(store)
     fence = GitHubProducerFence()
-    if args.apply and not args.reader_only:
-        reject_unaccepted_ccrd_collection(store)
     report = {"version": 1, "mode": "collect" if args.apply else "plan", "grace_days": args.grace_days,
               "started_at": lifecycle.now_iso(), "complete": False}
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -664,6 +661,8 @@ def main():
                 resume = None
         hints = retirement.load(store) if args.retired_assets_only else None
         report['retirement_receipts'] = len(hints or {})
+        if resume:
+            validate_resume_ownership(resume)
         if resume and args.auto_resume:
             changed = [r for r in resume['targets'] if (r['bucket'], r['path']) in reference_graph.references]
             if changed:

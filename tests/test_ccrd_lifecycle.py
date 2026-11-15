@@ -4,12 +4,13 @@ import hashlib
 import json
 import unittest
 
-from scripts import ccrd_lifecycle as lifecycle, reader_gc_graph as graph, reader_gc_collect as collector
+from scripts import ccrd_lifecycle as lifecycle, reader_gc_graph as graph
 from scripts.reader_gc_stream import graph_json
 from tests.test_reader_gc_graph import MemoryStore
 
 
-ASSETS, PDF, INPUT = graph.READER_BUCKETS
+ASSETS, PDF = graph.READER_BUCKETS
+INPUT = graph.PDF_OCR_INPUT_BUCKET
 CCRD = lifecycle.BUCKET
 
 
@@ -116,13 +117,6 @@ class CcrdLifecycleTests(unittest.TestCase):
         self.assertNotIn('text', parsed['pages'][0])
         parsed, _ = graph_json([b'{"text":"top level OCR body", "kind":"raw"}'])
         self.assertNotIn('text', parsed)
-
-    def test_deleting_collector_refuses_new_domain_before_any_write_or_delete(self):
-        release, _ = self.release(); self.root([release])
-        before = {bucket: dict(files) for bucket, files in self.store.objects.items()}
-        with self.assertRaisesRegex(RuntimeError, 'report-only'):
-            collector.reject_unaccepted_ccrd_collection(self.store)
-        self.assertEqual(self.store.objects, before)
 
     def test_exact_ocr_quarantine_is_a_known_non_deleting_control_root(self):
         self.put(CCRD, 'control/ocr-automation.json', {'version': 1, 'kind': 'ccrd-ocr-automation',

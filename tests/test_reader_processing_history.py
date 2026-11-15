@@ -8,7 +8,8 @@ from scripts import reader_processing_history as history, reader_gc_graph as gra
 from scripts import reader_gc_collect as collector, reader_lifecycle as lifecycle
 from tests.test_reader_gc_collect import Store
 
-ASSETS, PDF, INPUT = graph.READER_BUCKETS
+ASSETS, PDF = graph.READER_BUCKETS
+INPUT = graph.PDF_OCR_INPUT_BUCKET
 
 
 class ProcessingHistoryTests(unittest.TestCase):
@@ -58,11 +59,15 @@ class ProcessingHistoryTests(unittest.TestCase):
         scanned = reference.build()
         self.assertTrue(scanned['graph_complete'], scanned['blockers'])
         result = collector.collect(self.store, Mock(), reference, scanned, {}, apply=True, reader_only=True)
-        self.assertEqual(result['confirmed_deleted_objects'], 8 + 7)
+        self.assertEqual(result['confirmed_deleted_objects'], 8 + 6)
+        self.assertEqual(result['excluded_other_bucket_candidates'], 1)
         self.assertEqual(len(result['processing_retirements']), 8)
         self.assertIn(current[1], self.store.objects[current[0]])
         for bucket, path in paths[1:]:
-            self.assertNotIn(path, self.store.objects[bucket])
+            if bucket == INPUT:
+                self.assertEqual(self.store.objects[bucket][path], b'retired')
+            else:
+                self.assertNotIn(path, self.store.objects[bucket])
         self.assertTrue(all(row['supersession']['original_generation'] == 'a' * 32
                             for row in result['processing_retirements']))
 

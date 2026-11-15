@@ -190,7 +190,7 @@ class ChmGcWindowTests(unittest.TestCase):
     def test_direct_mutation_helpers_cannot_skip_the_guard(self):
         store = Mock()
         reference = Mock()
-        reference.files = {}
+        reference.files = {bucket: set() for bucket in collector.graph.BUCKETS}
         calls = (
             lambda: collector.retire_catalog(store, {}, {}, 0, apply=True),
             lambda: collector.collect_retired_snapshots(store, Mock(), {}, apply=True),

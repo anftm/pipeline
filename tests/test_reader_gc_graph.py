@@ -15,7 +15,8 @@ from scripts import reader_gc_graph as gc
 from scripts import reader_bucket
 
 
-ASSETS, PDF, INPUT = gc.READER_BUCKETS
+ASSETS, PDF = gc.READER_BUCKETS
+INPUT = gc.PDF_OCR_INPUT_BUCKET
 CCRD = gc.ccrd_lifecycle.BUCKET
 SIDECAR = "reader-index/reader_assets.json.gz"
 
@@ -44,6 +45,11 @@ class MemoryStore:
 
 
 class ReaderGcGraphTests(unittest.TestCase):
+    def test_reader_ownership_does_not_reduce_reference_closure(self):
+        self.assertEqual(gc.READER_BUCKETS, ('vomebook/reader-assets-v2', 'vomebook/pdf-pages-v2'))
+        self.assertEqual(gc.EXTERNAL_REFERENCE_BUCKETS, ('melsm/pdf-archive-v2', 'vomebook/ccrd-index'))
+        self.assertEqual(gc.BUCKETS, (ASSETS, PDF, INPUT, CCRD))
+
     def test_derived_pdf_redirect_catalog_pins_both_old_and_new_paths(self):
         old = 'derived/legacy/' + 'b' * 32 + '/document.pdf'
         new = 'objects/aa/' + 'a' * 64 + '/' + 'c' * 16 + '/document.pdf'

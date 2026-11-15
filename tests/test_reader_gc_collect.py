@@ -1,8 +1,13 @@
 import gzip
 import hashlib
 import json
+import os
+import subprocess
 import unittest
 from datetime import datetime, timezone
+from pathlib import Path
+
+import yaml
 from unittest.mock import Mock, patch
 
 from scripts import reader_gc_collect as collector, reader_gc_graph as graph, reader_lifecycle
@@ -412,31 +417,123 @@ class ReaderGcCollectTests(unittest.TestCase):
             self.assertIn('alicetran68/pipeline', producer_repositories())
             self.assertIn('vomebook/pdf-pipeline', producer_repositories())
 
-    def test_reader_only_deletion_requires_the_complete_four_bucket_closure(self):
-        store = Store()
-        store.put(PDF, 'objects/orphan/document.pdf', b'orphan')
-        reference = graph.ReferenceGraph(store)
-        report = reference.build()
-        # Without the fourth domain inventoried the reader-only tier must refuse,
-        # because a CCRD text export may still retain this Reader resource.
-        del reference.files[graph.ccrd_lifecycle.BUCKET]
-        with self.assertRaisesRegex(RuntimeError, 'four-bucket'):
-            collector.collect(store, Mock(), reference, report, {}, apply=True, reader_only=True)
-        self.assertIn('objects/orphan/document.pdf', store.objects[PDF])
+    def test_deletion_always_requires_the_complete_four_bucket_closure(self):
+        for reader_only in (False, True):
+            for missing in graph.EXTERNAL_REFERENCE_BUCKETS:
+                with self.subTest(reader_only=reader_only, missing=missing):
+                    store = Store()
+                    store.put(PDF, 'objects/orphan/document.pdf', b'orphan')
+                    reference = graph.ReferenceGraph(store)
+                    report = reference.build()
+                    del reference.files[missing]
+                    with patch.object(store, 'delete') as delete:
+                        with self.assertRaisesRegex(RuntimeError, 'four-bucket'):
+                            collector.collect(store, Mock(), reference, report, {},
+                                              apply=True, reader_only=reader_only)
+                        delete.assert_not_called()
 
-    def test_reader_only_deletion_never_targets_the_fourth_domain(self):
-        store = Store()
-        ccrd = graph.ccrd_lifecycle.BUCKET
-        store.put(ccrd, 'text/objects/aa/' + 'a' * 64 + '.txt', b'ocr text')
-        store.put(PDF, 'objects/orphan/document.pdf', b'orphan')
-        reference = graph.ReferenceGraph(store)
-        report = reference.build()
-        self.assertTrue(report['graph_complete'], report['blockers'])
-        result = collector.collect(store, Mock(), reference, report, {}, apply=True, reader_only=True)
-        self.assertEqual(result['confirmed_deleted_objects'], 1)
-        self.assertTrue(result['reader_only'])
-        self.assertIn('text/objects/aa/' + 'a' * 64 + '.txt', store.objects[ccrd])
-        self.assertNotIn('objects/orphan/document.pdf', store.objects[PDF])
+    def test_external_buckets_never_become_targets_even_when_reader_only_is_false(self):
+        for reader_only in (False, True):
+            for apply in (False, True):
+                with self.subTest(reader_only=reader_only, apply=apply):
+                    store = Store()
+                    ccrd = graph.ccrd_lifecycle.BUCKET
+                    store.put(INPUT, 'objects/orphan/page.png', b'archive')
+                    store.put(ccrd, 'text/objects/orphan.txt', b'ocr text')
+                    for bucket in graph.READER_BUCKETS:
+                        store.put(bucket, 'objects/orphan/document.pdf', b'orphan')
+                    external_before = {b: dict(store.objects[b]) for b in graph.EXTERNAL_REFERENCE_BUCKETS}
+                    reference = graph.ReferenceGraph(store)
+                    report = reference.build()
+                    self.assertTrue(report['graph_complete'], report['blockers'])
+                    with patch.object(store, 'delete', wraps=store.delete) as delete:
+                        result = collector.collect(store, Mock(), reference, report, {},
+                            apply=apply, reader_only=reader_only, workers=2, batch_size=1)
+                    self.assertEqual({t['bucket'] for t in result['targets']}, set(graph.READER_BUCKETS))
+                    self.assertEqual(result['planned_objects'], 2)
+                    self.assertEqual(result['excluded_other_bucket_candidates'], 2)
+                    self.assertEqual(result['confirmed_deleted_objects'], 2 if apply else 0)
+                    self.assertEqual({c.args[0] for c in delete.call_args_list},
+                                     set(graph.READER_BUCKETS) if apply else set())
+                    for bucket, before in external_before.items():
+                        self.assertEqual(store.objects[bucket], before)
+
+    def test_external_roots_keep_reader_targets_and_are_rechecked_before_deletion(self):
+        for reader_only in (False, True):
+            for owner in graph.EXTERNAL_REFERENCE_BUCKETS:
+                for changed in (False, True):
+                    with self.subTest(reader_only=reader_only, owner=owner, changed=changed):
+                        store = Store()
+                        path = 'objects/live/document.pdf'
+                        orphan = 'objects/orphan/document.pdf'
+                        store.put(PDF, path, b'live')
+                        store.put(PDF, orphan, b'orphan')
+                        ref = {'bucket': PDF, 'path': path, 'bytes': 4,
+                               'sha256': hashlib.sha256(b'live').hexdigest(), 'role': 'runtime'}
+                        root = ('control/reader-pin.json' if owner == graph.ccrd_lifecycle.BUCKET
+                                else 'reader-index/reader-pin.json')
+                        payload = {'version': 1, 'kind': 'ccrd-ocr-retention', 'resources': [ref]}
+                        store.put(owner, root, payload)
+                        reference = graph.ReferenceGraph(store)
+                        report = reference.build()
+                        self.assertTrue(report['graph_complete'], report['blockers'])
+                        self.assertIn((PDF, path), reference.references)
+                        if changed:
+                            store.put(owner, root, {**payload, 'resources': []})
+                        with patch.object(store, 'delete', wraps=store.delete) as delete:
+                            if changed:
+                                with self.assertRaisesRegex(RuntimeError, 'root changed'):
+                                    collector.collect(store, Mock(), reference, report, {},
+                                                      apply=True, reader_only=reader_only)
+                                delete.assert_not_called()
+                            else:
+                                result = collector.collect(store, Mock(), reference, report, {},
+                                                           apply=True, reader_only=reader_only)
+                                self.assertEqual(result['confirmed_deleted_objects'], 1)
+                                delete.assert_called_once_with(PDF, [orphan])
+                        self.assertEqual(store.objects[PDF][path], b'live')
+
+    def test_old_resume_external_targets_are_rejected_even_if_already_missing(self):
+        for reader_only in (False, True):
+            for bucket in (*graph.EXTERNAL_REFERENCE_BUCKETS, 'other/search-metadata'):
+                for present in (False, True):
+                    for apply in (False, True):
+                        with self.subTest(reader_only=reader_only, bucket=bucket, present=present, apply=apply):
+                            store = Store()
+                            path = 'text/objects/orphan.txt' if bucket == graph.ccrd_lifecycle.BUCKET else 'objects/orphan.png'
+                            store.objects.setdefault(bucket, {})
+                            if present:
+                                store.put(bucket, path, b'external')
+                            store.put(PDF, 'objects/orphan.pdf', b'reader')
+                            reference = graph.ReferenceGraph(store)
+                            report = reference.build()
+                            targets = sorted([(bucket, path), (PDF, 'objects/orphan.pdf')])
+                            plan = {'reader_only': reader_only,
+                                    'targets': [{'bucket': b, 'path': p} for b, p in targets],
+                                    'plan_sha256': hashlib.sha256(collector.encode(targets)).hexdigest()}
+                            with patch.object(store, 'delete') as delete, patch.object(store, 'put_json') as write:
+                                with self.assertRaisesRegex(ValueError, 'outside Reader ownership'):
+                                    collector.collect(store, Mock(), reference, report, {},
+                                        apply=apply, reader_only=reader_only, resume=plan)
+                                delete.assert_not_called()
+                                write.assert_not_called()
+
+    def test_workflow_defaults_to_reader_only_and_rejects_false_apply(self):
+        workflow = yaml.safe_load((Path(__file__).resolve().parents[1] /
+            '.github/workflows/reader-gc-collect.yml').read_text())
+        inputs = workflow.get('on', workflow.get(True))['workflow_dispatch']['inputs']
+        self.assertIs(inputs['reader_only']['default'], True)
+        step = next(s for s in workflow['jobs']['collect']['steps'] if 'READER_ONLY' in s.get('env', {}))
+        for scope in ('unreferenced', 'retired-assets', 'retired-catalog-snapshots'):
+            with self.subTest(scope=scope):
+                result = subprocess.run(['bash', '-eu', '-c',
+                    'python() { echo unexpected-collector-invocation; };\n' + step['run']],
+                    env={**os.environ, 'APPLY': 'true', 'READER_ONLY': 'false',
+                         'GRACE_DAYS': '0', 'LIMIT': '0', 'SCOPE': scope},
+                    capture_output=True, text=True)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn('requires reader_only=true', result.stderr)
+                self.assertNotIn('unexpected-collector-invocation', result.stdout)
 
     def test_retired_v3_and_processing_roots_are_collected(self):
         store = Store()

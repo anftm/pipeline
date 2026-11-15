@@ -32,8 +32,11 @@ except ImportError:
     from reader_gc_stream import catalog_json
 
 
-READER_BUCKETS = (READER_ASSETS_BUCKET, PDF_PAGES_BUCKET, PDF_OCR_INPUT_BUCKET)
-BUCKETS = (*READER_BUCKETS, ccrd_lifecycle.BUCKET)
+# Ownership and reference observation are different scopes. Legacy archive and
+# CCRD may retain Reader objects, but Reader GC never owns their deletion.
+READER_BUCKETS = (READER_ASSETS_BUCKET, PDF_PAGES_BUCKET)
+EXTERNAL_REFERENCE_BUCKETS = (PDF_OCR_INPUT_BUCKET, ccrd_lifecycle.BUCKET)
+BUCKETS = (*READER_BUCKETS, *EXTERNAL_REFERENCE_BUCKETS)
 CATALOG_REF = (READER_ASSETS_BUCKET, "reader-index/reader_catalog.json")
 RETIREMENT_REF = (READER_ASSETS_BUCKET, "reader-index/v3/retirement.json")
 ACKED = {"hf": True, "pages": True}

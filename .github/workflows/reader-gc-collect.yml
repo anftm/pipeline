@@ -30,12 +30,12 @@ on:
         type: string
         default: "0"
       scope:
-        description: "unreferenced: full sweep; retired-assets: all format retirement receipts; retired-ocr-inputs: released PNGs. All apply scopes require the maintenance fence."
+        description: "unreferenced/retired-assets: two Reader buckets only, with four-bucket reference closure. Other scopes use separate legacy collectors. All apply scopes require the maintenance fence."
         type: choice
-        options: [unreferenced, retired-assets, retired-catalog-snapshots, retired-ocr-inputs, document-control, document-pages, ocr-inputs, djvu-pdf, ocr-library, page-plan, page-apply]
+        options: [unreferenced, retired-assets, retired-catalog-snapshots, page-plan, page-apply]
         default: unreferenced
       reader_only:
-        description: Delete only the original Reader buckets and keep the fourth domain intact
+        description: General collection deletes only reader-assets-v2 and pdf-pages-v2; Archive/BHA and CCRD are reference-only
         type: boolean
         default: true
       limit:
@@ -73,7 +73,7 @@ jobs:
           python-version: "3.11"
       - run: pip install -r scripts/requirements.txt PyYAML==6.0.3
       - name: Verify primary-document reference and retirement safety
-        run: python -m unittest tests.test_direct_document_policy tests.test_reader_storage_contract tests.test_reader_gc_graph tests.test_reader_page_delete
+        run: python -m unittest tests.test_direct_document_policy tests.test_reader_storage_contract tests.test_reader_gc_graph tests.test_reader_gc_collect tests.test_reader_page_delete
       - uses: actions/cache/restore@v4
         with:
           path: .cache/reader-gc
@@ -112,6 +112,10 @@ jobs:
           HF_S3_INPUT_ACCESS_KEY_ID: ${{ secrets.HF_S3_INPUT_ACCESS_KEY_ID }}
           HF_S3_INPUT_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_INPUT_SECRET_ACCESS_KEY }}
         run: |
+          case "$SCOPE" in
+            unreferenced|retired-assets|retired-catalog-snapshots|page-plan|page-apply) ;;
+            *) echo 'This workflow owns only the two Reader buckets; legacy external/reset scopes are disabled' >&2; exit 1 ;;
+          esac
           [[ "$GRACE_DAYS" =~ ^[0-9]+$ ]] || exit 1
           [[ "$LIMIT" =~ ^[0-9]+$ ]] || exit 1
           if [[ "$SCOPE" == page-plan ]]; then
@@ -142,6 +146,10 @@ jobs:
             if [[ "$APPLY" == true ]]; then iargs+=(--apply); fi
             python -u scripts/reader_gc_inputs.py "${iargs[@]}"
             exit 0
+          fi
+          if [[ "$APPLY" == true && "$READER_ONLY" != true ]]; then
+            echo 'General Reader collection requires reader_only=true; external buckets are reference-only' >&2
+            exit 1
           fi
           args=(--grace-days "$GRACE_DAYS" --limit "$LIMIT" --storage "$STORAGE"
                 --output output/gc/collection.json)

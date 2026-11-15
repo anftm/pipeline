@@ -11,7 +11,8 @@ from scripts import reader_gc_retirement as retirement, reader_gc_maintenance as
 from scripts import reader_lifecycle as lifecycle
 from tests.test_reader_gc_collect import Store
 
-ASSETS, PDF, INPUT = graph.READER_BUCKETS
+ASSETS, PDF = graph.READER_BUCKETS
+INPUT = graph.PDF_OCR_INPUT_BUCKET
 SOURCE = 'a' * 64
 
 
@@ -23,7 +24,7 @@ class RetirementTests(unittest.TestCase):
         self.chm_guard.start()
         self.addCleanup(self.chm_guard.stop)
 
-    def test_global_collection_honors_input_retention_period(self):
+    def test_global_collection_never_deletes_inputs_even_after_retention_expires(self):
         store = Store()
         root = f'objects/aa/{SOURCE}/' + 'b' * 16 + '/ocr-input'
         path = root + '/page-000001.png'
@@ -41,8 +42,13 @@ class RetirementTests(unittest.TestCase):
         store.put(ASSETS, 'reader-index/v3/retirement.json', journal)
         reference = graph.ReferenceGraph(store)
         scanned = reference.build()
-        result = collect.collect(store, Mock(), reference, scanned, {}, apply=True, retirement_roots=set())
-        self.assertEqual(result['confirmed_deleted_objects'], 1)
+        self.assertEqual(scanned['buckets'][INPUT]['candidates'], [path])
+        with patch.object(store, 'delete', wraps=store.delete) as delete:
+            result = collect.collect(store, Mock(), reference, scanned, {}, apply=True, retirement_roots=set())
+        self.assertEqual(result['confirmed_deleted_objects'], 0)
+        self.assertEqual(result['excluded_other_bucket_candidates'], 1)
+        delete.assert_not_called()
+        self.assertEqual(store.objects[INPUT][path], b'input')
 
     def test_fourth_domain_mutations_participate_in_global_fence(self):
         from scripts.reader_gc_fence import producer_path
@@ -89,7 +95,11 @@ class RetirementTests(unittest.TestCase):
         scanned = reference.build()
         result = collect.collect(store, Mock(), reference, scanned, {}, apply=True,
                                  retirement_roots=retirement.targets({hint[0]: hint[1]}))
-        self.assertEqual(result['confirmed_deleted_objects'], len(families) * 2)
+        self.assertEqual(result['confirmed_deleted_objects'], (len(families) - 1) * 2)
+        self.assertEqual(result['excluded_other_bucket_candidates'], 2)
+        for bucket, root in families:
+            for name in ['obsolete.bin', 'shared.bin']:
+                self.assertEqual(root + '/' + name in store.objects[bucket], bucket == INPUT)
         self.assertTrue(result['complete'])
         self.assertIn('objects/unrelated/deferred.bin', store.objects[PDF])
         self.assertIn(hint[0], store.objects[ASSETS])
