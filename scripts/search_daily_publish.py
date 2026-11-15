@@ -59,6 +59,7 @@ RESUME_SCOPE = 'claimed-space-apply-before-pages'
 def publish(*, generation, expected_parent, pages_revision, space_revision,
             known_writers_coordinated, timeout_seconds, store, pointer_store, hub,
             session, api, get=daily.bounded_get, revision=None, resume_transaction=None,
+            reviewed_space_successor=None, reviewed_space_test_path=None,
             clock=time.monotonic, sleep=time.sleep, emit=_emit):
     """Run the normal path once; injected adapters/clocks support offline tests."""
     _generation(generation)
@@ -73,6 +74,11 @@ def publish(*, generation, expected_parent, pages_revision, space_revision,
         raise ValueError('timeout must be finite and positive')
     if resume_transaction is not None:
         tx._id(resume_transaction)
+    if reviewed_space_successor is not None or reviewed_space_test_path is not None:
+        if (resume_transaction is None or not isinstance(reviewed_space_successor, str)
+                or not space.SHA.fullmatch(reviewed_space_successor) or not reviewed_space_test_path):
+            raise ValueError('reviewed Space successor and exact test path require explicit resume')
+    runtime_revision = reviewed_space_successor or space_revision
     revision = revision or promotion_intent.preflight.fetch.get_repo_sha
     deadline = clock() + timeout_seconds
     transaction = None
@@ -100,7 +106,8 @@ def publish(*, generation, expected_parent, pages_revision, space_revision,
             raise ValueError('daily publication journal identity changed')
         tx.audit_history(store, value)
         pending = value.record['pending']
-        if pending and pending['expected_revision'] != {'pages': pages_revision, 'space': space_revision}[pending['site']]:
+        bound_space = runtime_revision if pending and pending['operation'] == 'set-default' else space_revision
+        if pending and pending['expected_revision'] != {'pages': pages_revision, 'space': bound_space}[pending['site']]:
             raise ValueError('pending operation differs from bound site revision')
         intended = make_pointer(generation, expected_parent, transaction)
         allowed = {parent_raw}
@@ -119,15 +126,15 @@ def publish(*, generation, expected_parent, pages_revision, space_revision,
             value = current() if transaction is not None else None
             if pages._main(session) != pages_revision:
                 raise ValueError('Pages revision differs from bound revision')
-            if api.space_info(space.deploy.SPACE, timeout=20).sha != space_revision:
+            if api.space_info(space.deploy.SPACE, timeout=20).sha != runtime_revision:
                 raise ValueError('Space repository differs from bound revision')
             runtime = api.get_space_runtime(space.deploy.SPACE)
             raw = getattr(runtime, 'raw', None)
             sha = raw.get('sha') if isinstance(raw, dict) else None
-            if sha is not None and sha != space_revision:
+            if sha is not None and sha != runtime_revision:
                 raise ValueError('Space runtime differs from bound revision')
             if runtime.stage == 'RUNNING':
-                space.deploy.runtime(api, expected_sha=space_revision)
+                space.deploy.runtime(api, expected_sha=runtime_revision)
                 budget()
                 return
             if runtime.stage not in WAIT_STAGES:
@@ -229,6 +236,9 @@ def publish(*, generation, expected_parent, pages_revision, space_revision,
         if {repo: revision(repo, os.environ.get('HF_TOKEN', ''))
                 for repo in promotion_intent.preflight.fetch.REPOS} != manifest['source_revisions']:
             raise ValueError('resume source revisions differ from candidate')
+        if reviewed_space_successor is not None:
+            space.verify_reviewed_successor(expected_revision=space_revision,
+                                            successor=reviewed_space_successor, test_path=reviewed_space_test_path)
         identities()
         if current().head_raw != existing.head_raw:
             raise ValueError('resume journal changed during preflight')
@@ -237,7 +247,9 @@ def publish(*, generation, expected_parent, pages_revision, space_revision,
               'space_revision': space_revision, 'resume_scope': RESUME_SCOPE,
               'external_writers_verified': False})
         # Never prepare or apply this operation again, regardless of visibility.
-    await_site('space', operation, space.reconcile, api=api, hub=hub, get=get)
+    successor_options = ({'reviewed_successor': reviewed_space_successor,
+                          'reviewed_test_path': reviewed_space_test_path} if reviewed_space_successor else {})
+    await_site('space', operation, space.reconcile, api=api, hub=hub, get=get, **successor_options)
 
     operation = secrets.token_hex(16)
     site_common = dict(session=session, api=api, hub=hub, get=get)
@@ -266,7 +278,7 @@ def publish(*, generation, expected_parent, pages_revision, space_revision,
         else:
             wait('pointer-parent-visible')
 
-    step(finalize.observe_space_default, **common, expected_revision=space_revision,
+    step(finalize.observe_space_default, **common, expected_revision=runtime_revision,
          operation=secrets.token_hex(16), created_at=_now())
     operation = secrets.token_hex(16)
     step(finalize.start_pages_default, session=session, expected_revision=pages_revision,
@@ -314,6 +326,8 @@ def main(argv=None):
     parser.add_argument('--known-writers-coordinated', action='store_true')
     parser.add_argument('--timeout-seconds', type=float, default=1800)
     parser.add_argument('--resume-transaction', help='exact existing transaction; only claimed Space apply before Pages')
+    parser.add_argument('--reviewed-space-successor', help='reviewed direct single-parent successor SHA; resume only')
+    parser.add_argument('--reviewed-space-test-path', help='one exact reviewed tests/*.py path; no wildcard')
     args = parser.parse_args(argv)
     token = os.environ.get('PAGES_TOKEN', '')
     if not token:

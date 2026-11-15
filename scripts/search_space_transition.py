@@ -11,6 +11,10 @@ import json
 import os
 import re
 import secrets
+import subprocess
+import tempfile
+import hashlib
+from pathlib import PurePosixPath
 from datetime import UTC, datetime
 
 try:
@@ -111,7 +115,69 @@ def search_parent_bytes(current: tx.Current) -> bytes:
     return search_snapshot.canonical(current.record['parent_pointer'])
 
 
-def reconcile(store, *, api, hub, get, operation_id: str) -> dict:
+SPACE_GIT_URL = 'https://huggingface.co/spaces/VoiceOfML/Search'
+
+
+def verify_reviewed_successor(*, expected_revision, successor, test_path) -> dict:
+    """Verify Git ancestry and the exact reviewed file; never checkout or run it.
+
+    Hub commit lists omit parents and its tree API omits modes. Read actual Git
+    objects instead; blob IDs also bind LFS pointers. Operator review remains
+    necessary: a tests/ path alone does not prove that code is never imported.
+    """
+    if (not isinstance(successor, str) or not SHA.fullmatch(successor)
+            or not SHA.fullmatch(expected_revision) or successor == expected_revision):
+        raise ValueError('reviewed Space successor requires two distinct exact SHAs')
+    if (not isinstance(test_path, str) or not test_path.startswith('tests/')
+            or not test_path.endswith('.py') or str(PurePosixPath(test_path)) != test_path
+            or any(part in {'', '.', '..'} for part in test_path.split('/'))
+            or any(ord(char) < 32 for char in test_path) or any(char in test_path for char in '\\*?[]')):
+        raise ValueError('reviewed Space test path must be one exact tests Python file')
+    with tempfile.TemporaryDirectory(prefix='search-space-successor-') as directory:
+        def git(*args):
+            return subprocess.run(['git', '-C', directory, '-c', 'credential.helper=',
+                                   '-c', 'core.hooksPath=/dev/null', *args], check=True,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120,
+                                  env={**os.environ, 'GIT_TERMINAL_PROMPT': '0', 'GIT_LFS_SKIP_SMUDGE': '1'}).stdout
+        git('init', '--bare', '--quiet')
+        git('fetch', '--quiet', '--no-tags', '--depth=2', SPACE_GIT_URL, successor)
+        commit = git('cat-file', 'commit', successor)
+        parents = [line[7:].decode('ascii') for line in commit.split(b'\n\n', 1)[0].splitlines()
+                   if line.startswith(b'parent ')]
+        if parents != [expected_revision]:
+            raise ValueError('reviewed Space successor is not a direct single-parent successor')
+
+        def tree(sha):
+            raw = git('ls-tree', '-r', '-z', '--full-tree', sha)
+            entries = {}
+            for entry in raw.split(b'\0'):
+                if not entry:
+                    continue
+                metadata, path = entry.split(b'\t', 1)
+                if path in entries:
+                    raise ValueError('duplicate Space Git tree path')
+                entries[path] = metadata
+            return raw, entries
+        before_raw, before = tree(expected_revision)
+        after_raw, after = tree(successor)
+        path = test_path.encode('utf8')
+        changed = {key for key in before.keys() | after.keys() if before.get(key) != after.get(key)}
+        if changed != {path} or path not in before or path not in after:
+            raise ValueError('Space successor changes paths outside the exact reviewed file')
+        old_mode, old_type, old_blob = before[path].split()
+        new_mode, new_type, new_blob = after[path].split()
+        if (old_mode != new_mode or old_mode not in {b'100644', b'100755'}
+                or old_type != b'blob' or new_type != b'blob' or old_blob == new_blob):
+            raise ValueError('reviewed Space file must remain a regular file with unchanged mode')
+        return {'expected_revision': expected_revision, 'successor': successor, 'reviewed_test_path': test_path,
+                'single_parent': expected_revision, 'before_tree_sha256': hashlib.sha256(before_raw).hexdigest(),
+                'after_tree_sha256': hashlib.sha256(after_raw).hexdigest(),
+                'before_blob': old_blob.decode('ascii'), 'after_blob': new_blob.decode('ascii'),
+                'mode': old_mode.decode('ascii')}
+
+
+def reconcile(store, *, api, hub, get, operation_id: str,
+              reviewed_successor=None, reviewed_test_path=None) -> dict:
     current = tx.load(store)
     pending = current.record['pending'] if current is not None else None
     if (current is None or not isinstance(pending, dict) or pending.get('site') != 'space'
@@ -120,6 +186,15 @@ def reconcile(store, *, api, hub, get, operation_id: str) -> dict:
     tx.audit_history(store, current)
     if store.read_pointer() != search_parent_bytes(current):
         raise ValueError('search desired pointer changed before Space reconciliation')
+    expected_revision = pending['expected_revision']
+    witness = None
+    if reviewed_successor is not None or reviewed_test_path is not None:
+        if pending['operation'] != 'apply' or not pending.get('write_claim'):
+            raise ValueError('reviewed successor requires a consumed Space apply claim')
+        witness = verify_reviewed_successor(expected_revision=expected_revision,
+                                            successor=reviewed_successor, test_path=reviewed_test_path)
+        expected_revision = reviewed_successor
+        deploy.runtime(api, expected_sha=expected_revision)
     configured, updated = deploy.variable(api)
     source = pending['config_before']['generation']
     target = current.record['parent_pointer']['desired'] if pending['operation'] == 'rollback' else current.record['candidate']
@@ -135,9 +210,9 @@ def reconcile(store, *, api, hub, get, operation_id: str) -> dict:
     if state.stage == 'RUNNING_BUILDING':
         return {'kind': 'search-space-observation', 'operation': operation_id, 'status': 'building',
                 'journal_advanced': False, 'external_writers_verified': False}
-    if state.stage != 'RUNNING' or not isinstance(state.raw, dict) or state.raw.get('sha') != pending['expected_revision']:
+    if state.stage != 'RUNNING' or not isinstance(state.raw, dict) or state.raw.get('sha') != expected_revision:
         raise ValueError('Space runtime is unavailable or running an unexpected revision')
-    deploy.runtime(api, expected_sha=pending['expected_revision'])
+    deploy.runtime(api, expected_sha=expected_revision)
     manifest = adoption.validate_generation(hub, target)
     actual = receipts.observe('space', target, manifest, get=get)
     if store.read_pointer() != search_parent_bytes(current):
@@ -145,7 +220,11 @@ def reconcile(store, *, api, hub, get, operation_id: str) -> dict:
     configured_after, updated_after = deploy.variable(api)
     if (configured_after, updated_after) != (configured, updated):
         raise ValueError('Space configuration changed during reconciliation')
-    deploy.runtime(api, expected_sha=pending['expected_revision'])
+    deploy.runtime(api, expected_sha=expected_revision)
+    if witness is not None:
+        evidence = json.loads(actual)
+        evidence['details']['reviewed_space_successor'] = witness
+        actual = search_snapshot.canonical(evidence)
     result = tx.observe_site(store, current, site='space', generation=target, receipt=actual)
     status = 'parent-loaded' if pending['operation'] == 'rollback' else 'candidate-loaded'
     return {'kind': 'search-space-observation', 'operation': operation_id, 'status': status,

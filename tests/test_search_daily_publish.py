@@ -5,6 +5,7 @@ live HF/GitHub/S3 semantics, writer isolation, or production-scale timing.
 """
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -364,6 +365,109 @@ class DailyPublishTests(unittest.TestCase):
         self.assertEqual(output[-1]['state'], 'complete')
         self.assertEqual(output[-1]['transaction'], transaction)
         self.assertEqual(self.remote.calls, ['space-write', 'pages-dispatch', 'default-write'])
+
+    def successor_repo(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        def git(*args):
+            return subprocess.check_output(['git', '-C', str(root), *args], stderr=subprocess.PIPE).decode().strip()
+        git('init', '--quiet')
+        git('config', 'user.name', 'Offline Test')
+        git('config', 'user.email', 'test@example.invalid')
+        path = 'tests/reader/browser/test_reader_refactor.py'
+        target = root / path
+        target.parent.mkdir(parents=True)
+        target.write_text('assert True\n')
+        (root / 'app.py').write_text('print("app")\n')
+        git('add', '.')
+        git('commit', '--quiet', '-m', 'parent')
+        old = git('rev-parse', 'HEAD')
+        target.write_text('assert 1 == 1\n')
+        git('commit', '--quiet', '-am', 'reviewed test edit')
+        new = git('rev-parse', 'HEAD')
+        return root, git, old, new, path
+
+    def test_reviewed_successor_resume_verifies_git_and_preserves_original_claim(self):
+        root, git, old, new, path = self.successor_repo()
+        self.remote.space_sha = self.remote.runtime_sha = old
+        with patch(__name__ + '.SPACE_SHA', old), patch.object(subject.space, 'SPACE_GIT_URL', str(root)):
+            interrupted = self.interrupt_space_starting()
+            self.remote.stages = []
+            self.remote.space_sha = self.remote.runtime_sha = new
+            result = self.run_publish(resume_transaction=interrupted.record['transition'],
+                                      reviewed_space_successor=new, reviewed_space_test_path=path)
+        self.assertEqual(result['state'], 'complete')
+        self.assertEqual(self.remote.calls, ['space-write', 'pages-dispatch', 'default-write'])
+        records = [json.loads(raw) for raw in self.store.records.values()]
+        claims = [r['pending'] for r in records if r['transition'] == result['transaction'] and r['pending']
+                  and r['pending']['site'] == 'space' and r['pending'].get('write_claim')]
+        self.assertEqual(claims, [interrupted.record['pending']])
+        witnesses = [json.loads(raw)['details']['reviewed_space_successor'] for raw in self.store.receipts.values()
+                     if 'reviewed_space_successor' in json.loads(raw).get('details', {})]
+        self.assertEqual(len(witnesses), 1)
+        self.assertEqual(witnesses[0]['expected_revision'], old)
+        self.assertEqual(witnesses[0]['successor'], new)
+        self.assertEqual(witnesses[0]['reviewed_test_path'], path)
+
+    def test_successor_verifier_rejects_unreviewed_paths_modes_and_non_direct_parent(self):
+        root, git, old, new, path = self.successor_repo()
+        with patch.object(subject.space, 'SPACE_GIT_URL', str(root)):
+            for bad in ('tests/*.py', 'app.py', 'tests/../app.py', ''):
+                with self.subTest(path=bad), self.assertRaises(ValueError):
+                    subject.space.verify_reviewed_successor(expected_revision=old, successor=new, test_path=bad)
+            (root / 'app.py').write_text('print("changed")\n')
+            git('commit', '--quiet', '-am', 'runtime change')
+            runtime_change = git('rev-parse', 'HEAD')
+            with self.assertRaisesRegex(ValueError, 'single-parent successor'):
+                subject.space.verify_reviewed_successor(expected_revision=old, successor=runtime_change, test_path=path)
+            with self.assertRaisesRegex(ValueError, 'outside the exact reviewed file'):
+                subject.space.verify_reviewed_successor(expected_revision=new, successor=runtime_change, test_path=path)
+            git('reset', '--hard', new)
+            git('update-index', '--chmod=+x', path)
+            git('commit', '--quiet', '-m', 'mode change')
+            mode_change = git('rev-parse', 'HEAD')
+            with self.assertRaisesRegex(ValueError, 'unchanged mode'):
+                subject.space.verify_reviewed_successor(expected_revision=new, successor=mode_change, test_path=path)
+
+    def test_successor_verifier_rejects_merge_even_with_only_reviewed_tree_change(self):
+        root, git, old, new, path = self.successor_repo()
+        merge = git('commit-tree', git('rev-parse', new + '^{tree}'), '-p', old, '-p', new, '-m', 'merge')
+        with patch.object(subject.space, 'SPACE_GIT_URL', str(root)), \
+                self.assertRaisesRegex(ValueError, 'single-parent successor'):
+            subject.space.verify_reviewed_successor(expected_revision=old, successor=merge, test_path=path)
+
+    def test_reviewed_successor_drift_during_consumer_observation_keeps_claim_pending(self):
+        root, git, old, new, path = self.successor_repo()
+        self.remote.space_sha = self.remote.runtime_sha = old
+        with patch(__name__ + '.SPACE_SHA', old), patch.object(subject.space, 'SPACE_GIT_URL', str(root)):
+            interrupted = self.interrupt_space_starting()
+            self.remote.stages = []
+            self.remote.space_sha = self.remote.runtime_sha = new
+            original = self.remote.public_get
+            def get(url, limit):
+                result = original(url, limit)
+                if url.endswith('/api/search-data-generation'):
+                    self.remote.space_sha = self.remote.runtime_sha = 'f' * 40
+                return result
+            with self.assertRaisesRegex(ValueError, 'revision differs'):
+                self.run_publish(resume_transaction=interrupted.record['transition'],
+                                 reviewed_space_successor=new, reviewed_space_test_path=path, get=get)
+        self.assertEqual(tx.load(self.store), interrupted)
+        self.assertEqual(self.remote.calls, ['space-write'])
+
+    def test_reviewed_successor_requires_resume_and_current_exact_runtime(self):
+        root, git, old, new, path = self.successor_repo()
+        with self.assertRaisesRegex(ValueError, 'require explicit resume'):
+            self.run_publish(reviewed_space_successor=new, reviewed_space_test_path=path)
+        self.remote.space_sha = self.remote.runtime_sha = old
+        with patch(__name__ + '.SPACE_SHA', old), patch.object(subject.space, 'SPACE_GIT_URL', str(root)):
+            interrupted = self.interrupt_space_starting()
+            with self.assertRaisesRegex(ValueError, 'repository differs'):
+                self.run_publish(resume_transaction=interrupted.record['transition'],
+                                 reviewed_space_successor=new, reviewed_space_test_path=path)
+        self.assertEqual(tx.load(self.store), interrupted)
+        self.assertEqual(self.remote.calls, ['space-write'])
 
     def test_resume_rejects_source_drift_before_reconciliation(self):
         interrupted = self.interrupt_space_starting()
