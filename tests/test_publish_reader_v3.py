@@ -176,7 +176,7 @@ class V3PublicationTests(unittest.TestCase):
         self.assertFalse(workflow[True]["workflow_dispatch"]["inputs"]["apply"]["default"])
         self.assertEqual(workflow[True]["workflow_dispatch"]["inputs"]["operation"]["options"],
                          ["inspect", "unify", "ack", "retire", "withdraw", "reset-documents",
-                          "remove-route", "restore-route", "verify-route", "migrate-derived", "resume-derived", "redirect-derived", "reconcile-derived-index", "reconcile-sidecar", "compact-legacy-history", "publish-generation", "verify-generation"])
+                          "remove-route", "restore-route", "verify-route", "migrate-derived", "resume-derived", "redirect-derived", "finalize-derived-redirects", "reconcile-derived-index", "reconcile-sidecar", "compact-legacy-history", "publish-generation", "verify-generation"])
         operation_step = next(step for step in workflow["jobs"]["publish"]["steps"]
                               if step.get("id") == "operation")
         # Detached OCR admission and correction are retired; retention remains
@@ -264,6 +264,123 @@ class V3PublicationTests(unittest.TestCase):
 
 
 
+
+
+class AcknowledgeAllTests(unittest.TestCase):
+    def setUp(self):
+        self.store = Store()
+        self.pointer = self.advance("first.epub")
+        self.store.writes.clear()
+
+    def advance(self, path):
+        base = {"v": 1, "f": {"book": {"s": 2, "m": "e", "p": path}}}
+        self.store.put_bytes(publish.ASSETS, "reader-index/reader_assets.json.gz",
+                             gzip.compress(publish.encode(base), mtime=0))
+        return publish.unify(self.store, apply=True)["pointer"]
+
+    def receipt(self, store, surface, client):
+        pointer, catalog = publish.current(store)
+        return {"version": 1, "surface": surface, "active": True,
+                "generation": pointer["generation"], "catalog_sha256": pointer["catalog"]["sha256"],
+                "files": len(catalog["files"]), "projection_verified": True,
+                "checked_url": "https://example.test/status"}
+
+    def history(self, pointer):
+        return json.loads(self.store.read_bytes(
+            publish.ASSETS, f"reader-index/v3/promotions/{pointer['generation']}.json"))
+
+    def test_both_consumers_acknowledge_one_generation_with_or_without_expected(self):
+        for expected in (None, self.pointer["generation"]):
+            with self.subTest(expected=expected), patch.object(
+                    publish, "observe_consumer", side_effect=self.receipt):
+                report = publish.acknowledge_all(
+                    self.store, None, apply=True, timeout_seconds=0, expected_generation=expected)
+            self.assertTrue(report["complete"])
+            self.assertEqual(report["pending"], [])
+            self.assertEqual(report["generation"], self.pointer["generation"])
+            self.assertEqual({result["generation"] for result in report["consumers"].values()},
+                             {self.pointer["generation"]})
+            self.assertEqual(self.history(self.pointer)["acks"], {"hf": True, "pages": True})
+
+    def test_pointer_advanced_before_acknowledgment_rejects_expected_generation(self):
+        self.advance("second.epub")
+        self.store.writes.clear()
+        with patch.object(publish, "observe_consumer") as observe:
+            with self.assertRaisesRegex(ValueError, "changed before acknowledgment"):
+                publish.acknowledge_all(self.store, None, apply=True,
+                                        expected_generation=self.pointer["generation"])
+        observe.assert_not_called()
+        self.assertEqual(self.store.writes, [])
+
+    def test_pointer_advance_between_or_after_consumers_aborts(self):
+        for advance_after in ("hf", "pages"):
+            for explicit in (False, True):
+                with self.subTest(advance_after=advance_after, explicit=explicit):
+                    self.store = Store()
+                    self.pointer = self.advance("first.epub")
+                    acknowledge = publish.acknowledge
+                    advanced = []
+
+                    def ack(store, surface, receipt, *, apply=False):
+                        result = acknowledge(store, surface, receipt, apply=apply)
+                        if surface == advance_after:
+                            advanced.append(self.advance("second.epub"))
+                        return result
+
+                    with patch.object(publish, "observe_consumer", side_effect=self.receipt) as observe, \
+                            patch.object(publish, "acknowledge", side_effect=ack):
+                        with self.assertRaisesRegex(ValueError, "changed during acknowledgment"):
+                            publish.acknowledge_all(
+                                self.store, None, apply=True, timeout_seconds=0,
+                                expected_generation=self.pointer["generation"] if explicit else None)
+                    self.assertEqual(observe.call_count, 1 if advance_after == "hf" else 2)
+                    self.assertEqual(self.history(advanced[0])["acks"], {"hf": False, "pages": False})
+
+    def test_pointer_advance_during_observation_prevents_acknowledgment(self):
+        def observe(store, surface, client):
+            receipt = self.receipt(store, surface, client)
+            self.advance("second.epub")
+            return receipt
+
+        with patch.object(publish, "observe_consumer", side_effect=observe), \
+                patch.object(publish, "acknowledge") as ack:
+            with self.assertRaisesRegex(ValueError, "changed during acknowledgment"):
+                publish.acknowledge_all(self.store, None, apply=True, timeout_seconds=0)
+        ack.assert_not_called()
+        self.assertEqual(self.history(self.pointer)["acks"], {"hf": False, "pages": False})
+
+    def test_wrong_consumer_generation_remains_pending_without_writes(self):
+        def observe(store, surface, client):
+            return {**self.receipt(store, surface, client), "generation": "f" * 64}
+
+        with patch.object(publish, "observe_consumer", side_effect=observe):
+            report = publish.acknowledge_all(self.store, None, apply=True, timeout_seconds=0)
+        self.assertFalse(report["complete"])
+        self.assertEqual(report["pending"], ["hf", "pages"])
+        self.assertEqual(report["reason"], "consumer-projection-timeout")
+        self.assertEqual(self.store.writes, [])
+
+    def test_no_current_generation_preserves_report_unless_expected(self):
+        store = Store()
+        report = publish.acknowledge_all(store, None, timeout_seconds=0)
+        self.assertFalse(report["complete"])
+        self.assertEqual(report["reason"], "no-current-generation")
+        with self.assertRaisesRegex(ValueError, "changed before acknowledgment"):
+            publish.acknowledge_all(store, None, expected_generation=self.pointer["generation"])
+
+    def test_cli_passes_optional_expected_parent_to_acknowledge_all(self):
+        for expected in (None, self.pointer["generation"]):
+            argv = ["publish_reader_v3.py", "ack-all", "--apply"]
+            if expected is not None:
+                argv.extend(["--expected-parent", expected])
+            with self.subTest(expected=expected), patch("sys.argv", argv), \
+                    patch.object(publish, "CentralHubStore", return_value=self.store), \
+                    patch("httpx.Client") as client, \
+                    patch.object(publish, "acknowledge_all", return_value={}) as ack, \
+                    patch("builtins.print"):
+                publish.main()
+            ack.assert_called_once_with(self.store, client.return_value.__enter__.return_value,
+                                        apply=True, expected_generation=expected)
 
 
 if __name__ == "__main__":

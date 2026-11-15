@@ -701,28 +701,47 @@ def compact_legacy_catalog(store, *, apply=False, grace_days=0):
 
 
 def acknowledge_all(store, client, *, apply=False, timeout_seconds=1200,
-                    sleep_fn=time.sleep, clock=time.monotonic):
-    """Acknowledge both consumers without turning propagation lag into a publish failure."""
+                    sleep_fn=time.sleep, clock=time.monotonic, expected_generation=None):
+    """Acknowledge both consumers on one generation while tolerating propagation lag."""
     import httpx
 
     pending = {"hf", "pages"}
     report = {"applied": apply, "complete": False, "consumers": {},
               "pending": sorted(pending), "timeout_seconds": timeout_seconds}
-    if current(store)[0] is None:
+    pointer, _ = current(store)
+    if expected_generation is not None:
+        expected_generation = text.sha(expected_generation)
+        if not pointer or pointer["generation"] != expected_generation:
+            raise ValueError("v3 generation changed before acknowledgment")
+    if pointer is None:
         report["reason"] = "no-current-generation"
         return report
+    expected_generation = pointer["generation"]
+    report["generation"] = expected_generation
+
+    def check_pointer():
+        if current(store)[0] != pointer:
+            raise ValueError("v3 generation changed during acknowledgment")
 
     errors = {}
     deadline = clock() + timeout_seconds
     while pending:
         for surface in sorted(pending):
+            check_pointer()
             try:
                 receipt = observe_consumer(store, surface, client)
-                report["consumers"][surface] = acknowledge(store, surface, receipt, apply=apply)
+                if receipt.get("generation") != expected_generation:
+                    raise ValueError("unexpected consumer generation")
+                check_pointer()
+                result = acknowledge(store, surface, receipt, apply=apply)
+                if result.get("generation") != expected_generation:
+                    raise ValueError("unexpected acknowledged generation")
+                report["consumers"][surface] = result
                 pending.remove(surface)
                 errors.pop(surface, None)
             except (ValueError, httpx.HTTPError) as error:
                 errors[surface] = type(error).__name__
+            check_pointer()
         if not pending:
             break
         remaining = deadline - clock()
@@ -730,6 +749,7 @@ def acknowledge_all(store, client, *, apply=False, timeout_seconds=1200,
             break
         sleep_fn(min(20, remaining))
 
+    check_pointer()
     report["pending"] = sorted(pending)
     report["complete"] = not pending
     if pending:
@@ -807,7 +827,7 @@ def main():
     parser.add_argument("command", choices=("withdraw", "ack", "ack-all", "acknowledge-legacy",
                                             "compact-legacy", "inspect", "project", "retire",
                                             "unify", "reset-documents", "remove-route", "restore-route", "verify-route",
-                                            "migrate-derived", "resume-derived", "redirect-derived", "reconcile-derived-index", "reconcile-sidecar", "compact-legacy-history", "publish-generation", "verify-generation", "check-page-window"))
+                                            "migrate-derived", "resume-derived", "redirect-derived", "finalize-derived-redirects", "reconcile-derived-index", "reconcile-sidecar", "compact-legacy-history", "publish-generation", "verify-generation", "check-page-window"))
     parser.add_argument("--resource-json")
     parser.add_argument("--expected-parent", default="none")
     parser.add_argument("--apply", action="store_true")
@@ -885,6 +905,28 @@ def main():
         plan = redirect.prepare(store, api, expected_index=options['index_sha256'],
                                 expected_sidecar=options['sidecar_sha256'], expected_v3=options['v3_generation'])
         report = redirect.apply(store, api, plan) if args.apply else redirect.report(plan, applied=False)
+    elif args.command == 'finalize-derived-redirects':
+        try:
+            from . import reader_page_redirect_retirement as finalize
+            from .reader_page_cas import ConditionalPageStore
+        except ImportError:
+            import reader_page_redirect_retirement as finalize
+            from reader_page_cas import ConditionalPageStore
+        from huggingface_hub import HfApi
+        options = json.loads(args.resource_json or '{}')
+        identities = {'index_sha256', 'sidecar_sha256', 'catalog_sha256', 'v3_generation'}
+        if not isinstance(options, dict) or set(options) != identities:
+            raise ValueError('finalize-derived-redirects requires exact canonical and v3 identities')
+        if args.apply:
+            assert_writer(store)
+            store = ConditionalPageStore(store)
+            store.preflight()
+        api = HfApi(token=os.environ.get('HF_TOKEN'))
+        plan = finalize.prepare(store, api, expected_index=options['index_sha256'],
+                                expected_sidecar=options['sidecar_sha256'],
+                                expected_catalog=options['catalog_sha256'],
+                                expected_generation=options['v3_generation'])
+        report = finalize.apply(store, api, plan) if args.apply else finalize.report(plan, applied=False)
     elif args.command == 'reconcile-derived-index':
         try:
             from . import reader_page_reconcile as reconcile
@@ -1080,7 +1122,9 @@ def main():
     elif args.command == "ack-all":
         import httpx
         with httpx.Client(timeout=30, follow_redirects=True) as client:
-            report = acknowledge_all(store, client, apply=args.apply)
+            report = acknowledge_all(
+                store, client, apply=args.apply,
+                expected_generation=None if args.expected_parent == "none" else text.sha(args.expected_parent))
     elif args.command == "acknowledge-legacy":
         report = record_legacy_acknowledgments(store, apply=args.apply)
     elif args.command == "compact-legacy":
