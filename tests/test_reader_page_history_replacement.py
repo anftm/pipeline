@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from scripts import publish_reader_v3 as publication, reader_page_audit as audit
 from scripts import reader_page_history_replacement as replacement
+from scripts import reader_page_history_inventory as inventory, reader_page_migrate as migration
 from scripts import reader_page_redirects as redirects, reader_page_redirect_retirement as finalization
 from tests.test_reader_page_audit import fixture, KEY, OLD, NEW
 from tests.test_reader_page_atomic import AtomicStore
@@ -24,6 +25,10 @@ class HistoryReplacementTests(unittest.TestCase):
         for path, raw in manifests.items():
             self.store.objects[audit.BUCKET, path] = raw
         self.paths = []
+        self.store.list_files = lambda bucket, prefixes: [
+            path for b, path in self.store.objects if b == bucket and path.startswith(prefixes)]
+        self.store.objects[audit.ASSETS, migration.CATALOG] = publication.encode({
+            'version': 1, 'kind': 'reader-catalog', 'current': None, 'generations': {}})
 
     def history(self, base=None, **fields):
         base = copy.deepcopy(self.base if base is None else base)
@@ -167,7 +172,7 @@ class HistoryReplacementTests(unittest.TestCase):
         self.assertEqual(self.store.objects, before)
         self.assertEqual(self.store.writes, [])
 
-    def test_existing_rollback_target_rejects_without_losing_prior_history(self):
+    def test_existing_rollback_target_is_preserved_without_losing_prior_history(self):
         for target in ('a' * 64, None):
             for rewritten in (False, True):
                 with self.subTest(target=target, rewritten=rewritten):
@@ -176,8 +181,14 @@ class HistoryReplacementTests(unittest.TestCase):
                     catalog, _ = self.history(base, rollback_target=target)
                     self.assertNotEqual(catalog['generation'], target)
                     before = copy.deepcopy(self.store.objects)
-                    with self.assertRaisesRegex(ValueError, 'existing rollback_target'):
-                        self.prepare()
+                    plan = self.prepare()
+                    if rewritten:
+                        self.assertEqual(plan['replacements'], [])
+                    else:
+                        item = plan['replacements'][0]
+                        self.assertEqual(item['catalog']['rollback_target'], target)
+                        self.assertEqual(item['rollback_target'], target)
+                        self.assertEqual(item['old_generation'], catalog['generation'])
                     self.assertEqual(self.store.objects, before)
                     self.assertEqual(self.store.writes, [])
 
@@ -202,27 +213,178 @@ class HistoryReplacementTests(unittest.TestCase):
         alias_path = 'reader-index/v3/retirement.json'
         self.store.objects[audit.ASSETS, alias_path] = b'not inspected by this planner'
         before = copy.deepcopy(self.store.objects)
-        for explicit in (False, True):
-            for paths in (self.paths, []):
-                with self.subTest(explicit=explicit, paths=paths), \
-                        patch.object(self.store, 'list_files', create=True, return_value=paths) as listing, \
-                        patch.object(self.store, 'read_bytes', wraps=self.store.read_bytes) as read:
-                    plan = replacement.prepare(self.store, {OLD: NEW},
-                        promotion_paths=paths if explicit else None)
-                    self.assertEqual(plan['discovery_scope'], 'promotion-records-only')
-                    self.assertEqual(plan['discovery_mode'], 'explicit' if explicit else 'listed')
-                    self.assertFalse(plan['history_inventory_complete'])
-                    self.assertEqual(plan['unsupported_alias_inventory'],
-                                     {'retirement_aliases': 'not-inspected'})
-                    self.assertFalse(plan['apply_allowed'])
-                    self.assertFalse(plan['applied'])
-                    self.assertFalse(plan['deletion_authorized'])
-                    if explicit:
-                        listing.assert_not_called()
-                    else:
-                        listing.assert_called_once_with(audit.ASSETS, (replacement.PROMOTIONS,))
-                    self.assertNotIn((audit.ASSETS, alias_path), [call.args for call in read.call_args_list])
+        for paths in (self.paths, []):
+            with self.subTest(paths=paths), \
+                    patch.object(self.store, 'list_files') as listing, \
+                    patch.object(self.store, 'read_bytes', wraps=self.store.read_bytes) as read:
+                plan = replacement.prepare(self.store, {OLD: NEW}, promotion_paths=paths)
+                self.assertEqual(plan['discovery_scope'], 'promotion-records-only')
+                self.assertEqual(plan['discovery_mode'], 'explicit')
+                self.assertFalse(plan['history_inventory_complete'])
+                self.assertEqual(plan['unsupported_alias_inventory'],
+                                 {'retirement_aliases': 'not-inspected'})
+                self.assertIsNone(plan['rollback_replacements'])
+                self.assertFalse(plan['apply_allowed'])
+                self.assertFalse(plan['applied'])
+                self.assertFalse(plan['deletion_authorized'])
+                listing.assert_not_called()
+                self.assertNotIn((audit.ASSETS, alias_path), [call.args for call in read.call_args_list])
+        with self.assertRaisesRegex(ValueError, 'not scope complete'):
+            replacement.prepare(self.store, {OLD: NEW})
         self.assertEqual(self.store.objects, before)
+        self.assertEqual(self.store.writes, [])
+
+    def retirement(self, aliases, retired=()):
+        raw = publication.encode({'version': 1, 'kind': 'reader-v3-retirement',
+            'resources': [], 'retired_paths': list(retired), 'rollback_replacements': aliases})
+        self.store.objects[audit.ASSETS, inventory.RETIREMENT] = raw
+        return publication.metadata(audit.ASSETS, inventory.RETIREMENT, raw)
+
+    def composed_history(self, *, retired=True):
+        base = copy.deepcopy(self.base)
+        base['f']['VoiceOfML/Test\0unsafe.chm'] = {'s': 2, 'b': audit.ASSETS, 'p': 'chm/unsafe/index.html'}
+        base['f']['safe.epub'] = {'s': 2, 'b': audit.ASSETS, 'p': 'epub/keep/index.html'}
+        original, promotion = self.history(base)
+        sanitized = copy.deepcopy(base)
+        del sanitized['f']['VoiceOfML/Test\0unsafe.chm']
+        chm, chm_promotion = self.history(sanitized, rollback_target=original['generation'],
+            suppressed_sources=['VoiceOfML/Test\0unsafe.chm'])
+        # This CHM replacement exists solely through the retirement alias.
+        del self.store.objects[audit.ASSETS, self.paths.pop()]
+        journal = self.retirement({original['generation']: chm_promotion['resources'][0]},
+            [promotion['resources'][0]['path']] if retired else [])
+        return original, chm, journal
+
+    def test_composed_chm_pdf_alias_preserves_original_target_and_non_pdf_routes(self):
+        original, chm, journal = self.composed_history()
+        before = copy.deepcopy(self.store.objects)
+        plan = replacement.prepare(self.store, {OLD: NEW})
+        self.assertEqual(plan, replacement.prepare(self.store, {OLD: NEW}))
+        self.assertTrue(plan['history_inventory_complete'])
+        self.assertIn(journal, plan['evidence_resources'])
+        items = {item['old_generation']: item for item in plan['replacements']}
+        composed = items[chm['generation']]
+        self.assertIsNone(composed['old_promotion'])
+        self.assertEqual(composed['old_generation'], chm['generation'])
+        self.assertEqual(composed['rollback_target'], original['generation'])
+        self.assertEqual(composed['catalog']['rollback_target'], original['generation'])
+        self.assertEqual(composed['catalog']['suppressed_sources'], ['VoiceOfML/Test\0unsafe.chm'])
+        base = audit.decode_sidecar(composed['packed'])
+        self.assertNotIn('VoiceOfML/Test\0unsafe.chm', base['f'])
+        self.assertEqual(base['f']['safe.epub'],
+                         {'s': 2, 'b': audit.ASSETS, 'p': 'epub/keep/index.html'})
+        self.assertEqual(base['f'][KEY]['p'], NEW)
+        self.assertEqual(plan['rollback_replacements'],
+                         {original['generation']: composed['catalog_ref']})
+        old = items[original['generation']]
+        self.assertFalse(old['candidate_required'])
+        self.assertEqual(old['alias_action'], 'unnecessary-retired-original')
+        self.assertTrue(composed['candidate_required'])
+        self.assertEqual({d['action'] for d in plan['alias_decisions']},
+                         {'replace-existing-target', 'unnecessary-retired-original'})
+        for flag in ('graph_complete', 'fully_unreferenced', 'apply_allowed', 'applied',
+                     'consumer_acks_created', 'deletion_authorized', 'objects_deleted'):
+            self.assertFalse(plan[flag])
+        self.assertEqual(self.store.objects, before)
+        self.assertEqual(self.store.writes, [])
+
+    def test_alias_only_discovery_does_not_invent_a_promotion(self):
+        original = 'a' * 64
+        chm, promotion = self.history(rollback_target=original)
+        del self.store.objects[audit.ASSETS, self.paths.pop()]
+        self.retirement({original: promotion['resources'][0]})
+        with patch.object(self.store, 'list_files', return_value=[]):
+            plan = replacement.prepare(self.store, {OLD: NEW})
+        self.assertTrue(plan['history_inventory_complete'])
+        self.assertEqual(len(plan['replacements']), 1)
+        item = plan['replacements'][0]
+        self.assertEqual(item['old_generation'], chm['generation'])
+        self.assertIsNone(item['old_promotion'])
+        self.assertFalse(any(ref['path'].startswith(replacement.PROMOTIONS)
+                             for ref in plan['evidence_resources']))
+        self.assertEqual(plan['rollback_replacements'][original], item['catalog_ref'])
+        self.assertEqual(self.store.writes, [])
+
+    def test_complete_inventory_includes_17_catalogs_5_aliases_excludes_current(self):
+        aliases, retired = {}, []
+        for i in range(11):
+            original, promotion = self.history(metadata={'edition': i})
+            if i < 5:
+                _, chm_promotion = self.history(rollback_target=original['generation'],
+                    metadata={'edition': i, 'chm_sanitized': True})
+                del self.store.objects[audit.ASSETS, self.paths.pop()]
+                aliases[original['generation']] = chm_promotion['resources'][0]
+                retired.append(promotion['resources'][0]['path'])
+        current, promotion = self.history(base={'v': 1, 'f': {}})
+        ref = promotion['resources'][0]
+        self.store.objects[audit.ASSETS, publication.POINTER] = publication.encode({
+            'version': 1, 'kind': 'reader-reading-pointer', 'generation': current['generation'],
+            'catalog': ref, 'resources': [ref]})
+        self.paths.pop()
+        journal = self.retirement(aliases, retired)
+        partial = self.prepare()
+        complete = replacement.prepare(self.store, {OLD: NEW})
+        self.assertEqual(len(partial['replacements']), 11)
+        self.assertFalse(partial['history_inventory_complete'])
+        self.assertEqual(len(complete['history_inventory']['histories']), 17)
+        self.assertEqual(len(complete['history_inventory']['aliases_needing_preserve']), 5)
+        self.assertEqual(len(complete['replacements']), 16)
+        self.assertEqual(sum(not r['candidate_required'] for r in complete['replacements']), 5)
+        self.assertNotIn(current['generation'], [r['old_generation'] for r in complete['replacements']])
+        self.assertIn(journal, complete['evidence_resources'])
+        self.assertEqual(self.store.writes, [])
+
+    def test_conflicting_alias_decisions_block(self):
+        self.composed_history(retired=False)
+        with self.assertRaisesRegex(ValueError, 'alias conflict: original is not retired'):
+            replacement.prepare(self.store, {OLD: NEW})
+        self.store.objects.pop((audit.ASSETS, inventory.RETIREMENT))
+        self.history(rollback_target='a' * 64, metadata={'variant': 1})
+        self.history(rollback_target='a' * 64, metadata={'variant': 2})
+        with self.assertRaisesRegex(ValueError, 'rollback alias conflict'):
+            replacement.prepare(self.store, {OLD: NEW})
+        self.assertEqual(self.store.writes, [])
+
+    def test_existing_clean_alias_is_preserved_over_retired_original_candidate(self):
+        original, promotion = self.history()
+        clean, _ = redirects.rewrite(self.base, {OLD: NEW})
+        _, sanitized_promotion = self.history(clean, rollback_target=original['generation'])
+        del self.store.objects[audit.ASSETS, self.paths.pop()]
+        ref = sanitized_promotion['resources'][0]
+        self.retirement({original['generation']: ref}, [promotion['resources'][0]['path']])
+        plan = replacement.prepare(self.store, {OLD: NEW})
+        self.assertEqual(len(plan['replacements']), 1)
+        self.assertFalse(plan['replacements'][0]['candidate_required'])
+        self.assertEqual(plan['rollback_replacements'], {original['generation']: ref})
+        self.assertEqual(plan['alias_decisions'][0]['action'], 'preserve-existing-target')
+        self.assertEqual(self.store.writes, [])
+
+    def test_retirement_root_change_or_creation_during_candidates_blocks(self):
+        for present in (False, True):
+            with self.subTest(present=present):
+                self.store.objects.pop((audit.ASSETS, inventory.RETIREMENT), None)
+                self.history()
+                if present:
+                    self.retirement({})
+                available = replacement._available
+                def changed(*args):
+                    available(*args)
+                    self.retirement({}, ['newly-retired-path'])
+                with patch.object(replacement, '_available', side_effect=changed):
+                    with self.assertRaisesRegex(ValueError, 'evidence changed'):
+                        replacement.prepare(self.store, {OLD: NEW})
+        self.assertEqual(self.store.writes, [])
+
+    def test_retirement_evidence_change_after_inventory_blocks(self):
+        self.composed_history()
+        scan = inventory.inventory
+        def changed(*args):
+            report = scan(*args)
+            self.store.objects[audit.ASSETS, inventory.RETIREMENT] += b' '
+            return report
+        with patch.object(inventory, 'inventory', side_effect=changed):
+            with self.assertRaisesRegex(ValueError, 'checksum mismatch|evidence changed'):
+                replacement.prepare(self.store, {OLD: NEW})
         self.assertEqual(self.store.writes, [])
 
     def test_wrong_bucket_and_unsupported_selected_bundle_references_reject(self):
@@ -345,8 +507,7 @@ class HistoryReplacementTests(unittest.TestCase):
             'catalog': ref, 'resources': [ref]})
         with self.assertRaisesRegex(ValueError, 'current generation'):
             self.prepare()
-        with patch.object(self.store, 'list_files', create=True, return_value=self.paths):
-            self.assertEqual(replacement.prepare(self.store, {OLD: NEW})['replacements'], [])
+        self.assertEqual(replacement.prepare(self.store, {OLD: NEW})['replacements'], [])
         self.assertEqual(self.store.writes, [])
 
     def test_full_projection_metadata_drift_rejects(self):
