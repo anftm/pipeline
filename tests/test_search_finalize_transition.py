@@ -87,18 +87,66 @@ class FinalizeTests(unittest.TestCase):
         self.session.patch.return_value.status_code = 204
         with patch.object(subject.pages, 'assert_idle'), \
                 patch.object(subject.defaults, 'observe_pages', side_effect=[default_receipt('pages', A), default_receipt('pages', A),
-                                                                            default_receipt('pages', B), default_receipt('pages', B),
-                                                                            default_receipt('pages', B)]), \
+                                                                            default_receipt('pages', B), default_receipt('pages', B)]), \
                 patch.object(subject.defaults, 'observe_space', return_value=default_receipt('space', B)):
             current = subject.start_pages_default(self.store, session=self.session, expected_revision=REV,
                                                   operation='8' * 32, created_at=TIME)
             result = subject.set_pages_default(self.store, **self.common, operation='8' * 32)
             self.assertTrue(result['variable_written']); self.assertFalse(result['journal_advanced'])
+            self.assertFalse(result['loaded_verified'])
             self.assertEqual(self.session.patch.call_count, 1)
             current = subject.reconcile_pages_default(self.store, **self.common, operation='8' * 32)
             self.assertEqual(current.record['defaults']['pages']['generation'], B)
             current = subject.finish(self.store, **self.common)
         self.assertEqual(current.record['state'], 'complete')
+
+    def test_pages_default_204_requires_separate_candidate_reconciliation(self):
+        self.pointer_observed()
+        configured = A
+        reads = []
+        def get(url, **kwargs):
+            if url.endswith('/branches/main'):
+                return Mock(json=lambda: {'commit': {'sha': REV}})
+            self.assertTrue(url.endswith('/actions/variables/' + subject.VARIABLE))
+            reads.append(configured)
+            return Mock(json=lambda: {'name': subject.VARIABLE, 'value': configured})
+        self.session.get.side_effect = get
+        self.session.patch.return_value.status_code = 204
+        with patch.object(subject.pages, 'assert_idle'):
+            subject.start_pages_default(self.store, session=self.session, expected_revision=REV,
+                                        operation=OP, created_at=TIME)
+            result = subject.set_pages_default(self.store, **self.common, operation=OP)
+            self.assertFalse(result['loaded_verified'])
+            self.assertFalse(result['journal_advanced'])
+            self.assertEqual(reads, [A, A], 'only pre-write default observations belong to the write call')
+            claimed = subject.tx.load(self.store)
+            self.assertTrue(claimed.record['pending']['write_claim'])
+            for observed in (A, 'f' * 64):
+                configured = observed
+                with self.assertRaisesRegex(ValueError, 'configured search default does not match'):
+                    subject.reconcile_pages_default(self.store, **self.common, operation=OP)
+                self.assertEqual(subject.tx.load(self.store), claimed)
+            configured = B
+            accepted = subject.reconcile_pages_default(self.store, **self.common, operation=OP)
+        self.assertIsNone(accepted.record['pending'])
+        self.assertEqual(accepted.record['defaults']['pages']['generation'], B)
+        self.session.patch.assert_called_once()
+
+    def test_pages_default_prewrite_value_error_is_not_swallowed_or_claimed(self):
+        self.pointer_observed()
+        self.session.get.return_value.json.return_value = {'commit': {'sha': REV}}
+        with patch.object(subject.pages, 'assert_idle'), \
+                patch.object(subject.defaults, 'observe_pages', return_value=default_receipt('pages', A)):
+            subject.start_pages_default(self.store, session=self.session, expected_revision=REV,
+                                        operation=OP, created_at=TIME)
+        prepared = subject.tx.load(self.store)
+        with patch.object(subject.pages, 'assert_idle'), \
+                patch.object(subject.defaults, 'observe_pages', side_effect=ValueError('prewrite parent mismatch')), \
+                self.assertRaisesRegex(ValueError, 'prewrite parent mismatch'):
+            subject.set_pages_default(self.store, **self.common, operation=OP)
+        self.assertEqual(subject.tx.load(self.store), prepared)
+        self.assertIsNone(prepared.record['pending']['write_claim'])
+        self.session.patch.assert_not_called()
 
     def test_space_default_read_only_recovery_after_interruption(self):
         self.pointer_observed()

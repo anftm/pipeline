@@ -291,6 +291,40 @@ class DailyPublishTests(unittest.TestCase):
         self.assertEqual(self.remote.calls, ['space-write', 'pages-dispatch'])
         self.assertEqual(self.store.pointer_writes, 0)
 
+    def test_default_204_then_parent_then_candidate_waits_without_repatch(self):
+        original_get = self.remote.get
+        readbacks = []
+        def delayed_get(url, **kwargs):
+            if url.endswith('/actions/variables/' + subject.finalize.VARIABLE) and 'default-write' in self.remote.calls:
+                value = self.parent if len(readbacks) < 2 else self.candidate
+                readbacks.append(value)
+                return Response({'name': subject.finalize.VARIABLE, 'value': value})
+            return original_get(url, **kwargs)
+        self.remote.get = delayed_get
+        result = self.run_publish()
+        self.assertEqual(result['state'], 'complete')
+        self.assertEqual(readbacks[:3], [self.parent, self.parent, self.candidate])
+        self.assertEqual(self.elapsed, 10)
+        self.assertEqual(self.remote.calls.count('default-write'), 1)
+        self.assertEqual(sum(e.get('status') == 'pages-default-parent-visible' for e in self.events), 2)
+        self.assertEqual(result['journal']['generation'], self.candidate)
+
+    def test_default_204_then_foreign_readback_fails_without_wait_or_repatch(self):
+        original_get = self.remote.get
+        def foreign_get(url, **kwargs):
+            if url.endswith('/actions/variables/' + subject.finalize.VARIABLE) and 'default-write' in self.remote.calls:
+                return Response({'name': subject.finalize.VARIABLE, 'value': 'f' * 64})
+            return original_get(url, **kwargs)
+        self.remote.get = foreign_get
+        with self.assertRaisesRegex(ValueError, 'foreign generation'):
+            self.run_publish()
+        self.assertEqual(self.elapsed, 0)
+        self.assertEqual(self.remote.calls.count('default-write'), 1)
+        current = tx.load(self.store)
+        self.assertEqual(current.record['state'], 'pointer-observed')
+        self.assertTrue(current.record['pending']['write_claim'])
+        self.assertEqual(current.record['defaults']['pages']['generation'], self.parent)
+
     def test_default_remaining_parent_blocks_without_repatch(self):
         self.remote.loss = self.remote.no_effect = {'default'}
         with self.assertRaisesRegex(subject.Blocked, 'pages-default-parent-visible'):

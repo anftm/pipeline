@@ -143,9 +143,11 @@ def set_pages_default(store, *, session, api, hub, get, revision, operation: str
     response = session.patch(url, json={'name': VARIABLE, 'value': current.record['candidate']}, timeout=25)
     if response.status_code != 204:
         raise RuntimeError('Pages default update outcome is unconfirmed; inspect before recovery')
-    defaults.observe_pages(current.record['candidate'], session=session)
+    # A 204 confirms the request, not visibility of the new default. Readback
+    # belongs to reconciliation: an eventually consistent parent must not turn
+    # this consumed write into a failed candidate observation or another PATCH.
     return {'kind': 'search-pages-default-update', 'operation': operation, 'variable_written': True,
-            'journal_advanced': False, 'external_writers_verified': False}
+            'loaded_verified': False, 'journal_advanced': False, 'external_writers_verified': False}
 
 
 def reconcile_pages_default(store, *, session, api, hub, get, revision, operation: str) -> tx.Current:
