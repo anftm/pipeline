@@ -27,7 +27,7 @@ on:
 
 permissions:
   contents: read
-  actions: read
+  actions: write
 
 concurrency:
   group: reader-global-maintenance
@@ -41,6 +41,7 @@ jobs:
     timeout-minutes: 500
     env:
       READER_GC_DURABLE_MAINTENANCE: 'true'
+      GC_CENTRAL_TOKEN: ${{ github.token }}
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
       HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
       HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}

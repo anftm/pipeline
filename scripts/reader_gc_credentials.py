@@ -14,6 +14,10 @@ OVERRIDE_VARIABLE = 'GC_AMBROSSEE_MAINTENANCE_TOKEN'
 
 
 def token_for(repo):
+    # The owner retired the other producer repositories. Central maintenance
+    # may use its scoped Actions token; never extend it to another repository.
+    if repo == 'anftm/pipeline' and os.environ.get('GC_CENTRAL_TOKEN'):
+        return os.environ['GC_CENTRAL_TOKEN']
     try:
         tokens = json.loads(os.environ.get('GC_PRODUCER_TOKENS_JSON', ''))
     except (TypeError, ValueError) as error:

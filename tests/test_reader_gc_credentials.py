@@ -12,6 +12,15 @@ class TokenSelectionTests(unittest.TestCase):
         self.env = {'GC_PRODUCER_TOKENS_JSON': json.dumps({self.target: 'old-target', 'other/repo': 'other-token'}),
                     credentials.OVERRIDE_VARIABLE: 'new-target'}
 
+    def test_central_token_never_authorizes_a_retired_repository(self):
+        with patch.dict('os.environ', {'GC_CENTRAL_TOKEN': 'central-only'}, clear=True):
+            self.assertEqual(credentials.token_for('anftm/pipeline'), 'central-only')
+            with self.assertRaises(RuntimeError):
+                credentials.token_for('other/repo')
+
+    def test_owner_confirmed_producer_inventory_is_central_only(self):
+        self.assertEqual(fence.producer_repositories(), ['anftm/pipeline'])
+
     def test_override_is_bound_to_only_one_repository(self):
         with patch.dict('os.environ', self.env, clear=True):
             self.assertEqual(credentials.token_for(self.target), 'new-target')
