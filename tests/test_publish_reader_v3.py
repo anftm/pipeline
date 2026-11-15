@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch, Mock
+from unittest.mock import patch, Mock, call
 
 import pymupdf
 from PIL import Image
@@ -381,6 +381,128 @@ class AcknowledgeAllTests(unittest.TestCase):
                 publish.main()
             ack.assert_called_once_with(self.store, client.return_value.__enter__.return_value,
                                         apply=True, expected_generation=expected)
+
+
+class ReplaceDerivedHistoryMainTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.output = Path(self.temp.name) / 'reports' / 'history.json'
+        self.store = Store()
+        self.generation = 'a' * 64
+        self.mapping = {'derived/repo/' + 'b' * 32 + '/document.pdf':
+                        'documents/pdf/repo/' + 'c' * 64 + '/document.pdf'}
+        self.argv = ['publish_reader_v3.py', 'replace-derived-history', '--apply',
+                     '--resource-json', json.dumps({'mapping': self.mapping,
+                                                   'v3_generation': self.generation}),
+                     '--expected-parent', 'd' * 64, '--output', str(self.output)]
+
+    def run_outcome(self, outcome):
+        from scripts import reader_page_history_publish as history
+        from scripts import reader_page_history_store as history_store
+
+        plan = {'reviewed': True}
+        report = {'kind': 'reader-derived-pdf-history-publish-result',
+                  'outcome': outcome, 'applied': outcome == 'applied', 'cas_attempts': 1,
+                  'current_ack_verified_generation': self.generation,
+                  'objects_deleted': False, 'deletion_authorized': False}
+        observations = [
+            {surface: {'generation': self.generation, 'surface': surface,
+                       'projection_verified': True, 'checked_at': phase}
+             for surface in ('hf', 'pages')}
+            for phase in ('prepare', 'apply')]
+        clients = [Mock(name='prepare_client'), Mock(name='apply_client')]
+        targets = [Mock(name='prepare_target'), Mock(name='apply_target')]
+        callbacks = []
+
+        def prepare(store, mapping, *, api, current_ack_verified_generation, observe_consumers):
+            callbacks.append(observe_consumers)
+            self.assertEqual(observe_consumers(targets[0], current_ack_verified_generation),
+                             observations[0])
+            return plan
+
+        def apply(store, reviewed, *, api, current_ack_verified_generation, observe_consumers):
+            self.assertIs(reviewed, plan)
+            self.assertIs(observe_consumers, callbacks[0])
+            self.assertEqual(observe_consumers(targets[1], current_ack_verified_generation),
+                             observations[1])
+            self.assertFalse(self.output.exists())
+            return report
+
+        with patch('sys.argv', self.argv), \
+                patch.object(publish, 'CentralHubStore', return_value=self.store) as central, \
+                patch.object(publish, 'assert_writer', wraps=publish.assert_writer) as writer, \
+                patch.object(history_store, 'ConditionalPageHistoryStore') as conditional, \
+                patch('huggingface_hub.HfApi') as api, patch('httpx.Client') as client, \
+                patch.object(publish, 'observe_consumer', side_effect=[
+                    receipts[surface] for receipts in observations for surface in ('hf', 'pages')]) as observe, \
+                patch.object(history, 'prepare', side_effect=prepare) as prepare_mock, \
+                patch.object(history, 'apply', side_effect=apply) as apply_mock, \
+                patch('builtins.print') as printed:
+            client.return_value.__enter__.side_effect = clients
+            if outcome == 'applied':
+                publish.main()
+            else:
+                with self.assertRaisesRegex(
+                        RuntimeError, 'history publication outcome requires inspection; do not retry'):
+                    try:
+                        publish.main()
+                    except RuntimeError:
+                        # The diagnostic must already be durable when main raises.
+                        self.assertEqual(json.loads(self.output.read_bytes()), report)
+                        raise
+            self.assertEqual(json.loads(self.output.read_bytes()), report)
+            central.assert_called_once_with()
+            writer.assert_called_once_with(self.store)
+            conditional.assert_called_once_with(self.store)
+            api.assert_called_once()
+            prepare_mock.assert_called_once_with(
+                conditional.return_value, self.mapping, api=api.return_value,
+                current_ack_verified_generation=self.generation, observe_consumers=callbacks[0])
+            apply_mock.assert_called_once_with(
+                conditional.return_value, plan, api=api.return_value,
+                current_ack_verified_generation=self.generation, observe_consumers=callbacks[0])
+            self.assertEqual(client.call_args_list,
+                             [call(timeout=60, follow_redirects=True)] * 2)
+            self.assertEqual(client.return_value.__exit__.call_count, 2)
+            self.assertEqual(observe.call_args_list, [
+                call(target, surface, active_client)
+                for target, active_client in zip(targets, clients) for surface in ('hf', 'pages')])
+            printed.assert_not_called()
+        self.assertEqual(self.store.writes, [])
+
+    def test_applied_forwards_options_and_observes_fresh_consumers_in_both_helpers(self):
+        self.run_outcome('applied')
+
+    def test_unknown_writes_report_before_raising_without_retry(self):
+        self.run_outcome('unknown')
+
+    def test_conflict_writes_report_before_raising_without_retry(self):
+        self.run_outcome('conflict')
+
+    def test_consumer_callback_rejects_either_surface_on_a_different_generation(self):
+        from scripts import reader_page_history_publish as history
+        from scripts import reader_page_history_store as history_store
+
+        def prepare(store, mapping, *, api, current_ack_verified_generation, observe_consumers):
+            observe_consumers(store, current_ack_verified_generation)
+
+        for stale_surface in ('hf', 'pages'):
+            with self.subTest(surface=stale_surface), patch('sys.argv', self.argv), \
+                    patch.object(publish, 'CentralHubStore', return_value=self.store), \
+                    patch.object(history_store, 'ConditionalPageHistoryStore'), \
+                    patch('huggingface_hub.HfApi'), patch('httpx.Client'), \
+                    patch.object(publish, 'observe_consumer', side_effect=[
+                        {'generation': 'f' * 64 if surface == stale_surface else self.generation}
+                        for surface in ('hf', 'pages')]) as observe, \
+                    patch.object(history, 'prepare', side_effect=prepare) as prepare_mock, \
+                    patch.object(history, 'apply') as apply_mock:
+                with self.assertRaisesRegex(ValueError, 'history replacement consumer generation changed'):
+                    publish.main()
+                prepare_mock.assert_called_once()
+                apply_mock.assert_not_called()
+                self.assertEqual(observe.call_count, 2)
+                self.assertFalse(self.output.exists())
 
 
 if __name__ == "__main__":
