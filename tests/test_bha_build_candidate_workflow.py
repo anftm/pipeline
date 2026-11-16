@@ -4,6 +4,21 @@ import yaml
 
 
 class CandidateWorkflowTests(unittest.TestCase):
+    def test_baseline_requires_exact_publication_and_never_pushes(self):
+        value=yaml.safe_load(Path('.github/workflows/bha-baseline-handoff.yml').read_text())
+        self.assertEqual(value['permissions'],{'contents':'read','actions':'read'})
+        commands='\n'.join(s.get('run','') for s in value['jobs']['prepare']['steps'])
+        self.assertIn('scripts.bha_parsed_baseline',commands)
+        self.assertIn('.github/workflows/bha-publish-candidate.yml',commands)
+        self.assertNotIn('git push',commands)
+        self.assertNotIn('/api/reindex',commands)
+        inputs=value.get('on',value.get(True))['workflow_dispatch']['inputs']
+        self.assertIs(inputs['commit_baseline']['default'],False)
+        step=next(s for s in value['jobs']['prepare']['steps'] if s.get('name')=='Commit exact baseline pair after fresh acceptance')
+        self.assertEqual(step['if'],'inputs.commit_baseline == true')
+        self.assertIn('scripts.bha_baseline_publish',step['run'])
+        self.assertIn('--expected-sha "$GITHUB_SHA"',step['run'])
+
     def test_publisher_requires_exact_candidate_provenance_without_rebuild(self):
         value=yaml.safe_load(Path('.github/workflows/bha-publish-candidate.yml').read_text())
         self.assertEqual(set(value.get('on',value.get(True))),{'workflow_dispatch'})

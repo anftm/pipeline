@@ -511,6 +511,11 @@ def build_candidate(token: str, helper: Path, root: Path, archive_id: int, revis
     tree = run_output(['git', 'write-tree'], cwd=parsed, env=safe_env)
     before_tree = run_output(['git', 'rev-parse', revisions[PARSED_BRANCH] + '^{tree}'], cwd=parsed, env=safe_env)
     changed = tree != before_tree
+    try:
+        from . import bha_parsed_content
+    except ImportError:
+        import bha_parsed_content
+    content_review = bha_parsed_content.inspect(parsed, before_tree, tree, archive_id, safe_env)
     diff = run_output(['git', 'diff', '--name-status', '--no-renames', revisions[PARSED_BRANCH], tree],
                       cwd=parsed, env=safe_env)
     commit = revisions[PARSED_BRANCH]
@@ -524,7 +529,7 @@ def build_candidate(token: str, helper: Path, root: Path, archive_id: int, revis
     return {'version': 1, 'kind': 'bha-parsed-local-candidate', 'archive': archive_id,
             'revisions': dict(revisions), 'helper_revision': helper_revision,
             'before_tree': before_tree, 'tree': tree, 'commit': commit, 'changed': changed,
-            'diff_name_status': diff, 'remote_writes': 0}
+            'diff_name_status': diff, 'content_review': content_review, 'remote_writes': 0}
 
 
 def publish_candidate(token: str, root: Path, candidate: dict, *, checkpoint) -> bool:

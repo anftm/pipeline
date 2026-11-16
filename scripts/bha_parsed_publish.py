@@ -64,7 +64,9 @@ def publish_reviewed(value, *, inspect_live, restore, publish, workspace, checkp
     # verify the index before updating any consumer baseline.
     result = {'kind':'bha-parsed-publication-result','status':'published','archive':plan['archive'],
               'commit':candidate['commit'],'tree':candidate['tree'],'plan_sha256':plan['plan_sha256'],
-              'built_inputs':plan['current_inputs'],'consumer_verified':False,'baseline_updated':False}
+              'built_inputs':plan['current_inputs'],'previous_inputs':plan['recorded_inputs'],
+              'previous_tree':plan['recorded_parsed_tree'],'source_snapshot':plan['snapshot'],
+              'consumer_verified':False,'baseline_updated':False}
     checkpoint(result)
     return result
 
@@ -113,7 +115,13 @@ def main(argv=None):
     def inspect_live():
         return planning.inspect(token,value['plan']['archive'],input_path=args.inputs,tree_path=args.trees)
     def restore(root,candidate):
-        return restore_bundle(root,candidate,args.bundle,token)
+        repo = restore_bundle(root,candidate,args.bundle,token)
+        from . import bha_parsed_content
+        actual = bha_parsed_content.inspect(repo,candidate['before_tree'],candidate['tree'],
+                                            candidate['archive'],builder.clean_environment())
+        if actual != candidate.get('content_review'):
+            raise ValueError('reviewed article/deletion/tag evidence differs from bundle')
+        return repo
     with tempfile.TemporaryDirectory(prefix='bha-parsed-publish-') as directory:
         publish_reviewed(value,inspect_live=inspect_live,restore=restore,
             publish=lambda root,candidate,record:builder.publish_candidate(token,root,candidate,checkpoint=record),

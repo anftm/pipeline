@@ -33,7 +33,7 @@ jobs:
           python-version: '3.11'
       - run: pip install -r scripts/requirements.txt PyYAML==6.0.3
       - name: Verify candidate contracts
-        run: python -B -m unittest tests.test_bha_parsed_candidate_runner tests.test_bha_parsed_candidate tests.test_bha_parsed_git_integration tests.test_build_fork_parsed tests.test_bha_build_candidate_workflow
+        run: python -B -m unittest tests.test_bha_parsed_content tests.test_bha_parsed_candidate_runner tests.test_bha_parsed_candidate tests.test_bha_parsed_git_integration tests.test_build_fork_parsed tests.test_bha_build_candidate_workflow
       - name: Validate request
         env:
           PLAN_RUN: ${{ inputs.plan_run }}

@@ -1,0 +1,104 @@
+name: BHA · Prepare Verified Parsed Baseline
+
+on:
+  workflow_dispatch:
+    inputs:
+      publication_run:
+        description: Successful parsed publication run on this revision
+        type: string
+        required: true
+      publication_sha256:
+        description: Exact SHA-256 of publication result.json
+        type: string
+        required: true
+      commit_baseline:
+        description: Commit the verified pair only if main is unchanged and Reader writers are idle
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: maintain-archive-forks
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  prepare:
+    if: github.repository == 'anftm/pipeline' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - run: pip install -r scripts/requirements.txt PyYAML==6.0.3
+      - run: python -B -m unittest tests.test_bha_baseline_publish tests.test_bha_parsed_baseline tests.test_bha_build_candidate_workflow
+      - name: Validate request
+        env:
+          PUBLICATION_RUN: ${{ inputs.publication_run }}
+          PUBLICATION_SHA: ${{ inputs.publication_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$PUBLICATION_RUN" =~ ^[1-9][0-9]*$ && "$PUBLICATION_SHA" =~ ^[0-9a-f]{64}$ ]]
+      - uses: actions/download-artifact@v8
+        with:
+          name: bha-parsed-publication
+          path: ${{ runner.temp }}/bha-publication
+          run-id: ${{ inputs.publication_run }}
+          github-token: ${{ github.token }}
+      - name: Verify publication provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PUBLICATION_RUN: ${{ inputs.publication_run }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PUBLICATION_RUN" > "$RUNNER_TEMP/bha-publication-run.json"
+          python - <<'PY'
+          import os,json
+          from pathlib import Path
+          r=json.loads((Path(os.environ['RUNNER_TEMP'])/'bha-publication-run.json').read_bytes())
+          if (r.get('conclusion')!='success' or r.get('status')!='completed' or r.get('run_attempt')!=1
+                  or r.get('event')!='workflow_dispatch' or r.get('head_branch')!='main'
+                  or r.get('repository',{}).get('full_name')!='anftm/pipeline'
+                  or r.get('path','').split('@',1)[0]!='.github/workflows/bha-publish-candidate.yml'
+                  or r.get('head_sha')!=os.environ['GITHUB_SHA']):
+              raise SystemExit('publication provenance differs')
+          PY
+      - name: Prepare baseline pair after exact index and snapshot acceptance
+        if: inputs.commit_baseline != true
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+          BHA_REINDEX_TOKEN: ${{ secrets.BHA_REINDEX_TOKEN }}
+          HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+          PUBLICATION_SHA: ${{ inputs.publication_sha256 }}
+        run: |
+          python -u -m scripts.bha_parsed_baseline --publication "$RUNNER_TEMP/bha-publication/result.json" \
+            --publication-sha256 "$PUBLICATION_SHA" --output-dir output/bha-baseline
+      - name: Commit exact baseline pair after fresh acceptance
+        if: inputs.commit_baseline == true
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+          BHA_REINDEX_TOKEN: ${{ secrets.BHA_REINDEX_TOKEN }}
+          HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+          PUBLICATION_SHA: ${{ inputs.publication_sha256 }}
+        run: |
+          python -u -m scripts.bha_baseline_publish --publication "$RUNNER_TEMP/bha-publication/result.json" \
+            --publication-sha256 "$PUBLICATION_SHA" --expected-sha "$GITHUB_SHA" \
+            --output "$RUNNER_TEMP/bha-baseline-publication/result.json"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: bha-verified-baseline
+          path: |
+            output/bha-baseline/
+            ${{ runner.temp }}/bha-baseline-publication/
+          retention-days: 30
+          if-no-files-found: warn
