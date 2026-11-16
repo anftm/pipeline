@@ -476,7 +476,9 @@ def parsed_tree_changed(parsed: Path, current_commit: str, env: dict[str, str]) 
     return generated_tree != current_tree
 
 
-def build_archive(token: str, helper: Path, root: Path, archive_id: int, revisions: dict[str, str]) -> bool:
+def build_candidate(token: str, helper: Path, root: Path, archive_id: int, revisions: dict[str, str]) -> dict:
+    """Generate and describe a local candidate without publishing a branch."""
+    helper_revision = run_output(['git', 'rev-parse', 'HEAD'], cwd=helper, env=clean_environment())
     repo = f"{REPOSITORY_PREFIX}{archive_id}"
     repo_url = f"https://github.com/{MIRROR_OWNER}/{repo}.git"
     archive_root = root / repo
@@ -506,19 +508,92 @@ def build_archive(token: str, helper: Path, root: Path, archive_id: int, revisio
     safe_env = clean_environment()
     safe_env["HOME"] = str(secure_home)
     run(["git", "add", "-A"], cwd=parsed, env=safe_env)
-    if not parsed_tree_changed(parsed, revisions[PARSED_BRANCH], safe_env):
-        if ref_revision(token, MIRROR_OWNER, repo, PARSED_BRANCH) != revisions[PARSED_BRANCH]:
-            raise RuntimeError(f"{MIRROR_OWNER}/{repo}:parsed changed during no-op generation; retry the workflow")
+    tree = run_output(['git', 'write-tree'], cwd=parsed, env=safe_env)
+    before_tree = run_output(['git', 'rev-parse', revisions[PARSED_BRANCH] + '^{tree}'], cwd=parsed, env=safe_env)
+    changed = tree != before_tree
+    diff = run_output(['git', 'diff', '--name-status', '--no-renames', revisions[PARSED_BRANCH], tree],
+                      cwd=parsed, env=safe_env)
+    commit = revisions[PARSED_BRANCH]
+    if changed:
+        run(['git', 'config', 'user.name', 'vomebook'], cwd=parsed, env=safe_env)
+        run(['git', 'config', 'user.email', 'vomebook@gmail.com'], cwd=parsed, env=safe_env)
+        safe_env.update(GIT_AUTHOR_NAME='vomebook', GIT_AUTHOR_EMAIL='vomebook@gmail.com',
+                        GIT_COMMITTER_NAME='vomebook', GIT_COMMITTER_EMAIL='vomebook@gmail.com')
+        run(['git', 'commit', '-m', 'Rebuild parsed data from anftm corrections'], cwd=parsed, env=safe_env)
+        commit = run_output(['git', 'rev-parse', 'HEAD'], cwd=parsed, env=safe_env)
+    return {'version': 1, 'kind': 'bha-parsed-local-candidate', 'archive': archive_id,
+            'revisions': dict(revisions), 'helper_revision': helper_revision,
+            'before_tree': before_tree, 'tree': tree, 'commit': commit, 'changed': changed,
+            'diff_name_status': diff, 'remote_writes': 0}
+
+
+def publish_candidate(token: str, root: Path, candidate: dict, *, checkpoint) -> bool:
+    """Publish one exact local candidate, with source rechecks and one leased push."""
+    archive_id = candidate.get('archive')
+    if (candidate.get('kind') != 'bha-parsed-local-candidate' or candidate.get('version') != 1
+            or type(archive_id) is not int or not 0 <= archive_id < 32
+            or type(candidate.get('changed')) is not bool or candidate.get('remote_writes') != 0):
+        raise ValueError('invalid parsed candidate')
+    revisions = candidate['revisions']
+    if set(revisions) != {*INPUT_BRANCHES, PARSED_BRANCH} or any(
+            not re.fullmatch(r'[0-9a-f]{40}', str(x)) for x in
+            [*revisions.values(), candidate['helper_revision'], candidate['tree'], candidate['commit'], candidate['before_tree']]):
+        raise ValueError('candidate identities incomplete')
+    repo = f'{REPOSITORY_PREFIX}{archive_id}'
+    parsed = root / repo / PARSED_BRANCH
+    secure_home = root / repo / 'push-home'
+    env = clean_environment(); env['HOME'] = str(secure_home)
+    if run_output(['git', 'rev-parse', candidate['commit'] + '^{tree}'], cwd=parsed, env=env) != candidate['tree']:
+        raise ValueError('candidate commit/tree mismatch')
+    if run_output(['git', 'rev-parse', revisions[PARSED_BRANCH] + '^{tree}'], cwd=parsed, env=env) != candidate['before_tree']:
+        raise ValueError('candidate previous tree differs')
+    actual_diff = run_output(['git', 'diff', '--name-status', '--no-renames', revisions[PARSED_BRANCH], candidate['tree']], cwd=parsed, env=env)
+    if actual_diff != candidate.get('diff_name_status'):
+        raise ValueError('candidate reviewed changes differ')
+    if candidate['changed'] != (candidate['tree'] != candidate['before_tree']):
+        raise ValueError('candidate change flag differs')
+    def fresh():
+        if (branch_revisions(token, MIRROR_OWNER, repo) != revisions
+                or ref_revision(token, UPSTREAM_OWNER, 'ocr_helper', 'main') != candidate['helper_revision']):
+            raise RuntimeError('parsed build inputs changed; review a new candidate')
+    fresh()
+    if not candidate['changed']:
+        if candidate['commit'] != revisions[PARSED_BRANCH]:
+            raise ValueError('no-op candidate commit differs')
+        checkpoint({'status': 'no-change', 'candidate': candidate, 'push_attempts': 0})
+        fresh()
         return False
-    run(["git", "config", "user.name", "github-actions[bot]"], cwd=parsed, env=safe_env)
-    run(["git", "config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com"], cwd=parsed, env=safe_env)
-    run(["git", "commit", "-m", "Rebuild parsed data from anftm corrections"], cwd=parsed, env=safe_env)
-    run([
-        "git", "-c", "core.hooksPath=/dev/null", "-c", "credential.helper=", "-c", "http.proxy=",
-        "push", repo_url, "HEAD:parsed",
-        f"--force-with-lease=refs/heads/parsed:{revisions[PARSED_BRANCH]}",
-    ], cwd=parsed, env=push_environment(token, secure_home))
+    identity = run_output(['git', 'show', '-s', '--format=%an <%ae>|%cn <%ce>', candidate['commit']], cwd=parsed, env=env)
+    if identity != 'vomebook <vomebook@gmail.com>|vomebook <vomebook@gmail.com>':
+        raise ValueError('candidate author/committer differs')
+    checkpoint({'status': 'push-intent', 'candidate': candidate, 'push_attempts': 1})
+    fresh()
+    error = None
+    try:
+        run(['git', '-c', 'core.hooksPath=/dev/null', '-c', 'credential.helper=', '-c', 'http.proxy=',
+             'push', f'https://github.com/{MIRROR_OWNER}/{repo}.git',
+             candidate['commit'] + ':refs/heads/parsed',
+             '--force-with-lease=refs/heads/parsed:' + revisions[PARSED_BRANCH]],
+            cwd=parsed, env=push_environment(token, secure_home))
+    except Exception as exc:
+        error = type(exc).__name__
+    observed = ref_revision(token, MIRROR_OWNER, repo, PARSED_BRANCH)
+    if observed != candidate['commit']:
+        checkpoint({'status': 'unknown', 'candidate': candidate, 'push_attempts': 1, 'push_error': error})
+        raise RuntimeError('parsed push result unconfirmed; inspect exact commit before recovery')
+    checkpoint({'status': 'published', 'candidate': candidate, 'push_attempts': 1,
+                'observed_commit': observed, 'push_error': error})
     return True
+
+
+def build_archive(token: str, helper: Path, root: Path, archive_id: int, revisions: dict[str, str]) -> bool:
+    candidate = build_candidate(token, helper, root, archive_id, revisions)
+    def checkpoint(value):
+        path = root / f'{REPOSITORY_PREFIX}{archive_id}' / 'publication-result.json'
+        temporary = path.with_suffix('.pending')
+        temporary.write_text(json.dumps(value, ensure_ascii=False, sort_keys=True) + '\n', encoding='utf-8')
+        temporary.replace(path)
+    return publish_candidate(token, root, candidate, checkpoint=checkpoint)
 
 
 def sync_parsed(token: str, root: Path, archive_id: int, mirror: dict[str, str], upstream: dict[str, str]) -> None:

@@ -55,6 +55,17 @@ class BhaInputMonitorTests(unittest.TestCase):
             result = monitor._row('token', 0, HELPER, baseline()['archives'])
         self.assertFalse(result['input_changed']); self.assertTrue(result['local_build_needed'])
         self.assertFalse(result['upstream_parsed_equal'])
+        self.assertEqual(result['upstream_inputs']['config'], 'f' * 40)
+
+    def test_upstream_commit_drift_is_detected_even_when_build_flag_stays_true(self):
+        source = {'main': 'b' * 40, 'config': 'c' * 40, 'ocr_cache': 'd' * 40,
+                  'ocr_patch': 'e' * 40, 'parsed': '1' * 40}
+        first = {**source, 'config': 'f' * 40}
+        second = {**source, 'config': '9' * 40}
+        with patch.object(monitor.identity, 'identities', return_value=('repo', {'id': 1}, {'id': 2})), \
+                patch.object(monitor.parsed, 'branch_revisions', side_effect=[source, first, source, second]):
+            with self.assertRaisesRegex(RuntimeError, 'changed during'):
+                monitor.inspect('token', self.path, ids=[0], helper_lookup=lambda *_: HELPER)
 
     def test_cli_writes_report_before_returning_drift_failure(self):
         report = {'changed_archives': [0], 'remote_writes': 0}

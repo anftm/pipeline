@@ -48,7 +48,8 @@ def _row(token: str, archive: int, helper: str, baseline: dict) -> dict:
     if not isinstance(previous['patch_layout'], str):
         raise TypeError('BHA patch layout baseline is invalid')
     return {'archive': archive, 'upstream_repository_id': upstream_info['id'], 'mirror_repository_id': mirror_info['id'],
-            'mirror_inputs': snapshot, 'mirror_parsed': mirror['parsed'], 'upstream_parsed': upstream['parsed'],
+            'mirror_inputs': snapshot, 'upstream_inputs': parsed.source_snapshot(upstream, helper),
+            'mirror_parsed': mirror['parsed'], 'upstream_parsed': upstream['parsed'],
             'input_changed': snapshot != previous, 'local_build_needed': parsed.needs_local_build(mirror, upstream),
             'upstream_parsed_equal': mirror['parsed'] == upstream['parsed']}
 

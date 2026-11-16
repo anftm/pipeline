@@ -406,6 +406,15 @@ def main():
         assert_collector_context()
     args.output.parent.mkdir(parents=True, exist_ok=True)
     store = Store()
+    try:
+        from .reader_document_reset_terminal import completed
+    except ImportError:
+        from reader_document_reset_terminal import completed
+    terminal = completed(store, args.reset_id, args.scope)
+    if terminal is not None:
+        args.output.write_bytes(reset.encode({**terminal, 'already_complete': True, 'remote_mutations': 0}))
+        print('document reset already completed; no inventory or deletion performed', flush=True)
+        return
     if args.apply:
         reader_gc_chm_window.require_clear(store)
     fence = reset.DocumentProducerFence()

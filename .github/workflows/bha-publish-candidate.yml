@@ -1,0 +1,85 @@
+name: BHA · Publish Reviewed Parsed Candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_run:
+        description: Successful candidate-build run on this revision
+        type: string
+        required: true
+      candidate_sha256:
+        description: Exact SHA-256 of reviewed candidate result.json
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: maintain-archive-forks
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  publish:
+    if: github.repository == 'anftm/pipeline' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - run: pip install -r scripts/requirements.txt PyYAML==6.0.3
+      - name: Verify single-publication contracts
+        run: python -B -m unittest tests.test_bha_parsed_publish tests.test_bha_parsed_candidate tests.test_bha_parsed_git_integration tests.test_bha_build_candidate_workflow
+      - name: Validate request
+        env:
+          CANDIDATE_RUN: ${{ inputs.candidate_run }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$CANDIDATE_RUN" =~ ^[1-9][0-9]*$ && "$CANDIDATE_SHA" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$GITHUB_RUN_ATTEMPT" == 1 ]]
+      - uses: actions/download-artifact@v8
+        with:
+          name: bha-parsed-candidate
+          path: ${{ runner.temp }}/bha-candidate
+          run-id: ${{ inputs.candidate_run }}
+          github-token: ${{ github.token }}
+      - name: Verify candidate provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_RUN: ${{ inputs.candidate_run }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CANDIDATE_RUN" > "$RUNNER_TEMP/bha-candidate-run.json"
+          python - <<'PY'
+          import os,json
+          from pathlib import Path
+          r=json.loads((Path(os.environ['RUNNER_TEMP'])/'bha-candidate-run.json').read_bytes())
+          if (r.get('conclusion')!='success' or r.get('status')!='completed' or r.get('run_attempt')!=1
+                  or r.get('event')!='workflow_dispatch' or r.get('head_branch')!='main'
+                  or r.get('repository',{}).get('full_name')!='anftm/pipeline'
+                  or r.get('path','').split('@',1)[0]!='.github/workflows/bha-build-candidate.yml'
+                  or r.get('head_sha')!=os.environ['GITHUB_SHA']):
+              raise SystemExit('candidate provenance differs')
+          PY
+      - name: Publish exact reviewed commit once
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha256 }}
+        run: |
+          set -euo pipefail
+          mkdir -p output/bha-publication
+          python -u -m scripts.bha_parsed_publish --candidate "$RUNNER_TEMP/bha-candidate/result.json" \
+            --candidate-sha256 "$CANDIDATE_SHA" --bundle "$RUNNER_TEMP/bha-candidate/parsed.bundle" \
+            --output output/bha-publication/result.json
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: bha-parsed-publication
+          path: output/bha-publication/
+          retention-days: 30
+          if-no-files-found: warn
