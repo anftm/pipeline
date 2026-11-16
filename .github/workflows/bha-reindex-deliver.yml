@@ -1,0 +1,139 @@
+name: BHA · Deliver Reviewed Index Update
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: Plan an incremental update, apply an exact plan, or reconcile an existing operation
+        type: choice
+        options: [plan, apply, reconcile, abandon]
+        default: plan
+      plan_run:
+        description: Successful plan run on this code revision; apply only
+        type: string
+        default: ''
+      plan_sha256:
+        description: SHA-256 of the reviewed plan.json; apply only
+        type: string
+        default: ''
+      operation_id:
+        description: Exact existing operation for reconciliation, prepared resume, or abandonment
+        type: string
+        default: ''
+      reason:
+        description: Reason for abandoning an unclaimed prepared operation
+        type: choice
+        options: ['', stale-plan, superseded-plan, operator-cancelled]
+        default: ''
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: update-bha-index
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  deliver:
+    if: github.repository == 'anftm/pipeline' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - run: pip install -r scripts/requirements.txt PyYAML==6.0.3
+      - name: Test delivery and recovery contracts
+        run: python -B -m unittest tests.test_bha_reindex_run tests.test_bha_reindex_delivery tests.test_bha_reindex_journal tests.test_bha_reindex_delivery_workflow
+      - name: Validate explicit request
+        env:
+          ACTION: ${{ inputs.action }}
+          PLAN_RUN: ${{ inputs.plan_run }}
+          PLAN_SHA: ${{ inputs.plan_sha256 }}
+          OPERATION: ${{ inputs.operation_id }}
+          REASON: ${{ inputs.reason }}
+        run: |
+          set -euo pipefail
+          if [[ "$ACTION" != abandon ]]; then [[ -z "$REASON" ]]; fi
+          case "$ACTION" in
+            plan) [[ -z "$PLAN_RUN" && -z "$PLAN_SHA" && -z "$OPERATION" ]] ;;
+            apply) [[ "$PLAN_RUN" =~ ^[1-9][0-9]*$ && "$PLAN_SHA" =~ ^[0-9a-f]{64}$ ]] ;;
+            reconcile) [[ -z "$PLAN_RUN" && -z "$PLAN_SHA" && -n "$OPERATION" ]] ;;
+            abandon) [[ -z "$PLAN_RUN" && -z "$PLAN_SHA" && -n "$OPERATION" && -n "$REASON" ]] ;;
+            *) exit 1 ;;
+          esac
+      - name: Download reviewed plan
+        if: inputs.action == 'apply'
+        uses: actions/download-artifact@v8
+        with:
+          name: bha-reindex-plan
+          path: ${{ runner.temp }}/bha-reviewed-plan
+          run-id: ${{ inputs.plan_run }}
+          github-token: ${{ github.token }}
+      - name: Verify exact plan provenance
+        if: inputs.action == 'apply'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PLAN_RUN: ${{ inputs.plan_run }}
+          PLAN_SHA: ${{ inputs.plan_sha256 }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PLAN_RUN" > "$RUNNER_TEMP/bha-plan-run.json"
+          python - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP'])
+          run = json.loads((root / 'bha-plan-run.json').read_bytes())
+          if (run.get('status') != 'completed' or run.get('conclusion') != 'success'
+                  or run.get('event') != 'workflow_dispatch' or run.get('head_branch') != 'main'
+                  or run.get('path', '').split('@', 1)[0] != '.github/workflows/bha-reindex-deliver.yml'
+                  or run.get('head_sha') != os.environ['GITHUB_SHA']
+                  or run.get('repository', {}).get('full_name') != 'anftm/pipeline'
+                  or run.get('run_attempt') != 1):
+              raise SystemExit('plan provenance differs from the exact successful first-attempt plan')
+          raw = (root / 'bha-reviewed-plan/plan.json').read_bytes()
+          if len(raw) > 1024 * 1024 or hashlib.sha256(raw).hexdigest() != os.environ['PLAN_SHA']:
+              raise SystemExit('reviewed plan bytes differ')
+          PY
+      - name: Run bounded BHA delivery
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+          BHA_REINDEX_TOKEN: ${{ secrets.BHA_REINDEX_TOKEN }}
+          HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+          ACTION: ${{ inputs.action }}
+          PLAN_SHA: ${{ inputs.plan_sha256 }}
+          OPERATION: ${{ inputs.operation_id }}
+          REASON: ${{ inputs.reason }}
+        run: |
+          set -euo pipefail
+          if [[ "$ACTION" == apply && "$GITHUB_RUN_ATTEMPT" != 1 ]]; then
+            echo 'Apply cannot be rerun; reconcile the recorded operation.' >&2
+            exit 1
+          fi
+          mkdir -p output/bha
+          args=(--action "$ACTION" --output output/bha/result.json --samples config/bha-delivery-samples.json)
+          if [[ "$ACTION" == plan ]]; then args+=(--plan output/bha/plan.json); fi
+          if [[ "$ACTION" == apply ]]; then args+=(--plan "$RUNNER_TEMP/bha-reviewed-plan/plan.json" --plan-sha256 "$PLAN_SHA"); fi
+          if [[ -n "$OPERATION" ]]; then args+=(--operation-id "$OPERATION"); fi
+          if [[ "$ACTION" == abandon ]]; then args+=(--reason "$REASON"); fi
+          python -u -m scripts.bha_reindex_run "${args[@]}"
+      - name: Preserve plan
+        if: always() && inputs.action == 'plan'
+        uses: actions/upload-artifact@v7
+        with:
+          name: bha-reindex-plan
+          path: output/bha/plan.json
+          retention-days: 14
+          if-no-files-found: warn
+      - name: Preserve operation and acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: bha-reindex-delivery-result
+          path: output/bha/*.json
+          retention-days: 30
+          if-no-files-found: warn

@@ -94,15 +94,18 @@ def observe_one(archive: int, commit: str, path: str, *, fetch=get, query=search
     article_raw = fetch(prefix + escaped_path, MAX_SOURCE)
     tags_raw = fetch(prefix + escaped_path[:-5] + '.tags', MAX_SOURCE)
     article, tags = _object(article_raw, 'article'), _object(tags_raw, 'tags')
-    if not isinstance(article, dict) or 'tags' in article or not isinstance(tags, list):
+    if not isinstance(article, dict) or not isinstance(tags, list):
         raise ValueError('invalid BHA parsed article or tags')
     title = article.get('title')
     if not isinstance(title, str) or not 1 <= len(title.strip()) <= 256:
         raise ValueError('invalid BHA sample article title')
+    # Backend data_loader.iter_documents replaces embedded tags even for an empty sidecar.
+    # Preserve every other source field for the complete preview comparison.
+    expected_article = {**article, 'tags': tags}
     preview = _object(fetch(BASE + '/api/preview/' + urllib.parse.quote(doc_id, safe=':'), MAX_PREVIEW), 'preview')
     if (not isinstance(preview, dict) or preview.get('doc_id') != doc_id or preview.get('archive_id') != archive
             or preview.get('article_id') != path.split('/')[-1][:-5]
-            or preview.get('publication_id') != path.split('/')[1] or preview.get('article') != {**article, 'tags': tags}):
+            or preview.get('publication_id') != path.split('/')[1] or preview.get('article') != expected_article):
         raise ValueError('BHA preview differs from the pinned parsed article and tags')
     hits = _object(query(doc_id, archive, title), 'search')
     if (not isinstance(hits, dict) or hits.get('indexing') is not False or hits.get('index_status') != 'ready'

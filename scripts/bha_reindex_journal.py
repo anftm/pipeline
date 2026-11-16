@@ -31,7 +31,15 @@ ROOT = 'bha-reindex/operations/'
 ID = re.compile(r'[0-9a-f]{32}\Z')
 SHA = re.compile(r'[0-9a-f]{64}\Z')
 MAX_JSON = 256 * 1024
-STATES = {'prepared', 'claimed', 'accepted', 'verified', 'failed'}
+STATES = {'prepared', 'claimed', 'accepted', 'verified', 'failed', 'abandoned'}
+# Fixed, bounded codes keep credentials and arbitrary diagnostic text out of history.
+ABANDON_REASONS = frozenset({'stale-plan', 'superseded-plan', 'operator-cancelled'})
+
+
+def _abandon_reason(reason):
+    if not isinstance(reason, str) or reason not in ABANDON_REASONS:
+        raise ValueError('invalid BHA abandonment reason code')
+    return reason
 
 
 def _parse(raw: bytes, keys: set[str]) -> dict:
@@ -74,7 +82,8 @@ def _record(raw):
             or not isinstance(value['mode'], str) or value['mode'] not in {'incremental', 'full'}):
         raise ValueError('invalid BHA journal record')
     _id(value['operation']); _sha(value['plan_sha256'])
-    allowed_sequence = {'prepared': {0}, 'claimed': {1}, 'accepted': {2}, 'verified': {3}, 'failed': {2, 3}}
+    allowed_sequence = {'prepared': {0}, 'claimed': {1}, 'accepted': {2}, 'verified': {3},
+                        'failed': {2, 3}, 'abandoned': {1}}
     if value['sequence'] not in allowed_sequence[value['state']]:
         raise ValueError('BHA journal state sequence differs')
     for name in ('archive_commits', 'archive_revisions', 'baseline_revisions'):
@@ -98,11 +107,17 @@ def _record(raw):
         if not isinstance(previous, dict) or set(previous) != {'operation', 'record', 'sequence'}:
             raise ValueError('invalid BHA previous operation')
         _id(previous['operation']); _sha(previous['record'])
-        if previous['operation'] == value['operation'] or type(previous['sequence']) is not int or not 2 <= previous['sequence'] <= 4:
+        if previous['operation'] == value['operation'] or type(previous['sequence']) is not int or not 1 <= previous['sequence'] <= 4:
             raise ValueError('invalid BHA previous operation identity')
     if value['state'] == 'prepared':
         if value['claim'] is not None or value['job_id'] is not None or value['result'] is not None:
             raise ValueError('BHA prepared state cannot claim a result')
+    elif value['state'] == 'abandoned':
+        if value['claim'] is not None or value['job_id'] is not None:
+            raise ValueError('BHA abandoned state cannot claim a request or job')
+        if not isinstance(value['result'], dict) or set(value['result']) != {'reason'}:
+            raise ValueError('BHA abandonment reason is missing')
+        _abandon_reason(value['result']['reason'])
     else:
         _id(value['claim'])
         if value['state'] in {'accepted', 'verified'} or value['state'] == 'failed' and value['sequence'] == 3:
@@ -124,7 +139,8 @@ def _advance(previous: dict, value: dict, prior_digest: str) -> None:
             or value['sequence'] != previous['sequence'] + 1):
         raise ValueError('BHA journal immutable identity or predecessor changed')
     pair = previous['state'], value['state']
-    if pair not in {('prepared', 'claimed'), ('claimed', 'accepted'), ('accepted', 'verified'),
+    if pair not in {('prepared', 'claimed'), ('prepared', 'abandoned'),
+                    ('claimed', 'accepted'), ('accepted', 'verified'),
                     ('accepted', 'failed'), ('claimed', 'failed')}:
         raise ValueError('invalid BHA journal transition')
     if pair != ('prepared', 'claimed') and previous['claim'] != value['claim']:
@@ -135,10 +151,11 @@ def _advance(previous: dict, value: dict, prior_digest: str) -> None:
 
 def _successor(previous: dict, value: dict, digest: str) -> None:
     expected = {'operation': previous['operation'], 'record': digest, 'sequence': previous['sequence']}
-    if (previous['state'] != 'verified' or value['state'] != 'prepared'
+    if (previous['state'] not in {'verified', 'abandoned'} or value['state'] != 'prepared'
             or value['sequence'] != 0 or value['previous_terminal'] != expected
             or value['operation'] == previous['operation']
-            or value['baseline_revisions'] != previous['archive_revisions']):
+            or (previous['state'] == 'verified'
+                and value['baseline_revisions'] != previous['archive_revisions'])):
         raise ValueError('BHA previous operation is not an exact terminal predecessor')
 
 
@@ -237,9 +254,10 @@ def begin(store, plan: dict, *, mode: str, operation: str | None = None) -> Curr
         _count, prior_operations = _walk_history(store, previous)
         # A failed request may still have partial external effects. Do not
         # authorize another request merely because it is terminal.
-        if previous.record['state'] != 'verified':
+        if previous.record['state'] not in {'verified', 'abandoned'}:
             raise ValueError('BHA journal has unfinished or failed work requiring recovery')
-        if plan.get('consumer_revisions') != previous.record['archive_revisions']:
+        if (previous.record['state'] == 'verified'
+                and plan.get('consumer_revisions') != previous.record['archive_revisions']):
             raise ValueError('BHA consumer baseline differs from the last verified index target')
     operation = _id(operation or uuid.uuid4().hex)
     if operation in prior_operations:
@@ -252,6 +270,27 @@ def begin(store, plan: dict, *, mode: str, operation: str | None = None) -> Curr
              'baseline_fingerprint': plan['consumer_fingerprint'], 'baseline_job': plan['last_job'],
              'changed_archives': plan['changed_archives'], 'claim': None, 'job_id': None, 'result': None}
     return _commit(store, value, previous)
+
+
+def abandon_prepared(store, current: Current, reason: str) -> Current:
+    """CAS an exact, unclaimed prepared head to an auditable abandoned terminal.
+
+    Use a Current returned by load/begin and one of ABANDON_REASONS. Only the
+    reason code is persisted as result.reason; no credentials or free text are
+    accepted. This sends no request and never retries a claim or a failed CAS.
+    A new begin must use a fresh read-only plan and a new operation identity;
+    the abandoned target is not evidence of the consumer's indexed baseline.
+    """
+    _abandon_reason(reason)
+    active = load(store)
+    if active is None or active != current:
+        raise ValueError('BHA journal changed before prepared abandonment')
+    if (active.record['state'] != 'prepared' or active.record['claim'] is not None
+            or active.record['job_id'] is not None):
+        raise ValueError('BHA abandonment requires an unclaimed prepared operation')
+    audit(store, active)
+    return _commit(store, {**active.record, 'sequence': 1, 'prior': active.head['record'],
+                           'state': 'abandoned', 'result': {'reason': reason}}, active)
 
 
 def claim(store, current: Current) -> Current:

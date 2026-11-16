@@ -1,0 +1,117 @@
+{
+  "version": 1,
+  "samples": [
+    {
+      "archive": 0,
+      "path": "mao/maoquanji27/002/002fff5d4e.json"
+    },
+    {
+      "archive": 1,
+      "path": "01e/01ec427d-9e37-4ead-a568-05b3614d4dde/52d/52d34aa25b.json"
+    },
+    {
+      "archive": 2,
+      "path": "02a/02af10b3-2972-4837-874e-a4c001c66ea6/07b/07bb507578.json"
+    },
+    {
+      "archive": 3,
+      "path": "019/01970a4d-895c-4f40-9511-60b51d869906/09a/09aa82803c.json"
+    },
+    {
+      "archive": 4,
+      "path": "027/027ebe43-b178-4a02-91bc-4c52456a84da/ef2/ef2c7708be.json"
+    },
+    {
+      "archive": 5,
+      "path": "0aa/0aade93c-c356-46d2-9807-b567596b7e45/05a/05a82b63c0.json"
+    },
+    {
+      "archive": 8,
+      "path": "122/122dcf75-e0ad-49a3-9c52-bc335828fd4d/524/524c5d743a.json"
+    },
+    {
+      "archive": 9,
+      "path": "8f8/8f8c68cf-5727-4178-98ae-05b57cb2623d/45c/45ca37121f.json"
+    },
+    {
+      "archive": 10,
+      "path": "rmr/rmrb/000/0000449482.json"
+    },
+    {
+      "archive": 11,
+      "path": "mao/maoistlegacy.de-1000/bfc/bfc573c201.json"
+    },
+    {
+      "archive": 12,
+      "path": "cnd/cnd/000/00062d508a.json"
+    },
+    {
+      "archive": 14,
+      "path": "017/0174e492-2d34-482a-959b-3a42f0bdff16/d0f/d0f1dd7203.json"
+    },
+    {
+      "archive": 15,
+      "path": "006/006412bf-a8dd-4db3-9ad4-97e9581cf69d/8d1/8d17f4dba5.json"
+    },
+    {
+      "archive": 16,
+      "path": "003/0030b6ae-bc3a-4015-931f-4757447abb55/e38/e38bf7cf61.json"
+    },
+    {
+      "archive": 17,
+      "path": "054/0540e892-0798-42a4-bf7a-48aeae5d9805/955/955b12bfb8.json"
+    },
+    {
+      "archive": 18,
+      "path": "009/009434a8-e758-4ab1-b535-73c56856dcd7/282/2825cfbe2f.json"
+    },
+    {
+      "archive": 19,
+      "path": "069/0698ec87-213a-4a84-94ca-ff7f86d948c2/144/144000b73e.json"
+    },
+    {
+      "archive": 20,
+      "path": "whb/whb/000/000044f47c.json"
+    },
+    {
+      "archive": 21,
+      "path": "01d/01d6f73e-211d-449b-928b-e162e4767897/a21/a21ce958e1.json"
+    },
+    {
+      "archive": 22,
+      "path": "0ae/0ae734d9-585e-4253-9083-2c7b41bc2b1a/dd0/dd0f051edf.json"
+    },
+    {
+      "archive": 23,
+      "path": "36d/36d29512-11a3-4801-a3c6-8551ce7d39dc/d75/d75c47d6f3.json"
+    },
+    {
+      "archive": 24,
+      "path": "jfj/jfjb/000/0000031d28.json"
+    },
+    {
+      "archive": 25,
+      "path": "01a/01a44a03-a723-425b-b4b5-b67a28649fe1/6dc/6dcac4ce0a.json"
+    },
+    {
+      "archive": 27,
+      "path": "177/177dc947-4213-43e3-825e-459076e353ac/771/771390a231.json"
+    },
+    {
+      "archive": 28,
+      "path": "635/635bcabe-4f6b-4630-81a1-68a020862443/12b/12b70c5e0a.json"
+    },
+    {
+      "archive": 29,
+      "path": "74f/74faf475-968f-4e9a-a7cf-64a107787b2b/6cf/6cf544b53d.json"
+    },
+    {
+      "archive": 30,
+      "path": "4bd/4bdccb11-dd6d-430c-9d22-1cff22789261/f5a/f5a495f1f3.json"
+    },
+    {
+      "archive": 31,
+      "path": "ais/aisixiang/009/0094adf541.json"
+    }
+  ]
+}

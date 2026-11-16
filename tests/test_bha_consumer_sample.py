@@ -54,6 +54,71 @@ class BhaConsumerSampleTests(unittest.TestCase):
         self.assertTrue(result['samples'][0]['exact_title_search_found'])
         self.assertEqual(result['remote_writes'], 0)
 
+    def test_sidecar_replaces_embedded_tags_including_empty_lists(self):
+        embedded = [{'name': 'embedded', 'type': 'subject'}]
+        for embedded_tags, sidecar in ((TAGS, TAGS), (embedded, TAGS), (embedded, []),
+                                       ([], TAGS), ([], [])):
+            with self.subTest(embedded=embedded_tags, sidecar=sidecar):
+                article = {**ARTICLE, 'tags': embedded_tags, 'description': 'preserve me',
+                           'extra': {'nested': ['also preserve me']}}
+                def tagged_fetch(url, limit):
+                    if url.endswith('.json'):
+                        return data(article)
+                    if url.endswith('.tags'):
+                        return data(sidecar)
+                    preview = json.loads(fetch(url, limit))
+                    preview['article'] = {**article, 'tags': sidecar}
+                    return data(preview)
+                result = sample.observe_one(0, COMMIT, PATH, fetch=tagged_fetch, query=query)
+                self.assertTrue(result['preview_article_equal'])
+                self.assertTrue(result['exact_title_search_found'])
+                self.assertEqual(result['source_sha256'], hashlib.sha256(data(article)).hexdigest())
+                self.assertEqual(result['tags_sha256'], hashlib.sha256(data(sidecar)).hexdigest())
+
+    def test_embedded_tags_do_not_hide_preview_mismatches(self):
+        embedded = [{'name': 'embedded', 'type': 'subject'}]
+        article = {**ARTICLE, 'tags': embedded, 'extra': {'nested': 'preserve me'}}
+        for sidecar in (TAGS, []):
+            expected = {**article, 'tags': sidecar}
+            wrong_articles = (
+                article,  # Embedded tags retained instead of the sidecar.
+                {**expected, 'tags': embedded + sidecar},  # Tags concatenated.
+                {key: value for key, value in expected.items() if key != 'tags'},
+                {key: value for key, value in expected.items() if key != 'extra'},
+                {**expected, 'extra': {'nested': 'changed'}},
+                {**expected, 'parts': [{'text': 'changed'}]},
+                {**expected, 'unexpected': 'field'},
+            )
+            for wrong_article in wrong_articles:
+                with self.subTest(sidecar=sidecar, preview=wrong_article):
+                    def wrong(url, limit):
+                        if url.endswith('.json'):
+                            return data(article)
+                        if url.endswith('.tags'):
+                            return data(sidecar)
+                        preview = json.loads(fetch(url, limit))
+                        preview['article'] = wrong_article
+                        return data(preview)
+                    search = Mock(side_effect=AssertionError('search after a mismatched preview'))
+                    with self.assertRaisesRegex(ValueError, 'preview differs'):
+                        sample.observe_one(0, COMMIT, PATH, fetch=wrong, query=search)
+                    search.assert_not_called()
+
+    def test_embedded_tags_do_not_replace_missing_or_invalid_sidecar(self):
+        for sidecar in (None, {}, 'bad', b'bad', FileNotFoundError('missing sidecar')):
+            with self.subTest(sidecar=sidecar):
+                def invalid(url, limit):
+                    if url.endswith('.json'):
+                        return data({**ARTICLE, 'tags': TAGS})
+                    if url.endswith('.tags'):
+                        if isinstance(sidecar, Exception):
+                            raise sidecar
+                        return sidecar if isinstance(sidecar, bytes) else data(sidecar)
+                    raise AssertionError('preview requested with invalid sidecar')
+                error = FileNotFoundError if isinstance(sidecar, Exception) else ValueError
+                with self.assertRaises(error):
+                    sample.observe_one(0, COMMIT, PATH, fetch=invalid, query=query)
+
     def test_invalid_paths_cannot_escape_or_cross_archive(self):
         bad = ('../mao/002/002fff5d4e.json', 'mao/../002/002fff5d4e.json',
                'mao/pub/002/002fff5d4e.tags', 'mao/pub/003/002fff5d4e.json',
