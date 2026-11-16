@@ -65,6 +65,96 @@ class BhaJournalOwnershipTests(unittest.TestCase):
     def begin(self):
         return journal.begin(self.store, plan(), mode='incremental', operation=OPERATION)
 
+    def test_retained_plan_uses_full_canonical_file_sha_and_only_bha_owned_create(self):
+        value = plan()
+        raw = search_snapshot.canonical(value)
+        digest = hashlib.sha256(raw).hexdigest()
+        artifact = journal.retain_plan(self.store, value)
+        self.assertEqual(artifact, {'bucket': journal.BUCKET,
+                                   'key': f'bha-reindex/plans/{digest}.json', 'sha256': digest})
+        self.assertNotEqual(digest, value['plan_sha256'])
+        self.assertEqual(self.objects['bha-data', artifact['key']], raw)
+        self.client.put_object.assert_called_once_with(Bucket='bha-data', Key=artifact['key'],
+            Body=raw, ContentType='application/json', IfNoneMatch='*')
+        self.assertEqual(self.client.get_object.call_count, 2)
+        self.assertEqual(journal.retain_plan(self.store, value), artifact)
+        self.assertEqual(self.client.put_object.call_count, 1)
+        self.assertNotIn(('bha-data', journal.HEAD), self.objects)
+
+    def test_retained_plan_failure_has_one_create_and_requires_exact_readback(self):
+        for outcome in ('not-written', 'lost-response', 'corrupt', 'missing-readback', 'racing-identical'):
+            with self.subTest(outcome=outcome):
+                self.objects.clear()
+                self.client.put_object.reset_mock()
+                def put(**kwargs):
+                    if outcome == 'not-written':
+                        raise TimeoutError('not written')
+                    if outcome != 'missing-readback':
+                        self.put(**kwargs)
+                    if outcome == 'corrupt':
+                        self.objects[kwargs['Bucket'], kwargs['Key']] = b'{}'
+                    if outcome == 'lost-response':
+                        raise TimeoutError('response lost')
+                    if outcome == 'racing-identical':
+                        raise error('PreconditionFailed')
+                self.client.put_object.side_effect = put
+                if outcome in {'lost-response', 'racing-identical'}:
+                    result = journal.retain_plan(self.store, plan())
+                    self.assertEqual(self.store.read_plan(result['key']), search_snapshot.canonical(plan()))
+                else:
+                    with self.assertRaises((ValueError, TimeoutError)):
+                        journal.retain_plan(self.store, plan())
+                self.client.put_object.assert_called_once()
+                self.assertNotIn(('bha-data', journal.HEAD), self.objects)
+
+    def test_retained_plan_rejects_corrupt_existing_object_without_overwrite(self):
+        value = plan()
+        digest = hashlib.sha256(search_snapshot.canonical(value)).hexdigest()
+        self.objects['bha-data', journal._plan_key(digest)] = b'{}'
+        with self.assertRaisesRegex(ValueError, 'content address differs'):
+            journal.retain_plan(self.store, value)
+        self.client.put_object.assert_not_called()
+
+    def test_plan_paths_cannot_escape_to_records_legacy_or_other_objects(self):
+        raw = search_snapshot.canonical(plan())
+        key = journal._plan_key(hashlib.sha256(raw).hexdigest())
+        for invalid in (journal.HEAD, journal._record_key(OPERATION, 'a' * 64), '../' + key,
+                        key + '/extra', 'published/current.json', key.upper(), None):
+            with self.subTest(key=invalid):
+                with self.assertRaises(ValueError):
+                    self.store.read_plan(invalid)
+                with self.assertRaises(ValueError):
+                    self.store.create_plan(invalid, raw)
+        with self.assertRaisesRegex(ValueError, 'outside allowlist'):
+            self.store._get(key, legacy=True)
+        with self.assertRaisesRegex(ValueError, 'outside allowlist'):
+            self.store.read_record(key)
+        with self.assertRaises(ValueError):
+            self.store.create_record(key, raw)
+        self.client.get_object.assert_not_called()
+        self.client.put_object.assert_not_called()
+
+    def test_plan_body_is_bounded_canonical_and_checks_inner_and_full_digest(self):
+        value = plan()
+        tampered = {**value, 'consumer_fingerprint': 'tampered'}
+        for raw in (b'', b'x' * (journal.MAX_JSON + 1), b'[]', b'{}',
+                    search_snapshot.canonical(value) + b' ', search_snapshot.canonical(tampered)):
+            with self.subTest(size=len(raw)), self.assertRaises(ValueError):
+                self.store.create_plan(journal._plan_key(hashlib.sha256(raw).hexdigest()), raw)
+        raw = search_snapshot.canonical(value)
+        with self.assertRaises(ValueError):
+            self.store.create_plan(journal._plan_key('f' * 64), raw)
+        key = journal._plan_key(hashlib.sha256(raw).hexdigest())
+        for changes in ({'ContentLength': journal.MAX_JSON + 1}, {'ContentLength': len(raw) + 1},
+                        {'ETag': 'W/"weak"'}):
+            body = BytesIO(raw)
+            self.client.get_object.side_effect = None
+            self.client.get_object.return_value = {'Body': body, 'ContentLength': len(raw), 'ETag': '"tag"', **changes}
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                self.store.read_plan(key)
+            self.assertTrue(body.closed)
+        self.client.put_object.assert_not_called()
+
     def test_new_journal_and_transitions_write_only_bha_data_with_cas(self):
         self.assertEqual(journal.BUCKET, 'vomebook/bha-data')
         current = self.begin()

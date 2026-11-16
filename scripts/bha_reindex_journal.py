@@ -240,6 +240,42 @@ def _commit(store, value: dict, previous: Current | None) -> Current:
     return actual
 
 
+def _plan_key(digest: str) -> str:
+    return f'bha-reindex/plans/{_sha(digest)}.json'
+
+
+def _plan_bytes(raw: bytes, digest: str) -> None:
+    if (not isinstance(raw, bytes) or not 0 < len(raw) <= MAX_JSON
+            or hashlib.sha256(raw).hexdigest() != _sha(digest)):
+        raise ValueError('BHA retained plan content address differs')
+    value = json.loads(raw)
+    if (not isinstance(value, dict) or search_snapshot.canonical(value) != raw
+            or value.get('kind') != 'bha-reindex-readonly-plan'
+            or value.get('version') != 1 or value.get('publication_ready') is not False
+            or value.get('remote_writes') != 0
+            or hashlib.sha256(search_snapshot.canonical({k: v for k, v in value.items()
+                if k != 'plan_sha256'})).hexdigest() != value.get('plan_sha256')):
+        raise ValueError('BHA retained plan is invalid or noncanonical')
+
+
+def retain_plan(store, plan: dict) -> dict:
+    """Create once and read back the full canonical plan before preparation."""
+    raw = search_snapshot.canonical(plan)
+    digest = hashlib.sha256(raw).hexdigest()
+    _plan_bytes(raw, digest)
+    key = _plan_key(digest)
+    prior = store.read_plan(key)
+    if prior is None:
+        try: store.create_plan(key, raw)
+        except Exception:
+            prior = store.read_plan(key)
+            if prior != raw: raise
+        else: prior = store.read_plan(key)
+    if prior != raw:
+        raise ValueError('BHA retained plan readback differs')
+    return {'bucket': BUCKET, 'key': key, 'sha256': digest}
+
+
 def begin(store, plan: dict, *, mode: str, operation: str | None = None) -> Current:
     """Persist identities from a plan; caller must re-read actual sources/status."""
     if not isinstance(plan, dict) or plan.get('kind') != 'bha-reindex-readonly-plan':
@@ -356,7 +392,7 @@ class S3Store:
 
     def _get(self, key, *, legacy=False):
         if not isinstance(key, str) or (key != HEAD and (legacy or not re.fullmatch(
-                r'bha-reindex/operations/[0-9a-f]{32}/records/[0-9a-f]{64}\.json', key))):
+                r'bha-reindex/(?:operations/[0-9a-f]{32}/records|plans)/[0-9a-f]{64}\.json', key))):
             raise ValueError('BHA journal key outside allowlist')
         client, bucket = self._client(legacy=legacy)
         try: response = client.get_object(Bucket=bucket, Key=key)
@@ -393,6 +429,21 @@ class S3Store:
         if etag is None: self._require_no_legacy_head()
         client, bucket = self._client()
         client.put_object(Bucket=bucket, Key=HEAD, Body=raw, ContentType='application/json', **condition)
+
+    def read_plan(self, key):
+        if not isinstance(key, str) or not re.fullmatch(r'bha-reindex/plans/[0-9a-f]{64}\.json', key):
+            raise ValueError('BHA plan key outside allowlist')
+        raw, _etag = self._get(key)
+        if raw is not None: _plan_bytes(raw, key.rsplit('/', 1)[1][:-5])
+        return raw
+
+    def create_plan(self, key, raw):
+        digest = hashlib.sha256(raw).hexdigest()
+        _plan_bytes(raw, digest)
+        if key != _plan_key(digest):
+            raise ValueError('BHA plan key outside allowlist')
+        client, bucket = self._client()
+        client.put_object(Bucket=bucket, Key=key, Body=raw, ContentType='application/json', IfNoneMatch='*')
 
     def read_record(self, key):
         if not isinstance(key, str) or not re.fullmatch(r'bha-reindex/operations/[0-9a-f]{32}/records/[0-9a-f]{64}\.json', key):

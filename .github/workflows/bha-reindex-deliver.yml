@@ -1,12 +1,14 @@
 name: BHA · Deliver Reviewed Index Update
 
 on:
+  schedule:
+    - cron: '43 */6 * * *'
   workflow_dispatch:
     inputs:
       action:
         description: Plan an incremental update, apply an exact plan, or reconcile an existing operation
         type: choice
-        options: [plan, apply, reconcile, abandon]
+        options: [plan, apply, reconcile, abandon, auto]
         default: plan
       plan_run:
         description: Successful plan run on this code revision; apply only
@@ -37,7 +39,7 @@ concurrency:
 
 jobs:
   deliver:
-    if: github.repository == 'anftm/pipeline' && github.ref == 'refs/heads/main'
+    if: github.repository == 'anftm/pipeline' && github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' || vars.BHA_REINDEX_AUTO_ENABLED == 'true')
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     steps:
@@ -50,7 +52,7 @@ jobs:
         run: python -B -m unittest tests.test_bha_reindex_run tests.test_bha_reindex_delivery tests.test_bha_reindex_journal tests.test_bha_reindex_delivery_workflow
       - name: Validate explicit request
         env:
-          ACTION: ${{ inputs.action }}
+          ACTION: ${{ github.event_name == 'schedule' && 'auto' || inputs.action }}
           PLAN_RUN: ${{ inputs.plan_run }}
           PLAN_SHA: ${{ inputs.plan_sha256 }}
           OPERATION: ${{ inputs.operation_id }}
@@ -59,7 +61,7 @@ jobs:
           set -euo pipefail
           if [[ "$ACTION" != abandon ]]; then [[ -z "$REASON" ]]; fi
           case "$ACTION" in
-            plan) [[ -z "$PLAN_RUN" && -z "$PLAN_SHA" && -z "$OPERATION" ]] ;;
+            plan|auto) [[ -z "$PLAN_RUN" && -z "$PLAN_SHA" && -z "$OPERATION" ]] ;;
             apply) [[ "$PLAN_RUN" =~ ^[1-9][0-9]*$ && "$PLAN_SHA" =~ ^[0-9a-f]{64}$ ]] ;;
             reconcile) [[ -z "$PLAN_RUN" && -z "$PLAN_SHA" && -n "$OPERATION" ]] ;;
             abandon) [[ -z "$PLAN_RUN" && -z "$PLAN_SHA" && -n "$OPERATION" && -n "$REASON" ]] ;;
@@ -104,14 +106,14 @@ jobs:
           BHA_REINDEX_TOKEN: ${{ secrets.BHA_REINDEX_TOKEN }}
           HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
           HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
-          ACTION: ${{ inputs.action }}
+          ACTION: ${{ github.event_name == 'schedule' && 'auto' || inputs.action }}
           PLAN_SHA: ${{ inputs.plan_sha256 }}
           OPERATION: ${{ inputs.operation_id }}
           REASON: ${{ inputs.reason }}
         run: |
           set -euo pipefail
-          if [[ "$ACTION" == apply && "$GITHUB_RUN_ATTEMPT" != 1 ]]; then
-            echo 'Apply cannot be rerun; reconcile the recorded operation.' >&2
+          if [[ ( "$ACTION" == apply || "$ACTION" == auto ) && "$GITHUB_RUN_ATTEMPT" != 1 ]]; then
+            echo 'Apply/auto cannot be rerun; reconcile the recorded operation.' >&2
             exit 1
           fi
           mkdir -p output/bha

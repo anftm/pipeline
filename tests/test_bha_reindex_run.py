@@ -36,6 +36,17 @@ class CountingStore(Store):
     def __init__(self):
         super().__init__()
         self.record_writes = 0
+        self.plans = {}
+        self.plan_writes = 0
+
+    def read_plan(self, key):
+        return self.plans.get(key)
+
+    def create_plan(self, key, raw):
+        self.plan_writes += 1
+        if key in self.plans:
+            raise ValueError('exists')
+        self.plans[key] = raw
 
     def create_record(self, key, raw):
         self.record_writes += 1
@@ -98,6 +109,194 @@ class ReindexRunTests(unittest.TestCase):
         if state in {'failed', 'verified'}:
             current = journal.terminal(self.store, current, state=state, result={'fixture': True})
         return current
+
+    def test_auto_no_change_after_absent_verified_or_abandoned_writes_nothing(self):
+        for state in (None, 'verified', 'abandoned'):
+            with self.subTest(state=state):
+                self.store = CountingStore()
+                self.plan = plan()
+                if state == 'verified':
+                    self.pending(state)
+                    self.plan['consumer_revisions'] = dict(self.plan['archive_revisions'])
+                    self.plan['changed_archives'] = []
+                    rehash(self.plan)
+                else:
+                    if state == 'abandoned':
+                        current = self.pending('prepared')
+                        journal.abandon_prepared(self.store, current, 'stale-plan')
+                    self.plan = plan(False)
+                before = (self.store.writes, self.store.record_writes, self.store.plan_writes)
+                retain = Mock(side_effect=AssertionError('no artifact for no change'))
+                result = self.run_action('auto', retain_plan=retain)
+                self.assertTrue(result['ok'])
+                self.assertEqual(result['status'], 'no-change')
+                self.assertEqual(result['remote_writes'], 0)
+                self.assertEqual((self.store.writes, self.store.record_writes, self.store.plan_writes), before)
+                retain.assert_not_called()
+        self.reviewed.assert_not_called()
+        self.send.assert_not_called()
+
+    def test_auto_pending_reconciles_then_returns_without_planning_or_retention(self):
+        for state in ('claimed', 'accepted'):
+            with self.subTest(state=state):
+                self.store = CountingStore()
+                self.pending(state)
+                retain = Mock(side_effect=AssertionError('pending must not retain'))
+                result = self.run_action('auto', retain_plan=retain)
+                self.assertTrue(result['ok'])
+                self.assertEqual(result['operation_id'], T)
+                self.assertEqual(result['reindex_post_attempts'], 0)
+                retain.assert_not_called()
+        self.collect.assert_not_called()
+        self.reviewed.assert_not_called()
+        self.send.assert_not_called()
+        self.snapshot.assert_called_with(self.plan['archive_revisions'], full_sidecars=True,
+                                         expected_generation='bha-fixture', not_before=100)
+
+    def test_auto_prepared_failed_and_broken_history_block_before_planning(self):
+        for state in ('prepared', 'failed', 'verified'):
+            with self.subTest(state=state):
+                self.store = CountingStore()
+                self.pending(state)
+                if state == 'verified':
+                    del self.store.records[next(iter(self.store.records))]
+                before = (self.store.writes, self.store.record_writes)
+                with self.assertRaises(ValueError):
+                    self.run_action('auto')
+                self.assertEqual((self.store.writes, self.store.record_writes), before)
+                self.assertEqual(self.store.plan_writes, 0)
+        self.collect.assert_not_called()
+        self.send.assert_not_called()
+
+    def test_auto_coverage_blocks_before_artifact_journal_or_post(self):
+        for declared in ([], [1]):
+            with self.subTest(declared=declared):
+                self.plan['archive_revisions']['1'] = 'd' * 40
+                self.plan['changed_archives'] = [0, 1]
+                self.plan['post_index_sample_missing_archives'] = declared
+                rehash(self.plan)
+                retain = Mock()
+                with self.assertRaisesRegex(runner.RunError, 'all changed archives'):
+                    self.run_action('auto', retain_plan=retain)
+                retain.assert_not_called()
+                self.assertEqual((self.store.writes, self.store.record_writes, self.store.plan_writes), (0, 0, 0))
+        self.send.assert_not_called()
+
+    def test_auto_retention_failure_or_wrong_provenance_blocks_begin(self):
+        for retain in (Mock(side_effect=TimeoutError('artifact failed')), Mock(return_value=None),
+                       Mock(return_value={'bucket': journal.BUCKET, 'key': 'wrong', 'sha256': 'f' * 64})):
+            with self.subTest(retain=retain), patch.object(journal, 'begin') as begin:
+                with self.assertRaises((TimeoutError, runner.RunError)):
+                    self.run_action('auto', retain_plan=retain)
+                begin.assert_not_called()
+                self.assertIsNone(self.store.head)
+                self.assertEqual(self.store.record_writes, 0)
+        self.send.assert_not_called()
+
+    def test_auto_changed_retains_exact_plan_before_begin_and_posts_once(self):
+        begin = journal.begin
+        retain = Mock(wraps=journal.retain_plan)
+        def checked_begin(store, value, **kwargs):
+            retain.assert_called_once()
+            raw = search_snapshot.canonical(value)
+            digest = hashlib.sha256(raw).hexdigest()
+            self.assertEqual(store.plans[journal._plan_key(digest)], raw)
+            self.assertEqual(self.events[-1]['plan_file_sha256'], digest)
+            return begin(store, value, **kwargs)
+        self.status.side_effect = lambda _: {
+            **live_status(self.plan), 'job': {**live_status(self.plan)['job'],
+                'operation_id': journal.load(self.store).record['operation']}}
+        with patch.object(journal, 'begin', side_effect=checked_begin):
+            result = self.run_action('auto', retain_plan=retain)
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['plan_artifact']['sha256'], result['plan_file_sha256'])
+        self.assertEqual(result['plan_artifact']['bucket'], journal.BUCKET)
+        self.assertEqual(self.store.plan_writes, 1)
+        self.assertEqual(self.collect.call_count, 3)
+        self.reviewed.assert_not_called()
+        self.send.assert_called_once()
+        self.assertEqual(journal.audit(self.store, journal.load(self.store)), 4)
+        self.snapshot.assert_called_once_with(self.plan['archive_revisions'], full_sidecars=True,
+                                             expected_generation='bha-fixture', not_before=100)
+
+    def test_auto_changed_after_terminal_uses_fresh_plan_and_new_operation(self):
+        for state in ('verified', 'abandoned'):
+            with self.subTest(state=state):
+                self.store = CountingStore()
+                self.plan = plan()
+                if state == 'verified':
+                    self.pending('verified')
+                    self.plan['consumer_revisions'] = dict(self.plan['archive_revisions'])
+                else:
+                    current = self.pending('prepared')
+                    journal.abandon_prepared(self.store, current, 'superseded-plan')
+                self.plan['archive_revisions']['0'] = 'e' * 40
+                rehash(self.plan)
+                self.collect.reset_mock()
+                self.send.reset_mock()
+                self.status.side_effect = lambda _: {
+                    **live_status(self.plan), 'job': {**live_status(self.plan)['job'],
+                        'operation_id': journal.load(self.store).record['operation']}}
+                result = self.run_action('auto')
+                self.assertTrue(result['ok'])
+                self.assertNotEqual(result['operation_id'], T)
+                self.assertEqual(self.collect.call_count, 3)
+                self.assertEqual(journal.load(self.store).record['previous_terminal']['operation'], T)
+                self.assertEqual(self.store.plan_writes, 1)
+                self.send.assert_called_once()
+                journal.audit(self.store, journal.load(self.store))
+        self.reviewed.assert_not_called()
+
+    def test_auto_pending_coverage_failure_does_not_advance_journal(self):
+        self.plan['archive_revisions']['1'] = 'e' * 40
+        self.plan['changed_archives'] = [0, 1]
+        rehash(self.plan)
+        current = self.pending('claimed')
+        before = (self.store.writes, self.store.record_writes)
+        with self.assertRaisesRegex(runner.RunError, 'all changed archives'):
+            self.run_action('auto')
+        self.assertEqual(journal.load(self.store), current)
+        self.assertEqual((self.store.writes, self.store.record_writes), before)
+        self.assertEqual(self.store.plan_writes, 0)
+        self.collect.assert_not_called()
+        self.reconcile.assert_not_called()
+        self.send.assert_not_called()
+
+    def test_auto_full_plan_drift_at_prepare_or_claim_stops_post(self):
+        changed = rehash({**self.plan, 'samples': [{'changed': 'evidence'}]})
+        for during in ('prepare', 'claim'):
+            with self.subTest(during=during):
+                self.store = CountingStore()
+                self.collect.side_effect = ([self.plan, changed] if during == 'prepare'
+                                            else [self.plan, self.plan, changed])
+                with self.assertRaisesRegex(runner.RunError, 'retained plan is stale'):
+                    self.run_action('auto')
+                current = journal.load(self.store)
+                self.assertEqual(current.record['state'] if current else None,
+                                 'prepared' if during == 'claim' else None)
+                self.assertEqual(self.store.plan_writes, 1)
+        self.send.assert_not_called()
+
+    def test_auto_lost_response_unknown_stays_claimed_next_auto_reconciles(self):
+        self.send.side_effect = TimeoutError('lost response')
+        with self.assertRaises(TimeoutError):
+            self.run_action('auto')
+        claimed = journal.load(self.store)
+        self.assertEqual(claimed.record['state'], 'claimed')
+        self.reconcile.assert_not_called()
+        self.collect.reset_mock()
+        self.status.side_effect = lambda _: {'job': None}
+        result = self.run_action('auto', timeout_seconds=35)
+        self.assertEqual(result['status'], 'timeout')
+        self.assertEqual(journal.load(self.store), claimed)
+        self.status.side_effect = lambda _: {
+            **live_status(self.plan), 'job': {**live_status(self.plan)['job'],
+                'operation_id': claimed.record['operation']}}
+        self.assertTrue(self.run_action('auto')['ok'])
+        self.collect.assert_not_called()
+        self.reviewed.assert_not_called()
+        self.assertEqual(self.store.plan_writes, 1)
+        self.send.assert_called_once()
 
     def test_pending_apply_recovers_before_collecting_or_loading_plan(self):
         for state in ('claimed', 'accepted'):
@@ -563,6 +762,52 @@ class ReindexCLITests(unittest.TestCase):
     def write_plan(self, value):
         self.plan_path.write_text(json.dumps(value) + '\n')
         return hashlib.sha256(self.plan_path.read_bytes()).hexdigest()
+
+    def test_auto_cli_rejects_manual_controls_before_any_io(self):
+        for option, value in (('--plan-sha256', 'a' * 64), ('--operation-id', T), ('--reason', 'stale-plan')):
+            with self.subTest(option=option), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                self.invoke('auto', option, value)
+            self.assertFalse(self.output.exists())
+        self.collect.assert_not_called()
+        self.send.assert_not_called()
+
+    def test_auto_cli_no_change_optional_local_output_and_no_remote_writes(self):
+        self.assertEqual(self.invoke('auto'), 0)
+        self.assertEqual(json.loads(self.output.read_bytes())['status'], 'no-change')
+        self.output = self.root / 'auto-local-result.json'
+        self.assertEqual(self.invoke('auto', '--plan', str(self.plan_path)), 0)
+        result = json.loads(self.output.read_bytes())
+        self.assertEqual(self.plan_path.read_bytes(), search_snapshot.canonical(result['plan']))
+        self.assertEqual(result['plan_file_sha256'], hashlib.sha256(self.plan_path.read_bytes()).hexdigest())
+        self.assertEqual(result['plan_path'], str(self.plan_path))
+        self.assertNotIn('plan_artifact', result)
+        self.assertEqual((self.store.writes, self.store.record_writes, self.store.plan_writes), (0, 0, 0))
+        self.send.assert_not_called()
+
+    def test_auto_cli_retains_local_and_remote_plan_before_lost_post(self):
+        self.collect.return_value = plan()
+        def lost(_token, *, mode, payload):
+            result = json.loads(self.output.read_bytes())
+            artifact = result['plan_artifact']
+            self.assertEqual(self.plan_path.read_bytes(), self.store.plans[artifact['key']])
+            self.assertEqual(result['plan_file_sha256'], hashlib.sha256(self.plan_path.read_bytes()).hexdigest())
+            self.assertEqual(result['journal_state'], 'claimed')
+            raise TimeoutError('fixture-secret-never-log')
+        self.send.side_effect = lost
+        self.assertEqual(self.invoke('auto', '--plan', str(self.plan_path)), 1)
+        result = json.loads(self.output.read_bytes())
+        self.assertEqual(result['journal_state'], 'claimed')
+        self.assertIn('plan_artifact', result)
+        self.assertNotIn('fixture-secret-never-log', self.output.read_text())
+        self.send.assert_called_once()
+
+    def test_auto_cli_never_overwrites_existing_plan_output(self):
+        self.write_plan(plan())
+        before = self.plan_path.read_bytes()
+        self.assertEqual(self.invoke('auto', '--plan', str(self.plan_path)), 1)
+        self.assertEqual(self.plan_path.read_bytes(), before)
+        self.collect.assert_not_called()
+        self.assertEqual(self.store.plan_writes, 0)
 
     def test_exact_workflow_contract_plan_then_apply_noop(self):
         self.assertEqual(self.invoke('plan', '--plan', str(self.plan_path)), 0)

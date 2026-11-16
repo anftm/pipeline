@@ -1,8 +1,9 @@
-"""Manual incremental BHA plan/apply/reconcile runner.
+"""Incremental BHA auto/plan/apply/reconcile runner.
 
-The workflow verifies artifact provenance; --plan-sha256 binds apply to the
-exact downloaded file bytes. A claimed request is never posted again. Recovery
-uses the existing journal target, even when source heads have since moved.
+Auto reconciles pending work first, or retains a fresh changed plan in BHA
+storage before preparation. For manual apply, --plan-sha256 binds the exact
+downloaded file bytes. A claimed request is never posted again. Recovery uses
+the existing journal target, even when source heads have since moved.
 """
 from __future__ import annotations
 
@@ -139,10 +140,13 @@ def observe_target(record, selected):
 
 def run(*, action, store, collect_plan, load_reviewed, selected, token,
         operation_id=None, reason=None, timeout_seconds=9000, poll_seconds=30,
-        emit=lambda value: None, clock=time.monotonic, sleep=time.sleep):
+        emit=lambda value: None, clock=time.monotonic, sleep=time.sleep,
+        retain_plan=journal.retain_plan):
     """Run one operation; injectable clock and boundaries permit offline tests."""
-    if action not in {'plan', 'apply', 'reconcile', 'abandon'}:
+    if action not in {'auto', 'plan', 'apply', 'reconcile', 'abandon'}:
         raise RunError('invalid action')
+    if action == 'auto' and (operation_id is not None or reason is not None):
+        raise RunError('auto rejects --operation-id and --reason')
     if (not math.isfinite(timeout_seconds) or timeout_seconds <= 0
             or not math.isfinite(poll_seconds) or not 0 < poll_seconds <= 30):
         raise RunError('timeout must be positive and polling must be between zero and 30 seconds')
@@ -160,7 +164,7 @@ def run(*, action, store, collect_plan, load_reviewed, selected, token,
         emit(dict(report))
         return dict(report)
 
-    # Inspect durable work before touching a reviewed plan or ready-only planner.
+    # Inspect durable work before touching a reviewed plan or read-only planner.
     current = journal.load(store)
     if current is not None:
         journal.audit(store, current)
@@ -238,13 +242,18 @@ def run(*, action, store, collect_plan, load_reviewed, selected, token,
             if reviewed['plan_sha256'] != current.record['plan_sha256']:
                 raise RunError('reviewed plan differs from the prepared operation')
 
+    retained_digest = None
+
     def fresh_plan():
         value = collect_plan()
         validate_plan(value)
-        if action == 'apply':
+        if action in {'apply', 'auto'}:
             require_coverage(value['changed_archives'], selected, value)
-            if value['plan_sha256'] != reviewed['plan_sha256']:
+            if reviewed is not None and value['plan_sha256'] != reviewed['plan_sha256']:
                 raise RunError('reviewed plan is stale; collect and review a new plan')
+            if (retained_digest is not None
+                    and hashlib.sha256(search_snapshot.canonical(value)).hexdigest() != retained_digest):
+                raise RunError('retained plan is stale; fresh plan file digest differs')
         return value
 
     plan = fresh_plan()
@@ -253,6 +262,13 @@ def run(*, action, store, collect_plan, load_reviewed, selected, token,
         return publish(status='planned', ok=True, remote_writes=0)
     if not plan['changed_archives']:
         return publish(status='no-change', ok=True, remote_writes=0)
+    if action == 'auto':
+        retained_digest = hashlib.sha256(search_snapshot.canonical(plan)).hexdigest()
+        artifact = retain_plan(store, plan)
+        if artifact != {'bucket': journal.BUCKET, 'key': journal._plan_key(retained_digest),
+                        'sha256': retained_digest}:
+            raise RunError('durable plan retention did not confirm exact provenance')
+        publish(status='plan-retained', plan_artifact=artifact, plan_file_sha256=retained_digest)
     if current is None or current.record['state'] in {'verified', 'abandoned'}:
         current = delivery.prepare(store, plan=plan, mode='incremental', inspect_live=fresh_plan)
     publish(operation_id=current.record['operation'], journal_state='prepared', status='prepared')
@@ -271,9 +287,9 @@ def run(*, action, store, collect_plan, load_reviewed, selected, token,
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--action', required=True, choices=('plan', 'apply', 'reconcile', 'abandon'))
+    parser.add_argument('--action', required=True, choices=('auto', 'plan', 'apply', 'reconcile', 'abandon'))
     parser.add_argument('--output', required=True, type=Path)
-    parser.add_argument('--plan', type=Path, help='plan output for plan; downloaded reviewed input for apply')
+    parser.add_argument('--plan', type=Path, help='local output for plan/auto; downloaded reviewed input for apply')
     parser.add_argument('--plan-sha256', help='SHA-256 of the exact reviewed plan file bytes')
     parser.add_argument('--operation-id', help='existing operation for reconcile, abandon or explicit prepared resume')
     parser.add_argument('--reason', help='required for abandon: stale-plan, superseded-plan or operator-cancelled')
@@ -282,6 +298,9 @@ def main(argv=None) -> int:
     parser.add_argument('--poll-seconds', type=float, default=30)
     parser.add_argument('--timeout-seconds', type=float, default=150 * 60)
     args = parser.parse_args(argv)
+    if args.action == 'auto' and any(value is not None for value in
+                                   (args.plan_sha256, args.operation_id, args.reason)):
+        parser.error('auto rejects --plan-sha256, --operation-id and --reason')
     inputs = {args.samples.resolve(), args.baseline.resolve()}
     if args.plan is not None:
         inputs.add(args.plan.resolve())
@@ -306,10 +325,10 @@ def main(argv=None) -> int:
 
         try:
             emit(dict(latest))
-            if args.action == 'plan':
+            if args.action == 'plan' or args.action == 'auto' and args.plan is not None:
                 if (args.plan is None or args.plan.exists() or args.plan.is_symlink()
                         or args.plan.resolve() in {args.samples.resolve(), args.baseline.resolve()}):
-                    raise RunError('plan requires --plan pointing to a new path outside its inputs')
+                    raise RunError('plan output requires --plan pointing to a new path outside its inputs')
             selected = None
             if args.action != 'abandon':
                 _, spec = read_json(args.samples)
@@ -322,10 +341,30 @@ def main(argv=None) -> int:
             def collect():
                 return inspect_plan_with_samples(github_token, token, args.baseline, selected_samples=selected)
 
+            def retain(store, value):
+                artifact = journal.retain_plan(store, value)
+                if args.plan is not None:
+                    args.plan.parent.mkdir(parents=True, exist_ok=True)
+                    with args.plan.open('xb') as plan_file:
+                        plan_file.write(search_snapshot.canonical(value))
+                        plan_file.flush()
+                        os.fsync(plan_file.fileno())
+                    if hashlib.sha256(args.plan.read_bytes()).hexdigest() != artifact['sha256']:
+                        raise RunError('local retained plan readback differs')
+                return artifact
+
             result = run(action=args.action, store=journal.S3Store(), collect_plan=collect,
                          load_reviewed=lambda: reviewed_plan(args.plan, args.plan_sha256),
                          selected=selected, token=token, operation_id=args.operation_id, reason=args.reason,
-                         timeout_seconds=args.timeout_seconds, poll_seconds=args.poll_seconds, emit=emit)
+                         timeout_seconds=args.timeout_seconds, poll_seconds=args.poll_seconds, emit=emit,
+                         retain_plan=retain)
+            if args.action == 'auto' and args.plan is not None and 'plan' in result:
+                if not args.plan.exists():
+                    args.plan.parent.mkdir(parents=True, exist_ok=True)
+                    with args.plan.open('xb') as plan_file:
+                        plan_file.write(search_snapshot.canonical(result['plan']))
+                emit({**result, 'plan_file_sha256': hashlib.sha256(args.plan.read_bytes()).hexdigest(),
+                      'plan_path': str(args.plan)})
             if args.action == 'plan' and result['ok']:
                 args.plan.parent.mkdir(parents=True, exist_ok=True)
                 with args.plan.open('x', encoding='utf-8') as plan_file:

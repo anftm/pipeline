@@ -11,14 +11,16 @@ class DeliveryWorkflowTests(unittest.TestCase):
         self.workflow = yaml.safe_load(Path('.github/workflows/bha-reindex-deliver.yml').read_text())
         self.steps = {s.get('name'): s for s in self.workflow['jobs']['deliver']['steps'] if s.get('name')}
 
-    def test_manual_only_shared_serialization_and_evidence(self):
+    def test_gated_schedule_shared_serialization_and_evidence(self):
         triggers = self.workflow.get('on', self.workflow.get(True))
-        self.assertEqual(set(triggers), {'workflow_dispatch'})
+        self.assertEqual(set(triggers), {'workflow_dispatch', 'schedule'})
+        self.assertEqual(triggers['schedule'], [{'cron': '43 */6 * * *'}])
+        self.assertIn("github.event_name == 'workflow_dispatch' || vars.BHA_REINDEX_AUTO_ENABLED == 'true'", self.workflow['jobs']['deliver']['if'])
+        self.assertEqual(self.steps['Run bounded BHA delivery']['env']['ACTION'], "${{ github.event_name == 'schedule' && 'auto' || inputs.action }}")
         self.assertEqual(self.workflow['concurrency']['group'], 'update-bha-index')
         self.assertIs(self.workflow['concurrency']['cancel-in-progress'], False)
         self.assertEqual(self.workflow['permissions'], {'contents': 'read', 'actions': 'read'})
         self.assertEqual(self.steps['Preserve operation and acceptance evidence']['if'], 'always()')
-        self.assertNotIn('schedule', triggers)
 
     def test_invalid_requests_fail_before_execution(self):
         script = self.steps['Validate explicit request']['run']
@@ -61,5 +63,5 @@ class DeliveryWorkflowTests(unittest.TestCase):
         script=self.steps['Run bounded BHA delivery']['run']
         result=subprocess.run(['bash','-c',script],env={**os.environ,'ACTION':'apply','GITHUB_RUN_ATTEMPT':'2'},capture_output=True)
         self.assertNotEqual(result.returncode,0)
-        self.assertIn(b'Apply cannot be rerun',result.stderr)
+        self.assertIn(b'Apply/auto cannot be rerun',result.stderr)
         self.assertNotIn('${{',script)
