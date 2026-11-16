@@ -2,7 +2,7 @@ import gzip
 import json
 import unittest
 
-from scripts.reader_gc_stream import catalog_identity, compact_catalog_stream
+from scripts.reader_gc_stream import catalog_identity, catalog_json, compact_catalog_stream
 
 NEW = "1" * 32
 OLD = "2" * 32
@@ -68,6 +68,33 @@ class CatalogCompactionStreamTests(unittest.TestCase):
             self.assertEqual(result['pages'][0]['rbucket'], 'vomebook/pdf-pages-v2')
             self.assertEqual(result['pages'][0]['r'], value['pages'][0]['r'])
             self.assertEqual(result['images'], value['images'])
+
+    def test_catalog_reference_deduplication_can_be_disabled_for_entry_validation(self):
+        import hashlib
+        source = catalog()
+        current = source['generations'][NEW]
+        earlier = source['generations'][RECENT]
+        earlier['references'] = list(current['references'])
+        # Keep an intra-entry duplicate too: exact-entry mode must not alter it.
+        current['references'] *= 2
+        retired = source['generations'][OLD]
+        retired['replacement_acks'] = {'hf': True, 'pages': True}
+        source['generations'] = {RECENT: earlier, NEW: current, OLD: retired}
+        raw = json.dumps(source).encode()
+        for compressed in (False, True):
+            with self.subTest(compressed=compressed):
+                wire = gzip.compress(raw) if compressed else raw
+                default, default_digest = catalog_json(chunks(wire), compressed)
+                exact, exact_digest = catalog_json(chunks(wire), compressed, deduplicate_references=False)
+                self.assertEqual(default['generations'][NEW]['references'], [])
+                self.assertEqual(default['generations'][RECENT]['references'], earlier['references'])
+                self.assertEqual(exact['generations'][NEW], current)
+                self.assertEqual(exact['generations'][RECENT], earlier)
+                for result in (default, exact):
+                    self.assertNotIn('references', result['generations'][OLD])
+                    self.assertTrue(result['generations'][OLD]['gc_stub'])
+                self.assertEqual(default_digest, hashlib.sha256(wire).hexdigest())
+                self.assertEqual(exact_digest, default_digest)
 
     def test_compaction_keeps_current_references_and_grace_history(self):
         wire = json.dumps(catalog(), sort_keys=True).encode()

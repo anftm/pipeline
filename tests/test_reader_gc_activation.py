@@ -13,7 +13,7 @@ class MaintenanceActivationTests(unittest.TestCase):
         triggers = workflow.get('on', workflow.get(True))
         inputs = triggers['workflow_dispatch']['inputs']
         self.assertEqual(inputs['scope']['options'],
-                         ['retired-assets', 'unreferenced', 'page-plan', 'page-apply', 'obsolete-pdf-references'])
+                         ['retired-assets', 'unreferenced', 'page-plan', 'page-apply', 'obsolete-pdf-references', 'obsolete-pdf-handoff'])
         self.assertEqual(inputs['scope']['default'], 'retired-assets')
         self.assertEqual(inputs['resume_run']['type'], 'string')
         self.assertEqual(inputs['resume_run']['default'], '')
@@ -48,12 +48,13 @@ class MaintenanceActivationTests(unittest.TestCase):
     def test_obsolete_reference_operation_requires_manual_write_selection(self):
         flow = yaml.safe_load(Path('.github/workflows/reader-maintenance.yml').read_text())
         step = next(s for s in flow['jobs']['maintain']['steps'] if s.get('name') == 'Pause producers, collect and restore')
-        for event, plan, limit in [('schedule', 'false', '0'), ('workflow_dispatch', 'true', '0'), ('workflow_dispatch', 'false', '1')]:
-            result = subprocess.run(['bash', '-eu', '-c', 'python() { exit 99; }; mkdir() { exit 98; };\n' + step['run']],
-                env={**os.environ, 'SCOPE':'obsolete-pdf-references', 'EVENT_NAME':event,
-                     'PLAN_ONLY':plan,'LIMIT':limit,'RESUME_RUN':'{}'}, capture_output=True)
-            self.assertNotEqual(result.returncode, 0)
-            self.assertNotIn(result.returncode, [98, 99])
+        for scope in ('obsolete-pdf-references', 'obsolete-pdf-handoff'):
+            for event, plan, limit in [('schedule', 'false', '0'), ('workflow_dispatch', 'true', '0'), ('workflow_dispatch', 'false', '1')]:
+                result = subprocess.run(['bash', '-eu', '-c', 'python() { exit 99; }; mkdir() { exit 98; };\n' + step['run']],
+                    env={**os.environ, 'SCOPE':scope, 'EVENT_NAME':event,
+                         'PLAN_ONLY':plan,'LIMIT':limit,'RESUME_RUN':'{}'}, capture_output=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn(result.returncode, [98, 99])
         self.assertIn('python -u -m scripts.reader_obsolete_pdf_run', step['run'])
 
     def test_preflight_cannot_pause_or_restore_producers(self):

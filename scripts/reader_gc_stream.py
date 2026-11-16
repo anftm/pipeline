@@ -68,12 +68,14 @@ def graph_json(chunks, compressed=False):
     return builder.value, source.hash.hexdigest()
 
 
-def catalog_json(chunks, compressed=False, grace_days=0):
+def catalog_json(chunks, compressed=False, grace_days=0, *, deduplicate_references=True):
     """Stream a Reader catalog keeping every generation id but only live references.
 
     Superseded, acknowledged generations are reduced to identity stubs. Live
     generations keep only references not already kept by another live
     generation, so the walk still visits every live reference exactly once.
+    Callers validating an individual live entry may disable deduplication to
+    retain its exact references. Retired-entry pruning is unchanged.
     """
     import ijson
     try:
@@ -108,7 +110,7 @@ def catalog_json(chunks, compressed=False, grace_days=0):
             item, entry = entry.value, None
             if isinstance(item, dict):
                 live = current is None or generation_live(item, current, grace_days=grace_days)
-                if live and isinstance(item.get("references"), list):
+                if live and deduplicate_references and isinstance(item.get("references"), list):
                     kept = []
                     for ref in item["references"]:
                         identity = (ref.get("bucket"), ref.get("path")) if isinstance(ref, dict) else None

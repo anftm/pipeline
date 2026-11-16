@@ -1,5 +1,7 @@
 import base64
 import copy
+from dataclasses import replace
+import gzip
 import hashlib
 import json
 from pathlib import Path
@@ -12,9 +14,17 @@ from scripts import reader_lifecycle as lifecycle
 from scripts import reader_retired_processing as history
 
 
+def synthetic_receipt_registry():
+    # Guard tests mock legacy transaction rows, but still authenticate gzip bytes.
+    compressed = gzip.compress(b'proof', mtime=0)
+    return (replace(history.RECEIPT_REGISTRY[0],
+                    gzip_sha256=hashlib.sha256(compressed).hexdigest(),
+                    uncompressed_size=len(b'proof')), *history.RECEIPT_REGISTRY[1:])
+
+
 def receipt_fixture(path):
-    if path == history.RECEIPT_PATH:
-        return b'proof'  # Legacy receipt authentication is mocked in guard unit tests.
+    if path == history.RECEIPT_REGISTRY[0].path:
+        return gzip.compress(b'proof', mtime=0)
     return (Path(__file__).parent / 'fixtures' / 'reader_retired_processing' /
             'collection-43730121335.json').read_bytes()
 
@@ -157,11 +167,12 @@ class HistoricalProcessingEvidenceTests(unittest.TestCase):
         pointer = {'generation': 'g'}
         catalog = {'base_sidecar': {'x': 1}}
         with patch.object(history, 'load_receipt', return_value={}), \
-             patch.object(history, 'RECEIPT_REGISTRY', history.RECEIPT_REGISTRY[:1]), \
+             patch.object(history, 'RECEIPT_REGISTRY', synthetic_receipt_registry()[:1]), \
              patch('scripts.publish_reader_v3.current', return_value=(pointer, catalog)):
             with self.assertRaisesRegex(ValueError, 'lack exact'):
                 sidecar.historical_processing_guard([{'files': [self.entry]}], self.sidecar, Store(), None)
-        with patch.object(history, 'load_receipt', return_value={self.path: self.row}), \
+        with patch.object(history, 'RECEIPT_REGISTRY', synthetic_receipt_registry()), \
+             patch.object(history, 'load_receipt', return_value={self.path: self.row}), \
              patch('scripts.publish_reader_v3.current', return_value=(pointer, catalog)), \
              patch('scripts.publish_reader_v3.pinned_base', return_value=self.sidecar), \
              patch('scripts.publish_reader_v3.project_sidecar', return_value=self.sidecar), \
@@ -178,7 +189,8 @@ class HistoricalProcessingEvidenceTests(unittest.TestCase):
             def read_bytes(self, bucket, path):
                 return receipt_fixture(path)
         pointer, catalog = {'generation': 'g'}, {'base_sidecar': {'x': 1}}
-        with patch.object(history, 'load_receipt', return_value={self.path: self.row}), \
+        with patch.object(history, 'RECEIPT_REGISTRY', synthetic_receipt_registry()), \
+             patch.object(history, 'load_receipt', return_value={self.path: self.row}), \
              patch('scripts.publish_reader_v3.current', return_value=(pointer, catalog)), \
              patch('scripts.publish_reader_v3.pinned_base', return_value=self.sidecar), \
              patch('scripts.publish_reader_v3.project_sidecar', return_value=self.sidecar), \
@@ -203,7 +215,8 @@ class HistoricalProcessingEvidenceTests(unittest.TestCase):
                 return receipt_fixture(path)
         pointer, catalog = {'generation': 'g'}, {'base_sidecar': {'x': 1}}
         new = {'v': 1, 'f': {self.entry['key']: {'b': history.ASSETS, 'p': 'documents/web/html/other'}}}
-        with patch.object(history, 'load_receipt', return_value={self.path: self.row}), \
+        with patch.object(history, 'RECEIPT_REGISTRY', synthetic_receipt_registry()), \
+             patch.object(history, 'load_receipt', return_value={self.path: self.row}), \
              patch('scripts.publish_reader_v3.current', return_value=(pointer, catalog)), \
              patch('scripts.publish_reader_v3.pinned_base', return_value=self.sidecar), \
              patch('scripts.publish_reader_v3.project_sidecar', return_value=self.sidecar), \
@@ -265,12 +278,170 @@ class CompletedProcessingReceiptTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'lacks original evidence'):
                     history.verify_owner(path, entry, self.proof.rows[path], self.before, self.after)
 
+    def compressed_receipt(self, raw=None):
+        compressed = gzip.compress(self.raw if raw is None else raw, mtime=0)
+        identity = replace(self.identity, path=self.identity.path + '.gz',
+                           gzip_sha256=hashlib.sha256(compressed).hexdigest(),
+                           uncompressed_size=len(self.raw))
+        return compressed, identity
+
+    def test_compressed_receipt_preserves_rows_and_legacy_positional_identity(self):
+        compressed, identity = self.compressed_receipt()
+        with patch.object(history, 'RECEIPT_REGISTRY', (identity,)):
+            self.assertEqual(history.VerifiedReceipt(compressed, identity).rows, self.proof.rows)
+        legacy = history.ReceiptIdentity(history.RECEIPT_PATH + '.gz', history.RECEIPT_SHA256,
+                                         history.PLAN_SHA256, 'unreferenced', True,
+                                         identity.gzip_sha256, identity.uncompressed_size)
+        with patch.object(history, 'RECEIPT_REGISTRY', (legacy,)), \
+             patch.object(history, 'load_receipt', return_value={}) as load:
+            history.VerifiedReceipt(compressed, legacy)
+        load.assert_called_once_with(self.raw)
+        plain = history.ReceiptIdentity('plain', 'a' * 64, 'b' * 64, 'unreferenced', True)
+        self.assertTrue(plain.legacy)
+        self.assertIsNone(plain.gzip_sha256)
+        self.assertIsNone(plain.uncompressed_size)
+
+    def test_compressed_authentication_and_membership_precede_decoding(self):
+        compressed, identity = self.compressed_receipt()
+        for registered, payload, error in ((False, compressed, 'unregistered'),
+                                            (True, b'not gzip', 'compressed checksum')):
+            with self.subTest(registered=registered), \
+                 patch.object(history, 'RECEIPT_REGISTRY', (identity,) if registered else ()), \
+                 patch.object(history.gzip, 'GzipFile') as decode, \
+                 patch.object(history, '_load_receipt') as load:
+                with self.assertRaisesRegex(ValueError, error):
+                    history.VerifiedReceipt(payload, identity)
+                decode.assert_not_called()
+                load.assert_not_called()
+
+    def test_invalid_and_truncated_gzip_fail_with_matching_compressed_hash(self):
+        compressed, identity = self.compressed_receipt()
+        corrupt = bytearray(compressed)
+        corrupt[-8] ^= 1  # Corrupt the gzip CRC while retaining the raw payload.
+        invalid_deflate = compressed[:10] + b'\x07' + compressed[-8:]
+        for payload in (b'not gzip', b'', compressed[:10], compressed[:-1],
+                        compressed[:-8], bytes(corrupt), invalid_deflate):
+            registered = replace(identity, gzip_sha256=hashlib.sha256(payload).hexdigest())
+            with self.subTest(size=len(payload)), \
+                 patch.object(history, 'RECEIPT_REGISTRY', (registered,)), \
+                 patch.object(history, '_load_receipt') as load:
+                with self.assertRaisesRegex(ValueError, 'gzip data|size mismatch'):
+                    history.VerifiedReceipt(payload, registered)
+                load.assert_not_called()
+
+    def test_compressed_receipt_still_checks_raw_checksum_and_transaction(self):
+        body = json.loads(self.raw)
+        body['complete'] = False
+        for raw, error in ((b' ' + self.raw[1:], 'checksum'),
+                           (retirement.encode(body), 'completed transaction')):
+            compressed, identity = self.compressed_receipt(raw)
+            identity = replace(identity, uncompressed_size=len(raw))
+            if error != 'checksum':
+                identity = replace(identity, sha256=hashlib.sha256(raw).hexdigest())
+            with self.subTest(error=error), patch.object(history, 'RECEIPT_REGISTRY', (identity,)):
+                with self.assertRaisesRegex(ValueError, error):
+                    history.VerifiedReceipt(compressed, identity)
+
+    def test_compressed_size_is_exact_and_read_is_bounded(self):
+        compressed, identity = self.compressed_receipt()
+        for size in (0, len(self.raw) - 1, len(self.raw), len(self.raw) + 1):
+            registered = replace(identity, uncompressed_size=size)
+            with self.subTest(size=size), patch.object(history, 'RECEIPT_REGISTRY', (registered,)):
+                if size == len(self.raw):
+                    self.assertEqual(history.VerifiedReceipt(compressed, registered).rows, self.proof.rows)
+                else:
+                    with self.assertRaisesRegex(ValueError, 'size mismatch'):
+                        history.VerifiedReceipt(compressed, registered)
+        # A highly compressible oversized payload must never trigger an unbounded read.
+        compressed, identity = self.compressed_receipt(b'x' * 1000000)
+        identity = replace(identity, uncompressed_size=32)
+        reader = history.gzip.GzipFile(fileobj=history.io.BytesIO(compressed))
+        with reader, patch.object(history, 'RECEIPT_REGISTRY', (identity,)), \
+             patch.object(history.gzip, 'GzipFile', return_value=reader), \
+             patch.object(reader, 'read', wraps=reader.read) as read:
+            with self.assertRaisesRegex(ValueError, 'size mismatch'):
+                history.VerifiedReceipt(compressed, identity)
+            read.assert_called_once_with(33)
+
+    def test_compressed_identity_requires_hash_and_nonnegative_integer_size(self):
+        compressed, identity = self.compressed_receipt()
+        invalid = [replace(identity, uncompressed_size=size) for size in (None, -1, True, 1.5, '1')]
+        invalid += [replace(identity, gzip_sha256=digest) for digest in (None, '', 'bad')]
+        for registered in invalid:
+            with self.subTest(identity=registered), \
+                 patch.object(history, 'RECEIPT_REGISTRY', (registered,)), \
+                 patch.object(history.gzip, 'GzipFile') as decode:
+                with self.assertRaisesRegex(ValueError, 'gzip identity'):
+                    history.VerifiedReceipt(compressed, registered)
+                decode.assert_not_called()
+
+    def test_guard_binds_registered_plain_and_compressed_receipts(self):
+        compressed, identity = self.compressed_receipt()
+        self.raw = compressed
+        with patch.object(history, 'RECEIPT_REGISTRY', (history.RECEIPT_REGISTRY[0], identity)):
+            self.test_guard_binds_mixed_receipts_and_never_writes_missing_records()
+
+    def test_guard_never_falls_back_to_original_for_missing_or_invalid_gzip(self):
+        compressed, identity = self.compressed_receipt()
+        reads = []
+        class Store:
+            def list_files(self, *_):
+                return set()
+            def read_bytes(self, bucket, path):
+                reads.append(path)
+                if path != identity.path:
+                    raise AssertionError('original receipt was requested')
+                if payload is None:
+                    raise FileNotFoundError(path)
+                return payload
+        for payload, error in ((None, FileNotFoundError), (b'not gzip', ValueError),
+                               (compressed[:-1], ValueError)):
+            reads.clear()
+            with self.subTest(payload_size=None if payload is None else len(payload)), \
+                 patch.object(history, 'RECEIPT_REGISTRY', (*history.RECEIPT_REGISTRY, identity)):
+                with self.assertRaises(error):
+                    sidecar.historical_processing_guard([{'files': self.entries}], self.after, Store(), None)
+            self.assertEqual(reads, [identity.path])
+
+    def test_production_legacy_gzip_has_no_original_url_fallback(self):
+        identity = history.RECEIPT_REGISTRY[0]
+        self.assertEqual(history.RECEIPT_PATH, 'reader-index/gc/40218962766/collection.json')
+        self.assertEqual(identity.path,
+                         'reader-index/gc/40218962766/collection.'
+                         'ff7c28c08ad8e29530ed9c2056c8465de7a4c3a3ed553c19e3765427d8ece309.json.gz')
+        self.assertEqual(identity.gzip_sha256,
+                         'ff7c28c08ad8e29530ed9c2056c8465de7a4c3a3ed553c19e3765427d8ece309')
+        self.assertEqual(identity.uncompressed_size, 85148939)
+        self.assertEqual(identity.sha256, history.RECEIPT_SHA256)
+        self.assertEqual(identity.plan_sha256, history.PLAN_SHA256)
+        self.assertTrue(identity.legacy)
+        self.assertNotIn(history.RECEIPT_PATH, [item.path for item in history.RECEIPT_REGISTRY])
+        reads = []
+        class Store:
+            def list_files(self, *_):
+                return set()
+            def read_bytes(store, bucket, path):
+                reads.append(path)
+                if path == self.identity.path:
+                    return self.raw
+                if path != identity.path:
+                    raise AssertionError('original receipt was requested')
+                if payload is None:
+                    raise FileNotFoundError(path)
+                return payload
+        unknown = {**self.entries[0], 'processing_roots': [
+            'reader-index/processing/stream-upload-' + 'f' * 32 + '.json']}
+        for payload, error in ((None, FileNotFoundError), (b'not gzip', ValueError)):
+            reads.clear()
+            with self.subTest(payload=payload), self.assertRaises(error):
+                sidecar.historical_processing_guard([{'files': [unknown]}], self.after, Store(), None)
+            self.assertEqual(reads, [self.identity.path, identity.path])
+
     def test_wrong_receipt_and_unregistered_identity_fail(self):
         with self.assertRaisesRegex(ValueError, 'checksum'):
             history.VerifiedReceipt(self.raw + b' ', self.identity)
         with self.assertRaisesRegex(ValueError, 'checksum'):
             history.VerifiedReceipt(self.raw, history.RECEIPT_REGISTRY[0])
-        from dataclasses import replace
         with self.assertRaisesRegex(ValueError, 'unregistered'):
             history.VerifiedReceipt(self.raw, replace(self.identity, path='reader-index/gc/other/collection.json'))
 
@@ -327,12 +498,13 @@ class CompletedProcessingReceiptTests(unittest.TestCase):
                 return set()
             def read_bytes(self, bucket, path):
                 reads.append(path)
-                return raw if path == history.RECEIPT_REGISTRY[1].path else b'old receipt'
+                return raw if path == history.RECEIPT_REGISTRY[1].path else receipt_fixture(path)
         pointer = {'generation': 'current'}
         # The MHT deterministic name occurs in both real receipts, with different
         # release generations/digests. A newer proof must win without falling back.
         reused = next(e['processing_roots'][0] for e in self.entries if e['key'].endswith('.mht'))
-        with patch.object(history, 'load_receipt', return_value={old.path: old.row, reused: {}}), \
+        with patch.object(history, 'RECEIPT_REGISTRY', synthetic_receipt_registry()), \
+             patch.object(history, 'load_receipt', return_value={old.path: old.row, reused: {}}), \
              patch('scripts.publish_reader_v3.current', return_value=(pointer, {'base_sidecar': {'p': 1}})), \
              patch('scripts.publish_reader_v3.pinned_base', return_value=before), \
              patch('scripts.publish_reader_v3.project_sidecar', return_value=before), \
@@ -380,10 +552,11 @@ class CompletedProcessingReceiptTests(unittest.TestCase):
             def list_files(self, *_):
                 return set()
             def read_bytes(self, bucket, path):
-                return raw if path == history.RECEIPT_REGISTRY[1].path else b'old receipt'
+                return raw if path == history.RECEIPT_REGISTRY[1].path else receipt_fixture(path)
         entry = {**self.entries[0], 'processing_roots': [
             'reader-index/processing/stream-upload-' + 'f' * 32 + '.json']}
-        with patch.object(history, 'load_receipt', return_value={}), \
+        with patch.object(history, 'RECEIPT_REGISTRY', synthetic_receipt_registry()), \
+             patch.object(history, 'load_receipt', return_value={}), \
              self.assertRaisesRegex(ValueError, 'lack exact'):
             sidecar.historical_processing_guard([{'files': [entry]}], self.after, Store(), None)
 

@@ -9,10 +9,13 @@ from __future__ import annotations
 
 import base64
 from dataclasses import dataclass
+import gzip
 import hashlib
+import io
 import json
 from pathlib import PurePosixPath
 import re
+import zlib
 
 try:
     from . import reader_lifecycle as lifecycle, reader_gc_retirement as retirement
@@ -94,6 +97,8 @@ class ReceiptIdentity:
     plan_sha256: str
     scope: str
     legacy: bool = False
+    gzip_sha256: str | None = None
+    uncompressed_size: int | None = None
 
 
 # Oldest to newest: a later exact deletion wins when a producer reused a name.
@@ -101,7 +106,11 @@ class ReceiptIdentity:
 # 43730121335: exact remote bytes read back 2026-11-15, preserved in the test
 # fixture collection-43730121335.json. All 88 processing rows are direct releases.
 RECEIPT_REGISTRY = (
-    ReceiptIdentity(RECEIPT_PATH, RECEIPT_SHA256, PLAN_SHA256, 'unreferenced', legacy=True),
+    ReceiptIdentity(
+        'reader-index/gc/40218962766/collection.ff7c28c08ad8e29530ed9c2056c8465de7a4c3a3ed553c19e3765427d8ece309.json.gz',
+        RECEIPT_SHA256, PLAN_SHA256, 'unreferenced', legacy=True,
+        gzip_sha256='ff7c28c08ad8e29530ed9c2056c8465de7a4c3a3ed553c19e3765427d8ece309',
+        uncompressed_size=85148939),
     ReceiptIdentity('reader-index/gc/43730121335/collection.json',
                     '03c2f25f70deb8e336f4480d8304eebb0e7925eeb3620f999053ab84c62060a0',
                     'a9c4e3c0f5fce8c33e061a55a08da436ca94e086e8a5b444aadc70ab16969530',
@@ -116,6 +125,19 @@ class VerifiedReceipt:
         if identity not in RECEIPT_REGISTRY:
             raise ValueError('unregistered historical processing receipt')
         self.identity = identity
+        if identity.gzip_sha256 is not None or identity.uncompressed_size is not None:
+            if (not _digest(identity.gzip_sha256)
+                    or type(identity.uncompressed_size) is not int or identity.uncompressed_size < 0):
+                raise ValueError('invalid historical processing receipt gzip identity')
+            if _hash(raw) != identity.gzip_sha256:
+                raise ValueError('historical processing receipt compressed checksum mismatch')
+            try:
+                with gzip.GzipFile(fileobj=io.BytesIO(raw), mode='rb') as compressed:
+                    raw = compressed.read(identity.uncompressed_size + 1)
+            except (OSError, EOFError, zlib.error) as exc:
+                raise ValueError('invalid historical processing receipt gzip data') from exc
+            if len(raw) != identity.uncompressed_size:
+                raise ValueError('historical processing receipt uncompressed size mismatch')
         self.rows = (load_receipt(raw) if identity.legacy else
                      _load_receipt(raw, identity.sha256, identity.plan_sha256, identity.scope))
         if not identity.legacy:
