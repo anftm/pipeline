@@ -22,7 +22,7 @@ on:
       scope:
         description: Retired assets, a full sweep, or an exact page plan/apply
         type: choice
-        options: [retired-assets, unreferenced, page-plan, page-apply]
+        options: [retired-assets, unreferenced, page-plan, page-apply, obsolete-pdf-references]
         default: retired-assets
       resume_run:
         description: Exact JSON for page-plan (paths) or page-apply (plan_run, plan_sha256, external_writers_stopped)
@@ -47,6 +47,11 @@ jobs:
       READER_GC_DURABLE_MAINTENANCE: 'true'
       GC_CENTRAL_TOKEN: ${{ github.token }}
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      HF_INPUT_TOKEN: ${{ secrets.HF_INPUT_TOKEN }}
+      HF_S3_INPUT_ACCESS_KEY_ID: ${{ secrets.HF_S3_INPUT_ACCESS_KEY_ID }}
+      HF_S3_INPUT_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_INPUT_SECRET_ACCESS_KEY }}
+      HF_S3_INPUT_NAMESPACE: melsm
+      GH_TOKEN: ${{ github.token }}
       HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
       HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
       GC_AMBROSSEE_MAINTENANCE_TOKEN: ${{ secrets.GC_AMBROSSEE_MAINTENANCE_20261102 }}
@@ -74,7 +79,16 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
         run: |
           [[ "$LIMIT" =~ ^[0-9]+$ ]] || exit 1
+          if [[ "$SCOPE" == obsolete-pdf-references ]]; then [[ "$EVENT_NAME" == workflow_dispatch ]]; fi
           if [[ "$EVENT_NAME" == schedule && "$(date -u +%u)" == 1 ]]; then SCOPE=unreferenced; fi
+          if [[ "$SCOPE" == obsolete-pdf-references ]]; then
+            [[ "$EVENT_NAME" == workflow_dispatch && "$PLAN_ONLY" == false && "$LIMIT" == 0 ]]
+            python -B -m unittest tests.test_reader_obsolete_pdf tests.test_reader_obsolete_pdf_apply tests.test_reader_obsolete_pdf_references tests.test_reader_obsolete_pdf_store tests.test_reader_obsolete_pdf_run
+            mkdir -p output/maintenance
+            python -c 'import os,pathlib; pathlib.Path("output/maintenance/obsolete-config.json").write_text(os.environ["RESUME_RUN"])'
+            python -u -m scripts.reader_obsolete_pdf_run --config output/maintenance/obsolete-config.json --journal output/maintenance/journal.json --output output/maintenance/obsolete-result.json
+            exit 0
+          fi
           args=(run --journal output/maintenance/journal.json --limit "$LIMIT" --scope "$SCOPE" --resume-run "$RESUME_RUN")
           if [[ "$PLAN_ONLY" == "true" ]]; then args+=(--plan-only); fi
           python -u scripts/reader_gc_maintenance.py "${args[@]}"
