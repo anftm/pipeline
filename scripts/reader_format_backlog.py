@@ -573,6 +573,38 @@ def inspect(*, hub, api, fs, client, threshold=10, observe_search=search_daily.o
     return summary, details
 
 
+MOVING_OBSERVATIONS = frozenset({
+    'search pointer changed during capture',
+    'search pointer changed during backlog inspection',
+    'search manifest changed during backlog inspection',
+    'Reader pointer changed during backlog inspection',
+    'EPUB canonical index changed during backlog inspection',
+    'EPUB shard index changed during backlog inspection',
+    'Reader ebook index changed during backlog inspection',
+    'Reader ebook shard changed during backlog inspection',
+    'Reader document index changed during backlog inspection',
+    'Reader text index changed during backlog inspection',
+    'Reader image canonical index changed during backlog inspection',
+    'Reader image shard changed during backlog inspection',
+    'Reader media canonical index changed during backlog inspection',
+    'Reader media shard changed during backlog inspection',
+    'Web source index changed during backlog inspection',
+    'Reader consumer changed during backlog inspection',
+    'Reader or search pointer changed at final acceptance',
+})
+
+
+def observe_stable(observe, *, attempts=3):
+    """Restart the whole read-only observation on explicit moving-input evidence."""
+    for attempt in range(attempts):
+        try:
+            return observe()
+        except ValueError as error:
+            if str(error) not in MOVING_OBSERVATIONS or attempt == attempts - 1:
+                raise
+            print('Reader observation changed; restarting complete inspection ' + str(attempt + 2), flush=True)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', required=True, type=Path)
@@ -583,9 +615,23 @@ def main(argv=None):
             path.exists() or path.is_symlink() for path in (args.output, args.epub_details)):
         raise ValueError('backlog outputs must be two new distinct paths')
     token = os.environ.get('HF_TOKEN')
-    with httpx.Client(timeout=90, follow_redirects=True) as client:
-        summary, details = inspect(hub=HubBucketStore(), api=HfApi(token=token), fs=HfFileSystem(token=token),
-                                   client=client, threshold=args.threshold)
+    try:
+        def observe():
+            # Fresh clients prevent caches from an earlier inconsistent pass
+            # contributing to the next pass's accepted evidence.
+            with httpx.Client(timeout=90, follow_redirects=True) as client:
+                return inspect(hub=HubBucketStore(), api=HfApi(token=token),
+                               fs=HfFileSystem(token=token, skip_instance_cache=True),
+                               client=client, threshold=args.threshold)
+        summary, details = observe_stable(observe)
+    except Exception as error:
+        diagnostic = args.output.with_name(args.output.stem + '-failure.json')
+        diagnostic.parent.mkdir(parents=True, exist_ok=True)
+        with diagnostic.open('x', encoding='utf8') as stream:
+            json.dump({'kind':'reader-backlog-inspection-failure','remote_writes':0,
+                       'complete':False,'error_type':type(error).__name__,
+                       'reason':str(error) if str(error) in MOVING_OBSERVATIONS else 'inspection rejected; see job log'}, stream)
+        raise
     for path, result in ((args.output, summary), (args.epub_details, details)):
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open('x', encoding='utf8') as stream:

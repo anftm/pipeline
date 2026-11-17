@@ -381,6 +381,31 @@ class ReaderFormatBacklogTests(unittest.TestCase):
                 self.assertFalse(report['trigger_ready'])
         self.assertFalse(reports['html']['conversion_dependencies_checked'])
 
+    def test_moving_snapshot_restarts_bounded_whole_observation(self):
+        from unittest.mock import Mock
+        observe=Mock(side_effect=[ValueError('Reader image shard changed during backlog inspection'),({'ok':True},{})])
+        self.assertEqual(subject.observe_stable(observe),({'ok':True},{}))
+        self.assertEqual(observe.call_count,2)
+        observe=Mock(side_effect=ValueError('Reader image shard changed during backlog inspection'))
+        with self.assertRaises(ValueError):subject.observe_stable(observe)
+        self.assertEqual(observe.call_count,3)
+        observe=Mock(side_effect=ValueError('invalid source identity'))
+        with self.assertRaises(ValueError):subject.observe_stable(observe)
+        observe.assert_called_once()
+
+    def test_cli_failure_preserves_diagnostic_without_fake_summary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output,details=Path(directory)/'summary.json',Path(directory)/'details.json'
+            with patch.object(subject,'inspect',side_effect=ValueError('Reader image shard changed during backlog inspection')), \
+                    patch.object(subject,'HubBucketStore'),patch.object(subject,'HfApi'), \
+                    patch.object(subject,'HfFileSystem') as filesystem, patch.object(subject.httpx,'Client'):
+                with self.assertRaises(ValueError):subject.main(['--output',str(output),'--epub-details',str(details)])
+                self.assertEqual(filesystem.call_count, 3)
+                self.assertTrue(all(call.kwargs['skip_instance_cache'] for call in filesystem.call_args_list))
+            self.assertFalse(output.exists());self.assertFalse(details.exists())
+            report=json.loads((output.parent/'summary-failure.json').read_text())
+            self.assertFalse(report['complete']);self.assertEqual(report['remote_writes'],0)
+
     def test_cli_default_threshold_is_ten(self):
         with tempfile.TemporaryDirectory() as directory:
             output, details = Path(directory)/'summary.json', Path(directory)/'details.json'

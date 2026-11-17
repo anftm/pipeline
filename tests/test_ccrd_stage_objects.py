@@ -3,7 +3,7 @@ import copy
 import gzip
 import hashlib
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from scripts import ccrd_lifecycle
 from scripts import ccrd_stage_objects as staging
@@ -204,6 +204,14 @@ class StageObjectTests(CandidateAssemblyTests):
         self.assertEqual(body.max_request, 1024 * 1024)
         self.assertTrue(body.closed)
         backing._client.return_value.put_object.assert_not_called()
+
+    def test_nested_data_manifest_is_a_staged_member_not_publication_root(self):
+        generation='ccrd-four-'+'a'*64
+        backing=Mock();backing._location.return_value=('vomebook','ccrd-index')
+        adapter=staging.S3Store(generation=generation,store=backing)
+        self.assertEqual(adapter._location(f'generations/{generation}/data/manifest.json'),('vomebook','ccrd-index'))
+        with self.assertRaisesRegex(ValueError,'separate step'):
+            adapter._location(f'generations/{generation}/manifest.json')
 
     def test_store_refuses_any_other_bucket_or_mutable_root(self):
         generation = 'ccrd-four-' + 'a' * 64

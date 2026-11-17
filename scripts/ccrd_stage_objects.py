@@ -189,7 +189,7 @@ class S3Store:
         if not isinstance(key, str) or not key.startswith(f'generations/{self.generation}/'):
             raise ValueError('CCRD staging key is outside the candidate generation')
         lifecycle.safe_path(key)
-        if key.endswith('/manifest.json'):
+        if key == f'generations/{self.generation}/manifest.json':
             raise ValueError('CCRD manifest publication is a separate step')
         namespace, name = self.store._location(lifecycle.BUCKET)
         if (namespace, name) != ('vomebook', 'ccrd-index'):
