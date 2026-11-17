@@ -29,7 +29,9 @@ jobs:
       - name: Compare all pinned parser inputs twice
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
-        run: python -B scripts/bha_input_monitor.py --output output/bha/input-report.json --fail-on-change
+          HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+        run: python -B -m scripts.bha_input_monitor --output output/bha/input-report.json --fail-on-change --runtime-baseline
       - uses: actions/upload-artifact@v7
         if: ${{ always() }}
         with:

@@ -2,10 +2,11 @@
 
 Inspect is read-only. Auto uses BHA-owned CAS receipts before branch writes;
 unknown writes are observed, never replayed. Only main/config fast-forwards are
-eligible. Existing local corrections are retained; changed OCR inputs and the
-planner's inspect-upstream-parsed path require separate review. Baseline/main
-publication is deliberately deferred to bha_baseline_publish at a Reader-safe
-boundary. A retained handoff blocks new work until its exact pair is adopted.
+eligible. Existing local corrections are retained; helper/OCR input changes
+require separate review. Changed regular inputs are
+rebuilt through the pinned parser instead of replacing parsed with upstream.
+After verified index/snapshot acceptance, a durable baseline overlay is adopted
+without rewriting Pipeline main.
 The handoff contains the full candidate pair and publication.json; validate its
 BHA content address before feeding publication.json and its SHA-256 to the
 existing baseline publisher. The manual baseline workflow's older provenance
@@ -32,7 +33,7 @@ from . import bha_build_plan as planning, bha_fork_safe_sync as sync
 from . import bha_input_monitor as monitor, bha_parsed_publish as publication
 from . import bha_parsed_baseline as baseline, bha_reindex_journal as journal
 from . import bha_reindex_run as delivery, build_fork_parsed as builder
-from . import check_bha_reindex_access as access, search_snapshot
+from . import check_bha_reindex_access as access, search_snapshot, bha_runtime_baseline as overlays
 from .reader_page_cas import strong_etag
 
 ROOT = 'bha-upstream-auto/'
@@ -215,8 +216,9 @@ def eligible(plan, branches):
                 or any(snapshot[k] != branch[k] for k in ('mirror_repository_id', 'upstream_repository_id'))):
             return 'branch-plan-drift'
         expected[name] = branch['upstream']
-    if not builder.needs_local_build(expected, plan['snapshot']['upstream_branches']):
-        return 'upstream-parsed-review-required'
+    if (not builder.needs_local_build(expected, snapshot['upstream_branches'])
+            and snapshot['mirror_branches']['parsed'] != snapshot['upstream_branches']['parsed']):
+        return 'parsed-corrections-review-required'
     if not branches and plan['action'] != 'build-candidate':
         return 'build-plan-review-required'
     return None
@@ -238,7 +240,7 @@ def published_snapshot(proof):
     return expected
 
 
-def run(*, action, receipts, ops, provenance):
+def run(*, action, receipts, ops, provenance, adopt_baseline=False):
     """Injectable orchestration. All write boundaries have durable intent first."""
     if action not in {'inspect', 'auto'}:
         raise ValueError('invalid action')
@@ -261,6 +263,18 @@ def run(*, action, receipts, ops, provenance):
         if state['stage'] in {'baseline-deferred', 'equal-tree-deferred'}:
             proof = receipts.read(state['publication']) if 'publication' in state else None
             handoff = receipts.read(state['handoff'])
+            if adopt_baseline and proof is None:
+                overlay = ops.advance_equal_baseline(handoff, receipts.read(handoff['candidate']))
+                save('complete', baseline_overlay=receipts.retain(overlay))
+                return result('baseline-adopted', archive=state['archive'],
+                              consumer_verified=True, runtime_baseline_adopted=True)
+            if adopt_baseline and proof is not None:
+                if ops.baseline(proof) != handoff:
+                    raise ValueError('verified baseline acceptance changed')
+                overlay = ops.advance_baseline(proof, handoff)
+                save('complete', baseline_overlay=receipts.retain(overlay))
+                return result('baseline-adopted', archive=state['archive'],
+                              consumer_verified=True, runtime_baseline_adopted=True)
             if ops.adopted(handoff):
                 save('complete')
                 return result('baseline-adopted', archive=state['archive'], baseline_published=False)
@@ -286,9 +300,12 @@ def run(*, action, receipts, ops, provenance):
         if action == 'inspect':
             return result('eligible', archive=archive, plan=plan, fast_forwards=branches,
                           remote_writes=0, blocked=blocked)
+        overlay_ref = state.get('baseline_overlay') if state else None
         state = {'version': 1, 'kind': 'bha-upstream-auto-state', 'archive': archive,
                  'provenance': provenance, 'initial_plan': plan, 'branches': branches,
                  'next_branch': 0, 'stage': 'syncing'}
+        if overlay_ref is not None:
+            state['baseline_overlay'] = overlay_ref
         receipts.save(state)
 
     archive = state['archive']
@@ -329,6 +346,11 @@ def run(*, action, receipts, ops, provenance):
                        'candidate': candidate_ref, 'baseline_published': False}
             save('equal-tree-deferred', handoff=receipts.retain(handoff))
             ops.export('handoff.json', handoff)
+            if adopt_baseline:
+                overlay = ops.advance_equal_baseline(handoff, value)
+                save('complete', baseline_overlay=receipts.retain(overlay))
+                return result('complete', archive=archive, consumer_verified=True,
+                              runtime_baseline_adopted=True)
             return result('equal-tree-deferred', archive=archive, handoff=state['handoff'])
         if value['status'] != 'candidate-ready' or value.get('plan') != plan:
             raise ValueError('candidate differs from exact normalized plan')
@@ -358,6 +380,13 @@ def run(*, action, receipts, ops, provenance):
         save('baseline-deferred', handoff=receipts.retain(handoff), delivery=receipts.retain(outcome))
         ops.export('publication.json', proof)
         ops.export('handoff.json', handoff)
+        if adopt_baseline:
+            if ops.baseline(proof) != handoff:
+                raise ValueError('verified baseline acceptance changed before adoption')
+            overlay = ops.advance_baseline(proof, handoff)
+            save('complete', baseline_overlay=receipts.retain(overlay))
+            return result('complete', archive=archive, handoff=state['handoff'],
+                          consumer_verified=True, runtime_baseline_adopted=True)
         return result('baseline-deferred', archive=archive, handoff=state['handoff'],
                       consumer_verified=True, reason='main-commit-requires-reader-safe-handoff')
     raise ValueError('unsupported orchestration state')
@@ -367,6 +396,68 @@ class Operations:
     def __init__(self, token, output, inputs, trees, samples):
         self.token, self.output = token, output
         self.inputs, self.trees, self.samples = inputs, trees, samples
+
+    def use_baseline(self, receipts):
+        """Materialize only verified overrides; never edit repository state files."""
+        state = receipts.state or {}
+        ref = state.get('baseline_overlay')
+        self.overlay = receipts.read(ref) if ref else overlays.empty()
+        inputs, trees = overlays.apply(json.loads(self.inputs.read_bytes()),
+                                        json.loads(self.trees.read_bytes()), self.overlay)
+        target = self.output / 'effective-baseline'
+        target.mkdir()
+        self.inputs, self.trees = target / 'inputs.json', target / 'trees.json'
+        self.inputs.write_bytes(search_snapshot.canonical(inputs))
+        self.trees.write_bytes(search_snapshot.canonical(trees))
+
+    def advance_equal_baseline(self, handoff, value):
+        from . import bha_snapshot_inspection as snapshots
+        plan, candidate = value['plan'], value['candidate']
+        if (value.get('status') != 'no-change' or value.get('build_requested') is not True
+                or candidate.get('changed') is not False or candidate['before_tree'] != candidate['tree']
+                or candidate['commit'] != plan['snapshot']['mirror_branches']['parsed']
+                or handoff['built_inputs'] != plan['current_inputs'] or handoff['tree'] != candidate['tree']
+                or self.plan(plan['archive']) != plan):
+            raise ValueError('equal-tree baseline requires exact completed build')
+        credential = os.environ.get('BHA_REINDEX_TOKEN', '')
+        selected = json.loads(self.samples.read_bytes())['samples']
+        observed = delivery.inspect_plan_with_samples(self.token, credential, self.trees, selected_samples=selected)
+        if observed['changed_archives'] or observed['archive_revisions'] != json.loads(self.trees.read_bytes()):
+            raise ValueError('equal-tree baseline requires current indexed baseline')
+        if plan['archive'] not in {row['archive'] for row in selected}:
+            from . import bha_empty_coverage
+            bha_empty_coverage.observe(observed, [plan['archive']], self.token, credential)
+        durable = snapshots.inspect(observed['archive_revisions'], full_sidecars=True)
+        if (durable.get('sidecars_verified') is not True or durable.get('manifest_verified') is not True
+                or durable.get('archive_revisions') != observed['archive_revisions']
+                or durable.get('document_count') != observed['document_count']
+                or durable.get('build_fingerprint') != observed['consumer_fingerprint']):
+            raise ValueError('equal-tree baseline snapshot differs')
+        if (delivery.inspect_plan_with_samples(self.token, credential, self.trees, selected_samples=selected) != observed
+                or self.plan(plan['archive']) != plan):
+            raise ValueError('equal-tree acceptance changed')
+        inputs, trees = json.loads(self.inputs.read_bytes()), json.loads(self.trees.read_bytes())
+        return overlays.advance(self.overlay, inputs, trees, archive=plan['archive'],
+            after_inputs=plan['current_inputs'], after_tree=candidate['tree'],
+            acceptance={'kind':'verified-equal-tree-build','commit':candidate['commit'],
+                        'snapshot_generation':durable['generation'],
+                        'snapshot_manifest_sha256':durable['manifest_sha256'],
+                        'build_fingerprint':observed['consumer_fingerprint']})
+
+    def advance_baseline(self, proof, handoff):
+        inputs, trees = json.loads(self.inputs.read_bytes()), json.loads(self.trees.read_bytes())
+        key = str(proof['archive'])
+        if (handoff.get('kind') != 'bha-parsed-baseline-candidate'
+                or handoff.get('published_commit') != proof['commit']
+                or handoff.get('published_tree') != proof['tree']
+                or inputs['archives'][key] != proof['previous_inputs']
+                or trees[key] != proof['previous_tree']):
+            raise ValueError('baseline overlay does not follow verified publication')
+        return overlays.advance(self.overlay, inputs, trees, archive=proof['archive'],
+            after_inputs=handoff['inputs']['archives'][key], after_tree=handoff['trees'][key],
+            acceptance={'operation':handoff['operation'],'job_id':handoff['job_id'],
+                        'snapshot_generation':handoff['snapshot_generation'],
+                        'commit':proof['commit'],'tree':proof['tree']})
 
     def export(self, name, value):
         path = self.output / name
@@ -498,7 +589,8 @@ def main(argv=None):
             raise ValueError('source credential unavailable')
         ops = Operations(token, args.output_dir.resolve(), args.inputs, args.trees, args.samples)
         receipts = Receipts(S3Store())
-        result = run(action=args.action, receipts=receipts, ops=ops,
+        ops.use_baseline(receipts)
+        result = run(action=args.action, receipts=receipts, ops=ops, adopt_baseline=True,
                      provenance={'repository': os.environ.get('GITHUB_REPOSITORY'),
                                  'sha': os.environ.get('GITHUB_SHA'), 'run_id': os.environ.get('GITHUB_RUN_ID')})
     except Exception as error:

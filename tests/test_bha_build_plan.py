@@ -44,12 +44,12 @@ class BhaBuildPlanTests(unittest.TestCase):
         self.assertEqual(value['action'], 'build-candidate')
         self.assertTrue(value['input_changed']); self.assertEqual(value['remote_writes'], 0)
 
-    def test_changed_but_matching_upstream_needs_review_not_automatic_rebuild(self):
+    def test_changed_matching_upstream_builds_reviewable_local_candidate(self):
         mirror = {**self.snapshot['mirror_branches'], 'ocr_patch': '4' * 40}
         value = self.inspect({**self.snapshot, 'mirror_branches': mirror, 'upstream_branches': dict(mirror)})
         self.assertTrue(value['input_changed'])
         self.assertFalse(value['fork_requires_local_build'])
-        self.assertEqual(value['action'], 'inspect-upstream-parsed')
+        self.assertEqual(value['action'], 'build-candidate')
         self.assertFalse(value['publication_ready'])
 
     def test_unexpected_parsed_tree_takes_precedence_over_build(self):

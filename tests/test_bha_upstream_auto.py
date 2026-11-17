@@ -208,13 +208,19 @@ class OrchestrationTests(unittest.TestCase):
         self.assertEqual(self.store.writes, [])
         self.ops.sync.assert_not_called()
 
-    def test_upstream_parsed_shortcut_is_deferred_before_input_mutation(self):
+    def test_matching_upstream_inputs_use_local_candidate_not_parsed_overwrite(self):
         plan = copy.deepcopy(self.initial)
         plan['snapshot']['upstream_branches']['config'] = plan['snapshot']['mirror_branches']['config']
         self.ops.plan.side_effect = None
         self.ops.plan.return_value = plan
-        self.assertEqual(self.run_auto()['reason'], 'upstream-parsed-review-required')
+        result=self.run_auto('inspect')
+        self.assertEqual(result['status'],'eligible')
         self.assertEqual(self.store.writes, [])
+        self.ops.publish.assert_not_called()
+        plan['snapshot']['upstream_branches']['parsed']='f'*40
+        result=self.run_auto('inspect')
+        self.assertEqual(result['reason'],'parsed-corrections-review-required')
+        self.ops.sync.assert_not_called()
 
     def test_repository_change_between_selection_and_plan_blocks_writes(self):
         plan = copy.deepcopy(self.initial)

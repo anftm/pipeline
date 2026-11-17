@@ -84,11 +84,29 @@ def main(argv=None) -> int:
     parser.add_argument('--baseline', type=Path, default=Path('state/bha-parsed-inputs.json'))
     parser.add_argument('--output', required=True, type=Path)
     parser.add_argument('--fail-on-change', action='store_true', help='return nonzero after writing a diagnostic drift report')
+    parser.add_argument('--runtime-baseline', action='store_true', help='read verified BHA baseline overlay without writes')
     args = parser.parse_args(argv)
     if args.output.resolve() == args.baseline.resolve() or args.output.exists() or args.output.is_symlink():
         raise ValueError('BHA report must be a new path outside its baseline')
     token = os.environ.get('GH_PAT') or os.environ.get('GITHUB_TOKEN', '')
-    report = inspect(token, args.baseline)
+    if args.runtime_baseline:
+        import tempfile
+        try:
+            from . import bha_upstream_auto as upstream, bha_runtime_baseline as overlays
+        except ImportError:
+            from scripts import bha_upstream_auto as upstream, bha_runtime_baseline as overlays
+        receipts = upstream.Receipts(upstream.S3Store())
+        state = receipts.state or {}
+        overlay = receipts.read(state['baseline_overlay']) if state.get('baseline_overlay') else overlays.empty()
+        trees_path = args.baseline.with_name('bha-parsed-revisions.json')
+        inputs, _trees = overlays.apply(json.loads(args.baseline.read_bytes()),
+                                        json.loads(trees_path.read_bytes()), overlay)
+        with tempfile.TemporaryDirectory(prefix='bha-input-effective-') as directory:
+            effective = Path(directory) / 'inputs.json'
+            effective.write_text(json.dumps(inputs), encoding='utf-8')
+            report = inspect(token, effective)
+    else:
+        report = inspect(token, args.baseline)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open('x', encoding='utf-8') as output:
         json.dump(report, output, ensure_ascii=False, sort_keys=True)

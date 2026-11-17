@@ -80,8 +80,7 @@ def _body(archive: int, snapshot: dict, input_baseline: dict, tree_baseline: dic
             'parsed_tree_changed': tree_changed,
             'fork_requires_local_build': parsed.needs_local_build(snapshot['mirror_branches'], snapshot['upstream_branches']),
             'action': ('inspect-drift' if tree_changed else 'no-input-change' if not input_changed else
-                       'build-candidate' if parsed.needs_local_build(snapshot['mirror_branches'], snapshot['upstream_branches'])
-                       else 'inspect-upstream-parsed'),
+                       'build-candidate'),
             'snapshots_observed_twice': True, 'remote_writes': 0, 'build_requested': False,
             'consumer_verified': False, 'publication_ready': False, 'external_writers_verified': False,
             'scope': 'exact fork input heads and parsed tree; no candidate bytes or consumer delivery'}

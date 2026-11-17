@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       action:
-        description: Inspect only, or normalize one eligible archive through a deferred baseline handoff
+        description: Inspect only, or normalize one archive through verified durable baseline adoption
         type: choice
         options: [inspect, auto]
         default: inspect
@@ -39,7 +39,7 @@ jobs:
       - run: pip install -r scripts/requirements.txt PyYAML==6.0.3
       - name: Verify orchestration and publication gates
         run: >-
-          python -B -m unittest tests.test_bha_upstream_auto
+          python -B -m unittest tests.test_bha_upstream_auto tests.test_bha_runtime_baseline
           tests.test_bha_fork_safe_sync tests.test_bha_build_plan
           tests.test_bha_parsed_candidate_runner tests.test_bha_parsed_publish
           tests.test_bha_parsed_baseline tests.test_bha_reindex_run
@@ -60,7 +60,7 @@ jobs:
           # The runner writes only bounded structured evidence to the artifact.
           python -B -m scripts.bha_upstream_auto --action "$ACTION" \
             --output-dir "$RUNNER_TEMP/bha-upstream-auto" >/dev/null 2>&1
-      - name: Preserve exact candidate and deferred baseline evidence
+      - name: Preserve exact candidate and verified baseline evidence
         if: always()
         uses: actions/upload-artifact@v7
         with:

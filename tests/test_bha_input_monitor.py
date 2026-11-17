@@ -74,6 +74,25 @@ class BhaInputMonitorTests(unittest.TestCase):
             self.assertEqual(monitor.main(['--baseline', str(self.path), '--output', str(target), '--fail-on-change']), 1)
         self.assertEqual(json.loads(target.read_text()), report)
 
+    def test_runtime_baseline_monitor_reads_verified_overlay_without_writes(self):
+        from scripts import bha_upstream_auto as upstream, bha_runtime_baseline as overlays
+        trees={str(i):'f'*40 for i in range(32)}
+        self.path.with_name('bha-parsed-revisions.json').write_text(json.dumps(trees))
+        newer={**baseline()['archives']['0'],'main':'1'*40}
+        overlay=overlays.advance(overlays.empty(),baseline(),trees,archive=0,after_inputs=newer,
+                                after_tree='2'*40,acceptance={'verified':True})
+        target=self.path.parent/'report.json'
+        with patch.object(upstream,'S3Store') as store, patch.object(upstream,'Receipts') as receipts:
+            receipts.return_value.state={'baseline_overlay':{'fixture':True}}
+            receipts.return_value.read.return_value=overlay
+            def inspect(token,path):
+                self.assertEqual(json.loads(path.read_text())['archives']['0'],newer)
+                return {'changed_archives':[],'remote_writes':0}
+            with patch.object(monitor,'inspect',side_effect=inspect):
+                self.assertEqual(monitor.main(['--baseline',str(self.path),'--output',str(target),'--runtime-baseline']),0)
+            store.return_value.put.assert_not_called()
+        self.assertEqual(json.loads(self.path.read_text()),baseline())
+
     def test_workflow_is_manual_or_scheduled_readonly_and_serialized_with_forks(self):
         path = Path(__file__).resolve().parents[1] / '.github/workflows/bha-input-monitor.yml'
         value = yaml.load(path.read_text(), Loader=yaml.BaseLoader)
@@ -81,7 +100,8 @@ class BhaInputMonitorTests(unittest.TestCase):
         self.assertEqual(value['permissions'], {'contents': 'read'})
         self.assertEqual(value['concurrency']['group'], 'maintain-archive-forks')
         commands = '\n'.join(step.get('run', '') for step in value['jobs']['inspect']['steps'])
-        self.assertIn('scripts/bha_input_monitor.py', commands)
+        self.assertIn('-m scripts.bha_input_monitor', commands)
+        self.assertIn('--runtime-baseline', commands)
         self.assertIn('--fail-on-change', commands)
         artifact = next(step for step in value['jobs']['inspect']['steps'] if step.get('uses') == 'actions/upload-artifact@v7')
         self.assertEqual(artifact['if'], '${{ always() }}')
