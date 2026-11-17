@@ -2030,10 +2030,14 @@ def load_request():
 
 def main():
     require_paused_delivery()
+    return execute_request(load_request())
+
+
+def execute_request(request):
+    """Called only by the durable delivery entry after claiming the request."""
     token = os.environ.get("GH_PAT", "")
     if not token:
         fail("GH_PAT is required")
-    request = load_request()
     try:
         archive_id = int(request.get("archive_id"))
     except (TypeError, ValueError):

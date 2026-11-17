@@ -203,7 +203,9 @@ def eligible(plan, branches):
         return 'parsed-tree-drift'
     # Only regular source edits may trigger this slice; existing cache and patch
     # contents can be read by build_parsed, never regenerated or synchronized.
-    for key in ('ocr_cache', 'ocr_patch', 'helper', 'patch_layout'):
+    # Human-reviewed corrections in the mirror ocr_patch branch are parser
+    # inputs, not OCR production. Do not synchronize upstream OCR branches.
+    for key in ('ocr_cache', 'helper', 'patch_layout'):
         if plan['current_inputs'][key] != plan['recorded_inputs'][key]:
             return 'non-regular-input-change'
     snapshot = plan['snapshot']

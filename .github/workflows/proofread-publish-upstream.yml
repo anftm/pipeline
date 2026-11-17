@@ -1,41 +1,51 @@
 name: 校对 · Publish Proofreading Upstream
-
 on:
   schedule:
-    - cron: "0 3 * * *"
+    - cron: '0 3 * * *'
   workflow_dispatch:
     inputs:
-      bootstrap:
-        description: Establish a baseline without publishing existing merged corrections
-        required: false
-        default: false
+      apply:
+        description: Publish reviewed merged corrections with durable receipts
         type: boolean
-
+        default: false
 permissions:
-  contents: write
-
+  contents: read
 concurrency:
   group: publish-proofread-upstream
   cancel-in-progress: false
-
+  queue: max
 jobs:
   publish:
-    runs-on: ubuntu-latest
+    if: github.repository == 'anftm/pipeline' && (github.event_name == 'workflow_dispatch' || vars.PROOFREAD_UPSTREAM_ENABLED == 'true')
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
-      - name: Publish merged proofreading corrections
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - run: pip install -r scripts/requirements.txt
+      - run: python -B -m unittest -v tests.test_proofread_delivery tests.test_proofread_upstream_delivery
+      - name: Publish reviewed corrections without rewriting Pipeline main
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
-          PROOFREAD_BOOTSTRAP: ${{ inputs.bootstrap || 'false' }}
+          PROOFREAD_UPSTREAM_ENABLED: ${{ vars.PROOFREAD_UPSTREAM_ENABLED }}
           PROOFREAD_TARGET_REPOSITORY: ${{ github.repository }}
           PROOFREAD_TARGET_BASE_BRANCH: main
-        run: python3 scripts/publish_proofread_upstream.py
-      - name: Commit publishing state
+          HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+          APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
         run: |
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add state/proofread-upstream.json
-          git diff --cached --quiet && exit 0
-          git commit -m "Track published proofreading batches"
-          git push
+          set -euo pipefail
+          args=(--output output/proofreading-upstream.json)
+          if [[ "$APPLY" == true ]]; then args+=(--apply); fi
+          python -B -m scripts.proofread_upstream_delivery "${args[@]}"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: proofreading-upstream-result
+          path: output/proofreading-upstream.json
+          retention-days: 30
+          if-no-files-found: warn

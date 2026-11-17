@@ -15,6 +15,7 @@ concurrency:
 
 jobs:
   submit:
+    if: github.repository == 'anftm/pipeline' && vars.PROOFREAD_DELIVERY_ENABLED == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -26,10 +27,22 @@ jobs:
           python-version: "3.11"
       - name: Install review image dependencies
         run: pip install -r scripts/requirements.txt
+      - name: Verify durable delivery contracts
+        run: python -B -m unittest -v tests.test_proofread_delivery tests.test_proofread_legacy_recovery_risks
       - name: Create parsing pull request
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
           TRACKER_TOKEN: ${{ github.token }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_SOURCE_REPOSITORY: vomebook/BHA-Source-Files
-        run: python3 scripts/submit_proofread.py
+          PROOFREAD_DELIVERY_ENABLED: ${{ vars.PROOFREAD_DELIVERY_ENABLED }}
+          HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+        run: python -B -m scripts.proofread_delivery --output output/proofread-delivery.json
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: proofreading-delivery-result
+          path: output/proofread-delivery.json
+          if-no-files-found: warn
+          retention-days: 30

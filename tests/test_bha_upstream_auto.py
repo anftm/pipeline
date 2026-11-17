@@ -198,7 +198,7 @@ class OrchestrationTests(unittest.TestCase):
         self.ops.build.assert_called_once()
 
     def test_ocr_and_helper_changes_block_before_sync(self):
-        for name in ('ocr_patch', 'ocr_cache', 'helper', 'patch_layout'):
+        for name in ('ocr_cache', 'helper', 'patch_layout'):
             with self.subTest(name=name):
                 plan = copy.deepcopy(self.initial)
                 plan['current_inputs'][name] = 'changed'
@@ -207,6 +207,14 @@ class OrchestrationTests(unittest.TestCase):
                 self.assertEqual(self.run_auto()['reason'], 'non-regular-input-change')
         self.assertEqual(self.store.writes, [])
         self.ops.sync.assert_not_called()
+
+    def test_mirror_proofreading_patch_is_eligible_without_ocr_production(self):
+        plan=copy.deepcopy(self.initial)
+        plan['current_inputs']['ocr_patch']='a'*40
+        plan['snapshot']['mirror_branches']['ocr_patch']='a'*40
+        plan['action']='build-candidate'
+        self.assertIsNone(auto.eligible(plan,[]))
+        self.assertNotIn('ocr_patch',auto.REGULAR)
 
     def test_matching_upstream_inputs_use_local_candidate_not_parsed_overwrite(self):
         plan = copy.deepcopy(self.initial)

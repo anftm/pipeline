@@ -1,0 +1,33 @@
+name: 校对 · Verify Delivery Access
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: submit-proofread
+  cancel-in-progress: false
+jobs:
+  inspect:
+    if: github.repository == 'anftm/pipeline'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - run: pip install -r scripts/requirements.txt
+      - run: python -B -m unittest -v tests.test_proofread_delivery tests.test_proofread_upstream_delivery
+      - name: Inspect repository and receipt-store access without submitting content
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+          TRACKER_TOKEN: ${{ github.token }}
+          PROOFREAD_DELIVERY_ENABLED: 'true'
+          HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+        run: python -B -m scripts.proofread_delivery --check --output output/proofread-check.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: proofreading-delivery-check
+          path: output/proofread-check.json
+          if-no-files-found: error

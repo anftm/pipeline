@@ -192,6 +192,8 @@ class ThresholdBuildTests(unittest.TestCase):
         path=Path(__file__).resolve().parents[1]/'.github/workflows/reader-backlog-monitor.yml'
         flow=yaml.load(path.read_text(),Loader=yaml.BaseLoader)
         self.assertEqual(flow['permissions'],{'contents':'read'})
+        self.assertEqual(flow['concurrency']['group'],'reader-format-daily')
+        self.assertEqual(flow['concurrency']['cancel-in-progress'],'false')
         steps=flow['jobs']['inspect']['steps'];names={x.get('name'):x for x in steps}
         for ext in ('EPUB','JPG','MP3'):
             step=names['Build bounded '+ext+' conversion shadow']

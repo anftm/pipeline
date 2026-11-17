@@ -5,21 +5,36 @@ on:
     types: [created]
 
 permissions:
+  contents: read
   issues: write
   pull-requests: write
 
 jobs:
   review:
-    if: github.event.issue.pull_request == null && contains(github.event.issue.body, '<!-- proofreading-prs:') && (contains(github.event.comment.body, '/approve') || contains(github.event.comment.body, '/reject'))
+    if: github.repository == 'anftm/pipeline' && vars.PROOFREAD_DELIVERY_ENABLED == 'true' && github.event.issue.pull_request == null && contains(github.event.issue.body, '<!-- proofreading-prs:') && (contains(github.event.comment.body, '/approve') || contains(github.event.comment.body, '/reject'))
     runs-on: ubuntu-latest
     concurrency:
       group: proofreading-review
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - run: pip install -r scripts/requirements.txt
+      - run: python -B -m unittest -v tests.test_proofread_review_delivery
       - name: Apply review command
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
           TRACKER_TOKEN: ${{ github.token }}
           PROOFREAD_REVIEW_ACTORS: ${{ vars.PROOFREAD_REVIEW_ACTORS }}
-        run: python3 scripts/review_proofread.py
+          PROOFREAD_DELIVERY_ENABLED: ${{ vars.PROOFREAD_DELIVERY_ENABLED }}
+          HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+        run: python -B -m scripts.proofread_review_delivery review --output output/review.json
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: proofreading-review-result
+          path: output/review.json
+          if-no-files-found: warn

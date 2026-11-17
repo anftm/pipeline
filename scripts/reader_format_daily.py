@@ -297,6 +297,18 @@ class GitHub:
                         and (name.startswith(('reader-', 'search-daily-', 'search-promotion-'))
                              or name == 'pdf-account-worker.yml')
                         and row.get('status') != 'completed'):
+                    if (row.get('status') == 'pending'
+                            and name in {DAILY, 'reader-backlog-monitor.yml'}):
+                        # These workflows share reader-format-daily concurrency.
+                        # Only a job that has not started is a waiting successor,
+                        # not a concurrently executing producer or observer.
+                        jobs = self.request('GET', f'/actions/runs/{row["id"]}/jobs', params={'per_page': 100})
+                        entries = jobs.get('jobs')
+                        if (isinstance(entries, list) and type(jobs.get('total_count')) is int
+                                and jobs['total_count'] == len(entries)
+                                and all(j.get('status') in {'queued', 'pending', 'waiting'}
+                                        and not j.get('steps') and not j.get('started_at') for j in entries)):
+                            continue
                     if row.get('status') == 'queued':
                         jobs = self.request('GET', f'/actions/runs/{row["id"]}/jobs', params={'per_page': 1})
                         if isinstance(jobs, dict) and jobs.get('total_count') == 0 and jobs.get('jobs') == []:

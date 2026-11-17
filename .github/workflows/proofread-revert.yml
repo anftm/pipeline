@@ -21,13 +21,18 @@ permissions:
 
 jobs:
   revert:
-    if: github.event_name == 'workflow_dispatch' || (github.event.issue.pull_request == null && contains(github.event.issue.body, '<!-- proofreading-auto-merge-log -->') && contains(github.event.comment.body, '/proofread-revert'))
+    if: github.repository == 'anftm/pipeline' && vars.PROOFREAD_DELIVERY_ENABLED == 'true' && (github.event_name == 'workflow_dispatch' || (github.event.issue.pull_request == null && contains(github.event.issue.body, '<!-- proofreading-auto-merge-log -->') && contains(github.event.comment.body, '/proofread-revert')))
     runs-on: ubuntu-latest
     concurrency:
       group: proofreading-revert
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - run: pip install -r scripts/requirements.txt
+      - run: python -B -m unittest -v tests.test_proofread_review_delivery
       - name: Create human-reviewed revert PRs
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
@@ -35,4 +40,13 @@ jobs:
           PROOFREAD_CORRECTION_ID: ${{ inputs.correction_id }}
           PROOFREAD_CONFIRM: ${{ inputs.confirm }}
           PROOFREAD_REVERT_ACTORS: ${{ vars.PROOFREAD_REVERT_ACTORS }}
-        run: python3 scripts/revert_proofread.py
+          PROOFREAD_DELIVERY_ENABLED: ${{ vars.PROOFREAD_DELIVERY_ENABLED }}
+          HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+        run: python -B -m scripts.proofread_review_delivery revert --output output/revert.json
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: proofreading-revert-result
+          path: output/revert.json
+          if-no-files-found: warn
