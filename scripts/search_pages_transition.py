@@ -163,6 +163,36 @@ def reconcile(store, *, session, api, hub, get, operation_id: str) -> dict:
             'journal_advanced': True, 'external_writers_verified': False}
 
 
+def abandon_unclaimed_apply(store, *, session, api, hub, get, operation_id: str) -> dict:
+    """Close a stale, never-claimed Pages intent after exact parent observations."""
+    current, pending = _pending(store, operation_id)
+    if pending['operation'] != 'apply' or pending.get('write_claim', 'missing') is not None:
+        raise ValueError('only an explicitly unclaimed Pages apply may be abandoned')
+    if deploy.inspect_runs(session, operation=operation_id, not_before=pending['created_at'],
+                           expected_sha=pending['expected_revision']) is not None:
+        raise ValueError('Pages run exists; inspect instead of abandoning')
+    if _main(session) != pending['expected_revision']:
+        raise ValueError('Pages main changed before abandonment')
+    deploy.assert_idle(session)
+    parent = current.record['parent_pointer']['desired']
+    defaults.observe_pages(parent, session=session)
+    manifest = adoption.validate_generation(hub, parent)
+    receipt = receipts.observe('pages', parent, manifest, get=get)
+    _space_loaded(current, api=api, hub=hub, get=get)
+    if _main(session) != pending['expected_revision'] or store.read_pointer() != search_parent_bytes(current):
+        raise ValueError('Pages or pointer changed during abandonment')
+    deploy.assert_idle(session)
+    if deploy.inspect_runs(session, operation=operation_id, not_before=pending['created_at'],
+                           expected_sha=pending['expected_revision']) is not None:
+        raise ValueError('Pages run appeared during abandonment')
+    active = tx.load(store)
+    if active is None or active.head_raw != current.head_raw or active.etag != current.etag:
+        raise ValueError('journal changed during abandonment')
+    result = tx.observe_failed_apply(store, current, site='pages', receipt=receipt)
+    return {'kind': 'search-pages-unclaimed-abandonment', 'operation': operation_id,
+            'sequence': result.record['sequence'], 'external_writers_verified': False}
+
+
 def recover_failed_apply(store, *, session, hub, get, operation_id: str) -> dict:
     """Record parent after a reviewed workflow failed before deployment.
 
@@ -204,7 +234,7 @@ def recover_failed_apply(store, *, session, hub, get, operation_id: str) -> dict
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--mode', required=True, choices=('prepare', 'rollback-prepare', 'apply', 'reconcile',
-                                                          'recover-failed-apply'))
+                                                          'recover-failed-apply', 'abandon-unclaimed'))
     parser.add_argument('--expected-revision', default='')
     parser.add_argument('--operation', default='')
     args = parser.parse_args(argv)
@@ -229,6 +259,8 @@ def main(argv=None) -> int:
                   'candidate': current.record['candidate'], 'site_changed': False, 'pointer_written': False}
     elif args.mode == 'apply':
         result = apply_once(store, session=session, api=api, hub=hub, get=bounded_get, operation_id=args.operation)
+    elif args.mode == 'abandon-unclaimed':
+        result = abandon_unclaimed_apply(store, session=session, api=api, hub=hub, get=bounded_get, operation_id=args.operation)
     elif args.mode == 'recover-failed-apply':
         result = recover_failed_apply(store, session=session, hub=hub, get=bounded_get, operation_id=args.operation)
     else:

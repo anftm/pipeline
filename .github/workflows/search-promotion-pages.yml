@@ -14,6 +14,7 @@ on:
           - apply
           - reconcile
           - recover-failed-apply
+          - abandon-unclaimed
       expected_revision:
         description: Exact Pages main revision, required for prepare
         type: string
@@ -67,7 +68,7 @@ jobs:
               [[ "$EXPECTED_REVISION" =~ ^[0-9a-f]{40}$ && -z "$OPERATION" ]]
               python -B scripts/search_pages_transition.py --mode "$MODE" --expected-revision "$EXPECTED_REVISION"
               ;;
-            apply|reconcile|recover-failed-apply)
+            apply|reconcile|recover-failed-apply|abandon-unclaimed)
               [[ "$OPERATION" =~ ^[0-9a-f]{32}$ && -z "$EXPECTED_REVISION" ]]
               python -B scripts/search_pages_transition.py --mode "$MODE" --operation "$OPERATION"
               ;;

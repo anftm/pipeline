@@ -61,6 +61,29 @@ class PagesTransitionTests(unittest.TestCase):
             send.assert_not_called()
         self.assertIsNone(subject.tx.load(self.s).record['pending']['write_claim'])
 
+    def test_unclaimed_pages_intent_can_be_safely_abandoned(self):
+        self.prepare_pages()
+        with patch.object(subject.deploy, 'inspect_runs', return_value=None), patch.object(subject.deploy, 'dispatch') as send:
+            result = subject.abandon_unclaimed_apply(self.s, session=self.session, api=self.api, hub=self.hub,
+                                                      get=lambda *_: b'', operation_id=OP)
+        self.assertEqual(result['kind'], 'search-pages-unclaimed-abandonment')
+        current = subject.tx.load(self.s)
+        self.assertEqual(current.record['state'], 'rolling-back')
+        self.assertIsNone(current.record['pending'])
+        self.assertEqual(current.record['observed']['space']['generation'], B)
+        send.assert_not_called()
+
+    def test_unclaimed_abandon_rejects_claim_or_visible_run(self):
+        current = self.prepare_pages()
+        with patch.object(subject.deploy, 'inspect_runs', return_value={'id': 5}):
+            with self.assertRaisesRegex(ValueError, 'run exists'):
+                subject.abandon_unclaimed_apply(self.s, session=self.session, api=self.api, hub=self.hub,
+                                                get=lambda *_: b'', operation_id=OP)
+        subject.tx.claim_write(self.s, current, site='pages', operation='apply', operation_id=OP)
+        with self.assertRaisesRegex(ValueError, 'unclaimed'):
+            subject.abandon_unclaimed_apply(self.s, session=self.session, api=self.api, hub=self.hub,
+                                            get=lambda *_: b'', operation_id=OP)
+
     def test_lost_dispatch_is_not_replayed_when_run_is_not_yet_visible(self):
         self.prepare_pages()
         with patch.object(subject.deploy, 'inspect_runs', return_value=None), \
@@ -208,7 +231,7 @@ class PagesTransitionTests(unittest.TestCase):
         self.assertEqual(flow['permissions'], {'contents': 'read'})
         self.assertEqual(flow['concurrency']['group'], 'daily-sync')
         self.assertEqual(flow['on']['workflow_dispatch']['inputs']['mode']['options'],
-                         ['prepare', 'rollback-prepare', 'apply', 'reconcile', 'recover-failed-apply'])
+                         ['prepare', 'rollback-prepare', 'apply', 'reconcile', 'recover-failed-apply', 'abandon-unclaimed'])
         self.assertEqual(flow['on']['workflow_dispatch']['inputs']['known_writers_coordinated']['default'], 'false')
 
 
