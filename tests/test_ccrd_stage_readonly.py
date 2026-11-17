@@ -37,6 +37,9 @@ class CcrdStageReadOnlyTests(CcrdStageManifestTests):
         self.assertEqual(store.inspect(key), {'bytes': 3, 'sha256': hashlib.sha256(b'abc').hexdigest()})
         self.assertEqual(store.read_manifest(), b'abc')
         self.assertEqual(len(calls), 2)
+        nested = f'generations/{gen}/data/manifest.json'
+        self.assertEqual(store.inspect(nested), {'bytes': 3, 'sha256': hashlib.sha256(b'abc').hexdigest()})
+        self.assertTrue(calls[-1][0].endswith('/data/manifest.json'))
         for key in ('current.json', f'generations/{gen}/manifest.json', f'generations/{gen}/../escape'):
             with self.subTest(key=key), self.assertRaises(ValueError): store.inspect(key)
         with self.assertRaisesRegex(RuntimeError, 'read-only'):

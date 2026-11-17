@@ -66,7 +66,8 @@ class ReadOnlyStore:
         return {'bytes': count, 'sha256': digest.hexdigest()}
 
     def inspect(self, key: str) -> dict | None:
-        if not isinstance(key, str) or not key.startswith(f'generations/{self.generation}/') or key.endswith('/manifest.json'):
+        if (not isinstance(key, str) or not key.startswith(f'generations/{self.generation}/')
+                or key == f'generations/{self.generation}/manifest.json'):
             raise ValueError('CCRD candidate member is outside the selected generation')
         lifecycle.safe_path(key)
         return self._identity(key, objects.MAX_BYTES)
