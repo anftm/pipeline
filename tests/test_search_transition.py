@@ -274,6 +274,20 @@ class SearchTransitionTests(unittest.TestCase):
                        transition=T2)
         self.assertEqual(nxt.record["sequence"], c.record["sequence"] + 1)
 
+    def test_rollback_finish_accepts_fresh_default_receipt_timestamps(self):
+        c = self.begin()
+        c = self.start_site(c, site='pages', operation_id='3' * 32)
+        c = tx.observe_failed_apply(self.s, c, site='pages', receipt=receipt('pages', A))
+        def fresh(site):
+            value = __import__('json').loads(default_receipt(site, A))
+            value['observed_at'] = '2026-02-02T00:00:00Z'
+            return search_snapshot.canonical(value)
+        c = tx.finish_rollback(self.s, c, pages_receipt=receipt('pages', A, 'new'),
+                               space_receipt=receipt('space', A, 'new'),
+                               pages_default=fresh('pages'), space_default=fresh('space'))
+        self.assertEqual(c.record['state'], 'rolled-back')
+        self.assertEqual(tx.load(self.s).record['state'], 'rolled-back')
+
     def test_failed_apply_clears_only_with_parent_receipt_and_stays_rolling_back(self):
         c = self.begin()
         c = self.start_site(c, site='pages', operation_id='3' * 32)

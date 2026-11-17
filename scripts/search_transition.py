@@ -288,8 +288,12 @@ def validate_advance(previous: dict, value: dict, *, prior_digest: str) -> None:
             return
         if ((a, b) == ("publishing", "rolling-back") and before == after and defaults_before == defaults_after):
             return
-        if ((a, b) == ("rolling-back", "rolled-back") and defaults_before == defaults_after
-                and all(after[s]["generation"] == value["parent_pointer"]["desired"] for s in SITES)):
+        if ((a, b) == ("rolling-back", "rolled-back")
+                and all(before[s]["generation"] == after[s]["generation"] == value["parent_pointer"]["desired"]
+                        and defaults_before[s]["generation"] == defaults_after[s]["generation"] == value["parent_pointer"]["desired"]
+                        for s in SITES)):
+            # Final acceptance deliberately replaces old receipts with freshly
+            # observed ones. Their hashes may differ while generation stays exact.
             return
     raise ValueError("invalid transition state change")
 
