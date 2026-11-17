@@ -1,0 +1,36 @@
+name: BHA · Verify Empty Archives
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: update-bha-index
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  inspect:
+    if: github.repository == 'anftm/pipeline'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Verify empty archive proof contracts
+        run: python -B -m unittest -v tests.test_bha_empty_archive_proof
+      - name: Verify complete source trees and authenticated serving counts
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          BHA_REINDEX_TOKEN: ${{ secrets.BHA_REINDEX_TOKEN }}
+        run: python -B scripts/bha_empty_archive_proof.py --output output/bha-empty-archive-proof.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: bha-empty-archive-proof
+          path: output/bha-empty-archive-proof.json
+          if-no-files-found: error
+          retention-days: 14
