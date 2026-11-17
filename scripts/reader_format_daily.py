@@ -266,16 +266,26 @@ class GitHub:
 
     def runs(self, workflow=None, **params):
         path = '/actions/' + ('workflows/' + workflow + '/' if workflow else '') + 'runs'
-        # Status-filtered inventories can move while paginating. Restart only
-        # this read, at most three times; no POST or incomplete inventory escapes.
-        for _attempt in range(3):
+        # Status counts and pages may briefly disagree while runs transition.
+        # Fresh URLs and paced full observations avoid repeating the same cached
+        # response. Never return a truncated inventory or retry a mutation.
+        last_observation = None
+        for attempt in range(6):
+            if attempt:
+                time.sleep(min(2 ** attempt, 16))
+            observation = uuid.uuid4().hex
             result = {}
             expected_total = None
             for page in range(1, 11):
-                data = self.request('GET', path, params={**params, 'per_page': 100, 'page': page})
+                data = self.request('GET', path,
+                                    params={**params, 'per_page': 100, 'page': page,
+                                            '_observation': observation},
+                                    headers={'Cache-Control': 'no-cache'})
                 rows, total = data.get('workflow_runs'), data.get('total_count')
                 if not isinstance(rows, list) or type(total) is not int or not 0 <= total <= 1000:
                     raise RuntimeError('run inventory incomplete or exceeds observation bound')
+                last_observation = {'page': page, 'total': total, 'rows': len(rows),
+                                    'previous_total': expected_total, 'unique_before': len(result)}
                 if expected_total is None:
                     expected_total = total
                 elif expected_total != total:
@@ -286,7 +296,9 @@ class GitHub:
                     if len(result) == total:
                         return list(result.values())
                     break
-        raise RuntimeError('run inventory changed or is incomplete after bounded reads')
+        raise RuntimeError('run inventory changed or is incomplete after bounded reads: '
+                           + json.dumps({'workflow': workflow, 'filters': params,
+                                         'last_observation': last_observation}, sort_keys=True))
 
     def active_children(self, parent_run_id=None):
         active = {}

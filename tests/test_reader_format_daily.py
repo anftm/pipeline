@@ -1071,7 +1071,8 @@ class GitHubTests(unittest.TestCase):
         api.request = Mock(return_value={'total_count': 1001, 'workflow_runs': []})
         with self.assertRaisesRegex(RuntimeError, 'inventory'): api.runs()
 
-    def test_changed_run_inventory_restarts_reads_but_never_accepts_truncation(self):
+    @patch.object(subject.time, 'sleep')
+    def test_changed_run_inventory_restarts_reads_but_never_accepts_truncation(self, sleep):
         api = self.api()
         api.request = Mock(side_effect=[{'total_count': 2, 'workflow_runs': [{'id': 1}]},
                                        {'total_count': 1, 'workflow_runs': [{'id': 2}]}])
@@ -1081,13 +1082,27 @@ class GitHubTests(unittest.TestCase):
         api.request = Mock(return_value={'total_count': 2, 'workflow_runs': [{'id': 1}]})
         with self.assertRaisesRegex(RuntimeError, 'bounded reads'):
             api.runs(status='queued')
-        self.assertEqual(api.request.call_count, 3)
+        self.assertEqual(api.request.call_count, 6)
+        self.assertEqual(len({c.kwargs['params']['_observation'] for c in api.request.call_args_list}), 6)
+        self.assertTrue(all(c.kwargs['headers']=={'Cache-Control':'no-cache'} for c in api.request.call_args_list))
         api.request = Mock(side_effect=[
             {'total_count': 101, 'workflow_runs': [{'id': n} for n in range(100)]},
             {'total_count': 100, 'workflow_runs': []},
             {'total_count': 1, 'workflow_runs': [{'id': 900}]}])
         self.assertEqual(api.runs(status='in_progress'), [{'id': 900}])
         self.assertEqual([call.kwargs['params']['page'] for call in api.request.call_args_list], [1, 2, 1])
+
+    @patch.object(subject.time, 'sleep')
+    def test_inventory_recovers_after_three_stale_reads_with_one_snapshot_per_pagination(self, sleep):
+        api = self.api()
+        api.request = Mock(side_effect=[{'total_count': 1, 'workflow_runs': []}]*3 + [
+            {'total_count': 101, 'workflow_runs': [{'id': n} for n in range(100)]},
+            {'total_count': 101, 'workflow_runs': [{'id': 100}]}])
+        self.assertEqual(len(api.runs(status='in_progress')), 101)
+        calls=api.request.call_args_list
+        self.assertEqual(calls[-1].kwargs['params']['_observation'],calls[-2].kwargs['params']['_observation'])
+        self.assertEqual([c.args[0] for c in calls], ['GET']*5)
+        self.assertEqual([c.args[0] for c in sleep.call_args_list], [2,4,8])
 
     def test_waiting_same_group_successors_do_not_block_current_controller(self):
         api=subject.GitHub('fixture')
