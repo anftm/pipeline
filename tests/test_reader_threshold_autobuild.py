@@ -82,6 +82,27 @@ class ThresholdBuildTests(unittest.TestCase):
         self.assertEqual(subject.blocked(value),['epub','pptx'])
         value['reader_consumers']['pages']['projection_verified']=False
         with self.assertRaisesRegex(ValueError,'both Reader consumers'):subject.decision(value)
+    def test_production_markdown_is_reported_without_claiming_local_conversion(self):
+        from tests.test_reader_format_daily import summary as full_summary
+        value=summary({'epub':0,'jpg':0,'mp3':0})
+        value['formats']=full_summary(12, 'md', conversion_dependencies_checked=False)['formats']
+        for row in value['formats']:
+            row['threshold_exceeded']=row['definite_backlog']>=10
+        self.assertEqual(subject.blocked(value), [])
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);result=subject.write_decision(value,root/'decision.json')
+            self.assertEqual(result['formats'], [])
+            self.assertEqual(result['production_formats']['md']['workflow'],'reader-text-stream.yml')
+            self.assertEqual(result['production_formats']['md']['completion_scope'],'explicit_source_changes')
+            self.assertTrue(result['production_formats']['md']['warnings'])
+            self.assertFalse(result['publication_ready'])
+            subject.verify_completion(result,root)
+        row=next(r for r in value['formats'] if r['extension']=='md')
+        for field in ['source_identity_unknown','pending_shard_checkpoint','recorded_failure_current']:
+            row[field]=1
+            self.assertEqual(subject.blocked(value),['md'])
+            row[field]=0
+
     def test_threshold_and_generation_cannot_be_forged(self):
         value=summary();value['formats'][0]['definite_backlog']=9
         with self.assertRaisesRegex(ValueError,'threshold identity'):subject.decision(value)

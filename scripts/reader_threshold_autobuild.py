@@ -87,9 +87,26 @@ def decision(summary):
     return result
 
 
+def production_formats(summary):
+    """Report formats owned by the production controller, without dispatching."""
+    try:
+        from . import reader_format_daily as daily
+    except ImportError:
+        import reader_format_daily as daily
+    try:
+        plan = daily.plan(summary)
+    except ValueError:
+        # An incomplete inventory cannot prove production eligibility.
+        return {}
+    return {ext: {'workflow': row['workflow'], 'completion_scope': row['completion_scope'],
+                  'warnings': row['warnings']}
+            for ext, row in plan['formats'].items()
+            if ext not in SUPPORTED and row['state'] == 'triggered'}
+
+
 def blocked(summary):
-    """Return unresolved formats; never hide one behind a successful build."""
-    eligible = set(decision(summary))
+    """Keep unsafe/unsupported formats visible; distinguish production ownership."""
+    eligible = set(decision(summary)) | set(production_formats(summary))
     return sorted(row['extension'] for row in summary['formats']
                   if row.get('threshold_exceeded') is True and row['extension'] not in eligible)
 
@@ -111,6 +128,8 @@ def write_decision(summary, output):
               'search_generation': summary['search_generation'], 'reader_generation': summary['reader_generation'],
               'summary_sha256': hashlib.sha256(search_snapshot.canonical(summary)).hexdigest(),
               'threshold': PRODUCTION_THRESHOLD, 'formats': formats, 'blocked_formats': blocked(summary),
+              'production_formats': production_formats(summary),
+              'completion_scope': 'local shadows only; production formats require independent controller acceptance',
               'max_sources_per_format': MAX_BATCH, 'remote_writes': 0, 'publication_ready': False}
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open('x', encoding='utf8') as stream:
