@@ -487,7 +487,14 @@ def validate_run(run, operation, expected_sha):
 
 
 def validate_daily_run(run, expected_sha, *, completed=False):
-    if (run.get('name') != DAILY_NAME or run.get('path') != '.github/workflows/' + DAILY
+    # GitHub run.name can be the evaluated run-name, not workflow.name.
+    # The exact workflow path and revision remain the authoritative binding.
+    event = run.get('event')
+    title = run.get('display_title')
+    valid_title = (isinstance(title, str) and (title == 'Reader format backlog / ' + str(event)
+                   or (event == 'workflow_dispatch' and re.fullmatch(r'reader-format-continuation/[0-9a-f]{32}', title))))
+    if (not valid_title or run.get('name') not in {DAILY_NAME, title}
+            or run.get('path') != '.github/workflows/' + DAILY
             or run.get('event') not in {'workflow_dispatch', 'workflow_run'}
             or run.get('head_branch') != 'main' or run.get('head_sha') != expected_sha
             or type(run.get('id')) is not int or type(run.get('run_attempt')) is not int

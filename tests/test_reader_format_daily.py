@@ -663,6 +663,19 @@ class ContinuationTests(unittest.TestCase):
         api.report_artifact = Mock(return_value=(output.getvalue(), {'id': 55}, 'sha256:' + 'a'*64))
         return api, parent, child, operations
 
+    def test_actual_github_run_name_uses_evaluated_title_for_parent_and_child(self):
+        previous = self.prepared()
+        api, parent, child, _operations = self.api_for_continuation(previous)
+        parent.update(name='Reader format backlog / workflow_dispatch',
+                      display_title='Reader format backlog / workflow_dispatch')
+        child['name'] = child['display_title']
+        self.assertEqual(api.continuation_report(100, previous['continuation']['id'], HEAD, '101'), previous)
+        for field,value in [('name','foreign workflow'),('display_title','Reader format backlog / push'),
+                            ('path','.github/workflows/other.yml'),('run_attempt',2)]:
+            bad={**parent,field:value}
+            with self.subTest(field=field), self.assertRaises(RuntimeError):
+                subject.validate_daily_run(bad, HEAD, completed=True)
+
     def test_continuation_artifact_binds_parent_success_unique_child_and_operation_attempts(self):
         previous = self.prepared()
         api, parent, child, operations = self.api_for_continuation(previous)
