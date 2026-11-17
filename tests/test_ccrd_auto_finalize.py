@@ -42,7 +42,9 @@ class AutoFinalizeTests(AutoActivateTests):
         self.assertEqual(inputs['mode']['options'], list(subject.MODES))
         self.assertEqual(inputs['known_writers_coordinated']['default'], 'false')
         commands = '\n'.join(step.get('run', '') for step in flow['jobs']['reconcile']['steps'])
-        self.assertIn("run.get('head_sha') != os.environ['STAGE_SHA']", commands)
+        self.assertIn('scripts/ccrd_stage_provenance.py', commands)
+        self.assertIn('--sha "$STAGE_SHA"', commands)
+        self.assertIn('/attempts/1/jobs?per_page=100', commands)
         self.assertIn('scripts/ccrd_auto_finalize.py', commands)
         self.assertNotIn('git push', commands)
 

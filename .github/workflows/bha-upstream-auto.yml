@@ -1,0 +1,70 @@
+name: BHA · Normalize Regular Upstream Inputs
+
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      action:
+        description: Inspect only, or normalize one eligible archive through a deferred baseline handoff
+        type: choice
+        options: [inspect, auto]
+        default: inspect
+
+permissions:
+  contents: read
+
+concurrency:
+  group: maintain-archive-forks
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  normalize:
+    if: github.repository == 'anftm/pipeline' && github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' || vars.BHA_UPSTREAM_AUTO_ENABLED == 'true')
+    # Hold both existing coordination groups while normalizing and delivering.
+    concurrency:
+      group: update-bha-index
+      cancel-in-progress: false
+      queue: max
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - run: pip install -r scripts/requirements.txt PyYAML==6.0.3
+      - name: Verify orchestration and publication gates
+        run: >-
+          python -B -m unittest tests.test_bha_upstream_auto
+          tests.test_bha_fork_safe_sync tests.test_bha_build_plan
+          tests.test_bha_parsed_candidate_runner tests.test_bha_parsed_publish
+          tests.test_bha_parsed_baseline tests.test_bha_reindex_run
+      - name: Run one bounded archive operation
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+          BHA_REINDEX_TOKEN: ${{ secrets.BHA_REINDEX_TOKEN }}
+          HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+          ACTION: ${{ github.event_name == 'schedule' && 'auto' || inputs.action }}
+        run: |
+          set -euo pipefail
+          if [[ "$ACTION" == auto && "$GITHUB_RUN_ATTEMPT" != 1 ]]; then
+            echo 'Reruns cannot mutate. Start a new run to inspect durable receipts.' >&2
+            exit 1
+          fi
+          # Helper subprocess diagnostics can include third-party request details.
+          # The runner writes only bounded structured evidence to the artifact.
+          python -B -m scripts.bha_upstream_auto --action "$ACTION" \
+            --output-dir "$RUNNER_TEMP/bha-upstream-auto" >/dev/null 2>&1
+      - name: Preserve exact candidate and deferred baseline evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: bha-upstream-auto
+          path: ${{ runner.temp }}/bha-upstream-auto/
+          retention-days: 30
+          if-no-files-found: warn

@@ -56,7 +56,7 @@ jobs:
       - name: Install pinned dependencies
         run: pip install -r scripts/requirements.txt PyYAML==6.0.3
       - name: Exercise action and recovery contracts
-        run: python -B -m unittest -v tests.test_ccrd_auto_finalize tests.test_ccrd_publication_coordinator tests.test_ccrd_rollback
+        run: python -B -m unittest -v tests.test_ccrd_auto_finalize tests.test_ccrd_stage_provenance tests.test_ccrd_publication_coordinator tests.test_ccrd_rollback
       - name: Verify staging workflow run provenance
         env:
           GH_TOKEN: ${{ github.token }}
@@ -68,16 +68,10 @@ jobs:
           set -euo pipefail
           [[ "$WRITERS" == 'true' && "$STAGE_RUN" =~ ^[0-9]+$ && "$STAGE_SHA" =~ ^[0-9a-f]{40}$ && "$TRANSACTION" =~ ^[0-9a-f]{32}$ ]]
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$STAGE_RUN" > "$RUNNER_TEMP/stage-run.json"
-          python - <<'PY'
-          import json, os
-          from pathlib import Path
-          run = json.loads((Path(os.environ['RUNNER_TEMP']) / 'stage-run.json').read_bytes())
-          if (run.get('status') != 'completed' or run.get('conclusion') != 'success'
-                  or run.get('head_branch') != 'main' or run.get('head_sha') != os.environ['STAGE_SHA']
-                  or run.get('event') not in {'schedule', 'workflow_dispatch'}
-                  or run.get('path', '').split('@', 1)[0] != '.github/workflows/publish-ccrd-index.yml'):
-              raise SystemExit('staging run is not an exact successful CCRD run')
-          PY
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$STAGE_RUN/attempts/1/jobs?per_page=100" > "$RUNNER_TEMP/stage-jobs.json"
+          python -B scripts/ccrd_stage_provenance.py \
+            --run "$RUNNER_TEMP/stage-run.json" --jobs "$RUNNER_TEMP/stage-jobs.json" \
+            --run-id "$STAGE_RUN" --sha "$STAGE_SHA"
       - name: Download exact staged candidate
         uses: actions/download-artifact@v8
         with:

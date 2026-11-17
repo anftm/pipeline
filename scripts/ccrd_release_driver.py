@@ -14,12 +14,14 @@ from pathlib import Path
 import time
 
 try:
+    from . import ccrd_activation_recovery as recovery
     from . import ccrd_auto_activate as activation
     from . import ccrd_auto_finalize as finalization
     from . import ccrd_pointer_transition as pointer
     from . import ccrd_transaction as tx
     from . import ccrd_transaction_s3 as journal_s3
 except ImportError:
+    import ccrd_activation_recovery as recovery
     import ccrd_auto_activate as activation
     import ccrd_auto_finalize as finalization
     import ccrd_pointer_transition as pointer
@@ -81,7 +83,11 @@ def _run(mode: str, transaction: str, *, bundle: Path, token: str, api, journal,
             return {'kind': 'ccrd-release-drive', 'status': 'manual-recovery', 'state': state,
                     'transaction': transaction, 'external_writers_verified': False}
         if state == 'space-claimed':
-            result = step('observe-space', transaction, **common)
+            try:
+                result = step('observe-space', transaction, **common)
+            except recovery.RuntimePending:
+                sleep(min(poll, max(0, deadline - clock())))
+                continue
             if not result['result'].get('journal_advanced'):
                 sleep(poll)
         elif state == 'space-verified':

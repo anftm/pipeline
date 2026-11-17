@@ -13,12 +13,14 @@ import urllib.request
 try:
     from . import bha_reindex_journal as journal
     from . import bha_reindex_plan as planning
+    from . import bha_empty_coverage as empty
     from . import bha_consumer_sample as consumer_samples
     from . import bha_snapshot_inspection as snapshots
     from . import check_bha_reindex_access as access
 except ImportError:
     import bha_reindex_journal as journal
     import bha_reindex_plan as planning
+    import bha_empty_coverage as empty
     import bha_consumer_sample as consumer_samples
     import bha_snapshot_inspection as snapshots
     import check_bha_reindex_access as access
@@ -180,7 +182,10 @@ def reconcile(store, *, operation: str, token: str, status=_raw_status, verify_s
                 or row.get('tree') != current.record['archive_revisions'][key]
                 or row.get('preview_article_equal') is not True or row.get('exact_title_search_found') is not True):
             raise ValueError('BHA consumer sample does not match target revision')
-    observed_archives = {row['archive'] for row in sample_report['samples']}
+    empty_rows = sample_report.get('empty_archives', [])
+    empty_archives = empty.validate_serving(empty_rows, current.record['archive_commits'],
+                                           current.record['archive_revisions'], data.get('build_fingerprint'))
+    observed_archives = {row['archive'] for row in sample_report['samples']} | empty_archives
     if (current.record['mode'] == 'incremental'
             and not set(current.record['changed_archives']).issubset(observed_archives)):
         raise ValueError('BHA consumer samples do not cover all changed archives')
@@ -190,6 +195,7 @@ def reconcile(store, *, operation: str, token: str, status=_raw_status, verify_s
             or later_job.get('state') != 'succeeded'
             or later_job.get('finished_at') != job.get('finished_at')
             or later_job.get('changed') != job.get('changed')
+            or later.get('build_fingerprint') != data.get('build_fingerprint')
             or later.get('index_status') != 'ready' or later.get('switch_pending') is not False
             or planning._trees(later.get('archive_revisions'), 'consumer trees') != current.record['archive_revisions']):
         raise ValueError('BHA consumer changed during acceptance')
@@ -252,6 +258,7 @@ def reconcile(store, *, operation: str, token: str, status=_raw_status, verify_s
         raise ValueError('BHA consumer changed during snapshot acceptance')
     result = {'job_id': job_id, 'state': 'succeeded', 'consumer_revisions_verified': True,
               'samples': sample_report['samples'], 'sample_count': len(sample_report['samples']),
+              'empty_archives': empty_rows,
               'snapshot_generation': snapshot['generation'], 'snapshot_manifest_sha256': snapshot['manifest_sha256'],
               'snapshot_sidecars_verified': True, 'snapshot_restore_verified': False}
     terminal = journal.terminal(store, current, state='verified', result=result)

@@ -90,6 +90,10 @@ def direct_child(parent: str, child: str) -> bool:
         return result.stdout.strip().split() == [child, parent]
 
 
+class RuntimePending(ValueError):
+    """Exact candidate files verified, but its deployment is still starting."""
+
+
 def observe(plan_value: dict, *, api, get=space._get, child_of=direct_child) -> dict:
     """Observe exact current revision/files only; perform no mutations."""
     value = _plan(plan_value)
@@ -114,6 +118,9 @@ def observe(plan_value: dict, *, api, get=space._get, child_of=direct_child) -> 
         raise RuntimeError('CCRD Space changed during recovery inspection')
     runtime = api.get_space_runtime(space.SPACE)
     if runtime.stage != 'RUNNING' or not isinstance(runtime.raw, dict) or runtime.raw.get('sha') != current:
+        if (status == 'candidate' and runtime.stage in {'BUILDING', 'RUNNING_BUILDING', 'APP_STARTING', 'RUNNING_APP_STARTING'}
+                and isinstance(runtime.raw, dict) and runtime.raw.get('sha') in {None, parent, current}):
+            raise RuntimePending('exact CCRD candidate deployment is still starting')
         raise ValueError('CCRD recovery runtime does not match the exact observed revision')
     return {'version': 1, 'kind': 'ccrd-space-recovery-observation', 'status': status,
             'revision': current, 'parent_revision': parent, 'plan_sha256': value['plan_sha256'],

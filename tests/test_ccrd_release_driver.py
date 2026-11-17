@@ -51,6 +51,22 @@ class ReleaseDriverTests(AutoActivateTests):
         self.assertEqual(pointer.writes, 0)  # fake step deliberately never mutates an external pointer
         self.assertFalse(result['external_writers_verified'])
 
+    def test_candidate_starting_is_bounded_wait_without_another_write(self):
+        bundle, journal, pointer, _ = self.setup_transaction()
+        now=[0]
+        def sleep(seconds):now[0]+=seconds
+        step=Mock(side_effect=driver.recovery.RuntimePending('starting'))
+        result=driver._run('fresh','1'*32,bundle=bundle,token='fixture',api=self.api,
+            journal=journal,pointer_store=pointer,timeout=2,poll=1,
+            sleep=sleep,clock=lambda:now[0],step=step)
+        self.assertEqual(result['status'],'waiting');self.assertEqual(step.call_count,2)
+        self.assertTrue(all(call.args[0]=='observe-space' for call in step.call_args_list))
+        self.assertEqual(tx.load(journal).record['state'],'space-claimed');self.assertEqual(pointer.writes,0)
+        with self.assertRaisesRegex(ValueError,'foreign runtime'):
+            driver._run('fresh','1'*32,bundle=bundle,token='fixture',api=self.api,
+                journal=journal,pointer_store=pointer,timeout=2,poll=1,
+                sleep=sleep,clock=lambda:now[0],step=Mock(side_effect=ValueError('foreign runtime')))
+
     def test_claimed_unknown_never_replays_and_timeout_preserves_state(self):
         bundle, journal, pointer, _ = self.setup_transaction(); calls = []; clock = iter([0, 0, 1, 3])
         def step(mode, *_a, **_k):

@@ -52,7 +52,20 @@ jobs:
           path: ${{ runner.temp }}/ccrd-stage/bundle/
           retention-days: 30
           if-no-files-found: error
+      - name: Publish verified staged update when automation is enabled
+        if: steps.stage.outputs.status == 'staged' && vars.CCRD_AUTOMATION_ENABLED == 'true'
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
+          HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+        run: |
+          set -euo pipefail
+          python -B scripts/ccrd_release_driver.py --known-writers-coordinated \
+            --bundle "$RUNNER_TEMP/ccrd-stage/bundle" \
+            --metadata-root "$RUNNER_TEMP/ccrd-activation-metadata"
       - name: Preserve stage report
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: ccrd-four-source-stage-report

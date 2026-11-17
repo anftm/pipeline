@@ -16,6 +16,7 @@ from pathlib import Path
 import time
 
 try:
+    from . import bha_empty_coverage as empty
     from . import bha_consumer_sample as consumer
     from . import bha_reindex_delivery as delivery
     from . import bha_reindex_journal as journal
@@ -23,6 +24,7 @@ try:
     from . import bha_snapshot_inspection as snapshot
     from . import search_snapshot
 except ImportError:
+    import bha_empty_coverage as empty
     import bha_consumer_sample as consumer
     import bha_reindex_delivery as delivery
     import bha_reindex_journal as journal
@@ -114,16 +116,21 @@ def reviewed_plan(path: Path | None, digest: str | None) -> dict:
     return value
 
 
-def require_coverage(changed, selected, plan=None):
-    missing = sorted(set(changed) - {row['archive'] for row in selected})
+def require_coverage(changed, selected, plan=None, *, empty_archives=()):
+    covered_empty = set(empty_archives)
+    if plan is not None and 'empty_source_proofs' in plan:
+        covered_empty = empty.validate_sources(plan['empty_source_proofs'], plan['archive_commits'], plan['archive_revisions'])
+    missing = sorted(set(changed) - {row['archive'] for row in selected} - covered_empty)
     declared = plan.get('post_index_sample_missing_archives') if plan is not None else []
     if missing or declared != []:
-        raise RunError('plan post_index_sample_missing_archives must be empty; all changed archives need samples')
+        raise RunError('plan post_index_sample_missing_archives must be empty; all changed archives need samples or exact empty proofs')
 
 
-def observe_target(record, selected):
-    """Keep the existing aggregate health semantics and sample exact commits."""
-    require_coverage(record['changed_archives'], selected)
+def observe_target(record, selected, *, empty_proofs=None):
+    """Verify article samples and independently proven empty target archives."""
+    empty_rows = empty_proofs(record) if empty_proofs is not None else []
+    empty_archives = empty.validate_sources(empty_rows, record['archive_commits'], record['archive_revisions'])
+    require_coverage(record['changed_archives'], selected, empty_archives=empty_archives)
     before = consumer.health(consumer.get(consumer.BASE + '/api/health', consumer.MAX_HEALTH))
     rows = []
     for selected_row in selected:
@@ -135,13 +142,14 @@ def observe_target(record, selected):
     if before != after:
         raise RunError('consumer health changed during target sampling')
     return {'version': 1, 'kind': 'bha-consumer-sample', 'samples': rows,
+            'empty_archives': empty_rows,
             'consumer_health_observed_twice': True, 'remote_writes': 0}
 
 
 def run(*, action, store, collect_plan, load_reviewed, selected, token,
         operation_id=None, reason=None, timeout_seconds=9000, poll_seconds=30,
         emit=lambda value: None, clock=time.monotonic, sleep=time.sleep,
-        retain_plan=journal.retain_plan):
+        retain_plan=journal.retain_plan, empty_proofs=None):
     """Run one operation; injectable clock and boundaries permit offline tests."""
     if action not in {'auto', 'plan', 'apply', 'reconcile', 'abandon'}:
         raise RunError('invalid action')
@@ -195,14 +203,15 @@ def run(*, action, store, collect_plan, load_reviewed, selected, token,
                        journal_audited=True, audited_records=audited_records)
 
     def poll(record):
-        require_coverage(record['changed_archives'], selected)
+        if empty_proofs is None:
+            require_coverage(record['changed_archives'], selected)
         deadline = clock() + timeout_seconds
         while True:
             if clock() >= deadline:
                 return publish(status='timeout', ok=False, journal_preserved=True)
             observed = delivery.reconcile(
                 store, operation=record['operation'], token=token,
-                verify_samples=lambda: observe_target(record, selected),
+                verify_samples=lambda: observe_target(record, selected, empty_proofs=empty_proofs),
                 verify_snapshot=snapshot.inspect)
             state = observed['status']
             journal_state = ('accepted' if state in {'accepted', 'running', 'snapshot-pending', 'snapshot-unverified'}
@@ -339,7 +348,19 @@ def main(argv=None) -> int:
             github_token = os.environ.get('GH_PAT') or os.environ.get('GITHUB_TOKEN', '')
 
             def collect():
-                return inspect_plan_with_samples(github_token, token, args.baseline, selected_samples=selected)
+                value = inspect_plan_with_samples(github_token, token, args.baseline, selected_samples=selected)
+                missing = value['post_index_sample_missing_archives']
+                if missing:
+                    value['empty_source_proofs'] = [empty.source(n, value['archive_commits'][str(n)],
+                        value['archive_revisions'][str(n)], github_token) for n in missing]
+                    value['post_index_sample_missing_archives'] = []
+                    value['plan_sha256'] = hashlib.sha256(search_snapshot.canonical(
+                        {k: v for k, v in value.items() if k != 'plan_sha256'})).hexdigest()
+                return value
+
+            def empty_proofs(record):
+                missing = sorted(set(record['changed_archives']) - {r['archive'] for r in selected})
+                return empty.observe(record, missing, github_token, token) if missing else []
 
             def retain(store, value):
                 artifact = journal.retain_plan(store, value)
@@ -357,7 +378,7 @@ def main(argv=None) -> int:
                          load_reviewed=lambda: reviewed_plan(args.plan, args.plan_sha256),
                          selected=selected, token=token, operation_id=args.operation_id, reason=args.reason,
                          timeout_seconds=args.timeout_seconds, poll_seconds=args.poll_seconds, emit=emit,
-                         retain_plan=retain)
+                         retain_plan=retain, empty_proofs=empty_proofs)
             if args.action == 'auto' and args.plan is not None and 'plan' in result:
                 if not args.plan.exists():
                     args.plan.parent.mkdir(parents=True, exist_ok=True)

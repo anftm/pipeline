@@ -44,8 +44,12 @@ class RecoveryTests(CcrdSpaceActivationTests):
         with self.assertRaisesRegex(ValueError, 'path differs'):
             recovery.observe(self.activation_plan_cache, api=self.api, get=lambda *_: b'wrong', child_of=lambda *_: True)
         self.api.get_space_runtime.return_value.stage = 'RUNNING_BUILDING'
-        with self.assertRaisesRegex(ValueError, 'runtime does not match'):
+        with self.assertRaises(recovery.RuntimePending):
             recovery.observe(self.activation_plan_cache, api=self.api, get=self.candidate_get, child_of=lambda *_: True)
+        for stage, revision in [('BUILD_ERROR',NEW_REV),('RUNNING','f'*40),('RUNNING_BUILDING','f'*40)]:
+            self.api.get_space_runtime.return_value=SimpleNamespace(stage=stage,raw={'sha':revision})
+            with self.subTest(stage=stage),self.assertRaisesRegex(ValueError,'runtime does not match'):
+                recovery.observe(self.activation_plan_cache,api=self.api,get=self.candidate_get,child_of=lambda *_:True)
         self.api.create_commit.assert_not_called()
 
     def test_bad_intent_or_moving_head_fails_before_recovery(self):
