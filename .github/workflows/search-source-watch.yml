@@ -1,0 +1,44 @@
+name: 搜索 · Source Change Watch
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  repository_dispatch:
+    types: [search-source-changed]
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: write
+concurrency:
+  group: search-source-watch
+  cancel-in-progress: false
+  queue: max
+jobs:
+  inspect:
+    if: github.repository == 'anftm/pipeline' && vars.SEARCH_AUTOMATION_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - run: pip install -r scripts/requirements.txt requests==2.32.5 PyYAML==6.0.3
+      - run: python -B -m unittest -v tests.test_search_source_watch
+      - name: Compare published exact source heads
+        id: observe
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: python -B -m scripts.search_source_watch
+      - name: Start existing journalled sync once
+        if: steps.observe.outputs.update_needed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_RUN_ATTEMPT" == 1 && "$GITHUB_REF" == refs/heads/main ]]
+          [[ "$(gh api repos/$GITHUB_REPOSITORY/git/ref/heads/main --jq .object.sha)" == "$GITHUB_SHA" ]]
+          # Only one mutation attempt; the sync itself serializes in daily-sync.
+          # Later watch runs re-observe and coalesce rather than rerun this POST.
+          python -B -m scripts.search_source_watch_dispatch
