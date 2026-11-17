@@ -158,6 +158,14 @@ class ReferenceGraph:
         try:
             if ref == CATALOG_REF:
                 payload, digest = self.read_catalog(ref)
+            elif (ref[0] == ccrd_lifecycle.BUCKET
+                  and (ref[1] == 'control/cw0-publication-head.json'
+                       or ref[1].startswith('control/cw0-publications/'))):
+                # Transaction validators authenticate the entire canonical
+                # document. The graph projection drops fields such as source
+                # and observations, so it cannot validate content addresses.
+                raw = self.store.read_bytes(*ref)
+                payload, digest = decode(raw), hashlib.sha256(raw).hexdigest()
             elif hasattr(self.store, "read_graph_json"):
                 payload, digest = self.store.read_graph_json(*ref)
             else:

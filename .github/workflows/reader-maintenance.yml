@@ -34,7 +34,8 @@ permissions:
   actions: write
 
 concurrency:
-  group: reader-global-maintenance
+  # Wait for bounded format controllers/inspection before isolating producers.
+  group: reader-format-daily
   cancel-in-progress: false
   queue: max
 

@@ -1092,13 +1092,14 @@ class GitHubTests(unittest.TestCase):
     def test_waiting_same_group_successors_do_not_block_current_controller(self):
         api=subject.GitHub('fixture')
         api.runs=Mock(return_value=[{'id':2,'path':'.github/workflows/reader-format-daily.yml','status':'pending'},
-                                   {'id':3,'path':'.github/workflows/reader-backlog-monitor.yml','status':'pending'}])
+                                   {'id':3,'path':'.github/workflows/reader-backlog-monitor.yml','status':'pending'},
+                                   {'id':4,'path':'.github/workflows/reader-maintenance.yml','status':'pending'}])
         api.request=Mock(return_value={'total_count':0,'jobs':[]})
         self.assertEqual(api.active_children('1'),[])
         api.request.return_value={'total_count':1,'jobs':[{'status':'in_progress','steps':[{'name':'running'}],'started_at':'now'}]}
-        self.assertEqual({r['id'] for r in api.active_children('1')},{2,3})
+        self.assertEqual({r['id'] for r in api.active_children('1')},{2,3,4})
         api.request.return_value={'total_count':2,'jobs':[]}
-        self.assertEqual({r['id'] for r in api.active_children('1')},{2,3})
+        self.assertEqual({r['id'] for r in api.active_children('1')},{2,3,4})
 
     def test_active_detection_includes_pending_and_excludes_parent(self):
         api = self.api()

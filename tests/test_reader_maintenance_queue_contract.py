@@ -10,7 +10,7 @@ import yaml
 
 
 WORKFLOWS = Path(__file__).resolve().parents[1] / '.github/workflows'
-PROTECTED = ('publish-ccrd-index', 'reader-global-maintenance', 'reader-sidecar')
+PROTECTED = ('publish-ccrd-index', 'reader-global-maintenance', 'reader-sidecar', 'reader-format-daily')
 
 
 class MaintenanceQueueContractTests(unittest.TestCase):
@@ -37,6 +37,11 @@ class MaintenanceQueueContractTests(unittest.TestCase):
         checked_names = {name for name, _ in checked}
         self.assertTrue({'reader-maintenance.yml', 'reader-gc-collect.yml',
                          'reader-v3-publish.yml', 'publish-ccrd-index.yml'} <= checked_names)
+
+    def test_maintenance_waits_for_controller_and_monitor(self):
+        for name in ['reader-maintenance.yml', 'reader-format-daily.yml', 'reader-backlog-monitor.yml']:
+            flow = yaml.load((WORKFLOWS / name).read_text(), Loader=yaml.BaseLoader)
+            self.assertEqual(flow['concurrency']['group'], 'reader-format-daily')
 
     def test_retired_ocr_audit_has_no_workflow(self):
         self.assertFalse((WORKFLOWS / 'reader-ocr-audit.yml').exists())

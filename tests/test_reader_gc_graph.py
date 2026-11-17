@@ -45,6 +45,25 @@ class MemoryStore:
 
 
 class ReaderGcGraphTests(unittest.TestCase):
+    def test_content_addressed_ccrd_control_uses_complete_document(self):
+        from scripts import ccrd_lifecycle, reader_gc_stream
+        payload = {'kind': 'ccrd-activation-evidence', 'observations': {'source': 'retained evidence'}}
+        raw = ccrd_lifecycle.canonical(payload)
+        digest = hashlib.sha256(raw).hexdigest()
+        path = 'control/cw0-publications/' + 'a' * 32 + '/evidence/' + digest + '.json'
+        projected, _ = reader_gc_stream.graph_json([raw])
+        with self.assertRaises(ValueError):
+            ccrd_lifecycle.references(projected, path)
+        store = MemoryStore(); store.put(CCRD, path, raw)
+        store.read_graph_json = Mock(side_effect=AssertionError('must preserve authenticated fields'))
+        graph = gc.ReferenceGraph(store)
+        loaded = graph.load((CCRD, path))
+        self.assertEqual(loaded, payload)
+        self.assertTrue(graph.validate(loaded, CCRD, path))
+        store.read_graph_json.assert_not_called()
+        store.put(CCRD, path, ccrd_lifecycle.canonical({**payload, 'observations': {'source': 'tampered'}}))
+        self.assertFalse(graph.validate(graph.load((CCRD, path)), CCRD, path))
+
     def test_reader_ownership_does_not_reduce_reference_closure(self):
         self.assertEqual(gc.READER_BUCKETS, ('vomebook/reader-assets-v2', 'vomebook/pdf-pages-v2'))
         self.assertEqual(gc.EXTERNAL_REFERENCE_BUCKETS, ('melsm/pdf-archive-v2', 'vomebook/ccrd-index'))

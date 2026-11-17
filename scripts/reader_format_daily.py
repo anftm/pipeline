@@ -298,7 +298,7 @@ class GitHub:
                              or name == 'pdf-account-worker.yml')
                         and row.get('status') != 'completed'):
                     if (row.get('status') == 'pending'
-                            and name in {DAILY, 'reader-backlog-monitor.yml'}):
+                            and name in {DAILY, 'reader-backlog-monitor.yml', 'reader-maintenance.yml'}):
                         # These workflows share reader-format-daily concurrency.
                         # Only a job that has not started is a waiting successor,
                         # not a concurrently executing producer or observer.
