@@ -15,6 +15,16 @@ on:
           - reconcile
           - recover-failed-apply
           - abandon-unclaimed
+          - recover-superseded
+          - inspect-superseded
+      successor_revision:
+        description: Exact current Pages revision for superseded-apply recovery
+        type: string
+        required: false
+      successor_run:
+        description: Exact later successful Pages push run ID
+        type: string
+        required: false
       expected_revision:
         description: Exact Pages main revision, required for prepare
         type: string
@@ -38,11 +48,23 @@ concurrency:
 
 jobs:
   switch:
-    if: github.repository == 'anftm/pipeline'
+    if: github.repository == 'anftm/pipeline' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Require exact current main before supersession recovery
+        if: inputs.mode == 'recover-superseded' || inputs.mode == 'inspect-superseded'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF" == refs/heads/main && "$GITHUB_RUN_ATTEMPT" == 1 ]]
+          [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/search-promotion-pages.yml@refs/heads/main" ]]
+          [[ "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" && "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          [[ "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" == "$GITHUB_SHA" ]]
       - uses: actions/setup-python@v7
         with:
           python-version: '3.11'
@@ -59,14 +81,20 @@ jobs:
           MODE: ${{ inputs.mode }}
           EXPECTED_REVISION: ${{ inputs.expected_revision }}
           OPERATION: ${{ inputs.operation }}
+          SUCCESSOR_REVISION: ${{ inputs.successor_revision }}
+          SUCCESSOR_RUN: ${{ inputs.successor_run }}
           WRITERS: ${{ inputs.known_writers_coordinated }}
         run: |
           set -euo pipefail
-          [[ "$WRITERS" == 'true' ]]
+          [[ "$MODE" == inspect-superseded || "$WRITERS" == 'true' ]]
           case "$MODE" in
             prepare|rollback-prepare)
               [[ "$EXPECTED_REVISION" =~ ^[0-9a-f]{40}$ && -z "$OPERATION" ]]
               python -B scripts/search_pages_transition.py --mode "$MODE" --expected-revision "$EXPECTED_REVISION"
+              ;;
+            recover-superseded|inspect-superseded)
+              [[ "$OPERATION" =~ ^[0-9a-f]{32}$ && "$SUCCESSOR_REVISION" =~ ^[0-9a-f]{40}$ && "$SUCCESSOR_RUN" =~ ^[1-9][0-9]*$ && -z "$EXPECTED_REVISION" ]]
+              python -B scripts/search_pages_transition.py --mode "$MODE" --operation "$OPERATION" --successor-revision "$SUCCESSOR_REVISION" --successor-run "$SUCCESSOR_RUN"
               ;;
             apply|reconcile|recover-failed-apply|abandon-unclaimed)
               [[ "$OPERATION" =~ ^[0-9a-f]{32}$ && -z "$EXPECTED_REVISION" ]]

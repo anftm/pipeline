@@ -24,7 +24,7 @@ class PagesTransitionTests(unittest.TestCase):
         subject.tx.observe_site(self.s, current, site='space', generation=B, receipt=receipt('space', B))
         self.session, self.api, self.hub = Mock(), Mock(), Mock()
         self.patches = [patch.object(subject, '_main', return_value=REV),
-                        patch.object(subject, '_space_loaded'), patch.object(subject, '_verify_candidate_sources'),
+                        patch.object(subject, '_space_loaded', return_value={'runtime_revision':REV,'receipt':{'generation':B}}), patch.object(subject, '_verify_candidate_sources'),
                         patch.object(subject.deploy, 'assert_idle'),
                         patch.object(subject.deploy, 'failed_before_deploy'),
                         patch.object(subject.defaults, 'observe_pages', return_value=default_receipt('pages', A)),
@@ -35,6 +35,73 @@ class PagesTransitionTests(unittest.TestCase):
     def prepare_pages(self):
         return subject.prepare(self.s, session=self.session, api=self.api, hub=self.hub, get=lambda *_: b'',
                                expected_revision=REV, operation_id=OP, created_at=TIME)
+
+    def test_successful_apply_superseded_by_exact_parent_deploy_is_recoverable(self):
+        current = self.prepare_pages()
+        subject.tx.claim_write(self.s, current, site='pages', operation='apply', operation_id=OP)
+        original={'id':10,'head_sha':REV,'status':'completed','conclusion':'success','run_attempt':1,'created_at':TIME}
+        successor={'id':11,'head_sha':'e'*40,'head_branch':'main','event':'push','run_attempt':1,
+                   'path':'.github/workflows/static.yml','status':'completed','conclusion':'success',
+                   'created_at':'2026-11-08T01:00:00Z'}
+        def get_response(url,**kwargs):
+            response=Mock();response.links={}
+            if '/contents/' in url: response.json.return_value={'sha':next(iter(subject.SUPERSESSION_WORKFLOW_BLOBS))}
+            elif '/jobs' in url:
+                old='/runs/10/' in url
+                response.json.return_value={'total_count':1,'jobs':[{'id':20 if old else 21,'name':'deploy',
+                    'status':'completed','conclusion':'success','steps':[{'name':'Deploy to GitHub Pages',
+                    'conclusion':'success','started_at':TIME if old else '2026-11-08T01:00:00Z',
+                    'completed_at':'2026-11-08T00:10:00Z' if old else '2026-11-08T01:10:00Z'}]}]}
+            else: response.json.return_value=successor
+            return response
+        self.session.get.side_effect=get_response
+        kwargs=dict(session=self.session,api=self.api,hub=self.hub,get=lambda *_:b'', operation_id=OP,
+                    successor_revision='e'*40,successor_run_id=11)
+        with patch.object(subject.deploy,'inspect_runs',return_value=original), patch.object(subject,'_main',return_value='e'*40):
+            prior=subject.tx.load(self.s)
+            preview=subject.recover_superseded_apply(self.s,inspect_only=True,**kwargs)
+            self.assertFalse(preview['journal_advanced']);self.assertEqual(prior,subject.tx.load(self.s))
+            def overlapping(url,**options):
+                response=get_response(url,**options)
+                if '/runs/11/' in url and '/jobs' in url:
+                    response.json.return_value['jobs'][0]['steps'][0]['started_at']=TIME
+                return response
+            self.session.get.side_effect=overlapping
+            with self.assertRaisesRegex(ValueError,'order'):
+                subject.recover_superseded_apply(self.s,**kwargs)
+            self.assertEqual(prior,subject.tx.load(self.s))
+            self.session.get.side_effect=get_response
+        with patch.object(subject.deploy,'inspect_runs',return_value=original), patch.object(subject,'_main',return_value='e'*40), \
+                patch.object(subject.deploy,'dispatch') as send:
+            result=subject.recover_superseded_apply(self.s,session=self.session,api=self.api,hub=self.hub,get=lambda *_:b'',
+                                                     operation_id=OP,successor_revision='e'*40,successor_run_id=11)
+        self.assertEqual(result['original_run'],10)
+        recovered=subject.tx.load(self.s)
+        self.assertEqual(recovered.record['state'],'rolling-back')
+        subject.tx.audit_history(self.s, recovered)
+        import json
+        evidence=next(v['details']['supersession_recovery'] for v in map(json.loads,self.s.receipts.values())
+                      if 'supersession_recovery' in v.get('details',{}))
+        self.assertEqual(evidence['successor_run']['event'],'push')
+        self.assertEqual(evidence['original_run']['run_attempt'],1)
+        self.assertEqual(evidence['successor_deploy']['job_id'],21)
+        self.assertEqual(evidence['pages_default_after']['generation'],A)
+        send.assert_not_called()
+
+    def test_superseded_recovery_rejects_failed_or_retried_successor(self):
+        current=self.prepare_pages()
+        subject.tx.claim_write(self.s,current,site='pages',operation='apply',operation_id=OP)
+        original={'id':10,'head_sha':REV,'status':'completed','conclusion':'success','run_attempt':1,'created_at':TIME}
+        for changes in ({'conclusion':'failure'},{'run_attempt':2},{'event':'workflow_dispatch'},{'head_sha':'f'*40}):
+            successor={'id':11,'head_sha':'e'*40,'head_branch':'main','event':'push','run_attempt':1,
+                       'path':'.github/workflows/static.yml','status':'completed','conclusion':'success',
+                       'created_at':'2026-11-08T01:00:00Z',**changes}
+            self.session.get.return_value.json.return_value=successor
+            with patch.object(subject.deploy,'inspect_runs',return_value=original), patch.object(subject,'_main',return_value='e'*40):
+                with self.assertRaisesRegex(ValueError,'successor'):
+                    subject.recover_superseded_apply(self.s,session=self.session,api=self.api,hub=self.hub,get=lambda *_:b'',
+                                                     operation_id=OP,successor_revision='e'*40,successor_run_id=11)
+        self.assertIsNotNone(subject.tx.load(self.s).record['pending'])
 
     def test_prepare_and_dispatch_require_exact_durable_intent(self):
         current = self.prepare_pages()
@@ -231,7 +298,7 @@ class PagesTransitionTests(unittest.TestCase):
         self.assertEqual(flow['permissions'], {'contents': 'read'})
         self.assertEqual(flow['concurrency']['group'], 'daily-sync')
         self.assertEqual(flow['on']['workflow_dispatch']['inputs']['mode']['options'],
-                         ['prepare', 'rollback-prepare', 'apply', 'reconcile', 'recover-failed-apply', 'abandon-unclaimed'])
+                         ['prepare', 'rollback-prepare', 'apply', 'reconcile', 'recover-failed-apply', 'abandon-unclaimed', 'recover-superseded', 'inspect-superseded'])
         self.assertEqual(flow['on']['workflow_dispatch']['inputs']['known_writers_coordinated']['default'], 'false')
 
 

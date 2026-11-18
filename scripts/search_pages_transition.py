@@ -36,6 +36,8 @@ except ImportError:
 
 
 REV = re.compile(r'[0-9a-f]{40}\Z')
+# Independently reviewed static workflow topology for this recovery only.
+SUPERSESSION_WORKFLOW_BLOBS = frozenset({'a62e59ff2ac2272df619f93d6be7444d4dd717dc'})
 
 
 def _pending(store, operation: str) -> tuple[tx.Current, dict]:
@@ -58,7 +60,7 @@ def _main(session) -> str:
     return revision
 
 
-def _space_loaded(current: tx.Current, *, api, hub, get) -> None:
+def _space_loaded(current: tx.Current, *, api, hub, get) -> dict:
     manifest = adoption.validate_generation(hub, current.record['candidate'])
     configured, updated = space_deploy.variable(api)
     if configured != current.record['candidate']:
@@ -67,10 +69,11 @@ def _space_loaded(current: tx.Current, *, api, hub, get) -> None:
     if state.stage != 'RUNNING' or not isinstance(state.raw, dict) or not REV.fullmatch(str(state.raw.get('sha', ''))):
         raise ValueError('Space runtime is not running a known revision')
     space_deploy.runtime(api, expected_sha=state.raw['sha'])
-    receipts.observe('space', current.record['candidate'], manifest, get=get)
+    receipt = receipts.observe('space', current.record['candidate'], manifest, get=get)
     if space_deploy.variable(api) != (configured, updated):
         raise ValueError('Space configuration changed during candidate observation')
     space_deploy.runtime(api, expected_sha=state.raw['sha'])
+    return {'runtime_revision': state.raw['sha'], 'receipt': json.loads(receipt)}
 
 
 def prepare(store, *, session, api, hub, get, expected_revision: str, operation_id: str, created_at: str,
@@ -193,6 +196,111 @@ def abandon_unclaimed_apply(store, *, session, api, hub, get, operation_id: str)
             'sequence': result.record['sequence'], 'external_writers_verified': False}
 
 
+def recover_superseded_apply(store, *, session, api, hub, get, operation_id: str,
+                             successor_revision: str, successor_run_id: int, inspect_only: bool = False) -> dict:
+    """Recover a claimed, successful Pages apply superseded by a parent deployment.
+
+    Both exact runs must be terminal and immutable; actual deployed bytes and
+    defaults must independently agree with the parent before the journal CAS.
+    Queue checks are not a global fence: all external writers must be coordinated.
+    """
+    current, pending = _pending(store, operation_id)
+    if (pending['operation'] != 'apply' or not pending.get('write_claim')
+            or not REV.fullmatch(successor_revision) or type(successor_run_id) is not int
+            or successor_run_id <= 0 or successor_revision == pending['expected_revision']):
+        raise ValueError('exact claimed apply and distinct successor required')
+    def inspect():
+        original = deploy.inspect_runs(session, operation=operation_id, not_before=pending['created_at'],
+                                       expected_sha=pending['expected_revision'])
+        if not original or original.get('status') != 'completed' or original.get('conclusion') != 'success':
+            raise ValueError('original exact Pages apply is not terminal success')
+        response = session.get(f'{deploy.BASE}/actions/runs/{successor_run_id}', timeout=20)
+        response.raise_for_status(); successor = response.json()
+        if (not isinstance(successor, dict) or successor.get('id') != successor_run_id
+                or successor.get('head_sha') != successor_revision or successor.get('head_branch') != 'main'
+                or successor.get('event') != 'push' or successor.get('run_attempt') != 1
+                or successor.get('path', '').split('@', 1)[0] != '.github/workflows/static.yml'
+                or successor.get('status') != 'completed' or successor.get('conclusion') != 'success'
+                or deploy._timestamp(successor.get('created_at')) <= deploy._timestamp(original.get('created_at'))):
+            raise ValueError('successor is not an exact later successful Pages push deployment')
+        if _main(session) != successor_revision:
+            raise ValueError('Pages main differs from reviewed successor')
+        deploy.assert_idle(session)
+        return original, successor
+    def deployment(run):
+        response = session.get(f"{deploy.BASE}/contents/.github/workflows/static.yml",
+                               params={'ref': run['head_sha']}, timeout=20)
+        response.raise_for_status(); metadata = response.json()
+        if not isinstance(metadata, dict) or metadata.get('sha') not in SUPERSESSION_WORKFLOW_BLOBS:
+            raise ValueError('Pages workflow topology has not been reviewed')
+        response = session.get(f"{deploy.BASE}/actions/runs/{run['id']}/attempts/1/jobs",
+                               params={'per_page': 100}, timeout=20)
+        response.raise_for_status(); body = response.json()
+        if (not isinstance(body, dict) or not isinstance(body.get('jobs'), list)
+                or body.get('total_count') != len(body['jobs']) or getattr(response, 'links', {}).get('next')):
+            raise ValueError('Pages deployment jobs are incomplete')
+        jobs = [j for j in body['jobs'] if j.get('name') == 'deploy']
+        if len(jobs) != 1 or jobs[0].get('status') != 'completed' or jobs[0].get('conclusion') != 'success':
+            raise ValueError('Pages deployment job did not succeed')
+        steps = [s for s in jobs[0].get('steps', []) if s.get('name') == 'Deploy to GitHub Pages']
+        if len(steps) != 1 or steps[0].get('conclusion') != 'success':
+            raise ValueError('Pages deploy step did not succeed')
+        start, end = steps[0].get('started_at'), steps[0].get('completed_at')
+        if deploy._timestamp(start) > deploy._timestamp(end):
+            raise ValueError('Pages deploy times are invalid')
+        return {'job_id': jobs[0]['id'], 'started_at': start, 'completed_at': end,
+                'workflow_blob': metadata['sha']}
+    original, successor = inspect()
+    original_deploy, successor_deploy = deployment(original), deployment(successor)
+    if deploy._timestamp(original_deploy['completed_at']) >= deploy._timestamp(successor_deploy['started_at']):
+        raise ValueError('Pages deployment order is not established')
+    parent = current.record['parent_pointer']['desired']
+    default_before = defaults.observe_pages(parent, session=session)
+    manifest = adoption.validate_generation(hub, parent)
+    actual = receipts.observe('pages', parent, manifest, get=get)
+    space_observation = _space_loaded(current, api=api, hub=hub, get=get)
+    if store.read_pointer() != search_parent_bytes(current):
+        raise ValueError('search pointer changed during supersession recovery')
+    default_after = defaults.observe_pages(parent, session=session)
+    tx._check_default(default_before, site='pages', generation=parent)
+    tx._check_default(default_after, site='pages', generation=parent)
+    later_original, later_successor = inspect()
+    if deployment(later_original) != original_deploy or deployment(later_successor) != successor_deploy:
+        raise ValueError('Pages deployment evidence changed during recovery')
+    # The exact parent receipt is immutable and linked from the journal; embed
+    # the run/job evidence in its existing extensible details field.
+    evidence = json.loads(actual)
+    identity = ('id', 'head_sha', 'head_branch', 'path', 'display_title', 'event',
+                'status', 'conclusion', 'run_attempt', 'created_at')
+    evidence['details']['supersession_recovery'] = {
+        'operation': operation_id, 'write_claim': pending['write_claim'],
+        'transaction': current.record['transition'], 'observed_head': current.head['record'],
+        'original_run': {k: original.get(k) for k in identity}, 'original_deploy': original_deploy,
+        'successor_run': {k: successor.get(k) for k in identity}, 'successor_deploy': successor_deploy,
+        'space_observation': space_observation,
+        'pages_default_before': json.loads(default_before), 'pages_default_after': json.loads(default_after),
+        'external_writers_verified': False}
+    try:
+        from . import search_snapshot
+    except ImportError:
+        import search_snapshot
+    actual = search_snapshot.canonical(evidence)
+    if (any(original.get(k) != later_original.get(k) for k in identity)
+            or any(successor.get(k) != later_successor.get(k) for k in identity)):
+        raise ValueError('Pages run identity changed during recovery')
+    active = tx.load(store)
+    if active is None or active.head_raw != current.head_raw or active.etag != current.etag:
+        raise ValueError('journal changed during supersession recovery')
+    if inspect_only:
+        return {'kind': 'search-pages-supersession-preview', 'journal_advanced': False,
+                'generation': parent, 'evidence': evidence['details']['supersession_recovery']}
+    result = tx.observe_failed_apply(store, current, site='pages', receipt=actual)
+    return {'kind': 'search-pages-superseded-apply-observation', 'operation': operation_id,
+            'original_run': original['id'], 'successor_run': successor_run_id,
+            'successor_revision': successor_revision, 'generation': parent,
+            'sequence': result.record['sequence'], 'external_writers_verified': False}
+
+
 def recover_failed_apply(store, *, session, hub, get, operation_id: str) -> dict:
     """Record parent after a reviewed workflow failed before deployment.
 
@@ -234,7 +342,9 @@ def recover_failed_apply(store, *, session, hub, get, operation_id: str) -> dict
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--mode', required=True, choices=('prepare', 'rollback-prepare', 'apply', 'reconcile',
-                                                          'recover-failed-apply', 'abandon-unclaimed'))
+                                                          'recover-failed-apply', 'abandon-unclaimed', 'recover-superseded', 'inspect-superseded'))
+    parser.add_argument('--successor-revision', default='')
+    parser.add_argument('--successor-run', type=int, default=0)
     parser.add_argument('--expected-revision', default='')
     parser.add_argument('--operation', default='')
     args = parser.parse_args(argv)
@@ -261,6 +371,10 @@ def main(argv=None) -> int:
         result = apply_once(store, session=session, api=api, hub=hub, get=bounded_get, operation_id=args.operation)
     elif args.mode == 'abandon-unclaimed':
         result = abandon_unclaimed_apply(store, session=session, api=api, hub=hub, get=bounded_get, operation_id=args.operation)
+    elif args.mode in {'recover-superseded', 'inspect-superseded'}:
+        result = recover_superseded_apply(store, session=session, api=api, hub=hub, get=bounded_get,
+                                          operation_id=args.operation, successor_revision=args.successor_revision,
+                                          successor_run_id=args.successor_run, inspect_only=args.mode == 'inspect-superseded')
     elif args.mode == 'recover-failed-apply':
         result = recover_failed_apply(store, session=session, hub=hub, get=bounded_get, operation_id=args.operation)
     else:
