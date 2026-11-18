@@ -44,6 +44,19 @@ class FinalizeTests(unittest.TestCase):
         self.assertIn('pages-default-reconcile', flow['on']['workflow_dispatch']['inputs']['mode']['options'])
         self.assertIn('rollback-finish', flow['on']['workflow_dispatch']['inputs']['mode']['options'])
         self.assertIn('abort-unpublished', flow['on']['workflow_dispatch']['inputs']['mode']['options'])
+        self.assertIn('abort-prepared', flow['on']['workflow_dispatch']['inputs']['mode']['options'])
+
+    def test_abort_prepared_cli_rejects_missing_coordination_and_unrelated_arguments(self):
+        from contextlib import redirect_stderr
+        from io import StringIO
+        prefix = ['--mode', 'abort-prepared', '--prepared-head', B]
+        for args in (prefix, prefix + ['--known-writers-coordinated', '--operation', OP],
+                     prefix + ['--known-writers-coordinated', '--expected-revision', REV],
+                     ['--mode', 'finish', '--known-writers-coordinated'],
+                     ['--mode', 'abort-prepared', '--known-writers-coordinated', '--prepared-head', OP]):
+            with self.subTest(args=args), redirect_stderr(StringIO()), self.assertRaises(SystemExit) as err:
+                subject.main(args)
+            self.assertEqual(err.exception.code, 2)
 
     def test_actual_prepublication_checks_durable_source_digest(self):
         import hashlib
@@ -209,6 +222,34 @@ class FinalizeTests(unittest.TestCase):
         self.assertEqual(self.store.pointer, make_pointer(A, None, '0' * 32))
         self.session.patch.assert_not_called()
         self.assertEqual(subject.tx.audit_history(self.store, result), 10)
+
+    def test_abort_prepared_checks_exact_head_and_live_parent_before_journal_only_cas(self):
+        fixture = SearchTransitionTests(); fixture.setUp()
+        store = fixture.s; current = fixture.begin()
+        self.api.get_space_runtime.return_value = Mock(stage='RUNNING', raw={'sha': REV})
+        self.session.get.return_value.json.return_value = {'commit': {'sha': REV}}
+        common = {k: self.common[k] for k in ('session', 'api', 'hub', 'get')}
+        with self.assertRaisesRegex(ValueError, 'requested head'):
+            subject.finish_rollback(store, **common, prepared_head=B)
+        self.session.get.assert_not_called()
+        with patch.object(subject.adoption, 'validate_generation', return_value={}), \
+                patch.object(subject.pages, 'assert_idle'), patch.object(subject.space, 'runtime'), \
+                patch.object(subject.space, 'variable', return_value=(A, TIME)), \
+                patch.object(subject.defaults, 'observe_pages', return_value=default_receipt('pages', A)), \
+                patch.object(subject.defaults, 'observe_space', return_value=default_receipt('space', A)), \
+                patch.object(subject.consumers, 'observe', side_effect=[receipt('pages', A), ValueError('wrong live Space'),
+                                                                      receipt('pages', A), receipt('space', A)]) as observe:
+            with self.assertRaisesRegex(ValueError, 'wrong live Space'):
+                subject.finish_rollback(store, **common, prepared_head=current.head['record'])
+            self.assertEqual(subject.tx.load(store), current)
+            result = subject.finish_rollback(store, **common, prepared_head=current.head['record'])
+        self.assertEqual(observe.call_count, 4)
+        self.assertEqual(result.record['state'], 'rolled-back')
+        self.assertEqual(store.writes, 2)
+        self.assertEqual(store.pointer_writes, 0)
+        self.session.patch.assert_not_called()
+        self.session.post.assert_not_called()
+        self.api.add_space_variable.assert_not_called()
 
     def test_foreign_or_missing_pending_default_never_writes(self):
         self.pointer_observed()

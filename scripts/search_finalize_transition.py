@@ -171,11 +171,13 @@ def finish(store, *, session, api, hub, get, revision) -> tx.Current:
                      space_default=defaults.observe_space(current.record['candidate'], api=api))
 
 
-def finish_rollback(store, *, session, api, hub, get) -> tx.Current:
+def finish_rollback(store, *, session, api, hub, get, prepared_head=None) -> tx.Current:
     """Accept rollback only after both actual sites and defaults are parent."""
-    current = _current(store, 'rolling-back')
+    current = _current(store, 'rolling-back' if prepared_head is None else 'prepared')
     if current.record['pending'] is not None:
         raise ValueError('rollback has a pending site operation')
+    if prepared_head is not None and current.head['record'] != prepared_head:
+        raise ValueError('prepared journal record differs from the requested head')
     parent = current.record['parent_pointer']['desired']
     response = session.get(f'{pages.BASE}/branches/main', timeout=20); response.raise_for_status()
     main = response.json().get('commit', {}).get('sha')
@@ -204,7 +206,8 @@ def finish_rollback(store, *, session, api, hub, get) -> tx.Current:
     if response.json().get('commit', {}).get('sha') != main:
         raise ValueError('Pages main changed during rollback acceptance')
     return tx.finish_rollback(store, current, pages_receipt=first, space_receipt=second,
-                              pages_default=page_default, space_default=space_default)
+                              pages_default=page_default, space_default=space_default,
+                              prepared_head=prepared_head)
 
 
 def main(argv=None) -> int:
@@ -212,9 +215,18 @@ def main(argv=None) -> int:
     parser.add_argument('--mode', required=True, choices=('mark', 'publish', 'reconcile-pointer', 'space-default',
                                                           'pages-default-prepare', 'pages-default-apply',
                                                           'pages-default-reconcile', 'finish', 'rollback-finish',
-                                                          'abort-unpublished'))
+                                                          'abort-unpublished', 'abort-prepared'))
     parser.add_argument('--expected-revision', default=''); parser.add_argument('--operation', default='')
+    parser.add_argument('--prepared-head', default='')
+    parser.add_argument('--known-writers-coordinated', action='store_true')
     args = parser.parse_args(argv)
+    if args.mode == 'abort-prepared':
+        if len(args.prepared_head) != 64 or any(c not in '0123456789abcdef' for c in args.prepared_head):
+            parser.error('abort-prepared requires an exact lowercase SHA-256 journal record')
+        if not args.known_writers_coordinated or args.expected_revision or args.operation:
+            parser.error('abort-prepared requires writer coordination and accepts no site operation inputs')
+    elif args.prepared_head or args.known_writers_coordinated:
+        parser.error('prepared abort arguments are only valid for abort-prepared')
     import requests
     from huggingface_hub import HfApi
     token = os.environ.get('PAGES_TOKEN', '')
@@ -237,8 +249,9 @@ def main(argv=None) -> int:
     elif args.mode == 'pages-default-apply':
         print(json.dumps(set_pages_default(store, **common, operation=op), sort_keys=True)); return 0
     elif args.mode == 'pages-default-reconcile': current = reconcile_pages_default(store, **common, operation=op)
-    elif args.mode == 'rollback-finish':
-        current = finish_rollback(store, session=session, api=api, hub=hub, get=bounded_get)
+    elif args.mode in {'rollback-finish', 'abort-prepared'}:
+        current = finish_rollback(store, session=session, api=api, hub=hub, get=bounded_get,
+                                  prepared_head=args.prepared_head or None)
     elif args.mode == 'abort-unpublished':
         current = tx.abort_publishing(store, _current(store, 'publishing'))
     else: current = finish(store, **common)

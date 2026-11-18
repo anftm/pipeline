@@ -160,6 +160,77 @@ class SearchTransitionTests(unittest.TestCase):
         self.assertEqual(tx.audit_history(self.s, nxt), 13)
         self.assertNotEqual(nxt.record["transition"], c.record["transition"])
 
+    def test_abort_exact_prepared_head_preserves_pointer_and_audits(self):
+        c = self.begin()
+        kwargs = dict(pages_receipt=receipt('pages', A, 'fresh'), space_receipt=receipt('space', A, 'fresh'),
+                      pages_default=default_receipt('pages', A), space_default=default_receipt('space', A))
+        with self.assertRaisesRegex(ValueError, 'not ready'):
+            tx.finish_rollback(self.s, c, **kwargs)
+        with self.assertRaisesRegex(ValueError, 'not ready'):
+            tx.finish_rollback(self.s, c, prepared_head=C, **kwargs)
+        parent = self.s.pointer
+        options = dict(kwargs, prepared_head=c.head['record'])
+        self.s.pointer = make_pointer(A, None, T2)  # Same generation, different pointer identity.
+        with self.assertRaisesRegex(ValueError, 'actual pointer changed'):
+            tx.finish_rollback(self.s, c, **options)
+        self.s.pointer = parent
+        with self.assertRaises(ValueError):
+            tx.finish_rollback(self.s, c, **dict(options, space_default=default_receipt('space', B)))
+        self.assertEqual(tx.load(self.s), c)
+        self.assertEqual(self.s.writes, 1)
+        self.s.fail_head = 'after'
+        closed = tx.finish_rollback(self.s, c, **options)
+        self.assertEqual(closed.record['state'], 'rolled-back')
+        self.assertEqual(closed.record['prior'], c.head['record'])
+        self.assertIsNone(closed.record['pending'])
+        self.assertEqual(tx.audit_history(self.s, closed), 2)
+        self.assertEqual(self.s.writes, 2)
+        self.assertEqual(self.s.pointer, parent)
+        self.assertEqual(self.s.pointer_writes, 0)
+        from scripts import search_daily_journal
+        self.assertEqual(search_daily_journal.inspect(self.s)['state'], 'rolled-back')
+        self.s.fail_head = None
+        next_tx = tx.begin(self.s, parent_pointer=parent, candidate=B, source_revisions_sha256=C,
+                           transition=T2, **kwargs)
+        self.assertEqual(tx.audit_history(self.s, next_tx), 3)
+        with self.assertRaisesRegex(ValueError, 'not ready'):
+            tx.finish_rollback(self.s, next_tx, **options)
+        self.assertEqual(self.s.writes, 3)
+
+    def test_abort_prepared_detects_pointer_drift_before_or_during_cas(self):
+        for method in ('create_record', 'write_head'):
+            with self.subTest(method=method):
+                self.s = MemoryStore()
+                c = self.begin()
+                original = getattr(self.s, method)
+
+                def divergent(*args):
+                    original(*args)
+                    self.s.pointer = make_pointer(A, None, T2)
+                    if method == 'write_head':
+                        raise TimeoutError('lost CAS response')
+
+                setattr(self.s, method, divergent)
+                with self.assertRaisesRegex(ValueError, 'pointer changed'):
+                    tx.finish_rollback(self.s, c, prepared_head=c.head['record'],
+                                       pages_receipt=receipt('pages', A), space_receipt=receipt('space', A),
+                                       pages_default=default_receipt('pages', A), space_default=default_receipt('space', A))
+                self.assertEqual(self.s.writes, 1 if method == 'create_record' else 2)
+                self.assertEqual(tx.load(self.s).record['state'], 'prepared' if method == 'create_record' else 'rolled-back')
+                self.assertEqual(self.s.pointer_writes, 0)
+
+    def test_abort_prepared_refuses_a_concurrent_site_intent(self):
+        c = self.begin()
+        active = self.start_site(c, site='space', operation_id='3' * 32)
+        kwargs = dict(prepared_head=c.head['record'], pages_receipt=receipt('pages', A),
+                      space_receipt=receipt('space', A), pages_default=default_receipt('pages', A),
+                      space_default=default_receipt('space', A))
+        with self.assertRaisesRegex(ValueError, 'head changed'):
+            tx.finish_rollback(self.s, c, **kwargs)
+        with self.assertRaisesRegex(ValueError, 'not ready'):
+            tx.finish_rollback(self.s, active, **dict(kwargs, prepared_head=active.head['record']))
+        self.assertEqual(tx.load(self.s), active)
+
     def test_pointer_write_lost_response_is_read_back_without_replay(self):
         c = self.ready()
         c = tx.mark_publishing(self.s, c, pages_receipt=receipt("pages", B), space_receipt=receipt("space", B))

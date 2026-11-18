@@ -288,7 +288,7 @@ def validate_advance(previous: dict, value: dict, *, prior_digest: str) -> None:
             return
         if ((a, b) == ("publishing", "rolling-back") and before == after and defaults_before == defaults_after):
             return
-        if ((a, b) == ("rolling-back", "rolled-back")
+        if ((a, b) in {("prepared", "rolled-back"), ("rolling-back", "rolled-back")}
                 and all(before[s]["generation"] == after[s]["generation"] == value["parent_pointer"]["desired"]
                         and defaults_before[s]["generation"] == defaults_after[s]["generation"] == value["parent_pointer"]["desired"]
                         for s in SITES)):
@@ -429,7 +429,8 @@ def _put_record(store: TransitionStore, raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-def _commit(store: TransitionStore, value: dict, current: Current | None) -> Current:
+def _commit(store: TransitionStore, value: dict, current: Current | None, *,
+            expected_pointer: bytes | None = None) -> Current:
     raw = search_snapshot.canonical(value)
     validate_record(raw)
     if current is None:
@@ -442,6 +443,8 @@ def _commit(store: TransitionStore, value: dict, current: Current | None) -> Cur
             "transition": value["transition"], "record": digest}
     head_raw = search_snapshot.canonical(head)
     validate_head(head_raw)
+    if expected_pointer is not None and store.read_pointer() != expected_pointer:
+        raise ValueError('pointer changed while staging the transition; head was not written')
     try:
         store.write_head(head_raw, current.etag if current else None)
     except Exception:
@@ -616,15 +619,18 @@ def observe_failed_apply(store: TransitionStore, current: Current, *, site: str,
 
 
 def finish_rollback(store: TransitionStore, current: Current, *, pages_receipt: bytes, space_receipt: bytes,
-                    pages_default: bytes, space_default: bytes) -> Current:
-    """Record fresh observations of both parents before ending a failed rollout."""
-    if current.record['state'] != 'rolling-back' or current.record['pending'] is not None:
+                    pages_default: bytes, space_default: bytes, prepared_head: str | None = None) -> Current:
+    """Record both parents; an exact untouched prepared head needs no site write."""
+    state = 'rolling-back' if prepared_head is None else 'prepared'
+    if (current.record['state'] != state or current.record['pending'] is not None
+            or (prepared_head is not None and current.head['record'] != prepared_head)):
         raise ValueError('transition is not ready for rollback completion')
     active = load(store)
     if active is None or active.head_raw != current.head_raw or active.etag != current.etag:
         raise ValueError('transition head changed before rollback completion')
     audit_history(store, current)
-    if store.read_pointer() != search_snapshot.canonical(current.record['parent_pointer']):
+    parent_raw = search_snapshot.canonical(current.record['parent_pointer'])
+    if store.read_pointer() != parent_raw:
         raise ValueError('actual pointer changed before rollback completion')
     parent = current.record['parent_pointer']['desired']
     for site, actual, configured in (('pages', pages_receipt, pages_default),
@@ -638,7 +644,11 @@ def finish_rollback(store: TransitionStore, current: Current, *, pages_receipt: 
                 for site, receipt in (('pages', pages_receipt), ('space', space_receipt))}
     defaults = {site: _observed(parent, _store_receipt(store, current.record['transition'], receipt))
                 for site, receipt in (('pages', pages_default), ('space', space_default))}
-    return _commit(store, _next(current, state='rolled-back', observed=observed, defaults=defaults), current)
+    result = _commit(store, _next(current, state='rolled-back', observed=observed, defaults=defaults), current,
+                     expected_pointer=parent_raw if prepared_head is not None else None)
+    if prepared_head is not None and store.read_pointer() != parent_raw:
+        raise ValueError('pointer changed during prepared abort; inspect the committed head and do not replay')
+    return result
 
 
 def abort_publishing(store: TransitionStore, current: Current) -> Current:
