@@ -1,8 +1,10 @@
 """Start one daily publication using the existing durable transition journal.
 
 New starts require a terminal journal. Explicit --resume-transaction supports
-only an applying Space operation with a consumed claim, before Pages begins;
-all other interrupted states require separate operator reconciliation. The
+only observation of a claimed Space apply before Pages. If a running process
+reconciles that bound Space apply and then detects valid source drift at its
+own Pages pre-claim check, it may roll back without dispatching or publishing.
+An existing Pages intent, claimed or not, is outside explicit resume. The
 caller must serialize the entire run and coordinate other writers. No local
 receipt is recovery state.
 The timeout bounds orchestration/polling, not an in-flight adapter HTTP call.
@@ -52,7 +54,7 @@ def _emit(event):
 # an uncertain write is observed, never retried, even with a consumed claim.
 # huggingface_hub 1.x uses httpx; its transport failures are not OSError.
 UNKNOWN_WRITE = (OSError, requests.RequestException, httpx.TransportError, RuntimeError)
-WAIT_STAGES = {'RUNNING_BUILDING', 'BUILDING', 'APP_STARTING', 'RUNNING_APP_STARTING'}
+WAIT_STAGES = space.WAIT_STAGES
 RESUME_SCOPE = 'claimed-space-apply-before-pages'
 
 
@@ -80,12 +82,14 @@ def publish(*, generation, expected_parent, pages_revision, space_revision,
                 or not (reviewed_space_test_path or reviewed_space_path)):
             raise ValueError('reviewed Space successor and exact paths require explicit resume')
     runtime_revision = reviewed_space_successor or space_revision
-    revision = revision or promotion_intent.preflight.fetch.get_repo_sha
+    source_lookup = promotion_intent.preflight.fetch.get_repo_sha
+    revision = source_lookup if revision is None else revision
     deadline = clock() + timeout_seconds
     transaction = None
     parent_raw = None
     last = 'preflight'
-    common = dict(hub=hub, api=api, session=session, get=get, revision=revision)
+    site_common = dict(hub=hub, api=api, session=session, get=get)
+    common = dict(site_common, revision=revision)
 
     def budget():
         if clock() >= deadline:
@@ -107,7 +111,7 @@ def publish(*, generation, expected_parent, pages_revision, space_revision,
             raise ValueError('daily publication journal identity changed')
         tx.audit_history(store, value)
         pending = value.record['pending']
-        bound_space = runtime_revision if pending and pending['operation'] == 'set-default' else space_revision
+        bound_space = runtime_revision if pending and pending['operation'] in {'rollback', 'set-default'} else space_revision
         if pending and pending['expected_revision'] != {'pages': pages_revision, 'space': bound_space}[pending['site']]:
             raise ValueError('pending operation differs from bound site revision')
         intended = make_pointer(generation, expected_parent, transaction)
@@ -127,30 +131,23 @@ def publish(*, generation, expected_parent, pages_revision, space_revision,
             value = current() if transaction is not None else None
             if pages._main(session) != pages_revision:
                 raise ValueError('Pages revision differs from bound revision')
-            if api.space_info(space.deploy.SPACE, timeout=20).sha != runtime_revision:
-                raise ValueError('Space repository differs from bound revision')
-            runtime = api.get_space_runtime(space.deploy.SPACE)
-            raw = getattr(runtime, 'raw', None)
-            sha = raw.get('sha') if isinstance(raw, dict) else None
-            if sha is not None and sha != runtime_revision:
-                raise ValueError('Space runtime differs from bound revision')
-            if runtime.stage == 'RUNNING':
-                space.deploy.runtime(api, expected_sha=runtime_revision)
+            stage = space.runtime_stage(api, expected_sha=runtime_revision)
+            if stage == 'RUNNING':
                 budget()
                 return
-            if runtime.stage not in WAIT_STAGES:
-                raise ValueError('Space runtime is unavailable: ' + str(runtime.stage))
+            if stage not in WAIT_STAGES:
+                raise ValueError('Space runtime is unavailable: ' + str(stage))
             if value is not None:
                 configured, updated = space.deploy.variable(api)
                 pending = value.record['pending']
                 allowed = {value.record['observed']['space']['generation']}
-                if pending and pending['site'] == 'space' and pending['operation'] == 'apply':
-                    allowed.add(generation)
+                if pending and pending['site'] == 'space' and pending['operation'] in {'apply', 'rollback'}:
+                    allowed.add(expected_parent if pending['operation'] == 'rollback' else generation)
                     if space.deploy._timestamp(updated) < space.deploy._timestamp(pending['config_before']['updated_at']):
                         raise ValueError('Space configuration timestamp moved backwards')
                 if configured not in allowed:
                     raise ValueError('Space configuration differs while waiting')
-            wait('space-' + runtime.stage)
+            wait('space-' + stage)
 
     def step(function, **kwargs):
         identities()
@@ -176,22 +173,85 @@ def publish(*, generation, expected_parent, pages_revision, space_revision,
                   'operation': claim_operation, 'error_type': type(error).__name__})
         current()
 
-    def await_site(site, operation, reconcile, **kwargs):
-        before = current().record['sequence']
+    def await_site(site, operation, reconcile, *, rollback=False, **kwargs):
+        before = current()
+        target = expected_parent if rollback else generation
+        if site == 'space':
+            pending = before.record['pending']
+            if (not pending or pending['site'] != 'space' or pending['operation_id'] != operation
+                    or pending['operation'] != ('rollback' if rollback else 'apply') or not pending.get('write_claim')):
+                raise ValueError('Space reconciliation requires the exact consumed claim')
         while True:
             identities()
             result = reconcile(store, operation_id=operation, **kwargs)
-            value = current().record
-            if (value['pending'] is None and value['sequence'] > before
-                    and value['observed'][site]['generation'] == generation):
-                return
+            active = current()
+            value = active.record
+            if (value['pending'] is None and value['sequence'] > before.record['sequence']
+                    and value['observed'][site]['generation'] == target):
+                if site == 'space' and (value['state'] != ('rolling-back' if rollback else 'applying')
+                                        or value['prior'] != before.head['record']
+                                        or result.get('status') != ('parent-loaded' if rollback else 'candidate-loaded')
+                                        or not result.get('journal_advanced')):
+                    raise ValueError('Space reconciliation did not durably accept the bound operation')
+                return active
             pending = value['pending']
             if not pending or pending['site'] != site or pending['operation_id'] != operation:
                 raise ValueError('site reconciliation changed operation identity without acceptance')
-            allowed = {'parent-configured', 'building'} if site == 'space' else {'run-not-visible', 'deploying'}
+            if site == 'space':
+                if active != before:
+                    raise ValueError('Space claim changed during reconciliation')
+                allowed = {'candidate-configured' if rollback else 'parent-configured', 'building'}
+            else:
+                allowed = {'run-not-visible', 'deploying'}
             if result.get('status') not in allowed or result.get('journal_advanced'):
-                raise ValueError('site reconciliation did not durably accept the candidate')
+                raise ValueError('site reconciliation did not durably accept the ' + ('parent' if rollback else 'candidate'))
             wait(site + '-' + result['status'])
+
+    def check_sources(record):
+        manifest = space.adoption.validate_generation(hub, generation)
+        space._verify_candidate_sources(manifest, record['source_revisions_sha256'], revision=revision)
+
+    def unclaimed_pages(record):
+        pending = record['pending']
+        return (record['state'] == 'applying' and pending is not None
+                and pending['site'] == 'pages' and pending['operation'] == 'apply'
+                and pending.get('write_claim', 'missing') is None
+                and record['observed']['space']['generation'] == generation
+                and record['observed']['pages']['generation'] == expected_parent)
+
+    def rollback_stale_pages(intent, space_accepted):
+        # Only the process that reconciled the bound Space claim and prepared
+        # this exact Pages intent may abandon it after confirmed source drift.
+        identities()
+        if (intent.record['prior'] != space_accepted.head['record']
+                or current() != intent or not unclaimed_pages(intent.record)):
+            raise ValueError('no exact unclaimed Pages apply to abandon')
+        def bound_get(url, limit):
+            # These adapters check the live Space SHA around their consumer
+            # read but do not know the revision bound by this publication.
+            if url == space.adoption.SPACE + '/api/search-data-generation':
+                space.deploy.runtime(api, expected_sha=runtime_revision)
+            return get(url, limit)
+
+        rollback_common = dict(site_common, get=bound_get)
+        pages.abandon_unclaimed_apply(store, **rollback_common, operation_id=intent.record['pending']['operation_id'])
+        abandoned = current().record
+        if (abandoned['state'] != 'rolling-back' or abandoned['pending'] is not None
+                or abandoned['prior'] != intent.head['record']):
+            raise ValueError('Pages abandonment was not durably observed')
+
+        rollback = secrets.token_hex(16)
+        step(space.prepare, api=api, hub=hub, get=get, expected_revision=runtime_revision,
+             operation_id=rollback, created_at=_now(), rollback=True)
+        write_once(space.apply_once, claim_operation=rollback, api=api, hub=hub, operation_id=rollback)
+        await_site('space', rollback, space.reconcile, rollback=True, api=api, hub=hub, get=get, poll_runtime=True)
+        finished = step(finalize.finish_rollback, **rollback_common)
+        if finished != current() or finished.record['state'] != 'rolled-back':
+            raise ValueError('rollback completion was not durably observed')
+        identities()
+        return {'kind': 'search-daily-publish-rolled-back', 'transaction': transaction,
+                'candidate': generation, 'generation': expected_parent, 'state': 'rolled-back',
+                'reason': 'candidate-sources-changed', 'external_writers_verified': False}
 
     if resume_transaction is None:
         # Normal starts never adopt unfinished work implicitly.
@@ -221,7 +281,10 @@ def publish(*, generation, expected_parent, pages_revision, space_revision,
             raise ValueError('resume transaction/candidate/parent identity mismatch')
         transaction = resume_transaction
         parent_raw = search_snapshot.canonical(existing.record['parent_pointer'])
-        record = current().record  # Audit history, exact pointer and pending SHA.
+        active = current()  # Audit history, exact pointer and pending SHA.
+        if active != existing:
+            raise ValueError('resume journal changed during preflight')
+        record = active.record
         pending = record['pending']
         if (record['state'] != 'applying' or not pending
                 or pending['site'] != 'space' or pending['operation'] != 'apply'
@@ -234,15 +297,14 @@ def publish(*, generation, expected_parent, pages_revision, space_revision,
         # digest before any reconciliation can advance this interrupted run.
         manifest = space.adoption.validate_generation(hub, generation)
         space._verify_candidate_sources(manifest, record['source_revisions_sha256'])
-        if {repo: revision(repo, os.environ.get('HF_TOKEN', ''))
-                for repo in promotion_intent.preflight.fetch.REPOS} != manifest['source_revisions']:
-            raise ValueError('resume source revisions differ from candidate')
+        if revision is not source_lookup:
+            space._verify_candidate_sources(manifest, record['source_revisions_sha256'], revision=revision)
         if reviewed_space_successor is not None:
             space.verify_reviewed_successor(expected_revision=space_revision,
                                             successor=reviewed_space_successor, test_path=reviewed_space_test_path,
                                             reviewed_paths=reviewed_space_path)
         identities()
-        if current().head_raw != existing.head_raw:
+        if current() != existing:
             raise ValueError('resume journal changed during preflight')
         emit({'kind': 'search-daily-publish-resume', 'transaction': transaction, 'candidate': generation,
               'operation': operation, 'expected_parent': expected_parent, 'pages_revision': pages_revision,
@@ -252,12 +314,19 @@ def publish(*, generation, expected_parent, pages_revision, space_revision,
     successor_options = ({'reviewed_successor': reviewed_space_successor,
                           'reviewed_test_path': reviewed_space_test_path,
                           'reviewed_paths': reviewed_space_path} if reviewed_space_successor else {})
-    await_site('space', operation, space.reconcile, api=api, hub=hub, get=get, **successor_options)
+    space_accepted = await_site('space', operation, space.reconcile, api=api, hub=hub, get=get,
+                               poll_runtime=True, **successor_options)
 
     operation = secrets.token_hex(16)
-    site_common = dict(session=session, api=api, hub=hub, get=get)
-    step(pages.prepare, **site_common, expected_revision=pages_revision, operation_id=operation, created_at=_now())
-    write_once(pages.apply_once, claim_operation=operation, operation_id=operation, **site_common)
+    intent = step(pages.prepare, **site_common, expected_revision=pages_revision, operation_id=operation, created_at=_now())
+    try:
+        # When supplied, the caller's source lookup must also agree at the
+        # write boundary. The deployed adapter independently checks its own.
+        if revision is not source_lookup:
+            check_sources(intent.record)
+        write_once(pages.apply_once, claim_operation=operation, operation_id=operation, **site_common)
+    except space.CandidateSourcesChanged:
+        return rollback_stale_pages(intent, space_accepted)
     await_site('pages', operation, pages.reconcile, **site_common)
 
     step(finalize.mark_publishing, **common)
@@ -350,7 +419,7 @@ def main(argv=None):
                'journal_retained': True, 'resume_scope': RESUME_SCOPE})
         return 2
     _emit(result)
-    return 0
+    return 0 if result['state'] == 'complete' else 2
 
 
 if __name__ == '__main__':

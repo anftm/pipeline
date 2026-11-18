@@ -35,6 +35,23 @@ except ImportError:
 
 
 SHA = re.compile(r'[0-9a-f]{40}\Z')
+WAIT_STAGES = frozenset({'RUNNING_BUILDING', 'BUILDING', 'APP_STARTING', 'RUNNING_APP_STARTING'})
+
+
+def _runtime_sha(state):
+    raw = getattr(state, 'raw', None)
+    return raw.get('sha') if isinstance(raw, dict) else None
+
+
+def runtime_stage(api, *, expected_sha: str) -> str:
+    """Use one runtime sample for both stage and SHA; RUNNING requires an exact SHA."""
+    if api.space_info(deploy.SPACE, timeout=20).sha != expected_sha:
+        raise ValueError('Space repository differs from bound revision')
+    state = api.get_space_runtime(deploy.SPACE)
+    sha = _runtime_sha(state)
+    if (sha is not None or state.stage == 'RUNNING') and sha != expected_sha:
+        raise ValueError('Space runtime differs from bound revision')
+    return state.stage
 
 
 def prepare(store, *, api, expected_revision: str, operation_id: str, created_at: str,
@@ -65,16 +82,27 @@ def prepare(store, *, api, expected_revision: str, operation_id: str, created_at
                          rollback=rollback)
 
 
-def _verify_candidate_sources(manifest, expected_digest):
-    import hashlib
+class CandidateSourcesChanged(ValueError):
+    """A valid durable source map differs from a complete, valid live map."""
+
+
+def _source_sha(sha: object) -> bool:
+    return isinstance(sha, str) and SHA.fullmatch(sha) is not None and sha != '0' * 40
+
+
+def _verify_candidate_sources(manifest, expected_digest, *, revision=None):
     revisions = manifest.get('source_revisions') if isinstance(manifest, dict) else None
     if (not isinstance(revisions, dict) or set(revisions) != set(fetch.REPOS)
-            or any(not isinstance(sha, str) or not SHA.fullmatch(sha) for sha in revisions.values())
+            or any(not _source_sha(sha) for sha in revisions.values())
             or hashlib.sha256(search_snapshot.canonical(revisions)).hexdigest() != expected_digest):
         raise ValueError('Space candidate source identity differs from the durable intent')
     token = os.environ.get('HF_TOKEN', '')
-    if {repo: fetch.get_repo_sha(repo, token) for repo in fetch.REPOS} != revisions:
-        raise ValueError('Space candidate sources changed before update')
+    revision = fetch.get_repo_sha if revision is None else revision
+    live = {repo: revision(repo, token) for repo in fetch.REPOS}
+    if any(not _source_sha(sha) for sha in live.values()):
+        raise ValueError('live search source revision is unavailable or malformed')
+    if live != revisions:
+        raise CandidateSourcesChanged('search candidate sources changed before update')
 
 
 def apply_once(store, *, api, operation_id: str, hub=None) -> dict:
@@ -203,7 +231,8 @@ def verify_reviewed_successor(*, expected_revision, successor, test_path=None, r
 
 
 def reconcile(store, *, api, hub, get, operation_id: str,
-              reviewed_successor=None, reviewed_test_path=None, reviewed_paths=None) -> dict:
+              reviewed_successor=None, reviewed_test_path=None, reviewed_paths=None, poll_runtime=False) -> dict:
+    """Observe one operation; the daily poller may defer on an exact-revision restart."""
     current = tx.load(store)
     pending = current.record['pending'] if current is not None else None
     if (current is None or not isinstance(pending, dict) or pending.get('site') != 'space'
@@ -221,25 +250,46 @@ def reconcile(store, *, api, hub, get, operation_id: str,
                                             successor=reviewed_successor, test_path=reviewed_test_path,
                                             reviewed_paths=reviewed_paths)
         expected_revision = reviewed_successor
-        deploy.runtime(api, expected_sha=expected_revision)
+        if not poll_runtime:
+            deploy.runtime(api, expected_sha=expected_revision)
+
+    def building():
+        return {'kind': 'search-space-observation', 'operation': operation_id, 'status': 'building',
+                'journal_advanced': False, 'external_writers_verified': False}
+
+    def running():
+        if not poll_runtime:
+            deploy.runtime(api, expected_sha=expected_revision)
+            return True
+        stage = runtime_stage(api, expected_sha=expected_revision)
+        if stage in WAIT_STAGES:
+            return False
+        if stage != 'RUNNING':
+            raise ValueError('Space runtime is unavailable: ' + str(stage))
+        return True
+
     configured, updated = deploy.variable(api)
     source = pending['config_before']['generation']
     target = current.record['parent_pointer']['desired'] if pending['operation'] == 'rollback' else current.record['candidate']
+    if configured not in {source, target}:
+        raise ValueError('Space configuration is neither the source nor the requested target')
+    if ((poll_runtime or configured == target or pending['operation'] == 'rollback')
+            and deploy._timestamp(updated) < deploy._timestamp(pending['config_before']['updated_at'])):
+        raise ValueError('Space configuration timestamp moved backwards')
+    if poll_runtime and not running():
+        return building()
     if configured == source:
         status = 'candidate-configured' if pending['operation'] == 'rollback' else 'parent-configured'
         return {'kind': 'search-space-observation', 'operation': operation_id, 'status': status,
                 'journal_advanced': False, 'external_writers_verified': False}
-    if configured != target:
-        raise ValueError('Space configuration is neither the source nor the requested target')
-    if deploy._timestamp(updated) < deploy._timestamp(pending['config_before']['updated_at']):
-        raise ValueError('Space configuration timestamp moved backwards')
-    state = api.get_space_runtime(deploy.SPACE)
-    if state.stage == 'RUNNING_BUILDING':
-        return {'kind': 'search-space-observation', 'operation': operation_id, 'status': 'building',
-                'journal_advanced': False, 'external_writers_verified': False}
-    if state.stage != 'RUNNING' or not isinstance(state.raw, dict) or state.raw.get('sha') != expected_revision:
-        raise ValueError('Space runtime is unavailable or running an unexpected revision')
-    deploy.runtime(api, expected_sha=expected_revision)
+    if not poll_runtime:
+        state = api.get_space_runtime(deploy.SPACE)
+        sha = _runtime_sha(state)
+        if state.stage == 'RUNNING_BUILDING' and sha in (None, expected_revision):
+            return building()
+        if state.stage != 'RUNNING' or sha != expected_revision:
+            raise ValueError('Space runtime is unavailable or running an unexpected revision')
+        deploy.runtime(api, expected_sha=expected_revision)
     manifest = adoption.validate_generation(hub, target)
     actual = receipts.observe('space', target, manifest, get=get)
     if store.read_pointer() != search_parent_bytes(current):
@@ -247,7 +297,9 @@ def reconcile(store, *, api, hub, get, operation_id: str,
     configured_after, updated_after = deploy.variable(api)
     if (configured_after, updated_after) != (configured, updated):
         raise ValueError('Space configuration changed during reconciliation')
-    deploy.runtime(api, expected_sha=expected_revision)
+    if not running():
+        # A rebuild during readback invalidates this receipt. Poll from scratch.
+        return building()
     if witness is not None:
         evidence = json.loads(actual)
         evidence['details']['reviewed_space_successor'] = witness

@@ -3,6 +3,7 @@
 Only source-head lookup and external transports are replaced. This cannot prove
 live HF/GitHub/S3 semantics, writer isolation, or production-scale timing.
 """
+import hashlib
 import json
 import os
 import subprocess
@@ -74,6 +75,9 @@ class Remote:
 
     def add_space_variable(self, _space, *, key, value):
         self.calls.append('space-write')
+        pending = tx.load(self.store).record['pending']
+        assert pending['write_claim'] and pending['site'] == 'space'
+        assert pending['expected_revision'] == self.space_sha
         if 'space' not in self.no_effect:
             self.space_generation = self.loaded_space = value
         if 'space' in self.loss:
@@ -233,18 +237,22 @@ class DailyPublishTests(unittest.TestCase):
         self.assertEqual(output[-1]['generation'], self.candidate)
         self.assertEqual(self.remote.calls, ['space-write', 'pages-dispatch', 'default-write'])
 
-    def test_cli_blocked_result_is_nonzero_and_does_not_claim_completion(self):
+    def test_cli_nonpublication_results_do_not_claim_completion(self):
         output = []
         with patch.dict(os.environ, {'PAGES_TOKEN': 'offline-test'}), \
                 patch.object(subject.tx, 'S3TransitionStore', return_value=self.store), \
                 patch.object(subject, 'S3SearchPointerStore', return_value=self.store), \
                 patch.object(subject.space, 'HubBucketStore', return_value=self.remote), \
                 patch('huggingface_hub.HfApi', return_value=self.remote), \
-                patch.object(subject, 'publish', side_effect=subject.Blocked('no progress')), \
                 patch.object(subject, '_emit', side_effect=output.append):
-            self.assertEqual(subject.main(self.cli_args()), 2)
-        self.assertEqual(output[-1]['status'], 'blocked')
-        self.assertTrue(output[-1]['journal_retained'])
+            blocked = 'search-daily-publish-blocked'
+            rolled_back = 'search-daily-publish-rolled-back'
+            for effect, event in ((subject.Blocked('no progress'), blocked), (None, rolled_back)):
+                with self.subTest(event=event), patch.object(subject, 'publish', side_effect=effect,
+                        return_value={'kind': event, 'state': 'rolled-back'}):
+                    self.assertEqual(subject.main(self.cli_args()), 2)
+                self.assertEqual(output[-1]['kind'], event)
+        self.assertTrue(output[0]['journal_retained'])
         self.assertEqual(self.store.head, self.initial_head)
 
     def test_real_normal_path_audits_candidate_and_orders_once_writes(self):
@@ -541,6 +549,35 @@ class DailyPublishTests(unittest.TestCase):
                 subject.space.verify_reviewed_successor(expected_revision=old, successor=git('rev-parse', 'HEAD'),
                                                        reviewed_paths=paths + [extra])
 
+    def test_reviewed_successor_restarts_during_consumer_readback_and_reobserves(self):
+        root, git, old, new, path = self.successor_repo()
+        self.remote.space_sha = self.remote.runtime_sha = old
+        with patch(__name__ + '.SPACE_SHA', old), patch.object(subject.space, 'SPACE_GIT_URL', str(root)):
+            interrupted = self.interrupt_space_starting()
+            self.remote.stages = []
+            self.remote.space_sha = self.remote.runtime_sha = new
+            get = self.remote.public_get
+            reads = []
+            def readback(url, limit):
+                result = get(url, limit)
+                if url.endswith('/api/search-data-generation') and tx.load(self.store) == interrupted:
+                    reads.append(result)
+                    if len(reads) == 1:
+                        self.remote.stages = ['BUILDING']
+                        self.remote.runtime_sha = None  # no SHA exposed while building
+                return result
+            def sleep(seconds):
+                self.assertEqual(tx.load(self.store), interrupted)
+                self.sleep(seconds)
+                self.remote.runtime_sha = new
+            result = self.run_publish(resume_transaction=interrupted.record['transition'],
+                                      reviewed_space_successor=new, reviewed_space_test_path=path,
+                                      get=readback, sleep=sleep)
+        self.assertEqual(result['state'], 'complete')
+        self.assertEqual(len(reads), 2)
+        self.assertEqual(self.elapsed, 5)
+        self.assertEqual(self.remote.calls, ['space-write', 'pages-dispatch', 'default-write'])
+
     def test_reviewed_successor_drift_during_consumer_observation_keeps_claim_pending(self):
         root, git, old, new, path = self.successor_repo()
         self.remote.space_sha = self.remote.runtime_sha = old
@@ -554,7 +591,7 @@ class DailyPublishTests(unittest.TestCase):
                 if url.endswith('/api/search-data-generation'):
                     self.remote.space_sha = self.remote.runtime_sha = 'f' * 40
                 return result
-            with self.assertRaisesRegex(ValueError, 'revision differs'):
+            with self.assertRaisesRegex(ValueError, 'Space repository differs'):
                 self.run_publish(resume_transaction=interrupted.record['transition'],
                                  reviewed_space_successor=new, reviewed_space_test_path=path, get=get)
         self.assertEqual(tx.load(self.store), interrupted)
@@ -687,6 +724,12 @@ class DailyPublishTests(unittest.TestCase):
             self.run_publish(timeout_seconds=6)
         self.assertEqual(self.remote.calls, ['space-write', 'pages-dispatch'])
         self.assertEqual(self.store.pointer_writes, 0)
+        claimed = tx.load(self.store)
+        self.assertTrue(claimed.record['pending']['write_claim'])
+        with self.assertRaisesRegex(ValueError, 'only a claimed Space apply before Pages'):
+            self.run_publish(resume_transaction=claimed.record['transition'], revision=lambda *_: 'f' * 40)
+        self.assertEqual(tx.load(self.store), claimed)
+        self.assertEqual(self.remote.calls, ['space-write', 'pages-dispatch'])
 
     def test_default_204_then_parent_then_candidate_waits_without_repatch(self):
         original_get = self.remote.get
@@ -937,17 +980,326 @@ class DailyPublishTests(unittest.TestCase):
         self.assertEqual(self.remote.calls, ['space-write', 'pages-dispatch'])
         self.assertEqual(self.store.pointer_writes, 0)
 
-    def test_source_drift_after_space_write_blocks_pages_dispatch(self):
+    def change_source_after_space_apply(self, sha='f' * 40, *, error=None):
         original = self.remote.add_space_variable
         fetch = subject.promotion_intent.preflight.fetch
         def write(*args, **kwargs):
             original(*args, **kwargs)
-            fetch.get_repo_sha.return_value = 'f' * 40
+            if kwargs['value'] == self.candidate:
+                fetch.get_repo_sha.return_value = sha
+                fetch.get_repo_sha.side_effect = error
         self.remote.add_space_variable = write
-        with self.assertRaisesRegex(ValueError, 'candidate sources changed'):
+
+    def interrupt_before_pages_claim(self):
+        # Interrupt after real Pages preparation; no dispatch or synthetic state.
+        with patch.object(subject.pages, 'apply_once', side_effect=TimeoutError('interrupted')), \
+                self.assertRaisesRegex(TimeoutError, 'interrupted'):
             self.run_publish()
+        active = tx.load(self.store)
+        self.assertEqual(active.record['pending']['site'], 'pages')
+        self.assertIsNone(active.record['pending']['write_claim'])
         self.assertEqual(self.remote.calls, ['space-write'])
-        self.assertIsNone(tx.load(self.store).record['pending']['write_claim'])
+        return active
+
+    def assert_source_rollback(self, result, parent_pointer):
+        active = tx.load(self.store)
+        self.assertEqual(result['kind'], 'search-daily-publish-rolled-back')
+        self.assertEqual(result['state'], 'rolled-back')
+        self.assertEqual(result['generation'], self.parent)
+        self.assertEqual(result['candidate'], self.candidate)
+        self.assertEqual(result['transaction'], active.record['transition'])
+        self.assertEqual(active.record['state'], 'rolled-back')
+        self.assertIsNone(active.record['pending'])
+        self.assertEqual(self.remote.calls, ['space-write', 'space-write'])
+        self.assertIsNone(self.remote.run)
+        self.assertEqual(self.store.pointer, parent_pointer)
+        self.assertEqual(self.store.pointer_writes, 0)
+        self.assertEqual((self.remote.space_generation, self.remote.loaded_space,
+                          self.remote.pages_generation, self.remote.default), (self.parent,) * 4)
+        for field in ('observed', 'defaults'):
+            self.assertEqual({item['generation'] for item in active.record[field].values()}, {self.parent})
+        self.assertEqual(subject.daily_journal.inspect(self.store)['state'], 'rolled-back')
+        records = sorted((r for raw in self.store.records.values()
+                          if (r := json.loads(raw))['transition'] == result['transaction']),
+                         key=lambda r: r['sequence'])
+        pending = [r['pending'] for r in records if r['pending']]
+        self.assertEqual([(p['site'], p['operation'], bool(p['write_claim'])) for p in pending],
+                         [('space', 'apply', False), ('space', 'apply', True), ('pages', 'apply', False),
+                          ('space', 'rollback', False), ('space', 'rollback', True)])
+        self.assertEqual([(r['state'], r['pending'] is not None) for r in records[-5:]],
+                         [('rolling-back', False), ('rolling-back', True), ('rolling-back', True),
+                          ('rolling-back', False), ('rolled-back', False)])
+
+    def test_source_drift_after_space_write_abandons_pages_and_finishes_rollback(self):
+        parent_pointer = self.store.pointer
+        self.change_source_after_space_apply()
+        with patch.object(subject.pages, 'abandon_unclaimed_apply', wraps=subject.pages.abandon_unclaimed_apply) as abandon, \
+                patch.object(subject.finalize, 'publish', side_effect=AssertionError('must not publish')):
+            self.assert_source_rollback(self.run_publish(), parent_pointer)
+        abandon.assert_called_once()
+
+    def test_caller_source_lookup_drift_after_space_write_also_rolls_back(self):
+        parent_pointer = self.store.pointer
+        def revision(*_):
+            return 'f' * 40 if self.remote.space_generation == self.candidate else 'a' * 40
+        self.assert_source_rollback(self.run_publish(revision=revision), parent_pointer)
+
+    def test_same_process_rollback_after_reviewed_successor_resume_uses_bound_successor(self):
+        root, git, old, new, path = self.successor_repo()
+        parent_pointer = self.store.pointer
+        self.remote.space_sha = self.remote.runtime_sha = old
+        prepare = subject.pages.prepare
+        def stale_after_prepare(*args, **kwargs):
+            intent = prepare(*args, **kwargs)
+            subject.promotion_intent.preflight.fetch.get_repo_sha.return_value = 'f' * 40
+            return intent
+        with patch(__name__ + '.SPACE_SHA', old), patch.object(subject.space, 'SPACE_GIT_URL', str(root)):
+            interrupted = self.interrupt_space_starting()
+            self.remote.stages = []
+            self.remote.space_sha = self.remote.runtime_sha = new
+            with patch.object(subject.pages, 'prepare', side_effect=stale_after_prepare):
+                result = self.run_publish(resume_transaction=interrupted.record['transition'],
+                                          reviewed_space_successor=new, reviewed_space_test_path=path)
+        self.assert_source_rollback(result, parent_pointer)
+        claims = {r['pending']['operation']: r['pending'] for raw in self.store.records.values()
+                  if (r := json.loads(raw))['transition'] == result['transaction']
+                  and r['pending'] and r['pending'].get('write_claim')}
+        self.assertEqual(claims['apply'], interrupted.record['pending'])
+        self.assertEqual(claims['rollback']['expected_revision'], new)
+
+    def test_explicit_resume_rejects_unclaimed_pages_even_with_stale_sources_and_live_sha(self):
+        intent = self.interrupt_before_pages_claim()
+        for live_sha in (SPACE_SHA, 'f' * 40):
+            self.remote.space_sha = self.remote.runtime_sha = live_sha
+            with self.subTest(live_sha=live_sha), \
+                    patch.object(subject.pages, 'abandon_unclaimed_apply') as abandon, \
+                    self.assertRaisesRegex(ValueError, 'only a claimed Space apply before Pages'):
+                self.run_publish(resume_transaction=intent.record['transition'], space_revision=live_sha,
+                                 revision=lambda *_: 'f' * 40)
+            abandon.assert_not_called()
+            self.assertEqual(tx.load(self.store), intent)
+        self.assertEqual(self.remote.calls, ['space-write'])
+        self.assertEqual(self.store.pointer_writes, 0)
+
+    def test_malformed_or_unavailable_live_sha_is_not_source_drift(self):
+        fetch = subject.promotion_intent.preflight.fetch
+        revisions = {'VoiceOfML/Test': 'a' * 40}
+        digest = hashlib.sha256(search_snapshot.canonical(revisions)).hexdigest()
+        with patch.object(fetch, 'REPOS', list(revisions)):
+            for sha in ('', None, 'F' * 40, 'f' * 39, 'f' * 40 + '\n', 'g' * 40, '0' * 40):
+                with self.subTest(sha=sha), \
+                        self.assertRaisesRegex(ValueError, 'live search source revision is unavailable or malformed') as error:
+                    subject.space._verify_candidate_sources({'source_revisions': revisions}, digest,
+                                                            revision=lambda *_: sha)
+                self.assertNotIsInstance(error.exception, subject.space.CandidateSourcesChanged)
+
+    def test_same_process_rollback_rejects_space_sha_drift_before_abandonment(self):
+        def revision(*_):
+            if self.remote.space_generation == self.candidate:
+                self.remote.space_sha = self.remote.runtime_sha = 'f' * 40
+                return 'f' * 40
+            return 'a' * 40
+        with patch.object(subject.pages, 'abandon_unclaimed_apply') as abandon, \
+                self.assertRaisesRegex(ValueError, 'Space repository differs'):
+            self.run_publish(revision=revision)
+        abandon.assert_not_called()
+        active = tx.load(self.store)
+        self.assertEqual(active.record['pending']['site'], 'pages')
+        self.assertIsNone(active.record['pending']['write_claim'])
+        self.assertEqual(self.remote.calls, ['space-write'])
+        self.assertEqual(self.store.pointer_writes, 0)
+
+    def test_same_process_rejects_space_sha_race_inside_pages_abandonment(self):
+        self.change_source_after_space_apply()
+        abandon = subject.pages.abandon_unclaimed_apply
+        def race(store, **kwargs):
+            self.remote.space_sha = self.remote.runtime_sha = 'f' * 40
+            return abandon(store, **kwargs)
+        with patch.object(subject.pages, 'abandon_unclaimed_apply', side_effect=race), \
+                self.assertRaisesRegex(ValueError, 'Space repository or running revision differs'):
+            self.run_publish()
+        active = tx.load(self.store)
+        self.assertEqual(active.record['pending']['site'], 'pages')
+        self.assertIsNone(active.record['pending']['write_claim'])
+        self.assertEqual(self.remote.calls, ['space-write'])
+        self.assertEqual(self.store.pointer_writes, 0)
+
+    def test_empty_live_sha_from_pages_preclaim_reads_does_not_abandon(self):
+        self.change_source_after_space_apply('')
+        with self.assertRaisesRegex(ValueError, 'live search source revision is unavailable or malformed'):
+            self.run_publish()
+        active = tx.load(self.store)
+        self.assertEqual(active.record['pending']['site'], 'pages')
+        self.assertIsNone(active.record['pending']['write_claim'])
+        self.assertEqual(self.remote.calls, ['space-write'])
+        self.assertEqual(self.store.pointer_writes, 0)
+
+    def test_source_read_failure_in_pages_preclaim_does_not_abandon(self):
+        self.change_source_after_space_apply(error=httpx.ReadTimeout('upstream source timed out'))
+        with self.assertRaisesRegex(httpx.ReadTimeout, 'upstream source timed out'):
+            self.run_publish()
+        active = tx.load(self.store)
+        self.assertEqual(active.record['pending']['site'], 'pages')
+        self.assertIsNone(active.record['pending']['write_claim'])
+        self.assertEqual(self.remote.calls, ['space-write'])
+        self.assertFalse(self.store.pointer_writes)
+        self.assertEqual(self.elapsed, 0)
+
+    def test_changed_repo_cannot_mask_other_unknown_repo(self):
+        fetch = subject.promotion_intent.preflight.fetch
+        revisions = {'VoiceOfML/Test': 'a' * 40, 'VoiceOfML/Other': 'b' * 40}
+        digest = hashlib.sha256(search_snapshot.canonical(revisions)).hexdigest()
+        with patch.object(fetch, 'REPOS', list(revisions)):
+            with self.assertRaisesRegex(ValueError, 'unavailable or malformed') as error:
+                subject.space._verify_candidate_sources({'source_revisions': revisions}, digest,
+                    revision=lambda repo, _token: 'f' * 40 if repo == 'VoiceOfML/Test' else '')
+            self.assertNotIsInstance(error.exception, subject.space.CandidateSourcesChanged)
+            with self.assertRaisesRegex(ValueError, 'durable intent'):
+                subject.space._verify_candidate_sources({'source_revisions': revisions}, 'f' * 64,
+                    revision=lambda *_: self.fail('invalid candidate must never query live heads'))
+
+    def test_pages_run_appearing_before_abandonment_prevents_rollback(self):
+        self.change_source_after_space_apply()
+        abandon = subject.pages.abandon_unclaimed_apply
+        def run_appeared(store, **kwargs):
+            p = tx.load(store).record['pending']
+            self.remote.run = {'id': 1, 'run_attempt': 1, 'event': 'workflow_dispatch', 'head_branch': 'main',
+                               'head_sha': PAGES_SHA, 'path': '.github/workflows/static.yml',
+                               'created_at': p['created_at'], 'display_title': subject.pages.deploy.run_name(p['operation_id']),
+                               'status': 'completed', 'conclusion': 'success'}
+            return abandon(store, **kwargs)
+        with patch.object(subject.pages, 'abandon_unclaimed_apply', side_effect=run_appeared), \
+                self.assertRaisesRegex(ValueError, 'Pages run exists'):
+            self.run_publish()
+        self.assertEqual(tx.load(self.store).record['pending']['site'], 'pages')
+        self.assertEqual(self.remote.calls, ['space-write'])
+        self.assertFalse(self.store.pointer_writes)
+
+    def test_lost_rollback_response_observes_parent_after_build_without_replay(self):
+        parent_pointer = self.store.pointer
+        self.change_source_after_space_apply()
+        write = self.remote.add_space_variable
+        def lose_rollback(*args, **kwargs):
+            write(*args, **kwargs)
+            if kwargs['value'] == self.parent:
+                raise httpx.ReadTimeout('lost rollback response after effect')
+        self.remote.add_space_variable = lose_rollback
+        reconcile = subject.space.reconcile
+        seen = []
+        def race(store, **kwargs):
+            if tx.load(store).record['pending']['operation'] == 'rollback' and not seen:
+                # identities() just saw RUNNING. Reconciliation must see the
+                # restart as wait-only, even after a lost write response.
+                self.remote.stages = ['RUNNING_APP_STARTING']
+                result = reconcile(store, **kwargs)
+                seen.append(result)
+                self.assertTrue(tx.load(store).record['pending']['write_claim'])
+                return result
+            return reconcile(store, **kwargs)
+        with patch.object(subject.space, 'reconcile', side_effect=race):
+            self.assert_source_rollback(self.run_publish(), parent_pointer)
+        self.assertEqual([(r['status'], r['journal_advanced']) for r in seen], [('building', False)])
+        self.assertEqual(self.elapsed, 5)
+        self.assertEqual([e['error_type'] for e in self.events if e['kind'] == 'search-daily-publish-unknown'],
+                         ['ReadTimeout'])
+
+    def test_wrong_sha_in_transient_runtime_race_is_not_polled(self):
+        interrupted = self.interrupt_space_starting()
+        reconcile = subject.space.reconcile
+        for field, error in (('space_sha', 'repository'), ('runtime_sha', 'runtime')):
+            with self.subTest(field=field):
+                self.remote.stages = []
+                def race(store, **kwargs):
+                    self.remote.stages = ['RUNNING_BUILDING']
+                    setattr(self.remote, field, 'f' * 40)
+                    return reconcile(store, **kwargs)
+                with patch.object(subject.space, 'reconcile', side_effect=race), \
+                        self.assertRaisesRegex(ValueError, f'Space {error} differs'):
+                    self.run_publish(resume_transaction=interrupted.record['transition'])
+                self.assertEqual(tx.load(self.store), interrupted)
+                self.assertEqual(self.elapsed, 0)
+                self.assertEqual(self.remote.calls, ['space-write'])
+                self.assertEqual(self.store.pointer_writes, 0)
+                setattr(self.remote, field, SPACE_SHA)
+
+    def test_unknown_rollback_without_effect_blocks_without_retry_or_resume(self):
+        self.change_source_after_space_apply()
+        write = self.remote.add_space_variable
+        def lose_rollback(*args, **kwargs):
+            if kwargs['value'] == self.parent:
+                self.remote.no_effect = self.remote.loss = {'space'}
+            write(*args, **kwargs)
+        self.remote.add_space_variable = lose_rollback
+        with self.assertRaisesRegex(subject.Blocked, 'space-candidate-configured'):
+            self.run_publish(timeout_seconds=6)
+        active = tx.load(self.store)
+        self.assertEqual(active.record['state'], 'rolling-back')
+        self.assertEqual(active.record['pending']['operation'], 'rollback')
+        self.assertTrue(active.record['pending']['write_claim'])
+        with self.assertRaisesRegex(ValueError, 'resume supports only'):
+            self.run_publish(resume_transaction=active.record['transition'])
+        self.assertEqual(tx.load(self.store), active)
+        self.assertEqual(self.remote.calls, ['space-write', 'space-write'])
+        self.assertFalse(self.store.pointer_writes)
+
+    def test_rollback_parent_config_without_parent_consumer_cannot_finish(self):
+        self.change_source_after_space_apply()
+        write = self.remote.add_space_variable
+        def stale_consumer(*args, **kwargs):
+            write(*args, **kwargs)
+            if kwargs['value'] == self.parent:
+                self.remote.loaded_space = self.candidate
+        self.remote.add_space_variable = stale_consumer
+        with self.assertRaisesRegex(ValueError, 'Space has not verified'):
+            self.run_publish()
+        active = tx.load(self.store)
+        self.assertEqual(active.record['state'], 'rolling-back')
+        self.assertTrue(active.record['pending']['write_claim'])
+        self.assertEqual(active.record['observed']['space']['generation'], self.candidate)
+        self.assertEqual(self.remote.calls, ['space-write', 'space-write'])
+        self.assertFalse(self.store.pointer_writes)
+
+    def test_rollback_wait_rejects_regressed_configuration_timestamp(self):
+        self.change_source_after_space_apply()
+        write = self.remote.add_space_variable
+        def regress(*args, **kwargs):
+            if kwargs['value'] == self.parent:
+                self.remote.no_effect = self.remote.loss = {'space'}
+                self.remote.get_space_variables = lambda _: {
+                    subject.finalize.VARIABLE: SimpleNamespace(value=self.candidate, updated_at='2026-11-14T00:00:00Z')}
+            write(*args, **kwargs)
+        self.remote.add_space_variable = regress
+        with self.assertRaisesRegex(ValueError, 'timestamp moved backwards'):
+            self.run_publish()
+        self.assertEqual(self.elapsed, 0)
+        self.assertTrue(tx.load(self.store).record['pending']['write_claim'])
+        self.assertEqual(self.remote.calls, ['space-write', 'space-write'])
+        self.assertFalse(self.store.pointer_writes)
+
+    def test_finish_rollback_requires_pages_default_to_still_be_parent(self):
+        self.change_source_after_space_apply()
+        write = self.remote.add_space_variable
+        def foreign_default(*args, **kwargs):
+            write(*args, **kwargs)
+            if kwargs['value'] == self.parent:
+                self.remote.default = self.candidate
+        self.remote.add_space_variable = foreign_default
+        with self.assertRaisesRegex(ValueError, 'configured search default does not match expected generation'):
+            self.run_publish()
+        active = tx.load(self.store)
+        self.assertEqual(active.record['state'], 'rolling-back')
+        self.assertIsNone(active.record['pending'])
+        self.assertEqual(active.record['observed']['space']['generation'], self.parent)
+        self.assertEqual(self.remote.calls, ['space-write', 'space-write'])
+        self.assertFalse(self.store.pointer_writes)
+
+    def test_missing_bootstrap_journal_is_not_created(self):
+        self.store.head = self.store.etag = None
+        with self.assertRaisesRegex(ValueError, 'journal is absent'):
+            self.run_publish()
+        self.assertIsNone(tx.load(self.store))
+        self.assertFalse(self.remote.calls)
+        self.assertFalse(self.store.pointer_writes)
 
     def test_read_error_is_not_retried_or_classified_as_a_write(self):
         original = self.remote.add_space_variable
