@@ -9,6 +9,8 @@ import os
 import subprocess
 import tempfile
 import unittest
+from collections import Counter
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -274,6 +276,29 @@ class DailyPublishTests(unittest.TestCase):
         self.assertGreater(tx.audit_history(self.store, tx.load(self.store)), len(own))
         self.assertTrue(result['resume_supported'])
         self.assertEqual(result['resume_scope'], subject.RESUME_SCOPE)
+
+    def test_history_read_budget_on_normal_path(self):
+        # Count underlying reads of the preceding terminal history separately
+        # from write staging and from reads by the fake external services.
+        counts = Counter()
+        def counted(kind, read):
+            def call(key):
+                counts[kind, key] += 1
+                return read(key)
+            return call
+        old_records, old_receipts = set(self.store.records), set(self.store.receipts)
+        with patch.object(self.store, 'read_record', counted('record', self.store.read_record)), \
+                patch.object(self.store, 'read_receipt', counted('receipt', self.store.read_receipt)), \
+                patch.object(subject.finalize.consumers, '_timestamp', return_value=TIME), \
+                patch.object(subject.finalize.defaults, 'datetime') as default_clock:
+            default_clock.now.return_value = datetime.fromisoformat(TIME)
+            result = self.run_publish()
+        self.assertEqual(result['journal']['records_audited'], 27)
+        # Exactly one read per old key in each of the initial and final audits.
+        self.assertEqual({counts['record', key] for key in old_records}, {2})
+        self.assertEqual({counts['receipt', key] for key in old_receipts}, {2})
+        self.assertEqual(sum(n for (kind, _), n in counts.items() if kind == 'record'), 90)
+        self.assertEqual(sum(n for (kind, _), n in counts.items() if kind == 'receipt'), 62)
 
     def interrupt_space_starting(self):
         original = self.remote.add_space_variable
@@ -704,7 +729,7 @@ class DailyPublishTests(unittest.TestCase):
         self.assertEqual(self.elapsed, 0)
         self.assertEqual(self.store.head, self.initial_head)
         self.assertFalse(self.remote.calls)
-        self.assertFalse(self.events)
+        self.assertEqual(self.events, [{'kind': 'search-daily-publish-phase', 'transaction': None, 'phase': 'preflight'}])
 
     def test_parent_without_progress_blocks_and_second_start_refuses_resume(self):
         self.remote.loss = self.remote.no_effect = {'space'}
@@ -730,6 +755,50 @@ class DailyPublishTests(unittest.TestCase):
             self.run_publish(resume_transaction=claimed.record['transition'], revision=lambda *_: 'f' * 40)
         self.assertEqual(tx.load(self.store), claimed)
         self.assertEqual(self.remote.calls, ['space-write', 'pages-dispatch'])
+
+    def test_timeout_after_default_write_reports_active_phase_not_prior_pages_wait(self):
+        def after_dispatch():
+            self.remote.run['status'] = 'in_progress'
+        self.remote.after_dispatch = after_dispatch
+
+        def sleep(seconds):
+            self.sleep(seconds)
+            self.remote.run['status'] = 'completed'
+
+        patch_default = self.remote.patch
+        def slow_patch(*args, **kwargs):
+            result = patch_default(*args, **kwargs)
+            self.elapsed += 15
+            return result
+        self.remote.patch = slow_patch
+
+        with self.assertRaisesRegex(subject.Blocked, r'timed out: pages-default-write;.*do not replay writes'):
+            self.run_publish(sleep=sleep)
+        self.assertTrue(any(e.get('status') == 'pages-deploying' for e in self.events))
+        self.assertEqual(self.events[-1]['phase'], 'pages-default-write')
+        self.assertEqual(self.elapsed, 20)
+        self.assertEqual(self.remote.calls, ['space-write', 'pages-dispatch', 'default-write'])
+        self.assertEqual(self.store.pointer_writes, 1)
+        self.assertEqual(self.remote.default, self.candidate)
+        current = tx.load(self.store)
+        self.assertEqual(current.record['state'], 'pointer-observed')
+        self.assertTrue(current.record['pending']['write_claim'])
+        self.assertEqual(current.record['defaults']['pages']['generation'], self.parent)
+
+    def test_timeout_in_final_journal_inspection_has_no_wait_status(self):
+        inspect = subject.daily_journal.inspect
+        def slow_inspect(store):
+            result = inspect(store)
+            if result['generation'] == self.candidate:
+                self.elapsed += 20
+            return result
+        with patch.object(subject.daily_journal, 'inspect', side_effect=slow_inspect), \
+                self.assertRaisesRegex(subject.Blocked, r'timed out: final-journal-inspection;'):
+            self.run_publish()
+        self.assertEqual(self.events[-1]['phase'], 'final-journal-inspection')
+        self.assertFalse(any(e['kind'] == 'search-daily-publish-wait' for e in self.events))
+        self.assertEqual(self.remote.calls, ['space-write', 'pages-dispatch', 'default-write'])
+        self.assertEqual(tx.load(self.store).record['state'], 'complete')
 
     def test_default_204_then_parent_then_candidate_waits_without_repatch(self):
         original_get = self.remote.get
@@ -943,16 +1012,27 @@ class DailyPublishTests(unittest.TestCase):
 
     def test_fresh_final_journal_audit_is_required_after_public_inspection(self):
         inspect = subject.daily.inspect_published
+        oldest = next(iter(self.store.records))
         def inspect_then_corrupt(**kwargs):
             result = inspect(**kwargs)
-            c = tx.load(self.store)
-            if c.record['state'] == 'complete' and c.record['candidate'] == self.candidate:
-                self.store.receipts.clear()
+            if result['generation'] == self.candidate:
+                del self.store.records[oldest]
+                self.assertEqual(tx.load(self.store).record['state'], 'complete')
             return result
         with patch.object(subject.daily, 'inspect_published', side_effect=inspect_then_corrupt), \
-                self.assertRaises(ValueError):
+                self.assertRaisesRegex(ValueError, 'history has a missing or altered record'):
             self.run_publish()
         self.assertEqual(self.remote.calls, ['space-write', 'pages-dispatch', 'default-write'])
+
+    def test_first_audit_rejects_historical_corruption_before_writes(self):
+        oldest = next(iter(self.store.records))
+        self.store.records[oldest] = b'corrupt'
+        self.assertEqual(tx.load(self.store).record['state'], 'complete')
+        with self.assertRaisesRegex(ValueError, 'history has a missing or altered record'):
+            self.run_publish()
+        self.assertEqual(self.store.head, self.initial_head)
+        self.assertEqual(self.remote.calls, [])
+        self.assertEqual(self.store.pointer_writes, 0)
 
     def test_building_wrong_sha_is_not_a_wait_condition(self):
         original = self.remote.add_space_variable

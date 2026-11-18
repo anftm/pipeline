@@ -72,6 +72,24 @@ class TransitionStore(Protocol):
     def read_receipt(self, key: str) -> bytes | None: ...
 
 
+class CachedTransitionStore:
+    """Invocation-local validation cache for a write-once journal.
+
+    Only verified record bytes, receipt identities, and fully audited history
+    tips are reused. Raw reads (including staging/readback), head, pointer and
+    CAS all go to the backing store. Re-wrap the backing store for a fresh
+    audit: this cache cannot detect deletion or alteration after verification.
+    """
+    def __init__(self, store: TransitionStore):
+        self._store = store
+        self._record_bytes: dict[str, bytes] = {}
+        self._verified_receipts: set[tuple[str, str, str, str]] = set()
+        self._audited_tips: set[str] = set()
+
+    def __getattr__(self, name):
+        return getattr(self._store, name)
+
+
 def _json(raw: bytes) -> dict:
     if not isinstance(raw, bytes) or not 0 < len(raw) <= MAX_JSON:
         raise ValueError("invalid or oversized transition JSON")
@@ -212,8 +230,12 @@ def validate_record(raw: bytes) -> dict:
     return value
 
 
+def _record_key(transition: str, digest: str) -> str:
+    return f"{RECORD_ROOT}{transition}/{digest}.json"
+
+
 def record_key(value: dict, raw: bytes) -> str:
-    return f"{RECORD_ROOT}{value['transition']}/{hashlib.sha256(raw).hexdigest()}.json"
+    return _record_key(value['transition'], hashlib.sha256(raw).hexdigest())
 
 
 def validate_advance(previous: dict, value: dict, *, prior_digest: str) -> None:
@@ -352,6 +374,22 @@ class Current:
     record_raw: bytes
 
 
+def _read_record(store: TransitionStore, transition: str, digest: str, *, error: str) -> tuple[dict, bytes]:
+    key = _record_key(transition, digest)
+    cache = store._record_bytes if isinstance(store, CachedTransitionStore) else None
+    raw = cache.get(key) if cache is not None else None
+    if raw is not None:
+        # Parse anew so callers cannot mutate a cached record through Current.
+        return validate_record(raw), raw
+    raw = store.read_record(key)
+    if not isinstance(raw, bytes) or hashlib.sha256(raw).hexdigest() != digest:
+        raise ValueError(error)
+    record = validate_record(raw)
+    if cache is not None and record['transition'] == transition:
+        cache[key] = raw
+    return record, raw
+
+
 def load(store: TransitionStore) -> Current | None:
     raw, etag = store.read_head()
     if raw is None:
@@ -360,20 +398,14 @@ def load(store: TransitionStore) -> Current | None:
         return None
     strong_etag(etag)
     head = validate_head(raw)
-    key = f"{RECORD_ROOT}{head['transition']}/{head['record']}.json"
-    record_raw = store.read_record(key)
-    if record_raw is None or hashlib.sha256(record_raw).hexdigest() != head["record"]:
-        raise ValueError("transition head points to a missing or altered record")
-    record = validate_record(record_raw)
+    record, record_raw = _read_record(store, head['transition'], head['record'],
+                                      error="transition head points to a missing or altered record")
     if record["transition"] != head["transition"] or record["sequence"] != head["sequence"]:
         raise ValueError("transition head does not match its record")
     _verify_receipts(store, record, error="transition observation receipt is missing or altered")
     if record["prior"] is not None:
-        prior_key = f"{RECORD_ROOT}{record['prior_transition']}/{record['prior']}.json"
-        prior_raw = store.read_record(prior_key)
-        if prior_raw is None or hashlib.sha256(prior_raw).hexdigest() != record["prior"]:
-            raise ValueError("transition predecessor is missing or altered")
-        prior = validate_record(prior_raw)
+        prior, _ = _read_record(store, record['prior_transition'], record['prior'],
+                                error="transition predecessor is missing or altered")
         validate_advance(prior, record, prior_digest=record["prior"])
     return Current(head, raw, etag, record, record_raw)
 
@@ -383,32 +415,47 @@ def audit_history(store: TransitionStore, current: Current, *, max_records: int 
     if type(max_records) is not int or not 1 <= max_records <= 1_000_000:
         raise ValueError("invalid history audit limit")
     record, count = current.record, 0
+    audited = store._audited_tips if isinstance(store, CachedTransitionStore) else None
+    # Use the record itself rather than trusting the caller's mutable head dict.
+    tip = key = record_key(record, search_snapshot.canonical(record)) if audited is not None else None
     while True:
-        count += 1
+        # A verified tip includes its chain to sequence zero. The link into it
+        # was checked before this shortcut, and its full length counts toward the cap.
+        verified = audited is not None and key in audited
+        count += record['sequence'] + 1 if verified else 1
         if count > max_records:
             raise ValueError("transition history exceeds audit limit")
+        if verified:
+            break
         _verify_receipts(store, record, error="transition history has a missing or altered receipt")
         if record["prior"] is None:
             if record["sequence"] != 0 or record["state"] != "prepared":
                 raise ValueError("invalid first transition record")
-            return count
-        key = f"{RECORD_ROOT}{record['prior_transition']}/{record['prior']}.json"
-        raw = store.read_record(key)
-        if raw is None or hashlib.sha256(raw).hexdigest() != record["prior"]:
-            raise ValueError("transition history has a missing or altered record")
-        previous = validate_record(raw)
+            break
+        key = _record_key(record['prior_transition'], record['prior'])
+        previous, _ = _read_record(store, record['prior_transition'], record['prior'],
+                                   error="transition history has a missing or altered record")
         validate_advance(previous, record, prior_digest=record["prior"])
         record = previous
+    if audited is not None:
+        audited.add(tip)
+    return count
 
 
 def _verify_receipts(store: TransitionStore, record: dict, *, error: str) -> None:
+    verified = store._verified_receipts if isinstance(store, CachedTransitionStore) else None
     for field, check in (("observed", _check_receipt), ("defaults", _check_default)):
         for site, evidence in record[field].items():
             key = f"{RECORD_ROOT}{record['transition']}/receipts/{evidence['receipt_sha256']}.json"
+            identity = (key, field, site, evidence["generation"])
+            if verified is not None and identity in verified:
+                continue
             raw = store.read_receipt(key)
-            if raw is None or hashlib.sha256(raw).hexdigest() != evidence["receipt_sha256"]:
+            if not isinstance(raw, bytes) or hashlib.sha256(raw).hexdigest() != evidence["receipt_sha256"]:
                 raise ValueError(error)
             check(raw, site=site, generation=evidence["generation"])
+            if verified is not None:
+                verified.add(identity)
 
 
 def _put_record(store: TransitionStore, raw: bytes) -> str:

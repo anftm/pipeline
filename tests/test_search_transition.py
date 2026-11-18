@@ -1,7 +1,7 @@
 """Durable promotion intents do not infer deployment, recovery, or writer fencing."""
 import hashlib
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from scripts import search_snapshot
 from scripts import search_transition as tx
@@ -483,6 +483,87 @@ class SearchTransitionTests(unittest.TestCase):
         self.assertEqual(tx.load(self.s), current)
         with self.assertRaisesRegex(ValueError, "missing or altered record"):
             tx.audit_history(self.s, current)
+
+    def test_cached_audit_checks_first_chain_and_only_new_suffix_thereafter(self):
+        first = self.begin()
+        pending = self.start_site(first, site='pages', operation_id='3' * 32)
+        done = self.observe(pending, 'pages', B, b'new')
+        store = tx.CachedTransitionStore(self.s)
+        with patch.object(tx, 'validate_advance', wraps=tx.validate_advance) as advance:
+            self.assertEqual(tx.audit_history(store, pending), 2)
+            self.assertEqual(advance.call_count, 1)
+            self.assertEqual(tx.audit_history(store, pending), 2)
+            self.assertEqual(advance.call_count, 1)
+            self.assertEqual(tx.audit_history(store, done), 3)
+            self.assertEqual(advance.call_count, 2)
+            self.assertEqual(tx.audit_history(store, done), 3)
+            self.assertEqual(advance.call_count, 2)
+        for current, limit in ((pending, 1), (done, 2)):
+            with self.assertRaisesRegex(ValueError, 'exceeds audit limit'):
+                tx.audit_history(store, current, max_records=limit)
+        with self.assertRaisesRegex(ValueError, 'exceeds audit limit'):
+            tx.audit_history(tx.CachedTransitionStore(self.s), done, max_records=2)
+        original = done.record['observed']['pages']['receipt_sha256']
+        done.record['observed']['pages']['receipt_sha256'] = C
+        try:
+            with self.assertRaisesRegex(ValueError, 'missing or altered receipt'):
+                tx.audit_history(store, done)
+        finally:
+            done.record['observed']['pages']['receipt_sha256'] = original
+
+    def test_cached_validation_does_not_retain_missing_corrupt_or_schema_invalid_bytes(self):
+        current = self.begin()
+        digest = current.record['observed']['pages']['receipt_sha256']
+        receipt_key = f'{tx.RECORD_ROOT}{T1}/receipts/{digest}.json'
+        record_key = tx.record_key(current.record, current.record_raw)
+        for objects, key, error in ((self.s.records, record_key, 'altered record'),
+                                    (self.s.receipts, receipt_key, 'receipt is missing or altered')):
+            with self.subTest(key=key):
+                store = tx.CachedTransitionStore(self.s)
+                original = objects.pop(key)
+                with self.assertRaisesRegex(ValueError, error):
+                    tx.load(store)
+                objects[key] = b'corrupt'
+                with self.assertRaisesRegex(ValueError, error):
+                    tx.load(store)
+                objects[key] = original
+                self.assertEqual(tx.load(store), current)
+        # A matching digest alone is not enough to retain an invalid record.
+        bad = search_snapshot.canonical({})
+        digest = hashlib.sha256(bad).hexdigest()
+        key = f'{tx.RECORD_ROOT}{T1}/{digest}.json'
+        self.s.records[key] = bad
+        self.s.head = search_snapshot.canonical({**current.head, 'record': digest})
+        with self.assertRaisesRegex(ValueError, 'invalid transition schema'):
+            tx.load(store)
+        del self.s.records[key]
+        with self.assertRaisesRegex(ValueError, 'altered record'):
+            tx.load(store)
+
+    def test_cached_receipt_validation_is_bound_to_its_evidence(self):
+        current = self.begin()
+        store = tx.CachedTransitionStore(self.s)
+        self.assertEqual(tx.audit_history(store, tx.load(store)), 1)
+        pages = current.record['observed']['pages']
+        current.record['observed']['space'] = pages
+        with self.assertRaisesRegex(ValueError, 'receipt identity does not match'):
+            tx.audit_history(store, current)
+
+    def test_cached_store_keeps_head_etag_pointer_and_cas_live(self):
+        first = self.begin()
+        store = tx.CachedTransitionStore(self.s)
+        self.assertEqual(tx.load(store), first)
+        self.s.etag = '"changed"'
+        self.assertEqual(tx.load(store).etag, '"changed"')
+        with self.assertRaisesRegex(ValueError, 'CAS conflict'):
+            tx.start_site(store, first, site='pages', operation_id='3' * 32,
+                          expected_revision=REV, created_at=WHEN)
+        self.assertEqual(self.s.head, first.head_raw)
+        self.s.pointer = make_pointer(C, A, T2)
+        self.assertEqual(store.read_pointer(), self.s.pointer)
+        with self.assertRaisesRegex(ValueError, 'pointer changed'):
+            tx.start_site(store, tx.load(store), site='pages', operation_id='3' * 32,
+                          expected_revision=REV, created_at=WHEN)
 
     def test_operation_intent_requires_revision_time_and_space_config_snapshot(self):
         c = self.begin()

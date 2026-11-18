@@ -7,7 +7,9 @@ own Pages pre-claim check, it may roll back without dispatching or publishing.
 An existing Pages intent, claimed or not, is outside explicit resume. The
 caller must serialize the entire run and coordinate other writers. No local
 receipt is recovery state.
-The timeout bounds orchestration/polling, not an in-flight adapter HTTP call.
+The timeout is checked between orchestration steps and polls; it cannot
+interrupt an in-flight adapter call. Phase events identify the active work
+if an outer timeout kills the process.
 """
 from __future__ import annotations
 
@@ -87,21 +89,33 @@ def publish(*, generation, expected_parent, pages_revision, space_revision,
     deadline = clock() + timeout_seconds
     transaction = None
     parent_raw = None
-    last = 'preflight'
+    active_phase = None
+    wait_status = None
+    backing_store = store
+    store = tx.CachedTransitionStore(backing_store)
     site_common = dict(hub=hub, api=api, session=session, get=get)
     common = dict(site_common, revision=revision)
 
     def budget():
         if clock() >= deadline:
-            raise Blocked('daily publication timed out: ' + last + '; journal retained, do not replay writes')
+            detail = f' ({wait_status})' if wait_status is not None else ''
+            raise Blocked(f'daily publication timed out: {active_phase}{detail}; journal retained, do not replay writes')
+
+    def phase(name):
+        nonlocal active_phase
+        if name != active_phase:
+            active_phase = name
+            emit({'kind': 'search-daily-publish-phase', 'transaction': transaction, 'phase': name})
+        budget()
 
     def wait(status):
-        nonlocal last
-        last = status
+        nonlocal wait_status
+        wait_status = status
         emit({'kind': 'search-daily-publish-wait', 'transaction': transaction, 'status': status})
         budget()
         sleep(min(5, max(0, deadline - clock())))
         budget()
+        wait_status = None
 
     def current():
         value = tx.load(store)
@@ -149,17 +163,21 @@ def publish(*, generation, expected_parent, pages_revision, space_revision,
                     raise ValueError('Space configuration differs while waiting')
             wait('space-' + stage)
 
-    def step(function, **kwargs):
+    def step(name, function, **kwargs):
+        phase(name)
         identities()
         result = function(store, **kwargs)
         current()
+        budget()
         return result
 
-    def write_once(function, *, claim_operation, **kwargs):
+    def write_once(name, function, *, claim_operation, **kwargs):
+        phase(name)
         identities()
         pending = current().record['pending']
         if not pending or pending['operation_id'] != claim_operation:
             raise ValueError('no exact daily publication operation')
+        budget()
         # This run may have observed a consumed claim. It cannot send again.
         if pending.get('write_claim') is not None or 'write_claim' not in pending:
             return
@@ -172,8 +190,10 @@ def publish(*, generation, expected_parent, pages_revision, space_revision,
             emit({'kind': 'search-daily-publish-unknown', 'transaction': transaction,
                   'operation': claim_operation, 'error_type': type(error).__name__})
         current()
+        budget()
 
     def await_site(site, operation, reconcile, *, rollback=False, **kwargs):
+        phase('space-rollback-reconcile' if rollback else site + '-reconcile')
         before = current()
         target = expected_parent if rollback else generation
         if site == 'space':
@@ -193,6 +213,7 @@ def publish(*, generation, expected_parent, pages_revision, space_revision,
                                         or result.get('status') != ('parent-loaded' if rollback else 'candidate-loaded')
                                         or not result.get('journal_advanced')):
                     raise ValueError('Space reconciliation did not durably accept the bound operation')
+                budget()
                 return active
             pending = value['pending']
             if not pending or pending['site'] != site or pending['operation_id'] != operation:
@@ -220,8 +241,10 @@ def publish(*, generation, expected_parent, pages_revision, space_revision,
                 and record['observed']['pages']['generation'] == expected_parent)
 
     def rollback_stale_pages(intent, space_accepted):
+        nonlocal store
         # Only the process that reconciled the bound Space claim and prepared
         # this exact Pages intent may abandon it after confirmed source drift.
+        phase('pages-abandon')
         identities()
         if (intent.record['prior'] != space_accepted.head['record']
                 or current() != intent or not unclaimed_pages(intent.record)):
@@ -234,18 +257,23 @@ def publish(*, generation, expected_parent, pages_revision, space_revision,
             return get(url, limit)
 
         rollback_common = dict(site_common, get=bound_get)
+        budget()
         pages.abandon_unclaimed_apply(store, **rollback_common, operation_id=intent.record['pending']['operation_id'])
         abandoned = current().record
+        budget()
         if (abandoned['state'] != 'rolling-back' or abandoned['pending'] is not None
                 or abandoned['prior'] != intent.head['record']):
             raise ValueError('Pages abandonment was not durably observed')
 
         rollback = secrets.token_hex(16)
-        step(space.prepare, api=api, hub=hub, get=get, expected_revision=runtime_revision,
+        step('space-rollback-prepare', space.prepare, api=api, hub=hub, get=get, expected_revision=runtime_revision,
              operation_id=rollback, created_at=_now(), rollback=True)
-        write_once(space.apply_once, claim_operation=rollback, api=api, hub=hub, operation_id=rollback)
+        write_once('space-rollback-write', space.apply_once, claim_operation=rollback,
+                   api=api, hub=hub, operation_id=rollback)
         await_site('space', rollback, space.reconcile, rollback=True, api=api, hub=hub, get=get, poll_runtime=True)
-        finished = step(finalize.finish_rollback, **rollback_common)
+        finished = step('rollback-finish', finalize.finish_rollback, **rollback_common)
+        phase('rollback-final-audit')
+        store = tx.CachedTransitionStore(backing_store)
         if finished != current() or finished.record['state'] != 'rolled-back':
             raise ValueError('rollback completion was not durably observed')
         identities()
@@ -254,6 +282,7 @@ def publish(*, generation, expected_parent, pages_revision, space_revision,
                 'reason': 'candidate-sources-changed', 'external_writers_verified': False}
 
     if resume_transaction is None:
+        phase('preflight')
         # Normal starts never adopt unfinished work implicitly.
         baseline = daily_journal.inspect(store)
         if baseline['generation'] != expected_parent:
@@ -261,19 +290,24 @@ def publish(*, generation, expected_parent, pages_revision, space_revision,
         parent_raw = store.read_pointer()
         identities()
         daily_journal.verify_unchanged(baseline, daily_journal.inspect(store))
+        budget()
+        phase('prepare-publication')
         operation = secrets.token_hex(16)
         promotion_intent.prepare(generation, store=store, transaction_id=operation, **common)
         transaction = operation
         if current().record['state'] != 'prepared':
             raise ValueError('new daily publication is not prepared')
+        budget()
         emit({'kind': 'search-daily-publish-start', 'transaction': transaction, 'candidate': generation,
               'expected_parent': expected_parent, 'pages_revision': pages_revision, 'space_revision': space_revision,
               'resume_scope': RESUME_SCOPE, 'external_writers_verified': False})
 
         operation = secrets.token_hex(16)
-        step(space.prepare, api=api, expected_revision=space_revision, operation_id=operation, created_at=_now())
-        write_once(space.apply_once, claim_operation=operation, api=api, hub=hub, operation_id=operation)
+        step('space-prepare', space.prepare, api=api, expected_revision=space_revision,
+             operation_id=operation, created_at=_now())
+        write_once('space-apply', space.apply_once, claim_operation=operation, api=api, hub=hub, operation_id=operation)
     else:
+        phase('resume-preflight')
         existing = tx.load(store)
         if (existing is None or existing.record['transition'] != resume_transaction
                 or existing.record['candidate'] != generation
@@ -306,6 +340,7 @@ def publish(*, generation, expected_parent, pages_revision, space_revision,
         identities()
         if current() != existing:
             raise ValueError('resume journal changed during preflight')
+        budget()
         emit({'kind': 'search-daily-publish-resume', 'transaction': transaction, 'candidate': generation,
               'operation': operation, 'expected_parent': expected_parent, 'pages_revision': pages_revision,
               'space_revision': space_revision, 'resume_scope': RESUME_SCOPE,
@@ -318,18 +353,22 @@ def publish(*, generation, expected_parent, pages_revision, space_revision,
                                poll_runtime=True, **successor_options)
 
     operation = secrets.token_hex(16)
-    intent = step(pages.prepare, **site_common, expected_revision=pages_revision, operation_id=operation, created_at=_now())
+    intent = step('pages-prepare', pages.prepare, **site_common, expected_revision=pages_revision,
+                  operation_id=operation, created_at=_now())
     try:
         # When supplied, the caller's source lookup must also agree at the
         # write boundary. The deployed adapter independently checks its own.
         if revision is not source_lookup:
+            phase('pages-source-check')
             check_sources(intent.record)
-        write_once(pages.apply_once, claim_operation=operation, operation_id=operation, **site_common)
+            budget()
+        write_once('pages-dispatch', pages.apply_once, claim_operation=operation, operation_id=operation, **site_common)
     except space.CandidateSourcesChanged:
         return rollback_stale_pages(intent, space_accepted)
     await_site('pages', operation, pages.reconcile, **site_common)
 
-    step(finalize.mark_publishing, **common)
+    step('mark-publishing', finalize.mark_publishing, **common)
+    phase('pointer-publish')
     identities()
     try:
         finalize.publish(store, pointer_store, **common)
@@ -337,26 +376,32 @@ def publish(*, generation, expected_parent, pages_revision, space_revision,
         emit({'kind': 'search-daily-publish-unknown', 'transaction': transaction,
               'status': 'pointer-readback-required', 'error_type': type(error).__name__})
     # Never call publish again, even if the exact parent remains visible.
+    budget()
     intended = make_pointer(generation, expected_parent, transaction)
     while True:
+        phase('pointer-readback')
         identities()
         value = current()
+        budget()
         if value.record['state'] == 'pointer-observed':
             break
         if value.record['state'] != 'publishing':
             raise ValueError('unexpected journal state after pointer publication')
-        if store.read_pointer() == intended:
-            step(finalize.reconcile_pointer, **common)
+        pointer = store.read_pointer()
+        budget()
+        if pointer == intended:
+            step('pointer-reconcile', finalize.reconcile_pointer, **common)
         else:
             wait('pointer-parent-visible')
 
-    step(finalize.observe_space_default, **common, expected_revision=runtime_revision,
+    step('space-default-observe', finalize.observe_space_default, **common, expected_revision=runtime_revision,
          operation=secrets.token_hex(16), created_at=_now())
     operation = secrets.token_hex(16)
-    step(finalize.start_pages_default, session=session, expected_revision=pages_revision,
+    step('pages-default-prepare', finalize.start_pages_default, session=session, expected_revision=pages_revision,
          operation=operation, created_at=_now())
-    write_once(finalize.set_pages_default, claim_operation=operation, **common, operation=operation)
+    write_once('pages-default-write', finalize.set_pages_default, claim_operation=operation, **common, operation=operation)
     while True:
+        phase('pages-default-readback')
         identities()
         # Observe the parent as a valid wait condition without suppressing an
         # invalid response, a foreign default, or a consumer validation error.
@@ -371,20 +416,30 @@ def publish(*, generation, expected_parent, pages_revision, space_revision,
         if body.get('value') != generation:
             raise ValueError('Pages default readback has a foreign generation')
         before = current().record['sequence']
-        step(finalize.reconcile_pages_default, **common, operation=operation)
+        budget()
+        step('pages-default-reconcile', finalize.reconcile_pages_default, **common, operation=operation)
         value = current().record
         if (value['pending'] is not None or value['sequence'] <= before
                 or value['defaults']['pages']['generation'] != generation):
             raise ValueError('Pages default was not durably observed')
+        budget()
         break
-    step(finalize.finish, **common)
+    step('finish', finalize.finish, **common)
+    phase('final-consumer-inspection')
     identities()
     published = daily.inspect_published(get=get)
+    budget()
+    phase('final-journal-inspection')
+    # Re-read the entire chain at final acceptance, including old history;
+    # a write-once cache cannot detect out-of-protocol deletion or corruption.
+    store = tx.CachedTransitionStore(backing_store)
     journal = daily_journal.inspect(store)
     if (published['generation'] != generation or published['transition'] != transaction
             or journal['state'] != 'complete' or journal['generation'] != generation
             or journal['transition'] != transaction or journal['pointer_transition'] != transaction):
         raise ValueError('fresh daily inspections do not confirm this completed candidate')
+    budget()
+    phase('final-identity-check')
     identities()
     return {'kind': 'search-daily-publish-complete', 'generation': generation, 'transaction': transaction,
             'state': 'complete', 'published': published, 'journal': journal,
