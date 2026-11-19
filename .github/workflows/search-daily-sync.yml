@@ -62,6 +62,9 @@ jobs:
 
   sync:
     if: inputs.target != 'directories'
+    permissions:
+      contents: write
+      actions: write
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
@@ -282,3 +285,24 @@ jobs:
               raise SystemExit('Source revisions differ from the two-site published generation')
           print('Both sites use the current source revision snapshot')
           PY
+
+      - name: Prepare exact bot Search handoff for Reader
+        id: reader_handoff
+        if: github.event_name == 'workflow_dispatch' && github.actor == 'github-actions[bot]' && github.run_attempt == 1 && steps.publish.outcome == 'success' && vars.READER_FORMAT_AUTOMATION_ENABLED == 'true' && vars.READER_V3_AUTO_PAUSED != 'true'
+        env:
+          SOURCE_RUN: ${{ github.run_id }}
+        run: python -B -m scripts.search_reader_handoff prepare
+      - name: Preserve verified Search handoff receipt
+        if: steps.reader_handoff.outcome == 'success'
+        uses: actions/upload-artifact@v7
+        with:
+          name: search-reader-handoff
+          path: ${{ runner.temp }}/handoff.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Start Reader once for the bot Search handoff
+        if: steps.reader_handoff.outcome == 'success'
+        env:
+          SOURCE_RUN: ${{ github.run_id }}
+          GH_TOKEN: ${{ github.token }}
+        run: python -B -m scripts.search_reader_handoff send

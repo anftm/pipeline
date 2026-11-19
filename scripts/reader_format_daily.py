@@ -516,7 +516,9 @@ def validate_daily_run(run, expected_sha, *, completed=False):
     event = run.get('event')
     title = run.get('display_title')
     valid_title = (isinstance(title, str) and (title == 'Reader format backlog / ' + str(event)
-                   or (event == 'workflow_dispatch' and re.fullmatch(r'reader-format-continuation/[0-9a-f]{32}', title))))
+                   or (event == 'workflow_dispatch' and re.fullmatch(r'reader-format-continuation/[0-9a-f]{32}', title))
+                   or (event == 'workflow_dispatch' and run.get('actor', {}).get('login') == 'github-actions[bot]'
+                       and re.fullmatch(r'reader-search-handoff/[1-9][0-9]{0,19}', title))))
     if (not valid_title or run.get('name') not in {DAILY_NAME, title}
             or run.get('path') != '.github/workflows/' + DAILY
             or run.get('event') not in {'workflow_dispatch', 'workflow_run'}
