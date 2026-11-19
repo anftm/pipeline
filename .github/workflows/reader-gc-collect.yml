@@ -30,7 +30,7 @@ on:
         type: string
         default: "0"
       scope:
-        description: "General collection uses four-bucket reference closure. scheduled-retired-assets is the bounded daily derivative policy. All apply scopes require the maintenance fence."
+        description: "General collection uses four-bucket reference closure. scheduled-retired-assets is the daily policy for eligible retired derivatives. All apply scopes require the maintenance fence."
         type: choice
         options: [unreferenced, retired-assets, scheduled-retired-assets, retired-catalog-snapshots, page-plan, page-apply]
         default: unreferenced

@@ -41,7 +41,6 @@ CATALOG_REF = (READER_ASSETS_BUCKET, "reader-index/reader_catalog.json")
 RETIREMENT_REF = (READER_ASSETS_BUCKET, "reader-index/v3/retirement.json")
 ACKED = {"hf": True, "pages": True}
 SCHEDULED_SCOPE = 'scheduled-retired-assets'
-SCHEDULED_LIMIT = 500
 # Keep every extant base-catalog generation in the streaming projection and
 # graph walk; this duration exceeds the entire representable datetime range.
 KEEP_CATALOG_HISTORY = timedelta.max.days

@@ -15,13 +15,13 @@ import uuid
 
 try:
     from .reader_gc_fence import producer_repositories, producer_path
-    from .reader_gc_graph import SCHEDULED_LIMIT, SCHEDULED_SCOPE
+    from .reader_gc_graph import SCHEDULED_SCOPE
     from .reader_producer_scope import load_config
     from .reader_gc_credentials import token_for
     from .reader_producer_scope_transition import journal_binding, validate_journal_binding
 except ImportError:
     from reader_gc_fence import producer_repositories, producer_path
-    from reader_gc_graph import SCHEDULED_LIMIT, SCHEDULED_SCOPE
+    from reader_gc_graph import SCHEDULED_SCOPE
     from reader_producer_scope import load_config
     from reader_gc_credentials import token_for
     from reader_producer_scope_transition import journal_binding, validate_journal_binding
@@ -495,7 +495,7 @@ def run(path, *, limit=0, apply=None, scope='unreferenced', resume_run='', isola
         if (scope != 'unreferenced' or limit != 0 or resume_run or type(apply) is not bool
                 or isolated_callback is not None):
             raise ValueError('scheduled collection does not accept manual scope, limit, callback or resume overrides')
-        scope, limit = 'retired-assets', SCHEDULED_LIMIT
+        scope = 'retired-assets'  # limit=0 means all eligible objects; delete requests remain batched.
     apply = validate_collection(scope, resume_run, limit=limit, apply=apply,
                                 isolated_callback=isolated_callback)
     central = load_config()["publisher_repository"]
@@ -695,7 +695,7 @@ if __name__ == "__main__":
     parser.add_argument('--expected-maintenance-id', help='Require this exact durable maintenance window')
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--plan-only", action="store_true")
-    parser.add_argument('--scheduled', action='store_true', help='Plan the bounded daily retired-derivative policy')
+    parser.add_argument('--scheduled', action='store_true', help='Plan the daily retired-derivative policy')
     parser.add_argument('--scheduled-apply', action='store_true', help='Explicitly enable apply for --scheduled')
     parser.add_argument('--scope', choices=['unreferenced', 'retired-assets', 'page-plan', 'page-apply'],
                         default='unreferenced')

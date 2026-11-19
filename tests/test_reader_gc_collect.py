@@ -182,6 +182,28 @@ class ReaderGcCollectTests(unittest.TestCase):
             delete.assert_not_called()
         self.assertIn('first_seen_at', graph.read_gc_state(store)['orphans'][key])
 
+    def test_scheduled_unlimited_collects_all_eligible_objects_in_bounded_batches(self):
+        store = Store()
+        paths = [f'pages/image/png/{i:064x}/document.webp' for i in range(501)]
+        first = datetime.now(timezone.utc) - timedelta(days=2)
+        for path in paths:
+            store.put(ASSETS, path, b'derivative')
+        store.put(ASSETS, 'reader-index/reader_gc_state.json', {'version': 1, 'kind': 'reader-gc-state',
+            'orphans': {f'{ASSETS}:{path}': {'first_seen': first.date().isoformat(),
+                                           'first_seen_at': first.isoformat()} for path in paths}})
+        reference = graph.ReferenceGraph(store)
+        scanned = reference.build()
+        roots = {(ASSETS, collector.retirement.bundle_root(path)) for path in paths}
+        modified = Mock(return_value=first)
+        with patch.object(store, 'delete', wraps=store.delete) as delete:
+            result = collector.collect(store, Mock(), reference, scanned, {}, apply=True, scheduled=True,
+                grace_days=1, limit=0, retirement_roots=roots, target_modified=modified)
+        self.assertEqual([len(call.args[1]) for call in delete.call_args_list], [500, 1])
+        self.assertEqual(modified.call_count, 2 * len(paths))
+        self.assertEqual(result['confirmed_deleted_objects'], len(paths))
+        self.assertTrue(result['complete'])
+        self.assertTrue(set(paths).isdisjoint(store.objects[ASSETS]))
+
     def test_scheduled_recreated_target_waits_for_a_new_observation(self):
         store = Store()
         path = 'pages/image/png/' + 'a' * 64 + '/document.webp'
@@ -218,10 +240,10 @@ class ReaderGcCollectTests(unittest.TestCase):
 
     def test_scheduled_cli_rejects_resume_and_out_of_policy_flags_before_store_access(self):
         base = ['collector', '--scheduled-retired-assets', '--apply', '--output', 'unused.json']
-        valid = ['--storage', 's3', '--grace-days', '1', '--limit', '500']
+        valid = ['--storage', 's3', '--grace-days', '1', '--limit', '0']
         for args in (valid + ['--auto-resume'], valid + ['--resume-run', '123'],
                      valid + ['--retired-snapshots-only'], valid + ['--retired-assets-only'],
-                     valid + ['--limit', '0'], valid + ['--limit', '501'], valid + ['--grace-days', '0'],
+                     valid + ['--limit', '-1'], valid + ['--grace-days', '0'],
                      valid + ['--storage', 'hub']):
             with self.subTest(args=args), patch('sys.argv', base + args), \
                  patch.object(collector, 'assert_collector_context') as context, \

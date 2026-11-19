@@ -184,7 +184,7 @@ class MaintenanceTests(unittest.TestCase):
                 saved = json.loads(path.read_text())
                 self.assertEqual(state['dispatches'], [{'ref': 'main', 'inputs': {
                     'apply': apply, 'grace_days': '1', 'scope': 'scheduled-retired-assets',
-                    'reader_only': 'true', 'auto_resume': 'false', 'limit': '500', 'storage': 's3',
+                    'reader_only': 'true', 'auto_resume': 'false', 'limit': '0', 'storage': 's3',
                     'maintenance_id': saved['maintenance_id']}}])
                 self.assertTrue(saved['restored'])
                 self.assertTrue(state['active'])

@@ -45,7 +45,7 @@ class MaintenanceActivationTests(unittest.TestCase):
         self.assertEqual(collector['concurrency']['group'], 'reader-sidecar')
         self.assertIs(collector['concurrency']['cancel-in-progress'], False)
 
-    def test_every_scheduled_run_uses_the_same_bounded_collector_lane(self):
+    def test_every_scheduled_run_uses_the_same_collector_lane(self):
         workflow = yaml.safe_load(Path('.github/workflows/reader-maintenance.yml').read_text())
         self.assertEqual(workflow.get('on', workflow.get(True))['schedule'], [{'cron': '13 2 * * *'}])
         step = next(s for s in workflow['jobs']['maintain']['steps']
@@ -69,7 +69,7 @@ class MaintenanceActivationTests(unittest.TestCase):
         self.assertEqual(step['env']['SCHEDULED_APPLY_ENABLED'], '${{ vars.READER_GC_24H_APPLY_ENABLED }}')
         for enabled, apply in (('', 'false'), ('', 'true'), ('true', 'true')):
             result = subprocess.run(['bash', '-eu', '-c', 'python() { printf "%s\\0" "$@"; };\n' + step['run']],
-                env={**os.environ, 'APPLY': apply, 'GRACE_DAYS': '1', 'LIMIT': '500', 'STORAGE': 's3',
+                env={**os.environ, 'APPLY': apply, 'GRACE_DAYS': '1', 'LIMIT': '0', 'STORAGE': 's3',
                      'SCOPE': 'scheduled-retired-assets', 'READER_ONLY': 'true', 'RESUME_RUN': '',
                      'AUTO_RESUME': 'false', 'SCHEDULED_APPLY_ENABLED': enabled}, capture_output=True)
             if apply == 'true' and not enabled:
@@ -78,7 +78,7 @@ class MaintenanceActivationTests(unittest.TestCase):
                 self.assertFalse(result.stdout)
                 continue
             self.assertEqual(result.returncode, 0, result.stderr)
-            expected = ['-u', 'scripts/reader_gc_collect.py', '--grace-days', '1', '--limit', '500',
+            expected = ['-u', 'scripts/reader_gc_collect.py', '--grace-days', '1', '--limit', '0',
                         '--storage', 's3', '--output', 'output/gc/collection.json']
             if apply == 'true':
                 expected.append('--apply')

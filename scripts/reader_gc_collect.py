@@ -426,10 +426,9 @@ def collect(store, fence, reference_graph, report, catalog, *, grace_days=0, lim
     if apply:
         reader_gc_chm_window.require_clear(store)
     # Persist observations even when this window has a small deletion budget.
-    if scheduled and (grace_days != 1 or not 1 <= limit <= graph.SCHEDULED_LIMIT
-                      or retirement_roots is None or resume is not None or not reader_only
-                      or target_modified is None):
-        raise ValueError('scheduled collection requires 24h grace, bounded retired assets, '
+    if scheduled and (grace_days != 1 or limit < 0 or retirement_roots is None
+                      or resume is not None or not reader_only or target_modified is None):
+        raise ValueError('scheduled collection requires 24h grace, receipt-backed retired assets, '
                          'current object metadata and no resume')
     prior_state = graph.read_gc_state(store)
     snapshots = set()
@@ -468,9 +467,8 @@ def collect(store, fence, reference_graph, report, catalog, *, grace_days=0, lim
     if not 1 <= workers <= 8 or not 1 <= batch_size <= 1000:
         raise ValueError('invalid deletion worker or batch limit')
     if scheduled:
-        # Check at most the window budget. A path can have been reuploaded
-        # since first_seen_at, including after an interrupted delete. If so,
-        # start a new 24h observation rather than inheriting the old timer.
+        # Check every selected target, with bounded read concurrency. A path
+        # reuploaded since first_seen_at starts a new 24h observation.
         def inspect(ref):
             modified = target_modified(*ref)
             if not isinstance(modified, datetime) or modified.utcoffset() is None:
@@ -507,7 +505,7 @@ def collect(store, fence, reference_graph, report, catalog, *, grace_days=0, lim
     if scheduled:
         result['observations'] = observation_summary
         if not apply:
-            result['candidate_sample'] = sorted(candidates)[:limit]
+            result['candidate_sample'] = sorted(candidates)[:min(limit or 100, 100)]
     if resume:
         result['batches'] = [dict(entry) for entry in resume.get('batches', [])]
     if not apply and not scheduled:
@@ -640,10 +638,9 @@ def main():
     if (args.grace_days < 0 or args.limit < 0 or not 1 <= args.workers <= 8
             or args.resume_run and not re.fullmatch(r'[1-9][0-9]*', args.resume_run)):
         parser.error("grace and limit must be non-negative")
-    if scheduled and (args.grace_days != 1 or not 1 <= args.limit <= graph.SCHEDULED_LIMIT
-                      or args.storage != 's3' or args.retired_assets_only or args.retired_snapshots_only
-                      or args.auto_resume or args.resume_run):
-        parser.error('scheduled collection requires --grace-days 1, a bounded limit, S3 and no other scope or resume')
+    if scheduled and (args.grace_days != 1 or args.storage != 's3' or args.retired_assets_only
+                      or args.retired_snapshots_only or args.auto_resume or args.resume_run):
+        parser.error('scheduled collection requires --grace-days 1, S3 and no other scope or resume')
     if args.apply:
         assert_collector_context()
     if args.storage == "s3":
