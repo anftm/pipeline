@@ -26,6 +26,7 @@ try:
     from . import reader_assets, reader_lifecycle, reader_route_plan, reader_stream_index
     from . import search_daily, search_generation, search_publication_pointer, search_snapshot
     from .reader_bucket_store import HubBucketStore, retry_read
+    from .reader_chapter_profiles import CHM_PROFILE, chm_profile_upgrade
 except ImportError:
     import plan_reader_stream_matrix as matrix
     import finalize_image_index
@@ -39,6 +40,7 @@ except ImportError:
     import search_publication_pointer
     import search_snapshot
     from reader_bucket_store import HubBucketStore, retry_read
+    from reader_chapter_profiles import CHM_PROFILE, chm_profile_upgrade
 
 
 SEARCH_BUCKET = search_publication_pointer.BUCKET
@@ -198,7 +200,7 @@ def _matches_route(entry, route):
 
 
 def classify_indexed(records, routes, canonical, shards, api, *, extensions, kind, route_modes, shard_count=8,
-                     merge=reader_stream_index.merge_shards):
+                     merge=reader_stream_index.merge_shards, include_profile_upgrades=True):
     """Compare exact source bytes without treating repository commits as content."""
     source = [value for value in records.values() if value['extension'] in extensions]
     if not isinstance(canonical, dict) or canonical.get('version') != 1 or canonical.get('kind') != kind:
@@ -312,6 +314,28 @@ def classify_indexed(records, routes, canonical, shards, api, *, extensions, kin
                     row.update(previous_git_blob=before_blob, current_git_blob=after_blob)
         else:
             row['state'] = 'source_identity_unknown'
+    for item in source:
+        row = rows[item['key']]
+        if (item['extension'] != 'chm' or row['state'] not in {'same_revision', 'content_unchanged'}
+                or not chm_profile_upgrade(entries[item['key']].get('profile'))):
+            continue
+        entry, route = entries[item['key']], routes[item['key']]
+        manifest = entry.get('manifest')
+        chapter = (route.get('cb', route.get('b')), route.get('c', route.get('p')))
+        if not manifest or chapter != (READER_BUCKET, manifest):
+            row['state'] = 'route_or_index_mismatch'
+        elif (not include_profile_upgrades or entry.get('fallback') or entry.get('object') or route.get('f')
+              or not isinstance(entry.get('source_sha256'), str)
+              or not SHA.fullmatch(entry['source_sha256'])):
+            row['profile_upgrade_deferred'] = True
+        else:
+            row['state'] = 'profile_outdated'
+            row['previous_source_sha256'] = entry['source_sha256']
+            row['previous_manifest'] = manifest
+            row['previous_profile'] = entry['profile']
+            # An unrelated dataset revision bump cannot retry the failed rule
+            # on the same bytes. A genuinely changed source is a new input.
+            row['recorded_failure'] |= any(f.get('profile') == CHM_PROFILE for f in failure_rows.get(item['key'], []))
     return rows
 
 
@@ -342,13 +366,15 @@ def summarize(records: dict, routes: dict, checked_rows: dict, *, threshold: int
                     counts['recorded_failure_current'] += 1
                 if row.get('pending_shard_checkpoint'):
                     counts['pending_shard_checkpoint'] += 1
+                if row.get('profile_upgrade_deferred'):
+                    counts['profile_upgrade_deferred'] += 1
             elif route is None:
                 counts['not_mapped'] += 1
             elif not isinstance(route, dict) or route.get('s') != 2:
                 counts['route_unverified'] += 1
             else:
                 counts['mapped_content_not_checked'] += 1
-        actionable = counts['not_mapped'] + counts['content_changed']
+        actionable = counts['not_mapped'] + counts['content_changed'] + counts['profile_outdated']
         unverified = counts['source_identity_unknown'] + counts['route_or_index_mismatch'] + counts['route_unverified']
         verified = (extension in checked_extensions and unverified == 0
                     and counts['pending_shard_checkpoint'] == 0 and counts['recorded_failure_current'] == 0)
@@ -356,7 +382,10 @@ def summarize(records: dict, routes: dict, checked_rows: dict, *, threshold: int
         output.append({'extension': extension, 'family': family, 'workflow': workflow,
                        'sources': len(grouped[extension]), 'not_mapped': counts['not_mapped'],
                        'source_content_changed': counts['content_changed'],
-                       'source_content_unchanged': counts['content_unchanged'] + counts['same_revision'],
+                       'source_content_unchanged': (counts['content_unchanged'] + counts['same_revision']
+                                                    + counts['profile_outdated']),
+                       'profile_outdated': counts['profile_outdated'],
+                       'profile_upgrade_deferred': counts['profile_upgrade_deferred'],
                        'source_identity_unknown': unverified,
                        'mapped_content_not_checked': counts['mapped_content_not_checked'],
                        'recorded_failure_current': counts['recorded_failure_current'],
@@ -369,7 +398,7 @@ def summarize(records: dict, routes: dict, checked_rows: dict, *, threshold: int
 
 
 def inspect(*, hub, api, fs, client, threshold=10, observe_search=search_daily.observe_consumers,
-            get=search_daily.bounded_get, scope='all', details_out=None):
+            get=search_daily.bounded_get, scope='all', details_out=None, include_profile_upgrades=True):
     """Return the legacy pair; optionally expose the accepted full capture.
 
     details_out is populated only after all final pin checks succeed. Its rows
@@ -387,6 +416,11 @@ def inspect(*, hub, api, fs, client, threshold=10, observe_search=search_daily.o
     reader_pointer, catalog = publication.current(hub)
     if reader_pointer is None or not catalog.get('base_sidecar'):
         raise ValueError('Reader has no pinned v3 sidecar')
+    # A missing projection for an explicitly withdrawn source is not an
+    # unmapped input. Keep the full inventory for the producer's source pin.
+    all_records = records
+    suppressed = set(catalog.get('suppressed_sources', []))
+    records = {key: row for key, row in all_records.items() if key not in suppressed}
     base = publication.pinned_base(hub, catalog, {})
     projection = publication.project_sidecar(base, catalog)
     routes = projection['f']
@@ -424,7 +458,8 @@ def inspect(*, hub, api, fs, client, threshold=10, observe_search=search_daily.o
                 if value:
                     parts.append((number, value))
             checked.update(classify_indexed(records, routes, index, parts, api, extensions={extension},
-                                            kind='ebook-chapter-stream-index', route_modes={'e'}))
+                                            kind='ebook-chapter-stream-index', route_modes={'e'},
+                                            include_profile_upgrades=include_profile_upgrades))
             checked_extensions.add(extension)
             extra_ebook_indexes[extension] = index
             extra_ebook_shards[extension] = dict(parts)
@@ -558,6 +593,7 @@ def inspect(*, hub, api, fs, client, threshold=10, observe_search=search_daily.o
                'reader_generation': reader_pointer['generation'], 'threshold': threshold,
                'reader_consumers': receipts, 'formats': summaries, 'remote_writes': 0,
                'dispatches': 0, 'publication_ready': False, 'external_writers_verified': False,
+               'suppressed_sources_excluded': len(all_records) - len(records),
                'scope': ('published search and pinned Reader projection; exact source content checked for EPUB only'
                          if scope == 'epub' else
                          'published search and pinned Reader projection; exact source content checked for indexed ebooks, office, images, media, text, web, spreadsheets and static PDFs; '
@@ -569,7 +605,7 @@ def inspect(*, hub, api, fs, client, threshold=10, observe_search=search_daily.o
                         or row.get('pending_shard_checkpoint') or row.get('recorded_failure')],
                'remote_writes': 0, 'publication_ready': False}
     if details_out is not None:
-        details_out.update(corpus=corpus, source_revisions=revisions, records=records, rows=checked)
+        details_out.update(corpus=corpus, source_revisions=revisions, records=all_records, rows=checked)
     return summary, details
 
 
@@ -622,7 +658,8 @@ def main(argv=None):
             with httpx.Client(timeout=90, follow_redirects=True) as client:
                 return inspect(hub=HubBucketStore(), api=HfApi(token=token),
                                fs=HfFileSystem(token=token, skip_instance_cache=True),
-                               client=client, threshold=args.threshold)
+                               client=client, threshold=args.threshold,
+                               include_profile_upgrades=os.getenv('READER_CHM_PROFILE_REBUILD_ENABLED') == 'true')
         summary, details = observe_stable(observe)
     except Exception as error:
         diagnostic = args.output.with_name(args.output.stem + '-failure.json')

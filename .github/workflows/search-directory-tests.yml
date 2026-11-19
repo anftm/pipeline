@@ -35,6 +35,13 @@ on:
       - tests/test_search_daily_resume_workflow.py
       - scripts/reader_format_daily.py
       - scripts/reader_format_sources.py
+      - scripts/reader_chapter_profiles.py
+      - scripts/pilot_epub_chapters.py
+      - scripts/convert_reader_assets.py
+      - scripts/epub_chapters.py
+      - tests/test_pilot_epub_chapters.py
+      - tests/test_epub_toc.py
+      - tests/test_reader_format_backlog.py
       - scripts/pilot_text_stream.py
       - tests/test_reader_format_sources.py
       - tests/test_reader_text_automation.py
@@ -50,6 +57,15 @@ on:
       - .github/workflows/reader-office-chapters.yml
       - .github/workflows/reader-chm-repair.yml
       - .github/workflows/reader-v3-publish.yml
+      - .github/workflows/reader-gc-collect.yml
+      - .github/workflows/reader-maintenance.yml
+      - scripts/reader_gc_collect.py
+      - scripts/reader_gc_graph.py
+      - scripts/reader_gc_maintenance.py
+      - tests/test_reader_gc_activation.py
+      - tests/test_reader_gc_collect.py
+      - tests/test_reader_gc_graph.py
+      - tests/test_reader_gc_maintenance.py
       - tests/test_sync_auth.py
       - tests/test_text_encoding_retirement.py
   workflow_dispatch:
@@ -71,4 +87,6 @@ jobs:
       - name: Install pinned Reader conversion contracts
         run: python -m pip install -r scripts/requirements.txt
       - name: Exercise local Git and LFS, concurrency and source snapshots
-        run: python -B -m unittest tests.test_search_directory_sync tests.test_fetch_and_parse tests.test_sync_auth tests.test_text_encoding_retirement tests.test_search_daily_journal tests.test_search_automation_workflows tests.test_search_daily_publish tests.test_search_reader_handoff tests.test_search_gc tests.test_search_gc_s3 tests.test_search_gc_roots tests.test_search_daily_resume_workflow tests.test_reader_format_daily tests.test_reader_format_daily_workflow tests.test_reader_format_workflow_automation tests.test_reader_format_sources tests.test_reader_text_automation tests.test_pilot_text_stream -v
+        run: python -B -m unittest tests.test_search_directory_sync tests.test_fetch_and_parse tests.test_sync_auth tests.test_text_encoding_retirement tests.test_search_daily_journal tests.test_search_automation_workflows tests.test_search_daily_publish tests.test_search_reader_handoff tests.test_search_gc tests.test_search_gc_s3 tests.test_search_gc_roots tests.test_search_daily_resume_workflow tests.test_reader_format_daily tests.test_reader_format_daily_workflow tests.test_reader_format_workflow_automation tests.test_reader_format_backlog tests.test_reader_format_sources tests.test_reader_text_automation tests.test_pilot_epub_chapters tests.test_epub_toc tests.test_pilot_text_stream -v
+      - name: Verify Reader maintenance, fences and timed deletion policy
+        run: python -B -m unittest -v tests.test_reader_gc_activation tests.test_reader_gc_maintenance tests.test_reader_gc_graph tests.test_reader_gc_collect tests.test_chm_gc_terminal_guard tests.test_reader_maintenance_queue_contract

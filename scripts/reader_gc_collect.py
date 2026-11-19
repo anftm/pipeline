@@ -11,11 +11,12 @@ import re
 import time
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
 
 try:
     from . import reader_gc_graph as graph, reader_lifecycle as lifecycle, reader_gc_retirement as retirement
-    from .reader_bucket_store import HubBucketStore
+    from .reader_bucket_store import HubBucketStore, retry_s3
     from .reader_gc_fence import GitHubProducerFence, assert_collector_context
     from . import reader_gc_chm_window
     from .publish_reader_v3 import current, project_sidecar, observe_consumer
@@ -23,7 +24,7 @@ except ImportError:
     import reader_gc_graph as graph
     import reader_lifecycle as lifecycle
     import reader_gc_retirement as retirement
-    from reader_bucket_store import HubBucketStore
+    from reader_bucket_store import HubBucketStore, retry_s3
     from reader_gc_fence import GitHubProducerFence, assert_collector_context
     import reader_gc_chm_window
     from publish_reader_v3 import current, project_sidecar, observe_consumer
@@ -36,6 +37,16 @@ CONSUMERS = "reader-index/reader_gc_consumers.json"
 
 
 ACKNOWLEDGMENTS = "reader-index/reader_gc_acknowledgments.json"
+# Only known generated payload/manifest layouts. Do not infer disposability
+# from broad mixed-purpose roots such as objects/, native/, or derived/.
+SCHEDULED_DERIVATIVE = re.compile(
+    r'pages/image/(?:jpg|jpeg|png|bmp|webp|gif|tif|tiff)/[0-9a-f]{64}/'
+    r'(?:document\.webp|page-manifest\.json|pages/page-[0-9]{6}\.webp)'
+    r'|chapters/ebook/(?:epub|mobi|azw3|fb2)/[0-9a-f]{64}/[0-9a-f]{16}/'
+    r'(?:chapter-manifest\.json|epub-search-index\.json\.gz|chapters/chapter-[0-9]{4,}\.xhtml)'
+    r'|documents/(?:web/(?:html|htm|mht|mhtml)/[0-9a-f]{64}/(?:document\.html|document-manifest\.json)'
+    r'|spreadsheet/(?:xls|xlsx|csv|ods)/[0-9a-f]{64}/(?:document\.html|worksheet-manifest\.json))'
+)
 
 
 def catalog_acknowledged(store, identity):
@@ -386,32 +397,66 @@ def validate_resume_ownership(resume):
         raise ValueError('saved collection plan targets a bucket outside Reader ownership')
 
 
+def s3_target_modified(store, bucket, path):
+    namespace, name = store._location(bucket)
+    return retry_s3(lambda: store._client(namespace).head_object(Bucket=name, Key=path)).get('LastModified')
+
+
+def scheduled_candidates(reference_graph, report, retirement_roots):
+    """Narrow before aging, without changing the full reference closure."""
+    asset_candidates = report['buckets'][ASSETS]['candidates']
+    # The graph pins siblings when walking a manifest. Guard the full receipt
+    # root too, in case a consumer links directly into a nested bundle directory.
+    pinned = {retirement.bundle_root(path) for bucket, path in reference_graph.references
+              if bucket == ASSETS and path.startswith(('pages/image/', 'chapters/ebook/', 'documents/'))}
+    return {f'{ASSETS}:{path}' for path in asset_candidates
+            if SCHEDULED_DERIVATIVE.fullmatch(path) and retirement.bundle_root(path) not in pinned
+            and (ASSETS, retirement.bundle_root(path)) in retirement_roots
+            and (ASSETS, path) not in reference_graph.retired_roots}
+
+
 def collect(store, fence, reference_graph, report, catalog, *, grace_days=0, limit=0,
              batch_size=500, apply=False, checkpoint=None, reader_only=True,
-             workers=1, resume=None, retirement_roots=None, chm_guard=None):
+             workers=1, resume=None, retirement_roots=None, chm_guard=None,
+             scheduled=False, target_modified=None):
     if not report["graph_complete"]:
         raise RuntimeError("reference graph is incomplete; no object deletion is authorized")
     if set(reference_graph.files) != set(graph.BUCKETS):
         raise RuntimeError("Reader deletion requires the complete four-bucket reference closure")
     if apply:
         reader_gc_chm_window.require_clear(store)
-    # Persist observations for every candidate even when this window has a small
-    # deletion budget. Applying a limit here used to reset/lose later candidates.
-    state, retention = graph.plan_retention(graph.read_gc_state(store), report, grace_days, 0)
-    eligible = {tuple(key.split(":", 1)) for key in retention["past_grace_paths"]}
-    snapshots = retired_snapshots(catalog)
-    eligible.update((ASSETS, path) for path in snapshots if path in reference_graph.files.get(ASSETS, set())
-                    and (ASSETS, path) not in reference_graph.references)
-    # reader_only is retained for saved-plan compatibility, never as permission
-    # to collect Archive/BHA or CCRD objects observed by the reference graph.
-    excluded = {ref for ref in eligible if ref[0] not in graph.READER_BUCKETS}
-    eligible -= excluded
-    if retirement_roots is not None:
-        eligible = {ref for ref in eligible if retirement.within(*ref, retirement_roots)
-                    or reference_graph.input_retired(ref) or ref in reference_graph.retired_roots
-                    or ref[0] == ASSETS and ref[1] in snapshots}
+    # Persist observations even when this window has a small deletion budget.
+    if scheduled and (grace_days != 1 or not 1 <= limit <= graph.SCHEDULED_LIMIT
+                      or retirement_roots is None or resume is not None or not reader_only
+                      or target_modified is None):
+        raise ValueError('scheduled collection requires 24h grace, bounded retired assets, '
+                         'current object metadata and no resume')
+    prior_state = graph.read_gc_state(store)
+    snapshots = set()
+    excluded = set()
+    if scheduled:
+        candidates = scheduled_candidates(reference_graph, report, retirement_roots)
+        state, eligible = graph.plan_scheduled_retention(prior_state, report, candidates)
+        observation_summary = {'candidates': len(candidates), 'past_grace': len(eligible),
+                               'persisted': False, 'recreated': 0}
+    else:
+        state, retention = graph.plan_retention(prior_state, report, grace_days, 0)
+        eligible = {tuple(key.split(":", 1)) for key in retention["past_grace_paths"]}
+        snapshots = retired_snapshots(catalog)
+        eligible.update((ASSETS, path) for path in snapshots if path in reference_graph.files.get(ASSETS, set())
+                        and (ASSETS, path) not in reference_graph.references)
+        # reader_only is retained for saved-plan compatibility, never as permission
+        # to collect Archive/BHA or CCRD objects observed by the reference graph.
+        excluded = {ref for ref in eligible if ref[0] not in graph.READER_BUCKETS}
+        eligible -= excluded
+        if retirement_roots is not None:
+            eligible = {ref for ref in eligible if retirement.within(*ref, retirement_roots)
+                        or reference_graph.input_retired(ref) or ref in reference_graph.retired_roots
+                        or ref[0] == ASSETS and ref[1] in snapshots}
     selected = sorted(eligible)[:limit] if limit else sorted(eligible)
     if resume:
+        if resume.get('scope') == graph.SCHEDULED_SCOPE:
+            raise ValueError('scheduled plans are audit-only and cannot be resumed')
         validate_resume_ownership(resume)
         previous = sorted((entry['bucket'], entry['path']) for entry in resume['targets'])
         if (resume.get('plan_sha256') != hashlib.sha256(encode(previous)).hexdigest()
@@ -422,6 +467,25 @@ def collect(store, fence, reference_graph, report, catalog, *, grace_days=0, lim
         selected = previous
     if not 1 <= workers <= 8 or not 1 <= batch_size <= 1000:
         raise ValueError('invalid deletion worker or batch limit')
+    if scheduled:
+        # Check at most the window budget. A path can have been reuploaded
+        # since first_seen_at, including after an interrupted delete. If so,
+        # start a new 24h observation rather than inheriting the old timer.
+        def inspect(ref):
+            modified = target_modified(*ref)
+            if not isinstance(modified, datetime) or modified.utcoffset() is None:
+                raise RuntimeError('scheduled target lacks a verified modification time')
+            return ref, modified
+
+        checked = {}
+        for (bucket, path), modified in lifecycle.ordered_reads(inspect, selected, workers=workers):
+            key = f'{bucket}:{path}'
+            if modified > datetime.fromisoformat(state['orphans'][key]['first_seen_at']):
+                state['orphans'][key]['first_seen_at'] = datetime.now(timezone.utc).isoformat()
+                observation_summary['recreated'] += 1
+            else:
+                checked[bucket, path] = modified
+        selected = list(checked)
     sizes = getattr(store, 'object_sizes', {})
     target_sizes = {f'{bucket}:{path}': sizes.get((bucket, path)) for bucket, path in selected}
     if resume:
@@ -437,16 +501,29 @@ def collect(store, fence, reference_graph, report, catalog, *, grace_days=0, lim
                "processing_retirements": [entry for entry in report.get('processing_retirements', [])
                     if (entry['bucket'], entry['path']) in selected_set],
                 "plan_sha256": hashlib.sha256(encode(selected)).hexdigest(),
-                "scope": 'retired-assets' if retirement_roots is not None else 'unreferenced',
+                "scope": graph.SCHEDULED_SCOPE if scheduled else (
+                    'retired-assets' if retirement_roots is not None else 'unreferenced'),
                 "complete": False}
+    if scheduled:
+        result['observations'] = observation_summary
+        if not apply:
+            result['candidate_sample'] = sorted(candidates)[:limit]
     if resume:
         result['batches'] = [dict(entry) for entry in resume.get('batches', [])]
-    if not apply:
+    if not apply and not scheduled:
         return result
     fence.check()
     verify_roots(store, reference_graph)
+    if scheduled:
+        # Verify the dry-run evidence too. An apply's retention observation
+        # can authorize deletion in a later window even with no batch now.
+        verify_graph_documents(store, reference_graph)
     reader_gc_chm_window.require_clear(store)
+    if not apply:
+        return result
     store.put_json(ASSETS, 'reader-index/reader_gc_state.json', state)
+    if scheduled:
+        observation_summary['persisted'] = True
     # This collector owns the state mutation; include its new digest in the
     # root barrier instead of rejecting our own retention checkpoint.
     state_ref = (ASSETS, 'reader-index/reader_gc_state.json')
@@ -465,7 +542,7 @@ def collect(store, fence, reference_graph, report, catalog, *, grace_days=0, lim
         if chm_guard:
             chm_guard(store)
         fence.check()
-        verify_roots(store, reference_graph, frozenset(selected))
+        verify_roots(store, reference_graph, frozenset() if scheduled else frozenset(selected))
         verify_graph_documents(store, reference_graph)
         last_barrier[0] = time.monotonic()
     def save():
@@ -500,6 +577,11 @@ def collect(store, fence, reference_graph, report, catalog, *, grace_days=0, lim
                     record['status'] = 'submitted'
                 save()
             if present:
+                if scheduled:
+                    for ref, modified in lifecycle.ordered_reads(
+                            inspect, [(bucket, path) for path in present], workers=workers):
+                        if modified != checked[ref]:
+                            raise RuntimeError('scheduled target changed after planning')
                 reader_gc_chm_window.require_clear(store)
                 if chm_guard:
                     chm_guard(store)
@@ -552,10 +634,16 @@ def main():
     parser.add_argument('--resume-run', default='')
     parser.add_argument('--retired-assets-only', action='store_true')
     parser.add_argument('--auto-resume', action='store_true')
+    parser.add_argument('--scheduled-retired-assets', action='store_true')
     args = parser.parse_args()
+    scheduled = args.scheduled_retired_assets
     if (args.grace_days < 0 or args.limit < 0 or not 1 <= args.workers <= 8
             or args.resume_run and not re.fullmatch(r'[1-9][0-9]*', args.resume_run)):
         parser.error("grace and limit must be non-negative")
+    if scheduled and (args.grace_days != 1 or not 1 <= args.limit <= graph.SCHEDULED_LIMIT
+                      or args.storage != 's3' or args.retired_assets_only or args.retired_snapshots_only
+                      or args.auto_resume or args.resume_run):
+        parser.error('scheduled collection requires --grace-days 1, a bounded limit, S3 and no other scope or resume')
     if args.apply:
         assert_collector_context()
     if args.storage == "s3":
@@ -571,6 +659,9 @@ def main():
     fence = GitHubProducerFence()
     report = {"version": 1, "mode": "collect" if args.apply else "plan", "grace_days": args.grace_days,
               "started_at": lifecycle.now_iso(), "complete": False}
+    if scheduled:
+        report.update(scope=graph.SCHEDULED_SCOPE, limit=args.limit, grace_hours=24,
+                      resume_enabled=False, catalog_retirement_enabled=False)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     def save():
         args.output.write_bytes(encode(report))
@@ -612,9 +703,15 @@ def main():
         fence.check()
         if args.apply:
             reader_gc_chm_window.require_clear(store)
-        catalog_raw, report["catalog"] = retire_catalog(
-            store, identity, consumers, args.grace_days, apply=args.apply)
-        catalog = graph.decode(catalog_raw)
+        if scheduled:
+            # Don't compact the base catalog or rewrite acknowledgment state
+            # for this lane. The graph streams all extant rollback refs below.
+            report['catalog'] = {**identity, 'retirement_enabled': False}
+            catalog, supersessions = {}, {}
+        else:
+            catalog_raw, report["catalog"] = retire_catalog(
+                store, identity, consumers, args.grace_days, apply=args.apply)
+            catalog = graph.decode(catalog_raw)
         save()
         if args.retired_snapshots_only:
             report["collection"] = collect_retired_snapshots(store, fence, catalog,
@@ -622,12 +719,13 @@ def main():
             report["complete"] = True
             print(json.dumps({k: v for k, v in report["collection"].items() if k != "batches"}), flush=True)
             return
-        try:
-            from . import reader_processing_history
-        except ImportError:
-            import reader_processing_history
-        fence.check()
-        supersessions = reader_processing_history.reconcile(store, catalog, consumers)
+        if not scheduled:
+            try:
+                from . import reader_processing_history
+            except ImportError:
+                import reader_processing_history
+            fence.check()
+            supersessions = reader_processing_history.reconcile(store, catalog, consumers)
         report['processing_supersessions'] = [{'bucket': bucket, 'path': path, **value}
             for (bucket, path), value in sorted(supersessions.items())]
         save()
@@ -641,13 +739,16 @@ def main():
             store.put_bytes(ASSETS, audit_path, audit)
             if store.read_bytes(ASSETS, audit_path) != audit:
                 raise RuntimeError('processing supersession audit readback mismatch')
-        reference_graph = graph.ReferenceGraph(store, generation_grace_days=args.grace_days, progress=progress,
-                                              processing_supersessions=supersessions)
+        reference_graph = graph.ReferenceGraph(store, progress=progress, processing_supersessions=supersessions,
+            generation_grace_days=graph.KEEP_CATALOG_HISTORY if scheduled else args.grace_days,
+            consumer_resources=consumers['resources'] if scheduled else ())
         scanned = reference_graph.build()
         report["graph"] = scanned
         save()
         progress("deletion-preflight", graph_complete=scanned["graph_complete"],
                  blockers=len(scanned["blockers"]))
+        if scheduled and reference_graph.root_hashes.get(graph.CATALOG_REF) != identity['digest']:
+            raise RuntimeError('catalog changed after consumer acceptance')
         resume = None
         if args.auto_resume and not args.resume_run:
             saved, resume = retirement.pending_plan(store)
@@ -659,7 +760,7 @@ def main():
             resume = json.loads(store.read_bytes(ASSETS, f'reader-index/gc/{args.resume_run}/collection.json'))
             if args.auto_resume and resume.get('complete'):
                 resume = None
-        hints = retirement.load(store) if args.retired_assets_only else None
+        hints = retirement.load(store) if scheduled or args.retired_assets_only else None
         report['retirement_receipts'] = len(hints or {})
         if resume:
             validate_resume_ownership(resume)
@@ -674,7 +775,8 @@ def main():
         report["collection"] = collect(store, fence, reference_graph, scanned, catalog,
             grace_days=args.grace_days, limit=args.limit, apply=args.apply,
             checkpoint=checkpoint if args.apply else None, reader_only=args.reader_only,
-            workers=args.workers, resume=resume,
+            workers=args.workers, resume=resume, scheduled=scheduled,
+            target_modified=(lambda bucket, path: s3_target_modified(store, bucket, path)) if scheduled else None,
             retirement_roots=retirement.targets(hints) if hints is not None else None)
         report["complete"] = True
         print(json.dumps({"catalog": report["catalog"], "collection": {

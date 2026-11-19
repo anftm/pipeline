@@ -197,6 +197,27 @@ class EpubTocTests(unittest.TestCase):
             self.assertEqual([(item['title'], item['chapter']) for item in result['toc']],
                              [('第二首', 2), ('第一首', 1)])
 
+    def test_published_manifest_keeps_verified_chm_anchor_with_repeated_heading(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / 'verified.epub'
+            with zipfile.ZipFile(source, 'w') as archive:
+                archive.writestr('META-INF/container.xml', '<container><rootfiles><rootfile full-path="book.opf"/></rootfiles></container>')
+                archive.writestr('book.opf', '<package><manifest>'
+                                 '<item id="m" href="merged.xhtml" media-type="application/xhtml+xml"/>'
+                                 '<item id="n" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>'
+                                 '</manifest><spine><itemref idref="m"/></spine></package>')
+                archive.writestr('nav.xhtml', '<html xmlns:epub="http://www.idpf.org/2007/ops"><body>'
+                                 '<nav epub:type="toc"><ol><li><a href="merged.xhtml#section-2">重复</a></li></ol>'
+                                 '</nav></body></html>')
+                archive.writestr('merged.xhtml', '<html><body><section id="section-1"><h1 id="early">重复</h1>'
+                                 '<p>前一节</p></section><section id="section-2"><h1 id="late">重复</h1>'
+                                 '<p>后一节</p></section></body></html>')
+            bundle = root / 'bundle'
+            epub_chapters.build_bundle(source, bundle, preserve_toc_targets=True)
+            manifest = json.loads((bundle / 'chapter-manifest.json').read_text())
+            self.assertEqual([(item['chapter'], item['fragment']) for item in manifest['toc']], [(1, 'section-2')])
+
     def test_merged_chm_relocation_preserves_same_document_source_anchor(self):
         # The title may occur far inside a merged file. Rediscovering the same
         # document must not discard its independently valid page destination.

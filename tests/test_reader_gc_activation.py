@@ -45,6 +45,46 @@ class MaintenanceActivationTests(unittest.TestCase):
         self.assertEqual(collector['concurrency']['group'], 'reader-sidecar')
         self.assertIs(collector['concurrency']['cancel-in-progress'], False)
 
+    def test_every_scheduled_run_uses_the_same_bounded_collector_lane(self):
+        workflow = yaml.safe_load(Path('.github/workflows/reader-maintenance.yml').read_text())
+        self.assertEqual(workflow.get('on', workflow.get(True))['schedule'], [{'cron': '13 2 * * *'}])
+        step = next(s for s in workflow['jobs']['maintain']['steps']
+                    if s.get('name') == 'Pause producers, collect and restore')
+        self.assertEqual(step['env']['SCHEDULED_APPLY_ENABLED'], '${{ vars.READER_GC_24H_APPLY_ENABLED }}')
+        for enabled in ('', 'false', 'True', 'true'):
+            result = subprocess.run(['bash', '-eu', '-c',
+                'python() { printf "%s\\0" "$@"; }; date() { echo 1; };\n' + step['run']],
+                env={**os.environ, 'LIMIT': '0', 'SCOPE': 'unreferenced', 'RESUME_RUN': '',
+                     'PLAN_ONLY': 'false', 'EVENT_NAME': 'schedule', 'SCHEDULED_APPLY_ENABLED': enabled},
+                capture_output=True, check=True)
+            expected = ['-u', 'scripts/reader_gc_maintenance.py', 'run', '--scheduled', '--journal',
+                        'output/maintenance/journal.json']
+            if enabled == 'true':
+                expected.append('--scheduled-apply')
+            self.assertEqual(result.stdout.decode().split('\0')[:-1], expected)
+        collector = yaml.safe_load(Path('.github/workflows/reader-gc-collect.yml').read_text())
+        scope = collector.get('on', collector.get(True))['workflow_dispatch']['inputs']['scope']
+        self.assertIn('scheduled-retired-assets', scope['options'])
+        step = next(s for s in collector['jobs']['collect']['steps'] if 'READER_ONLY' in s.get('env', {}))
+        self.assertEqual(step['env']['SCHEDULED_APPLY_ENABLED'], '${{ vars.READER_GC_24H_APPLY_ENABLED }}')
+        for enabled, apply in (('', 'false'), ('', 'true'), ('true', 'true')):
+            result = subprocess.run(['bash', '-eu', '-c', 'python() { printf "%s\\0" "$@"; };\n' + step['run']],
+                env={**os.environ, 'APPLY': apply, 'GRACE_DAYS': '1', 'LIMIT': '500', 'STORAGE': 's3',
+                     'SCOPE': 'scheduled-retired-assets', 'READER_ONLY': 'true', 'RESUME_RUN': '',
+                     'AUTO_RESUME': 'false', 'SCHEDULED_APPLY_ENABLED': enabled}, capture_output=True)
+            if apply == 'true' and not enabled:
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(b'READER_GC_24H_APPLY_ENABLED=true', result.stderr)
+                self.assertFalse(result.stdout)
+                continue
+            self.assertEqual(result.returncode, 0, result.stderr)
+            expected = ['-u', 'scripts/reader_gc_collect.py', '--grace-days', '1', '--limit', '500',
+                        '--storage', 's3', '--output', 'output/gc/collection.json']
+            if apply == 'true':
+                expected.append('--apply')
+            self.assertEqual(result.stdout.decode().split('\0')[:-1],
+                             expected + ['--reader-only', '--scheduled-retired-assets'])
+
     def test_obsolete_reference_operation_requires_manual_write_selection(self):
         flow = yaml.safe_load(Path('.github/workflows/reader-maintenance.yml').read_text())
         step = next(s for s in flow['jobs']['maintain']['steps'] if s.get('name') == 'Pause producers, collect and restore')

@@ -133,7 +133,8 @@ class ChmChapterPilotTests(unittest.TestCase):
             root = Path(temporary);revisions = root/'revisions.json';revisions.write_text('{}')
             args = SimpleNamespace(limit=100, max_source_bytes=0, workers=1, shard_count=1, shard_index=0,
                 extension='chm', bucket='vomebook/reader-assets-v2', retry_failures=False, failed_only=False,
-                strict=False, apply=False, plan_only=True, revisions=revisions, search_data=root/'unused.json')
+                strict=False, apply=False, plan_only=True, revisions=revisions, search_data=root/'unused.json',
+                chm_profile_proof=None)
             stdout, stderr = io.StringIO(), io.StringIO()
             def reuse(*_):
                 print('transient Reader bucket read error; retrying')
@@ -204,6 +205,7 @@ class ChmChapterPilotTests(unittest.TestCase):
                 native.parent.mkdir(parents=True, exist_ok=True)
                 native.write_bytes(b"native epub")
                 return {"path": "objects/document.epub", "profile": queue_item["profile"],
+                        "source_sha256": source_digest,
                         "chapter_manifest": "objects/chapters/epub-chapters/chapter-manifest.json",
                         "chapter_bundle_error": None}
 
@@ -220,7 +222,9 @@ class ChmChapterPilotTests(unittest.TestCase):
                                 for path in uploads))
             self.assertFalse(any(path.startswith("native/ebook/") for path in uploads))
             chapter_manifest = next(local for path, local in uploads.items() if path.endswith('/chapter-manifest.json'))
-            self.assertNotIn('fallback', json.loads(Path(chapter_manifest).read_bytes()))
+            manifest = json.loads(Path(chapter_manifest).read_bytes())
+            self.assertNotIn('fallback', manifest)
+            self.assertEqual(manifest['conversion_profile'], pilot_epub_chapters.CHM_PROFILE)
 
     def test_chm_recovery_still_publishes_only_the_chapter_stream(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -231,7 +235,8 @@ class ChmChapterPilotTests(unittest.TestCase):
                 target.write_bytes(b'source chm')
             def recover(_source, target, _title):
                 target.write_bytes(b'recovered epub')
-            def build(_source, bundle):
+            def build(_source, bundle, *, preserve_toc_targets):
+                self.assertTrue(preserve_toc_targets)
                 bundle.mkdir(parents=True)
                 (bundle/'chapter-manifest.json').write_text(json.dumps({'chapters': [{'index':1}]}))
                 (bundle/'epub-search-index.json.gz').write_bytes(b'search')

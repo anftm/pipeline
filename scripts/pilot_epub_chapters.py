@@ -33,6 +33,7 @@ try:
         converted_output, doc_to_html_fallback, looks_like_html, run_libreoffice,
     )
     from .reader_bucket import index_path, read_bytes
+    from .reader_chapter_profiles import CHM_PROFILE, chm_profile_upgrade
     from .recover_chm import recover as recover_chm
     from . import reader_lifecycle
     from .reader_assets import (
@@ -47,6 +48,7 @@ except ImportError:
         converted_output, doc_to_html_fallback, looks_like_html, run_libreoffice,
     )
     from reader_bucket import index_path, read_bytes
+    from reader_chapter_profiles import CHM_PROFILE, chm_profile_upgrade
     from recover_chm import recover as recover_chm
     import reader_lifecycle
     from reader_assets import (
@@ -62,7 +64,6 @@ SUPPORTED_EXTENSIONS = {"epub", "mobi", "azw3", "fb2", "chm", "doc", "docx", "od
 OFFICE_EXTENSIONS = {"doc", "docx", "odt", "rtf"}
 OFFICE_ROOT = "chapters/ebook/epub"
 OFFICE_PROFILE = "office-epub-chapters-v1-flow-512"
-CHM_PROFILE = "chm-epub-chapters-v10-exact-sections"
 EPUB_PROFILE = "epub-chapters-v9-cover-toc"
 OFFICE_FLOW_SIZE_KB = 512
 OFFICE_COMMAND_TIMEOUT_SECONDS = 900
@@ -84,6 +85,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--revisions", type=Path, default=Path("state/commits.json"))
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--max-source-bytes", type=int, default=0)
+    parser.add_argument("--chm-profile-proof", type=Path)
     parser.add_argument("--retry-failures", action="store_true",
                          help="include previously failed sources in this extension's work queue")
     parser.add_argument("--failed-only", action="store_true",
@@ -535,6 +537,8 @@ def build_one(item: dict, work: Path, token: str | None, bucket: str) -> tuple[d
                     item["repo"], item["revision"], item["path"]), "source_bytes": item["source_bytes"],
                 "profile": profile, "reader_mode": mode, "output_name": output_name,
             }, converted_root)
+            if converted.get('source_sha256') != source_digest:
+                raise ValueError('CHM converter downloaded bytes different from the pinned input')
             if not converted.get("chapter_manifest") or converted.get("chapter_bundle_error"):
                 raise RuntimeError(converted.get("chapter_bundle_error") or "CHM chapter stream was not produced")
             source_chapter_dir = converted_root / Path(converted["chapter_manifest"]).parent
@@ -555,7 +559,7 @@ def build_one(item: dict, work: Path, token: str | None, bucket: str) -> tuple[d
             try:
                 recover_chm(source, recovered, Path(item["path"]).stem)
                 bundle = work / "bundle"
-                manifest = build_bundle(recovered, bundle)
+                manifest = build_bundle(recovered, bundle, preserve_toc_targets=True)
                 print(f"CHM recovery fallback succeeded: {item['repo']}/{item['path']}")
             except Exception as recovery_error:
                 raise RuntimeError(
@@ -573,12 +577,14 @@ def build_one(item: dict, work: Path, token: str | None, bucket: str) -> tuple[d
         manifest = build_bundle(chapter_source, bundle)
         root_extension = extension
     if extension == "chm":
-        version = bundle_version(bundle)
-        root_extension = extension
-        root = f"chapters/ebook/{root_extension}/{source_digest}/{version}"
-    else:
-        version = bundle_version(bundle)
-        root = f"chapters/ebook/{root_extension}/{source_digest}/{version}"
+        # Bind the conversion profile to the immutable chapter manifest. A
+        # successful profile upgrade must produce a new live route even when
+        # the rendered chapters happen to be byte-for-byte identical.
+        manifest = {**manifest, 'conversion_profile': chapter_profile(extension)}
+        (bundle / 'chapter-manifest.json').write_text(
+            json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2) + '\n', encoding='utf-8')
+    version = bundle_version(bundle)
+    root = f"chapters/ebook/{root_extension}/{source_digest}/{version}"
     # The conversion EPUB is a local input to the chapter builder, not a
     # published reader asset. Existing fallback entries remain untouched until
     # a future explicit index update; this producer never deletes old objects.
@@ -628,6 +634,21 @@ def main() -> int:
     if args.failed_only and not args.retry_failures:
         raise ValueError("--failed-only requires --retry-failures")
     expected_profile = chapter_profile(extension)
+    profile_keys = {}
+    if args.chm_profile_proof is not None:
+        if (extension != 'chm' or args.shard_count != 1 or not args.apply or not args.strict
+                or args.retry_failures or args.failed_only):
+            raise ValueError('profile proof requires a strict, non-retry CHM apply')
+        proof = json.loads(args.chm_profile_proof.read_text(encoding='utf-8'))
+        profile_keys = proof['profile_keys']
+        if not isinstance(profile_keys, dict) or any(not isinstance(sha, str) or not re.fullmatch('[0-9a-f]{64}', sha)
+                                                    for sha in profile_keys.values()):
+            raise ValueError('invalid CHM profile proof')
+        prior = {e['key']: e for e in previous['files']}
+        if any(not chm_profile_upgrade(prior.get(key, {}).get('profile'))
+               or prior[key].get('source_sha256') != sha
+               or prior[key].get('fallback') or prior[key].get('object') for key, sha in profile_keys.items()):
+            raise ValueError('CHM canonical profile proof changed before conversion')
     records = [item for item in select_records(args.search_data, revisions, args.max_source_bytes, extension)
                if shard_for(f"{item['repo']}\0{item['path']}", args.shard_count) == args.shard_index]
     selected, plan = pending_chapter_sources(records, previous, extension, token,
@@ -639,6 +660,8 @@ def main() -> int:
                           "profile": expected_profile, **plan, "selected": len(selected)}, ensure_ascii=False), flush=True)
         return 0
     if not selected:
+        if args.chm_profile_proof is not None:
+            raise ValueError('guarded CHM apply selected no work; refusing follow-up publication')
         print("no pending chapter sources")
         return 0
     converted, failed = 0, 0
@@ -649,7 +672,10 @@ def main() -> int:
             index, item = pair
             item["extension"] = extension
             try:
-                return item, *build_one(item, root / str(index), token, args.bucket), None
+                entry, uploads = build_one(item, root / str(index), token, args.bucket)
+                if entry['key'] in profile_keys and entry['source_sha256'] != profile_keys[entry['key']]:
+                    raise ValueError('CHM profile upgrade source checksum differs from the pinned source')
+                return item, entry, uploads, None
             except Exception as error:
                 failure = {
                     "key": f"{item['repo']}\0{item['path']}",

@@ -15,11 +15,13 @@ import uuid
 
 try:
     from .reader_gc_fence import producer_repositories, producer_path
+    from .reader_gc_graph import SCHEDULED_LIMIT, SCHEDULED_SCOPE
     from .reader_producer_scope import load_config
     from .reader_gc_credentials import token_for
     from .reader_producer_scope_transition import journal_binding, validate_journal_binding
 except ImportError:
     from reader_gc_fence import producer_repositories, producer_path
+    from reader_gc_graph import SCHEDULED_LIMIT, SCHEDULED_SCOPE
     from reader_producer_scope import load_config
     from reader_gc_credentials import token_for
     from reader_producer_scope_transition import journal_binding, validate_journal_binding
@@ -484,9 +486,16 @@ def validate_collection(scope, resume_run, *, limit, apply, isolated_callback):
     return True
 
 
-def run(path, *, limit=0, apply=True, scope='unreferenced', resume_run='', isolated_callback=None,
+def run(path, *, limit=0, apply=None, scope='unreferenced', resume_run='', isolated_callback=None,
         suppress_resume_dispatch=False, preserve_queued_runs=False, require_callback_commit=False,
-        allow_staged_handoff=False):
+        allow_staged_handoff=False, scheduled=False):
+    if apply is None:
+        apply = not scheduled
+    if scheduled:
+        if (scope != 'unreferenced' or limit != 0 or resume_run or type(apply) is not bool
+                or isolated_callback is not None):
+            raise ValueError('scheduled collection does not accept manual scope, limit, callback or resume overrides')
+        scope, limit = 'retired-assets', SCHEDULED_LIMIT
     apply = validate_collection(scope, resume_run, limit=limit, apply=apply,
                                 isolated_callback=isolated_callback)
     central = load_config()["publisher_repository"]
@@ -499,7 +508,9 @@ def run(path, *, limit=0, apply=True, scope='unreferenced', resume_run='', isola
         inputs = {"apply": str(apply).lower(), "grace_days": "0", "scope": scope,
                   "reader_only": "true", "auto_resume": "true", "limit": str(limit),
                   "maintenance_id": state['maintenance_id']}
-        if scope in {'page-plan', 'page-apply'}:
+        if scheduled:
+            inputs.update(scope=SCHEDULED_SCOPE, grace_days='1', auto_resume='false', storage='s3')
+        elif scope in {'page-plan', 'page-apply'}:
             inputs.update(resume_run=resume_run, auto_resume='false')
         state['collector_inputs'] = inputs
     if durable_store() is not None:
@@ -684,6 +695,8 @@ if __name__ == "__main__":
     parser.add_argument('--expected-maintenance-id', help='Require this exact durable maintenance window')
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--plan-only", action="store_true")
+    parser.add_argument('--scheduled', action='store_true', help='Plan the bounded daily retired-derivative policy')
+    parser.add_argument('--scheduled-apply', action='store_true', help='Explicitly enable apply for --scheduled')
     parser.add_argument('--scope', choices=['unreferenced', 'retired-assets', 'page-plan', 'page-apply'],
                         default='unreferenced')
     parser.add_argument('--resume-run', default='', help='Exact JSON configuration for page-plan/page-apply')
@@ -695,6 +708,10 @@ if __name__ == "__main__":
         parser.error('guarded owner and maintenance identity are only valid for restore')
     if arguments.expected_maintenance_id is not None and arguments.expected_owner is None:
         parser.error('--expected-maintenance-id requires --expected-owner')
+    if arguments.scheduled and arguments.operation != 'run':
+        parser.error('--scheduled requires run')
+    if arguments.scheduled_apply and (not arguments.scheduled or arguments.plan_only):
+        parser.error('--scheduled-apply requires --scheduled and cannot be combined with --plan-only')
     if arguments.operation == "preflight":
         inventory = preflight()
         journal(arguments.journal, {"preflight_only": True, "repositories": inventory,
@@ -705,8 +722,10 @@ if __name__ == "__main__":
         # The independent collector fence still rejects any queued run that is
         # not demonstrably isolated, so preserving work can block collection but
         # never grants deletion authority.
-        run(arguments.journal, limit=arguments.limit, apply=not arguments.plan_only,
-            scope=arguments.scope, resume_run=arguments.resume_run, preserve_queued_runs=True)
+        apply = arguments.scheduled_apply if arguments.scheduled else not arguments.plan_only
+        run(arguments.journal, limit=arguments.limit, apply=apply,
+            scope=arguments.scope, resume_run=arguments.resume_run, preserve_queued_runs=True,
+            scheduled=arguments.scheduled)
     else:
         restore(arguments.journal, expected_owner=arguments.expected_owner,
                 expected_maintenance_id=arguments.expected_maintenance_id)

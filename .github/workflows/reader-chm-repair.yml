@@ -110,17 +110,21 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           EXTENSION: chm
           SEARCH_GENERATION: ${{ inputs.search_generation }}
+          READER_CHM_PROFILE_REBUILD_ENABLED: ${{ vars.READER_CHM_PROFILE_REBUILD_ENABLED }}
         run: |
           set -euo pipefail
           [[ -n "$EXTENSION" && "$EXTENSION" != 'all' ]]
           python scripts/reader_format_sources.py --extension "$EXTENSION" \
             --generation "$SEARCH_GENERATION" --search-data output/search_data.json \
-            --revisions state/commits.json --output output/reader-actionable.json
+            --revisions state/commits.json --output output/reader-actionable.json \
+            --profile-proof output/chm-profile-proof.json
+          cp output/search_data.json output/chm-full-source.json
           mv output/reader-actionable.json output/search_data.json
       - name: Plan only sources on the old CHM chapter profile
         id: plan
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          AUTOMATION_ID: ${{ inputs.automation_id }}
           LIMIT: ${{ inputs.limit || '1' }}
           RETRY_FAILED: ${{ inputs.retry_failed || 'false' }}
           FAILED_ONLY: ${{ inputs.failed_only || 'false' }}
@@ -134,9 +138,18 @@ jobs:
           mkdir -p output
           printf '%s\n' "$report" > output/chm-plan.json
           count=$(python -c 'import json,sys; print(json.loads(sys.argv[1])["selected"])' "$report")
+          if [[ -n "$AUTOMATION_ID" && "$count" == 0 ]]; then
+            echo 'Guarded CHM batch has no actionable rows; refusing follow-up publication' >&2
+            exit 1
+          fi
           echo "count=$count" >> "$GITHUB_OUTPUT"
       - name: Preserve the pinned source snapshot for the conversion run
-        run: tar -czf output/chm-source-snapshot.tgz output/search_data.json state/commits.json output/chm-plan.json
+        env:
+          AUTOMATION_ID: ${{ inputs.automation_id }}
+        run: |
+          files=(output/search_data.json state/commits.json output/chm-plan.json)
+          if [[ -n "$AUTOMATION_ID" ]]; then files+=(output/chm-full-source.json output/chm-profile-proof.json); fi
+          tar -czf output/chm-source-snapshot.tgz "${files[@]}"
       - uses: actions/upload-artifact@v7
         with:
           name: chm-source-snapshot
@@ -169,6 +182,19 @@ jobs:
       - run: tar -xzf output/chm-source-snapshot.tgz
       - *automation-gate
       - *source-guard
+      - name: Revalidate CHM profile inputs under the Reader writer lock
+        if: inputs.automation_id != ''
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          SEARCH_GENERATION: ${{ inputs.search_generation }}
+          READER_CHM_PROFILE_REBUILD_ENABLED: ${{ vars.READER_CHM_PROFILE_REBUILD_ENABLED }}
+        run: |
+          set -euo pipefail
+          python scripts/reader_format_sources.py --extension chm --generation "$SEARCH_GENERATION" \
+            --search-data output/chm-full-source.json --revisions state/commits.json \
+            --output output/chm-actionable-recheck.json --profile-proof output/chm-profile-proof-recheck.json
+          cmp output/search_data.json output/chm-actionable-recheck.json
+          cmp output/chm-profile-proof.json output/chm-profile-proof-recheck.json
       - name: Build chapter streams from pinned CHMs (EPUB is temporary)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -176,12 +202,14 @@ jobs:
           HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
           READER_CHM_COMMAND_TIMEOUT: "1800"
           READER_CONVERSION_WORKERS: "2"
+          AUTOMATION_ID: ${{ inputs.automation_id }}
           LIMIT: ${{ inputs.limit || '1' }}
           RETRY_FAILED: ${{ inputs.retry_failed || 'false' }}
           FAILED_ONLY: ${{ inputs.failed_only || 'false' }}
         run: |
           [[ "$LIMIT" =~ ^[1-5]$ ]] || { echo 'limit must be 1-5' >&2; exit 1; }
           args=(--extension chm --limit "$LIMIT" --shard-count 1 --shard-index 0 --apply --workers 2 --strict)
+          if [[ -n "$AUTOMATION_ID" ]]; then args+=(--chm-profile-proof output/chm-profile-proof-recheck.json); fi
           if [[ "$RETRY_FAILED" == "true" ]]; then args+=(--retry-failures); fi
           if [[ "$FAILED_ONLY" == "true" ]]; then args+=(--failed-only); fi
           python scripts/pilot_epub_chapters.py "${args[@]}"

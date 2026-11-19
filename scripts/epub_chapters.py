@@ -243,7 +243,7 @@ def _merged_chm_inline_targets(root):
             if len(values) == 1 and ids[next(iter(values))] == 1}
 
 
-def bundle_toc(entries: list[dict], records: list[dict]) -> list[dict]:
+def bundle_toc(entries: list[dict], records: list[dict], *, preserve_targets: bool = False) -> list[dict]:
     by_source = {record["source_path"]: record for record in reversed(records)}
     toc = []
     documents, inline_targets = {}, {}
@@ -274,9 +274,10 @@ def bundle_toc(entries: list[dict], records: list[dict]) -> list[dict]:
             # Keep a usable chapter destination when the source TOC points at
             # an anchor omitted by the source document or its sanitizer.
             fragment = ""
-        if root is not None:
+        if root is not None and not preserve_targets:
             fragment = usable_toc_fragment(root, fragment, title)
-        if not fragment and root is not None and posixpath.basename(entry['source_path']) == 'chm-fallback.html':
+        if (not preserve_targets and not fragment and root is not None
+                and posixpath.basename(entry['source_path']) == 'chm-fallback.html'):
             if entry['source_path'] not in inline_targets:
                 inline_targets[entry['source_path']] = _merged_chm_inline_targets(root)
             targets = inline_targets[entry['source_path']].get(_normalized_label(title), set())
@@ -523,7 +524,8 @@ def write_search_index(output: Path, chapters: list[dict]) -> dict:
 
 
 def build_bundle(epub: Path, output: Path, *, fallback: str | None = None,
-                 include_resources: bool = True, include_all_documents: bool = False) -> dict:
+                 include_resources: bool = True, include_all_documents: bool = False,
+                 preserve_toc_targets: bool = False) -> dict:
     """Write chapter files and return the validated manifest.
 
     The output directory contains only files intended for a dataset commit.
@@ -611,7 +613,9 @@ def build_bundle(epub: Path, output: Path, *, fallback: str | None = None,
             resource_usage.update(resources)
         if not chapter_records:
             raise ValueError("EPUB spine has no readable chapters")
-        toc = bundle_toc(relocate_toc_entries(toc_entries, chapter_records), chapter_records)
+        if not preserve_toc_targets:
+            toc_entries = relocate_toc_entries(toc_entries, chapter_records)
+        toc = bundle_toc(toc_entries, chapter_records, preserve_targets=preserve_toc_targets)
         # Resolve links only after every readable spine item has its final name.
         # Original filenames cannot be used after chapters move into the bundle.
         chapter_paths = {}

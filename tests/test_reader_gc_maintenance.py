@@ -23,6 +23,7 @@ class MaintenanceTests(unittest.TestCase):
         self.assertIsInstance(keywords.get('preserve_queued_runs'), ast.Constant)
         self.assertIs(keywords['preserve_queued_runs'].value, True)
         self.assertEqual(ast.unparse(keywords['resume_run']), 'arguments.resume_run')
+        self.assertEqual(ast.unparse(keywords['scheduled']), 'arguments.scheduled')
 
     def setUp(self):
         # These are offline fixtures. A production Actions environment may set
@@ -175,6 +176,26 @@ class MaintenanceTests(unittest.TestCase):
                     'auto_resume': 'true', 'limit': '7', 'maintenance_id': saved['maintenance_id']}}])
                 self.assertTrue(saved['restored'])
                 self.assertTrue(state['active'])
+
+    def test_scheduled_dispatch_is_exact_and_restores_producers(self):
+        for options, apply in (({}, 'false'), ({'apply': True}, 'true')):
+            with self.subTest(apply=apply), self.collector_window() as (path, state):
+                maintenance.run(path, scheduled=True, preserve_queued_runs=True, **options)
+                saved = json.loads(path.read_text())
+                self.assertEqual(state['dispatches'], [{'ref': 'main', 'inputs': {
+                    'apply': apply, 'grace_days': '1', 'scope': 'scheduled-retired-assets',
+                    'reader_only': 'true', 'auto_resume': 'false', 'limit': '500', 'storage': 's3',
+                    'maintenance_id': saved['maintenance_id']}}])
+                self.assertTrue(saved['restored'])
+                self.assertTrue(state['active'])
+
+    def test_scheduled_rejects_manual_overrides_before_recovery(self):
+        with patch.object(maintenance, 'recover') as recover:
+            for args in ({'scope': 'page-plan'}, {'limit': 501}, {'apply': 'true'}, {'resume_run': '123'},
+                         {'isolated_callback': Mock()}):
+                with self.subTest(args=args), self.assertRaisesRegex(ValueError, 'overrides'):
+                    maintenance.run(Path('unused'), scheduled=True, **args)
+            recover.assert_not_called()
 
     def test_exact_collector_failure_restores_producers(self):
         with self.collector_window(conclusion='failure') as (path, state):

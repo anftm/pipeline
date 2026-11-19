@@ -32,7 +32,7 @@ REPOSITORY = 'anftm/pipeline'
 PUBLISH = 'reader-v3-publish.yml'
 DAILY = 'reader-format-daily.yml'
 DAILY_NAME = 'Reader/桶 · Daily Format Conversion'
-THRESHOLD = 10
+THRESHOLD = 1
 MAX_BATCHES = 20
 MAX_SECONDS = 5 * 60 * 60
 PUBLICATION_ARTIFACT = 'v3-publication-report'
@@ -59,7 +59,7 @@ FORMATS = {ext: (family, workflow, limit) for family, (exts, workflow, limit) in
            for ext in exts.split()}
 COUNTS = ('sources', 'not_mapped', 'source_content_changed', 'source_content_unchanged',
           'source_identity_unknown', 'mapped_content_not_checked', 'recorded_failure_current',
-          'pending_shard_checkpoint', 'definite_backlog')
+          'pending_shard_checkpoint', 'profile_outdated', 'profile_upgrade_deferred', 'definite_backlog')
 UNCERTAIN = ('source_identity_unknown', 'mapped_content_not_checked',
              'recorded_failure_current', 'pending_shard_checkpoint')
 
@@ -68,7 +68,7 @@ def validate_summary(summary):
     if (not isinstance(summary, dict) or summary.get('version') != 1
             or summary.get('kind') != 'reader-format-backlog'
             or type(summary.get('threshold')) is not int or summary['threshold'] != THRESHOLD):
-        raise ValueError('requires a threshold-10 reader-format-backlog summary')
+        raise ValueError(f'requires a threshold-{THRESHOLD} reader-format-backlog summary')
     for field in ('search_generation', 'reader_generation'):
         if not isinstance(summary.get(field), str) or not GENERATION.fullmatch(summary[field]):
             raise ValueError('invalid ' + field)
@@ -94,7 +94,9 @@ def validate_summary(summary):
         for field in COUNTS:
             if type(row.get(field)) is not int or not 0 <= row[field] <= row['sources']:
                 raise ValueError('invalid count: ' + ext + '/' + field)
-        if (row['definite_backlog'] != row['not_mapped'] + row['source_content_changed']
+        if (row['definite_backlog'] != row['not_mapped'] + row['source_content_changed'] + row['profile_outdated']
+                or row['profile_outdated'] + row['profile_upgrade_deferred'] > row['source_content_unchanged']
+                or ((row['profile_outdated'] or row['profile_upgrade_deferred']) and ext != 'chm')
                 or sum(row[k] for k in ('not_mapped', 'source_content_changed', 'source_content_unchanged',
                                         'source_identity_unknown', 'mapped_content_not_checked')) != row['sources']):
             raise ValueError('inconsistent source counts: ' + ext)
@@ -156,8 +158,8 @@ def plan(summary):
             decisions[ext] = {'state': 'excluded', 'reasons': ['existing dataset-primary policy']}
             continue
         reasons = blockers(row)
-        state = ('blocked' if reasons else 'triggered' if row['definite_backlog'] >= THRESHOLD
-                 else 'complete' if row['definite_backlog'] == 0 else 'below_threshold')
+        state = ('blocked' if reasons else 'triggered' if row['definite_backlog'] > 0
+                 else 'complete')
         decisions[ext] = {'state': state, 'reasons': reasons,
                           'counts': {key: row[key] for key in COUNTS}, 'workflow': FORMATS[ext][1],
                           'completion_scope': ('no_sources' if row['sources'] == 0 else
@@ -309,7 +311,7 @@ class GitHub:
                         and (name.startswith(('reader-', 'search-daily-', 'search-promotion-'))
                              or name == 'pdf-account-worker.yml')
                         and row.get('status') != 'completed'):
-                    if (row.get('status') == 'pending'
+                    if (row.get('status') in {'pending', 'queued'}
                             and name in {DAILY, 'reader-backlog-monitor.yml', 'reader-maintenance.yml'}):
                         # These workflows share reader-format-daily concurrency.
                         # Only a job that has not started is a waiting successor,
@@ -521,7 +523,7 @@ def validate_daily_run(run, expected_sha, *, completed=False):
                        and re.fullmatch(r'reader-search-handoff/[1-9][0-9]{0,19}', title))))
     if (not valid_title or run.get('name') not in {DAILY_NAME, title}
             or run.get('path') != '.github/workflows/' + DAILY
-            or run.get('event') not in {'workflow_dispatch', 'workflow_run'}
+            or run.get('event') not in {'workflow_dispatch', 'workflow_run', 'schedule'}
             or run.get('head_branch') != 'main' or run.get('head_sha') != expected_sha
             or type(run.get('id')) is not int or type(run.get('run_attempt')) is not int
             or run['run_attempt'] != 1
@@ -860,7 +862,7 @@ class Controller:
                 operation['verification'] = receipt
                 self.checkpoint()
                 if after['definite_backlog'] >= row['definite_backlog']:
-                    raise RuntimeError('zero progress: source backlog did not decrease for ' + ext)
+                    raise RuntimeError('zero progress: conversion backlog did not decrease for ' + ext)
                 self.batch_durations.append(self.clock() - started)
                 reasons = blockers(after, source_changes_triggered=
                                    decision['completion_scope'] in SOURCE_CHANGE_SCOPES)
@@ -868,7 +870,7 @@ class Controller:
                     decision.update(state='blocked', reasons=reasons)
                     self.result['blocked'][ext] = reasons
                 elif after['definite_backlog']:
-                    queue.append(ext)  # Round robin, including backlog below ten.
+                    queue.append(ext)  # Round robin until the verified backlog reaches zero.
                 else:
                     decision['state'] = 'complete'
             # Recheck previously drained formats too: a later batch cannot hide
@@ -934,7 +936,8 @@ def live_callbacks():
 
     def refresh():
         with httpx.Client(timeout=30, follow_redirects=True) as client:
-            return backlog.inspect(hub=hub, api=api, fs=fs, client=client, threshold=10, scope='all')[0]
+            return backlog.inspect(hub=hub, api=api, fs=fs, client=client, threshold=THRESHOLD, scope='all',
+                                   include_profile_upgrades=os.getenv('READER_CHM_PROFILE_REBUILD_ENABLED') == 'true')[0]
 
     def verify(generation, remaining):
         with httpx.Client(timeout=min(30, remaining), follow_redirects=True) as client:

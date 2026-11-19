@@ -423,7 +423,8 @@ class FormatProducerRegressionTests(unittest.TestCase):
             revisions.write_text('{}')
             args = SimpleNamespace(limit=0, max_source_bytes=0, workers=1, shard_count=1, shard_index=0,
                 extension="epub", bucket=BUCKET, retry_failures=False, failed_only=False, strict=True,
-                apply=True, plan_only=False, revisions=revisions, search_data=root / "search.json")
+                apply=True, plan_only=False, revisions=revisions, search_data=root / "search.json",
+                chm_profile_proof=None)
             with patch.object(ebook, "parse_args", return_value=args), \
                     patch.object(ebook, "existing_index", return_value={"files": []}), \
                     patch.object(ebook, "select_records", return_value=[{"repo": "repo", "path": "bad.epub", "revision": "rev"}]), \

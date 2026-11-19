@@ -40,6 +40,11 @@ BUCKETS = (*READER_BUCKETS, *EXTERNAL_REFERENCE_BUCKETS)
 CATALOG_REF = (READER_ASSETS_BUCKET, "reader-index/reader_catalog.json")
 RETIREMENT_REF = (READER_ASSETS_BUCKET, "reader-index/v3/retirement.json")
 ACKED = {"hf": True, "pages": True}
+SCHEDULED_SCOPE = 'scheduled-retired-assets'
+SCHEDULED_LIMIT = 500
+# Keep every extant base-catalog generation in the streaming projection and
+# graph walk; this duration exceeds the entire representable datetime range.
+KEEP_CATALOG_HISTORY = timedelta.max.days
 MANAGED_PREFIXES = (
     "objects/", "ebook-chapters/", "staging/", "pages/", "documents/",
     "chapters/", "media/", "native/", "derived/",
@@ -99,7 +104,8 @@ def decode(raw: bytes) -> dict:
 class ReferenceGraph:
     def __init__(self, store, include_input: bool = True, generation_grace_days: int = 0,
                  progress=None, workers: int = 8, max_rounds: int = 20, full_passes: int = 3,
-                 deadline: float | None = None, processing_supersessions=None):
+                 deadline: float | None = None, processing_supersessions=None,
+                 consumer_resources=()):
         self.store = store
         self.include_input = include_input
         self.files = {}
@@ -146,6 +152,7 @@ class ReferenceGraph:
         self.active_external_pin = False
         self.released_processing = {}
         self.processing_supersessions = processing_supersessions or {}
+        self.consumer_resources = {(item['bucket'], item['path']) for item in consumer_resources}
 
     def read_catalog(self, ref):
         parser = functools.partial(catalog_json, grace_days=self.generation_grace_days)
@@ -967,6 +974,8 @@ class ReferenceGraph:
                     if ref not in self.retired_roots and ref not in self.seen:
                         self.references.add(ref)
                         self.pending.add(ref)
+            for ref in sorted(self.consumer_resources):
+                self.mark(*ref)
             if not self.converge(pool):
                 self.blockers.add(f"root inventory did not stabilize after {self.max_rounds} rounds")
         except TimeoutError:
@@ -984,6 +993,8 @@ class ReferenceGraph:
                     'buckets': {}, 'deletion_authorized': False, 'workers_may_still_be_running': True,
                     'consistency': 'deadline reached; partial inventory discarded'}
         self.finalize()
+        self.missing.update(ref for ref in self.consumer_resources if not self.input_retired(ref)
+                            and ref[1] not in self.files.get(ref[0], ()))
         if self.missing:
             self.blockers.add("referenced objects are missing")
         buckets = {}
@@ -1047,16 +1058,20 @@ def read_gc_state(store) -> dict:
     return payload
 
 
-def plan_retention(state: dict, report: dict, grace_days: int, limit: int, today=None) -> tuple[dict, dict]:
+def orphan_observations(state, report):
     if not report.get("graph_complete"):
         raise RuntimeError("reference graph is incomplete; refusing orphan observations")
+    current = {f"{bucket}:{path}" for bucket, data in report["buckets"].items()
+               for path in data.get("candidates", [])}
+    return current, {key: value for key, value in state.get("orphans", {}).items()
+                     if key in current and isinstance(value, dict)}
+
+
+def plan_retention(state: dict, report: dict, grace_days: int, limit: int, today=None) -> tuple[dict, dict]:
+    current, orphans = orphan_observations(state, report)
     if grace_days < 0 or limit < 0:
         raise ValueError("orphan grace and limit must be non-negative")
     today = today or date.today()
-    current = {f"{bucket}:{path}" for bucket, data in report["buckets"].items()
-               for path in data.get("candidates", [])}
-    orphans = {key: value for key, value in state.get("orphans", {}).items()
-               if key in current and isinstance(value, dict)}
     for key in sorted(current):
         orphans.setdefault(key, {"first_seen": today.isoformat()})
     updated = {"version": 1, "kind": "reader-gc-state", "orphans": dict(sorted(orphans.items()))}
@@ -1071,6 +1086,35 @@ def plan_retention(state: dict, report: dict, grace_days: int, limit: int, today
     eligible = sorted(eligible)[:limit] if limit else sorted(eligible)
     return updated, {"marked": len(current), "past_grace": len(eligible),
                      "past_grace_paths": eligible, "deletion_authorized": False}
+
+
+def plan_scheduled_retention(state, report, allowed, *, now=None):
+    """Track an elapsed-time observation without backdating legacy dates."""
+    current, orphans = orphan_observations(state, report)
+    current.intersection_update(allowed)
+    now = datetime.now(timezone.utc) if now is None else now
+    if now.utcoffset() is None:
+        raise ValueError('observation time must be timezone-qualified')
+    now = now.astimezone(timezone.utc)
+    cutoff = now - timedelta(hours=24)
+    eligible = set()
+    for key, value in orphans.items():
+        if key not in current and 'first_seen_at' in value:
+            orphans[key] = {k: v for k, v in value.items() if k != 'first_seen_at'}
+    for key in current:
+        value = orphans.get(key, {'first_seen': now.date().isoformat()})
+        try:
+            first = datetime.fromisoformat(value['first_seen_at'])
+            if first.utcoffset() is None or first > now:
+                raise ValueError('invalid first unreferenced instant')
+        except (KeyError, TypeError, ValueError, OverflowError):
+            # Missing, date-only, malformed or future state must wait a full
+            # day from this complete scheduled observation. Keep manual dates.
+            orphans[key] = {**value, 'first_seen_at': now.isoformat()}
+        else:
+            if first <= cutoff:
+                eligible.add(tuple(key.split(':', 1)))
+    return {'version': 1, 'kind': 'reader-gc-state', 'orphans': orphans}, eligible
 
 
 def report_exit_code(report: dict, allow_incomplete: bool = False) -> int:

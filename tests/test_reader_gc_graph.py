@@ -4,7 +4,7 @@ import json
 import shutil
 import tempfile
 import unittest
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -946,6 +946,49 @@ class ReaderGcGraphTests(unittest.TestCase):
         _state, second = gc.plan_retention(state, report, 14, 0)
         self.assertEqual((second["past_grace"], second["deletion_authorized"]), (1, False))
         self.assertIn(orphan, store.objects[PDF])
+
+    def test_scheduled_observation_requires_24_exact_hours_and_restarts_after_a_pin(self):
+        path = 'pages/image/png/' + 'a' * 64 + '/document.webp'
+        key = f'{ASSETS}:{path}'
+        report = {'graph_complete': True, 'buckets': {ASSETS: {'candidates': [path]}}}
+        start = datetime(2026, 11, 18, 23, 59, 59, 500000, tzinfo=timezone.utc)
+        state = {'orphans': {key: {'first_seen': '2020-01-01'}}}
+        state, eligible = gc.plan_scheduled_retention(state, report, {key}, now=start)
+        self.assertEqual(eligible, set())
+        self.assertEqual(state['orphans'][key], {'first_seen': '2020-01-01', 'first_seen_at': start.isoformat()})
+        for delta, expected in ((timedelta(seconds=1), set()),
+                                (timedelta(days=1, microseconds=-1), set()),
+                                (timedelta(days=1), {(ASSETS, path)})):
+            same, eligible = gc.plan_scheduled_retention(state, report, {key}, now=start + delta)
+            self.assertEqual(eligible, expected)
+            self.assertEqual(same, state)
+        later = start + timedelta(days=2)
+        state, eligible = gc.plan_scheduled_retention(state, report, set(), now=later)
+        self.assertEqual(state['orphans'][key], {'first_seen': '2020-01-01'})
+        self.assertEqual(eligible, set())
+        state, eligible = gc.plan_scheduled_retention(state, report, {key}, now=later)
+        self.assertEqual(state['orphans'][key]['first_seen_at'], later.isoformat())
+        self.assertEqual(eligible, set())
+        empty = {**report, 'buckets': {ASSETS: {'candidates': []}}}
+        state, eligible = gc.plan_scheduled_retention(state, empty, {key}, now=later)
+        self.assertEqual(state['orphans'], {})
+        self.assertEqual(eligible, set())
+
+    def test_scheduled_observation_ignores_invalid_legacy_or_future_instants(self):
+        now = datetime(2026, 11, 19, tzinfo=timezone.utc)
+        path = 'test'
+        key = f'{ASSETS}:{path}'
+        report = {'graph_complete': True, 'buckets': {ASSETS: {'candidates': [path]}}}
+        for value in ('2020-01-01', 'garbage', None, '2020-01-01T00:00:00', '2099-01-01T00:00:00Z'):
+            with self.subTest(value=value):
+                state = {'orphans': {key: {'first_seen_at': value}}}
+                migrated, eligible = gc.plan_scheduled_retention(state, report, {key}, now=now)
+                self.assertEqual(eligible, set())
+                self.assertEqual(migrated['orphans'][key]['first_seen_at'], now.isoformat())
+        old = {'orphans': {key: {'first_seen_at': '2026-11-18T08:00:00+08:00'}}}
+        self.assertEqual(gc.plan_scheduled_retention(old, report, {key}, now=now)[1], {(ASSETS, path)})
+        with self.assertRaisesRegex(RuntimeError, 'incomplete'):
+            gc.plan_scheduled_retention(old, {**report, 'graph_complete': False}, {key}, now=now)
 
     def test_gc_observation_aborts_when_a_root_is_unreadable(self):
         store = MemoryStore()

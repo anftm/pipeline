@@ -3,8 +3,9 @@ import hashlib
 import json
 import os
 import subprocess
+import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import yaml
@@ -72,6 +73,161 @@ class ReaderGcCollectTests(unittest.TestCase):
         self.chm_guard = patch.object(collector.reader_gc_chm_window, 'require_clear')
         self.chm_guard.start()
         self.addCleanup(self.chm_guard.stop)
+
+    def test_scheduled_cli_replans_without_reading_or_overwriting_the_old_cursor(self):
+        store = Store()
+        first = datetime(2026, 11, 18, 3, 0, tzinfo=timezone.utc)
+        def image(identity):
+            return f'pages/image/png/{identity * 64}/document.webp'
+        target, second, over_budget, legacy, rollback, deployed, unhinted = map(image, 'abcdef0')
+        chapter_root = 'chapters/ebook/epub/' + 'a' * 64 + '/' + 'b' * 16
+        nested = chapter_root + '/chapters/chapter-0001.xhtml'
+        chapter_manifest = chapter_root + '/chapter-manifest.json'
+        original = 'native/ebook/chm/' + 'b' * 64 + '/document.epub'
+        pdf_original = 'objects/aa/' + 'a' * 64 + '/' + 'b' * 16 + '/document.pdf'
+        chm_chapter = chapter_manifest.replace('/epub/', '/chm/')
+        snapshot = 'reader-index/generations/' + 'f' * 32 + '/reader_assets.json.gz'
+        managed_snapshot = 'reader-index/snapshots/' + 'f' * 64 + '/reader_assets.json.gz'
+        control = 'reader-index/v3/candidates/' + 'c' * 64 + '.json'
+        identity = {'current': 'live'}
+        catalog = {'version': 1, 'kind': 'reader-catalog', 'current': {'generation': 'live'},
+                   'generations': {'live': {'generation': 'live', 'status': 'current', 'references': []},
+                       'rollback': {'generation': 'rollback', 'status': 'superseded',
+                           'superseded_at': '2020-01-01T00:00:00Z', 'replacement_acks': graph.ACKED,
+                           'references': [{'bucket': ASSETS, 'path': rollback}]}},
+                   'retired_generations': {'f' * 32: {'replacement_acks': graph.ACKED,
+                       'snapshot': {'bucket': ASSETS, 'path': snapshot}}}}
+        store.put(ASSETS, collector.CATALOG, catalog)
+        identity['digest'] = hashlib.sha256(store.read_bytes(ASSETS, collector.CATALOG)).hexdigest()
+        store.put(ASSETS, graph.RETIREMENT_REF[1], {'kind': 'reader-v3-retirement', 'version': 1,
+            'replacement_acks': graph.ACKED, 'retired_paths': [control], 'resources': []})
+        store.put(ASSETS, 'reader-index/live-chapter.json', {'resources': [{'bucket': ASSETS, 'path': nested}]})
+        assets = (target, second, over_budget, legacy, rollback, deployed, unhinted, original, snapshot,
+                  managed_snapshot, chm_chapter, chapter_manifest, nested, control)
+        for path in assets:
+            store.put(ASSETS, path, b'fixture')
+        store.put(PDF, pdf_original, b'original')
+        hinted = [path for path in assets if collector.retirement.bundle_root(path) and path != unhinted]
+        receipt = collector.retirement.record([{'bucket': ASSETS, 'path': path} for path in hinted]
+            + [{'bucket': PDF, 'path': pdf_original}], [], 'b' * 32, 'catalog-replacement')
+        store.put(ASSETS, *receipt)
+        old_cursor = b'{"scope":"unreferenced","legacy":"must not be consulted"}'
+        store.put(ASSETS, collector.retirement.CURSOR, old_cursor)
+        state_path = 'reader-index/reader_gc_state.json'
+        observations = {f'{ASSETS}:{path}': {'first_seen': '2020-01-01', 'first_seen_at': first.isoformat()}
+                        for path in assets}
+        observations[f'{ASSETS}:{legacy}'].pop('first_seen_at')
+        store.put(ASSETS, state_path, {'version': 1, 'kind': 'reader-gc-state', 'orphans': observations})
+        consumers = {'resources': [{'bucket': ASSETS, 'path': deployed}]}
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {'GITHUB_RUN_ID': '987'}):
+            output = Path(directory) / 'report.json'
+            argv = ['collector', '--scheduled-retired-assets', '--apply', '--grace-days', '1', '--limit', '2',
+                    '--storage', 's3', '--output', str(output)]
+            with patch('sys.argv', argv), patch('scripts.reader_gc_store.CollectionStore', return_value=store), \
+                 patch.object(collector, 'assert_collector_context'), \
+                 patch.object(collector, 'GitHubProducerFence', return_value=Mock(check=Mock(return_value={}))), \
+                 patch.object(collector, 'observe_projections', return_value=(identity, consumers)), \
+                 patch.object(collector, 'retire_catalog') as retire, \
+                 patch.object(collector.retirement, 'pending_plan') as resume, \
+                 patch.object(collector, 's3_target_modified', return_value=first) as modified:
+                collector.main()
+            retire.assert_not_called()
+            resume.assert_not_called()
+            self.assertEqual(modified.call_count, 4)  # two targets, checked again before delete
+            result = json.loads(output.read_bytes())['collection']
+        self.assertEqual(result['scope'], graph.SCHEDULED_SCOPE)
+        self.assertEqual([item['path'] for item in result['targets']], [target, second])
+        self.assertEqual(result['confirmed_deleted_objects'], 2)
+        self.assertEqual(result['observations'], {'candidates': 4, 'past_grace': 3,
+                                                 'persisted': True, 'recreated': 0})
+        self.assertEqual(store.read_bytes(ASSETS, collector.retirement.CURSOR), old_cursor)
+        self.assertEqual(graph.decode(store.read_bytes(ASSETS, collector.CATALOG)), catalog)
+        for path in set(assets) - {target, second}:
+            self.assertIn(path, store.objects[ASSETS])
+        self.assertIn(pdf_original, store.objects[PDF])
+        current = graph.read_gc_state(store)['orphans']
+        self.assertEqual(current[f'{ASSETS}:{over_budget}']['first_seen_at'], first.isoformat())
+        self.assertGreater(datetime.fromisoformat(current[f'{ASSETS}:{legacy}']['first_seen_at']), first)
+        self.assertNotIn(f'{ASSETS}:{rollback}', current)
+        self.assertNotIn(f'{ASSETS}:{deployed}', current)
+        self.assertNotIn('first_seen_at', current[f'{ASSETS}:{chapter_manifest}'])
+
+    def test_scheduled_plan_does_not_write_state_and_first_apply_only_marks(self):
+        store = Store()
+        path = 'pages/image/png/' + 'a' * 64 + '/document.webp'
+        key = f'{ASSETS}:{path}'
+        store.put(ASSETS, path, b'derivative')
+        state_path = 'reader-index/reader_gc_state.json'
+        store.put(ASSETS, state_path, {'version': 1, 'kind': 'reader-gc-state',
+                                      'orphans': {key: {'first_seen': '2020-01-01'}}})
+        original = store.read_bytes(ASSETS, state_path)
+        reference = graph.ReferenceGraph(store)
+        scanned = reference.build()
+        args = {'scheduled': True, 'grace_days': 1, 'limit': 1,
+                'retirement_roots': {(ASSETS, collector.retirement.bundle_root(path))}, 'target_modified': Mock()}
+        with patch.object(store, 'delete') as delete, patch.object(collector, 'verify_graph_documents') as verify:
+            planned = collector.collect(store, Mock(), reference, scanned, {}, **args)
+            self.assertEqual(store.read_bytes(ASSETS, state_path), original)
+            self.assertEqual(planned['planned_objects'], 0)
+            self.assertEqual(planned['candidate_sample'], [key])
+            self.assertEqual(planned['observations'], {'candidates': 1, 'past_grace': 0,
+                                                      'persisted': False, 'recreated': 0})
+            verify.assert_called_once_with(store, reference)
+            verify.reset_mock()
+            applied = collector.collect(store, Mock(), reference, scanned, {}, apply=True, **args)
+            self.assertTrue(applied['observations']['persisted'])
+            self.assertEqual(applied['confirmed_deleted_objects'], 0)
+            verify.assert_called_once_with(store, reference)
+            args['target_modified'].assert_not_called()
+            delete.assert_not_called()
+        self.assertIn('first_seen_at', graph.read_gc_state(store)['orphans'][key])
+
+    def test_scheduled_recreated_target_waits_for_a_new_observation(self):
+        store = Store()
+        path = 'pages/image/png/' + 'a' * 64 + '/document.webp'
+        store.put(ASSETS, path, b'recreated')
+        first = datetime.now(timezone.utc) - timedelta(days=2)
+        key = f'{ASSETS}:{path}'
+        store.put(ASSETS, 'reader-index/reader_gc_state.json', {'version': 1, 'kind': 'reader-gc-state',
+            'orphans': {key: {'first_seen': first.date().isoformat(), 'first_seen_at': first.isoformat()}}})
+        reference = graph.ReferenceGraph(store)
+        scanned = reference.build()
+        with patch.object(store, 'delete') as delete:
+            result = collector.collect(store, Mock(), reference, scanned, {}, apply=True, scheduled=True,
+                grace_days=1, limit=1, retirement_roots={(ASSETS, collector.retirement.bundle_root(path))},
+                target_modified=lambda *_: first + timedelta(seconds=1))
+            delete.assert_not_called()
+        self.assertEqual(result['planned_objects'], 0)
+        self.assertGreater(datetime.fromisoformat(graph.read_gc_state(store)['orphans'][key]['first_seen_at']), first)
+
+    def test_scheduled_target_modified_after_checkpoint_blocks_deletion(self):
+        store = Store()
+        path = 'pages/image/png/' + 'a' * 64 + '/document.webp'
+        store.put(ASSETS, path, b'derivative')
+        first = datetime.now(timezone.utc) - timedelta(days=2)
+        store.put(ASSETS, 'reader-index/reader_gc_state.json', {'version': 1, 'kind': 'reader-gc-state',
+            'orphans': {f'{ASSETS}:{path}': {'first_seen': first.date().isoformat(), 'first_seen_at': first.isoformat()}}})
+        reference = graph.ReferenceGraph(store)
+        scanned = reference.build()
+        modified = Mock(side_effect=[first, datetime.now(timezone.utc)])
+        with patch.object(store, 'delete') as delete, self.assertRaisesRegex(RuntimeError, 'changed after planning'):
+            collector.collect(store, Mock(), reference, scanned, {}, apply=True, scheduled=True,
+                grace_days=1, limit=1, retirement_roots={(ASSETS, collector.retirement.bundle_root(path))},
+                target_modified=modified)
+        delete.assert_not_called()
+
+    def test_scheduled_cli_rejects_resume_and_out_of_policy_flags_before_store_access(self):
+        base = ['collector', '--scheduled-retired-assets', '--apply', '--output', 'unused.json']
+        valid = ['--storage', 's3', '--grace-days', '1', '--limit', '500']
+        for args in (valid + ['--auto-resume'], valid + ['--resume-run', '123'],
+                     valid + ['--retired-snapshots-only'], valid + ['--retired-assets-only'],
+                     valid + ['--limit', '0'], valid + ['--limit', '501'], valid + ['--grace-days', '0'],
+                     valid + ['--storage', 'hub']):
+            with self.subTest(args=args), patch('sys.argv', base + args), \
+                 patch.object(collector, 'assert_collector_context') as context, \
+                 patch('sys.stderr'), self.assertRaises(SystemExit):
+                collector.main()
+            context.assert_not_called()
 
     def test_nested_graph_documents_require_fresh_exact_versions(self):
         from types import SimpleNamespace

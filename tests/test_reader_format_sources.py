@@ -42,8 +42,9 @@ class SourcesTests(unittest.TestCase):
         self.indexes['chapters/ebook/epub/index.json'] = self.index('ebook-chapter-stream-index')
         self.indexes['pages/image/index-v2.json'] = {
             'version': 1, 'kind': 'image-stream-index', 'files': [{'key': 'historical-image'}]}
+        self.catalog = {'base_sidecar': {'sha256': '6' * 64}}
         self.stack.enter_context(patch.object(backlog.publication, 'current', return_value=(
-            self.reader_pointer, {'base_sidecar': {'sha256': '6' * 64}})))
+            self.reader_pointer, self.catalog)))
         self.stack.enter_context(patch.object(backlog.publication, 'pinned_base', return_value={'f': self.routes}))
         self.stack.enter_context(patch.object(backlog.publication, 'project_sidecar', return_value={'f': self.routes}))
         self.stack.enter_context(patch.object(backlog.publication, 'observe_consumer', return_value={
@@ -58,13 +59,14 @@ class SourcesTests(unittest.TestCase):
     def capture_search(self, *args, **kwargs):
         return self.pointer, b'manifest', self.published, self.pins, {}
 
-    def add(self, name, ext='docx', state='new'):
+    def add(self, name, ext='docx', state='new', *, profile=None):
         key, path = REPO + '\0' + name + '.' + ext, name + '.' + ext
         self.rows.append([0, name, ext, 0, 1, 0])
         metadata = SimpleNamespace(path=path, lfs={'sha256': SHA_A if state == 'unchanged' else SHA_B}, blob_id=None)
         self.metadata[(REPO, NEW, path)] = metadata
-        if ext in {'docx', 'epub'}:
-            index_path, kind, mode = 'chapters/ebook/epub/index.json', 'ebook-chapter-stream-index', 'e'
+        if ext in {'docx', 'epub', 'chm'}:
+            chapter_ext = 'chm' if ext == 'chm' else 'epub'
+            index_path, kind, mode = f'chapters/ebook/{chapter_ext}/index.json', 'ebook-chapter-stream-index', 'e'
         elif ext in {'md', 'markdown'}:
             index_path, kind, mode = 'documents/text/index.json', 'text-stream-index', 'k'
         elif ext == 'xlsx':
@@ -75,6 +77,8 @@ class SourcesTests(unittest.TestCase):
         entry = {'key': key, 'source_revision': NEW if state == 'same' else OLD,
                  'source_sha256': SHA_A, 'source_extension': ext, 'bucket': backlog.READER_BUCKET,
                  'manifest': f'chapters/ebook/{ext}/{name}/chapter-manifest.json'}
+        if profile is not None:
+            entry['profile'] = profile
         if state in {'unchanged', 'changed', 'same', 'unknown', 'mismatch'}:
             index['files'].append(entry)
             self.routes[key] = {'s': 2, 'm': mode, 'b': backlog.READER_BUCKET, 'p': entry['manifest']}
@@ -99,10 +103,59 @@ class SourcesTests(unittest.TestCase):
             row[4], row[5] = 100, 1
         self.source.write_text(json.dumps(self.payload))
 
-    def prepare(self, extension='docx', generation=GENERATION):
+    def prepare(self, extension='docx', generation=GENERATION, **options):
         return subject.prepare(extension=extension, generation=generation, search_data=self.source,
                                revisions=self.revisions, output=self.output, hub=self.hub,
-                               api=self.api, fs=Mock(), client=Mock())
+                               api=self.api, fs=Mock(), client=Mock(), **options)
+
+    def test_withdrawn_source_is_not_reconverted_even_with_threshold_one(self):
+        withdrawn = self.add('intentionally-withdrawn')
+        remaining = self.add('actual-new')
+        self.catalog['suppressed_sources'] = [withdrawn]
+        self.write_source()
+        report = self.prepare()
+        self.assertEqual(report['source_records'], 2)
+        self.assertEqual(report['selected_records'], 1)
+        self.assertEqual(set(backlog.source_records(json.loads(self.output.read_text()), self.pins)), {remaining})
+
+    def test_reviewed_chm_profile_enters_queue_without_source_change(self):
+        legacy = 'chm-epub-chapters-v9-source-text'
+        current = 'chm-epub-chapters-v10-exact-sections'
+        self.add('same-revision', 'chm', 'same', profile=legacy)
+        self.add('same-content', 'chm', 'unchanged', profile=legacy)
+        self.add('current', 'chm', 'same', profile=current)
+        self.add('missing-profile', 'chm', 'same')
+        self.add('unknown-profile', 'chm', 'same', profile='unreviewed')
+        self.add('unknown-source', 'chm', 'unknown', profile=legacy)
+        self.add('wrong-route', 'chm', 'mismatch', profile=legacy)
+        broken = self.add('previous-failure', 'chm', 'same', profile=legacy)
+        legacy_index = self.indexes['chapters/ebook/chm/index.json']
+        legacy_index['failures'].append({'key': broken, 'source_revision': NEW})
+        stale_failure = self.add('previous-v10-failure', 'chm', 'unchanged', profile=legacy)
+        legacy_index['failures'].append({'key': stale_failure, 'source_revision': OLD, 'profile': current})
+        with_fallback = self.add('fallback-preserved', 'chm', 'same', profile=legacy)
+        next(e for e in legacy_index['files'] if e['key'] == with_fallback)['fallback'] = 'native/ebook/chm/fallback.epub'
+        historical_match = self.add('fallback-matches-wrong-chapter', 'chm', 'same', profile=legacy)
+        e = next(e for e in legacy_index['files'] if e['key'] == historical_match)
+        e['object'] = self.routes[historical_match]['p']
+        self.routes[historical_match].update(c='chapters/ebook/chm/different/chapter-manifest.json', cb=backlog.READER_BUCKET)
+        self.write_source()
+        proof_file = self.root / 'chm-proof.json'
+        report = self.prepare('chm', profile_proof=proof_file)
+        self.assertEqual(report['selected_records'], 2)
+        payload = json.loads(self.output.read_text())
+        self.assertEqual({r['File'] for r in reader_assets.decode_search_payload(payload)},
+                         {'same-revision', 'same-content'})
+        proof = json.loads(proof_file.read_text())
+        self.assertEqual(proof['search_generation'], GENERATION)
+        self.assertEqual(proof['reader_generation'], self.reader_pointer['generation'])
+        self.assertEqual(proof['profile_keys'], {REPO + '\0' + name + '.chm': SHA_A
+                                                for name in ('same-revision', 'same-content')})
+        self.output = self.root / 'profile-disabled.json'
+        new_key = self.add('actual-new', 'chm')
+        self.write_source()
+        self.assertEqual(self.prepare('chm', include_profile_upgrades=False)['selected_records'], 1)
+        self.assertEqual(set(backlog.source_records(json.loads(self.output.read_text()), self.pins)), {new_key})
 
     def test_revision_churn_before_ten_new_sources_filters_by_key_for_office_and_sheet(self):
         for ext in ('docx', 'xlsx'):

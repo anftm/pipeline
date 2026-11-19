@@ -29,7 +29,7 @@ def summary(count=10, extension='epub', **changes):
             row.update(sources=30, not_mapped=count, definite_backlog=count, source_content_unchanged=30-count)
             row.update(changes)
         formats.append(row)
-    return {'version': 1, 'kind': 'reader-format-backlog', 'threshold': 10,
+    return {'version': 1, 'kind': 'reader-format-backlog', 'threshold': 1,
             'search_generation': SEARCH, 'reader_generation': READER, 'formats': formats}
 
 
@@ -106,11 +106,10 @@ class DailyTests(unittest.TestCase):
 
     def test_threshold_for_all_supported_formats_and_exclusions(self):
         for ext, (_family, workflow, _limit) in subject.FORMATS.items():
-            for count in (0, 9, 10, 11):
+            for count in (0, 1, 9, 10, 11):
                 with self.subTest(ext=ext, count=count):
                     result = subject.plan(summary(count, ext))
-                    expected = ('blocked' if workflow is None else 'triggered' if count >= 10
-                                else 'complete' if count == 0 else 'below_threshold')
+                    expected = 'blocked' if workflow is None else 'triggered' if count else 'complete'
                     self.assertEqual(result['formats'][ext]['state'], expected)
                     self.assertEqual(result['operation_ids'], [])
         data = summary()
@@ -131,12 +130,12 @@ class DailyTests(unittest.TestCase):
 
     def test_new_web_sources_trigger_without_claiming_dependencies_checked(self):
         for ext in subject.FAMILIES['web'][0].split():
-            for count in (9, 10, 11):
+            for count in (1, 9, 10, 11):
                 with self.subTest(ext=ext, count=count):
                     data = summary(count, ext, conversion_dependencies_checked=False)
                     before = copy.deepcopy(data)
                     decision = subject.plan(data)['formats'][ext]
-                    self.assertEqual(decision['state'], 'triggered' if count >= 10 else 'below_threshold')
+                    self.assertEqual(decision['state'], 'triggered')
                     self.assertEqual(decision['completion_scope'], 'explicit_source_changes')
                     self.assertFalse(decision['conversion_dependencies_checked'])
                     self.assertEqual(decision['dependency_freshness'], 'unknown')
@@ -236,12 +235,11 @@ class DailyTests(unittest.TestCase):
 
     def test_mixed_source_changes_threshold_and_uncertainty(self):
         for ext in ('md', 'markdown', *subject.FAMILIES['web'][0].split()):
-            for count in (9, 10):
+            for count in (1, 9, 10):
                 with self.subTest(ext=ext, count=count):
                     data = summary(count, ext, not_mapped=count-1, source_content_changed=1,
                                    conversion_dependencies_checked=False)
-                    self.assertEqual(subject.plan(data)['formats'][ext]['state'],
-                                     'triggered' if count == 10 else 'below_threshold')
+                    self.assertEqual(subject.plan(data)['formats'][ext]['state'], 'triggered')
             for field in (*subject.UNCERTAIN, 'all_source_identities_checked'):
                 data = summary(10, ext, not_mapped=2, source_content_changed=8,
                                conversion_dependencies_checked=False)
@@ -270,8 +268,8 @@ class DailyTests(unittest.TestCase):
             self.assertFalse(decision['conversion_dependencies_checked'])
             self.assertTrue(decision['warnings'])
 
-    def test_changed_sources_count_toward_ten_without_trusting_trigger_ready(self):
-        data = summary(10, not_mapped=2, source_content_changed=8, trigger_ready=False, threshold_exceeded=False)
+    def test_one_changed_source_triggers_without_trusting_trigger_ready(self):
+        data = summary(1, not_mapped=0, source_content_changed=1, trigger_ready=False, threshold_exceeded=False)
         self.assertEqual(subject.plan(data)['formats']['epub']['state'], 'triggered')
 
     def test_untrusted_summary_rejected(self):
@@ -321,10 +319,26 @@ class DailyTests(unittest.TestCase):
         self.assertEqual(result['status'], 'complete')
         self.assertNotIn('txt', result['blocked'])
 
-    def test_nine_initially_does_not_dispatch(self):
-        self.refresh.side_effect = [summary(9)]
-        result = self.controller().run(summary(9))
-        self.assertEqual(result['formats']['epub']['state'], 'below_threshold')
+    def test_chm_profile_only_backlog_completes_after_verified_publish(self):
+        before = summary(0, 'chm', definite_backlog=1, profile_outdated=1)
+        self.refresh.side_effect = [before, summary(0, 'chm')]
+        result = self.controller().run(before)
+        self.assertEqual(self.api.posts[0][0], 'reader-chm-repair.yml')
+        self.assertEqual(self.api.posts[1][0], subject.PUBLISH)
+        self.assertEqual(result['formats']['chm']['counts']['profile_outdated'], 0)
+        self.assertEqual(result['status'], 'complete')
+        with self.assertRaisesRegex(ValueError, 'inconsistent source counts'):
+            subject.plan(summary(0, 'epub', definite_backlog=1, profile_outdated=1))
+
+    def test_one_initially_dispatches_but_zero_does_not(self):
+        self.refresh.side_effect = [summary(1), summary(0)]
+        result = self.controller().run(summary(1))
+        self.assertEqual(result['formats']['epub']['state'], 'complete')
+        self.assertEqual(len(self.api.posts), 2)
+        self.api.posts.clear()
+        self.refresh.side_effect = [summary(0)]
+        result = self.controller(journal=self.journal.with_name('empty-journal.json')).run(summary(0))
+        self.assertEqual(result['formats']['epub']['state'], 'complete')
         self.assertFalse(self.api.posts)
 
     def test_reader_generation_can_advance_search_must_stay_pinned(self):
@@ -538,7 +552,7 @@ class ContinuationTests(unittest.TestCase):
         self.refresh.side_effect = [summary(10), summary(9)]
         return self.controller(parent_run_id='100', max_batches=1, **kwargs).run(summary())
 
-    def test_resume_below_threshold_preserves_trigger_and_drains(self):
+    def test_resume_preserves_trigger_and_drains(self):
         previous = self.prepared()
         self.assertEqual(previous['status'], 'continuation_required')
         subject.validate_continuation(previous, HEAD, 100)
@@ -1115,6 +1129,18 @@ class GitHubTests(unittest.TestCase):
         self.assertEqual({r['id'] for r in api.active_children('1')},{2,3,4})
         api.request.return_value={'total_count':2,'jobs':[]}
         self.assertEqual({r['id'] for r in api.active_children('1')},{2,3,4})
+
+    def test_waiting_same_lane_successor_is_not_an_active_writer(self):
+        api = self.api()
+        for status in ('pending', 'queued'):
+            with self.subTest(status=status):
+                row = {'id': 2, 'path': '.github/workflows/reader-maintenance.yml', 'status': status}
+                api.runs = Mock(side_effect=lambda **kw: [row] if kw['status'] == status else [])
+                job = {'status': 'queued', 'steps': [], 'started_at': None}
+                api.request = Mock(return_value={'total_count': 1, 'jobs': [job]})
+                self.assertEqual(api.active_children('1'), [])
+                job['started_at'] = '2026-11-19T05:00:00Z'
+                self.assertEqual(api.active_children('1'), [row])
 
     def test_active_detection_includes_pending_and_excludes_parent(self):
         api = self.api()

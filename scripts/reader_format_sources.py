@@ -25,7 +25,8 @@ def _identities(records):
             for key, record in records.items()}
 
 
-def prepare(*, extension, generation, search_data, revisions, output, hub, api, fs, client):
+def prepare(*, extension, generation, search_data, revisions, output, hub, api, fs, client,
+            profile_proof=None, include_profile_upgrades=True):
     """Inspect once, validate the full fetch, and write a new compact subset."""
     if extension not in backlog.EXTENSIONS:
         raise ValueError('requires one supported Reader extension')
@@ -40,7 +41,8 @@ def prepare(*, extension, generation, search_data, revisions, output, hub, api, 
     records = backlog.source_records(payload, source_revisions)
     details = {}
     summary, _epub = backlog.inspect(hub=hub, api=api, fs=fs, client=client,
-                                     scope='all', details_out=details)
+                                     scope='all', details_out=details,
+                                     include_profile_upgrades=include_profile_upgrades)
     if summary['search_generation'] != generation:
         raise ValueError('published search generation differs from producer pin')
     if source_revisions != details['source_revisions']:
@@ -53,14 +55,13 @@ def prepare(*, extension, generation, search_data, revisions, output, hub, api, 
         if record['extension'] != extension:
             continue
         row = details['rows'].get(key)
-        if (not row or row.get('state') not in {'not_mapped', 'content_changed'}
+        if (not row or row.get('state') not in {'not_mapped', 'content_changed', 'profile_outdated'}
                 or row.get('recorded_failure') or row.get('pending_shard_checkpoint')):
             continue
         if row.get('key') != key or row.get('source_revision') != record['revision']:
             raise ValueError('classified source differs from pinned record')
-        # New and proven-changed main files recapture current dependencies in
-        # the converter. Unchanged sources remain excluded: their dependency
-        # freshness was not established by the main-file identity check.
+        # Ordinary unchanged files remain excluded. A reviewed old chapter
+        # profile is a separate reason to rebuild, not a source-content change.
         selected.append(record)
 
     requests = {(record['repo'], record['revision'], record['path']) for record in selected}
@@ -74,6 +75,16 @@ def prepare(*, extension, generation, search_data, revisions, output, hub, api, 
     # Preserve dictionaries and row order; never re-encode/split away repositories
     # needed by the full revision guard. source_records preserves decoder order.
     filtered = {**payload, 'rc': [row for key, row in zip(records, payload['rc']) if key in selected_keys]}
+    profile_keys = {key: details['rows'][key]['previous_source_sha256'] for key in sorted(selected_keys)
+                    if details['rows'][key]['state'] == 'profile_outdated'}
+    if profile_proof is not None:
+        if extension != 'chm' or Path(profile_proof).resolve() in {
+                output.resolve(), search_data.resolve(), revisions.resolve()}:
+            raise ValueError('profile proof requires a distinct CHM output path')
+        with Path(profile_proof).open('x', encoding='utf8') as stream:
+            json.dump({'search_generation': generation, 'reader_generation': summary['reader_generation'],
+                       'profile_keys': profile_keys}, stream, ensure_ascii=False, sort_keys=True)
+            stream.write('\n')
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open('x', encoding='utf8') as stream:
         json.dump(filtered, stream, ensure_ascii=False, separators=(',', ':'))
@@ -91,11 +102,13 @@ def main(argv=None):
     parser.add_argument('--search-data', required=True, type=Path)
     parser.add_argument('--revisions', required=True, type=Path)
     parser.add_argument('--output', required=True, type=Path)
+    parser.add_argument('--profile-proof', type=Path)
     args = parser.parse_args(argv)
     token = os.environ.get('HF_TOKEN')
     with backlog.httpx.Client(timeout=90, follow_redirects=True) as client:
         result = prepare(**vars(args), hub=backlog.HubBucketStore(), api=backlog.HfApi(token=token),
-                         fs=backlog.HfFileSystem(token=token), client=client)
+                         fs=backlog.HfFileSystem(token=token), client=client,
+                         include_profile_upgrades=os.getenv('READER_CHM_PROFILE_REBUILD_ENABLED') == 'true')
     print(json.dumps(result, ensure_ascii=False, sort_keys=True), flush=True)
     return 0
 

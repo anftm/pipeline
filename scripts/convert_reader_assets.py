@@ -2444,6 +2444,7 @@ def convert_item(item: dict, bundle: Path, reusable: dict | None = None) -> dict
                 epub_chapters.build_bundle(
                     chapter_source, staged_chapters,
                     include_all_documents=item["extension"] == "chm",
+                    preserve_toc_targets=item["extension"] == "chm",
                 )
                 chapter_parent = (Path(*Path(object_path).parts[:3])
                                   / epub_chapters.bundle_version(staged_chapters)

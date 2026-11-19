@@ -78,10 +78,16 @@ jobs:
           SCOPE: ${{ inputs.scope || 'retired-assets' }}
           RESUME_RUN: ${{ inputs.resume_run || '' }}
           EVENT_NAME: ${{ github.event_name }}
+          SCHEDULED_APPLY_ENABLED: ${{ vars.READER_GC_24H_APPLY_ENABLED }}
         run: |
           [[ "$LIMIT" =~ ^[0-9]+$ ]] || exit 1
           if [[ "$SCOPE" == obsolete-pdf-references || "$SCOPE" == obsolete-pdf-handoff ]]; then [[ "$EVENT_NAME" == workflow_dispatch ]]; fi
-          if [[ "$EVENT_NAME" == schedule && "$(date -u +%u)" == 1 ]]; then SCOPE=unreferenced; fi
+          if [[ "$EVENT_NAME" == schedule ]]; then
+            args=(run --scheduled --journal output/maintenance/journal.json)
+            if [[ "$SCHEDULED_APPLY_ENABLED" == true ]]; then args+=(--scheduled-apply); fi
+            python -u scripts/reader_gc_maintenance.py "${args[@]}"
+            exit 0
+          fi
           if [[ "$SCOPE" == obsolete-pdf-references ]]; then
             [[ "$EVENT_NAME" == workflow_dispatch && "$PLAN_ONLY" == false && "$LIMIT" == 0 ]]
             python -B -m unittest tests.test_reader_obsolete_pdf tests.test_reader_obsolete_pdf_apply tests.test_reader_obsolete_pdf_references tests.test_reader_obsolete_pdf_store tests.test_reader_obsolete_pdf_run

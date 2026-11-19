@@ -223,9 +223,12 @@ gh() {
             self.assertIn('plan_reader_stream_matrix.py' if name != 'chm-repair' else 'pilot_epub_chapters.py',
                           planning['run'])
             self.assertNotIn('continue-on-error', filtering)
-            self.assertEqual(filtering['env'], {'HF_TOKEN': '${{ secrets.HF_TOKEN }}',
+            expected_env = {'HF_TOKEN': '${{ secrets.HF_TOKEN }}',
                 'EXTENSION': 'chm' if name == 'chm-repair' else '${{ inputs.extension }}',
-                'SEARCH_GENERATION': '${{ inputs.search_generation }}'})
+                'SEARCH_GENERATION': '${{ inputs.search_generation }}'}
+            if name == 'chm-repair':
+                expected_env['READER_CHM_PROFILE_REBUILD_ENABLED'] = '${{ vars.READER_CHM_PROFILE_REBUILD_ENABLED }}'
+            self.assertEqual(filtering['env'], expected_env)
             archive = next(step for step in steps if 'tar -czf' in step.get('run', ''))
             self.assertGreater(steps.index(archive), steps.index(planning))
             build = next(job for job in jobs.values() if any(
@@ -237,6 +240,9 @@ gh() {
   printf '%s\\n' "$@" > helper-args
   if [[ "$FILTER_STATUS" != missing ]]; then
     printf '%s' "$FILTERED" > output/reader-actionable.json
+    if [[ "$*" == *'--profile-proof output/chm-profile-proof.json' ]]; then
+      printf '{}' > output/chm-profile-proof.json
+    fi
   fi
   if [[ "$FILTER_STATUS" == fail ]]; then return 1; fi
 }
@@ -258,16 +264,21 @@ gh() {
                     (root / 'output/search_data.json').write_text(original)
                     (root / 'state/commits.json').write_text(revisions)
                     # Supply planner reports for the actual YAML archive command.
-                    for filename in archive['run'].split()[3:]:
-                        if filename not in ('output/search_data.json', 'state/commits.json'):
-                            (root / filename).write_text('{}')
+                    if name == 'chm-repair':
+                        (root / 'output/chm-plan.json').write_text('{}')
+                        artifact = 'output/chm-source-snapshot.tgz'
+                    else:
+                        for filename in archive['run'].split()[3:]:
+                            if filename not in ('output/search_data.json', 'state/commits.json'):
+                                (root / filename).write_text('{}')
+                        artifact = archive['run'].split()[2]
                     values = inputs_for(config, automation_id=AUTO_ID if automatic else '', extension=extension)
                     enabled = expression(filtering['if'], inputs=values)
                     self.assertEqual(bool(enabled), automatic)
                     script = stub + (filtering['run'] if enabled else '')
                     script += '\nprintf planned > planned\n' + archive['run']
                     env = dict(os.environ, EXTENSION=extension, SEARCH_GENERATION=GENERATION,
-                               FILTER_STATUS=status, FILTERED=filtered)
+                               FILTER_STATUS=status, FILTERED=filtered, AUTOMATION_ID=AUTO_ID if automatic else '')
                     result = subprocess.run(['bash', '-e', '-o', 'pipefail', '-c', script],
                                             cwd=root, env=env, capture_output=True, text=True, timeout=5)
                     allowed = not automatic or (status == 'ok' and extension not in ('', 'all'))
@@ -279,16 +290,17 @@ gh() {
                     helper_called = automatic and extension not in ('', 'all')
                     self.assertEqual((root / 'helper-args').exists(), helper_called)
                     if helper_called:
-                        self.assertEqual((root / 'helper-args').read_text().splitlines(), [
-                            'scripts/reader_format_sources.py', '--extension', extension,
-                            '--generation', GENERATION, '--search-data', 'output/search_data.json',
-                            '--revisions', 'state/commits.json', '--output', 'output/reader-actionable.json'])
+                        expected = ['scripts/reader_format_sources.py', '--extension', extension,
+                                    '--generation', GENERATION, '--search-data', 'output/search_data.json',
+                                    '--revisions', 'state/commits.json', '--output', 'output/reader-actionable.json']
+                        if name == 'chm-repair':
+                            expected += ['--profile-proof', 'output/chm-profile-proof.json']
+                        self.assertEqual((root / 'helper-args').read_text().splitlines(), expected)
                     if allowed:
                         restored = root / 'restored'
                         restored.mkdir()
                         # Use the same artifact basename/path the build job downloads.
                         (restored / 'output').mkdir()
-                        artifact = archive['run'].split()[2]
                         (restored / artifact).write_bytes((root / artifact).read_bytes())
                         extracted = subprocess.run(['bash', '-e', '-c', unpack['run']], cwd=restored,
                                                    capture_output=True, text=True, timeout=5)
@@ -296,8 +308,11 @@ gh() {
                         self.assertEqual((restored / 'output/search_data.json').read_text(),
                                          filtered if automatic else original)
                         self.assertEqual((restored / 'state/commits.json').read_text(), revisions)
+                        if name == 'chm-repair':
+                            self.assertEqual((restored / 'output/chm-full-source.json').exists(), automatic)
+                            self.assertEqual((restored / 'output/chm-profile-proof.json').exists(), automatic)
                     else:
-                        self.assertFalse((root / archive['run'].split()[2]).exists())
+                        self.assertFalse((root / artifact).exists())
                         needs = {key: {'result': 'failure' if key == 'plan' else 'success',
                                       'outputs': {'matrix': '{"include":[{}]}', 'count': '1'}} for key in jobs}
                         for job_name, job in jobs.items():
@@ -318,7 +333,12 @@ gh() {
             self.assertEqual(steps[unpack + 1]['name'], GATE)
             guard = steps[unpack + 2]
             self.assertEqual(guard, plan_guard)
-            self.assertEqual(first_write, unpack + 3)
+            self.assertEqual(first_write, unpack + (4 if name == 'chm-repair' else 3))
+            if name == 'chm-repair':
+                recheck = steps[first_write - 1]
+                self.assertIn('cmp output/chm-profile-proof.json', recheck['run'])
+                self.assertIn('cmp output/search_data.json', recheck['run'])
+                self.assertEqual(recheck['if'], guard['if'])
             self.assertEqual(build['concurrency']['group'], 'reader-sidecar')
             if 'finalize' in jobs:
                 self.assertFalse(any('guard-source' in step.get('run', '')
@@ -403,7 +423,8 @@ gh() {
                                             for step in active))
                         skipped = list(dispatch) if defer else []
                         if not automation_id:
-                            skipped += [step for step in steps if 'guard-source' in step.get('run', '')]
+                            skipped += [step for step in steps if 'guard-source' in step.get('run', '')
+                                        or step.get('name') == 'Revalidate CHM profile inputs under the Reader writer lock']
                         self.assertCountEqual([step for step in steps if step not in active], skipped)
                         for step in active:
                             if 'scripts/finalize_' in step.get('run', ''):

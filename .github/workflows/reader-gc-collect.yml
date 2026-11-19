@@ -30,9 +30,9 @@ on:
         type: string
         default: "0"
       scope:
-        description: "unreferenced/retired-assets: two Reader buckets only, with four-bucket reference closure. Other scopes use separate legacy collectors. All apply scopes require the maintenance fence."
+        description: "General collection uses four-bucket reference closure. scheduled-retired-assets is the bounded daily derivative policy. All apply scopes require the maintenance fence."
         type: choice
-        options: [unreferenced, retired-assets, retired-catalog-snapshots, page-plan, page-apply]
+        options: [unreferenced, retired-assets, scheduled-retired-assets, retired-catalog-snapshots, page-plan, page-apply]
         default: unreferenced
       reader_only:
         description: General collection deletes only reader-assets-v2 and pdf-pages-v2; Archive/BHA and CCRD are reference-only
@@ -105,6 +105,7 @@ jobs:
           RESUME_SCAN_RUN: ${{ inputs.resume_scan_run }}
           RESUME_RUN: ${{ inputs.resume_run }}
           AUTO_RESUME: ${{ inputs.auto_resume }}
+          SCHEDULED_APPLY_ENABLED: ${{ vars.READER_GC_24H_APPLY_ENABLED }}
           HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
           HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
           HF_S3_NAMESPACE: vomebook
@@ -113,7 +114,7 @@ jobs:
           HF_S3_INPUT_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_INPUT_SECRET_ACCESS_KEY }}
         run: |
           case "$SCOPE" in
-            unreferenced|retired-assets|retired-catalog-snapshots|page-plan|page-apply) ;;
+            unreferenced|retired-assets|scheduled-retired-assets|retired-catalog-snapshots|page-plan|page-apply) ;;
             *) echo 'This workflow owns only the two Reader buckets; legacy external/reset scopes are disabled' >&2; exit 1 ;;
           esac
           [[ "$GRACE_DAYS" =~ ^[0-9]+$ ]] || exit 1
@@ -151,6 +152,9 @@ jobs:
             echo 'General Reader collection requires reader_only=true; external buckets are reference-only' >&2
             exit 1
           fi
+          if [[ "$SCOPE" == scheduled-retired-assets && "$APPLY" == true && "$SCHEDULED_APPLY_ENABLED" != true ]]; then
+            echo 'Scheduled apply requires READER_GC_24H_APPLY_ENABLED=true' >&2; exit 1
+          fi
           args=(--grace-days "$GRACE_DAYS" --limit "$LIMIT" --storage "$STORAGE"
                 --output output/gc/collection.json)
           if [[ "$APPLY" == true ]]; then args+=(--apply); fi
@@ -158,6 +162,7 @@ jobs:
           if [[ -n "$RESUME_RUN" ]]; then args+=(--resume-run "$RESUME_RUN"); fi
           if [[ "$AUTO_RESUME" == true ]]; then args+=(--auto-resume); fi
           if [[ "$SCOPE" == retired-assets ]]; then args+=(--retired-assets-only); fi
+          if [[ "$SCOPE" == scheduled-retired-assets ]]; then args+=(--scheduled-retired-assets); fi
           if [[ "$SCOPE" == retired-catalog-snapshots ]]; then args+=(--retired-snapshots-only); fi
           python -u scripts/reader_gc_collect.py "${args[@]}"
       - uses: actions/upload-artifact@v7
