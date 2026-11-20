@@ -20,9 +20,10 @@ BASE = f"https://api.github.com/repos/{REPO}"
 WORKFLOW = "static.yml"
 OPERATION = re.compile(r"[0-9a-f]{32}\Z")
 SHA = re.compile(r"[0-9a-f]{40}\Z")
-# Reviewed topology: source-checks has no deployment permissions; deploy is a
-# separate needs: source-checks job. A change requires a new code review.
+# Reviewed topology: the preparation job cannot deploy, and the only deploy
+# job requires its success. An exact workflow blob selects the topology.
 RECOVERY_WORKFLOW_BLOBS = frozenset({'3e13f0e4c9ca38d4019151cf07becc756d8da1f0'})
+PREPARE_RECOVERY_WORKFLOW_BLOBS = frozenset({'cc069b7850abae7662c166b85c2b294cc5786e18'})
 
 
 def _operation(value: str) -> str:
@@ -99,8 +100,14 @@ def failed_before_deploy(session, run: dict, *, expected_sha: str) -> None:
                            params={'ref': expected_sha}, timeout=20)
     response.raise_for_status()
     metadata = response.json()
-    if (not isinstance(metadata, dict) or metadata.get('sha') not in RECOVERY_WORKFLOW_BLOBS
-            or metadata.get('type') != 'file'):
+    if not isinstance(metadata, dict) or metadata.get('type') != 'file':
+        raise ValueError('Pages workflow topology is not reviewed for failed-run recovery')
+    blob = metadata.get('sha')
+    if blob in RECOVERY_WORKFLOW_BLOBS:
+        preparation = 'source-checks'
+    elif blob in PREPARE_RECOVERY_WORKFLOW_BLOBS:
+        preparation = 'prepare'
+    else:
         raise ValueError('Pages workflow topology is not reviewed for failed-run recovery')
     response = session.get(f'{BASE}/actions/runs/{run_id}/attempts/1/jobs', params={'per_page': 100}, timeout=20)
     response.raise_for_status()
@@ -111,9 +118,9 @@ def failed_before_deploy(session, run: dict, *, expected_sha: str) -> None:
         raise ValueError('Pages failed-run job list is incomplete')
     jobs = body['jobs']
     if (len(jobs) != 2 or any(not isinstance(job, dict) for job in jobs)
-            or {job.get('name') for job in jobs} != {'source-checks', 'deploy'}):
+            or {job.get('name') for job in jobs} != {preparation, 'deploy'}):
         raise ValueError('Pages failed-run jobs differ from the pinned workflow')
-    source = next(job for job in jobs if job['name'] == 'source-checks')
+    source = next(job for job in jobs if job['name'] == preparation)
     deployment = next(job for job in jobs if job['name'] == 'deploy')
     if (source.get('status') != 'completed' or source.get('conclusion') not in {'failure', 'cancelled', 'timed_out'}
             or deployment.get('status') != 'completed' or deployment.get('conclusion') != 'skipped'):

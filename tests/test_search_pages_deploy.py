@@ -1,6 +1,6 @@
 """A dispatched workflow is only a correlated run, not a site receipt."""
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from scripts import search_pages_deploy as pages
 
@@ -127,6 +127,23 @@ class PagesDeployTests(unittest.TestCase):
         metadata.json.return_value = {'type': 'file', 'sha': 'f' * 40}
         with self.assertRaisesRegex(ValueError, 'not reviewed'):
             pages.failed_before_deploy(session, run(), expected_sha=SHA)
+
+    def test_prepare_topology_only_recovers_a_reviewed_skipped_deployment(self):
+        source = {'name':'prepare','status':'completed','conclusion':'failure'}
+        deploy = {'name':'deploy','status':'completed','conclusion':'skipped','steps':[]}
+        response, metadata, session = Mock(), Mock(), Mock()
+        response.links={}
+        response.json.return_value={'total_count':2,'jobs':[source,deploy]}
+        reviewed='4'*40
+        metadata.json.return_value={'type':'file','sha':reviewed}
+        session.get.side_effect=lambda url, **_kw: metadata if '/contents/' in url else response
+        with patch.object(pages,'PREPARE_RECOVERY_WORKFLOW_BLOBS',{reviewed}):
+            pages.failed_before_deploy(session,run(status='completed',conclusion='failure'),expected_sha=SHA)
+            deploy['conclusion']='failure'
+            with self.assertRaisesRegex(ValueError,'may have started'):
+                pages.failed_before_deploy(session,run(),expected_sha=SHA)
+        with self.assertRaisesRegex(ValueError,'not reviewed'):
+            pages.failed_before_deploy(session,run(),expected_sha=SHA)
 
     def test_inputs_cannot_change_repo_or_inject_operation(self):
         session = Mock()

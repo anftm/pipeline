@@ -37,7 +37,8 @@ except ImportError:
 
 REV = re.compile(r'[0-9a-f]{40}\Z')
 # Independently reviewed static workflow topology for this recovery only.
-SUPERSESSION_WORKFLOW_BLOBS = frozenset({'a62e59ff2ac2272df619f93d6be7444d4dd717dc'})
+SUPERSESSION_WORKFLOW_BLOBS = frozenset({'a62e59ff2ac2272df619f93d6be7444d4dd717dc',
+                                       'cc069b7850abae7662c166b85c2b294cc5786e18'})
 
 
 def _pending(store, operation: str) -> tuple[tx.Current, dict]:

@@ -100,6 +100,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GC_PRODUCER_TOKENS_JSON: ${{ secrets.GC_PRODUCER_TOKENS_JSON }}
           GC_AMBROSSEE_MAINTENANCE_TOKEN: ${{ secrets.GC_AMBROSSEE_MAINTENANCE_20261102 }}
+          PAGES_TOKEN: ${{ secrets.PAGES_TOKEN }}
           READER_V3_PREVIEW_FIRST: ${{ vars.READER_V3_PREVIEW_FIRST || 'false' }}
           READER_V3_DJVU_MIGRATION: ${{ vars.READER_V3_DJVU_MIGRATION || 'false' }}
           READER_DATASET_PRIMARY_ENABLED: ${{ vars.READER_DATASET_PRIMARY_ENABLED || 'false' }}
@@ -110,6 +111,7 @@ jobs:
           APPLY: ${{ inputs.apply }}
           EVENT_NAME: ${{ github.event_name }}
           SCHEDULE: ${{ github.event.schedule }}
+          READER_PAGES_EXACT_ENABLED: ${{ vars.READER_PAGES_EXACT_ENABLED }}
         run: |
           # Old scheduled or queued runs must not resume retirement after the
           # publisher is re-enabled. Manual dispatch is the only live entry.
@@ -132,6 +134,9 @@ jobs:
             *) exit 1 ;;
           esac
           if [[ "$APPLY" == true ]]; then args+=(--apply); fi
+          if [[ "$APPLY" == true && "$READER_PAGES_EXACT_ENABLED" == true && ( "$OPERATION" == unify || "$OPERATION" == publish-generation ) ]]; then
+            python -B -m scripts.reader_pages_release --preflight
+          fi
           python scripts/publish_reader_v3.py "${args[@]}"
           echo "changed=true" >> "$GITHUB_OUTPUT"
           echo "redirect_audited=$(jq -r '.redirect_audited // false' output/v3/publication.json)" >> "$GITHUB_OUTPUT"
@@ -150,6 +155,9 @@ jobs:
           RESOURCE_JSON: ${{ inputs.resource_json }}
           OPERATION: ${{ steps.operation.outputs.operation }}
           EXPECTED_PARENT: ${{ inputs.expected_parent }}
+          READER_PAGES_EXACT_ENABLED: ${{ vars.READER_PAGES_EXACT_ENABLED }}
+          HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
         run: |
           if [[ "$OPERATION" == publish-generation ]]; then
             actual=$(python scripts/publish_reader_v3.py inspect | jq -r '.pointer.generation')
@@ -158,7 +166,11 @@ jobs:
           if [[ "$OPERATION" == migrate-derived || "$OPERATION" == resume-derived ]]; then
             python scripts/publish_reader_v3.py check-page-window --resource-json "$RESOURCE_JSON"
           fi
-          python scripts/publish_search_reader_index.py --pinned-only
+          if [[ "$READER_PAGES_EXACT_ENABLED" == true && ( "$OPERATION" == unify || "$OPERATION" == publish-generation ) ]]; then
+            python -B -m scripts.reader_pages_release --publication output/v3/publication.json --output output/v3/pages-release.json
+          else
+            python scripts/publish_search_reader_index.py --pinned-only
+          fi
       - name: Confirm both deployed consumer projections
         id: ack
         if: >-
