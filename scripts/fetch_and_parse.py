@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-每天拉取 10 个 HF 仓库的 直接目录.txt，生成 search_data.json。
+读取配置中的 HF 仓库目录，生成 search_data.json。
 仅当有仓库 commit SHA 变化时才重新生成。
 
 用法:
@@ -24,22 +24,18 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+try:
+    from scripts.search_source_registry import SOURCES, accepts_baseline
+except ModuleNotFoundError as error:
+    if error.name != 'scripts':
+        raise
+    from search_source_registry import SOURCES, accepts_baseline
+
 # ═══════════════════════════════════════════════════════════
 # 配置
 # ═══════════════════════════════════════════════════════════
 
-REPOS = [
-    "VoiceOfML/VOMEBOOK",
-    "VoiceOfML/SovMaterials",
-    "VoiceOfML/GPCREducation",
-    "VoiceOfML/Teachers",
-    "VoiceOfML/MLMRL-Library",
-    "VoiceOfML/Japanese-Materials",
-    "VoiceOfML/A-Historical-Learning-Data",
-    "VoiceOfML/MLMRL-Hub",
-    "VoiceOfML/Omnibus",
-    "VoiceOfML/Marxists-Library",
-]
+REPOS = list(SOURCES)
 
 STATE_FILE = Path("state/commits.json")
 OUTPUT_DIR = Path("output")
@@ -598,9 +594,7 @@ def main():
             if baseline_path.resolve() == STATE_FILE.resolve():
                 raise ValueError("published baseline cannot be the writable output state")
             old_state = json.loads(baseline_path.read_text(encoding="utf-8"))
-            if (not isinstance(old_state, dict) or set(old_state) != set(REPOS)
-                    or any(not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}", sha)
-                           for sha in old_state.values())):
+            if not accepts_baseline(old_state, REPOS):
                 raise ValueError("invalid published source revision map")
         except (OSError, ValueError, UnicodeError) as error:
             print(f"❌ 无法读取已发布来源版本: {error}")
@@ -673,7 +667,7 @@ def main():
     for repo in REPOS:
         print(f"\n📥 处理仓库: {repo}")
 
-        # 1. 下载 txt
+        # 1. 下载经目录生成步骤验证的源版本。
         revision = new_state[repo]
         txt_url = f"{RAW_BASE}/{repo}/resolve/{revision}/{urllib.parse.quote('直接目录.txt')}"
         print(f"   📄 下载: {txt_url}")

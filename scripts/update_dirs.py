@@ -10,18 +10,14 @@ import sys
 import tempfile
 from datetime import datetime, timezone, timedelta
 
-REPOS = [
-    "datasets/VoiceOfML/MLMRL-Hub",
-    "datasets/VoiceOfML/Omnibus",
-    "datasets/VoiceOfML/MLMRL-Library",
-    "datasets/VoiceOfML/Teachers",
-    "datasets/VoiceOfML/A-Historical-Learning-Data",
-    "datasets/VoiceOfML/Japanese-Materials",
-    "datasets/VoiceOfML/GPCREducation",
-    "datasets/VoiceOfML/SovMaterials",
-    "datasets/VoiceOfML/VOMEBOOK",
-    "datasets/VoiceOfML/Marxists-Library",
-]
+try:
+    from scripts.search_source_registry import SOURCES
+except ModuleNotFoundError as error:
+    if error.name != 'scripts':
+        raise
+    from search_source_registry import SOURCES
+
+REPOS = [f'datasets/{name}' for name in SOURCES]
 
 HF_USERNAME = "VoiceOfML"
 AUTO_COMMIT_PREFIX = "自动更新目录"
@@ -131,10 +127,12 @@ def process_repo(repo_path, clone_url=None):
                 print(f"  git add 失败: {result.stderr.strip()[:300]}")
                 return None
             result = run_cmd([
-                "git", "-c", "user.name=github-actions[bot]",
-                "-c", "user.email=github-actions[bot]@users.noreply.github.com",
+                "git", "-c", "user.name=vomebook", "-c", "user.email=vomebook@gmail.com",
                 "commit", "-m", f"{AUTO_COMMIT_PREFIX} [{beijing_now_str()}] [auto-bot]",
-            ], cwd=repo_dir)
+            ], cwd=repo_dir, extra_env={
+                'GIT_AUTHOR_NAME': 'vomebook', 'GIT_AUTHOR_EMAIL': 'vomebook@gmail.com',
+                'GIT_COMMITTER_NAME': 'vomebook', 'GIT_COMMITTER_EMAIL': 'vomebook@gmail.com',
+            })
             if result.returncode != 0:
                 print(f"  git commit 失败: {result.stderr.strip()[:300]}")
                 return None
