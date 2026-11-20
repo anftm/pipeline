@@ -176,7 +176,7 @@ class V3PublicationTests(unittest.TestCase):
         self.assertFalse(workflow[True]["workflow_dispatch"]["inputs"]["apply"]["default"])
         self.assertEqual(workflow[True]["workflow_dispatch"]["inputs"]["operation"]["options"],
                          ["inspect", "unify", "ack", "retire", "withdraw", "reset-documents",
-                          "remove-route", "restore-route", "verify-route", "migrate-derived", "resume-derived", "redirect-derived", "finalize-derived-redirects", "replace-derived-history", "refresh-reader-consumers", "reconcile-derived-index", "reconcile-sidecar", "compact-legacy-history", "publish-generation", "verify-generation"])
+                          "remove-route", "restore-route", "verify-route", "migrate-derived", "resume-derived", "redirect-derived", "finalize-derived-redirects", "replace-derived-history", "refresh-reader-consumers", "reconcile-derived-index", "reconcile-sidecar", "compact-legacy-history", "publish-generation", "verify-generation", "verify-pages-lane"])
         operation_step = next(step for step in workflow["jobs"]["publish"]["steps"]
                               if step.get("id") == "operation")
         # Detached OCR admission and correction are retired; retention remains
@@ -205,7 +205,12 @@ class V3PublicationTests(unittest.TestCase):
             for operation in ('unify', 'remove-route', 'restore-route'):
                 self.assertIn('"' + operation + '"', value)
             self.assertIn('secrets.' + name, value)
-            self.assertNotIn('inputs.apply', value)
+            # Existing migration previews still need S3 without apply. Only
+            # the exact publication/preflight additions may depend on apply.
+            original_ops, exact = value.split(', inputs.operation) || ', 1)
+            self.assertNotIn('inputs.apply', original_ops)
+            self.assertIn("inputs.apply && inputs.operation == 'publish-generation'", exact)
+            self.assertIn("inputs.operation == 'verify-pages-lane' && !inputs.apply", exact)
         self.assertFalse(any(step.get("name", "").startswith("Retire acknowledged")
                              for step in workflow["jobs"]["publish"]["steps"]))
         env = {"GITHUB_ACTIONS": "true", "GITHUB_REPOSITORY": "anftm/pipeline", "GITHUB_RUN_ID": "123",

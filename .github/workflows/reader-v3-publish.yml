@@ -12,7 +12,7 @@ on:
         default: ''
       operation:
         type: choice
-        options: [inspect, unify, ack, retire, withdraw, reset-documents, remove-route, restore-route, verify-route, migrate-derived, resume-derived, redirect-derived, finalize-derived-redirects, replace-derived-history, refresh-reader-consumers, reconcile-derived-index, reconcile-sidecar, compact-legacy-history, publish-generation, verify-generation]
+        options: [inspect, unify, ack, retire, withdraw, reset-documents, remove-route, restore-route, verify-route, migrate-derived, resume-derived, redirect-derived, finalize-derived-redirects, replace-derived-history, refresh-reader-consumers, reconcile-derived-index, reconcile-sidecar, compact-legacy-history, publish-generation, verify-generation, verify-pages-lane]
         default: inspect
       resource_json:
         description: 'Migration requires root identities; optional read-only check_s3=true; apply/resume require external_writers_stopped=true'
@@ -60,7 +60,7 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: '3.11'
-      - run: pip install -r scripts/requirements.txt
+      - run: pip install -r scripts/requirements.txt PyYAML==6.0.3
       - name: Guard automatic format publication
         if: inputs.automation_id != ''
         env:
@@ -95,12 +95,12 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_INPUT_TOKEN: ${{ secrets.HF_INPUT_TOKEN }}
-          HF_S3_ACCESS_KEY_ID: ${{ contains(fromJSON('["migrate-derived","resume-derived","redirect-derived","finalize-derived-redirects","replace-derived-history","refresh-reader-consumers","reconcile-derived-index","reconcile-sidecar","compact-legacy-history","unify","remove-route","restore-route"]'), inputs.operation) && secrets.HF_S3_ACCESS_KEY_ID || '' }}
-          HF_S3_SECRET_ACCESS_KEY: ${{ contains(fromJSON('["migrate-derived","resume-derived","redirect-derived","finalize-derived-redirects","replace-derived-history","refresh-reader-consumers","reconcile-derived-index","reconcile-sidecar","compact-legacy-history","unify","remove-route","restore-route"]'), inputs.operation) && secrets.HF_S3_SECRET_ACCESS_KEY || '' }}
+          HF_S3_ACCESS_KEY_ID: ${{ (contains(fromJSON('["migrate-derived","resume-derived","redirect-derived","finalize-derived-redirects","replace-derived-history","refresh-reader-consumers","reconcile-derived-index","reconcile-sidecar","compact-legacy-history","unify","remove-route","restore-route"]'), inputs.operation) || (vars.READER_PAGES_EXACT_ENABLED == 'true' && inputs.apply && inputs.operation == 'publish-generation') || (inputs.operation == 'verify-pages-lane' && !inputs.apply)) && secrets.HF_S3_ACCESS_KEY_ID || '' }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ (contains(fromJSON('["migrate-derived","resume-derived","redirect-derived","finalize-derived-redirects","replace-derived-history","refresh-reader-consumers","reconcile-derived-index","reconcile-sidecar","compact-legacy-history","unify","remove-route","restore-route"]'), inputs.operation) || (vars.READER_PAGES_EXACT_ENABLED == 'true' && inputs.apply && inputs.operation == 'publish-generation') || (inputs.operation == 'verify-pages-lane' && !inputs.apply)) && secrets.HF_S3_SECRET_ACCESS_KEY || '' }}
           GH_TOKEN: ${{ github.token }}
           GC_PRODUCER_TOKENS_JSON: ${{ secrets.GC_PRODUCER_TOKENS_JSON }}
           GC_AMBROSSEE_MAINTENANCE_TOKEN: ${{ secrets.GC_AMBROSSEE_MAINTENANCE_20261102 }}
-          PAGES_TOKEN: ${{ secrets.PAGES_TOKEN }}
+          READER_PAGES_DISPATCH_TOKEN: ${{ ((vars.READER_PAGES_EXACT_ENABLED == 'true' && inputs.apply && contains(fromJSON('["unify","publish-generation"]'), inputs.operation)) || (inputs.operation == 'verify-pages-lane' && !inputs.apply)) && secrets.READER_PAGES_DISPATCH_TOKEN || '' }}
           READER_V3_PREVIEW_FIRST: ${{ vars.READER_V3_PREVIEW_FIRST || 'false' }}
           READER_V3_DJVU_MIGRATION: ${{ vars.READER_V3_DJVU_MIGRATION || 'false' }}
           READER_DATASET_PRIMARY_ENABLED: ${{ vars.READER_DATASET_PRIMARY_ENABLED || 'false' }}
@@ -121,6 +121,11 @@ jobs:
           fi
           echo "operation=$OPERATION" >> "$GITHUB_OUTPUT"
           echo "apply=$APPLY" >> "$GITHUB_OUTPUT"
+          if [[ "$OPERATION" == verify-pages-lane ]]; then
+            [[ "$APPLY" == false ]]
+            python -B -m scripts.reader_pages_release --preflight
+            exit 0
+          fi
           if [[ -z "$RESOURCE_JSON" ]]; then RESOURCE_JSON='{}'; fi
           args=("$OPERATION" --output output/v3/publication.json)
           case "$OPERATION" in
@@ -149,6 +154,7 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           PAGES_TOKEN: ${{ secrets.PAGES_TOKEN }}
           PAGES_REPO: ${{ secrets.PAGES_REPO }}
+          READER_PAGES_DISPATCH_TOKEN: ${{ vars.READER_PAGES_EXACT_ENABLED == 'true' && inputs.apply && contains(fromJSON('["unify","publish-generation"]'), inputs.operation) && secrets.READER_PAGES_DISPATCH_TOKEN || '' }}
           GH_TOKEN: ${{ github.token }}
           GC_PRODUCER_TOKENS_JSON: ${{ secrets.GC_PRODUCER_TOKENS_JSON }}
           GC_AMBROSSEE_MAINTENANCE_TOKEN: ${{ secrets.GC_AMBROSSEE_MAINTENANCE_20261102 }}

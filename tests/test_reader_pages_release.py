@@ -115,13 +115,43 @@ class ReaderPagesReleaseTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'receipt does not match'):self.execute()
         self.verify.assert_not_called()
 
+    def test_preflight_refuses_admin_maintainer_or_unproven_write_role(self):
+        for permissions in ({'admin':True,'maintain':False,'push':True},
+                            {'admin':False,'maintain':True,'push':True},
+                            {'admin':False,'maintain':False,'push':False}, {'push':True}):
+            with self.subTest(permissions=permissions), patch.object(release,'get_json',
+                    return_value=({'full_name':release.REPO,'permissions':permissions},False)) as read:
+                with self.assertRaisesRegex(ValueError,'verified Pages write role'):
+                    release.pages_preflight(self.session,SEARCH)
+                read.assert_called_once_with(self.session,'')
+                self.session.post.assert_not_called()
+
+    def test_runtime_does_not_fall_back_to_legacy_credential(self):
+        with patch.dict(release.os.environ,{'PAGES_TOKEN':'unused-legacy'},clear=True):
+            with self.assertRaisesRegex(ValueError,'dedicated non-admin'):
+                release.session_for_pages()
+
     def test_workflow_preflights_before_promotion_and_keeps_legacy_migration_fence(self):
         flow=yaml.safe_load(Path('.github/workflows/reader-v3-publish.yml').read_text())
         steps=flow['jobs']['publish']['steps']
-        operation=next(s for s in steps if s.get('id')=='operation')['run']
+        op=next(s for s in steps if s.get('id')=='operation')
+        operation=op['run']
+        self.assertTrue(any('scripts/requirements.txt PyYAML==6.0.3' in s.get('run','') for s in steps))
         self.assertLess(operation.index('reader_pages_release --preflight'),
                         operation.index('publish_reader_v3.py "${args[@]}"'))
-        publish=next(s for s in steps if s.get('name')=='Publish the pinned projection to Pages')['run']
+        pf=next(s for s in steps if s.get('name')=='Publish the pinned projection to Pages')
+        publish=pf['run']
+        for key in ('HF_S3_ACCESS_KEY_ID','HF_S3_SECRET_ACCESS_KEY'):
+            self.assertIn("vars.READER_PAGES_EXACT_ENABLED == 'true' && inputs.apply && inputs.operation == 'publish-generation'",op['env'][key])
+            self.assertIn(f'secrets.{key}',op['env'][key])
+        for step in (op,pf):
+            self.assertIn('secrets.READER_PAGES_DISPATCH_TOKEN',step['env']['READER_PAGES_DISPATCH_TOKEN'])
+        self.assertNotIn('PAGES_TOKEN',op['env'])
+        probe=operation.split('if [[ "$OPERATION" == verify-pages-lane ]]; then\n',1)[1].split('\nfi',1)[0]
+        self.assertEqual(probe.strip().splitlines(),['[[ "$APPLY" == false ]]',
+            '  python -B -m scripts.reader_pages_release --preflight','  exit 0'])
+        for key in ('HF_S3_ACCESS_KEY_ID','HF_S3_SECRET_ACCESS_KEY','READER_PAGES_DISPATCH_TOKEN'):
+            self.assertIn("inputs.operation == 'verify-pages-lane' && !inputs.apply",op['env'][key])
         self.assertLess(publish.index('check-page-window'),publish.index('reader_pages_release --publication'))
         self.assertIn('"$OPERATION" == unify || "$OPERATION" == publish-generation',publish)
         self.assertIn('else\n  python scripts/publish_search_reader_index.py --pinned-only',publish)

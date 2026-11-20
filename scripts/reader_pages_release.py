@@ -206,13 +206,21 @@ class Claims:
 
 def session_for_pages():
     session=requests.Session()
-    session.headers.update({'Authorization':'Bearer '+os.environ['PAGES_TOKEN'],
+    token=os.environ.get('READER_PAGES_DISPATCH_TOKEN')
+    if not token:
+        raise ValueError('A dedicated non-admin Reader Pages dispatch credential is required')
+    session.headers.update({'Authorization':'Bearer '+token,
                             'Accept':'application/vnd.github+json','Cache-Control':'no-cache',
                             'User-Agent':'reader-pages-release'})
     return session
 
 
 def pages_preflight(session, generation):
+    repository,_=get_json(session,'')
+    permissions=repository.get('permissions') or {}
+    if (repository.get('full_name')!=REPO or permissions.get('admin') is not False
+            or permissions.get('maintain') is not False or permissions.get('push') is not True):
+        raise ValueError('Reader Pages dispatch requires a verified Pages write role without admin or maintain access')
     ref,_=get_json(session,'/git/ref/heads/main')
     if ref.get('ref')!='refs/heads/main' or ref['object'].get('type')!='commit':
         raise ValueError('Pages default branch is not a usable workflow ref')
