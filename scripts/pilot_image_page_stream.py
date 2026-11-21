@@ -155,7 +155,10 @@ def build_one(item: dict, work: Path, token: str | None, bucket: str, *,
             image.seek(0)
         except EOFError:
             pass
-        converted = image.convert("RGB")
+        # A transparent GIF palette entry can have the same RGB color as
+        # the visible pixels; dropping alpha can erase the whole image.
+        mode = "RGBA" if image.format == "GIF" and "transparency" in image.info else "RGB"
+        converted = image.convert(mode)
         if max(converted.size) > MAX_WEBP_EDGE:
             scale = MAX_WEBP_EDGE / max(converted.size)
             resized = converted.resize(

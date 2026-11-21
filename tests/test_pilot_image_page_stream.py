@@ -219,6 +219,28 @@ class ImageAssetStreamTests(unittest.TestCase):
                 red, green, blue = image.convert("RGB").getpixel((0, 0))
                 self.assertGreater(red, blue)
 
+    def test_transparent_gif_with_black_palette_keeps_visible_shape_in_webp(self):
+        original = Image.new('P', (32, 16), 0)
+        # Both palette entries are black. Alpha is the only visible contrast.
+        original.putpalette([0] * 768)
+        original.paste(1, (8, 4, 24, 12))
+        source = io.BytesIO()
+        original.save(source, 'GIF', transparency=0, optimize=False)
+        raw = source.getvalue()
+        item = {'repo': 'repo', 'path': 'image.gif', 'extension': 'gif',
+                'bytes': len(raw), 'revision': 'revision'}
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(stream, 'download', side_effect=lambda _url, target, _token: target.write_bytes(raw)):
+            entry, uploads = stream.build_one(item, Path(directory), None, 'bucket')
+            with Image.open(io.BytesIO(raw)) as expected, Image.open(uploads[entry['path']]) as output:
+                self.assertEqual((output.format, output.size, output.n_frames), ('WEBP', original.size, 1))
+                self.assertEqual(output.getchannel('A').tobytes(), expected.convert('RGBA').getchannel('A').tobytes())
+                white = Image.new('RGBA', output.size, 'white')
+                composite = Image.alpha_composite(white, output.convert('RGBA'))
+                self.assertEqual(composite.getpixel((0, 0)), (255, 255, 255, 255))
+                self.assertEqual(composite.getpixel((16, 8)), (0, 0, 0, 255))
+        self.assertNotEqual(entry['path'].split('/')[-2], entry['source_sha256'])
+
     def test_single_frame_tiff_is_published_as_one_image(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
