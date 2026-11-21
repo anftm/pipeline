@@ -125,8 +125,14 @@ def _decoded_image(raw, expected_format):
                     or not 0 < image.width * image.height <= MAX_PIXELS):
                 raise ValueError(f'expected a bounded single-frame {expected_format} image')
             image.load()
-            alpha = any(band.lower() == 'a' for band in image.getbands()) or 'transparency' in image.info
-            return image.size, alpha
+            # Compare effective alpha pixels, not whether the file stores an
+            # unused fully opaque channel. Keep non-opaque masks exact.
+            alpha_digest = None
+            if any(band.lower() == 'a' for band in image.getbands()) or 'transparency' in image.info:
+                with image.convert('RGBA') as rgba, rgba.getchannel('A') as alpha:
+                    if alpha.getextrema() != (255, 255):
+                        alpha_digest = history._sha(alpha.tobytes())
+            return image.size, alpha_digest
     finally:
         ImageFile.LOAD_TRUNCATED_IMAGES = truncated
 
@@ -192,7 +198,7 @@ def plan(*, store, read_source, source_head, encode_avif, repo, path, historical
     else:
         current, _ = _source(read_source, (repo, path, current_revision), expected_size)
     history._same_source(source, current)
-    size, alpha = _decoded_image(original, FORMATS[extension])
+    size, alpha_digest = _decoded_image(original, FORMATS[extension])
     webp_path = old.get('path')
     webp = history.Asset(webp_path.rpartition('/')[0] if isinstance(webp_path, str) else '', webp_path,
                          old.get('sha256'), old.get('bytes'))
@@ -219,8 +225,8 @@ def plan(*, store, read_source, source_head, encode_avif, repo, path, historical
     avif_raw = encode_avif(original)
     if not isinstance(avif_raw, bytes) or not 0 < len(avif_raw) <= MAX_IMAGE:
         raise ValueError('local AVIF output exceeds the preview limit')
-    avif_dimensions, avif_alpha = _decoded_image(avif_raw, 'AVIF')
-    if avif_dimensions != dimensions or avif_alpha != alpha:
+    avif_dimensions, avif_alpha_digest = _decoded_image(avif_raw, 'AVIF')
+    if avif_dimensions != dimensions or avif_alpha_digest != alpha_digest:
         raise ValueError('AVIF dimensions or alpha differ from the expected image')
     digest = history._sha(avif_raw)
     root = images.image_root(extension, source.sha256, {'document.avif': digest})

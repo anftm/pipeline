@@ -18,11 +18,31 @@ KEY = REPO + '\0' + PATH
 OLD, CURRENT, OP = 'a' * 40, 'b' * 40, 'c' * 32
 
 
-def image_bytes(fmt, color):
+def image_bytes(fmt, color, *, mode='RGB', alpha_pixel=None):
     data = io.BytesIO()
-    with Image.new('RGB', (16, 16), color) as image:
+    with Image.new(mode, (16, 16), color) as image:
+        if alpha_pixel is not None:
+            image.putpixel(alpha_pixel, (255, 0, 0, 0))
         image.save(data, fmt)
     return data.getvalue()
+
+
+class AlphaProofTests(unittest.TestCase):
+    def test_opaque_alpha_channel_matches_rgb(self):
+        original = image_bytes('PNG', (255, 0, 0, 255), mode='RGBA')
+        encoded = image_bytes('AVIF', 'red')
+        self.assertEqual(preview._decoded_image(original, 'PNG'), ((16, 16), None))
+        self.assertEqual(preview._decoded_image(original, 'PNG'), preview._decoded_image(encoded, 'AVIF'))
+
+    def test_missing_or_moved_transparent_pixel_does_not_match(self):
+        def make(fmt, pixel):
+            return image_bytes(fmt, (255, 0, 0, 255), mode='RGBA', alpha_pixel=pixel)
+
+        original = preview._decoded_image(make('PNG', (1, 1)), 'PNG')
+        self.assertIsNotNone(original[1])
+        self.assertEqual(original, preview._decoded_image(make('AVIF', (1, 1)), 'AVIF'))
+        self.assertNotEqual(original, preview._decoded_image(make('AVIF', None), 'AVIF'))
+        self.assertNotEqual(original, preview._decoded_image(make('AVIF', (2, 2)), 'AVIF'))
 
 
 class MemoryReads:
