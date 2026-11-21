@@ -33,11 +33,17 @@ class S3:
         raw, tag = self.objects[Key]
         return {'ETag': tag, 'ContentLength': len(raw), 'ResponseMetadata': {'HTTPStatusCode': 200}}
 
-    def get_object(self, *, Bucket, Key, IfMatch=None):
+    def get_object(self, *, Bucket, Key, IfMatch=None, Range=None):
         result = self.head_object(Bucket=Bucket, Key=Key)
         if IfMatch is not None and result['ETag'] != IfMatch:
             raise self.error('PreconditionFailed', 412)
-        return {**result, 'Body': io.BytesIO(self.objects[Key][0])}
+        raw = self.objects[Key][0]
+        if Range is not None:
+            first, last = map(int, Range.removeprefix('bytes=').split('-'))
+            result.update(ContentRange=f'bytes {first}-{last}/{len(raw)}', ContentLength=last-first+1,
+                          ResponseMetadata={'HTTPStatusCode': 206})
+            raw = raw[first:last+1]
+        return {**result, 'Body': io.BytesIO(raw)}
 
     def put_object(self, *, Bucket, Key, Body, ContentType, ContentLength=None, **condition):
         assert Bucket == 'reader-assets-v2'

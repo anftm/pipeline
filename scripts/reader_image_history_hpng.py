@@ -23,6 +23,7 @@ from .reader_bucket_store import S3BucketStore, retry_s3
 from .reader_image_history_parent import CatalogParent
 from .reader_image_history_publish_journal import LegacyJournal
 from .reader_image_history_publish_s3 import LegacyRoots
+from .reader_image_history_ranges import open_catalog
 from .reader_lifecycle import processing_record
 from .reader_stream_checkpoint_cas import ConditionalCheckpointStore, strong_etag
 
@@ -470,9 +471,9 @@ class Operator:
         self._index_state(None)
         # Parse the observed live GC root, not a locally retained substitute.
         parent = r.catalog_parent
-        with self.s3.stream(ASSETS, legacy.CATALOG, parent.size, IfMatch=parent.etag) as (body, size, etag):
-            if (size, etag) != (parent.size, parent.etag):
-                raise ValueError('live S3 catalog parent differs from review')
+        if self.s3.head(legacy.CATALOG) != (parent.etag, parent.size):
+            raise ValueError('live S3 catalog parent differs from review')
+        with open_catalog(self.client, size=parent.size, etag=parent.etag) as body:
             rollback = self._catalog_plan(body)
         if self._catalog_digest(False) != rollback:
             raise ValueError('legacy catalog serving view differs from review')
