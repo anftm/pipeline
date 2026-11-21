@@ -104,7 +104,9 @@ class S3ClaimStore:
             raise ValueError('image history requires a single-attempt S3 client')
         self._client = client
 
-    def _get(self, path):
+    def _get(self, path, *, maximum=MAX_BYTES):
+        if type(maximum) is not int or not 0 < maximum <= MAX_BYTES:
+            raise ValueError('invalid image history read ceiling')
         try:
             response = self._client.get_object(Bucket=LOCATION[1], Key=path)
         except Exception as error:
@@ -114,7 +116,7 @@ class S3ClaimStore:
             raise
         length, body = response.get('ContentLength'), response['Body']
         try:
-            if type(length) is not int or not 0 < length <= MAX_BYTES:
+            if type(length) is not int or not 0 < length <= maximum:
                 raise ValueError('invalid image history claim size')
             raw = body.read(length + 1)
         finally:
@@ -123,8 +125,8 @@ class S3ClaimStore:
             raise ValueError('image history claim length differs')
         return raw, strong_etag(response.get('ETag'))
 
-    def _put(self, path, raw, **condition):
-        if not 0 < len(raw) <= MAX_BYTES:
+    def _put(self, path, raw, *, maximum=MAX_BYTES, **condition):
+        if type(maximum) is not int or not 0 < len(raw) <= maximum <= MAX_BYTES:
             raise ValueError('invalid image history claim size')
         message = 'image history journal PUT unconfirmed; inspect persisted evidence, do not retry'
         try:
@@ -140,7 +142,7 @@ class S3ClaimStore:
             if meta['HTTPStatusCode'] not in (200, 201) or meta.get('RetryAttempts', 0) != 0:
                 raise ValueError('ambiguous S3 PUT acknowledgement')
             etag = strong_etag(response.get('ETag'))
-            if self._get(path) != (raw, etag):
+            if self._get(path, maximum=maximum) != (raw, etag):
                 raise ValueError('image history journal readback bytes or ETag differ')
         except Exception as error:
             raise WriteUnconfirmed(message) from error
