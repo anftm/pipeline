@@ -23,7 +23,7 @@ from .reader_bucket_store import S3BucketStore, retry_s3
 from .reader_image_history_parent import CatalogParent
 from .reader_image_history_publish_journal import LegacyJournal
 from .reader_image_history_publish_s3 import LegacyRoots
-from .reader_image_history_ranges import open_catalog
+from .reader_image_history_ranges import open_catalog, resolver_digest
 from .reader_lifecycle import processing_record
 from .reader_stream_checkpoint_cas import ConditionalCheckpointStore, strong_etag
 
@@ -227,7 +227,7 @@ class Operator:
         if store._namespace != 'vomebook':
             raise ValueError('expected vomebook S3 credentials')
         store._config = store._config.merge(Config(
-            retries={'mode': 'standard', 'total_max_attempts': 1},
+            retries={'mode': 'standard', 'total_max_attempts': 1}, read_timeout=75,
             request_checksum_calculation='when_required', response_checksum_validation='when_required'))
         token = os.environ.get('HF_TOKEN') or False
         return cls(reviewed, s3=store._client('vomebook'), http=http, hub=HfApi(token=token), token=token)
@@ -333,7 +333,14 @@ class Operator:
     def _catalog_digest(self, target):
         r = self.reviewed
         size = r.catalog_target_bytes if target else r.catalog_parent.size
-        return self.resolver.bucket(ASSETS, legacy.CATALOG, size, size=size, digest=True)
+        tag = self.s3.head(legacy.CATALOG)
+        if tag[1] != size or not target and tag[0] != r.catalog_parent.etag:
+            raise ValueError('catalog writer view differs before independent resolver read')
+        url = f'https://huggingface.co/buckets/{ASSETS}/resolve/{legacy.CATALOG}'
+        digest = resolver_digest(self.http, url, size=size, etag=tag[0])
+        if self.s3.head(legacy.CATALOG) != tag:
+            raise ValueError('catalog changed during independent resolver read')
+        return digest
 
     def _cached_roots(self):
         seen = {}

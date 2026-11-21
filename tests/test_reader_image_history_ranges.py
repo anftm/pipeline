@@ -2,6 +2,8 @@ import io
 import unittest
 from unittest.mock import patch
 
+import httpx
+
 from scripts import reader_image_history_ranges as ranges
 
 
@@ -49,3 +51,17 @@ class RangeTests(unittest.TestCase):
         with patch.object(self, 'get_object', side_effect=lose_once_then_read):
             self.assertEqual(self.read(), self.raw)
         self.assertEqual(attempts, ['"reviewed"', '"reviewed"'])
+
+    def test_independent_resolver_hash_and_weak_or_foreign_etag(self):
+        tag = '"reviewed"'
+        def handle(request):
+            self.assertEqual(request.headers['If-Match'], '"reviewed"')
+            lo, hi = map(int, request.headers['Range'].removeprefix('bytes=').split('-'))
+            return httpx.Response(206, content=self.raw[lo:hi+1], headers={
+                'Content-Range': f'bytes {lo}-{hi}/{len(self.raw)}', 'ETag': tag})
+        with httpx.Client(transport=httpx.MockTransport(handle)) as http:
+            run = lambda: ranges.resolver_digest(http, 'https://example.org/catalog', size=len(self.raw), etag='"reviewed"')
+            self.assertEqual(run(), ranges.sha256(self.raw).hexdigest())
+            tag = 'W/"reviewed"'
+            with self.assertRaisesRegex(ValueError, 'resolver range'):
+                run()

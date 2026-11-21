@@ -102,7 +102,14 @@ class BridgeTests(unittest.TestCase):
         if path not in self.s3.objects:
             return httpx.Response(404)
         mime = 'image/webp' if path.endswith('.webp') else self.mime if path.endswith('.avif') else 'application/json'
-        return httpx.Response(200, content=self.served.get(path, self.s3.objects[path][0]), headers={'Content-Type': mime})
+        raw = self.served.get(path, self.s3.objects[path][0])
+        if 'Range' in request.headers:
+            tag = self.s3.objects[path][1]
+            self.assertEqual(request.headers['If-Match'], tag)
+            lo, hi = map(int, request.headers['Range'].removeprefix('bytes=').split('-'))
+            return httpx.Response(206, content=raw[lo:hi+1], headers={
+                'ETag': tag, 'Content-Range': f'bytes {lo}-{hi}/{len(raw)}', 'Content-Type': mime})
+        return httpx.Response(200, content=raw, headers={'Content-Type': mime})
 
     def guard(self, phase):
         self.labels.append(phase)
