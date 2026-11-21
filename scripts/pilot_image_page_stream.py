@@ -6,7 +6,8 @@ their pages as an ``image-page-stream`` page manifest instead of being wrapped
 in a PDF. Animated GIFs are reduced to their first frame and published as one
 static WebP. The canonical index is ``pages/image/index-v2.json``. Uploads
 are content-addressed and protected before checkpointing; the old image index
-and its objects remain untouched.
+and its objects remain untouched. Only the separate exact-source canary opts
+in to AVIF.
 """
 
 from __future__ import annotations
@@ -27,10 +28,14 @@ ImageFile.LOAD_TRUNCATED_IMAGES = True
 Image.MAX_IMAGE_PIXELS = 300_000_000
 
 try:
+    from . import reader_image_avif as avif
+    from .reader_image_avif import image_root
     from .reader_assets import decode_search_payload, relative_path, source_url
     from .reader_stream_index import (read_index, validate_index, unchanged_sources, publish_checkpoint,
                                       shard_for, source_failure)
 except ImportError:
+    import reader_image_avif as avif
+    from reader_image_avif import image_root
     from reader_assets import decode_search_payload, relative_path, source_url
     from reader_stream_index import (read_index, validate_index, unchanged_sources, publish_checkpoint,
                                      shard_for, source_failure)
@@ -151,49 +156,86 @@ def source_records(path: Path, revisions: dict, max_bytes: int, extension_filter
     return selected
 
 
+def encode_frame(image, target, *, codec, webp_mode='RGB'):
+    mode = webp_mode
+    if codec == 'avif':
+        alpha = any(band.lower() == 'a' for band in image.getbands()) or 'transparency' in image.info
+        mode = 'RGBA' if alpha else 'RGB'
+    converted = image.convert(mode)
+    try:
+        if max(converted.size) > MAX_WEBP_EDGE:
+            scale = MAX_WEBP_EDGE / max(converted.size)
+            resized = converted.resize(tuple(max(1, round(n * scale)) for n in converted.size),
+                                       Image.Resampling.LANCZOS)
+            converted.close()
+            converted = resized
+        if codec == 'avif':
+            import imagecodecs
+            import numpy
+            encoded = imagecodecs.avif_encode(numpy.asarray(converted), level=70, speed=6,
+                                               pixelformat='yuv444', numthreads=1)
+            if not 0 < len(encoded) <= avif.MAX_IMAGE_BYTES:
+                raise ValueError('AVIF output exceeds the Reader image byte limit')
+            target.write_bytes(encoded)
+        else:
+            converted.save(target, 'WEBP', quality=85, method=6)
+    finally:
+        converted.close()
+
+
 def build_one(item: dict, work: Path, token: str | None, bucket: str, *,
-              legacy_source_addressed: bool = False, boost_canary: bool = False) -> tuple[dict, dict[str, str]]:
+              legacy_source_addressed: bool = False, boost_canary: bool = False,
+              codec: str = 'webp', previous_source_sha256: str | None = None,
+              max_tiff_pages: int = avif.MAX_PAGES) -> tuple[dict, dict[str, str]]:
+    extension = item['extension']
+    if codec != 'webp' and (codec != 'avif' or extension not in avif.FORMATS or legacy_source_addressed):
+        raise ValueError('AVIF requires a supported non-GIF image and an immutable root')
     work.mkdir(parents=True, exist_ok=True)
-    source = work / "source"
-    options = {"exact_bytes": item["bytes"]} if boost_canary else {}
-    download(source_url(item["repo"], item["revision"], item["path"]), source, token, **options)
-    source_digest = hashlib.sha256(source.read_bytes()).hexdigest()
-    if item.get("source_sha256") and item["source_sha256"] != source_digest:
-        raise ValueError("image source checksum differs from pinned repair identity")
-    if item.get("bytes") and source.stat().st_size != item["bytes"]:
-        raise ValueError("image source byte count differs from pinned metadata")
-    extension = item["extension"]
+    source = work / 'source'
+    options = {'exact_bytes': item['bytes']} if boost_canary or codec == 'avif' else {}
+    download(source_url(item['repo'], item['revision'], item['path']), source, token, **options)
+    raw = source.read_bytes()
+    source_digest = hashlib.sha256(raw).hexdigest()
+    if item.get('source_sha256') and item['source_sha256'] != source_digest:
+        message = 'pinned identity' if codec == 'avif' else 'pinned repair identity'
+        raise ValueError(f'image source checksum differs from {message}')
+    if item.get('bytes') and len(raw) != item['bytes']:
+        raise ValueError('image source byte count differs from pinned metadata')
+    if codec == 'avif' and item.get('git_blob'):
+        git = hashlib.sha1(f'blob {len(raw)}\0'.encode())
+        git.update(raw)
+        if git.hexdigest() != item['git_blob']:
+            raise ValueError('image source differs from pinned Git blob')
+    del raw
+    if codec == 'avif' and source_digest == previous_source_sha256:
+        raise ValueError('source bytes are unchanged; historical profile conversion is disabled')
+    output = work / f'document.{codec}'
     with Image.open(source) as image:
         if image.width < 1 or image.height < 1:
             raise ValueError("image has invalid dimensions")
-        if extension in {"tif", "tiff"} and int(getattr(image, "n_frames", 1) or 1) > 1:
+        if codec == 'avif' and image.format != avif.FORMATS[extension]:
+            raise ValueError('decoded image format differs from canaried source extension')
+        frames = int(getattr(image, 'n_frames', 1) or 1) if extension in avif.TIFF or codec == 'avif' else 1
+        if extension in avif.TIFF and frames > 1:
+            if codec == 'avif' and frames > max_tiff_pages:
+                raise ValueError('AVIF TIFF exceeds the canary page count limit')
             return build_pages(item, source, image, work, extension, source_digest, bucket,
-                               legacy_source_addressed=legacy_source_addressed)
-        # GIF (and any other animated image) is represented by its first frame.
+                               legacy_source_addressed=legacy_source_addressed, codec=codec)
+        if codec == 'avif' and frames != 1:
+            raise ValueError('animated images are outside the AVIF still-image canary')
+        # GIF (and other animated inputs in the ordinary lane) keeps the
+        # production first-frame behavior, including transparent GIF palettes.
         try:
             image.seek(0)
         except EOFError:
             pass
-        # A transparent GIF palette entry can have the same RGB color as
-        # the visible pixels; dropping alpha can erase the whole image.
-        mode = "RGBA" if image.format == "GIF" and "transparency" in image.info else "RGB"
-        converted = image.convert(mode)
-        if max(converted.size) > MAX_WEBP_EDGE:
-            scale = MAX_WEBP_EDGE / max(converted.size)
-            resized = converted.resize(
-                (max(1, round(converted.width * scale)),
-                 max(1, round(converted.height * scale))),
-                Image.Resampling.LANCZOS,
-            )
-            converted.close()
-            converted = resized
-        converted.save(work / "document.webp", "WEBP", quality=85, method=6)
-        converted.close()
-    output = work / "document.webp"
+        mode = 'RGBA' if image.format == 'GIF' and 'transparency' in image.info else 'RGB'
+        encode_frame(image, output, codec=codec, webp_mode=mode)
     data = output.read_bytes()
+    checksum = hashlib.sha256(data).hexdigest()
     root = (f'{IMAGE_ROOT}/{extension}/{source_digest}' if legacy_source_addressed else
-            image_root(extension, source_digest, {'document.webp': hashlib.sha256(data).hexdigest()}))
-    remote = f"{root}/document.webp"
+            image_root(extension, source_digest, {output.name: checksum}))
+    remote = f'{root}/{output.name}'
     return {
         "key": f"{item['repo']}\0{item['path']}",
         "repo": item["repo"],
@@ -207,48 +249,44 @@ def build_one(item: dict, work: Path, token: str | None, bucket: str, *,
         "root": root,
         "path": remote,
         "bytes": len(data),
-        "sha256": hashlib.sha256(data).hexdigest(),
+        "sha256": checksum,
         "page_count": 1,
+        **({'profile': avif.PROFILE} if codec == 'avif' else {}),
     }, {remote: str(output)}
 
 
-def image_root(extension, source_digest, files):
-    """Keep the existing Reader URL shape while binding it to output bytes."""
-    identity = json.dumps({'version': 1, 'source_sha256': source_digest, 'files': files},
-                          sort_keys=True, separators=(',', ':')).encode()
-    return f"{IMAGE_ROOT}/{extension}/{hashlib.sha256(identity).hexdigest()}"
-
-
-def build_pages(item, source, image, work, extension, source_digest, bucket, *, legacy_source_addressed=False):
+def build_pages(item, source, image, work, extension, source_digest, bucket, *,
+                legacy_source_addressed=False, codec='webp'):
     """Publish every TIFF frame as an image page stream, never a PDF wrapper."""
+    if codec == 'avif' and not 2 <= image.n_frames <= avif.MAX_PAGES:
+        raise ValueError('AVIF TIFF exceeds the Reader page count limit')
     pages = work / "pages"
     pages.mkdir(parents=True, exist_ok=True)
     entries, local_pages = [], {}
+    total_bytes = 0
     for number in range(1, int(image.n_frames) + 1):
         image.seek(number - 1)
-        converted = image.convert("RGB")
-        if max(converted.size) > MAX_WEBP_EDGE:
-            scale = MAX_WEBP_EDGE / max(converted.size)
-            resized = converted.resize((max(1, round(converted.width * scale)),
-                                        max(1, round(converted.height * scale))),
-                                       Image.Resampling.LANCZOS)
-            converted.close()
-            converted = resized
-        target = pages / f"page-{number:06d}.webp"
-        converted.save(target, "WEBP", quality=85, method=6)
-        converted.close()
+        target = pages / f'page-{number:06d}.{codec}'
+        encode_frame(image, target, codec=codec)
         payload = target.read_bytes()
-        relative = f"pages/page-{number:06d}.webp"
+        total_bytes += len(payload)
+        if codec == 'avif' and total_bytes > avif.MAX_BUNDLE_BYTES:
+            raise ValueError('AVIF TIFF exceeds the Reader canary bundle byte limit')
+        relative = f'pages/{target.name}'
         entries.append({"path": relative, "bytes": len(payload),
                         "sha256": hashlib.sha256(payload).hexdigest()})
         local_pages[relative] = str(target)
     manifest = {"kind": "image-page-stream", "version": 1, "source_extension": extension,
-                "source_sha256": source_digest, "page_count": len(entries), "pages": entries}
+                "source_sha256": source_digest, "page_count": len(entries), "pages": entries,
+                **({'image_format': 'avif'} if codec == 'avif' else {})}
     manifest_file = work / "page-manifest.json"
-    manifest_file.write_text(json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
-                             encoding="utf-8")
+    manifest_raw = (json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2) + '\n').encode()
+    if codec == 'avif' and (len(manifest_raw) > avif.MAX_MANIFEST_BYTES
+                             or total_bytes + len(manifest_raw) > avif.MAX_BUNDLE_BYTES):
+        raise ValueError('AVIF TIFF manifest exceeds the Reader byte limit')
+    manifest_file.write_bytes(manifest_raw)
     identities = {entry['path']: entry['sha256'] for entry in entries}
-    identities['page-manifest.json'] = hashlib.sha256(manifest_file.read_bytes()).hexdigest()
+    identities['page-manifest.json'] = hashlib.sha256(manifest_raw).hexdigest()
     root = (f'{IMAGE_ROOT}/{extension}/{source_digest}' if legacy_source_addressed else
             image_root(extension, source_digest, identities))
     remote = f"{root}/page-manifest.json"
@@ -260,7 +298,8 @@ def build_pages(item, source, image, work, extension, source_digest, bucket, *, 
         "source_revision": item["revision"], "source_bytes": source.stat().st_size,
         "source_sha256": source_digest, "mode": "page-stream", "bucket": bucket,
         "root": root, "manifest": remote, "page_count": len(entries),
-        "bytes": sum(entry["bytes"] for entry in entries),
+        "bytes": total_bytes,
+        **({'profile': avif.PROFILE, 'image_format': 'avif'} if codec == 'avif' else {}),
     }, uploads
 
 
@@ -288,6 +327,8 @@ def shard_baseline(shard, canonical, number, count):
         seen.add(key)
         old = current.get(key)
         if old is not None and old != entry:
+            if avif.keeps_existing_profile(old, entry):
+                continue
             a, b = old.get('checkpointed_at', ''), entry.get('checkpointed_at', '')
             if not b:
                 if not a:
@@ -350,6 +391,7 @@ def main() -> int:
         print("no matching image sources")
         return 0
     converted = failed = 0
+    existing_avif = {e['key']: e.get('source_sha256') for e in previous['files'] if avif.is_avif_entry(e)}
     with tempfile.TemporaryDirectory(prefix="reader-image-v2-") as directory:
         work_root = Path(directory)
         for number, item in enumerate(selected):
@@ -357,6 +399,10 @@ def main() -> int:
             folder.mkdir()
             try:
                 result, files = build_one(item, folder / 'bundle', token, args.bucket, **options)
+                if result['key'] in existing_avif and result.get('source_sha256') == existing_avif[result['key']]:
+                    # The LFS fast path is not available for pinned Git blobs.
+                    # Confirmed equal bytes are not a reason to downgrade AVIF.
+                    continue
                 entries, failures = [result], []
                 converted += 1
             except Exception as error:

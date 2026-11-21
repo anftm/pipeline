@@ -127,7 +127,7 @@ gh() {
             triggers = config.get('on', config.get(True))
             self.assertEqual(set(triggers), {'workflow_dispatch'})
             schema = triggers['workflow_dispatch']['inputs']
-            self.assertLessEqual(len(schema), 11 if name == 'ebook-stream' else 10)
+            self.assertLessEqual(len(schema), 11 if name in {'ebook-stream', 'image-stream'} else 10)
             for key, kind, default in (('automation_id', 'string', ''), ('defer_unify', 'boolean', False),
                                        ('search_generation', 'string', ''), ('expected_sha', 'string', '')):
                 self.assertEqual(schema[key]['type'], kind)
@@ -417,8 +417,8 @@ gh() {
             self.assertLess(gate_index, fetch_index)
             for job_name, job in jobs.items():
                 self.assertNotIn('continue-on-error', job)
-                if job_name == 'plan':
-                    continue
+                if job_name in {'plan', 'avif-canary'}:
+                    continue  # The separate single-job image canary is tested in test_reader_image_avif.
                 with self.subTest(name=name, job=job_name):
                     self.assertIn('plan', needs_for(job))
                     needs = {key: {'result': 'success', 'outputs': {

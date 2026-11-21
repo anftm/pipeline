@@ -11,9 +11,11 @@ import boto3
 from botocore.config import Config
 
 try:
+    from .reader_image_avif import keeps_existing_profile
     from .reader_bucket_store import retry_s3
     from .reader_stream_index import shard_for, validate_index
 except ImportError:
+    from reader_image_avif import keeps_existing_profile
     from reader_bucket_store import retry_s3
     from reader_stream_index import shard_for, validate_index
 
@@ -43,6 +45,10 @@ def merge(canonical, shards, shard_count=8):
             seen.add(key)
             prior = current.get(key)
             if prior is not None and prior != entry:
+                # Never replace a canaried object with another profile for
+                # identical bytes, even if an ordinary shard was re-encoded.
+                if keeps_existing_profile(prior, entry):
+                    continue
                 before, after = prior.get('checkpointed_at', ''), entry.get('checkpointed_at', '')
                 # A timestamped new checkpoint may supersede an untimestamped
                 # legacy row; a legacy or older shard can never roll it back.

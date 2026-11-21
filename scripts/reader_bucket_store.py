@@ -610,12 +610,19 @@ class S3BucketStore:
             return {path for path in pool.map(exists, sorted(paths)) if path}
 
     def manifest_references(self, bucket: str, paths: set[str]) -> dict[str, set[str]]:
+        try:
+            from .reader_image_avif import avif_pages
+        except ImportError:
+            from reader_image_avif import avif_pages
         manifests = {path for path in paths if path.endswith(("/page-manifest.json", "/chapter-manifest.json"))}
         def load(path):
             raw = self.read_bytes(bucket, path)
             payload = json.loads(gzip.decompress(raw) if raw.startswith(b"\x1f\x8b") else raw)
             root = posixpath.dirname(path)
             if path.endswith("/page-manifest.json"):
+                pages = avif_pages(payload, path)
+                if pages is not None:
+                    return path, {f"{root}/{entry['path']}" for entry in pages}
                 count = payload.get("page_count")
                 if type(count) is not int or count < 1:
                     raise ValueError(f"invalid page manifest: {path}")

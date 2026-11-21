@@ -25,6 +25,11 @@ on:
         required: false
         default: false
         type: boolean
+      avif_canary:
+        description: 'Optional one-source AVIF canary JSON: {"repo":"owner/dataset","path":"file.png","reader_parent":"64 hex"}; leave empty for WebP'
+        required: false
+        type: string
+        default: ''
       extension:
         description: Image extension, or all
         required: true
@@ -67,7 +72,49 @@ concurrency:
   queue: max
 
 jobs:
+  avif-canary:
+    if: inputs.avif_canary != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    concurrency:
+      group: reader-sidecar
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - run: pip install -r scripts/requirements.txt
+      - name: Convert one pinned new or changed still image as AVIF
+        env:
+          READER_IMAGE_AVIF_ENABLED: ${{ vars.READER_IMAGE_AVIF_ENABLED }}
+          SOURCE: ${{ inputs.avif_canary }}
+          BOOST_CANARY: ${{ inputs.boost_canary }}
+          SEARCH_GENERATION: ${{ inputs.search_generation }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          AUTOMATION_ID: ${{ inputs.automation_id }}
+          DEFER_UNIFY: ${{ inputs.defer_unify }}
+          APPLY: ${{ inputs.apply }}
+          LIMIT: ${{ inputs.limit }}
+          RETRY_FAILURES: ${{ inputs.retry_failures }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$READER_IMAGE_AVIF_ENABLED" == true && "$GITHUB_RUN_ATTEMPT" == 1 ]]
+          [[ -z "$AUTOMATION_ID" && "$DEFER_UNIFY" == true && "$LIMIT" == 1 && "$RETRY_FAILURES" == false ]]
+          [[ "$BOOST_CANARY" == false ]]
+          [[ "$SEARCH_GENERATION" =~ ^[0-9a-f]{64}$ && "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$APPLY" == true || "$APPLY" == false ]]
+          args=(--source "$SOURCE" --search-generation "$SEARCH_GENERATION" --expected-sha "$EXPECTED_SHA")
+          if [[ "$APPLY" == true ]]; then args+=(--apply); fi
+          python -B -m scripts.reader_image_canary "${args[@]}"
+
   plan:
+    if: inputs.avif_canary == ''
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     outputs:
@@ -177,7 +224,7 @@ jobs:
   build:
     needs: plan
     if: >-
-      inputs.apply == true &&
+      inputs.avif_canary == '' && inputs.apply == true &&
       fromJSON(needs.plan.outputs.matrix).include[0] != null
     runs-on: ubuntu-24.04
     timeout-minutes: 360
@@ -224,7 +271,7 @@ jobs:
   finalize:
     needs: [plan, build]
     if: >-
-      always() && needs.plan.result == 'success' &&
+      always() && inputs.avif_canary == '' && needs.plan.result == 'success' &&
       inputs.apply == true && needs.build.result == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 120

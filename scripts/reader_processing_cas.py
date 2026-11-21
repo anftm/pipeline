@@ -1,5 +1,6 @@
 """Compare-before-write for processing handoffs in the current Reader bucket."""
 import json
+import re
 
 try:
     from .reader_bucket_store import retry_s3, s3_error_code
@@ -25,6 +26,18 @@ class ProcessingWriter:
             raise ValueError('invalid processing record')
         self.etags[path] = etag
         return record
+
+    def create(self, path, raw):
+        if not re.fullmatch(r'reader-index/processing/stream-upload-[0-9a-f]{32}\.json', path):
+            raise ValueError('expected a stream upload protection record')
+        record = json.loads(raw)
+        if record.get('kind') != 'reader-processing-roots' or record.get('status') != 'processing':
+            raise ValueError('expected an active processing record')
+        namespace, bucket = self.store._location(READER_ASSETS_BUCKET)
+        self.store._client(namespace).put_object(Bucket=bucket, Key=path, Body=raw,
+                                               ContentType='application/json', IfNoneMatch='*')
+        if self.read(path) != record:
+            raise RuntimeError('processing protection readback changed')
 
     def publish(self, path, record):
         if path.startswith('reader-index/processing/'):

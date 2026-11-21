@@ -14,11 +14,11 @@ from huggingface_hub import HfFileSystem, batch_bucket_files
 
 try:
     from . import shared
-    from . import reader_lifecycle
+    from . import reader_image_avif, reader_lifecycle
     from .reader_bucket import publish_catalog, read_json as read_bucket_json
 except ImportError:
     import shared
-    import reader_lifecycle
+    import reader_image_avif, reader_lifecycle
     from reader_bucket import publish_catalog, read_json as read_bucket_json
 
 
@@ -265,6 +265,9 @@ def build(fs: HfFileSystem, assets_bucket: str, pdf_bucket: str, derived_path: s
         image_payload = old_image_payload
     for entry in image_payload.get("files", []):
         if not isinstance(entry, dict) or not entry.get("key"):
+            continue
+        if reader_image_avif.is_avif_entry(entry):
+            files[entry['key']] = reader_image_avif.avif_route(entry, assets_bucket)
             continue
         path = entry.get("path") if entry.get("mode") == "image" else None
         if not isinstance(path, str):

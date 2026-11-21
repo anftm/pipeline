@@ -24,12 +24,14 @@ try:
     from .shared import READER_ASSETS_BUCKET, PDF_PAGES_BUCKET, PDF_OCR_INPUT_BUCKET
     from . import reader_lifecycle, ccrd_lifecycle
     from .reader_gc_stream import catalog_json
+    from .reader_image_avif import avif_pages
 except ImportError:
     from reader_bucket_store import HubBucketStore, S3BucketStore
     from shared import READER_ASSETS_BUCKET, PDF_PAGES_BUCKET, PDF_OCR_INPUT_BUCKET
     import reader_lifecycle
     import ccrd_lifecycle
     from reader_gc_stream import catalog_json
+    from reader_image_avif import avif_pages
 
 
 # Ownership and reference observation are different scopes. Legacy archive and
@@ -695,6 +697,14 @@ class ReferenceGraph:
                 except (ValueError, KeyError, TypeError):
                     self.blockers.add(f"invalid v3 manifest: {bucket}:{path}")
                     return False
+            if path.startswith('pages/image/') and path.endswith('/page-manifest.json'):
+                try:
+                    avif_pages(payload, path)
+                except ValueError as error:
+                    self.blockers.add(f'{error} ({bucket})')
+                    return False
+                # The normal manifest walk marks every validated relative
+                # page path (including a missing child) from the bundle root.
             if payload.get("kind") in {"pdf-pages", "image-page-stream", "image-pages"}:
                 count = payload.get("page_count")
                 if type(count) is not int or count < 1:
