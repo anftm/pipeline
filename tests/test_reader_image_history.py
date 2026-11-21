@@ -96,7 +96,8 @@ class ImageHistoryTests(unittest.TestCase):
         new_root = 'pages/image/png/' + 'c' * 64
         old = history.Asset(old_root, old_root + '/document.webp', sha(b'webp'), 4)
         new = history.Asset(new_root, new_root + '/document.avif', sha(b'avif'), 4)
-        self.preflight = history.Preflight(self.source, old, new, sha(b'rollback receipt'), sha(b'pinned inputs'))
+        self.preflight = history.Preflight(self.source, self.source, sha(b'Search pin proof'), old, new,
+                                           sha(b'rollback receipt'), sha(b'pinned inputs'))
         self.old_row = {'key': KEY, 'repo': repo, 'source_path': path, 'extension': 'png',
                         'source_revision': self.source.revision, 'source_sha256': self.source.sha256,
                         'source_bytes': self.source.size, 'mode': 'image', 'page_count': 1,
@@ -114,7 +115,29 @@ class ImageHistoryTests(unittest.TestCase):
         self.before = self.project(self.parent)
         self.after = self.project({**self.parent, 'files': [self.parent['files'][0], self.new_row]})
         self.calls = []
+        self.sources = None
         self.intent = self.seal()
+
+    def legacy(self, *, update_revision=True):
+        root = 'pages/image/png/' + self.source.sha256
+        self.old_row = {**self.old_row, 'path': root + '/document.webp'}
+        del self.old_row['root']
+        current = replace(self.source, revision='d' * 40)
+        self.search_pin = current
+        self.search_proof = b'Search pin proof'
+        self.sources = {self.source.revision: b'source', current.revision: b'source'}
+        self.source_reads = []
+        self.preflight = replace(self.preflight, current_source=current,
+                                 old=replace(self.preflight.old, root=root, path=self.old_row['path']))
+        self.new_row = {**self.new_row, 'source_revision': current.revision if update_revision else self.source.revision}
+        self.set_parent_row(self.old_row)
+        self.intent = self.seal()
+
+    def set_parent_row(self, row):
+        self.parent['files'][1] = self.old_row = row
+        self.bucket.raw = self.parent_raw = json.dumps(self.parent).encode()
+        self.before = self.project(self.parent)
+        self.after = self.project({**self.parent, 'files': [self.parent['files'][0], self.new_row]})
 
     @staticmethod
     def project(index):
@@ -129,7 +152,16 @@ class ImageHistoryTests(unittest.TestCase):
 
     def fresh(self, intent, phase):
         self.calls.append(phase)
-        return history.Checks(self.preflight, self.project(json.loads(intent.parent)),
+        proof = self.preflight
+        if self.sources is not None:
+            def read_source(source):
+                self.source_reads.append(source.revision)
+                raw = self.sources[source.revision]
+                return replace(source, sha256=sha(raw), size=len(raw))
+
+            proof = replace(proof, source=read_source(intent.preflight.source),
+                            current_source=read_source(self.search_pin), search_sha256=sha(self.search_proof))
+        return history.Checks(proof, self.project(json.loads(intent.parent)),
                               self.project(json.loads(intent.candidate)))
 
     def run_stage(self, stage, *, intent=None, revalidate=None):
@@ -178,6 +210,116 @@ class ImageHistoryTests(unittest.TestCase):
                 self.run_stage(history.apply_once, revalidate=lambda *_: history.Checks(wrong, self.before, self.after))
             self.assert_no_publication()
 
+    def test_legacy_parent_preserves_exact_bytes_and_only_allows_sealed_revision_choice(self):
+        for update in (False, True):
+            with self.subTest(update=update):
+                self.setUp()
+                self.legacy(update_revision=update)
+                self.assertEqual(self.intent.parent, self.parent_raw)
+                historical = json.loads(self.intent.parent)['files'][1]
+                self.assertEqual(historical, self.old_row)
+                self.assertNotIn('root', historical)
+                self.assertEqual(historical['source_revision'], self.source.revision)
+                self.assertEqual(self.intent.old_row_sha256, history.row_digest(historical))
+                self.assertEqual(self.run_stage(history.apply_once).state, 'observed')
+                self.assertEqual(json.loads(self.bucket.raw)['files'][1], self.new_row)
+                self.assertEqual(self.source_reads, [self.source.revision, self.search_pin.revision] * 3)
+                self.assertEqual(self.bucket.puts, [('"parent"', self.intent.candidate)])
+
+    def test_missing_root_is_only_for_exact_legacy_webp_and_not_null_or_wrong_root(self):
+        self.legacy()
+        old, proof = self.old_row, self.preflight
+        other = 'pages/image/png/' + 'e' * 64
+        for row, asset, error in (
+                ({**old, 'root': None}, proof.old, 'exact static-image'),
+                ({**old, 'root': other}, proof.old, 'exact static-image'),
+                ({**old, 'path': other + '/document.webp'},
+                 replace(proof.old, root=other, path=other + '/document.webp'), 'legacy source-addressed'),
+                ({**old, 'path': proof.old.path.replace('document.webp', '../document.webp')},
+                 replace(proof.old, path=proof.old.path.replace('document.webp', '../document.webp')), 'asset identity'),
+                (old, replace(proof.old, root=other), 'asset identity')):
+            self.set_parent_row(row)
+            with self.subTest(row=row, asset=asset), self.assertRaisesRegex(ValueError, error):
+                self.seal(checks=history.Checks(replace(proof, old=asset), self.before, self.after))
+        self.set_parent_row(old)
+        with self.assertRaisesRegex(ValueError, 'exact static-image'):
+            self.seal(new_row={k: v for k, v in self.new_row.items() if k != 'root'})
+        self.assert_no_publication()
+
+    def test_current_pin_must_prove_the_same_path_digest_and_length(self):
+        self.legacy()
+        current = self.preflight.current_source
+        for fields in ({'sha256': 'e' * 64}, {'size': current.size + 1}, {'path': 'other.png'},
+                       {'repo': 'other/images'}, {'revision': 'd' * 8}, {'size': True}):
+            wrong = replace(self.preflight, current_source=replace(current, **fields))
+            with self.subTest(fields=fields), self.assertRaises(ValueError):
+                self.seal(checks=history.Checks(wrong, self.before, self.after))
+        for fields in ({'source_revision': 'e' * 40}, {'source_sha256': 'e' * 64}, {'source_bytes': 7}):
+            with self.subTest(fields=fields), self.assertRaisesRegex(ValueError, 'exact static-image'):
+                self.seal(new_row={**self.new_row, **fields})
+        with self.assertRaises(ValueError):
+            self.seal(checks=history.Checks(replace(self.preflight, search_sha256=None), self.before, self.after))
+        self.assert_no_publication()
+
+    def test_legacy_fresh_proofs_must_match_even_when_revision_is_preserved(self):
+        self.legacy(update_revision=False)
+        for revision, changed in ((self.source.revision, b'differ'), (self.search_pin.revision, b'longer source')):
+            with self.subTest(revision=revision), self.assertRaisesRegex(ValueError, 'fresh source'):
+                self.sources[revision] = changed
+                self.run_stage(history.apply_once)
+            self.sources[revision] = b'source'
+            self.assert_no_publication()
+        self.sources['e' * 40] = b'source'
+        pin = self.search_pin
+        self.search_pin = replace(pin, revision='e' * 40)
+        with self.assertRaisesRegex(ValueError, 'fresh source'):
+            self.run_stage(history.apply_once)
+        self.search_pin = pin
+        self.assert_no_publication()
+        self.journal.before_claim = lambda: setattr(self, 'search_proof', b'new Search proof')
+        with self.assertRaisesRegex(ValueError, 'fresh source'):
+            self.run_stage(history.apply_once)
+        self.assertEqual(self.journal.transitions, ['claimed'])
+        self.assertEqual(self.bucket.puts, [])
+        with self.assertRaisesRegex(ValueError, 'already claimed'):
+            self.run_stage(history.apply_once)
+
+    def test_legacy_lost_cas_response_requires_fresh_dual_source_proof_and_never_replays(self):
+        self.legacy()
+        alternate = self.seal(operation='3' * 32)
+        self.bucket.fault = 'after'
+        with self.assertRaisesRegex(TimeoutError, 'readback interrupted'):
+            self.run_stage(history.apply_once)
+        self.assertEqual(self.bucket.raw, self.intent.candidate)
+        for intent in (self.intent, alternate):
+            with self.assertRaisesRegex(ValueError, 'already claimed'):
+                self.run_stage(history.apply_once, intent=intent)
+
+        self.sources[self.source.revision] = b'differ'
+        with self.assertRaisesRegex(ValueError, 'fresh source'):
+            self.run_stage(history.reconcile)
+        self.assertEqual(self.journal.transitions, ['claimed'])
+        self.sources[self.source.revision] = b'source'
+        self.assertEqual(self.run_stage(history.reconcile).state, 'observed')
+        self.sources[self.search_pin.revision] = b'different length'
+        with self.assertRaisesRegex(ValueError, 'fresh source'):
+            self.run_stage(history.finalize)
+        self.assertEqual(self.journal.transitions, ['claimed', 'observed'])
+        self.sources[self.search_pin.revision] = b'source'
+        self.assertEqual(self.run_stage(history.finalize).state, 'finalized')
+        self.assertEqual(self.bucket.puts, [('"parent"', self.intent.candidate)])
+
+    def test_exact_parent_rejects_duplicate_fields_and_unbound_bytes(self):
+        self.legacy()
+        replaced = replace(self.intent, parent=history._encode(self.parent))
+        with self.assertRaisesRegex(ValueError, 'sealed canonical delta'):
+            self.run_stage(history.apply_once, intent=replaced)
+        self.bucket.raw = self.parent_raw.replace(b'"page_count": 1', b'"page_count": 2, "page_count": 1')
+        with self.assertRaisesRegex(ValueError, 'duplicate field'):
+            self.seal()
+        self.assertEqual(self.bucket.puts, [])
+        self.assertEqual(self.journal.transitions, [])
+
     def test_wrong_route_and_unrelated_projection_drift_cannot_publish(self):
         wrong_before, wrong_after, lost_other = (copy.deepcopy(self.before), copy.deepcopy(self.after),
                                                   copy.deepcopy(self.after))
@@ -207,7 +349,7 @@ class ImageHistoryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'sealed canonical delta'):
             self.run_stage(history.apply_once, intent=changed)
         self.assert_no_publication()
-        for raw, etag in ((self.intent.parent, '"parent"'), (self.parent_raw, '"rotated"')):
+        for raw, etag in ((history._encode(self.parent), '"parent"'), (self.parent_raw, '"rotated"')):
             self.bucket.raw, self.bucket.etag = raw, etag
             with self.assertRaisesRegex(ValueError, 'exact canonical parent'):
                 self.run_stage(history.apply_once)

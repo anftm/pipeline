@@ -36,7 +36,7 @@ class ConditionalCheckpointTests(unittest.TestCase):
     def test_existing_parent_uses_exact_validator_and_reads_back(self):
         self.client.get_object.side_effect = [self.response(), self.response()]
         snapshot = self.store.read(BUCKET, INDEX)
-        self.assertEqual((snapshot.value, snapshot.etag), (VALUE, '"v1"'))
+        self.assertEqual((snapshot.value, snapshot.etag, snapshot.raw), (VALUE, '"v1"', RAW))
         self.assertEqual(self.store.write_once(BUCKET, INDEX, snapshot.value, snapshot.etag, operation_id=OP), 'written')
         self.client.put_object.assert_called_once_with(Bucket='reader-assets-v2', Key=INDEX, Body=RAW,
                                                        ContentType='application/json', IfMatch='"v1"')

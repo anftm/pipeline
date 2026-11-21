@@ -37,11 +37,11 @@ def _check(bucket, path):
         raise ValueError('Reader stream CAS root is outside the exact allowlist')
 
 
-def _index(raw):
+def _index(raw, *, object_pairs_hook=None):
     if not isinstance(raw, bytes) or not 0 < len(raw) <= MAX_INDEX:
         raise ValueError('invalid Reader stream index bytes')
     try:
-        value = json.loads(raw)
+        value = json.loads(raw, object_pairs_hook=object_pairs_hook)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ValueError('invalid Reader stream index JSON') from error
     if (not isinstance(value, dict) or value.get('version') != 1
@@ -103,6 +103,7 @@ class Snapshot:
     value: dict | None
     etag: str | None
     raw_sha256: str | None
+    raw: bytes | None = None  # Exact body from the same read as the ETag.
 
 
 class ConditionalCheckpointStore:
@@ -125,7 +126,7 @@ class ConditionalCheckpointStore:
             return Snapshot(None, None, None)
         value = _index(raw)
         etag = strong_etag(self.store.read_etags.get((bucket, path)))
-        return Snapshot(value, etag, hashlib.sha256(raw).hexdigest())
+        return Snapshot(value, etag, hashlib.sha256(raw).hexdigest(), raw)
 
     def write_once(self, bucket, path, value, etag, *, operation_id):
         _check(bucket, path)

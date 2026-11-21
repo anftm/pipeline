@@ -1,12 +1,14 @@
 """Conditional S3 ClaimStore; no dispatcher or checkpoint/asset access.
 
-Wire v1: reader-index/gc/image-history-claims/v1/<claim_key>.json in
-vomebook/reader-assets-v2. One canonical UTF-8 JSON object (sorted keys,
-2-space indent, final LF): {version: 1, kind: "reader-image-history-claim",
-intent, record}. The intent and record have exactly their dataclass fields
-(including nested preflight); parent and candidate are padded standard base64
-of the exact bytes. Record.intent_sha256 binds Intent.sha256; the path binds
-Intent.claim_key. Advance preserves the original intent bytes.
+Wire v2: one canonical UTF-8 JSON object (sorted keys, 2-space indent, final LF):
+{version: 2, kind: "reader-image-history-claim", intent, record}. Intent and
+record have exactly their dataclass fields. Preflight includes the historical
+source, current_source and search_sha256. Parent and candidate are padded
+standard base64 of the exact index bytes. Record.intent_sha256 binds the intent.
+
+The path stays reader-index/gc/image-history-claims/v1/<claim_key>.json in
+vomebook/reader-assets-v2 so a schema change cannot reopen a previous claim.
+Wire v1 is rejected, not treated as absent. Advance preserves the intent bytes.
 
 GC retains this control namespace without traversing it: this journal is not
 rollback protection. The endpoint must honor conditional PUT and fresh GET;
@@ -50,9 +52,7 @@ def _record(record):
 
 def _bind(key, intent, record):
     _record(record)
-    if (type(intent) is not history.Intent or type(intent.preflight) is not history.Preflight
-            or type(intent.preflight.source) is not history.Source
-            or any(type(asset) is not history.Asset for asset in (intent.preflight.old, intent.preflight.new))):
+    if type(intent) is not history.Intent:
         raise ValueError('expected a sealed image history intent')
     history._validate(intent)
     if intent.claim_key != key or intent.sha256 != record.intent_sha256:
@@ -63,7 +63,7 @@ def _encode(intent, record):
     fields = asdict(intent)
     for name in ('parent', 'candidate'):
         fields[name] = base64.b64encode(fields[name]).decode('ascii')
-    return history._encode({'version': 1, 'kind': KIND, 'intent': fields, 'record': asdict(record)})
+    return history._encode({'version': 2, 'kind': KIND, 'intent': fields, 'record': asdict(record)})
 
 
 def _decode(key, raw):
@@ -74,6 +74,7 @@ def _decode(key, raw):
         intent = history.Intent(**{
             **fields, 'preflight': history.Preflight(**{
                 **preflight, 'source': history.Source(**preflight['source']),
+                'current_source': history.Source(**preflight['current_source']),
                 'old': history.Asset(**preflight['old']), 'new': history.Asset(**preflight['new'])}),
             'parent': base64.b64decode(fields['parent'], validate=True),
             'candidate': base64.b64decode(fields['candidate'], validate=True)})

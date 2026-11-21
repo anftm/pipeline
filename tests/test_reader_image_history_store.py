@@ -59,6 +59,7 @@ class S3ClaimStoreTests(unittest.TestCase):
     def setUp(self):
         self.f = fixture.ImageHistoryTests()
         self.f.setUp()
+        self.f.legacy()
         self.intent = self.f.intent
         self.key = self.intent.claim_key
         self.path = f'reader-index/gc/image-history-claims/v1/{self.key}.json'
@@ -77,7 +78,7 @@ class S3ClaimStoreTests(unittest.TestCase):
         raw, etag = self.s3.objects[self.path]
         fields = asdict(self.intent) | {name: b64encode(getattr(self.intent, name)).decode('ascii')
                                        for name in ('parent', 'candidate')}
-        wire = {'kind': 'reader-image-history-claim', 'version': 1, 'intent': fields,
+        wire = {'kind': 'reader-image-history-claim', 'version': 2, 'intent': fields,
                 'record': asdict(self.claimed)}
         self.assertEqual(raw, (json.dumps(wire, sort_keys=True, ensure_ascii=False, indent=2) + '\n').encode())
         self.assertTrue(self.store.advance(self.key, self.claimed, self.observed))
@@ -91,6 +92,8 @@ class S3ClaimStoreTests(unittest.TestCase):
         self.assertEqual((intent, record), (self.intent, self.observed))
         self.assertEqual(intent.sha256, self.intent.sha256)
         self.assertEqual(intent.claim_key, self.key)
+        self.assertEqual(intent.parent, self.f.parent_raw)
+        self.assertNotEqual(intent.preflight.source.revision, intent.preflight.current_source.revision)
         self.assertEqual(self.f.run_stage(history.finalize, intent=intent), self.finalized)
         self.assertEqual(self.f.run_stage(history.finalize, intent=intent), self.finalized)
         self.assertEqual(self.f.calls, ['after', 'after'])
@@ -191,16 +194,27 @@ class S3ClaimStoreTests(unittest.TestCase):
         self.s3.objects[adapter.PREFIX + 'a' * 64 + '.json'] = raw, etag
         with self.assertRaises(ValueError):
             self.store.load('a' * 64)
-        for field, value in [('version', True), ('extra', None),
+        for field, value in [('version', True), ('version', 1), ('extra', None),
                              ('intent', json.loads(raw)['intent'] | {'candidate': '!!!!'}),
                              ('record', asdict(self.claimed) | {'intent_sha256': '0' * 64})]:
             self.s3.objects[self.path] = history._encode(json.loads(raw) | {field: value}), etag
             with self.subTest(field=field), self.assertRaises(ValueError):
                 self.store.advance(self.key, self.claimed, self.observed)
-        self.s3.objects[self.path] = raw.replace(b'"version": 1', b'"version": 1, "version": 1'), etag
+        self.s3.objects[self.path] = raw.replace(b'"version": 2', b'"version": 2, "version": 2'), etag
         with self.assertRaises(ValueError):
             self.store.read(self.key)
         self.assertEqual(len(self.s3.puts), 1)
+        # A pre-v2 envelope occupying the same key cannot be silently replaced.
+        old_wire = json.loads(raw)
+        old_wire['version'] = 1
+        del old_wire['intent']['preflight']['current_source']
+        del old_wire['intent']['preflight']['search_sha256']
+        old_raw = history._encode(old_wire)
+        self.s3.objects[self.path] = old_raw, etag
+        with self.assertRaises(ValueError):
+            self.store.load(self.key)
+        self.assertFalse(self.claim())
+        self.assertEqual(self.s3.objects[self.path], (old_raw, etag))
         for error in (S3Error('NoSuchBucket', 404), S3Error('AccessDenied', 403), TimeoutError()):
             self.s3.get_error = error
             with self.assertRaises(type(error)):
