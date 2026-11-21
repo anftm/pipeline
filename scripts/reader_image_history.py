@@ -25,6 +25,7 @@ from .shared import READER_ASSETS_BUCKET as BUCKET
 CANONICAL = 'pages/image/index-v2.json'
 IMAGE_EXTENSIONS = {'jpg', 'jpeg', 'png', 'bmp', 'webp', 'gif', 'tif', 'tiff'}
 OUTPUT_FIELDS = {'root', 'path', 'bytes', 'sha256', 'processing_roots', 'checkpointed_at'}
+AVIF_PROFILE = 'reader-image-avif-q70-444-v1'
 
 
 def _sha(raw: bytes) -> str:
@@ -197,33 +198,37 @@ def _static(row, key, source, asset, suffix):
         raise ValueError('row does not match the exact static-image source and asset')
 
 
-def _candidate(parent, key, old_row_sha256, new, preflight, operation):
-    _hex(operation, 32)
-    if type(preflight) is not Preflight:
-        raise ValueError('expected exact image history preflight evidence')
-    _hex(preflight.rollback_sha256)
-    _hex(preflight.pins_sha256)
-    _hex(preflight.search_sha256)
-    source, current = preflight.source, preflight.current_source
+def _same_source(source, current):
     _source(source)
     _source(current)
     if (source.repo, source.path, source.sha256, source.size) != (
             current.repo, current.path, current.sha256, current.size):
         raise ValueError('historical and current Search-pinned source identities differ in path or bytes')
+
+
+def _replacement(parent, key, old_row_sha256, new, *, source, current, webp, avif, operation):
+    _hex(operation, 32)
+    _same_source(source, current)
     position, old = _selected(parent, key)
     if row_digest(old) != old_row_sha256:
         raise ValueError('old mapped row digest differs')
-    _static(old, key, source, preflight.old, 'webp')
+    _static(old, key, source, webp, 'webp')
     revision = new.get('source_revision')
     if revision not in (source.revision, current.revision):
         raise ValueError('replacement revision is not an exact static-image source pin')
-    _static(new, key, current if revision == current.revision else source, preflight.new, 'avif')
-    if (preflight.old.root == preflight.new.root or preflight.old.sha256 == preflight.new.sha256
+    _static(new, key, current if revision == current.revision else source, avif, 'avif')
+    if (webp.root == avif.root or webp.sha256 == avif.sha256
             or parent.get('checkpoint_operation') == operation):
         raise ValueError('replacement needs a distinct asset root, content and operation')
     # Revision is the only mutable source field and _static bound it to one of
     # the two explicitly sealed, byte-identical source identities.
     mutable = OUTPUT_FIELDS | {'source_revision'}
+    if 'profile' in new and 'profile' not in old:
+        address = json.dumps({'version': 1, 'source_sha256': source.sha256, 'files': {'document.avif': avif.sha256}},
+                             sort_keys=True, separators=(',', ':')).encode()
+        if new['profile'] != AVIF_PROFILE or avif.root != f"pages/image/{old['extension']}/{_sha(address)}":
+            raise ValueError('replacement AVIF profile or content address differs')
+        mutable.add('profile')
     if _encode({k: v for k, v in old.items() if k not in mutable}) != _encode(
             {k: v for k, v in new.items() if k not in mutable}):
         raise ValueError('replacement changes non-output row fields')
@@ -232,15 +237,25 @@ def _candidate(parent, key, old_row_sha256, new, preflight, operation):
     return _encode({**parent, 'files': files, 'checkpoint_operation': operation})
 
 
-def _projection_delta(key, preflight, before, after):
-    def route(asset):
-        return {'s': 2, 'm': 'i', 'b': BUCKET, 'p': asset.path}
+def _candidate(parent, key, old_row_sha256, new, preflight, operation):
+    if type(preflight) is not Preflight:
+        raise ValueError('expected exact image history preflight evidence')
+    for digest in (preflight.rollback_sha256, preflight.pins_sha256, preflight.search_sha256):
+        _hex(digest)
+    return _replacement(parent, key, old_row_sha256, new, source=preflight.source, current=preflight.current_source,
+                        webp=preflight.old, avif=preflight.new, operation=operation)
 
+
+def _route(asset):
+    return {'s': 2, 'm': 'i', 'b': BUCKET, 'p': asset.path}
+
+
+def _projection_delta(key, old, new, before, after):
     if (not isinstance(before, dict) or type(before.get('v')) is not int or before['v'] != 1
             or not isinstance(before.get('f'), dict)
-            or _encode(before['f'].get(key)) != _encode(route(preflight.old))):
+            or _encode(before['f'].get(key)) != _encode(_route(old))):
         raise ValueError('old projected route differs')
-    expected = _encode({**before, 'f': {**before['f'], key: route(preflight.new)}})
+    expected = _encode({**before, 'f': {**before['f'], key: _route(new)}})
     if _encode(after) != expected:
         raise ValueError('projected route delta is not exactly the selected path replacement')
     return _sha(_encode(before)), _sha(expected)
@@ -257,7 +272,8 @@ def seal(operation: str, *, key: str, parent: Snapshot, old_row_sha256: str,
         raise ValueError('exact canonical parent bytes differ from snapshot identity')
     candidate = _candidate(parent_value, key, old_row_sha256, new_row, checks.preflight, operation)
     _index(candidate)
-    before, after = _projection_delta(key, checks.preflight, checks.before_projection, checks.after_projection)
+    before, after = _projection_delta(key, checks.preflight.old, checks.preflight.new,
+                                      checks.before_projection, checks.after_projection)
     return Intent(operation, key, checks.preflight, old_row_sha256, row_digest(new_row),
                   parent.raw_sha256, parent.etag, parent_bytes, candidate, before, after)
 
@@ -285,7 +301,7 @@ def _fresh(intent, revalidate, phase):
             or type(actual.old) is not Asset or type(actual.new) is not Asset
             or _encode(asdict(actual)) != _encode(asdict(intent.preflight))):
         raise ValueError('fresh source, rollback, asset or pin preflight differs')
-    if _projection_delta(intent.key, intent.preflight, checks.before_projection, checks.after_projection) != (
+    if _projection_delta(intent.key, actual.old, actual.new, checks.before_projection, checks.after_projection) != (
             intent.before_projection_sha256, intent.after_projection_sha256):
         raise ValueError('whole fresh projected route delta differs from seal')
 
