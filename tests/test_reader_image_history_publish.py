@@ -47,6 +47,7 @@ class PublicationTests(unittest.TestCase):
         self.attempts = []
         self.fail = None
         self.guard = lambda phase: True
+        self.reader_catalog_digest = lambda: sha(self.data[publish.CATALOG])
 
     def read_bytes(self, bucket, path):
         self.assertEqual(bucket, publish.ASSETS)
@@ -92,7 +93,9 @@ class PublicationTests(unittest.TestCase):
     def run_publish(self, **overrides):
         kwargs = dict(parent=self.parent_version, before_sidecar=self.before, sidecar_etag=self.sidecar_etag,
                       after_sidecar=self.after, key=KEY, webp_path=WEBP, avif_path=AVIF, now=NOW,
-                      expected_pointer_raw=v3.encode(self.pointer), journal=self, observe=self.observe,
+                      expected_catalog_sha256=self.plan['target_sha256'],
+                      expected_catalog_bytes=self.plan['target_bytes'], expected_pointer_raw=v3.encode(self.pointer),
+                      journal=self, observe=self.observe, reader_catalog_digest=self.reader_catalog_digest,
                       cas=self.cas, store=self, guard=self.guard)
         return publish.publish(io.BytesIO(self.parent), **(kwargs | overrides))
 
@@ -123,6 +126,35 @@ class PublicationTests(unittest.TestCase):
         self.assertEqual(actual['generations'][result['generation']]['snapshot'], result['snapshot'])
         self.assertEqual(self.run_publish(resume=True), result)
         self.assertEqual(self.attempts, [publish.CATALOG, publish.SIDECAR])
+
+    def test_unreviewed_catalog_payload_cannot_claim_or_write(self):
+        different_time = '2026-11-21T00:01:00+00:00'
+        changed = catalog.plan(io.BytesIO(self.parent), io.BytesIO(), key=KEY, webp_path=WEBP, avif_path=AVIF,
+                               before_sidecar=self.before, after_sidecar=self.after, now=different_time)
+        self.assertEqual(self.plan['snapshot'], changed['snapshot'])
+        self.assertNotEqual(self.plan['target_sha256'], changed['target_sha256'])
+        for override in ({'now': different_time}, {'expected_catalog_bytes': self.plan['target_bytes'] + 1}):
+            with self.subTest(override=override), self.assertRaisesRegex(ValueError, 'reviewed preview'):
+                self.run_publish(**override)
+        self.assertEqual(self.attempts, [])
+        self.assertIsNone(self.record)
+
+    def test_lagging_reader_catalog_blocks_sidecar_until_catchup(self):
+        with self.assertRaisesRegex(ValueError, 'catalog reader view differs'):
+            self.run_publish(reader_catalog_digest=lambda: sha(self.parent))
+        self.assertEqual(self.record.state, 'catalog-permitted')
+        self.assertEqual(self.attempts, [publish.CATALOG])
+        self.assertEqual(self.data[publish.SIDECAR], self.before)
+        self.assert_admission(self.run_publish(resume=True))
+
+    def test_reader_catalog_is_checked_again_before_v3_admission(self):
+        def lag_after_sidecar():
+            return sha(self.parent if publish.SIDECAR in self.attempts else self.data[publish.CATALOG])
+
+        with self.assertRaisesRegex(ValueError, 'catalog reader view differs'):
+            self.run_publish(reader_catalog_digest=lag_after_sidecar)
+        self.assertEqual(self.record.state, 'sidecar-permitted')
+        self.assert_admission(self.run_publish(resume=True))
 
     def test_lost_put_responses_recover_without_replay(self):
         for path, state in ((publish.CATALOG, 'catalog-permitted'), (publish.SIDECAR, 'sidecar-permitted')):

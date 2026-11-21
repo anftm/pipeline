@@ -61,16 +61,19 @@ class Journal(Protocol):
 
 def publish(parent_catalog: BinaryIO, *, parent: Version, before_sidecar: bytes, sidecar_etag: str,
             after_sidecar: bytes, key: str, webp_path: str, avif_path: str, now: str,
-            expected_pointer_raw: bytes, journal: Journal, observe: Callable[[str], Version],
+            expected_catalog_sha256: str, expected_catalog_bytes: int, expected_pointer_raw: bytes,
+            journal: Journal, observe: Callable[[str], Version], reader_catalog_digest: Callable[[], str],
             cas: PutOnce, store, guard: Callable[[Phase], bool], resume: bool = False) -> dict:
     """Return legacy evidence and kwargs for a separate v3 unify.
 
     Retain the original reviewed inputs (including the parent catalog bytes)
     for resume. observe(path) returns the digest, size and ETag from one fresh
     full read; the streaming adapter's equivalent Observed also works.
-    cas is a synchronous single-attempt If-Match PUT with the sealed size and
-    digest. It returns the response ETag, or raises on failure or ambiguity.
-    store.read_bytes is the fresh reader view for small objects only.
+    The expected catalog identity must come from the reviewed preview, not
+    the regenerated candidate. cas issues one If-Match PUT and returns its
+    response ETag or raises. reader_catalog_digest streams the exact catalog
+    through the independent reader resolver, not the S3 writer endpoint.
+    store.read_bytes is that reader view for small objects only.
     guard(phase) must freshly confirm the fence and the reviewed prerequisites
     (applied image indexes, source/Search pins, full projected route delta,
     retained WebP and protected AVIF) and return True. It must be read-only.
@@ -79,6 +82,9 @@ def publish(parent_catalog: BinaryIO, *, parent: Version, before_sidecar: bytes,
     """
     strong_etag(parent.etag)
     strong_etag(sidecar_etag)
+    image._hex(expected_catalog_sha256)
+    if type(expected_catalog_bytes) is not int or not 0 < expected_catalog_bytes <= catalog.MAX_CATALOG_BYTES:
+        raise ValueError('invalid reviewed catalog target length')
     with TemporaryFile() as target:
         plan = catalog.plan(parent_catalog, target, key=key, webp_path=webp_path, avif_path=avif_path,
                             before_sidecar=before_sidecar, after_sidecar=after_sidecar, now=now,
@@ -88,6 +94,8 @@ def publish(parent_catalog: BinaryIO, *, parent: Version, before_sidecar: bytes,
         before = Version(image._sha(before_sidecar), len(before_sidecar), sidecar_etag)
         snapshot = plan['snapshot']
         catalog_target = plan['target_sha256'], plan['target_bytes']
+        if catalog_target != (expected_catalog_sha256, expected_catalog_bytes):
+            raise ValueError('catalog target bytes differ from the reviewed preview')
         sidecar_target = snapshot['sha256'], snapshot['bytes']
         seal = image._sha(image._encode(['reader-image-legacy-publish-v1',
                                         (parent.sha256, parent.size, parent.etag),
@@ -118,6 +126,10 @@ def publish(parent_catalog: BinaryIO, *, parent: Version, before_sidecar: bytes,
                      parent.etag if parents else catalog_etag)
             s = root(SIDECAR, before, sidecar_target if both else (before.sha256, before.size),
                      sidecar_etag if both else before.etag)
+            # The resolver can lag S3 despite an exclusive writer fence.
+            # Check it before the sidecar PUT and again before v3 admission.
+            if not parents and reader_catalog_digest() != expected_catalog_sha256:
+                raise ValueError('legacy catalog reader view differs from the reviewed successor')
             # Check the continuous fence after potentially long catalog reads.
             if guard(phase) is not True:
                 raise ValueError('legacy publication guard not confirmed')
