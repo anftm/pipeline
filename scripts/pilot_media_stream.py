@@ -44,6 +44,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--shard-count", type=int, default=1)
     parser.add_argument("--shard-index", type=int, default=0)
     parser.add_argument("--bucket", default=TARGET_BUCKET)
+    parser.add_argument("--boost-canary", action="store_true")
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--retry-failures", action="store_true")
     parser.add_argument("--strict", action="store_true")
@@ -86,7 +87,7 @@ def select_records(path: Path, revisions: dict, kind: str, extension: str = "all
     return selected
 
 
-def build_one(item: dict, work: Path, bucket: str) -> tuple[dict, dict[str, str]]:
+def build_one(item: dict, work: Path, bucket: str, *, boost_canary: bool = False) -> tuple[dict, dict[str, str]]:
     extension = item["extension"]
     contract = bucket_conversion_contract(item["repo"], item["path"], extension, item["source_bytes"])
     if contract is None:
@@ -100,7 +101,8 @@ def build_one(item: dict, work: Path, bucket: str) -> tuple[dict, dict[str, str]
         "output_name": output_name,
     }
     bundle = work / "bundle"
-    result = convert_item(queue_item, bundle)
+    options = {"exact_source_bytes": item["source_bytes"]} if boost_canary else {}
+    result = convert_item(queue_item, bundle, **options)
     artifact = bundle / result["path"]
     if not artifact.is_file():
         raise ValueError(f"converted artifact missing: {result['path']}")
@@ -130,6 +132,7 @@ def main() -> int:
     args = parse_args()
     if args.limit < 0 or args.shard_count < 1 or not 0 <= args.shard_index < args.shard_count:
         raise ValueError("invalid limit or shard")
+    options = {"boost_canary": True} if getattr(args, "boost_canary", False) else {}
     token = os.environ.get("HF_TOKEN")
     revisions = json.loads(args.revisions.read_text(encoding="utf-8"))
     root = f"media/{args.kind}"
@@ -165,7 +168,7 @@ def main() -> int:
             checkpoint_work = work / str(index)
             checkpoint_work.mkdir(parents=True, exist_ok=True)
             try:
-                entry, uploads = build_one(item, checkpoint_work, args.bucket)
+                entry, uploads = build_one(item, checkpoint_work, args.bucket, **options)
                 entries.append(entry)
                 converted += 1
             except Exception as error:

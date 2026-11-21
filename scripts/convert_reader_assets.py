@@ -124,12 +124,23 @@ ARTIFACT_LOCKS = {}
 ARTIFACT_LOCKS_GUARD = threading.Lock()
 
 
-def download_source(url: str, target: Path, *, max_bytes: int = MAX_SOURCE_BYTES) -> tuple[str, int]:
+def download_source(url: str, target: Path, *, max_bytes: int = MAX_SOURCE_BYTES,
+                    exact_bytes: int | None = None) -> tuple[str, int]:
+    if exact_bytes is not None and (type(exact_bytes) is not int or not 0 < exact_bytes <= max_bytes):
+        raise ValueError("invalid pinned source byte count")
     # HF resolve URLs can briefly return 404 while a dataset revision is
     # propagating. Do not resume a stale partial file after that response.
     for attempt in range(5):
         delay = attempt + 1
         offset = target.stat().st_size if target.exists() else 0
+        if exact_bytes is not None:
+            if offset > exact_bytes:
+                raise RuntimeError("cached source exceeds pinned byte count")
+            if offset == exact_bytes:
+                # A failed transfer may have written exactly this much before
+                # EOF was confirmed. Start fresh, not with a Range past EOF.
+                target.unlink()
+                offset = 0
         headers = {"User-Agent": "VoiceOfML-Reader-Assets/1.0"}
         if offset:
             headers["Range"] = f"bytes={offset}-"
@@ -138,6 +149,10 @@ def download_source(url: str, target: Path, *, max_bytes: int = MAX_SOURCE_BYTES
         try:
             with urllib.request.urlopen(request, timeout=180) as response:
                 resumed = bool(offset and response.status == 206)
+                if exact_bytes is not None and (response.status not in (200, 206)
+                                                or (response.status == 200 and response.headers.get("Content-Range"))
+                                                or response.headers.get("Content-Encoding", "identity").lower() != "identity"):
+                    raise RuntimeError("expected an unencoded full or resumed pinned source response")
                 if not offset and response.status == 206:
                     raise http.client.IncompleteRead(b"unexpected partial response")
                 if resumed:
@@ -146,6 +161,10 @@ def download_source(url: str, target: Path, *, max_bytes: int = MAX_SOURCE_BYTES
                     if not match or int(match.group(1)) != offset:
                         target.unlink(missing_ok=True)
                         raise http.client.IncompleteRead(b"invalid Content-Range")
+                    if exact_bytes is not None and (int(match.group(2)) != exact_bytes - 1
+                                                    or match.group(3) != str(exact_bytes)):
+                        target.unlink(missing_ok=True)
+                        raise RuntimeError("resumed source range differs from pinned byte count")
                 if offset and not resumed:
                     offset = 0
                 mode = "ab" if resumed else "wb"
@@ -157,12 +176,23 @@ def download_source(url: str, target: Path, *, max_bytes: int = MAX_SOURCE_BYTES
                             digest.update(chunk)
                     size = offset
                 with target.open(mode) as output:
-                    while chunk := response.read(1024 * 1024):
+                    while True:
+                        # Probe one byte past the pin to detect overflow rather
+                        # than silently accepting a truncated response.
+                        read_size = (1024 * 1024 if exact_bytes is None else
+                                     min(1024 * 1024, exact_bytes - size + 1))
+                        chunk = response.read(read_size)
+                        if not chunk:
+                            break
                         size += len(chunk)
+                        if exact_bytes is not None and size > exact_bytes:
+                            raise RuntimeError("download exceeds pinned byte count")
                         if size > max_bytes:
                             raise RuntimeError("download exceeds size limit")
                         digest.update(chunk)
                         output.write(chunk)
+                if exact_bytes is not None and size != exact_bytes:
+                    raise RuntimeError("download is shorter than pinned byte count")
             return digest.hexdigest(), size
         except urllib.error.HTTPError as exc:
             if exc.code == 404:
@@ -2311,7 +2341,8 @@ def validate_office_pdf(path: Path, item: dict, work: Path, source: Path | None 
         validate_output(path, "pdf")
 
 
-def convert_item(item: dict, bundle: Path, reusable: dict | None = None) -> dict:
+def convert_item(item: dict, bundle: Path, reusable: dict | None = None, *,
+                 exact_source_bytes: int | None = None) -> dict:
     if str(item["extension"]).lower().lstrip(".") == "djvu":
         # A stale generic queue must not download, reuse or create a derivative.
         # Native DjVu admission/probing belongs to the account render worker.
@@ -2319,7 +2350,8 @@ def convert_item(item: dict, bundle: Path, reusable: dict | None = None) -> dict
     with tempfile.TemporaryDirectory(prefix="reader-convert-") as root:
         work = Path(root)
         source = work / f"source.{item['extension']}"
-        digest, source_bytes = download_source(item["source_url"], source)
+        download_options = {} if exact_source_bytes is None else {"exact_bytes": exact_source_bytes}
+        digest, source_bytes = download_source(item["source_url"], source, **download_options)
         if item.get("profile") == NATIVE_MEDIA_PROFILE:
             item = prepare_native_media_item(item, source)
         if item["extension"] == "asx":

@@ -57,6 +57,7 @@ def parse_args() -> argparse.Namespace:
                         help="maximum source bytes; 0 means unlimited")
     parser.add_argument("--extension", default="all")
     parser.add_argument("--bucket", default=TARGET_BUCKET)
+    parser.add_argument("--boost-canary", action="store_true")
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--retry-failures", action="store_true",
                         help="retry recorded conversion failures")
@@ -85,17 +86,34 @@ def retry_delay(error: HfHubHTTPError, attempt: int) -> float:
     return min(300.0, 30.0 * (2 ** attempt))
 
 
-def download(url: str, target: Path, token: str | None) -> None:
+def download(url: str, target: Path, token: str | None, *, exact_bytes: int | None = None) -> None:
     from huggingface_hub.utils import get_session, hf_raise_for_status
+    if exact_bytes is not None and (type(exact_bytes) is not int or exact_bytes <= 0):
+        raise ValueError("invalid pinned image source byte count")
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    if exact_bytes is not None:
+        headers["Accept-Encoding"] = "identity"
     for attempt in range(DOWNLOAD_ATTEMPTS):
         try:
-            with get_session().stream("GET", url,
-                                      headers={"Authorization": f"Bearer {token}"} if token else {},
+            with get_session().stream("GET", url, headers=headers,
                                       follow_redirects=True, timeout=120) as response:
                 hf_raise_for_status(response)
+                if exact_bytes is not None and (response.status_code != 200 or response.headers.get("Content-Range")
+                                                or response.headers.get("Content-Encoding", "identity").lower() != "identity"):
+                    raise ValueError("expected a complete unencoded pinned image response")
+                remaining = exact_bytes
                 with target.open("wb") as stream:
-                    for chunk in response.iter_bytes():
+                    # Bound chunk size as well as total bytes written in canary mode.
+                    chunks = (response.iter_bytes() if remaining is None else
+                              response.iter_raw(chunk_size=min(64 * 1024, remaining + 1)))
+                    for chunk in chunks:
+                        if remaining is not None:
+                            remaining -= len(chunk)
+                            if remaining < 0:
+                                raise ValueError("image download exceeds pinned byte count")
                         stream.write(chunk)
+                if remaining not in (None, 0):
+                    raise ValueError("image download is shorter than pinned byte count")
             time.sleep(DOWNLOAD_INTERVAL_SECONDS)
             return
         except HfHubHTTPError as error:
@@ -134,10 +152,11 @@ def source_records(path: Path, revisions: dict, max_bytes: int, extension_filter
 
 
 def build_one(item: dict, work: Path, token: str | None, bucket: str, *,
-              legacy_source_addressed: bool = False) -> tuple[dict, dict[str, str]]:
+              legacy_source_addressed: bool = False, boost_canary: bool = False) -> tuple[dict, dict[str, str]]:
     work.mkdir(parents=True, exist_ok=True)
     source = work / "source"
-    download(source_url(item["repo"], item["revision"], item["path"]), source, token)
+    options = {"exact_bytes": item["bytes"]} if boost_canary else {}
+    download(source_url(item["repo"], item["revision"], item["path"]), source, token, **options)
     source_digest = hashlib.sha256(source.read_bytes()).hexdigest()
     if item.get("source_sha256") and item["source_sha256"] != source_digest:
         raise ValueError("image source checksum differs from pinned repair identity")
@@ -292,6 +311,7 @@ def main() -> int:
         raise ValueError("limit and max-source-bytes must be non-negative")
     if args.shard_count < 1 or not 0 <= args.shard_index < args.shard_count:
         raise ValueError("invalid shard")
+    options = {"boost_canary": True} if getattr(args, "boost_canary", False) else {}
     token = os.environ.get("HF_TOKEN")
     revisions = json.loads(args.revisions.read_text(encoding="utf-8"))
     extension = args.extension.lower().lstrip(".")
@@ -336,7 +356,7 @@ def main() -> int:
             folder = work_root / str(number)
             folder.mkdir()
             try:
-                result, files = build_one(item, folder / 'bundle', token, args.bucket)
+                result, files = build_one(item, folder / 'bundle', token, args.bucket, **options)
                 entries, failures = [result], []
                 converted += 1
             except Exception as error:

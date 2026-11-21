@@ -243,6 +243,7 @@ jobs:
           args=(--kind "$KIND" --extension "$EXTENSION" --limit "$LIMIT"
                 --shard-count 8 --shard-index "$SHARD" --apply --strict)
           if [[ "$RETRY_FAILURES" == "true" ]]; then args+=(--retry-failures); fi
+          if [[ "$BOOST_CANARY" == 'true' ]]; then args+=(--boost-canary); fi
           python scripts/pilot_media_stream.py "${args[@]}"
 
   finalize:

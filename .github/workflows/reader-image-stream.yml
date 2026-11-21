@@ -218,6 +218,7 @@ jobs:
           [[ "$SHARD" =~ ^[0-7]$ ]] || exit 1
           args=(--extension "$EXTENSION" --limit "$LIMIT" --shard-count 8 --shard-index "$SHARD" --apply --strict)
           if [[ "$RETRY_FAILURES" == 'true' ]]; then args+=(--retry-failures); fi
+          if [[ "$BOOST_CANARY" == 'true' ]]; then args+=(--boost-canary); fi
           python scripts/pilot_image_page_stream.py "${args[@]}"
 
   finalize:

@@ -40,6 +40,10 @@ on:
       - tests/test_search_daily_resume_workflow.py
       - scripts/reader_format_daily.py
       - scripts/reader_format_sources.py
+      - scripts/reader_ordinary_boost.py
+      - scripts/pilot_image_page_stream.py
+      - scripts/pilot_media_stream.py
+      - tests/test_reader_boost_downloads.py
       - scripts/reader_chapter_profiles.py
       - scripts/pilot_image_page_stream.py
       - tests/test_pilot_image_page_stream.py
@@ -101,6 +105,8 @@ jobs:
         run: python -B -m unittest -v tests.test_pilot_image_page_stream
       - name: Exercise Space transition and rollback receipts
         run: python -B -m unittest -v tests.test_search_space_transition tests.test_search_space_deploy
+      - name: Verify ordinary Reader canary download bounds
+        run: python -B -m unittest -v tests.test_reader_boost_downloads
       - name: Verify pinned source addition and first publication
         run: python -B -m unittest -v tests.test_search_source_additions tests.test_search_source_watch
       - name: Verify Reader maintenance, fences and timed deletion policy
