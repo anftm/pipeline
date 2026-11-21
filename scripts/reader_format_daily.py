@@ -6,6 +6,9 @@ Producers accept automation_id, defer_unify=true and run-name
 reader-auto/{automation_id}; media additionally accepts extension. Publication
 accepts automation_id with the same run-name, but no defer_unify input.
 
+An explicit, enabled JPG/MP3 canary attempts one ordinary batch and verifies
+publication without queuing a continuation. Normal automation never boosts.
+
 A journal is a local recovery artifact, not a distributed lock. Existing journals
 are never replayed: observe only watches recorded operations and requires review.
 """
@@ -26,6 +29,11 @@ import time
 import uuid
 from urllib.parse import urlsplit
 import zipfile
+
+try:
+    from . import reader_ordinary_boost as boost
+except ImportError:
+    import reader_ordinary_boost as boost
 
 
 REPOSITORY = 'anftm/pipeline'
@@ -150,12 +158,15 @@ def blockers(row, *, source_changes_triggered=False, first_conversion_triggered=
     return reasons
 
 
-def plan(summary):
+def plan(summary, *, boost_canary=None):
     rows = validate_summary(summary)
     decisions = {}
     for ext, row in sorted(rows.items()):
         if ext in {'pdf', 'djvu'}:
             decisions[ext] = {'state': 'excluded', 'reasons': ['existing dataset-primary policy']}
+            continue
+        if boost_canary is not None and ext != boost_canary:
+            decisions[ext] = {'state': 'excluded', 'reasons': ['outside the requested boost canary']}
             continue
         reasons = blockers(row)
         state = ('blocked' if reasons else 'triggered' if row['definite_backlog'] > 0
@@ -173,17 +184,22 @@ def plan(summary):
             'batches': 0, 'operation_ids': [], 'operations': [], 'status': 'planned'}
 
 
-def producer_inputs(extension, automation_id, *, expected_sha, search_generation):
+def producer_inputs(extension, automation_id, *, expected_sha, search_generation, boost_limit=None):
     family, _workflow, limit = FORMATS[extension]
     if (not _workflow or not OPERATION_ID.fullmatch(automation_id)
             or not SHA.fullmatch(expected_sha) or not GENERATION.fullmatch(search_generation)):
         raise ValueError('invalid producer operation')
+    if boost_limit is not None:
+        boost.byte_budget(extension, boost_limit)
+        limit = boost_limit
     inputs = {'limit': str(limit), 'apply': 'true', 'automation_id': automation_id, 'defer_unify': 'true',
               'expected_sha': expected_sha, 'search_generation': search_generation}
     if family == 'chm':
         inputs.update(retry_failed='false', failed_only='false')
     else:
         inputs.update(extension=extension, retry_failures='false')
+    if boost_limit is not None:
+        inputs['boost_canary'] = 'true'
     if family == 'image':
         inputs['shard'] = 'all'
     if family == 'media':
@@ -660,7 +676,7 @@ def continue_dispatch(*, api, result, journal, expected_sha, current_run_id,
 class Controller:
     def __init__(self, *, api, refresh, verify, journal, expected_sha, enabled=False,
                  known_writers=False, parent_run_id=None, run_attempt=1,
-                 max_batches=MAX_BATCHES, timeout_seconds=MAX_SECONDS, continuation=None,
+                 max_batches=MAX_BATCHES, timeout_seconds=MAX_SECONDS, continuation=None, boost_canary=None,
                  clock=time.monotonic, sleep=time.sleep, new_id=lambda: uuid.uuid4().hex):
         if not isinstance(expected_sha, str) or not SHA.fullmatch(expected_sha):
             raise ValueError('expected SHA must be the exact pipeline HEAD')
@@ -677,7 +693,9 @@ class Controller:
         self.clock, self.sleep, self.new_id = clock, sleep, new_id
         self.deadline = clock() + timeout_seconds
         self.finish_reserve = min(60, timeout_seconds * 0.02)
-        self.continuation = continuation
+        if boost_canary is not None and (boost_canary not in boost.POLICIES or continuation is not None):
+            raise ValueError('boost canary requires one supported extension and no continuation')
+        self.continuation, self.boost_canary = continuation, boost_canary
         self.batch_durations = []
         self.result = None
 
@@ -753,7 +771,7 @@ class Controller:
         return summary
 
     def update_counts(self, summary, triggered):
-        latest = plan(summary)
+        latest = plan(summary, boost_canary=self.boost_canary)
         for ext, decision in latest['formats'].items():
             if ext not in triggered:
                 self.result['formats'][ext] = decision
@@ -778,9 +796,11 @@ class Controller:
         self.checkpoint()
 
     def run(self, summary):
-        self.result = plan(summary)
+        self.result = plan(summary, boost_canary=self.boost_canary)
         self.result.update(mode='run', status='running', expected_sha=self.expected_sha,
                            parent_run_id=self.parent_run_id)
+        if self.boost_canary is not None:
+            self.result['boost_canary'] = self.boost_canary
         # Refuse reuse even when the previous controller crashed before its first POST.
         save(self.journal, self.result, exclusive=True)
         try:
@@ -815,6 +835,8 @@ class Controller:
                 self.result['accepted_continuation_id'] = previous['continuation']['id']
             self.result['triggered_formats'] = triggered
             self.update_counts(current, triggered)
+            if self.boost_canary is not None and not queue:
+                raise RuntimeError('boost canary requires an initially triggered ordinary backlog')
             while queue:
                 # Yield only between fully published, refreshed batches. A timeout
                 # with a running child or unknown POST remains blocked for observation.
@@ -833,6 +855,11 @@ class Controller:
                     decision.update(state='blocked', reasons=reasons)
                     self.result['blocked'][ext] = reasons
                     continue
+                boost_limit = None
+                if self.boost_canary is not None:
+                    boost_limit = boost.batch_limit(ext, row['not_mapped'] + row['source_content_changed'])
+                    if boost_limit <= boost.STANDARD_LIMIT:
+                        raise RuntimeError('refreshed backlog is too small for a boosted batch')
                 if row['definite_backlog'] == 0:
                     decision['state'] = 'complete'
                     continue
@@ -841,7 +868,7 @@ class Controller:
                 producer_id = self.new_id()
                 self.dispatch(FORMATS[ext][1], producer_inputs(
                     ext, producer_id, expected_sha=self.expected_sha,
-                    search_generation=summary['search_generation']), ext, 'producer')
+                    search_generation=summary['search_generation'], boost_limit=boost_limit), ext, 'producer')
                 self.dispatch(PUBLISH, {'operation': 'unify', 'apply': 'true',
                                         'automation_id': self.new_id()}, ext, 'unify')
                 operation = self.result['operations'][-1]
@@ -869,6 +896,10 @@ class Controller:
                 if reasons:
                     decision.update(state='blocked', reasons=reasons)
                     self.result['blocked'][ext] = reasons
+                elif self.boost_canary is not None:
+                    decision['state'] = 'canary_remaining' if after['definite_backlog'] else 'complete'
+                    self.result['status'] = 'canary_complete'
+                    return self.result  # Verified decrease; deliberately do not enqueue more work.
                 elif after['definite_backlog']:
                     queue.append(ext)  # Round robin until the verified backlog reaches zero.
                 else:
@@ -1018,6 +1049,7 @@ def main(argv=None):
     parser.add_argument('--continuation-run-id', type=int)
     parser.add_argument('--continuation-id')
     parser.add_argument('--summary', type=Path)
+    parser.add_argument('--boost-canary', choices=tuple(boost.POLICIES))
     parser.add_argument('--generation')
     parser.add_argument('--revisions', type=Path)
     parser.add_argument('--output', type=Path)
@@ -1028,6 +1060,13 @@ def main(argv=None):
     parser.add_argument('--max-batches', type=int, default=MAX_BATCHES)
     parser.add_argument('--timeout-seconds', type=int, default=MAX_SECONDS)
     args = parser.parse_args(argv)
+    if args.boost_canary and (args.command != 'run' or args.continuation_run_id is not None
+                             or args.continuation_id is not None or not args.enabled
+                             or not args.known_writers_verified
+                             or os.getenv('GITHUB_EVENT_NAME') != 'workflow_dispatch'
+                             or os.getenv('GITHUB_RUN_ATTEMPT') != '1'
+                             or os.getenv(boost.POLICIES[args.boost_canary][2]) != 'true'):
+        parser.error('boost canary requires an enabled manual first-attempt controller without continuation')
     if args.command == 'guard-source':
         if not args.generation or not args.expected_sha or args.revisions is None:
             parser.error('guard-source requires --generation, --expected-sha and --revisions')
@@ -1089,7 +1128,7 @@ def main(argv=None):
                                 parent_run_id=os.environ.get('GITHUB_RUN_ID'),
                                 run_attempt=int(os.environ.get('GITHUB_RUN_ATTEMPT', '1')),
                                 max_batches=args.max_batches, timeout_seconds=args.timeout_seconds,
-                                continuation=continuation)
+                                continuation=continuation, boost_canary=args.boost_canary)
         with wall_timeout(args.timeout_seconds):
             result = (controller.observe() if args.command == 'observe' else
                       controller.run(json.loads(args.summary.read_text(encoding='utf8'))))

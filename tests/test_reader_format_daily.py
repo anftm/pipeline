@@ -294,12 +294,60 @@ class DailyTests(unittest.TestCase):
                 self.assertEqual(inputs['expected_sha'], HEAD)
                 self.assertEqual(inputs['search_generation'], SEARCH)
                 self.assertEqual(inputs['limit'], str(limit))
+                self.assertNotIn('boost_canary', inputs)
                 self.assertEqual(inputs['apply'], 'true')
                 self.assertEqual(inputs['defer_unify'], 'true')
                 self.assertEqual(inputs['retry_failed' if family == 'chm' else 'retry_failures'], 'false')
                 if family != 'chm': self.assertEqual(inputs['extension'], ext)
                 if family == 'media': self.assertIn(inputs['kind'], ('audio', 'video', 'swf'))
         self.assertEqual(len({value[1] for value in subject.FORMATS.values() if value[1]}), 9)
+
+    def test_boost_canary_verifies_one_batch_without_continuation(self):
+        def inventory(mp3, **changes):
+            value = summary(mp3, 'mp3', sources=100, source_content_unchanged=100-mp3, **changes)
+            next(row for row in value['formats'] if row['extension'] == 'jpg').update(
+                sources=30, not_mapped=30, definite_backlog=30)
+            return value
+        self.refresh.side_effect = [inventory(60), inventory(39)]
+        result = self.controller(boost_canary='mp3').run(inventory(25))
+        self.assertEqual(result['status'], 'canary_complete')
+        self.assertEqual(result['batches'], 1)
+        self.assertNotIn('continuation', result)
+        self.assertEqual(result['formats']['mp3']['state'], 'canary_remaining')
+        self.assertEqual(result['formats']['mp3']['counts']['definite_backlog'], 39)
+        self.assertEqual(result['formats']['jpg']['state'], 'excluded')
+        self.assertEqual([post[0] for post in self.api.posts], ['reader-media-stream.yml', subject.PUBLISH])
+        self.assertEqual(self.api.posts[0][1]['limit'], '8')  # initial summary would have requested 4
+        self.assertEqual(self.api.posts[0][1]['boost_canary'], 'true')
+        self.assertEqual(set(self.api.posts[1][1]), {'operation', 'apply', 'automation_id'})
+        self.verify.assert_called_once()
+        with self.assertRaises(ValueError):
+            self.controller(boost_canary='mp3', continuation={})
+
+    def test_canary_refuses_small_or_blocked_refreshed_backlog(self):
+        for n, changes in ((24, {}), (25, {'recorded_failure_current': 1}),
+                           (25, {'pending_shard_checkpoint': 1})):
+            with self.subTest(n=n, changes=changes):
+                self.journal.unlink(missing_ok=True)
+                self.refresh.side_effect = [summary(n, 'jpg', **changes)]
+                result = self.controller(boost_canary='jpg').run(summary(25, 'jpg'))
+                self.assertEqual(result['status'], 'blocked')
+                self.assertEqual(self.api.posts, [])
+                self.assertNotIn('continuation', result)
+
+    def test_canary_cli_requires_family_flag_and_first_attempt_without_continuation(self):
+        flags = {'GITHUB_EVENT_NAME': 'workflow_dispatch', 'GITHUB_RUN_ATTEMPT': '1',
+                 'READER_MP3_BATCH_BOOST_ENABLED': 'true'}
+        args = ['run', '--boost-canary', 'mp3', '--enabled', '--known-writers-verified']
+        for changes, extra in (({'READER_MP3_BATCH_BOOST_ENABLED': '',
+                                 'READER_JPG_BATCH_BOOST_ENABLED': 'true'}, []),
+                               ({'GITHUB_RUN_ATTEMPT': '2'}, []),
+                               ({'GITHUB_EVENT_NAME': 'schedule'}, []),
+                               ({}, ['--continuation-run-id', '7', '--continuation-id', 'a' * 32])):
+            with self.subTest(changes=changes, extra=extra), patch.dict('os.environ', {**flags, **changes}, clear=True), \
+                    patch('sys.stderr', new_callable=io.StringIO) as stderr, self.assertRaises(SystemExit):
+                subject.main(args + extra)
+            self.assertIn('boost canary requires', stderr.getvalue())
 
     def test_triggered_format_drains_10_to_9_to_1_to_zero(self):
         self.refresh.side_effect = [summary(n) for n in (10, 9, 1, 0)]

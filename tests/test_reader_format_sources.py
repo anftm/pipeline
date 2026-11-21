@@ -13,6 +13,7 @@ from unittest.mock import Mock, patch
 from scripts import reader_format_sources as subject
 from scripts import reader_assets, reader_stream_index, search_publication_pointer
 from scripts import pilot_text_stream as text, pilot_web_stream as web
+from scripts import pilot_image_page_stream as image, pilot_media_stream as media
 from scripts import convert_reader_assets as converter
 
 backlog = subject.backlog
@@ -41,7 +42,7 @@ class SourcesTests(unittest.TestCase):
             if (repo, kw['revision'], path) in self.metadata]
         self.indexes['chapters/ebook/epub/index.json'] = self.index('ebook-chapter-stream-index')
         self.indexes['pages/image/index-v2.json'] = {
-            'version': 1, 'kind': 'image-stream-index', 'files': [{'key': 'historical-image'}]}
+            'version': 1, 'kind': 'image-stream-index', 'files': [{'key': 'historical-image'}], 'failures': []}
         self.catalog = {'base_sidecar': {'sha256': '6' * 64}}
         self.stack.enter_context(patch.object(backlog.publication, 'current', return_value=(
             self.reader_pointer, self.catalog)))
@@ -67,6 +68,10 @@ class SourcesTests(unittest.TestCase):
         if ext in {'docx', 'epub', 'chm'}:
             chapter_ext = 'chm' if ext == 'chm' else 'epub'
             index_path, kind, mode = f'chapters/ebook/{chapter_ext}/index.json', 'ebook-chapter-stream-index', 'e'
+        elif ext == 'jpg':
+            index_path, kind, mode = 'pages/image/index-v2.json', 'image-stream-index', 'i'
+        elif ext == 'mp3':
+            index_path, kind, mode = 'media/audio/index.json', 'media-stream-index', 'a'
         elif ext in {'md', 'markdown'}:
             index_path, kind, mode = 'documents/text/index.json', 'text-stream-index', 'k'
         elif ext == 'xlsx':
@@ -316,6 +321,76 @@ class SourcesTests(unittest.TestCase):
                     self.prepare(generation='f' * 64 if mutation == 'generation' else GENERATION)
                 self.assertFalse(self.output.exists())
         self.source.write_bytes(original)
+
+    def boost_source(self, name_prefix, number, ext, state, size, shard):
+        for candidate in range(1000):
+            name = f'{name_prefix}-{number:02d}-{candidate}'
+            path = f'{name}.{ext}'
+            if reader_stream_index.shard_for(f'{REPO}\0{path}', 8) == shard:
+                break
+        else:
+            self.fail('could not find a fixture key for shard')
+        key = self.add(name, ext, state)
+        self.metadata[(REPO, NEW, path)].size = size
+        return key
+
+    def test_boosted_subset_follows_both_workers_order_and_budgets_without_filling_from_exclusions(self):
+        for extension, budget in (('jpg', 256 * 1024**2), ('mp3', 512 * 1024**2)):
+            with self.subTest(extension=extension):
+                start = len(self.rows)
+                rows = []
+                for n, size in enumerate((budget // 3, budget // 3, budget // 3, 3, 4)):
+                    rows.append((self.boost_source('regular', n, extension, 'changed' if n == 1 else 'new', size, 2), size))
+                changed = rows[1][0]
+                other_keys = [self.boost_source('another-shard', n, extension, 'new', 10, 6) for n in reversed(range(6))]
+                for state, size in (('new', 0), ('new', budget + 1), ('failure', 1), ('unchanged', 1)):
+                    self.boost_source('000-' + state, size % 100, extension, state, size, 2)
+                staged = self.boost_source('000-pending', 0, extension, 'new', 1, 2)
+                index_root, index_base, kind = (('pages/image', 'index-v2', 'image-stream-index') if extension == 'jpg' else
+                                               ('media/audio', 'index', 'media-stream-index'))
+                shard_index = self.index(kind)
+                shard_index['files'].append({'key': staged, 'extension': extension, 'source_revision': NEW})
+                self.indexes[f'{index_root}/{index_base}-02.json'] = shard_index
+                self.write_source()
+                # The fresh fetch gives misleading sizes; pinned sizes must win both admission and worker ordering.
+                sizes = {path: item.size for (repo, revision, path), item in self.metadata.items() if path.endswith('.' + extension)}
+                for row in self.published['rc'][start:]:
+                    row[4] = sizes[f'{row[1]}.{extension}']
+                self.output = self.root / f'{extension}.json'
+                report = self.prepare(extension, boost_limit=4)
+                self.assertEqual(report['skipped_unknown_or_oversized'], 2)
+                self.assertEqual(report['source_byte_budget_per_shard'], budget)
+                workers = (image.source_records(self.output, self.pins, 0, 'jpg') if extension == 'jpg' else
+                           media.select_records(self.output, self.pins, 'audio', 'mp3'))
+                key_for = lambda row: f"{row['repo']}\0{row['path']}"
+                size_field = 'bytes' if extension == 'jpg' else 'source_bytes'
+                shards = {2: [], 6: []}
+                for row in workers:
+                    self.assertEqual(row[size_field], sizes[row['path']])
+                    shard = (image if extension == 'jpg' else media).shard_for(key_for(row), 8)
+                    shards[shard].append(row)
+                expected = ([key for key, _ in sorted(rows, key=lambda pair: (pair[1], pair[0]))][:4]
+                            if extension == 'jpg' else [key for key, _ in rows[:3]])
+                self.assertEqual([key_for(row) for row in shards[2]], expected)
+                self.assertIn(changed, expected)
+                self.assertEqual([key_for(row) for row in shards[6]], sorted(other_keys)[:4])
+                self.assertTrue(all(sum(row[size_field] for row in part) <= budget for part in shards.values()))
+                self.assertEqual(json.loads(self.revisions.read_text()), self.pins)
+                planner_kind, wanted = ('image', {'jpg'}) if extension == 'jpg' else ('media', {'audio'})
+                planned = backlog.matrix.selected_records(self.output, self.pins, planner_kind, wanted,
+                                                          'mp3' if extension == 'mp3' else 'all')
+                self.assertEqual({row['key'] for row in planned}, {key_for(row) for row in workers})
+
+    def test_boost_fails_closed_on_missing_or_mismatched_budget_metadata_without_legacy_fallback(self):
+        self.boost_source('candidate', 0, 'jpg', 'new', 40, 3)
+        self.write_source()
+        for pinned_size in (0, 41):
+            self.published['rc'][0][4] = pinned_size
+            with self.assertRaisesRegex(ValueError, 'positive pinned size|differs from pinned file metadata'):
+                self.prepare('jpg', boost_limit=4)
+            self.assertFalse(self.output.exists())
+        self.assertEqual(self.prepare('jpg')['selected_records'], 1)
+        self.assertEqual(json.loads(self.output.read_text()), self.payload)
 
     def test_selected_not_mapped_requires_exact_metadata_hash(self):
         self.add('new')

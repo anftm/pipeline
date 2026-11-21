@@ -39,6 +39,23 @@ class DailyFormatWorkflowTests(unittest.TestCase):
         self.assertIn('continue-dispatch', continuation['run'])
         self.assertEqual(continuation['if'], "steps.convert.outputs.status == 'continuation_required'")
 
+    def test_canary_defaults_off_and_only_explicit_dispatch_can_request_it(self):
+        raw = (ROOT / '.github/workflows/reader-format-daily.yml').read_text()
+        workflow = yaml.load(raw, Loader=yaml.BaseLoader)
+        canary = workflow['on']['workflow_dispatch']['inputs']['boost_canary']
+        self.assertEqual(canary['default'], 'none')
+        self.assertEqual(canary['options'], ['none', 'mp3', 'jpg'])
+        steps = workflow['jobs']['formats']['steps']
+        guard = next(step for step in steps if step.get('name') == 'Verify current code and successful source sync')
+        for fragment in ('$MANUAL_APPLY', '$MANUAL_WRITERS', '$EXPLICIT_SEARCH_HANDOFF',
+                         '$READER_AUTOMATION_ENABLED', '$READER_PAUSED'):
+            self.assertIn(fragment, guard['run'])
+        apply = next(step for step in steps if step.get('id') == 'convert')
+        self.assertIn('args+=(--boost-canary "$BOOST_CANARY")', apply['run'])
+        for ext in ('JPG', 'MP3'):
+            flag = f'READER_{ext}_BATCH_BOOST_ENABLED'
+            self.assertEqual(apply['env'][flag], '${{ vars.' + flag + ' }}')
+
     def test_automatic_unify_requires_exact_generation_verification_without_gc(self):
         raw = (ROOT / '.github/workflows/reader-v3-publish.yml').read_text()
         w = yaml.load(raw, Loader=yaml.BaseLoader)

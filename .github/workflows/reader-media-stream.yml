@@ -37,8 +37,12 @@ on:
         default: all
         type: choice
         options: [all, audio, video, swf]
+      boost_canary:
+        description: Reserved for the guarded one-batch MP3 canary
+        type: boolean
+        default: false
       limit:
-        description: Maximum attempts per shard; apply requires 1-3, plan allows 0
+        description: Maximum attempts per shard (normally 1-3 for apply; MP3 canary up to 8)
         required: true
         default: "1"
         type: string
@@ -103,9 +107,19 @@ jobs:
           SEARCH_GENERATION: ${{ inputs.search_generation }}
           EXPECTED_SHA: ${{ inputs.expected_sha }}
           DEFER_UNIFY: ${{ inputs.defer_unify }}
+          BOOST_CANARY: ${{ inputs.boost_canary }}
+          READER_MP3_BATCH_BOOST_ENABLED: ${{ vars.READER_MP3_BATCH_BOOST_ENABLED }}
+          EXTENSION: ${{ inputs.extension }}
+          KIND: ${{ inputs.kind }}
+          LIMIT: ${{ inputs.limit || '1' }}
+          APPLY: ${{ inputs.apply }}
+          RETRY_FAILURES: ${{ inputs.retry_failures }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          if [[ "${BOOST_CANARY:-false}" == 'true' ]]; then
+            python scripts/reader_ordinary_boost.py mp3
+          fi
           if [[ -z "$AUTOMATION_ID$SEARCH_GENERATION$EXPECTED_SHA" && "$DEFER_UNIFY" != 'true' ]]; then exit 0; fi
           [[ "$SEARCH_GENERATION" =~ ^[0-9a-f]{64}$ && "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ && "$DEFER_UNIFY" == 'true' ]]
           [[ "$EXPECTED_SHA" == "$GITHUB_SHA" ]]
@@ -142,12 +156,16 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           EXTENSION: ${{ inputs.extension }}
           SEARCH_GENERATION: ${{ inputs.search_generation }}
+          BOOST_CANARY: ${{ inputs.boost_canary }}
+          LIMIT: ${{ inputs.limit || '1' }}
         run: |
           set -euo pipefail
           [[ -n "$EXTENSION" && "$EXTENSION" != 'all' ]]
+          args=()
+          if [[ "$BOOST_CANARY" == 'true' ]]; then args+=(--boost-limit "$LIMIT"); fi
           python scripts/reader_format_sources.py --extension "$EXTENSION" \
             --generation "$SEARCH_GENERATION" --search-data output/search_data.json \
-            --revisions state/commits.json --output output/reader-actionable.json
+            --revisions state/commits.json --output output/reader-actionable.json "${args[@]}"
           mv output/reader-actionable.json output/search_data.json
       - name: Plan pending media workers
         id: matrix
@@ -157,12 +175,13 @@ jobs:
           EXTENSION: ${{ inputs.extension || 'all' }}
           LIMIT: ${{ inputs.limit || '1' }}
           APPLY: ${{ inputs.apply }}
+          BOOST_CANARY: ${{ inputs.boost_canary }}
           RETRY_FAILURES: ${{ inputs.retry_failures }}
         run: |
-          [[ "$LIMIT" =~ ^[0-9]+$ ]] || { echo 'limit must be non-negative' >&2; exit 1; }
-          if [[ "$APPLY" == 'true' && ! "$LIMIT" =~ ^[1-3]$ ]]; then
-            echo 'apply requires 1-3 attempts per shard' >&2; exit 1
+          if [[ "${BOOST_CANARY:-false}" != 'true' && "$APPLY" == 'true' && ! "$LIMIT" =~ ^[1-3]$ ]]; then
+            echo 'apply requires 1-3 attempts per shard without canary intent' >&2; exit 1
           fi
+          [[ "$LIMIT" =~ ^[0-9]+$ ]] || { echo 'limit must be non-negative' >&2; exit 1; }
           args=(--kind media --extension "$KIND" --media-extension "$EXTENSION" --output output/media-matrix.json --verify-source-sha --report output/media-report.json)
           if [[ "$RETRY_FAILURES" == "true" ]]; then args+=(--retry-failures); fi
           python scripts/plan_reader_stream_matrix.py "${args[@]}"
@@ -216,9 +235,10 @@ jobs:
           EXTENSION: ${{ inputs.extension || 'all' }}
           SHARD: ${{ matrix.shard }}
           LIMIT: ${{ inputs.limit || '1' }}
+          BOOST_CANARY: ${{ inputs.boost_canary }}
           RETRY_FAILURES: ${{ inputs.retry_failures }}
         run: |
-          [[ "$LIMIT" =~ ^[1-3]$ ]] || { echo 'apply requires 1-3 attempts per shard' >&2; exit 1; }
+          [[ "${BOOST_CANARY:-false}" == 'true' || "$LIMIT" =~ ^[1-3]$ ]] || exit 1
           [[ "$SHARD" =~ ^[0-7]$ ]] || exit 1
           args=(--kind "$KIND" --extension "$EXTENSION" --limit "$LIMIT"
                 --shard-count 8 --shard-index "$SHARD" --apply --strict)

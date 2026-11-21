@@ -111,7 +111,7 @@ gh() {
 }
 '''
         return subprocess.run(['bash', '-e', '-o', 'pipefail', '-c', stubs + script],
-                              env=values, capture_output=True, text=True, timeout=5)
+                              cwd=ROOT, env=values, capture_output=True, text=True, timeout=5)
 
     def test_input_shape_and_actual_manual_automatic_run_names(self):
         labels = {'image-stream': 'Reader/桶 · Build Image WebP Assets',
@@ -183,6 +183,38 @@ gh() {
                             with self.subTest(env=env):
                                 self.assertNotEqual(self.shell(step['run'], name, **env).returncode, 0)
 
+    def test_canary_gate_executes_in_plan_worker_and_finalizer(self):
+        for name, worker, extension, flag, maximum in (
+                ('image-stream', 'build', 'jpg', 'READER_JPG_BATCH_BOOST_ENABLED', 12),
+                ('media-stream', 'media', 'mp3', 'READER_MP3_BATCH_BOOST_ENABLED', 8)):
+            jobs = workflow(name)['jobs']
+            gates = [step for job in jobs.values() for step in job['steps'] if step.get('name') == GATE]
+            self.assertEqual(len(gates), 3)
+            self.assertTrue(all(gate == gates[0] for gate in gates))
+            gate = gates[0]
+            self.assertEqual(gate['env'][flag], '${{ vars.' + flag + ' }}')
+            matrix_guard = next(step['run'] for step in jobs['plan']['steps'] if step.get('id') == 'matrix')
+            build_guard = next(step['run'] for step in jobs[worker]['steps'] if '--apply --strict' in step.get('run', ''))
+            script = 'python() { ' + sys.executable + ' -B "$@"; };\n' + gate['run'] + '\n'
+            script += matrix_guard.split('args=(', 1)[0] + '\nSHARD=0\n'
+            script += build_guard.split('args=(', 1)[0] + '\necho writes-allowed\n'
+            valid = {'BOOST_CANARY': 'true', flag: 'true', 'LIMIT': str(maximum),
+                     'EXTENSION': extension, 'SHARD': 'all', 'KIND': 'audio', 'APPLY': 'true',
+                     'RETRY_FAILURES': 'false', 'GITHUB_EVENT_NAME': 'workflow_dispatch',
+                     'GITHUB_ACTOR': 'github-actions[bot]', 'GITHUB_RUN_ATTEMPT': '1'}
+            for overrides, accepted in (({}, True), ({flag: ''}, False),
+                    ({'LIMIT': str(maximum + 1)}, False), ({'LIMIT': '3'}, False),
+                    ({'BOOST_CANARY': 'false'}, False), ({'BOOST_CANARY': 'false', 'LIMIT': '3'}, True),
+                    ({'AUTOMATION_ID': ''}, False), ({'GITHUB_ACTOR': 'operator'}, False),
+                    ({'GITHUB_REF': 'refs/heads/feature'}, False), ({'REMOTE_SHA': 'e' * 40}, False),
+                    ({'GITHUB_RUN_ATTEMPT': '2'}, False), ({'RETRY_FAILURES': 'true'}, False),
+                    ({'EXTENSION': 'all'}, False), ({'APPLY': 'false'}, False),
+                    ({'SHARD': '1'} if extension == 'jpg' else {'KIND': 'all'}, False)):
+                with self.subTest(name=name, overrides=overrides):
+                    result = self.shell(script, name, **{**valid, **overrides})
+                    self.assertEqual(result.returncode == 0, accepted, result.stderr)
+                    self.assertEqual('writes-allowed' in result.stdout, accepted)
+
     def test_source_guard_runs_after_fetch_before_planning_and_snapshot_and_fails_closed(self):
         for name in NAMES:
             config = workflow(name)
@@ -228,6 +260,8 @@ gh() {
                 'SEARCH_GENERATION': '${{ inputs.search_generation }}'}
             if name == 'chm-repair':
                 expected_env['READER_CHM_PROFILE_REBUILD_ENABLED'] = '${{ vars.READER_CHM_PROFILE_REBUILD_ENABLED }}'
+            if name in {'image-stream', 'media-stream'}:
+                expected_env.update(BOOST_CANARY='${{ inputs.boost_canary }}', LIMIT="${{ inputs.limit || '1' }}")
             self.assertEqual(filtering['env'], expected_env)
             archive = next(step for step in steps if 'tar -czf' in step.get('run', ''))
             self.assertGreater(steps.index(archive), steps.index(planning))
@@ -247,10 +281,12 @@ gh() {
   if [[ "$FILTER_STATUS" == fail ]]; then return 1; fi
 }
 '''
-            for automatic, status, extension in (
-                (True, 'ok', extensions[name]), (True, 'fail', extensions[name]),
-                (True, 'missing', extensions[name]), (False, 'fail', extensions[name]),
-                (True, 'ok', 'all'), (True, 'ok', '')):
+            cases = [(True, 'ok', extensions[name], False), (True, 'fail', extensions[name], False),
+                     (True, 'missing', extensions[name], False), (False, 'fail', extensions[name], False),
+                     (True, 'ok', 'all', False), (True, 'ok', '', False)]
+            if name in {'image-stream', 'media-stream'}:
+                cases.append((True, 'ok', 'jpg' if name == 'image-stream' else 'mp3', True))
+            for automatic, status, extension, canary in cases:
                 if name == 'chm-repair' and extension in ('', 'all'):
                     continue
                 with self.subTest(name=name, auto=automatic, status=status, extension=extension), \
@@ -278,7 +314,8 @@ gh() {
                     script = stub + (filtering['run'] if enabled else '')
                     script += '\nprintf planned > planned\n' + archive['run']
                     env = dict(os.environ, EXTENSION=extension, SEARCH_GENERATION=GENERATION,
-                               FILTER_STATUS=status, FILTERED=filtered, AUTOMATION_ID=AUTO_ID if automatic else '')
+                               FILTER_STATUS=status, FILTERED=filtered, AUTOMATION_ID=AUTO_ID if automatic else '',
+                               BOOST_CANARY='true' if canary else 'false', LIMIT='4' if canary else '3')
                     result = subprocess.run(['bash', '-e', '-o', 'pipefail', '-c', script],
                                             cwd=root, env=env, capture_output=True, text=True, timeout=5)
                     allowed = not automatic or (status == 'ok' and extension not in ('', 'all'))
@@ -295,6 +332,8 @@ gh() {
                                     '--revisions', 'state/commits.json', '--output', 'output/reader-actionable.json']
                         if name == 'chm-repair':
                             expected += ['--profile-proof', 'output/chm-profile-proof.json']
+                        if canary:
+                            expected += ['--boost-limit', '4']
                         self.assertEqual((root / 'helper-args').read_text().splitlines(), expected)
                     if allowed:
                         restored = root / 'restored'

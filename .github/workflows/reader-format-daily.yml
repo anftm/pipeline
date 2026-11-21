@@ -31,6 +31,11 @@ on:
         description: Known Reader producers and external writers are coordinated
         type: boolean
         default: false
+      boost_canary:
+        description: One boosted batch only (apply and known writers required; no continuation)
+        type: choice
+        options: [none, mp3, jpg]
+        default: none
 
 permissions:
   contents: read
@@ -68,8 +73,15 @@ jobs:
           SOURCE_RUN: ${{ github.event.workflow_run.id }}
           SOURCE_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
           SOURCE_WORKFLOW: ${{ github.event.workflow_run.name }}
+          BOOST_CANARY: ${{ inputs.boost_canary }}
+          MANUAL_APPLY: ${{ inputs.apply }}
+          MANUAL_WRITERS: ${{ inputs.known_writers_coordinated }}
         run: |
           set -euo pipefail
+          if [[ -n "$BOOST_CANARY" && "$BOOST_CANARY" != none ]]; then
+            [[ "$MANUAL_APPLY" == true && "$MANUAL_WRITERS" == true && "$EXPLICIT_SEARCH_HANDOFF" == false &&
+               "$READER_AUTOMATION_ENABLED" == true && "$READER_PAUSED" != true ]]
+          fi
           [[ "$GITHUB_REF" == refs/heads/main && "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]
           [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
           [[ "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" == "$GITHUB_SHA" ]]
@@ -130,6 +142,9 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           CONTINUATION_RUN_ID: ${{ inputs.continuation_run_id }}
           CONTINUATION_ID: ${{ inputs.continuation_id }}
+          BOOST_CANARY: ${{ inputs.boost_canary }}
+          READER_JPG_BATCH_BOOST_ENABLED: ${{ vars.READER_JPG_BATCH_BOOST_ENABLED }}
+          READER_MP3_BATCH_BOOST_ENABLED: ${{ vars.READER_MP3_BATCH_BOOST_ENABLED }}
         run: |
           set -euo pipefail
           [[ "$WRITERS" == true ]]
@@ -138,6 +153,9 @@ jobs:
                 --enabled --known-writers-verified --max-batches 20 --timeout-seconds 18000)
           if [[ -n "$CONTINUATION_RUN_ID" || -n "$CONTINUATION_ID" ]]; then
             args+=(--continuation-run-id "$CONTINUATION_RUN_ID" --continuation-id "$CONTINUATION_ID")
+          fi
+          if [[ -n "$BOOST_CANARY" && "$BOOST_CANARY" != none ]]; then
+            args+=(--boost-canary "$BOOST_CANARY")
           fi
           python -B scripts/reader_format_daily.py "${args[@]}"
           status=$(python -c 'import json; print(json.load(open("output/format-daily/result.json"))["status"])')
