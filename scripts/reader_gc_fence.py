@@ -131,14 +131,17 @@ class GitHubProducerFence:
                 "repository_actions_enabled": permission.get("enabled"),
                 "updated_at": after.get("updated_at")}
 
-    def check(self, *, allow_current_workflow=None, all_workflows=False):
+    def check(self, *, allow_current_workflow=None, all_workflows=False, hpng_retirement_receipts=False):
         """Check the full configured scope, optionally exempting this exact run.
 
         The exemption permits a central publishing workflow to perform a fenced
         mutation. It never excludes another run of that workflow, and proves
         GitHub state only—not revocation of independent bucket credentials.
         """
-        checked = []
+        if hpng_retirement_receipts and (not all_workflows or allow_current_workflow !=
+                                         '.github/workflows/reader-v3-publish.yml'):
+            raise ValueError('retirement receipts only apply to the h.PNG publisher fence')
+        checked, retired = [], []
         central = load_config()["publisher_repository"]
         current_id = None
         if allow_current_workflow is not None:
@@ -156,10 +159,14 @@ class GitHubProducerFence:
                 from .reader_producer_scope_transition import ADDITIONAL
             except ImportError:
                 from reader_producer_scope_transition import ADDITIONAL
-            # Prepared-only transition records identify further historical
-            # repositories; add them conservatively, never treat preparation as
-            # evidence that any of them is retired or inaccessible.
-            repositories = sorted(set(repositories) | set(ADDITIONAL))
+            additional = set(ADDITIONAL)
+            if hpng_retirement_receipts:
+                # Only the historical add-ons can be accounted for here. If a
+                # name is in the current producer inventory it is still checked.
+                from .reader_image_history_retired import verified_deletions
+                retired = verified_deletions(ADDITIONAL, repositories)
+                additional -= {item['repository'] for item in retired}
+            repositories = sorted(set(repositories) | additional)
         for repo in repositories:
             residuals = []
             workflows = [w for page in self.api(f"repos/{repo}/actions/workflows?per_page=100")
@@ -197,8 +204,11 @@ class GitHubProducerFence:
                     residuals.append(self.isolated_residual(repo, run, central=(repo == central)))
             checked.append({"repository": repo, "disabled_workflows": [w["path"] for w in workflows
                             if w['state'] != 'active'], "isolated_residual_runs": residuals})
-        return {"kind": "reader-gc-producer-fence", "repositories": checked,
-                "external_bucket_credentials_verified": False}
+        report = {"kind": "reader-gc-producer-fence", "repositories": checked,
+                  "external_bucket_credentials_verified": False}
+        if hpng_retirement_receipts:
+            report['historical_repository_deletions'] = retired
+        return report
 
 
 def assert_workflow_context(workflow):

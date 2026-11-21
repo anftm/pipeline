@@ -5,7 +5,7 @@ import os
 import unittest
 from unittest.mock import patch
 
-from scripts import reader_image_history_fence as window
+from scripts import reader_image_history_fence as window, reader_image_history_retired as retired
 
 
 OTHER = 'retired/pipeline'
@@ -188,6 +188,31 @@ class WindowGuardTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, '404'):
             self.guard(api=inaccessible)()
+
+    def test_exact_removed_addons_need_no_actions_queries_but_other_safety_checks_continue(self):
+        removed = {name: pin[0] for name, pin in retired.PINS.items()}
+        with patch('scripts.reader_producer_scope_transition.ADDITIONAL', removed):
+            self.assertTrue(self.guard()())
+            self.assertFalse(any(any(name in call for name in removed) for call in self.calls))
+            self.workflows[window.CENTRAL][window.COLLECTOR] = 'active'
+            with self.assertRaisesRegex(RuntimeError, 'not paused'):
+                self.guard()()
+
+    def test_wrong_retired_identity_or_missing_receipt_never_passes(self):
+        removed = {name: pin[0] for name, pin in retired.PINS.items()}
+        wrong = dict(removed)
+        wrong[next(iter(wrong))] += 1
+        with patch('scripts.reader_producer_scope_transition.ADDITIONAL', wrong):
+            with self.assertRaisesRegex(ValueError, 'ID changed'):
+                self.guard()()
+        with patch('scripts.reader_producer_scope_transition.ADDITIONAL', removed), \
+                patch.object(retired, 'DIRECTORY', retired.DIRECTORY / 'nonexistent'):
+            with self.assertRaises(FileNotFoundError):
+                self.guard()()
+
+    def test_receipts_do_not_override_active_scope(self):
+        active = next(iter(retired.PINS))
+        self.assertEqual(retired.verified_deletions({active: retired.PINS[active][0]}, [active.upper()]), [])
 
     def test_owner_or_receipt_change_during_fence_blocks(self):
         def change(endpoint):

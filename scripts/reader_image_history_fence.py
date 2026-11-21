@@ -130,7 +130,8 @@ class WindowGuard:
             raise RuntimeError('durable image history window receipt does not bind this owner and review')
 
         _active_owner(self._fence, *owner)
-        report = self._fence.check(allow_current_workflow=WORKFLOW, all_workflows=True)
+        report = self._fence.check(allow_current_workflow=WORKFLOW, all_workflows=True,
+                                   hpng_retirement_receipts=True)
         disabled = next((row['disabled_workflows'] for row in report['repositories']
                          if row['repository'] == CENTRAL), ())
         if not REQUIRED_PAUSED.issubset(disabled):
