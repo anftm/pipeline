@@ -14,6 +14,9 @@ class SearchSpaceBuildWorkflowTests(unittest.TestCase):
         steps = {step.get('name'): step for step in flow['jobs']['build']['steps'] if step.get('name')}
         checkout = steps['Fetch exact public Space commit and LFS objects']['run']
         self.assertIn('--single-branch --branch main --no-checkout', checkout)
+        self.assertIn('--single-branch --branch "$HF_CANDIDATE_REF" --no-checkout', checkout)
+        self.assertIn('test "$(git -C candidate-space rev-parse HEAD)" = "$HF_REVISION"', checkout)
+        self.assertIn('^avif-check-[a-f0-9]{12}$', steps['Check immutable inputs']['run'])
         self.assertIn('checkout --detach "$HF_REVISION"', checkout)
         self.assertIn('lfs fsck', checkout)
         build = steps['Build Docker image with the requested immutable generation']['run']

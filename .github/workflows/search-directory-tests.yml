@@ -5,6 +5,8 @@ on:
     branches: [main]
     paths:
       - .github/workflows/search-directory-tests.yml
+      - .github/workflows/search-space-build-check.yml
+      - tests/test_search_space_build_workflow.py
       - .github/workflows/search-daily-sync.yml
       - .github/workflows/search-bucket-gc.yml
       - .github/workflows/search-bucket-probe.yml
@@ -105,8 +107,8 @@ jobs:
         run: python -B -m unittest -v tests.test_pilot_image_page_stream
       - name: Exercise Space transition and rollback receipts
         run: python -B -m unittest -v tests.test_search_space_transition tests.test_search_space_deploy
-      - name: Verify ordinary Reader canary download bounds
-        run: python -B -m unittest -v tests.test_reader_boost_downloads
+      - name: Verify candidate Space build pin and Reader canary download bounds
+        run: python -B -m unittest -v tests.test_search_space_build_workflow tests.test_reader_boost_downloads
       - name: Verify pinned source addition and first publication
         run: python -B -m unittest -v tests.test_search_source_additions tests.test_search_source_watch
       - name: Verify Reader maintenance, fences and timed deletion policy
