@@ -146,7 +146,16 @@ def search_parent_bytes(current: tx.Current) -> bytes:
 SPACE_GIT_URL = 'https://huggingface.co/spaces/VoiceOfML/Search'
 
 
-def verify_reviewed_successor(*, expected_revision, successor, test_path=None, reviewed_paths=None) -> dict:
+ROLLBACK_HEAD = 'c86bef334ea62c095fd5522e0e24c834802f4f7c9c36cbb1e7cbef0f19d2fd56'
+ROLLBACK_OPERATION = '5232f5e170717b55d9004d2395a2f620'
+ROLLBACK_SPACE_BEFORE = '02a27d44291de288f5fa326dd0b02303bcd10b83'
+ROLLBACK_SPACE_AFTER = '925b307e8f4a5c852a1f15e5f4b38ab2eca84464'
+ROLLBACK_TEST_PATHS = ('tests/reader/browser/test_reader_speech.py',
+                       'tests/reader/core/test_reader_architecture.js')
+
+
+def verify_reviewed_successor(*, expected_revision, successor, test_path=None, reviewed_paths=None,
+                              rollback_tests=False) -> dict:
     """Verify a bounded single-parent chain and the exact manually reviewed diff.
 
     Read Git objects, including modes and LFS pointer IDs, without checkout.
@@ -164,10 +173,14 @@ def verify_reviewed_successor(*, expected_revision, successor, test_path=None, r
         paths.append(test_path)
     if not paths or any(not isinstance(path, str) for path in paths) or len(paths) != len(set(paths)):
         raise ValueError('reviewed Space paths must be nonempty and unique')
+    if rollback_tests and (expected_revision, successor, tuple(sorted(paths))) != (
+            ROLLBACK_SPACE_BEFORE, ROLLBACK_SPACE_AFTER, ROLLBACK_TEST_PATHS):
+        raise ValueError('unreviewed Space rollback test successor')
     for path in paths:
         if (not isinstance(path, str)
                 or not ((path.startswith('tests/') and path.endswith('.py'))
-                        or (path.startswith('static/reader/') and path.endswith('.mjs')))
+                        or (path.startswith('static/reader/') and path.endswith('.mjs'))
+                        or (rollback_tests and path in ROLLBACK_TEST_PATHS))
                 or str(PurePosixPath(path)) != path
                 or any(part in {'', '.', '..'} for part in path.split('/'))
                 or any(ord(char) < 32 for char in path) or any(char in path for char in '\\*?[]')):
@@ -216,6 +229,8 @@ def verify_reviewed_successor(*, expected_revision, successor, test_path=None, r
                 raise ValueError('reviewed Space file deletion is not allowed')
             new_mode, new_type, new_blob = after[key].split()
             old_mode, old_type, old_blob = before[key].split() if key in before else (None, None, None)
+            if (rollback_tests and (old_mode, new_mode) != (b'100644', b'100644')):
+                raise ValueError('rollback successor permits only existing regular test files')
             if (new_type != b'blob' or new_mode not in {b'100644', b'100755'}
                     or (key in before and (old_mode != new_mode or old_type != b'blob'))
                     or (key not in before and (not path.startswith('tests/') or new_mode != b'100644'))):
@@ -231,7 +246,8 @@ def verify_reviewed_successor(*, expected_revision, successor, test_path=None, r
 
 
 def reconcile(store, *, api, hub, get, operation_id: str,
-              reviewed_successor=None, reviewed_test_path=None, reviewed_paths=None, poll_runtime=False) -> dict:
+              reviewed_successor=None, reviewed_test_path=None, reviewed_paths=None, poll_runtime=False,
+              rollback_test_successor=False) -> dict:
     """Observe one operation; the daily poller may defer on an exact-revision restart."""
     current = tx.load(store)
     pending = current.record['pending'] if current is not None else None
@@ -243,7 +259,17 @@ def reconcile(store, *, api, hub, get, operation_id: str,
         raise ValueError('search desired pointer changed before Space reconciliation')
     expected_revision = pending['expected_revision']
     witness = None
-    if reviewed_successor is not None or reviewed_test_path is not None or reviewed_paths is not None:
+    if rollback_test_successor:
+        if (reviewed_successor is not None or reviewed_test_path is not None or reviewed_paths is not None
+                or (current.head['record'], current.record['state'], pending['operation'], operation_id,
+                    expected_revision) != (ROLLBACK_HEAD, 'rolling-back', 'rollback', ROLLBACK_OPERATION,
+                                           ROLLBACK_SPACE_BEFORE) or not pending.get('write_claim')):
+            raise ValueError('no exact claimed Space rollback for the reviewed successor')
+        witness = verify_reviewed_successor(expected_revision=expected_revision, successor=ROLLBACK_SPACE_AFTER,
+                                           reviewed_paths=ROLLBACK_TEST_PATHS, rollback_tests=True)
+        expected_revision = ROLLBACK_SPACE_AFTER
+        deploy.runtime(api, expected_sha=expected_revision)
+    elif reviewed_successor is not None or reviewed_test_path is not None or reviewed_paths is not None:
         if pending['operation'] != 'apply' or not pending.get('write_claim'):
             raise ValueError('reviewed successor requires a consumed Space apply claim')
         witness = verify_reviewed_successor(expected_revision=expected_revision,
@@ -279,6 +305,8 @@ def reconcile(store, *, api, hub, get, operation_id: str,
     if poll_runtime and not running():
         return building()
     if configured == source:
+        if rollback_test_successor:
+            raise ValueError('Space rollback target is not configured')
         status = 'candidate-configured' if pending['operation'] == 'rollback' else 'parent-configured'
         return {'kind': 'search-space-observation', 'operation': operation_id, 'status': status,
                 'journal_advanced': False, 'external_writers_verified': False}
@@ -304,6 +332,10 @@ def reconcile(store, *, api, hub, get, operation_id: str,
         evidence = json.loads(actual)
         evidence['details']['reviewed_space_successor'] = witness
         actual = search_snapshot.canonical(evidence)
+    if rollback_test_successor:
+        active = tx.load(store)
+        if active is None or (active.head_raw, active.etag) != (current.head_raw, current.etag):
+            raise ValueError('Space rollback journal changed during successor observation')
     result = tx.observe_site(store, current, site='space', generation=target, receipt=actual)
     status = 'parent-loaded' if pending['operation'] == 'rollback' else 'candidate-loaded'
     return {'kind': 'search-space-observation', 'operation': operation_id, 'status': status,
@@ -313,7 +345,8 @@ def reconcile(store, *, api, hub, get, operation_id: str,
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--mode', required=True, choices=('prepare', 'rollback-prepare', 'apply', 'reconcile'))
+    parser.add_argument('--mode', required=True, choices=('prepare', 'rollback-prepare', 'apply', 'reconcile',
+                                                         'reconcile-rollback-test-successor'))
     parser.add_argument('--expected-revision', default='')
     parser.add_argument('--operation', default='')
     args = parser.parse_args(argv)
@@ -344,7 +377,8 @@ def main(argv=None) -> int:
             from .search_daily import bounded_get
         except ImportError:
             from search_daily import bounded_get
-        result = reconcile(store, api=api, hub=HubBucketStore(), get=bounded_get, operation_id=args.operation)
+        result = reconcile(store, api=api, hub=HubBucketStore(), get=bounded_get, operation_id=args.operation,
+                           rollback_test_successor=args.mode == 'reconcile-rollback-test-successor')
     print(json.dumps(result, ensure_ascii=False, sort_keys=True), flush=True)
     return 0
 

@@ -37,7 +37,8 @@ class SearchSpaceTransitionTests(SearchTransitionTests):
         self.assertEqual(flow['permissions'], {'contents': 'read'})
         self.assertEqual(flow['concurrency']['group'], 'daily-sync')
         inputs = flow['on']['workflow_dispatch']['inputs']
-        self.assertEqual(inputs['mode']['options'], ['prepare', 'rollback-prepare', 'apply', 'reconcile'])
+        self.assertEqual(inputs['mode']['options'], ['prepare', 'rollback-prepare', 'apply', 'reconcile',
+                                                     'reconcile-rollback-test-successor'])
         self.assertEqual(inputs['known_writers_coordinated']['default'], 'false')
         commands = '\n'.join(step.get('run', '') for step in flow['jobs']['switch']['steps'])
         self.assertIn('[[ "$WRITERS" == \'true\' ]]', commands)
@@ -206,6 +207,51 @@ class SearchSpaceTransitionTests(SearchTransitionTests):
         self.assertEqual(result['status'], 'parent-loaded')
         self.assertEqual(subject.tx.load(self.s).record['state'], 'rolling-back')
         self.assertEqual(subject.tx.load(self.s).record['observed']['space']['generation'], A)
+
+    def test_only_exact_claimed_rollback_can_observe_reviewed_test_successor(self):
+        first = self.start_site(self.begin(), site='space', operation_id='3' * 32)
+        self.observe(first, 'space', B, b'candidate')
+        current = subject.tx.load(self.s)
+        op = subject.ROLLBACK_OPERATION
+        current = subject.tx.start_site(self.s, current, site='space', operation_id=op,
+                                       expected_revision=subject.ROLLBACK_SPACE_BEFORE, created_at=TIME,
+                                       config_before={'generation': B, 'updated_at': TIME}, rollback=True)
+        claimed = subject.tx.claim_write(self.s, current, site='space', operation='rollback', operation_id=op)
+        api = Mock(); successor = subject.ROLLBACK_SPACE_AFTER
+        kwargs = dict(api=api, hub=Mock(), get=lambda *_: b'', operation_id=op, rollback_test_successor=True)
+        with patch.object(subject, 'ROLLBACK_HEAD', claimed.head['record']), \
+                patch.object(subject, 'verify_reviewed_successor', return_value={'successor': successor}) as verify, \
+                patch.object(subject.deploy, 'variable', return_value=(B, TIME)) as variable, \
+                patch.object(subject.deploy, 'runtime') as runtime, \
+                patch.object(subject.deploy, 'set_generation') as write, \
+                patch.object(subject.receipts, 'observe', return_value=receipt('space', A)):
+            with self.assertRaisesRegex(ValueError, 'target is not configured'):
+                subject.reconcile(self.s, **kwargs)
+            variable.return_value = (A, TIME)
+            api.get_space_runtime.return_value = SimpleNamespace(stage='RUNNING', raw={'sha': REV})
+            with self.assertRaisesRegex(ValueError, 'unexpected revision'):
+                subject.reconcile(self.s, **kwargs)
+            api.get_space_runtime.return_value.raw['sha'] = successor
+            result = subject.reconcile(self.s, **kwargs)
+            verify.assert_called_with(expected_revision=subject.ROLLBACK_SPACE_BEFORE, successor=successor,
+                                      reviewed_paths=subject.ROLLBACK_TEST_PATHS, rollback_tests=True)
+            self.assertTrue(all(call.kwargs['expected_sha'] == successor for call in runtime.call_args_list))
+            write.assert_not_called()
+        self.assertTrue(result['journal_advanced'])
+        self.assertEqual(result['status'], 'parent-loaded')
+        self.assertEqual(self.s.pointer, make_pointer(A, None, '0' * 32))
+        self.assertIsNone(subject.tx.load(self.s).record['pending'])
+
+    def test_rollback_successor_rejects_unreviewed_head_and_cannot_widen_test_paths(self):
+        _current, api = self.prepare_space()
+        with self.assertRaisesRegex(ValueError, 'no exact claimed Space rollback'):
+            subject.reconcile(self.s, api=api, hub=Mock(), get=lambda *_: b'', operation_id='3' * 32,
+                              rollback_test_successor=True)
+        for rollback_tests, paths in ((False, subject.ROLLBACK_TEST_PATHS), (True, ('tests/anything.js',))):
+            with self.assertRaises(ValueError):
+                subject.verify_reviewed_successor(expected_revision=subject.ROLLBACK_SPACE_BEFORE,
+                                                  successor=subject.ROLLBACK_SPACE_AFTER,
+                                                  reviewed_paths=paths, rollback_tests=rollback_tests)
 
     def test_rollback_preparation_rejects_missing_target_or_source_evidence(self):
         c = self.begin()

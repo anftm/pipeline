@@ -13,6 +13,7 @@ on:
           - rollback-prepare
           - apply
           - reconcile
+          - reconcile-rollback-test-successor
       expected_revision:
         description: Exact running Space revision, required for prepare
         type: string
@@ -44,6 +45,16 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: '3.11'
+      - name: Require exact production checkout for rollback successor observation
+        if: inputs.mode == 'reconcile-rollback-test-successor'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF" == refs/heads/main && "$GITHUB_RUN_ATTEMPT" == 1 ]]
+          [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/search-promotion-space.yml@refs/heads/main" ]]
+          [[ "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" && "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          [[ "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" == "$GITHUB_SHA" ]]
       - name: Install pinned dependencies
         run: pip install -r scripts/requirements.txt PyYAML==6.0.3
       - name: Exercise Space transition and recovery contracts
@@ -65,7 +76,7 @@ jobs:
               [[ "$EXPECTED_REVISION" =~ ^[0-9a-f]{40}$ && -z "$OPERATION" ]]
               python -B scripts/search_space_transition.py --mode "$MODE" --expected-revision "$EXPECTED_REVISION"
               ;;
-            apply|reconcile)
+            apply|reconcile|reconcile-rollback-test-successor)
               [[ "$OPERATION" =~ ^[0-9a-f]{32}$ && -z "$EXPECTED_REVISION" ]]
               python -B scripts/search_space_transition.py --mode "$MODE" --operation "$OPERATION"
               ;;
