@@ -155,7 +155,7 @@ def _index(raw):
     return value, web._rows(value, 'files')
 
 
-def _check_change(parent_raw, target, after, ext, expected_keys=None):
+def _check_change(parent_raw, target, after, ext, expected_keys=None, *, managed=False):
     parent, before = _index(parent_raw)
     if before.keys() != after.keys() or not web._json_equal(parent['failures'], target['failures']):
         raise ValueError('exact web change must preserve all file keys and failures')
@@ -163,7 +163,7 @@ def _check_change(parent_raw, target, after, ext, expected_keys=None):
     if expected_keys is None:
         if len(changed) != 1:
             raise ValueError('exact web change must replace exactly one file row')
-    elif (not isinstance(expected_keys, frozenset) or not 1 <= len(expected_keys) <= 7
+    elif (not isinstance(expected_keys, frozenset) or not 1 <= len(expected_keys) <= (200 if managed is True else 7)
           or set(changed) != expected_keys):
         raise ValueError('exact web change does not match sealed keys')
     for key in changed:
@@ -179,7 +179,7 @@ def _check_change(parent_raw, target, after, ext, expected_keys=None):
 
 
 def apply(store, journal, *, path, parent_sha256, target_raw, prerequisites, guard, resume=False,
-          expected_keys=None, parent_etag=None):
+          expected_keys=None, parent_etag=None, managed=False):
     """Use a ConditionalCheckpointStore and S3Journal (or equivalent journal).
 
     Supply exact CAS-encoded target bytes with a unique checkpoint_operation and
@@ -219,7 +219,7 @@ def apply(store, journal, *, path, parent_sha256, target_raw, prerequisites, gua
         raise RuntimeError('exact web canonical parent ETag differs; no claim made')
     if parent.value.get('checkpoint_operation') == operation:
         raise ValueError('checkpoint operation must differ from the exact parent')
-    _check_change(parent.raw, target, after, ext, expected_keys)
+    _check_change(parent.raw, target, after, ext, expected_keys, managed=managed)
     if journal.claim(parent_sha256, seal, guard=guard) is not True:
         raise RuntimeError('exact web index parent permit not acquired; do not write')
     observed = checkpoints.read(web.BUCKET, path)

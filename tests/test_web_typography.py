@@ -40,7 +40,9 @@ class WebTypographyTests(unittest.TestCase):
         self.assertEqual(article.find('center').text, '作者')
         self.assertEqual(article.find('ol').get('start'), '3')
         self.assertEqual(article.find('ol/li').get('value'), '7')
-        table = article.find('table')
+        wrapper = article.find('div[@data-reader-table-scroll=""]')
+        self.assertIsNotNone(wrapper)
+        table = wrapper.find('table')
         self.assertEqual(table.attrib, {'width': '715', 'align': 'center', 'cellspacing': '0'})
         self.assertEqual(table.find('caption').text, '表格')
         self.assertEqual(table.find('tbody/tr/th').get('scope'), 'row')
@@ -50,6 +52,37 @@ class WebTypographyTests(unittest.TestCase):
         self.assertEqual(''.join(article.find('pre').itertext()), '\n  <tag> &\n\t例')
         self.assertEqual(after.find('head/style').text, convert.WEB_READER_CSS)
         self.assertNotIn('width="715"', convert.sanitize_html(document, normalize_utf8=True))
+
+    def test_preserves_intratable_header_references(self):
+        document = ('<table><tr><th id="year">Year</th><th id="section">Section</th></tr>'
+                    '<tr><td headers="year section" colspan="2">Data</td></tr></table>')
+        table = parse(convert.sanitize_web_html(document)).find('body/div/table')
+        ids = {n.get('id') for n in table.iter('th')}
+        data = next(table.iter('td'))
+        self.assertEqual(set(data.get('headers').split()), ids)
+        self.assertEqual(data.get('colspan'), '2')
+
+    def test_mhtml_explicit_root_preserves_selected_article_and_fragments(self):
+        b = 'test-related-root'
+        def source(start, second_id='main'):
+            return (f'Content-Type: multipart/related; boundary="{b}"; type="text/html"; start="<{start}>"\r\n'
+                    f'\r\n--{b}\r\nContent-Type: text/html; charset=utf-8\r\nContent-ID: <first>\r\n\r\n'
+                    f'<p>Unchosen companion</p>\r\n--{b}\r\nContent-Type: text/html; charset=utf-8\r\nContent-ID: <{second_id}>\r\n'
+                    f'\r\n<h1 id="heading">Main</h1><p><a href="#heading">Back</a></p>\r\n--{b}--\r\n').encode()
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp)/'source.mht'; target=Path(tmp)/'document.html'
+            path.write_bytes(source('main'))
+            convert.mhtml_to_html(path, target, web_typography=True)
+            doc=parse(target.read_text()).find('body')
+            self.assertEqual(doc.find('h1').attrib['id'],'heading')
+            self.assertEqual(doc.find('p/a').attrib['href'],'#heading')
+            self.assertNotIn('Unchosen companion',target.read_text())
+            convert.mhtml_to_html(path, target)
+            self.assertIn('Unchosen companion',target.read_text())  # CHM path unchanged.
+            for payload in (source('missing'),source('first',second_id='first')):
+                path.write_bytes(payload)
+                with self.assertRaisesRegex(ValueError,'unique HTML body'):
+                    convert.mhtml_to_html(path, target, web_typography=True)
 
     def test_candidate_keeps_resource_and_active_content_boundaries(self):
         document = r'''<meta http-equiv="refresh" content="0;https://evil.test/">
@@ -94,6 +127,28 @@ class WebTypographyTests(unittest.TestCase):
                     self.assertIn('<p align="center">中文</p>', text)
                     self.assertNotIn('notProse', text)
                     self.assertEqual(parse(text).find('body/pre').text, '\n  a < b')
+
+    def test_html_resources_use_elements_and_pinned_subtree(self):
+        source = '''<base href="https://untrusted.test/page/"><link rel=stylesheet href=layout.css>
+        <img src=picture.png alt=kept><img src="bad://host/a" data-src=picture.png alt=lazy>
+        <img src=%2e%2e/escape.png><img src=%252e%252e/escape.png><img src=//untrusted.test/a.png>
+        <pre>\n\n&lt;img src=example.png&gt;\t</pre>'''
+        url = 'https://huggingface.co/datasets/example/data/resolve/' + 'a'*40 + '/folder/source.htm'
+        with tempfile.TemporaryDirectory() as tmp:
+            work=Path(tmp); inp=work/'source.htm'; inp.write_text(source)
+            def fetch(address, target, **_):
+                data = b'.chapter { color: #123; }' if address.endswith('.css') else b'test-image'
+                target.write_bytes(data)
+                return hashlib.sha256(data).hexdigest(), len(data)
+            with patch.object(convert,'download_source', side_effect=fetch) as download:
+                html=convert.inline_html_resources(inp,url,work,web_typography=True).read_text()
+            root=parse(html)
+            self.assertEqual([c.args[0] for c in download.call_args_list],
+                             [url.rsplit('/',1)[0]+'/picture.png',url.rsplit('/',1)[0]+'/layout.css'])
+            self.assertEqual([n.get('src') is not None for n in root.iter('img')],[True,True,False,False,False])
+            self.assertEqual(root.find('body/pre').text,'\n<img src=example.png>\t')
+            self.assertIsNone(root.find('head/base'))
+            self.assertIn('.chapter{color: #123;',html)
 
     def test_portable_html_without_url_uses_candidate_only_when_requested(self):
         with tempfile.TemporaryDirectory() as tmp:

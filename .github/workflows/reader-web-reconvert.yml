@@ -1,0 +1,67 @@
+name: Prepare managed web reconversion
+
+on:
+  workflow_dispatch:
+    inputs:
+      request_base64:
+        description: Base64 UTF-8 conversion request (small batches); no credentials or private data
+        required: false
+        type: string
+      request_sha256:
+        description: SHA-256 of the bounded request, required for either input
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reader-web-reconvert-${{ inputs.request_sha256 }}
+  cancel-in-progress: false
+
+jobs:
+  convert:
+    if: github.repository == 'anftm/pipeline' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r scripts/requirements.txt
+      - name: Verify request and prepare immutable candidates (no publishing credentials)
+        env:
+          REQUEST_BASE64: ${{ inputs.request_base64 }}
+          REQUEST_SHA256: ${{ inputs.request_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" && "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          mkdir -p output
+          python - <<'PY'
+          from pathlib import Path
+          from hashlib import sha256
+          import base64, os, re, urllib.request
+          h=os.environ['REQUEST_SHA256']; value=os.environ.get('REQUEST_BASE64','')
+          if not re.fullmatch('[0-9a-f]{64}',h):raise ValueError('exact request digest required')
+          if value:
+              if len(value)>50000:raise ValueError('use digest-addressed request object for this size')
+              raw=base64.b64decode(value,validate=True)
+          else:
+              uri=f'https://huggingface.co/buckets/vomebook/reader-assets-v2/resolve/reader-index/gc/web-reconvert-requests/v1/{h}.json'
+              with urllib.request.urlopen(uri,timeout=25) as r:raw=r.read(256*1024+1)
+          if not 0<len(raw)<=256*1024 or sha256(raw).hexdigest()!=h:raise ValueError('request bytes differ from exact digest')
+          Path('output/request.json').write_bytes(raw)
+          PY
+          python -B -m scripts.reader_web_managed_convert --request output/request.json --output output/managed-web
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: managed-web-conversion-${{ inputs.request_sha256 }}
+          path: |
+            output/request.json
+            output/managed-web/
+          retention-days: 14
+          if-no-files-found: error

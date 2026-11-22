@@ -176,7 +176,7 @@ class V3PublicationTests(unittest.TestCase):
         self.assertFalse(workflow[True]["workflow_dispatch"]["inputs"]["apply"]["default"])
         self.assertEqual(workflow[True]["workflow_dispatch"]["inputs"]["operation"]["options"],
                          ["inspect", "unify", "ack", "retire", "withdraw", "reset-documents",
-                          "remove-route", "restore-route", "verify-route", "migrate-derived", "resume-derived", "redirect-derived", "finalize-derived-redirects", "replace-derived-history", "replace-exact-web", "verify-exact-web", "replace-exact-web-batch", "verify-exact-web-batch", "verify-exact-office-report", "replace-exact-office-report", "refresh-reader-consumers", "reconcile-derived-index", "reconcile-sidecar", "compact-legacy-history", "publish-generation", "verify-generation", "verify-pages-lane"])
+                          "remove-route", "restore-route", "verify-route", "migrate-derived", "resume-derived", "redirect-derived", "finalize-derived-redirects", "replace-derived-history", "replace-exact-web", "verify-exact-web", "replace-exact-web-batch", "verify-exact-web-batch", "replace-managed-web", "verify-managed-web", "prepare-managed-web", "verify-exact-office-report", "replace-exact-office-report", "refresh-reader-consumers", "reconcile-derived-index", "reconcile-sidecar", "compact-legacy-history", "publish-generation", "verify-generation", "verify-pages-lane"])
         operation_step = next(step for step in workflow["jobs"]["publish"]["steps"]
                               if step.get("id") == "operation")
         # Detached OCR admission and correction are retired; retention remains

@@ -23,18 +23,30 @@ def validate_legacy_plan(actual, reviewed):
         raise ValueError('sealed streamed catalog plan differs')
 
 
-def run(blob, bundle_sha, review_sha, proof, *, phase, external_writers_stopped):
+def run(blob, bundle_sha, review_sha, proof, *, phase, external_writers_stopped, managed=False):
     if phase not in {'apply','resume-index','resume-legacy','observe-v3'}:
         raise ValueError('explicit ten-web phase required')
-    review,data,parents,pairs=review_module.parse(blob,bundle_sha,review_sha)
+    if managed:
+        from . import reader_web_managed_review, reader_web_managed_pages
+        review,data,parents,pairs=reader_web_managed_review.parse(blob,bundle_sha,review_sha)
+    else:
+        review,data,parents,pairs=review_module.parse(blob,bundle_sha,review_sha)
     if (proof.get('version')!=1 or proof.get('remote_writes')!=0
             or proof.get('parent_generation')!=review['parent_generation']
             or proof.get('pointer_sha256')!=plan.digest(data['pointer.json'])
             or proof.get('review_sha256')!=review_sha or proof.get('bundle_sha256')!=bundle_sha):
         raise ValueError('authority receipt does not bind this exact batch')
     hub=v3.CentralHubStore()
-    window=lambda:guard_window(hub,external_writers_stopped)
+    def window():
+        if guard_window(hub,external_writers_stopped) is not True:return False
+        if managed:
+            for ext,expect in review['unchanged_indexes'].items():
+                if plan.digest(hub.read_bytes(B,f'documents/web/{ext}/index.json'))!=expect:
+                    raise ValueError('unrelated web index moved during managed batch')
+        return True
     window()
+    if managed and phase!='observe-v3':
+        reader_web_managed_pages.current(review['parent_pointer'],expected=proof['pages'])
     cps=ConditionalCheckpointStore();s3=cps.store;client=s3._client('vomebook')
     transport=LegacyRoots(client);journal=LegacyJournal(client);claims=S3ClaimStore(client)
     pointers=ConditionalPageStore(hub,s3=s3)
@@ -119,6 +131,8 @@ def run(blob, bundle_sha, review_sha, proof, *, phase, external_writers_stopped)
                 if index_journal.read(item['parent_sha256'],guard=lambda _:True)!=expected:
                     raise RuntimeError('exact canonical batch permit missing: '+ext)
         if phase in {'apply','resume-index'}:
+            if managed:
+                reader_web_managed_pages.current(review['parent_pointer'],expected=proof['pages'])
             def before_indexes():
                 if protected() is not True:return False
                 head=client.head_object(Bucket='reader-assets-v2',Key=legacy.CATALOG)
@@ -126,7 +140,7 @@ def run(blob, bundle_sha, review_sha, proof, *, phase, external_writers_stopped)
                         and pointers.read_for_update(B,legacy.SIDECAR)==(before,side_parent.etag)
                         and hub.read_bytes(B,legacy.SIDECAR)==before)
             outcomes=indexes.canonical_set(checkpoints=cps,journal=index_journal,hub=hub,parents=parents,pairs=pairs,
-                       operation=review['operation'],etags=proof['index_etags'],prerequisites=prereq,guard=before_indexes,recover=phase!='apply')
+                       operation=review['operation'],etags=proof['index_etags'],prerequisites=prereq,guard=before_indexes,recover=phase!='apply',managed=managed)
         else:outcomes={e:'observed' for e in targets}
         def legacy_guard(_):
             if protected() is not True:return False
@@ -159,5 +173,5 @@ def run(blob, bundle_sha, review_sha, proof, *, phase, external_writers_stopped)
     result=promote.promote_route(store=PointerStore(hub,s3,promotion_guard,ptr),client=client,
              parent_raw=ptr,target_pointer=successor,canonical_sha256=plan.digest(after),legacy_seal=moved['seal'],
              guard=promotion_guard,observe_only=phase=='observe-v3',permit_kind='reader-web-v3-permit')
-    return {**result,'applied':True,'canonical':outcomes,'changed_rows':10,'retention_root':pin,
+    return {**result,'applied':True,'canonical':outcomes,'changed_rows':len(pairs),'retention_root':pin,
              'objects_deleted':False,'pages_pending':True,'deleted_objects':0}

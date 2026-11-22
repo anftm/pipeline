@@ -9,13 +9,13 @@ from .reader_stream_checkpoint_cas import strong_etag
 
 
 def canonical_set(*, checkpoints, journal, hub, parents, pairs, operation, etags,
-                  prerequisites, guard, recover=False):
+                  prerequisites, guard, recover=False, managed=False):
     """A fresh batch or explicit continuation of an observed exact prefix.
 
     Recover never writes a root if that root has a spent permit and old bytes.
     All pending roots are preflighted before any per-index permit is spent.
     """
-    targets=plan.canonical(parents,pairs,operation)
+    targets=plan.canonical(parents,pairs,operation,managed=managed)
     order=tuple(sorted(targets))
     if set(etags)!=set(order) or type(recover) is not bool:
         raise ValueError('an exact ETag for each web index is required')
@@ -66,7 +66,7 @@ def canonical_set(*, checkpoints, journal, hub, parents, pairs, operation, etags
             return True
         out[ext]=index.apply(checkpoints,journal,path=paths[ext],parent_sha256=plan.digest(parents[ext]),
                            target_raw=targets[ext],prerequisites=prerequisites,guard=check,
-                           expected_keys=keys[ext],parent_etag=etags[ext])
+                           expected_keys=keys[ext],parent_etag=etags[ext],managed=managed)
         if read(ext)[0]!=targets[ext]:raise RuntimeError('exact index target not observable: '+ext)
         expected[ext]=targets[ext]
     call_guard('final-index-set')

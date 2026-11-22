@@ -17,10 +17,16 @@ def digest(raw):
     return sha256(raw).hexdigest()
 
 
-def canonical(parents, pairs, operation):
-    if (set(parents) != set(QUOTAS) or len(pairs) != 10
-            or not isinstance(operation, str) or re.fullmatch('[0-9a-f]{32}', operation) is None):
-        raise ValueError('invalid exact ten-web index set or operation')
+MAX_MANAGED_ROWS = 200
+
+
+def canonical(parents, pairs, operation, *, managed=False):
+    if managed is not True and managed is not False:
+        raise ValueError('invalid web batch mode')
+    if (not isinstance(operation, str) or re.fullmatch('[0-9a-f]{32}', operation) is None
+            or (managed and (len(parents)!=1 or not set(parents)<=web.EXTENSIONS or not 1<=len(pairs)<=MAX_MANAGED_ROWS))
+            or (not managed and (set(parents)!=set(QUOTAS) or len(pairs)!=10))):
+        raise ValueError('invalid web batch index set or operation')
     old_by_key, new_by_key = {}, {}
     for old, new in pairs:
         web._web_row(old, old=True)
@@ -32,7 +38,8 @@ def canonical(parents, pairs, operation):
             raise ValueError('candidate is not an exact same-source web successor')
         old_by_key[key] = old
         new_by_key[key] = new
-    if Counter(row['extension'] for row in old_by_key.values()) != QUOTAS:
+    quotas = {next(iter(parents)):len(pairs)} if managed else QUOTAS
+    if Counter(row['extension'] for row in old_by_key.values()) != quotas:
         raise ValueError('unexpected exact web batch composition')
     result = {}
     for ext in sorted(parents):

@@ -42,7 +42,9 @@ def live(sealed, consumer_report, publication, client):
         raise ValueError('both full deployed web projections must be verified')
     def check(path,digest,size=None):
         h=sha256();length=0
-        with client.stream('GET','https://voiceofml-search.hf.space/api/reader-bucket-resource?'+urlencode({'path':path}),
+        url=('https://huggingface.co/buckets/vomebook/reader-assets-v2/resolve/'+path if path.endswith('/document-manifest.json')
+             else 'https://voiceofml-search.hf.space/api/reader-bucket-resource?'+urlencode({'path':path}))
+        with client.stream('GET',url,
                            headers={'Cache-Control':'no-cache'}) as response:
             response.raise_for_status()
             for chunk in response.iter_bytes():
@@ -62,20 +64,23 @@ def live(sealed, consumer_report, publication, client):
 def main():
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('mode',choices=['preflight','apply','live'])
     p.add_argument('--resource-json',required=True);p.add_argument('--output',type=Path,required=True)
-    p.add_argument('--consumers',type=Path);p.add_argument('--publication',type=Path);a=p.parse_args()
+    p.add_argument('--consumers',type=Path);p.add_argument('--publication',type=Path);p.add_argument('--managed',action='store_true');a=p.parse_args()
     if (os.environ.get('GITHUB_REPOSITORY')!='anftm/pipeline' or os.environ.get('GITHUB_EVENT_NAME')!='workflow_dispatch'
             or os.environ.get('GITHUB_REF')!='refs/heads/main' or os.environ.get('GITHUB_RUN_ATTEMPT')!='1'):
         raise RuntimeError('first exact central main dispatch required')
     d=options(a.resource_json,a.mode)
     cps=ConditionalCheckpointStore();s3=cps.store;client=s3._client('vomebook');store=S3ClaimStore(client)
-    blob=read(store,PREFIX+d['bundle_sha256']+'.zip',review.MAX_PACKED)
+    if a.managed:
+        from . import reader_web_managed_review as managed, reader_web_managed_pages
+    schema=managed if a.managed else review
+    blob=read(store,PREFIX+d['bundle_sha256']+'.zip',schema.MAX_PACKED)
     if a.mode=='apply':
         raw=read(store,PROOFS+d['authority_sha256']+'.json',32*1024)
         if sha256(raw).hexdigest()!=d['authority_sha256']:raise ValueError('web authority digest mismatch')
         result=publish.run(blob,d['bundle_sha256'],d['review_sha256'],json.loads(raw),phase=d['phase'],
-                           external_writers_stopped=d['external_writers_stopped'])
+                           external_writers_stopped=d['external_writers_stopped'],managed=a.managed)
     else:
-        sealed,data,parents,_=review.parse(blob,d['bundle_sha256'],d['review_sha256'])
+        sealed,data,parents,pairs=schema.parse(blob,d['bundle_sha256'],d['review_sha256'])
         if a.mode=='live':
             with httpx.Client(follow_redirects=True,timeout=30) as http:
                 result=live(sealed,json.loads(a.consumers.read_bytes()),json.loads(a.publication.read_bytes()),http)
@@ -83,6 +88,15 @@ def main():
             hub=v3.CentralHubStore()
             result=review.authority(sealed,data,parents,checkpoints=cps,pointers=ConditionalPageStore(hub,s3=s3),
                    legacy=LegacyRoots(client),hub=hub,s3=s3)
+            if a.managed:
+                from . import reader_web_batch_plan as plan
+                from .reader_image_history_publish_s3 import CATALOG
+                if hub.digest(v3.ASSETS,CATALOG)!=result['catalog']['sha256']:
+                    raise ValueError('legacy catalog S3/resolver mismatch')
+                p,t,packed=plan.project(hub,data['sidecar-before.gz'],pairs)
+                if p!=sealed['parent_pointer'] or t!=sealed['target_pointer'] or packed!=data['sidecar-after.gz']:
+                    raise ValueError('managed route projection differs from review')
+                result['pages']=reader_web_managed_pages.current(p)
             result.update(bundle_sha256=d['bundle_sha256'],review_sha256=d['review_sha256'])
     with a.output.open('xb') as f:f.write(v3.encode(result))
 

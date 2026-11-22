@@ -377,13 +377,18 @@ def inline_html_resources(source: Path, source_url: str, work: Path, *, web_typo
                 not parsed.path.startswith(root_path) or parsed.path == root_path):
             return None
         path = parsed.path
-        if path in cache:
-            return cache[path]
-        if count >= MAX_HTML_RESOURCES:
-            return None
+        if web_typography:
+            relative = urllib.parse.unquote(path[len(root_path):])
+            if ('\\' in relative or '%' in relative or any(ord(ch) < 32 for ch in relative)
+                    or any(part in {'.', '..', ''} for part in relative.split('/'))):
+                return None
         suffix = Path(path).suffix.lower()
         mime = mimetypes.guess_type(path)[0] or ""
         if suffix not in allowed and mime not in allowed:
+            return None
+        if path in cache:
+            return cache[path]
+        if count >= MAX_HTML_RESOURCES:
             return None
         target = work / "html-resources" / str(count)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -405,9 +410,52 @@ def inline_html_resources(source: Path, source_url: str, work: Path, *, web_typo
         cache[path] = encoded
         return encoded
 
+    image_types = {"image/gif", "image/jpeg", "image/png", "image/webp", ".gif", ".jpg", ".jpeg", ".png", ".webp"}
+
+    if web_typography:
+        # Resolve only actual elements; old save-as HTML often uses unquoted
+        # attributes. Restrict resolution to the pinned source directory even
+        # if the document supplies its own <base> or a lazy image fallback.
+        doc = html5lib_shim.HTMLParser(namespaceHTMLElements=False).parse(text)
+        for img in doc.iter("img"):
+            src = img.get("src", "")
+            try:
+                if safe_embedded_url("src", src, allow_relative=False):
+                    continue
+                encoded = load_resource(src, image_types)
+                if not encoded and img.get("data-src"):
+                    encoded = load_resource(img.get("data-src"), image_types)
+            except ValueError:
+                continue
+            if encoded:
+                img.set("src", encoded)
+        for node in doc.iter("link"):
+            if "stylesheet" not in node.get("rel", "").lower().split() or node.get("media", "all").lower() not in {"all", "screen", ""}:
+                continue
+            try:
+                data = load_resource(node.get("href", ""), {"text/css", ".css"})
+            except ValueError:
+                data = None
+            if data:
+                css = base64.b64decode(data.partition(",")[2])
+                # CSS sanitizer later filters declarations; do not let an
+                # HTML end tag in a downloaded stylesheet escape serialization.
+                node.tag, node.text = "style", sanitize_css(decode_html_bytes(css))
+                if "<" in node.text:
+                    node.text = ""
+                node.attrib.clear()
+        preserve_pre_newlines(doc)
+        serializer = html5lib_shim.HTMLSerializer(
+            quote_attr_values="always", escape_lt_in_attrs=True, omit_optional_tags=False,
+        )
+        text = serializer.render(html5lib_shim.getTreeWalker("etree")(doc))
+        output = work / "inlined.html"
+        output.write_text(sanitize_web_html(text), encoding="utf-8")
+        return output
+
     def image(match):
         value = match.group(2)
-        encoded = load_resource(value, {"image/gif", "image/jpeg", "image/png", "image/webp", ".gif", ".jpg", ".jpeg", ".png", ".webp"})
+        encoded = load_resource(value, image_types)
         return match.group(1) + (encoded or value) + match.group(3)
 
     text = re.sub(r"(\b(?:src|data-src)\s*=\s*[\"'])([^\"']+)([\"'])", image, text, flags=re.IGNORECASE)
@@ -431,7 +479,7 @@ def inline_html_resources(source: Path, source_url: str, work: Path, *, web_typo
 
     text = re.sub(r"<link\b[^>]*\brel\s*=\s*[\"']stylesheet[\"'][^>]*\bhref\s*=\s*([\"'])([^\"']+)\1[^>]*>\s*", stylesheet_tag, text, flags=re.IGNORECASE)
     text = re.sub(r"<link\b[^>]*\bhref\s*=\s*([\"'])([^\"']+)\1[^>]*\brel\s*=\s*[\"']stylesheet[\"'][^>]*>\s*", stylesheet_tag, text, flags=re.IGNORECASE)
-    text = sanitize_web_html(text) if web_typography else sanitize_html(text, normalize_utf8=True)
+    text = sanitize_html(text, normalize_utf8=True)
     output = work / "inlined.html"
     output.write_text(text, encoding="utf-8")
     return output
@@ -758,6 +806,17 @@ def mhtml_to_html(source: Path, target: Path, *, web_typography: bool = False) -
     message = BytesParser(policy=email.policy.default).parsebytes(source.read_bytes())
     parts = list(message.walk()) if message.is_multipart() else [message]
     html_part = next((part for part in parts if part.get_content_type() == "text/html"), None)
+    if web_typography and message.get_content_type() == 'multipart/related':
+        start = message.get_param('start')
+        if start:
+            # A saved page can contain multiple HTML parts. RFC 2387 uses
+            # Content-ID (not MIME order) to identify an explicit root.
+            root_id = start.strip().strip('<>')
+            roots = [part for part in message.iter_parts()
+                     if root_id and str(part.get('Content-ID') or '').strip().strip('<>') == root_id]
+            if len(roots) != 1 or roots[0].get_content_type() != 'text/html':
+                raise ValueError('MHTML related start does not identify a unique HTML body')
+            html_part = roots[0]
     if html_part is None:
         raise RuntimeError("CHM MHTML has no HTML body")
     payload = html_part.get_payload(decode=True) or b""
@@ -924,6 +983,11 @@ body { box-sizing: border-box; max-width: 48rem; margin: 0 auto;
 :where(p) { margin-block: .7em; }
 :where(figure) { margin-inline: 0; }
 img { max-width: 100%; height: auto; }
+body * { box-sizing: border-box; }
+:where(div, section, article, aside, main, nav, p, header, footer, center) {
+  max-inline-size: 100% !important; min-inline-size: 0 !important;
+}
+[data-reader-table-scroll] { max-width: 100%; overflow-x: auto; }
 table { max-width: 100%; }
 pre { max-width: 100%; overflow: auto; white-space: pre; overflow-wrap: normal; }
 """
@@ -966,6 +1030,8 @@ class WebInlineCSS:
 def sanitize_web_html(document: str) -> str:
     """Sanitize a standalone web document and apply the opt-in layout layer."""
     def allowed_attribute(tag: str, name: str, value: str) -> bool:
+        if tag == 'div' and name == 'data-reader-table-scroll':
+            return value == ''
         # These attributes are set only on the producer's viewport; source
         # meta attributes of the same names are stripped before filtering.
         if tag == "meta" and name in {"name", "content"}:
@@ -977,6 +1043,8 @@ def sanitize_web_html(document: str) -> str:
             return value.strip().lower() in {"top", "middle", "bottom", "baseline"}
         if name in {"width", "height", "cellpadding", "cellspacing", "border"} and tag in {"table", "td", "th"}:
             return bool(re.fullmatch(r"[0-9]{1,5}%?", value.strip()))
+        if name == 'headers' and tag in {'th', 'td'}:
+            return bool(value.split()) and len(value) <= 2048
         if (tag, name) in {("ol", "start"), ("li", "value")}:
             return bool(re.fullmatch(r"-?[0-9]{1,9}", value.strip()))
         if (tag, name) in {("ol", "reversed"), ("details", "open")}:
@@ -1013,6 +1081,20 @@ def sanitize_web_html(document: str) -> str:
     for index, attrs in enumerate(({"charset": "utf-8"},
                                    {"name": "viewport", "content": "width=device-width, initial-scale=1"})):
         head.insert(index, ET.Element("meta", attrs))
+    # Keep the authored table structure, including nested layout tables.
+    # Put overflow on the outer table's viewport instead of the page.
+    pending = [root.find('body')]
+    while pending:
+        parent = pending.pop()
+        for i, node in enumerate(list(parent)):
+            if node.tag != 'table':
+                pending.append(node)
+                continue
+            wrapper = ET.Element('div', {'data-reader-table-scroll': ''})
+            wrapper.tail, node.tail = node.tail, None
+            wrapper.append(node)
+            parent.remove(node)
+            parent.insert(i, wrapper)
     ET.SubElement(head, "style").text = WEB_READER_CSS
     preserve_pre_newlines(root)
 
