@@ -176,7 +176,12 @@ class V3PublicationTests(unittest.TestCase):
         self.assertFalse(workflow[True]["workflow_dispatch"]["inputs"]["apply"]["default"])
         self.assertEqual(workflow[True]["workflow_dispatch"]["inputs"]["operation"]["options"],
                          ["inspect", "unify", "ack", "retire", "withdraw", "reset-documents",
-                          "remove-route", "restore-route", "verify-route", "migrate-derived", "resume-derived", "redirect-derived", "finalize-derived-redirects", "replace-derived-history", "replace-exact-web", "verify-exact-web", "replace-exact-web-batch", "verify-exact-web-batch", "replace-managed-web", "verify-managed-web", "prepare-managed-web", "verify-exact-office-report", "replace-exact-office-report", "refresh-reader-consumers", "reconcile-derived-index", "reconcile-sidecar", "compact-legacy-history", "publish-generation", "verify-generation", "verify-pages-lane"])
+                          "remove-route", "restore-route", "verify-route", "migrate-derived", "resume-derived",
+                          "redirect-derived", "finalize-derived-redirects", "replace-derived-history",
+                          "replace-exact-web", "verify-exact-web", "replace-managed-web", "verify-managed-web",
+                          "prepare-managed-web", "verify-exact-office-report", "replace-exact-office-report",
+                          "refresh-reader-consumers", "reconcile-derived-index", "reconcile-sidecar",
+                          "compact-legacy-history", "publish-generation", "verify-generation", "verify-pages-lane"])
         operation_step = next(step for step in workflow["jobs"]["publish"]["steps"]
                               if step.get("id") == "operation")
         # Detached OCR admission and correction are retired; retention remains
@@ -226,6 +231,21 @@ class V3PublicationTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     store.assert_serialized_writer(publish.PROTOCOL)
 
+    def test_workflow_keeps_only_managed_dispatches_on_the_shared_web_batch_cli(self):
+        import yaml
+        root = Path(__file__).resolve().parents[1]
+        source = (root / ".github/workflows/reader-v3-publish.yml").read_text()
+        for retired in ("replace-exact-web-batch", "verify-exact-web-batch"):
+            self.assertNotIn(retired, source)
+        steps = yaml.safe_load(source)["jobs"]["publish"]["steps"]
+        operation = next(step for step in steps if step.get("id") == "operation")
+        readback = next(step for step in steps if "scripts.reader_web_batch_cli live" in step.get("run", ""))
+        self.assertEqual(readback["if"],
+                         "steps.operation.outputs.changed == 'true' && inputs.operation == 'replace-managed-web'")
+        calls = [line.split()[4:6] for step in steps for line in step.get("run", "").splitlines()
+                 if "python -B -m scripts.reader_web_batch_cli " in line]
+        self.assertEqual(calls, [[mode, "--managed"] for mode in ("preflight", "apply", "live")])
+        self.assertIn("scripts.reader_web_managed_prepare", operation["run"])
 
     def preview_candidate(self, source="a" * 64, key="repo\0book.pdf"):
         full = self.candidate(source, key)
