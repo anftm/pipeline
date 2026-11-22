@@ -16,6 +16,13 @@ B=v3.ASSETS
 SEAL='reader-web-legacy-publish-v1'
 
 
+def validate_legacy_plan(actual, reviewed):
+    # Round-trip the Python retirement tuple through the same schema as the
+    # reviewed JSON. Comparing native container types rejects valid inputs.
+    if v3.encode(actual)!=v3.encode(reviewed):
+        raise ValueError('sealed streamed catalog plan differs')
+
+
 def run(blob, bundle_sha, review_sha, proof, *, phase, external_writers_stopped):
     if phase not in {'apply','resume-index','resume-legacy','observe-v3'}:
         raise ValueError('explicit ten-web phase required')
@@ -62,8 +69,12 @@ def run(blob, bundle_sha, review_sha, proof, *, phase, external_writers_stopped)
         permit=promote.PREFIX+plan.digest(ptr)+'.json'
         if claims._get(permit,maximum=promote.LIMIT)[0] is not None:
             raise RuntimeError('v3 parent already spent; reconcile before changing indexes')
-        if pointers.read_for_update(B,legacy.SIDECAR)!=(before,side_parent.etag):
+        if (pointers.read_for_update(B,legacy.SIDECAR)!=(before,side_parent.etag)
+                or hub.read_bytes(B,legacy.SIDECAR)!=before):
             raise ValueError('legacy sidecar parent no longer agrees')
+        cat=transport.observe(legacy.CATALOG)
+        if (cat.sha256,cat.size,cat.etag)!=(cat_parent.sha256,cat_parent.size,cat_parent.etag):
+            raise ValueError('live legacy catalog parent no longer agrees')
         for e,obj in review['canonical'].items():
             s=cps.read(B,obj['path']); allowed=(parents[e],targets[e]) if phase=='resume-index' else (parents[e],)
             if s.raw not in allowed or s.raw!=hub.read_bytes(B,obj['path']):
@@ -80,7 +91,7 @@ def run(blob, bundle_sha, review_sha, proof, *, phase, external_writers_stopped)
             return plan.plan_legacy(catalog_parent,out,before=before,after=after,pairs=pairs,
                                     timestamp=review['timestamp'],parent_sha=cat_parent.sha256)
         with TemporaryFile() as out:
-            if make_plan(out)!=meta:raise ValueError('sealed streamed catalog plan differs')
+            validate_legacy_plan(make_plan(out),meta)
         if phase=='apply':archive.stage(catalog_parent,guard=window)
         for row in review['rows']:
             old=row['old'];protect_input(old['object'],digest=old['sha256'],length=old['bytes'])
@@ -109,7 +120,11 @@ def run(blob, bundle_sha, review_sha, proof, *, phase, external_writers_stopped)
                     raise RuntimeError('exact canonical batch permit missing: '+ext)
         if phase in {'apply','resume-index'}:
             def before_indexes():
-                return protected() and pointers.read_for_update(B,legacy.SIDECAR)==(before,side_parent.etag)
+                if protected() is not True:return False
+                head=client.head_object(Bucket='reader-assets-v2',Key=legacy.CATALOG)
+                return ((head.get('ETag'),head.get('ContentLength'))==(cat_parent.etag,cat_parent.size)
+                        and pointers.read_for_update(B,legacy.SIDECAR)==(before,side_parent.etag)
+                        and hub.read_bytes(B,legacy.SIDECAR)==before)
             outcomes=indexes.canonical_set(checkpoints=cps,journal=index_journal,hub=hub,parents=parents,pairs=pairs,
                        operation=review['operation'],etags=proof['index_etags'],prerequisites=prereq,guard=before_indexes,recover=phase!='apply')
         else:outcomes={e:'observed' for e in targets}

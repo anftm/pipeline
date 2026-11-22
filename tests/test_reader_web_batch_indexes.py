@@ -1,9 +1,10 @@
 from copy import deepcopy
+import json
 from types import SimpleNamespace
 import unittest
 
 from scripts import reader_web_batch_indexes as batch, reader_web_batch_plan as plan
-from scripts import reader_web_index_guard as guard
+from scripts import reader_web_index_guard as guard, reader_web_batch_publish as publish
 from scripts.reader_stream_checkpoint_cas import ConditionalCheckpointStore
 from tests.test_reader_web_index_guard import MemoryS3, BUCKET, encode
 from unittest.mock import patch
@@ -86,6 +87,13 @@ class BatchIndexesTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError,'spent-but-unconfirmed'):self.execute(recover=True)
         self.assertEqual(self.put_paths(),first)
         self.assertNotIn(self.paths['mht'],first)
+
+    def test_legacy_review_round_trip_preserves_plan_identity(self):
+        actual={'retirement_hint':('reader-index/hint.json',{'objects':['one']}),'bytes':42}
+        reviewed=json.loads(json.dumps(actual))
+        publish.validate_legacy_plan(actual,reviewed)
+        with self.assertRaisesRegex(ValueError,'streamed catalog plan differs'):
+            publish.validate_legacy_plan(actual,{**reviewed,'bytes':41})
 
     def test_duplicate_wrong_source_and_wrong_scope_never_spend(self):
         newpairs=deepcopy(self.pairs);newpairs[0][1]['source_revision']='c'*40
