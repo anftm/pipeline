@@ -293,6 +293,11 @@ jobs:
       - name: Publish and verify automatic web profile on both sites
         if: steps.operation.outputs.changed == 'true' && inputs.operation == 'upgrade-web-profile'
         env:
+          RESOURCE_JSON: ${{ inputs.resource_json }}
+          WEB_PROFILE_AUTOMATION_ID: ${{ inputs.automation_id }}
+          READER_WEB_PROFILE_REBUILD_ENABLED: ${{ vars.READER_WEB_PROFILE_REBUILD_ENABLED }}
+          READER_WEB_PROFILE_PAGES_SCOPE_REVIEWED: ${{ vars.READER_WEB_PROFILE_PAGES_SCOPE_REVIEWED }}
+          READER_PROFILE_PAUSED: ${{ vars.READER_V3_AUTO_PAUSED }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_INPUT_TOKEN: ${{ secrets.HF_INPUT_TOKEN }}
           HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
@@ -308,7 +313,8 @@ jobs:
           python scripts/publish_reader_v3.py verify-generation --expected-parent "$generation" \
             --wait-seconds 1200 --output output/v3/format-automation-verification.json
           python -B -m scripts.reader_web_profile_readback --publication output/v3/publication.json \
-            --consumers output/v3/format-automation-verification.json --output output/v3/web-profile-readback.json
+            --consumers output/v3/format-automation-verification.json --resource-json "$RESOURCE_JSON" \
+            --output output/v3/web-profile-readback.json
       - name: Publish and verify exact Office consumer projections
         if: steps.operation.outputs.changed == 'true' && inputs.operation == 'replace-exact-office-report'
         env:

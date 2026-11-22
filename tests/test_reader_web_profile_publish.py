@@ -4,7 +4,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock,patch
 
-from scripts import reader_web_profile_publish as web
+from scripts import reader_gc_retirement as retirement, reader_web_profile_publish as web
+from scripts.reader_web_profile_readback import record_hint
 from scripts.reader_web_profile import WEB_PROFILE
 
 
@@ -53,6 +54,22 @@ class AutomaticWebProfileTests(unittest.TestCase):
                          {'pages':{'documents':passes},'space':{'documents':{'a':{'passed':True}}}}):
             with self.assertRaisesRegex(ValueError,'both sites'):
                 web.replay.rejected(evidence,docs)
+
+    def test_retirement_hint_is_idempotent_and_bound_to_old_web_routes(self):
+        old = {'bucket':web.B,'object':'documents/web/html/'+'a'*64+'/document.html'}
+        new = {'bucket':web.B,'object':'documents/web/html/'+'b'*64+'/document.html'}
+        rows = [{'old':old,'new':new}]
+        p,v = retirement.record([{'bucket':web.B,'path':old['object']}],[],'a'*32,'catalog-replacement')
+        data = {'retirement_hint':[p,v]}; raw = retirement.encode(v)
+        hub = Mock(); hub.read_bytes.return_value = raw
+        claims = Mock(); claims._get.side_effect = [(None,None),(raw,'etag'),(raw,'etag'),(raw,'etag')]
+        self.assertEqual(record_hint(data,rows,guard=lambda:True,hub=hub,claims=claims),p)
+        self.assertEqual(record_hint(data,rows,guard=lambda:True,hub=hub,claims=claims),p)
+        claims._put.assert_called_once_with(p,raw,IfNoneMatch='*')
+        with self.assertRaisesRegex(ValueError,'sealed replacement'):
+            record_hint(data,[{'old':new,'new':old}],guard=lambda:True,hub=hub,claims=claims)
+        with self.assertRaisesRegex(RuntimeError,'fence lost'):
+            record_hint(data,rows,guard=lambda:False,hub=hub,claims=claims)
 
     def test_automatic_switch_preserves_joint_locks_and_no_legacy_pages_fallback(self):
         w=(Path(__file__).parents[1]/'.github/workflows/reader-v3-publish.yml').read_text()

@@ -2,7 +2,9 @@
 import copy,hashlib,io,json,unittest
 from zipfile import ZipFile,ZIP_DEFLATED
 from scripts import reader_web_batch_plan as plan,reader_web_managed_review as schema,reader_web_managed_pages as pages
+import httpx
 from scripts import publish_reader_v3 as v3,reader_web_exact_plan as web,reader_gc_graph as gc
+from scripts.reader_web_batch_cli import live
 from tests.test_reader_gc_graph import MemoryStore,ASSETS
 
 S=lambda b:hashlib.sha256(b).hexdigest()
@@ -71,6 +73,26 @@ class ManagedPathsTests(unittest.TestCase):
                 ref=ASSETS,row['manifest'];self.assertIn(ref,graph.references)
                 graph.process(ref,json.loads(st.read_bytes(*ref)));self.assertIn((ASSETS,row['object']),graph.references)
         self.assertFalse(graph.blockers)
+
+    def test_old_readback_uses_bucket_bytes_not_the_compatibility_alias(self):
+        old='documents/web/html/'+'1'*64
+        new='documents/web/html/'+'2'*64
+        row={k:{'object':p+'/document.html','manifest':p+'/document-manifest.json','sha256':S(k.encode()),'bytes':3}
+             for k,p in [('old',old),('new',new)]}
+        row.update(old_manifest_sha256=S(b'm'),new_manifest_sha256=S(b'm'))
+        def serve(req):
+            if req.url.host=='huggingface.co':
+                if req.url.path.endswith('/document-manifest.json'):
+                    return httpx.Response(200,content=b'm')
+                self.assertTrue(req.url.path.endswith('/'+row['old']['object']))
+                return httpx.Response(200,content=b'old')
+            self.assertEqual(req.url.host,'voiceofml-search.hf.space')
+            self.assertEqual(req.url.params['path'],row['new']['object'])
+            return httpx.Response(200,content=b'new')
+        g='a'*64
+        receipt={'generation':g,'complete':True,'consumers':{k:{'generation':g,'projection_verified':True} for k in ('hf','pages')}}
+        with httpx.Client(transport=httpx.MockTransport(serve)) as client:
+            self.assertEqual(live({'target_pointer':{'generation':g},'rows':[row]},receipt,{'generation':g},client)['old_and_new_verified'],1)
 
     def test_pages_gate_rejects_wrong_parent_and_attempt(self):
         c='a'*40; g='f'*64; ptr={'generation':g,'catalog':{'sha256':'1'*64}}

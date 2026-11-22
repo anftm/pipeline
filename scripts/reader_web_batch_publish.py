@@ -179,4 +179,4 @@ def run(blob, bundle_sha, review_sha, proof, *, phase, external_writers_stopped,
              parent_raw=ptr,target_pointer=successor,canonical_sha256=plan.digest(after),legacy_seal=moved['seal'],
              guard=promotion_guard,observe_only=phase=='observe-v3',permit_kind='reader-web-v3-permit')
     return {**result,'applied':True,'canonical':outcomes,'changed_rows':len(pairs),'retention_root':pin,
-             'objects_deleted':False,'pages_pending':True,'deleted_objects':0}
+             'retirement_hint':meta['retirement_hint'],'objects_deleted':False,'pages_pending':True,'deleted_objects':0}

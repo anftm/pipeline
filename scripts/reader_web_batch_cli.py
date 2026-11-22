@@ -40,9 +40,12 @@ def live(sealed, consumer_report, publication, client):
             or any(a.get('generation')!=generation or a.get('projection_verified') is not True
                    for a in consumer_report['consumers'].values())):
         raise ValueError('both full deployed web projections must be verified')
-    def check(path,digest,size=None):
+    def check(path,digest,size=None,*,original_object=False):
         h=sha256();length=0
-        url=('https://huggingface.co/buckets/vomebook/reader-assets-v2/resolve/'+path if path.endswith('/document-manifest.json')
+        # Retired Web Reader URLs may intentionally resolve to today's asset.
+        # The exact old bytes must be checked at the immutable bucket key.
+        url=('https://huggingface.co/buckets/vomebook/reader-assets-v2/resolve/'+path
+             if original_object or path.endswith('/document-manifest.json')
              else 'https://voiceofml-search.hf.space/api/reader-bucket-resource?'+urlencode({'path':path}))
         with client.stream('GET',url,
                            headers={'Cache-Control':'no-cache'}) as response:
@@ -56,7 +59,7 @@ def live(sealed, consumer_report, publication, client):
     for r in sealed['rows']:
         for kind in ('old','new'):
             row=r[kind]
-            check(row['object'],row['sha256'],row['bytes'])
+            check(row['object'],row['sha256'],row['bytes'],original_object=kind=='old')
             check(row['manifest'],r[kind+'_manifest_sha256'])
     return {'generation':generation,'old_and_new_verified':len(sealed['rows']),'both_projections_verified':True,'deleted_objects':0}
 
