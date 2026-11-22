@@ -372,6 +372,31 @@ def replace_missing_image(node):
     node.text=text
 
 
+def inert_embed(node):
+    """Retain authored fallback children and labels, never the media endpoint."""
+    label = node.get('alt') or node.get('aria-label') or node.get('title') or ''
+    attrs = {k: node.attrib[k] for k in ('id', 'lang', 'dir', 'title') if node.get(k)}
+    svg = node.tag == '{http://www.w3.org/2000/svg}svg'
+    if svg:
+        from xml.etree.ElementTree import Element
+        ns = '{http://www.w3.org/2000/svg}'
+        # Do not copy SVG markup, nested HTML, metadata or resource URLs.
+        labels = [visible_text(child).strip() for child in node if child.tag in {ns+'title', ns+'desc'}]
+        text = [visible_text(child).strip() for child in node.iter(ns+'text')]
+        anchors = [Element('span', {'id': child.get('id')}) for child in node.iter() if child is not node and child.get('id')]
+        node[:] = anchors
+        node.text = ' '.join(filter(None, [*labels, *text])) or label
+    elif not visible_text(node).strip():
+        node.text = label or node.text
+    node.tag = 'span'
+    node.attrib.clear()
+    node.attrib.update(attrs)
+
+
+EMBED_TAGS = {'iframe', 'frame', 'object', 'embed', 'video', 'audio', 'canvas',
+              '{http://www.w3.org/2000/svg}svg'}
+
+
 def convert(raw, extension, url, downloads, limit, *, omissions=None):
     if extension in {'mht', 'mhtml'}:
         text, lookup = mhtml_body(raw)
@@ -383,6 +408,16 @@ def convert(raw, extension, url, downloads, limit, *, omissions=None):
     cache = {}
     expansion = 0
     missing_images=0
+    unsupported_images=0
+    cleaned_embeds=0
+    removed_srcsets=0
+    missing_stylesheets=0
+    body=tree.find('body')
+    if body is None:
+        raise Hold('unsupported_embedded_content')
+    # A title/alt label on an omitted embed is useful, but it should not be
+    # the only thing standing in for an otherwise media-only document.
+    authored_text=visible_text(body).strip()
 
     def resource(value, allowed):
         value = value.strip()
@@ -421,11 +456,16 @@ def convert(raw, extension, url, downloads, limit, *, omissions=None):
                 if anchor:node.set('id',anchor)
 
     for node in tree.iter():
-        if node.tag in {'iframe', 'frame', 'frameset', 'object', 'embed', 'video', 'audio', 'canvas',
-                        '{http://www.w3.org/2000/svg}svg'} or (node.tag in {'source', 'img'} and node.get('srcset')):
+        if node.tag=='frameset':
+            # No primary document body to preserve when the page is a frameset.
             raise Hold('unsupported_embedded_content')
+        if node.tag in EMBED_TAGS or node.tag in {'source','track','param'}:
+            inert_embed(node)
+            cleaned_embeds+=1
         if node.tag != 'img':
             continue
+        if node.attrib.pop('srcset', None):
+            removed_srcsets+=1
         value = node.get('src', '').strip()
         match = re.fullmatch(r'data:(image/(?:gif|jpeg|png|webp));base64,([A-Za-z0-9+/=]+)', value, re.I)
         if match:
@@ -434,13 +474,23 @@ def convert(raw, extension, url, downloads, limit, *, omissions=None):
             result = match[1].lower(), base64.b64decode(match[2], validate=True)
         else:
             types = frozenset(IMAGE_TYPES.values())
-            result = resource(value, types) or resource(node.get('data-src', ''), types)
+            unsupported = False
+            result = None
+            for reference in (value, node.get('data-src', '')):
+                try:
+                    result = resource(reference, types)
+                except Hold as error:
+                    if str(error)!='unsupported_embedded_content':
+                        raise
+                    unsupported=True
+                if result:
+                    break
+                unsupported |= reference.strip().lower().startswith(('data:', 'blob:', 'mhtml:'))
+            if not result and unsupported:
+                replace_missing_image(node)
+                unsupported_images+=1
+                continue
         if not result:
-            # An unresolved compound MHTML URI may still refer to archived
-            # bytes. Do not erase it as if it were a missing external asset.
-            opaque = ('data:', 'blob:', 'mhtml:')
-            if value.lower().startswith(opaque) or node.get('data-src','').strip().lower().startswith(opaque):
-                raise Hold('unsupported_embedded_content')
             replace_missing_image(node)
             missing_images+=1
             continue
@@ -449,11 +499,17 @@ def convert(raw, extension, url, downloads, limit, *, omissions=None):
             raise Hold('resource_byte_limit')
         try:
             with producer.Image.open(io.BytesIO(image)) as raster:
-                if raster.width * raster.height > 24_000_000 or producer.Image.MIME.get(raster.format) != mime:
+                if raster.width * raster.height > 24_000_000:
+                    raise Hold('image_pixel_limit')
+                if producer.Image.MIME.get(raster.format) != mime:
                     raise Hold('invalid_image')
                 raster.verify()
-        except Exception as exc:
-            raise Hold('invalid_image') from exc
+        except producer.Image.DecompressionBombError as exc:
+            raise Hold('image_pixel_limit') from exc
+        except (OSError, SyntaxError, ValueError):
+            replace_missing_image(node)
+            unsupported_images+=1
+            continue
         expansion += (len(image) + 2) // 3 * 4
         if expansion > limit:
             raise Hold('output_budget')
@@ -467,20 +523,14 @@ def convert(raw, extension, url, downloads, limit, *, omissions=None):
             continue
         css = resource(node.get('href', ''), frozenset({'text/css'}))
         if css is None:
-            # The reviewed MHT's saved page carries inline layout but not
-            # this publisher's external skin. No remote stylesheet access;
-            # leave every other missing stylesheet reviewable as a hold.
-            u=urlsplit(node.get('href',''))
-            if (extension in {'mht','mhtml'} and (u.scheme,u.netloc)==('https','www.360kuai.com')
-                    and u.path.rsplit('/',1)[-1]=='sq_root_css.css' and not (u.query or u.fragment)
-                    and node.get('id')=='sq_root_css' and not node.get('name')
-                    and any((style.text or '').strip() for style in tree.iter('style'))):
-                # This is a stylesheet loader ID, not a navigation target.
-                if any(a.get('href','').strip()=='#sq_root_css' for a in tree.iter('a')):
-                    raise Hold('missing_stylesheet')
-                detach(parent,node)
-                continue
-            raise Hold('missing_stylesheet')
+            # Use the built-in reader stylesheet in the absence of archived
+            # CSS. A failed request still raises above, and a linked ID is not
+            # removed as if it were an unreferenced stylesheet loader.
+            if node.get('id') and any(a.get('href','').strip()=='#'+node.get('id') for a in tree.iter('a')):
+                raise Hold('missing_stylesheet')
+            detach(parent,node)
+            missing_stylesheets+=1
+            continue
         expansion += len(css[1])
         if expansion > limit:
             raise Hold('output_budget')
@@ -489,10 +539,11 @@ def convert(raw, extension, url, downloads, limit, *, omissions=None):
             raise Hold('invalid_stylesheet')
         node.attrib.clear()
 
-    if omissions is not None and missing_images:
-        omissions['missing_images']=missing_images
+    if omissions is not None:
+        omissions.update({key:value for key,value in dict(missing_images=missing_images, unsupported_images=unsupported_images,
+            cleaned_embeds=cleaned_embeds, removed_srcsets=removed_srcsets, missing_stylesheets=missing_stylesheets).items() if value})
     expected = parity(tree)
-    if not expected['text'][0] and not expected['images']:
+    if not expected['images'] and (not expected['text'][0] or not authored_text):
         raise Hold('missing_content')
     producer.preserve_pre_newlines(tree)
     renderer = producer.html5lib_shim.HTMLSerializer(

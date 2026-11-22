@@ -130,8 +130,11 @@ class ManagedWebTests(unittest.TestCase):
         self.assertIn(b'<span id="old">old title</span>', output)
         self.assertIn(b'href="#old"', output)
         self.assertIn(b'data:image/png',output)
-        with self.assertRaisesRegex(managed.Hold,'unsupported_embedded_content'):
-            managed.convert(raw.replace(b' , ',b'alt.png 2x'),'htm','https://huggingface.co/',None,50000)
+        omissions={}
+        common=managed.convert(raw.replace(b' , ',b'alt.png 2x'),'htm','https://huggingface.co/',None,50000,omissions=omissions)
+        self.assertIn(b'data:image/png',common)
+        self.assertNotIn(b'alt.png',common)
+        self.assertEqual(omissions,{'removed_srcsets':1})
 
     def test_mhtml_preserves_content_excludes_known_counter_and_empty_frame(self):
         html = (DOC + '<img src="http://zyz.wyzxsx.com/tj/piwik.php?idsite=5" alt="">'
@@ -186,15 +189,36 @@ class ManagedWebTests(unittest.TestCase):
                 if wanted=='converted':self.assertEqual(row['omissions'],{'missing_images':1})
                 else:self.assertEqual(row['reason'],'download_failed')
 
-    def test_present_but_unsupported_embedded_image_still_holds(self):
-        for src in ('data:image/svg+xml,content','blob:existing','mhtml:existing!photo.png'):
-            with self.subTest(src=src),self.assertRaisesRegex(managed.Hold,'unsupported_embedded_content'):
-                managed.convert((DOC+f'<img src="{src}">').encode(),'html','https://huggingface.co/',None,50000)
+    def test_unsupported_images_cleaned_and_separately_counted(self):
+        for src in ('data:image/svg+xml,content','blob:existing','mhtml:existing!photo.png','data:image/png;base64,AA=='):
+            with self.subTest(src=src):
+                omitted={}
+                cleaned=managed.convert((DOC+f'<img id="media" alt="图" src="{src}">').encode(),'html','https://huggingface.co/',None,50000,omissions=omitted)
+                self.assertNotIn(b'<img',cleaned)
+                self.assertEqual(managed.parse_html(cleaned.decode()).find('body/span').attrib,{'id':'media'})
+                self.assertEqual(omitted,{'unsupported_images':1})
         raw = (b'Content-Type: multipart/related; boundary=x\r\n\r\n'
                b'--x\r\nContent-Type: text/html\r\n\r\n<p>Body</p><img src="cid:part">\r\n'
                b'--x\r\nContent-Type: text/plain\r\nContent-ID: <part>\r\n\r\narchive bytes\r\n--x--\r\n')
-        with self.assertRaisesRegex(managed.Hold, 'unsupported_embedded_content'):
-            managed.convert(raw,'mht','',None,50000)
+        omitted={}
+        self.assertIn(b'<p>Body</p>',managed.convert(raw,'mht','',None,50000,omissions=omitted))
+        self.assertEqual(omitted,{'unsupported_images':1})
+
+    def test_inert_embed_carries_fallback_text_caption_and_ids(self):
+        raw=(DOC+'<figure><video id="v" src="https://no.invalid/v" poster="https://no.invalid/p">'
+                 '<source src="movie.mp4"><p>文字稿</p></video><figcaption>注解</figcaption></figure>'
+                 '<object data="flash"><p>旧备用文本</p></object><iframe title="片段" src="other.html"></iframe>'
+                 '<svg id="chart"><title>题注</title><text id="axis">轴</text><image href="outside"/></svg>'
+                 '<a href="#axis">轴</a>').encode()
+        omitted={}
+        doc=managed.convert(raw,'html','https://huggingface.co/',None,50000,omissions=omitted).decode()
+        for retained in ('id="v"','文字稿','注解','旧备用文本','片段','题注','id="axis"','href="#axis"'):
+            self.assertIn(retained,doc)
+        for forbidden in ('<iframe','<object','<video','<svg','<source','https://no.invalid','movie.mp4','outside'):
+            self.assertNotIn(forbidden,doc)
+        self.assertEqual(omitted,{'cleaned_embeds':5})
+        with self.assertRaisesRegex(managed.Hold,'missing_content'):
+            managed.convert(b'<iframe title="video" src="media.html"></iframe>','html','https://huggingface.co/',None,50000)
 
     def test_mhtml_duplicate_attachment_must_match_bytes(self):
         p = base64.b64encode(png())

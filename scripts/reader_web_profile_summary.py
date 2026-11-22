@@ -23,12 +23,15 @@ def summarize(plan,artifacts):
             seen.add(key);status[row['status']]+=1
             formats.setdefault(row['extension'],Counter())[row['status']]+=1
             if row['status']=='hold':reasons[row['reason']]+=1
-            missing=row.get('omissions',{}).get('missing_images',0)
-            if type(missing) is not int or missing<0 or (missing and row['status']!='converted'):
-                raise ValueError('invalid missing-image omission count')
-            if missing:
-                omissions['documents_with_missing_images']+=1
-                omissions['missing_images']+=missing
+            report=row.get('omissions',{})
+            allowed={'missing_images','unsupported_images','cleaned_embeds','removed_srcsets','missing_stylesheets'}
+            if not isinstance(report,dict) or report.keys()-allowed or (report and row['status']!='converted'):
+                raise ValueError('invalid web omissions')
+            for key,count in report.items():
+                if type(count) is not int or not 0<count:
+                    raise ValueError('invalid web omission count')
+                omissions['documents_with_'+key]+=1
+                omissions[key]+=count
     if len(seen)!=p['counts']['queued']:
         raise ValueError('managed web profile rollout is missing results')
     return {'kind':'reader-web-managed-profile-summary','profile':WEB_PROFILE,'reader_generation':p['reader_generation'],
