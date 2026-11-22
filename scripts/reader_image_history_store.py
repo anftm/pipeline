@@ -94,7 +94,7 @@ class S3ClaimStore:
         if client is None:
             from botocore.config import Config
             store = S3BucketStore()
-            if store._namespace != LOCATION[0] or store._location(history.BUCKET) != LOCATION:
+            if store._namespace != LOCATION[0] or tuple(store._location(history.BUCKET)) != LOCATION:
                 raise ValueError('unexpected image history bucket mapping')
             store._config = store._config.merge(Config(
                 retries={'mode': 'standard', 'total_max_attempts': 1},

@@ -5,6 +5,7 @@ import unittest
 from base64 import b64encode
 from dataclasses import asdict, replace
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from scripts import reader_gc_cache, reader_gc_graph as gc, reader_image_history as history
 from scripts import reader_image_history_store as adapter
@@ -71,6 +72,22 @@ class S3ClaimStoreTests(unittest.TestCase):
 
     def claim(self):
         return self.store.claim(self.key, self.intent, self.claimed)
+
+    def test_default_adapter_accepts_exact_qualified_bucket_parsed_as_list(self):
+        from scripts.reader_bucket_store import S3BucketStore
+        # Exercise the actual bucket splitter used by hosted configuration,
+        # not the tuple-valued fake from the injected-client tests.
+        store = object.__new__(S3BucketStore)
+        store._namespace = 'vomebook'
+        store._input_namespace = 'melsm'
+        store._input_bucket = 'pdf-archive-v2'
+        store._config = SimpleNamespace(merge=lambda config: config)
+        store._client = lambda namespace: self.s3 if namespace == 'vomebook' else None
+        with patch.object(adapter, 'S3BucketStore', return_value=store):
+            self.assertIs(adapter.S3ClaimStore()._client, self.s3)
+            store._namespace = 'other'
+            with self.assertRaisesRegex(ValueError, 'unexpected image history bucket mapping'):
+                adapter.S3ClaimStore()
 
     def test_single_canonical_record_and_finalizer_only_reload(self):
         self.assertIsNone(self.store.load(self.key))

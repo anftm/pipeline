@@ -92,7 +92,7 @@ jobs:
         run: python -B -m unittest tests.test_reader_mht_s3_preflight tests.test_reader_web_exact_plan tests.test_reader_web_index_guard tests.test_reader_web_exact_publication tests.test_reader_image_history_catalog tests.test_reader_image_history_publish tests.test_reader_image_history_v3
       - name: Test exact Office report preflight
         if: inputs.operation == 'verify-exact-office-report' || inputs.operation == 'replace-exact-office-report'
-        run: python -B -m unittest tests.test_reader_exact_office_plan tests.test_reader_image_history_catalog tests.test_reader_image_history_publish tests.test_reader_image_history_v3
+        run: python -B -m unittest tests.test_reader_exact_office_plan tests.test_reader_image_history_store tests.test_reader_image_history_catalog tests.test_reader_image_history_publish tests.test_reader_image_history_v3
       - name: Test scoped Reader consumer root refresh
         if: inputs.operation == 'refresh-reader-consumers'
         run: python -B -m unittest tests.test_reader_page_consumer_refresh tests.test_reader_page_consumer_store
