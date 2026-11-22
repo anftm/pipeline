@@ -1333,7 +1333,7 @@ Content-Type: multipart/related; boundary=x
 Content-Type: text/html; charset=utf-8
 Content-Location: file:///book/index.html
 
-<html><head><base href="https://example.test/"></head><body onload="alert(1)"><p>Readable CHM body text</p><script>alert(1)</script><object>unsafe</object><img src="image.png"><a href="javascript:alert(1)">bad</a></body></html>
+<html><head><base href="https://example.test/"></head><body onload="alert(1)"><p>Readable CHM body text <SCRIPT data-test=">">hiddenMhtmlScript()</SCRIPT>after script &lt;script&gt;quoted prose&lt;/script&gt;</p><object>unsafe</object><img src="image.png"><a href="javascript:alert(1)">bad</a></body></html>
 --x
 Content-Type: image/png
 Content-Transfer-Encoding: base64
@@ -1347,9 +1347,43 @@ aW1hZ2U=
             source.write_bytes(message)
             convert_reader_assets.mhtml_to_html(source, target)
             document = target.read_text(encoding="utf-8")
-            self.assertIn("Readable CHM body text", document)
+            self.assertIn("Readable CHM body text after script &lt;script&gt;quoted prose&lt;/script&gt;", document)
             self.assertIn("data:image/png;base64,aW1hZ2U=", document)
-            self.assertNotRegex(document, r"(?i)<(?:base|object|script)\b|onload=|javascript:")
+            self.assertNotRegex(document, r"(?i)<(?:base|object|script)\b|onload=|javascript:|hiddenMhtmlScript")
+
+    def test_mhtml_decodes_bom_and_charset_fallbacks_to_utf8(self):
+        # Use Big5 for declaration fallbacks so a GB18030 guess won't pass.
+        cases = (
+            ("utf-16-le", b"\xff\xfe", "unicode",
+             '<meta http-equiv="Content-Type" content="text/html; charset=unicode">'),
+            ("utf-16-be", b"\xfe\xff", "windows-1252", '<meta charset="utf-16le">'),
+            ("utf-8", b"\xef\xbb\xbf", "windows-1252", '<meta charset="windows-1252">'),
+            ("utf-8", b"", None, ""),
+            ("gb18030", b"", "gb2312", ""),
+            ("big5", b"", "unknown-codec", '<meta charset="big5">'),
+            ("big5", b"", "utf-8",
+             '<meta http-equiv="Content-Type" content="text/html; charset=big5">'),
+            ("gb18030", b"", None, ""),
+        )
+        prose = "目錄 人民日報 研究資料"
+        with tempfile.TemporaryDirectory() as root:
+            source, target = Path(root) / "book.mht", Path(root) / "book.html"
+            for encoding, bom, mime_charset, declaration in cases:
+                with self.subTest(encoding=encoding, bom=bom, mime_charset=mime_charset, declaration=declaration):
+                    content_type = "Content-Type: text/html"
+                    if mime_charset:
+                        content_type += f'; charset="{mime_charset}"'
+                    payload = f"<html><head>{declaration}</head><body><p>{prose}</p></body></html>".encode(encoding)
+                    source.write_bytes(
+                        f"MIME-Version: 1.0\r\n{content_type}\r\nContent-Transfer-Encoding: base64\r\n\r\n".encode("ascii")
+                        + base64.encodebytes(bom + payload)
+                    )
+                    convert_reader_assets.mhtml_to_html(source, target)
+                    document = target.read_text(encoding="utf-8")
+                    self.assertIn(f"<p>{prose}</p>", document)
+                    self.assertTrue(document.startswith('<meta charset="utf-8">'))
+                    self.assertEqual(document.count("charset="), 1)
+                    self.assertNotRegex(document, r"[\ufffd\ufeff\x00]")
 
     def test_chm_conversion_falls_back_to_embedded_mhtml_for_empty_epub(self):
         with tempfile.TemporaryDirectory() as root:
@@ -1635,6 +1669,26 @@ aW1hZ2U=
             self.assertIn("remote", text)
             for unsafe in ("http-equiv", "<script", "<form", "onclick", "https://evil.test", "//evil.test"):
                 self.assertNotIn(unsafe, text)
+
+    def test_inline_html_drops_script_nodes_and_preserves_prose(self):
+        with tempfile.TemporaryDirectory() as root:
+            work = Path(root)
+            source = work / "source.htm"
+            source.write_text(
+                '<p>Before <ScRiPt data-test=">" src="tracker.png">hiddenScript()</ScRiPt>'
+                '<script>document.write("not part of the book")</script>'
+                '<script/>also not part of the book</script>'
+                'after &lt;script&gt;quoted prose&lt;/script&gt;</p>'
+                '<p>The last paragraph</p><script>unclosedScript()',
+                encoding="utf-8",
+            )
+            with patch.object(convert_reader_assets, "download_source") as download:
+                output = convert_reader_assets.inline_html_resources(source, "https://example.test/book/source.htm", work)
+            download.assert_not_called()
+            document = output.read_text(encoding="utf-8")
+            self.assertIn("<p>Before after &lt;script&gt;quoted prose&lt;/script&gt;</p>", document)
+            self.assertIn("<p>The last paragraph</p>", document)
+            self.assertNotRegex(document, r"(?i)<script\b|hiddenScript|unclosedScript|document\.write|not part of the book")
 
     def test_html_sanitizer_removes_unquoted_active_and_remote_urls(self):
         sanitized = convert_reader_assets.sanitize_html(

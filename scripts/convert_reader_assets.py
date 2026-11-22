@@ -38,6 +38,7 @@ from lxml import html as lxml_html
 import bleach
 import tinycss2
 import esprima
+from bleach import html5lib_shim
 from bleach.css_sanitizer import CSSSanitizer
 from PIL import Image, ImageSequence
 
@@ -225,36 +226,51 @@ def download_source(url: str, target: Path, *, max_bytes: int = MAX_SOURCE_BYTES
     raise RuntimeError("source download retry limit reached")
 
 
+class _HTMLCharsetProbe(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.charset = None
+
+    def handle_starttag(self, tag, attrs):
+        if tag != "meta" or self.charset:
+            return
+        attrs = dict(attrs)
+        self.charset = (attrs.get("charset") or "").strip() or None
+        if self.charset is None and (attrs.get("http-equiv") or "").strip().lower() == "content-type":
+            match = re.search(r"\bcharset\s*=\s*[\"']?\s*([A-Za-z0-9._:-]+)", attrs.get("content") or "", re.I)
+            if match:
+                self.charset = match[1]
+
+
 def decode_html_source(source: Path) -> str:
-    data = source.read_bytes()
+    return decode_html_bytes(source.read_bytes())
+
+
+def decode_html_bytes(data: bytes, mime_charset: str | None = None) -> str:
+    """Prefer a BOM, then MIME and HTML declarations, before guessing."""
     if data.startswith(b"\xef\xbb\xbf"):
-        return data[3:].decode("utf-8", errors="replace")
+        return data.decode("utf-8-sig", errors="replace")
     if data.startswith((b"\xff\xfe", b"\xfe\xff")):
         return data.decode("utf-16", errors="replace")
-    probe = data[:8192].decode("latin-1")
-    match = re.search(r"charset\s*=\s*[\"']?\s*([A-Za-z0-9._:-]+)", probe, re.IGNORECASE)
-    declared = None
-    if match:
-        declared = match.group(1).lower().replace("_", "-")
-        declared = {
-            "gb2312": "gb18030", "gb-2312": "gb18030", "gb-2312-80": "gb18030",
-            "gb2312-80": "gb18030", "gbk": "gb18030",
-            "x-gbk": "gb18030", "x-sjis": "shift-jis", "windows-31j": "shift-jis",
-            "ks_c_5601-1987": "euc-kr", "euc-cn": "gb18030", "x-euc-tw": "big5",
-        }.get(declared, declared)
-    if declared:
+
+    probe = _HTMLCharsetProbe()
+    probe.feed(data[:8192].decode("latin-1"))
+    aliases = {
+        "gb2312": "gb18030", "gb-2312": "gb18030", "gb-2312-80": "gb18030",
+        "gb2312-80": "gb18030", "gbk": "gb18030",
+        "x-gbk": "gb18030", "x-sjis": "shift-jis", "windows-31j": "shift-jis",
+        "ks-c-5601-1987": "euc-kr", "euc-cn": "gb18030", "x-euc-tw": "big5",
+    }
+    labels = [label.strip().lower().replace("_", "-") for label in (mime_charset, probe.charset) if label]
+    declared = [aliases.get(label, label) for label in labels if label]
+    for encoding in dict.fromkeys((*declared, "utf-8")):
         try:
-            return data.decode(declared)
-        except (LookupError, UnicodeDecodeError):
-            pass
-    try:
-        # Valid UTF-8 is unambiguous; legacy Chinese pages fall through to
-        # the GB18030-first candidates below.
-        return data.decode("utf-8")
-    except UnicodeDecodeError:
-        pass
-    candidates = [encoding for encoding in (declared, "gb18030", "big5",
-                  "shift-jis", "euc-kr", "latin-1") if encoding]
+            text = data.decode(encoding)
+        except (LookupError, UnicodeError):
+            continue
+        if "\x00" not in text:
+            return text
+    candidates = (*declared, "gb18030", "big5", "shift-jis", "euc-kr", "latin-1")
     best_text, best_score = "", float("-inf")
     for encoding in dict.fromkeys(candidates):
         try:
@@ -265,7 +281,7 @@ def decode_html_source(source: Path) -> str:
         controls = len(re.findall(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", text))
         readable = len(re.findall(r"[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af\u0400-\u04ffA-Za-z0-9]", text))
         score = readable - replacement * 80 - controls * 20
-        if encoding == declared:
+        if encoding in declared:
             score += 20
         if score > best_score:
             best_text, best_score = text, score
@@ -308,24 +324,42 @@ def expand_document_writes(document: str) -> tuple[str, bool]:
     return ("".join(output), True) if output else (document, False)
 
 
-def inline_html_resources(source: Path, source_url: str, work: Path) -> Path:
+def drop_html_scripts(document: str, *, web_typography: bool = False) -> str:
+    # Bleach strips the tags but not the contents. Parse inertly before looking
+    # for resources, and preserve text following each removed node.
+    if not re.search(r"<script\b", document, re.I):
+        return document
+    # Use Bleach's HTML5 parser without the tag-stripping shim so script nodes
+    # are still present. Unlike an XML parser, it handles <script/> as HTML.
+    root = html5lib_shim.HTMLParser(namespaceHTMLElements=False).parse(document)
+    script_tags = {"script", "{http://www.w3.org/2000/svg}script"}
+    removed = False
+    for parent in root.iter():
+        previous = None
+        for child in list(parent):
+            if child.tag not in script_tags:
+                previous = child
+                continue
+            if child.tail:
+                if previous is None:
+                    parent.text = (parent.text or "") + child.tail
+                else:
+                    previous.tail = (previous.tail or "") + child.tail
+            parent.remove(child)
+            removed = True
+    if not removed:
+        return document
+    if web_typography:
+        preserve_pre_newlines(root)
+    serializer = html5lib_shim.HTMLSerializer(
+        quote_attr_values="always", escape_lt_in_attrs=True, omit_optional_tags=False,
+    )
+    return serializer.render(html5lib_shim.getTreeWalker("etree")(root))
+
+
+def inline_html_resources(source: Path, source_url: str, work: Path, *, web_typography: bool = False) -> Path:
     """Inline safe same-tree images and stylesheets before the HTML is published."""
-    text = decode_html_source(source)
-    text = re.sub(
-        r"(charset\s*=\s*)([\"']?)[^\s\"'/>;]+\2",
-        lambda match: match.group(1) + ('"utf-8"' if match.group(2) else "utf-8"),
-        text,
-        flags=re.IGNORECASE,
-    )
-    text = re.sub(r"(<\?xml\b[^>]*\bencoding\s*=\s*)[\"'][^\"']+[\"']", r'\1"utf-8"', text, flags=re.IGNORECASE)
-    text = re.sub(
-        r"<meta\b(?=[^>]*\bhttp-equiv\b)(?=[^>]*\bcharset\s*=)[^>]*>",
-        '<meta charset="utf-8">', text, flags=re.IGNORECASE,
-    )
-    if not re.search(r"<meta\b[^>]*\bcharset\s*=", text, re.IGNORECASE):
-        text = re.sub(r"(<head\b[^>]*>)", r'\1<meta charset="utf-8">', text, count=1, flags=re.IGNORECASE)
-        if not re.search(r"<meta\b[^>]*\bcharset\s*=", text, re.IGNORECASE):
-            text = '<meta charset="utf-8">' + text
+    text = drop_html_scripts(decode_html_source(source), web_typography=web_typography)
     base = source_url.rsplit("/", 1)[0] + "/"
     root = urllib.parse.urlsplit(base)
     root_path = root.path.rstrip("/") + "/"
@@ -397,7 +431,7 @@ def inline_html_resources(source: Path, source_url: str, work: Path) -> Path:
 
     text = re.sub(r"<link\b[^>]*\brel\s*=\s*[\"']stylesheet[\"'][^>]*\bhref\s*=\s*([\"'])([^\"']+)\1[^>]*>\s*", stylesheet_tag, text, flags=re.IGNORECASE)
     text = re.sub(r"<link\b[^>]*\bhref\s*=\s*([\"'])([^\"']+)\1[^>]*\brel\s*=\s*[\"']stylesheet[\"'][^>]*>\s*", stylesheet_tag, text, flags=re.IGNORECASE)
-    text = sanitize_html(text)
+    text = sanitize_web_html(text) if web_typography else sanitize_html(text, normalize_utf8=True)
     output = work / "inlined.html"
     output.write_text(text, encoding="utf-8")
     return output
@@ -720,18 +754,15 @@ def convert_tiff(source: Path, target: Path, work: Path) -> None:
         run_checked(["pdfunite", *(str(output) for output in outputs), str(target)])
 
 
-def mhtml_to_html(source: Path, target: Path) -> None:
+def mhtml_to_html(source: Path, target: Path, *, web_typography: bool = False) -> None:
     message = BytesParser(policy=email.policy.default).parsebytes(source.read_bytes())
     parts = list(message.walk()) if message.is_multipart() else [message]
     html_part = next((part for part in parts if part.get_content_type() == "text/html"), None)
     if html_part is None:
         raise RuntimeError("CHM MHTML has no HTML body")
     payload = html_part.get_payload(decode=True) or b""
-    charset = html_part.get_content_charset() or "utf-8"
-    try:
-        document = payload.decode(charset)
-    except (LookupError, UnicodeDecodeError):
-        document = payload.decode("gb18030", "replace")
+    document = drop_html_scripts(decode_html_bytes(payload, html_part.get_content_charset()),
+                                 web_typography=web_typography)
     base = str(html_part.get("Content-Location") or "")
 
     def safe_join(root: str, value: str) -> str:
@@ -776,9 +807,8 @@ def mhtml_to_html(source: Path, target: Path) -> None:
         document,
         flags=re.IGNORECASE,
     )
-    document = sanitize_chm_html(document)
-    document = re.sub(r"<meta\b[^>]*charset[^>]*>", "", document, flags=re.IGNORECASE)
-    document = re.sub(r"(<head\b[^>]*>)", r'\1<meta charset="utf-8">', document, count=1, flags=re.IGNORECASE)
+    document = (sanitize_web_html(document) if web_typography
+                else sanitize_chm_html(document, normalize_utf8=True))
     target.write_text(document, encoding="utf-8")
 
 
@@ -828,11 +858,15 @@ def safe_embedded_url(name: str, value: str, *, allow_relative: bool) -> bool:
     return allow_relative and not parsed.scheme and not parsed.netloc and not normalized.startswith("//")
 
 
-def sanitize_html(document: str, *, allow_relative: bool = False) -> str:
+def normalize_html_numeric_references(document: str) -> str:
     # HTML accepts numeric references without a semicolon; Bleach otherwise
     # escapes the ampersand and turns a source space into visible entity text.
-    document = re.sub(r"&#[xX][0-9a-fA-F]+(?![0-9a-fA-F;])|&#[0-9]+(?![0-9;])",
-                      lambda match: match.group(0) + ";", document)
+    return re.sub(r"&#[xX][0-9a-fA-F]+(?![0-9a-fA-F;])|&#[0-9]+(?![0-9;])",
+                  lambda match: match.group(0) + ";", document)
+
+
+def sanitize_html(document: str, *, allow_relative: bool = False, normalize_utf8: bool = False) -> str:
+    document = normalize_html_numeric_references(document)
     styles = []
 
     def extract_style(match):
@@ -861,9 +895,133 @@ def sanitize_html(document: str, *, allow_relative: bool = False) -> str:
         strip_comments=True,
     )
     cleaned = cleaner.clean(document)
+    if normalize_utf8:
+        # Bleach returns a fragment without a head and has already removed
+        # legacy http-equiv attributes. Replace its remaining charset tags.
+        cleaned = '<meta charset="utf-8">' + re.sub(r'<meta\b[^>]* charset="[^"]*"[^>]*>', "", cleaned)
     for token, style in styles:
         cleaned = cleaned.replace(token, style)
     return cleaned
+
+
+# Standalone web candidate. Do not feed these allowances or defaults into CHM,
+# locally generated Office HTML, or spreadsheet rendering.
+WEB_EXTRA_TAGS = {"center"}
+WEB_ALIGN_TAGS = {
+    "p", "div", "h1", "h2", "h3", "h4", "h5", "h6", "caption", "table", "tr", "td", "th", "img",
+}
+WEB_INLINE_CSS = {
+    "background-color", "border-collapse", "color", "direction", "font-family", "font-size",
+    "font-style", "font-variant", "font-weight", "letter-spacing", "line-height", "margin-block",
+    "margin-bottom", "margin-top", "max-width", "text-align", "text-decoration", "text-indent",
+    "vertical-align", "white-space", "width", "word-break", "word-wrap", "overflow-wrap",
+}
+WEB_READER_CSS = """\
+html, body { font-size: 100% !important; }
+body { box-sizing: border-box; max-width: 48rem; margin: 0 auto;
+       padding: 1rem clamp(.75rem, 3vw, 2rem); line-height: 1.65; overflow-wrap: anywhere; }
+:where(h1, h2, h3, h4, h5, h6) { line-height: 1.25; }
+:where(p) { margin-block: .7em; }
+:where(figure) { margin-inline: 0; }
+img { max-width: 100%; height: auto; }
+table { max-width: 100%; }
+pre { max-width: 100%; overflow: auto; white-space: pre; overflow-wrap: normal; }
+"""
+
+
+def preserve_pre_newlines(root) -> None:
+    # HTML5 discards the first LF immediately after <pre>. Put one back when
+    # serializing a parsed tree so an authored blank code line isn't lost.
+    for node in root.iter("pre"):
+        if (node.text or "").startswith("\n"):
+            node.text = "\n" + node.text
+
+
+def web_css_declarations(tokens, properties) -> str:
+    # Retain ordinary literal typography values, never resource-bearing or
+    # executable CSS. Only the flat, numeric arguments of color functions pass.
+    literal_types = {"ident", "number", "dimension", "percentage", "hash", "string", "whitespace"}
+
+    def literal(token):
+        if token.type in literal_types:
+            return True
+        if token.type == "literal":
+            return token.value in {",", "/"}
+        return (token.type == "function" and token.lower_name in {"rgb", "rgba", "hsl", "hsla"}
+                and all(arg.type in {"number", "dimension", "percentage", "whitespace"}
+                        or (arg.type == "literal" and arg.value in {",", "/"}) for arg in token.arguments))
+
+    return tinycss2.serialize([
+        declaration for declaration in tinycss2.parse_declaration_list(tokens, skip_comments=True, skip_whitespace=True)
+        if declaration.type == "declaration" and declaration.lower_name in properties
+        and all(literal(token) for token in declaration.value)
+    ])
+
+
+class WebInlineCSS:
+    def sanitize_css(self, text: str) -> str:
+        return web_css_declarations(text, WEB_INLINE_CSS)
+
+
+def sanitize_web_html(document: str) -> str:
+    """Sanitize a standalone web document and apply the opt-in layout layer."""
+    def allowed_attribute(tag: str, name: str, value: str) -> bool:
+        # These attributes are set only on the producer's viewport; source
+        # meta attributes of the same names are stripped before filtering.
+        if tag == "meta" and name in {"name", "content"}:
+            return True
+        if name == "align" and tag in WEB_ALIGN_TAGS:
+            value_key = value.strip().lower()
+            return value_key in {"left", "center", "right", "justify", "middle", "char"}
+        if name == "valign" and tag in {"tr", "td", "th", "thead", "tbody", "tfoot"}:
+            return value.strip().lower() in {"top", "middle", "bottom", "baseline"}
+        if name in {"width", "height", "cellpadding", "cellspacing", "border"} and tag in {"table", "td", "th"}:
+            return bool(re.fullmatch(r"[0-9]{1,5}%?", value.strip()))
+        if (tag, name) in {("ol", "start"), ("li", "value")}:
+            return bool(re.fullmatch(r"-?[0-9]{1,9}", value.strip()))
+        if (tag, name) in {("ol", "reversed"), ("details", "open")}:
+            return True
+        if name == "style":
+            return True
+        if name not in GLOBAL_HTML_ATTRIBUTES | TAG_HTML_ATTRIBUTES.get(tag, set()):
+            return False
+        return name not in {"href", "src"} or safe_embedded_url(name, value, allow_relative=False)
+
+    cleaner = bleach.Cleaner(tags=HTML_TAGS | WEB_EXTRA_TAGS, attributes=allowed_attribute,
+                             protocols={"data", "http", "https"}, css_sanitizer=WebInlineCSS(),
+                             strip=True, strip_comments=True)
+    # The same Bleach policy as fragment cleaning, but use a document parse so
+    # html/body attributes, head content and table structure survive.
+    root = cleaner.parser.parse(normalize_html_numeric_references(document))
+    for node in root.iter("meta"):
+        for name in ("charset", "name", "content"):
+            node.attrib.pop(name, None)
+    for node in root.iter("style"):
+        rules = []
+        for rule in tinycss2.parse_stylesheet(node.text or "", skip_comments=True, skip_whitespace=True):
+            if rule.type != "qualified-rule":
+                continue
+            selector = tinycss2.serialize(rule.prelude).strip()
+            declarations = web_css_declarations(rule.content, CSS_SANITIZER.allowed_css_properties | WEB_INLINE_CSS)
+            # Never serialize a raw HTML end tag out of authored CSS.
+            if selector and declarations and "<" not in selector + declarations:
+                rules.append(f"{selector}{{{declarations}}}")
+        node.text = "".join(rules)
+        # Only the stylesheet text is retained, not untrusted style attributes.
+        node.attrib.clear()
+    head = root.find("head")
+    for index, attrs in enumerate(({"charset": "utf-8"},
+                                   {"name": "viewport", "content": "width=device-width, initial-scale=1"})):
+        head.insert(index, ET.Element("meta", attrs))
+    ET.SubElement(head, "style").text = WEB_READER_CSS
+    preserve_pre_newlines(root)
+
+    filtered = bleach.sanitizer.BleachSanitizerFilter(
+        source=cleaner.walker(root), allowed_tags=cleaner.tags, attributes=allowed_attribute,
+        allowed_protocols=cleaner.protocols, css_sanitizer=cleaner.css_sanitizer,
+        strip_disallowed_tags=True, strip_html_comments=True,
+    )
+    return '<!doctype html>' + cleaner.serializer.render(filtered)
 
 
 def sanitize_xml_document(document: str) -> str:
@@ -1996,7 +2154,7 @@ def convert_reader_image(source: Path, target: Path) -> None:
 
 
 def convert_file(item: dict, source: Path, target: Path, work: Path,
-                 source_sha256: str = "", object_path: str = "") -> None:
+                 source_sha256: str = "", object_path: str = "", *, web_typography: bool = False) -> None:
     ext = item["extension"]
     if str(ext).lower().lstrip(".") == "djvu":
         raise RuntimeError("DJVU-to-PDF conversion is retired; use the native DJVU render/OCR worker")
@@ -2063,10 +2221,14 @@ def convert_file(item: dict, source: Path, target: Path, work: Path,
     elif ext in {"htm", "html"}:
         source_url = item.get("source_url")
         if source_url:
-            prepared = inline_html_resources(source, source_url, work)
+            prepared = inline_html_resources(source, source_url, work, web_typography=web_typography)
         else:
             prepared = work / "sanitized.html"
-            prepared.write_text(sanitize_html(decode_html_source(source)), encoding="utf-8")
+            document = decode_html_source(source)
+            prepared.write_text(
+                sanitize_web_html(drop_html_scripts(document, web_typography=True)) if web_typography
+                else sanitize_html(document), encoding="utf-8",
+            )
         shutil.copyfile(prepared, target)
     elif ext == "doc":
         out = work / "office"
@@ -2187,7 +2349,10 @@ def convert_file(item: dict, source: Path, target: Path, work: Path,
             raise RuntimeError("LibreOffice produced no PDF")
         shutil.move(produced, target)
     elif ext in {"mht", "mhtml"}:
-        mhtml_to_html(source, target)
+        if web_typography:
+            mhtml_to_html(source, target, web_typography=True)
+        else:
+            mhtml_to_html(source, target)
     elif ext == "ps":
         run_checked([
             "gs", "-dBATCH", "-dNOPAUSE", "-sDEVICE=pdfwrite", "-dCompatibilityLevel=1.7",

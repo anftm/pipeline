@@ -131,16 +131,18 @@ class GitHubProducerFence:
                 "repository_actions_enabled": permission.get("enabled"),
                 "updated_at": after.get("updated_at")}
 
-    def check(self, *, allow_current_workflow=None, all_workflows=False, hpng_retirement_receipts=False):
+    def check(self, *, allow_current_workflow=None, all_workflows=False, hpng_retirement_receipts=False,
+              web_retirement_receipts=False):
         """Check the full configured scope, optionally exempting this exact run.
 
         The exemption permits a central publishing workflow to perform a fenced
         mutation. It never excludes another run of that workflow, and proves
         GitHub state only—not revocation of independent bucket credentials.
         """
-        if hpng_retirement_receipts and (not all_workflows or allow_current_workflow !=
-                                         '.github/workflows/reader-v3-publish.yml'):
-            raise ValueError('retirement receipts only apply to the h.PNG publisher fence')
+        use_retirement_receipts = hpng_retirement_receipts or web_retirement_receipts
+        if use_retirement_receipts and (not all_workflows or allow_current_workflow !=
+                                        '.github/workflows/reader-v3-publish.yml'):
+            raise ValueError('retirement receipts only apply to the exact central publisher fence')
         checked, retired = [], []
         central = load_config()["publisher_repository"]
         current_id = None
@@ -160,7 +162,7 @@ class GitHubProducerFence:
             except ImportError:
                 from reader_producer_scope_transition import ADDITIONAL
             additional = set(ADDITIONAL)
-            if hpng_retirement_receipts:
+            if use_retirement_receipts:
                 # Only the historical add-ons can be accounted for here. If a
                 # name is in the current producer inventory it is still checked.
                 from .reader_image_history_retired import verified_deletions
@@ -206,7 +208,7 @@ class GitHubProducerFence:
                             if w['state'] != 'active'], "isolated_residual_runs": residuals})
         report = {"kind": "reader-gc-producer-fence", "repositories": checked,
                   "external_bucket_credentials_verified": False}
-        if hpng_retirement_receipts:
+        if use_retirement_receipts:
             report['historical_repository_deletions'] = retired
         return report
 

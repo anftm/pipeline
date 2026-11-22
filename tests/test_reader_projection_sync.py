@@ -114,10 +114,10 @@ class ReaderProjectionSyncTests(unittest.TestCase):
         steps = workflow['jobs']['publish']['steps']
         ack = next(step for step in steps if step.get('id') == 'ack')
         self.assertIn('REDIRECT_AUDITED', ack['env'])
-        before_ack = ack['run'].split('python scripts/publish_reader_v3.py ack-all', 1)[0]
-        branch = before_ack.split('if [[ "$OPERATION" == unify && "$REDIRECT_AUDITED" == true ]]; then', 1)[1].split('\nfi', 1)[0]
+        branch = ack['run'].split('if [[ "$OPERATION" == unify && "$REDIRECT_AUDITED" == true ]]; then', 1)[1].split('\nfi', 1)[0]
         self.assertIn('verify-generation', branch)
         self.assertIn('exit 0', branch)
+        self.assertNotIn('ack-all', branch)
         self.assertNotIn('compact-legacy', branch)
         self.assertNotIn('acknowledge-legacy', branch)
 
@@ -127,7 +127,7 @@ class ReaderProjectionSyncTests(unittest.TestCase):
         publish = next(step for step in steps if step.get('name') == 'Publish the pinned projection to Pages')
         ack = next(step for step in steps if step.get('id') == 'ack')
         self.assertIn('--pinned-only', publish['run'])
-        branch = ack['run'].split('python scripts/publish_reader_v3.py ack-all', 1)[0]
+        branch = ack['run'].split('if [[ "$OPERATION" == remove-route || "$OPERATION" == restore-route ]]; then', 1)[1].split('\nfi', 1)[0]
         self.assertIn('verify-route', branch)
         self.assertIn('--route-action "$OPERATION"', branch)
         self.assertIn('--wait-seconds 1200', branch)

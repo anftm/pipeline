@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import tempfile
+from functools import partial
 from pathlib import Path
 
 try:
@@ -34,6 +35,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--retry-failures", action="store_true")
     parser.add_argument("--strict", action="store_true")
+    parser.add_argument("--web-typography", action="store_true",
+                        help="opt in to standalone web typography; does not rebuild checkpointed revisions")
     return parser.parse_args()
 
 
@@ -60,16 +63,19 @@ def select_records(path: Path, revisions: dict, extension: str) -> list[dict]:
     return result
 
 
-def build_one(item: dict, work: Path, token: str | None, bucket: str) -> tuple[dict, dict[str, str]]:
+def build_one(item: dict, work: Path, token: str | None, bucket: str, *,
+              web_typography: bool = False) -> tuple[dict, dict[str, str]]:
     work.mkdir(parents=True, exist_ok=True)
     source = work / f"source.{item['extension']}"
     download(source_url(item["repo"], item["revision"], item["path"]), source, token)
     raw_digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    layout_options = {"web_typography": True} if web_typography else {}
     if item["extension"] in {"mht", "mhtml"}:
         html_path = work / "document.html"
-        mhtml_to_html(source, html_path)
+        mhtml_to_html(source, html_path, **layout_options)
     else:
-        html_path = inline_html_resources(source, source_url(item["repo"], item["revision"], item["path"]), work)
+        html_path = inline_html_resources(source, source_url(item["repo"], item["revision"], item["path"]),
+                                          work, **layout_options)
     validate_html_content(html_path)
     output = html_path.read_bytes()
     output_digest = hashlib.sha256(output).hexdigest()
@@ -107,7 +113,8 @@ def main() -> int:
         return run_documents(selected_all, bucket=args.bucket, token=token, limit=args.limit,
                              retry_failures=args.retry_failures, strict=args.strict, apply=args.apply,
                              prefix="documents/web", kind="web-document-stream-index",
-                             build=build_one, work=Path(directory))
+                             build=partial(build_one, web_typography=True) if args.web_typography else build_one,
+                             work=Path(directory))
 
 
 if __name__ == "__main__":

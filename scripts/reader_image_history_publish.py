@@ -64,6 +64,30 @@ def publish(parent_catalog: BinaryIO, *, parent: Version, before_sidecar: bytes,
             expected_catalog_sha256: str, expected_catalog_bytes: int, expected_pointer_raw: bytes,
             journal: Journal, observe: Callable[[str], Version], reader_catalog_digest: Callable[[], str],
             cas: PutOnce, store, guard: Callable[[Phase], bool], resume: bool = False) -> dict:
+    return publish_route_transition(
+        parent=parent, before_sidecar=before_sidecar, sidecar_etag=sidecar_etag,
+        after_sidecar=after_sidecar, key=key, expected_catalog_sha256=expected_catalog_sha256,
+        expected_catalog_bytes=expected_catalog_bytes, expected_pointer_raw=expected_pointer_raw,
+        journal=journal, observe=observe, reader_catalog_digest=reader_catalog_digest,
+        cas=cas, store=store, guard=guard, resume=resume, seal_kind='reader-image-legacy-publish-v1',
+        plan_catalog=lambda target: catalog.plan(
+            parent_catalog, target, key=key, webp_path=webp_path, avif_path=avif_path,
+            before_sidecar=before_sidecar, after_sidecar=after_sidecar, now=now,
+            expected_parent_sha256=parent.sha256))
+
+
+def transition_seal(seal_kind, parent, before, catalog_target, sidecar_target, expected_pointer_raw):
+    return image._sha(image._encode([seal_kind, (parent.sha256, parent.size, parent.etag),
+                                     (before.sha256, before.size, before.etag), catalog_target,
+                                     sidecar_target, image._sha(expected_pointer_raw)]))
+
+
+def publish_route_transition(*, parent: Version, before_sidecar: bytes,
+                             sidecar_etag: str, after_sidecar: bytes, key: str,
+                             expected_catalog_sha256: str, expected_catalog_bytes: int,
+                             expected_pointer_raw: bytes, journal: Journal, observe,
+                             reader_catalog_digest, cas, store, guard, resume: bool,
+                             seal_kind: str, plan_catalog) -> dict:
     """Return legacy evidence and kwargs for a separate v3 unify.
 
     Retain the original reviewed inputs (including the parent catalog bytes)
@@ -86,9 +110,7 @@ def publish(parent_catalog: BinaryIO, *, parent: Version, before_sidecar: bytes,
     if type(expected_catalog_bytes) is not int or not 0 < expected_catalog_bytes <= catalog.MAX_CATALOG_BYTES:
         raise ValueError('invalid reviewed catalog target length')
     with TemporaryFile() as target:
-        plan = catalog.plan(parent_catalog, target, key=key, webp_path=webp_path, avif_path=avif_path,
-                            before_sidecar=before_sidecar, after_sidecar=after_sidecar, now=now,
-                            expected_parent_sha256=parent.sha256)
+        plan = plan_catalog(target)
         if type(parent.size) is not int or plan['parent_bytes'] != parent.size:
             raise ValueError('catalog parent size differs')
         before = Version(image._sha(before_sidecar), len(before_sidecar), sidecar_etag)
@@ -97,10 +119,7 @@ def publish(parent_catalog: BinaryIO, *, parent: Version, before_sidecar: bytes,
         if catalog_target != (expected_catalog_sha256, expected_catalog_bytes):
             raise ValueError('catalog target bytes differ from the reviewed preview')
         sidecar_target = snapshot['sha256'], snapshot['bytes']
-        seal = image._sha(image._encode(['reader-image-legacy-publish-v1',
-                                        (parent.sha256, parent.size, parent.etag),
-                                        (before.sha256, before.size, before.etag),
-                                        catalog_target, sidecar_target, image._sha(expected_pointer_raw)]))
+        seal = transition_seal(seal_kind, parent, before, catalog_target, sidecar_target, expected_pointer_raw)
         # One claim for the entire catalog parent, not one per route, ETag, or proposal.
         claim = parent.sha256
 
@@ -146,7 +165,8 @@ def publish(parent_catalog: BinaryIO, *, parent: Version, before_sidecar: bytes,
             raise ValueError('existing exact v3 pointer required')
         if (reading.get('derived_pdf_redirects') or key in reading.get('suppressed_sources', [])
                 or key in reading['files']):
-            raise ValueError('ordinary v3 unify cannot expose the selected image')
+            raise ValueError('ordinary v3 unify cannot expose the selected image' if seal_kind == 'reader-image-legacy-publish-v1'
+                             else 'ordinary v3 unify cannot expose the selected web route')
         control.prepare_base(reading, after_sidecar)  # Same base limits and filtering as unify.
 
         current = journal.read(claim)

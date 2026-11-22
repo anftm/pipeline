@@ -12,6 +12,13 @@ LIMIT = 8192
 
 def promote(*, store, client, parent_raw, target_pointer, canonical_sha256, legacy_seal, guard,
             observe_only=False):
+    return promote_route(store=store, client=client, parent_raw=parent_raw, target_pointer=target_pointer,
+                         canonical_sha256=canonical_sha256, legacy_seal=legacy_seal, guard=guard,
+                         observe_only=observe_only, permit_kind='reader-image-v3-permit')
+
+
+def promote_route(*, store, client, parent_raw, target_pointer, canonical_sha256, legacy_seal, guard,
+                  observe_only=False, permit_kind):
     """Verify the reviewed v3 successor or win one durable promotion attempt.
 
     The caller must check the continuous migration fence and all prior-stage
@@ -31,7 +38,11 @@ def promote(*, store, client, parent_raw, target_pointer, canonical_sha256, lega
     if target_pointer['generation'] == parent['generation']:
         raise ValueError('expected a distinct reviewed v3 successor')
     claim = PREFIX + history._sha(parent_raw) + '.json'
-    permit = history._encode({'version': 1, 'kind': 'reader-image-v3-permit', 'parent_sha256': history._sha(parent_raw),
+    # A shared claim namespace prevents two format-specific coordinators
+    # from spending the same v3 parent.
+    if permit_kind not in {'reader-image-v3-permit', 'reader-web-v3-permit'}:
+        raise ValueError('unknown scoped Reader v3 permit kind')
+    permit = history._encode({'version': 1, 'kind': permit_kind, 'parent_sha256': history._sha(parent_raw),
                               'pointer': target_pointer, 'canonical_sha256': canonical_sha256, 'legacy_seal': legacy_seal})
     if len(permit) > LIMIT:
         raise ValueError('oversized Reader v3 permit')

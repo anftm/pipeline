@@ -247,6 +247,18 @@ def plan(source, target, *, key: str, webp_path: str, avif_path: str,
     first, as required by existing streaming readers. Discard the target on a
     write failure. The caller owns both streams.
     """
+    return plan_route_transition(source, target, now=now,
+                                 removed=(image.BUCKET, webp_path),
+                                 verified_delta=_route_delta(before_sidecar, after_sidecar, key, webp_path, avif_path),
+                                 after_sidecar=after_sidecar, expected_parent_sha256=expected_parent_sha256,
+                                 max_source_bytes=max_source_bytes, max_target_bytes=max_target_bytes,
+                                 max_entry_bytes=max_entry_bytes)
+
+
+def plan_route_transition(source, target, *, now, removed, verified_delta, after_sidecar,
+                          expected_parent_sha256=None, max_source_bytes=MAX_CATALOG_BYTES,
+                          max_target_bytes=MAX_CATALOG_BYTES, max_entry_bytes=MAX_ENTRY_BYTES):
+    """Stream the shared legacy catalog after a caller has verified its format-specific delta."""
     if source is target or any(type(n) is not int or n < 1
                                for n in (max_source_bytes, max_target_bytes, max_entry_bytes)):
         raise ValueError('invalid catalog streams or limits')
@@ -254,15 +266,15 @@ def plan(source, target, *, key: str, webp_path: str, avif_path: str,
         image._hex(expected_parent_sha256)
     if not isinstance(now, str) or datetime.fromisoformat(now.replace('Z', '+00:00')).tzinfo is None:
         raise ValueError('catalog timestamp must have a timezone')
-    before_sha, after_sha, before_refs, after_refs = _route_delta(
-        before_sidecar, after_sidecar, key, webp_path, avif_path)
+    before_sha, after_sha, before_refs, after_refs = verified_delta
+    if removed not in before_refs:
+        raise ValueError('removed route reference is missing from the parent sidecar')
 
     reader = _Reader(source, max_source_bytes, max_entry_bytes)
     events = reader.events()
     identities = set()
     head = {}
     previous = successor = previous_published = hint = None
-    removed = (image.BUCKET, webp_path)
     with TemporaryFile() as spool:
         body = _Writer(spool, max_target_bytes)
         try:
