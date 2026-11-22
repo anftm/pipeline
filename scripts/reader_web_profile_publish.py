@@ -18,6 +18,7 @@ from . import reader_format_backlog as backlog, reader_format_daily as daily
 from . import publish_reader_v3 as v3, reader_web_index_guard as index
 from . import reader_web_managed_convert as convert, reader_web_managed_pages as pages
 from . import reader_web_managed_prepare as prepare, reader_web_managed_review as schema
+from . import reader_web_profile_replay as replay
 from . import reader_web_batch_review as batch_review, reader_web_batch_publish as publish
 from .reader_image_history_fence import _owner, _active_owner
 from .reader_image_history_publish_s3 import LegacyRoots, SIDECAR
@@ -138,7 +139,8 @@ def execute(resource,output):
     root=v3.current(hub)[0]
     # This proof is used before the first data mutation and sealed to the
     # ordinary projection promotion. Tokens stay inside the existing writer.
-    if pages.current(root)['search_generation']!=search_generation:
+    render_parent=pages.current(root)
+    if render_parent['search_generation']!=search_generation:
         raise RuntimeError('legacy web profile operation Search parent differs')
     cps=ConditionalCheckpointStore(); store=cps.store; client=store._client('vomebook'); legacy=LegacyRoots(client)
     pointer_raw=hub.read_bytes(B,v3.POINTER); side_before=hub.read_bytes(B,SIDECAR)
@@ -152,6 +154,9 @@ def execute(resource,output):
     if (summary['search_generation'],summary['reader_generation'])!=(search_generation,root['generation']) or daily.blockers(selected):
         raise RuntimeError('fresh web profile backlog became blocked')
     pairs=[]; objects={}; same={}; holds={}; notes={}; total=0
+    def hold(key, item, before, reason):
+        holds[key]={'key':key,'repo':before['repo'],'path':before['path'],'extension':ext,'source_revision':item['revision'],
+            'profile':WEB_PROFILE,'source_sha256':before['source_sha256'],'error':reason,'profile_upgrade_hold':True}
     for key,row in sorted(details['rows'].items()):
         item=details['records'][key]
         if item['extension']!=ext or row['state']!='profile_outdated' or row['recorded_failure'] or row.get('pending_shard_checkpoint'):
@@ -164,8 +169,7 @@ def execute(resource,output):
         except convert.Hold as error:
             if str(error) in {'download_failed','download_timeout','download_destination','download_response'}:
                 raise
-            holds[key]={'key':key,'repo':before['repo'],'path':before['path'],'extension':ext,'source_revision':item['revision'],
-                'profile':WEB_PROFILE,'source_sha256':before['source_sha256'],'error':str(error),'profile_upgrade_hold':True}
+            hold(key,item,before,str(error))
             continue
         notes[key]=omissions
         if new['object']==before['object']:
@@ -176,6 +180,19 @@ def execute(resource,output):
         pairs.append({'id':i,'new':new,'expected_old_object':before['object']})
         objects[i+'/document.html']=data;objects[i+'/document-manifest.json']=manifest
     if not (pairs or same or holds):raise RuntimeError('no exact profile work remains')
+    replay_report=None
+    if pairs:
+        documents={row['new']['sha256']:objects[row['id']+'/document.html'] for row in pairs}
+        replay_report=replay.verify(documents,render_parent['code_sha'])
+        (output/'web-profile-replay.json').write_bytes(v3.encode(replay_report))
+        rejected=replay.rejected(replay_report,documents)
+        for row in pairs:
+            if row['new']['sha256'] in rejected:
+                key=row['new']['key']
+                hold(key,details['records'][key],old[key],'reader_replay_mismatch')
+                for member in ('document.html','document-manifest.json'):
+                    del objects[row['id']+'/'+member]
+        pairs=[row for row in pairs if row['new']['sha256'] not in rejected]
     validate_search()
     if cps.read(B,path)!=observed or hub.read_bytes(B,v3.POINTER)!=pointer_raw or hub.read_bytes(B,SIDECAR)!=side_before:
         raise RuntimeError('web batch parents moved before preparation')
@@ -191,8 +208,10 @@ def execute(resource,output):
         if parents[ext]!=observed.raw or files['pointer.json']!=pointer_raw or files['sidecar-before.gz']!=side_before:
             raise RuntimeError('sealed profile review differs from producer parents')
         proof=batch_review.authority(report,files,parents,checkpoints=cps,pointers=ConditionalPageStore(hub,s3=store),legacy=legacy,hub=hub,s3=store)
-        publish_pages=pages.current(root)
-        if publish_pages['search_generation']!=search_generation:raise RuntimeError('Pages Search generation changed')
+        publish_pages=pages.current(root,expected=render_parent)
+        with httpx.Client(timeout=20, follow_redirects=True, headers={'Cache-Control':'no-cache'}) as http:
+            if replay.space_revision(http)!=replay_report['space']['code']:
+                raise RuntimeError('Space changed after Reader replay')
         proof.update(bundle_sha256=receipt['bundle_sha256'],review_sha256=receipt['review_sha256'],pages=publish_pages)
         # Persist exact preparation locally before the one-shot indexes. Failed
         # jobs upload these artifacts; they do not authorize automatic replay.

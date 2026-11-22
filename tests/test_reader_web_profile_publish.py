@@ -44,12 +44,24 @@ class AutomaticWebProfileTests(unittest.TestCase):
         self.assertEqual(payload['files'],[old['a']|{'profile':WEB_PROFILE},old['b']])
         self.assertEqual(payload['failures'],[{'key':'b','profile':WEB_PROFILE}])
 
+    def test_replay_requires_every_candidate_on_both_surfaces(self):
+        docs={'a':b'a','b':b'b'}
+        passes={'a':{'passed':True},'b':{'passed':True}}
+        fails={'a':{'passed':True},'b':{'passed':False}}
+        self.assertEqual(web.replay.rejected({'pages':{'documents':passes},'space':{'documents':fails}},docs),{'b'})
+        for evidence in ({'pages':{'documents':passes}},
+                         {'pages':{'documents':passes},'space':{'documents':{'a':{'passed':True}}}}):
+            with self.assertRaisesRegex(ValueError,'both sites'):
+                web.replay.rejected(evidence,docs)
+
     def test_automatic_switch_preserves_joint_locks_and_no_legacy_pages_fallback(self):
         w=(Path(__file__).parents[1]/'.github/workflows/reader-v3-publish.yml').read_text()
         self.assertIn('group: reader-sidecar',w);self.assertIn('group: daily-sync',w)
         apply=w.split('if [[ "$OPERATION" == upgrade-web-profile ]]; then',1)[1].split('exit 0',1)[0]
         self.assertIn('READER_WEB_PROFILE_PAGES_SCOPE_REVIEWED',apply)
         self.assertIn('reader_pages_release --preflight',apply)
+        self.assertIn('playwright install --with-deps chromium --only-shell',w)
+        self.assertIn('output/v3/web-profile-replay.json',w)
         readback=w.split('name: Publish and verify automatic web profile on both sites',1)[1].split('- name:',1)[0]
         self.assertIn('format-automation-verification.json',readback)
         self.assertIn('reader_web_profile_readback',readback)

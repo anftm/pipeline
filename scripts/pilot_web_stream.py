@@ -15,12 +15,12 @@ try:
     from .convert_reader_assets import download_source, inline_html_resources, mhtml_to_html, validate_html_content
     from .reader_assets import decode_search_payload, relative_path, source_url
     from .reader_stream_index import read_index, run_documents
-    from .reader_web_profile import WEB_PROFILE
+    from .reader_web_profile import STANDALONE_WEB_PROFILE
 except ImportError:
     from convert_reader_assets import download_source, inline_html_resources, mhtml_to_html, validate_html_content
     from reader_assets import decode_search_payload, relative_path, source_url
     from reader_stream_index import read_index, run_documents
-    from reader_web_profile import WEB_PROFILE
+    from reader_web_profile import STANDALONE_WEB_PROFILE
 
 
 TARGET_BUCKET = "vomebook/reader-assets-v2"
@@ -98,7 +98,7 @@ def build_one(item: dict, work: Path, token: str | None, bucket: str, *,
         "extension": item["extension"], "source_revision": item["revision"], "source_sha256": raw_digest,
         "mode": "document-stream", "bucket": bucket, "object": object_path, "manifest": manifest_path,
         "bytes": len(output), "sha256": output_digest,
-        **({"profile": WEB_PROFILE} if web_typography else {}),
+        **({"profile": STANDALONE_WEB_PROFILE} if web_typography else {}),
     }, {object_path: str(html_path), manifest_path: str(manifest_file)}
 
 

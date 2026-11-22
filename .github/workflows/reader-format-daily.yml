@@ -30,6 +30,10 @@ on:
         description: Process every triggered format through verified Reader publication
         type: boolean
         default: false
+      web_profile_only:
+        description: Run or inspect only the web profile upgrade lane
+        type: boolean
+        default: false
       known_writers_coordinated:
         description: Known Reader producers and external writers are coordinated
         type: boolean
@@ -66,6 +70,7 @@ jobs:
       READER_CHM_PROFILE_REBUILD_ENABLED: ${{ vars.READER_CHM_PROFILE_REBUILD_ENABLED }}
       READER_WEB_PROFILE_REBUILD_ENABLED: ${{ vars.READER_WEB_PROFILE_REBUILD_ENABLED }}
       REQUESTED_APPLY: ${{ github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_run' || (github.event_name == 'workflow_dispatch' && inputs.search_source_run != '') || inputs.apply }}
+      WEB_PROFILE_ONLY: ${{ github.event_name == 'push' || inputs.web_profile_only }}
       WRITERS: ${{ github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_run' || (github.event_name == 'workflow_dispatch' && inputs.search_source_run != '') || inputs.known_writers_coordinated }}
       EXPLICIT_SEARCH_HANDOFF: ${{ github.event_name == 'workflow_dispatch' && inputs.search_source_run != '' }}
     steps:
@@ -154,6 +159,9 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$WRITERS" == true ]]
+          if [[ "$WEB_PROFILE_ONLY" == true ]]; then
+            [[ "$READER_WEB_PROFILE_REBUILD_ENABLED" == true ]]
+          fi
           args=(run --summary output/format-daily/summary.json --output output/format-daily/result.json
                 --journal output/format-daily/operations.jsonl --expected-sha "$GITHUB_SHA"
                 --enabled --known-writers-verified --max-batches 20 --timeout-seconds 18000)

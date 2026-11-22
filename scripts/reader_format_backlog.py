@@ -361,7 +361,7 @@ def classify_indexed(records, routes, canonical, shards, api, *, extensions, kin
             prior = entry.get('profile')
             # Untagged output predates web typography. Don't treat an unknown
             # tag (including a future version) as a reviewed predecessor.
-            if prior == WEB_PROFILE or prior not in (None, 'web-utf8-typography-v1', 'web-utf8-typography-v2'):
+            if prior == WEB_PROFILE or prior not in (None, 'web-utf8-typography-v1', 'web-utf8-typography-v2', 'web-utf8-typography-v3'):
                 continue
             try:
                 _web_row(entry, old=True)

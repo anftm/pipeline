@@ -104,6 +104,11 @@ jobs:
       - name: Test scoped Reader consumer root refresh
         if: inputs.operation == 'refresh-reader-consumers'
         run: python -B -m unittest tests.test_reader_page_consumer_refresh tests.test_reader_page_consumer_store
+      - name: Install pinned Chromium for automatic web Reader acceptance
+        if: inputs.operation == 'upgrade-web-profile'
+        run: |
+          pip install playwright==1.65.2
+          python -m playwright install --with-deps chromium --only-shell
       - name: Verify and execute the central v3 operation
         id: operation
         env:
@@ -447,7 +452,9 @@ jobs:
         if: always() && inputs.operation == 'upgrade-web-profile'
         with:
           name: web-profile-recovery-input
-          path: output/v3/web-profile-review.zip
+          path: |
+            output/v3/web-profile-review.zip
+            output/v3/web-profile-replay.json
           retention-days: 30
           if-no-files-found: ignore
       - uses: actions/upload-artifact@v7

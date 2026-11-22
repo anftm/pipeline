@@ -1179,7 +1179,7 @@ def main(argv=None):
         controller = Controller(api=api, refresh=refresh, verify=verify, journal=args.journal,
                                 expected_sha=args.expected_sha, enabled=args.enabled,
                                 known_writers=args.known_writers_verified,
-                                web_profile_only=os.getenv('GITHUB_EVENT_NAME')=='push',
+                                web_profile_only=os.getenv('GITHUB_EVENT_NAME')=='push' or os.getenv('WEB_PROFILE_ONLY')=='true',
                                 parent_run_id=os.environ.get('GITHUB_RUN_ID'),
                                 run_attempt=int(os.environ.get('GITHUB_RUN_ATTEMPT', '1')),
                                 max_batches=args.max_batches, timeout_seconds=args.timeout_seconds,

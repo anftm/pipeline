@@ -3,7 +3,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from scripts import pilot_web_stream as worker,reader_web_profile_rollout as rollout,reader_web_batch_plan as batch
-from scripts.reader_web_profile import WEB_PROFILE
+from scripts.reader_web_profile import STANDALONE_WEB_PROFILE, WEB_PROFILE
 from scripts.reader_web_profile_summary import summarize
 from scripts.reader_web_managed_convert import digest
 from scripts.publish_reader_v3 import encode
@@ -37,7 +37,7 @@ class WebProfileRolloutTests(unittest.TestCase):
                 build=kwargs['build']; item={'repo':'VoiceOfML/Books','path':'x.html','revision':'a'*40,'extension':'html'}
                 with patch.object(worker,'download',side_effect=lambda _,path,__:path.write_bytes('<h1>中文</h1><p>abcd</p>'.encode())):
                     entry,files=build(item,root/'run',None,worker.TARGET_BUCKET)
-                self.assertEqual((entry['source_revision'],entry['profile']),('a'*40,WEB_PROFILE))
+                self.assertEqual((entry['source_revision'],entry['profile']),('a'*40,STANDALONE_WEB_PROFILE))
                 self.assertIn('viewport',Path(files[entry['object']]).read_text()); return 0
             with patch('sys.argv',args),patch.object(worker,'select_records',return_value=[]),patch.object(worker,'run_documents',side_effect=fake):
                 self.assertEqual(worker.main(),0)

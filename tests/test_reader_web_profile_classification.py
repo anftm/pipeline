@@ -61,7 +61,8 @@ class WebProfileClassificationTests(unittest.TestCase):
                 for profile, expected in (('web-utf8-typography-v1', 'profile_outdated'),
                                           (WEB_PROFILE, 'same_revision'),
                                           ('web-utf8-typography-v2', 'profile_outdated'),
-                                          ('web-utf8-typography-v4', 'same_revision'),
+                                          ('web-utf8-typography-v3', 'profile_outdated'),
+                                          ('web-utf8-typography-v5', 'same_revision'),
                                           ('other-profile', 'same_revision')):
                     self.assertEqual(self.classify(source, {**entry, 'profile': profile}, route)['state'], expected)
         for extension, kind in (('xlsx', 'spreadsheet-html-stream-index'), ('xlsx', WEB_INDEX),
