@@ -23,7 +23,7 @@ def validate_legacy_plan(actual, reviewed):
         raise ValueError('sealed streamed catalog plan differs')
 
 
-def run(blob, bundle_sha, review_sha, proof, *, phase, external_writers_stopped, managed=False):
+def run(blob, bundle_sha, review_sha, proof, *, phase, external_writers_stopped, managed=False, controller_guard=None):
     if phase not in {'apply','resume-index','resume-legacy','observe-v3'}:
         raise ValueError('explicit ten-web phase required')
     if managed:
@@ -36,9 +36,12 @@ def run(blob, bundle_sha, review_sha, proof, *, phase, external_writers_stopped,
             or proof.get('pointer_sha256')!=plan.digest(data['pointer.json'])
             or proof.get('review_sha256')!=review_sha or proof.get('bundle_sha256')!=bundle_sha):
         raise ValueError('authority receipt does not bind this exact batch')
+    if controller_guard is not None and (not managed or phase!='apply' or external_writers_stopped is not False):
+        raise ValueError('controller admission is restricted to fresh managed apply')
     hub=v3.CentralHubStore()
     def window():
-        if guard_window(hub,external_writers_stopped) is not True:return False
+        ok=controller_guard() if controller_guard is not None else guard_window(hub,external_writers_stopped)
+        if ok is not True:raise RuntimeError('exact web publishing guard is absent')
         if managed:
             for ext,expect in review['unchanged_indexes'].items():
                 if plan.digest(hub.read_bytes(B,f'documents/web/{ext}/index.json'))!=expect:
@@ -75,6 +78,8 @@ def run(blob, bundle_sha, review_sha, proof, *, phase, external_writers_stopped,
             raise ValueError('exact batch asset protection bytes differ: '+path)
     pin=review['retention']['path']; targets={e:data[f'target-{e}.json'] for e in parents}
     prereq={'review':review_sha,'sidecar':side_parent.sha256,'legacy_catalog':cat_parent.sha256,'pointer':plan.digest(ptr),'retention':review['retention']['sha256']}
+    # Canonical permits continue to bind the entire previous review schema;
+    # manual readers can still identify a spent automatic index permit.
     if phase in {'apply','resume-index'}:
         if journal.read(cat_parent.sha256) is not None:
             raise RuntimeError('legacy parent already spent; reconcile before changing indexes')

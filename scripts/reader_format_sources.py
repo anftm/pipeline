@@ -54,26 +54,34 @@ def _boosted_prefix(records, extension, limit, budget):
 
 
 def prepare(*, extension, generation, search_data, revisions, output, hub, api, fs, client,
-            profile_proof=None, include_profile_upgrades=True, boost_limit=None):
+            profile_proof=None, include_profile_upgrades=True, boost_limit=None,
+            include_web_profile_upgrades=False):
     """Inspect once, validate the full fetch, and write a new compact subset."""
     if extension not in backlog.EXTENSIONS:
         raise ValueError('requires one supported Reader extension')
+    web = extension in backlog.FAMILIES['web'][0]
     budget = boost.byte_budget(extension, boost_limit) if boost_limit is not None else None
     if budget is not None and profile_proof is not None:
         raise ValueError('ordinary boost cannot request profile work')
     if not isinstance(generation, str) or not backlog.SHA.fullmatch(generation):
         raise ValueError('invalid published search generation')
     search_data, revisions, output = Path(search_data), Path(revisions), Path(output)
-    if (output.exists() or output.is_symlink()
-            or output.resolve() in {search_data.resolve(), revisions.resolve()}):
+    inputs = {search_data.resolve(), revisions.resolve()}
+    if output.exists() or output.is_symlink() or output.resolve() in inputs:
         raise ValueError('filtered output must be a new distinct path')
+    if profile_proof is not None:
+        profile_proof = Path(profile_proof)
+        if (not (web or extension == 'chm') or profile_proof.exists() or profile_proof.is_symlink()
+                or profile_proof.resolve() in inputs | {output.resolve()}):
+            raise ValueError('profile proof requires a new distinct CHM or web output path')
     payload = backlog.search_generation._read_json_file(search_data)
     source_revisions = backlog.search_generation._read_json_file(revisions)
     records = backlog.source_records(payload, source_revisions)
     details = {}
     summary, _epub = backlog.inspect(hub=hub, api=api, fs=fs, client=client,
                                      scope='all', details_out=details,
-                                     include_profile_upgrades=include_profile_upgrades)
+                                     include_profile_upgrades=include_profile_upgrades,
+                                     include_web_profile_upgrades=web and include_web_profile_upgrades)
     if summary['search_generation'] != generation:
         raise ValueError('published search generation differs from producer pin')
     if source_revisions != details['source_revisions']:
@@ -83,7 +91,7 @@ def prepare(*, extension, generation, search_data, revisions, output, hub, api, 
 
     selected = []
     actionable_states = {'not_mapped', 'content_changed'}
-    if budget is None:
+    if budget is None and (extension == 'chm' or web and include_web_profile_upgrades):
         actionable_states.add('profile_outdated')
     for key, record in records.items():
         if record['extension'] != extension:
@@ -94,8 +102,10 @@ def prepare(*, extension, generation, search_data, revisions, output, hub, api, 
             continue
         if row.get('key') != key or row.get('source_revision') != record['revision']:
             raise ValueError('classified source differs from pinned record')
-        # Ordinary unchanged files remain excluded. A reviewed old chapter
-        # profile is a separate reason to rebuild, not a source-content change.
+        # A reviewed old profile is a separate reason to rebuild, not a
+        # source-content change. Web rebuilds require the exact prior route pin.
+        if web and row['state'] == 'profile_outdated' and profile_proof is None:
+            raise ValueError('web profile rebuilds require --profile-proof')
         selected.append(record)
 
     if budget is not None:
@@ -107,8 +117,12 @@ def prepare(*, extension, generation, search_data, revisions, output, hub, api, 
     metadata = backlog._metadata(api, requests)
     for request, record in requests.items():
         value = metadata.get(request)
-        if value is None or not (backlog._lfs_identity(value) or backlog._blob_identity(value)):
+        lfs = backlog._lfs_identity(value)
+        if value is None or not (lfs or backlog._blob_identity(value)):
             raise ValueError('selected source lacks exact pinned file identity: ' + request[2])
+        row = details['rows'][record['key']]
+        if web and row['state'] == 'profile_outdated' and lfs and lfs != row['previous_source_sha256']:
+            raise ValueError('web profile rebuild differs from pinned source SHA-256: ' + request[2])
         if budget is not None:
             size = backlog._item_field(value, 'size')
             if type(size) is not int or size != record['bytes']:
@@ -119,15 +133,19 @@ def prepare(*, extension, generation, search_data, revisions, output, hub, api, 
     # needed by the full revision guard. source_records preserves decoder order.
     filtered = {**payload, 'rc': [row if budget is None else [*row[:4], selected_by_key[key]['bytes'], row[5]]
                                   for key, row in zip(records, payload['rc']) if key in selected_by_key]}
-    profile_keys = {key: details['rows'][key]['previous_source_sha256'] for key in sorted(selected_by_key)
-                    if details['rows'][key]['state'] == 'profile_outdated'}
     if profile_proof is not None:
-        if extension != 'chm' or Path(profile_proof).resolve() in {
-                output.resolve(), search_data.resolve(), revisions.resolve()}:
-            raise ValueError('profile proof requires a distinct CHM output path')
-        with Path(profile_proof).open('x', encoding='utf8') as stream:
-            json.dump({'search_generation': generation, 'reader_generation': summary['reader_generation'],
-                       'profile_keys': profile_keys}, stream, ensure_ascii=False, sort_keys=True)
+        profile_rows = {key: details['rows'][key] for key in selected_by_key
+                        if details['rows'][key]['state'] == 'profile_outdated'}
+        proof = {'search_generation': generation, 'reader_generation': summary['reader_generation']}
+        if web:
+            proof.update(version=1, extension=extension, profile_keys={
+                key: {field: row['previous_' + field] for field in ('source_sha256', 'object', 'manifest', 'sha256', 'bytes')}
+                for key, row in profile_rows.items()})
+        else:
+            proof['profile_keys'] = {key: row['previous_source_sha256'] for key, row in profile_rows.items()}
+        profile_proof.parent.mkdir(parents=True, exist_ok=True)
+        with profile_proof.open('x', encoding='utf8') as stream:
+            json.dump(proof, stream, ensure_ascii=False, sort_keys=True)
             stream.write('\n')
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open('x', encoding='utf8') as stream:
@@ -155,7 +173,8 @@ def main(argv=None):
     with backlog.httpx.Client(timeout=90, follow_redirects=True) as client:
         result = prepare(**vars(args), hub=backlog.HubBucketStore(), api=backlog.HfApi(token=token),
                          fs=backlog.HfFileSystem(token=token), client=client,
-                         include_profile_upgrades=os.getenv('READER_CHM_PROFILE_REBUILD_ENABLED') == 'true')
+                         include_profile_upgrades=os.getenv('READER_CHM_PROFILE_REBUILD_ENABLED') == 'true',
+                         include_web_profile_upgrades=os.getenv('READER_WEB_PROFILE_REBUILD_ENABLED') == 'true')
     print(json.dumps(result, ensure_ascii=False, sort_keys=True), flush=True)
     return 0
 

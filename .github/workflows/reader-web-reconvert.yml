@@ -1,9 +1,6 @@
 name: Prepare managed web reconversion
 
 on:
-  push:
-    branches: [main]
-    paths: [scripts/reader_web_profile.py]
   workflow_dispatch:
     inputs:
       all_outdated:
@@ -23,12 +20,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: reader-web-reconvert-${{ (github.event_name == 'push' || inputs.all_outdated) && 'profile-rollout' || inputs.request_sha256 }}
+  group: reader-web-reconvert-${{ inputs.all_outdated && 'profile-rollout' || inputs.request_sha256 }}
   cancel-in-progress: false
 
 jobs:
   profile-plan:
-    if: (github.event_name == 'push' || inputs.all_outdated) && github.repository == 'anftm/pipeline' && github.ref == 'refs/heads/main'
+    if: inputs.all_outdated && github.repository == 'anftm/pipeline' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
@@ -92,7 +89,7 @@ jobs:
           if-no-files-found: error
   profile-summary:
     needs: [profile-plan, convert-profile]
-    if: ${{ always() && (github.event_name == 'push' || inputs.all_outdated) && needs.profile-plan.result == 'success' && (needs.convert-profile.result == 'success' || needs.convert-profile.result == 'skipped') }}
+    if: ${{ always() && inputs.all_outdated && needs.profile-plan.result == 'success' && (needs.convert-profile.result == 'success' || needs.convert-profile.result == 'skipped') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:

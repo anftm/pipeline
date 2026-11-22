@@ -27,6 +27,8 @@ try:
     from . import search_daily, search_generation, search_publication_pointer, search_snapshot
     from .reader_bucket_store import HubBucketStore, retry_read
     from .reader_chapter_profiles import CHM_PROFILE, chm_profile_upgrade
+    from .reader_web_exact_plan import KIND as WEB_INDEX_KIND, _web_row
+    from .reader_web_profile import WEB_PROFILE
 except ImportError:
     import plan_reader_stream_matrix as matrix
     import finalize_image_index
@@ -41,6 +43,8 @@ except ImportError:
     import search_snapshot
     from reader_bucket_store import HubBucketStore, retry_read
     from reader_chapter_profiles import CHM_PROFILE, chm_profile_upgrade
+    from reader_web_exact_plan import KIND as WEB_INDEX_KIND, _web_row
+    from reader_web_profile import WEB_PROFILE
 
 
 SEARCH_BUCKET = search_publication_pointer.BUCKET
@@ -199,9 +203,18 @@ def _matches_route(entry, route):
     return False
 
 
+def _web_profile_failure(failure):
+    """A profile-only failure carries an exact source digest, unlike an ordinary failure."""
+    profile, digest = failure.get('profile'), failure.get('source_sha256')
+    return (isinstance(profile, str) and re.fullmatch(r'web-utf8-typography-v[1-9][0-9]{0,5}', profile)
+            and isinstance(digest, str) and SHA.fullmatch(digest))
+
+
 def classify_indexed(records, routes, canonical, shards, api, *, extensions, kind, route_modes, shard_count=8,
-                     merge=reader_stream_index.merge_shards, include_profile_upgrades=True):
+                     merge=reader_stream_index.merge_shards, include_profile_upgrades=True,
+                     include_web_profile_upgrades=False):
     """Compare exact source bytes without treating repository commits as content."""
+    web_profile_enabled = include_web_profile_upgrades and kind == WEB_INDEX_KIND
     source = [value for value in records.values() if value['extension'] in extensions]
     if not isinstance(canonical, dict) or canonical.get('version') != 1 or canonical.get('kind') != kind:
         raise ValueError('canonical Reader index is invalid')
@@ -243,6 +256,8 @@ def classify_indexed(records, routes, canonical, shards, api, *, extensions, kin
         entry = entries.get(key)
         staged = merged_entries.get(key)
         failure_current = any(failure.get('source_revision') == item['revision']
+                              and not (kind == WEB_INDEX_KIND and item['extension'] in FAMILIES['web'][0]
+                                       and _web_profile_failure(failure))
                               for failure in failure_rows.get(key, []))
         row = {'key': key, 'source_revision': item['revision'], 'recorded_failure': failure_current}
         if route is None:
@@ -336,6 +351,45 @@ def classify_indexed(records, routes, canonical, shards, api, *, extensions, kin
             # An unrelated dataset revision bump cannot retry the failed rule
             # on the same bytes. A genuinely changed source is a new input.
             row['recorded_failure'] |= any(f.get('profile') == CHM_PROFILE for f in failure_rows.get(item['key'], []))
+    if web_profile_enabled:
+        for item in source:
+            key = item['key']
+            row = rows[key]
+            if item['extension'] not in FAMILIES['web'][0] or row['state'] not in {'same_revision', 'content_unchanged'}:
+                continue
+            entry = entries[key]
+            prior = entry.get('profile')
+            # Untagged output predates web typography. Don't treat an unknown
+            # tag (including a future version) as a reviewed predecessor.
+            if prior == WEB_PROFILE or prior not in (None, 'web-utf8-typography-v1', 'web-utf8-typography-v2'):
+                continue
+            try:
+                _web_row(entry, old=True)
+            except ValueError:
+                row['state'] = 'route_or_index_mismatch'
+                continue
+            if ((entry['repo'], entry['path'], entry['extension']) !=
+                    (item['repo'], item['path'], item['extension'])
+                    or routes[key] != {'s': 2, 'm': 'h', 'b': READER_BUCKET, 'p': entry['object']}):
+                row['state'] = 'route_or_index_mismatch'
+                continue
+            # A Git blob match against an old LFS pointer does not prove the
+            # current ordinary file contains the old source payload.
+            if (row['proof'] == 'exact-revision-git-blobs'
+                    and _lfs_identity(old[(item['repo'], entry['source_revision'], item['path'])])):
+                row['state'] = 'source_identity_unknown'
+                row.pop('proof')
+                continue
+            # Hold only the failed profile/key/source, even across revision
+            # churn. The mapped source is still verified and other keys can run.
+            if any(f.get('profile') == WEB_PROFILE and f.get('source_sha256') == entry['source_sha256']
+                   for f in failure_rows.get(key, [])):
+                row.update(profile_upgrade_deferred=True, profile_upgrade_deferred_reason='current_web_profile_failed')
+                continue
+            row.update(state='profile_outdated', previous_profile=prior,
+                       previous_source_sha256=entry['source_sha256'], previous_object=entry['object'],
+                       previous_manifest=entry['manifest'], previous_sha256=entry['sha256'],
+                       previous_bytes=entry['bytes'])
     return rows
 
 
@@ -398,7 +452,8 @@ def summarize(records: dict, routes: dict, checked_rows: dict, *, threshold: int
 
 
 def inspect(*, hub, api, fs, client, threshold=10, observe_search=search_daily.observe_consumers,
-            get=search_daily.bounded_get, scope='all', details_out=None, include_profile_upgrades=True):
+            get=search_daily.bounded_get, scope='all', details_out=None, include_profile_upgrades=True,
+            include_web_profile_upgrades=False):
     """Return the legacy pair; optionally expose the accepted full capture.
 
     details_out is populated only after all final pin checks succeed. Its rows
@@ -529,7 +584,8 @@ def inspect(*, hub, api, fs, client, threshold=10, observe_search=search_daily.o
             index = matrix.read_json(fs, READER_BUCKET, path)
             if index:
                 checked.update(classify_indexed(records, routes, index, [], api, extensions={extension},
-                                                kind='web-document-stream-index', route_modes={'h'}))
+                                                kind=WEB_INDEX_KIND, route_modes={'h'},
+                                                include_web_profile_upgrades=include_web_profile_upgrades))
                 checked_extensions.add(extension)
                 web_indexes[path] = index
     summaries = summarize(records, routes, checked, threshold=threshold, checked_extensions=checked_extensions)
@@ -659,7 +715,8 @@ def main(argv=None):
                 return inspect(hub=HubBucketStore(), api=HfApi(token=token),
                                fs=HfFileSystem(token=token, skip_instance_cache=True),
                                client=client, threshold=args.threshold,
-                               include_profile_upgrades=os.getenv('READER_CHM_PROFILE_REBUILD_ENABLED') == 'true')
+                               include_profile_upgrades=os.getenv('READER_CHM_PROFILE_REBUILD_ENABLED') == 'true',
+                               include_web_profile_upgrades=os.getenv('READER_WEB_PROFILE_REBUILD_ENABLED') == 'true')
         summary, details = observe_stable(observe)
     except Exception as error:
         diagnostic = args.output.with_name(args.output.stem + '-failure.json')

@@ -12,7 +12,7 @@ on:
         default: ''
       operation:
         type: choice
-        options: [inspect, unify, ack, retire, withdraw, reset-documents, remove-route, restore-route, verify-route, migrate-derived, resume-derived, redirect-derived, finalize-derived-redirects, replace-derived-history, replace-exact-web, verify-exact-web, replace-managed-web, verify-managed-web, prepare-managed-web, verify-exact-office-report, replace-exact-office-report, refresh-reader-consumers, reconcile-derived-index, reconcile-sidecar, compact-legacy-history, publish-generation, verify-generation, verify-pages-lane]
+        options: [inspect, unify, ack, retire, withdraw, reset-documents, remove-route, restore-route, verify-route, migrate-derived, resume-derived, redirect-derived, finalize-derived-redirects, replace-derived-history, replace-exact-web, verify-exact-web, replace-managed-web, verify-managed-web, prepare-managed-web, upgrade-web-profile, verify-exact-office-report, replace-exact-office-report, refresh-reader-consumers, reconcile-derived-index, reconcile-sidecar, compact-legacy-history, publish-generation, verify-generation, verify-pages-lane]
         default: inspect
       resource_json:
         description: 'Migration requires root identities; optional read-only check_s3=true; apply/resume require external_writers_stopped=true'
@@ -69,10 +69,12 @@ jobs:
           ENABLED: ${{ vars.READER_FORMAT_AUTOMATION_ENABLED }}
           OPERATION: ${{ inputs.operation }}
           APPLY: ${{ inputs.apply }}
+          WEB_PROFILE_ENABLED: ${{ vars.READER_WEB_PROFILE_REBUILD_ENABLED }}
         run: |
           set -euo pipefail
           [[ "$AUTOMATION_ID" =~ ^[0-9a-f]{32}$ && "$ENABLED" == true ]]
-          [[ "$OPERATION" == unify && "$APPLY" == true ]]
+          [[ "$APPLY" == true ]]
+          [[ "$OPERATION" == unify || ( "$OPERATION" == upgrade-web-profile && "$WEB_PROFILE_ENABLED" == true ) ]]
           [[ "$GITHUB_REF" == refs/heads/main && "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]
           [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
           [[ "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" == "$GITHUB_SHA" ]]
@@ -107,13 +109,13 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_INPUT_TOKEN: ${{ secrets.HF_INPUT_TOKEN }}
-          HF_S3_ACCESS_KEY_ID: ${{ (contains(fromJSON('["migrate-derived","resume-derived","redirect-derived","finalize-derived-redirects","replace-derived-history","replace-exact-web","verify-exact-web","replace-managed-web","verify-managed-web","prepare-managed-web","verify-exact-office-report","replace-exact-office-report","refresh-reader-consumers","reconcile-derived-index","reconcile-sidecar","compact-legacy-history","unify","remove-route","restore-route"]'), inputs.operation) || (vars.READER_PAGES_EXACT_ENABLED == 'true' && inputs.apply && inputs.operation == 'publish-generation') || (inputs.operation == 'verify-pages-lane' && !inputs.apply)) && secrets.HF_S3_ACCESS_KEY_ID || '' }}
-          HF_S3_SECRET_ACCESS_KEY: ${{ (contains(fromJSON('["migrate-derived","resume-derived","redirect-derived","finalize-derived-redirects","replace-derived-history","replace-exact-web","verify-exact-web","replace-managed-web","verify-managed-web","prepare-managed-web","verify-exact-office-report","replace-exact-office-report","refresh-reader-consumers","reconcile-derived-index","reconcile-sidecar","compact-legacy-history","unify","remove-route","restore-route"]'), inputs.operation) || (vars.READER_PAGES_EXACT_ENABLED == 'true' && inputs.apply && inputs.operation == 'publish-generation') || (inputs.operation == 'verify-pages-lane' && !inputs.apply)) && secrets.HF_S3_SECRET_ACCESS_KEY || '' }}
+          HF_S3_ACCESS_KEY_ID: ${{ (contains(fromJSON('["migrate-derived","resume-derived","redirect-derived","finalize-derived-redirects","replace-derived-history","replace-exact-web","verify-exact-web","replace-managed-web","verify-managed-web","prepare-managed-web","upgrade-web-profile","verify-exact-office-report","replace-exact-office-report","refresh-reader-consumers","reconcile-derived-index","reconcile-sidecar","compact-legacy-history","unify","remove-route","restore-route"]'), inputs.operation) || (vars.READER_PAGES_EXACT_ENABLED == 'true' && inputs.apply && inputs.operation == 'publish-generation') || (inputs.operation == 'verify-pages-lane' && !inputs.apply)) && secrets.HF_S3_ACCESS_KEY_ID || '' }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ (contains(fromJSON('["migrate-derived","resume-derived","redirect-derived","finalize-derived-redirects","replace-derived-history","replace-exact-web","verify-exact-web","replace-managed-web","verify-managed-web","prepare-managed-web","upgrade-web-profile","verify-exact-office-report","replace-exact-office-report","refresh-reader-consumers","reconcile-derived-index","reconcile-sidecar","compact-legacy-history","unify","remove-route","restore-route"]'), inputs.operation) || (vars.READER_PAGES_EXACT_ENABLED == 'true' && inputs.apply && inputs.operation == 'publish-generation') || (inputs.operation == 'verify-pages-lane' && !inputs.apply)) && secrets.HF_S3_SECRET_ACCESS_KEY || '' }}
           GH_TOKEN: ${{ github.token }}
           GC_CENTRAL_TOKEN: ${{ (inputs.operation == 'replace-exact-web' || inputs.operation == 'replace-managed-web' || inputs.operation == 'replace-exact-office-report') && github.token || '' }}
           GC_PRODUCER_TOKENS_JSON: ${{ secrets.GC_PRODUCER_TOKENS_JSON }}
           GC_AMBROSSEE_MAINTENANCE_TOKEN: ${{ secrets.GC_AMBROSSEE_MAINTENANCE_20261102 }}
-          READER_PAGES_DISPATCH_TOKEN: ${{ ((vars.READER_PAGES_EXACT_ENABLED == 'true' && inputs.apply && contains(fromJSON('["unify","publish-generation","replace-exact-web","replace-managed-web","replace-exact-office-report"]'), inputs.operation)) || (inputs.operation == 'verify-pages-lane' && !inputs.apply)) && secrets.READER_PAGES_DISPATCH_TOKEN || '' }}
+          READER_PAGES_DISPATCH_TOKEN: ${{ ((vars.READER_PAGES_EXACT_ENABLED == 'true' && inputs.apply && contains(fromJSON('["unify","publish-generation","replace-exact-web","replace-managed-web","replace-exact-office-report","upgrade-web-profile"]'), inputs.operation)) || (inputs.operation == 'verify-pages-lane' && !inputs.apply)) && secrets.READER_PAGES_DISPATCH_TOKEN || '' }}
           READER_V3_PREVIEW_FIRST: ${{ vars.READER_V3_PREVIEW_FIRST || 'false' }}
           READER_V3_DJVU_MIGRATION: ${{ vars.READER_V3_DJVU_MIGRATION || 'false' }}
           READER_DATASET_PRIMARY_ENABLED: ${{ vars.READER_DATASET_PRIMARY_ENABLED || 'false' }}
@@ -125,7 +127,11 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           SCHEDULE: ${{ github.event.schedule }}
           READER_PAGES_EXACT_ENABLED: ${{ vars.READER_PAGES_EXACT_ENABLED }}
-          READER_WEB_PAGES_PROOF_TOKEN: ${{ ((inputs.operation == 'verify-managed-web' || inputs.operation == 'prepare-managed-web') || (inputs.operation == 'replace-managed-web' && inputs.apply)) && secrets.READER_PAGES_DISPATCH_TOKEN || '' }}
+          READER_WEB_PROFILE_REBUILD_ENABLED: ${{ vars.READER_WEB_PROFILE_REBUILD_ENABLED }}
+          WEB_PROFILE_AUTOMATION_ID: ${{ inputs.automation_id }}
+          READER_WEB_PROFILE_PAGES_SCOPE_REVIEWED: ${{ vars.READER_WEB_PROFILE_PAGES_SCOPE_REVIEWED }}
+          READER_PROFILE_PAUSED: ${{ vars.READER_V3_AUTO_PAUSED }}
+          READER_WEB_PAGES_PROOF_TOKEN: ${{ ((inputs.operation == 'verify-managed-web' || inputs.operation == 'prepare-managed-web') || ((inputs.operation == 'replace-managed-web' || inputs.operation == 'upgrade-web-profile') && inputs.apply)) && secrets.READER_PAGES_DISPATCH_TOKEN || '' }}
           READER_WEB_PAGES_DISPATCH_SCOPE_REVIEWED: ${{ (inputs.operation == 'replace-exact-web' || inputs.operation == 'replace-managed-web' || inputs.operation == 'replace-exact-office-report') && vars.READER_WEB_PAGES_DISPATCH_SCOPE_REVIEWED || '' }}
         run: |
           # Old scheduled or queued runs must not resume retirement after the
@@ -167,6 +173,15 @@ jobs:
             python -B -m scripts.reader_pages_release --preflight
             mkdir -p output/v3
             python -B -m scripts.reader_exact_office_bundle --resource-json "$RESOURCE_JSON" --output output/v3/publication.json
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [[ "$OPERATION" == upgrade-web-profile ]]; then
+            set -euo pipefail
+            [[ "$APPLY" == true && "$GITHUB_RUN_ATTEMPT" == 1 && "$WEB_PROFILE_AUTOMATION_ID" =~ ^[0-9a-f]{32}$ ]]
+            [[ "$READER_WEB_PROFILE_REBUILD_ENABLED" == true && "$READER_PAGES_EXACT_ENABLED" == true && "$READER_WEB_PROFILE_PAGES_SCOPE_REVIEWED" == true && "$READER_PROFILE_PAUSED" != true ]]
+            python -B -m scripts.reader_pages_release --preflight
+            python -B -m scripts.reader_web_profile_publish --resource-json "$RESOURCE_JSON" --output output/v3/publication.json
             echo "changed=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -270,6 +285,25 @@ jobs:
           python -B -m scripts.reader_web_batch_cli live --managed --resource-json "$review" \
             --publication output/v3/publication.json --consumers output/v3/web-verification.json \
             --output output/v3/web-batch-object-readback.json
+      - name: Publish and verify automatic web profile on both sites
+        if: steps.operation.outputs.changed == 'true' && inputs.operation == 'upgrade-web-profile'
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_INPUT_TOKEN: ${{ secrets.HF_INPUT_TOKEN }}
+          HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+          READER_PAGES_DISPATCH_TOKEN: ${{ secrets.READER_PAGES_DISPATCH_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [[ "$(jq -er '.changed_rows' output/v3/publication.json)" != 0 ]]; then
+            python -B -m scripts.reader_pages_release --publication output/v3/publication.json --output output/v3/pages-release.json
+          fi
+          generation=$(jq -er '.generation' output/v3/publication.json)
+          python scripts/publish_reader_v3.py verify-generation --expected-parent "$generation" \
+            --wait-seconds 1200 --output output/v3/format-automation-verification.json
+          python -B -m scripts.reader_web_profile_readback --publication output/v3/publication.json \
+            --consumers output/v3/format-automation-verification.json --output output/v3/web-profile-readback.json
       - name: Publish and verify exact Office consumer projections
         if: steps.operation.outputs.changed == 'true' && inputs.operation == 'replace-exact-office-report'
         env:
@@ -409,6 +443,13 @@ jobs:
           generation=$(jq -r '.generation' output/v3/publication.json)
           python scripts/publish_reader_v3.py verify-generation --expected-parent "$generation" \
             --wait-seconds 1200 --output output/v3/reconciliation-verification.json
+      - uses: actions/upload-artifact@v7
+        if: always() && inputs.operation == 'upgrade-web-profile'
+        with:
+          name: web-profile-recovery-input
+          path: output/v3/web-profile-review.zip
+          retention-days: 30
+          if-no-files-found: ignore
       - uses: actions/upload-artifact@v7
         if: always()
         with:

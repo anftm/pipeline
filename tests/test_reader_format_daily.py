@@ -378,6 +378,20 @@ class DailyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'inconsistent source counts'):
             subject.plan(summary(0, 'epub', definite_backlog=1, profile_outdated=1))
 
+    def test_web_profile_replacement_is_one_central_operation_and_reports_held_rows(self):
+        before=summary(0,'html',definite_backlog=2,profile_outdated=2,conversion_dependencies_checked=False)
+        after=summary(0,'html',profile_upgrade_deferred=1,conversion_dependencies_checked=False)
+        self.refresh.side_effect=[before,after]
+        witness=self.api.publication_report
+        self.api.publication_report=lambda op,head:witness(op,head)|{'profile':{'converted':1,'identical':0,'held':1}}
+        result=self.controller(parent_run_id=123).run(before)
+        self.assertEqual(result['status'],'complete')
+        self.assertEqual(len(self.api.posts),1)
+        workflow,inputs=self.api.posts[0]
+        self.assertEqual((workflow,inputs['operation']),(subject.PUBLISH,'upgrade-web-profile'))
+        self.assertEqual(json.loads(inputs['resource_json']),{'extension':'html','search_generation':SEARCH,'parent_run_id':123})
+        self.assertEqual(result['formats']['html']['web_profile'],{'converted':1,'identical':0,'held':1})
+
     def test_one_initially_dispatches_but_zero_does_not(self):
         self.refresh.side_effect = [summary(1), summary(0)]
         result = self.controller().run(summary(1))

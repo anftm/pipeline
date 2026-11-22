@@ -2,6 +2,9 @@ name: Reader/桶 · Daily Format Conversion
 run-name: ${{ inputs.search_source_run && format('reader-search-handoff/{0}', inputs.search_source_run) || inputs.continuation_id && format('reader-format-continuation/{0}', inputs.continuation_id) || format('Reader format backlog / {0}', github.event_name) }}
 
 on:
+  push:
+    branches: [main]
+    paths: [scripts/reader_web_profile.py]
   # Recheck conversion rules even when Search has not published changed data.
   # This is an independent, default-off cadence; Search-triggered runs are unchanged.
   schedule:
@@ -49,6 +52,8 @@ jobs:
     if: >-
       github.repository == 'anftm/pipeline' &&
       (github.event_name == 'workflow_dispatch' ||
+       (github.event_name == 'push' && vars.READER_WEB_PROFILE_REBUILD_ENABLED == 'true' && vars.READER_WEB_PROFILE_PAGES_SCOPE_REVIEWED == 'true' &&
+        vars.READER_FORMAT_AUTOMATION_ENABLED == 'true' && vars.READER_V3_AUTO_PAUSED != 'true') ||
        (github.event_name == 'schedule' && vars.READER_FORMAT_RECHECK_ENABLED == 'true' &&
         vars.READER_FORMAT_AUTOMATION_ENABLED == 'true' && vars.READER_V3_AUTO_PAUSED != 'true') ||
        (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main' &&
@@ -59,8 +64,9 @@ jobs:
       READER_AUTOMATION_ENABLED: ${{ vars.READER_FORMAT_AUTOMATION_ENABLED }}
       READER_PAUSED: ${{ vars.READER_V3_AUTO_PAUSED }}
       READER_CHM_PROFILE_REBUILD_ENABLED: ${{ vars.READER_CHM_PROFILE_REBUILD_ENABLED }}
-      REQUESTED_APPLY: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_run' || (github.event_name == 'workflow_dispatch' && inputs.search_source_run != '') || inputs.apply }}
-      WRITERS: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_run' || (github.event_name == 'workflow_dispatch' && inputs.search_source_run != '') || inputs.known_writers_coordinated }}
+      READER_WEB_PROFILE_REBUILD_ENABLED: ${{ vars.READER_WEB_PROFILE_REBUILD_ENABLED }}
+      REQUESTED_APPLY: ${{ github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_run' || (github.event_name == 'workflow_dispatch' && inputs.search_source_run != '') || inputs.apply }}
+      WRITERS: ${{ github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_run' || (github.event_name == 'workflow_dispatch' && inputs.search_source_run != '') || inputs.known_writers_coordinated }}
       EXPLICIT_SEARCH_HANDOFF: ${{ github.event_name == 'workflow_dispatch' && inputs.search_source_run != '' }}
     steps:
       - uses: actions/checkout@v7

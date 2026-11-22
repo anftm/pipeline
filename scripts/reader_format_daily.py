@@ -104,7 +104,7 @@ def validate_summary(summary):
                 raise ValueError('invalid count: ' + ext + '/' + field)
         if (row['definite_backlog'] != row['not_mapped'] + row['source_content_changed'] + row['profile_outdated']
                 or row['profile_outdated'] + row['profile_upgrade_deferred'] > row['source_content_unchanged']
-                or ((row['profile_outdated'] or row['profile_upgrade_deferred']) and ext != 'chm')
+                or ((row['profile_outdated'] or row['profile_upgrade_deferred']) and family not in {'chm','web'})
                 or sum(row[k] for k in ('not_mapped', 'source_content_changed', 'source_content_unchanged',
                                         'source_identity_unknown', 'mapped_content_not_checked')) != row['sources']):
             raise ValueError('inconsistent source counts: ' + ext)
@@ -118,7 +118,7 @@ def validate_summary(summary):
 
 
 # Accept durable receipts produced before the source-change policy was widened.
-SOURCE_CHANGE_SCOPES = frozenset({'explicit_source_changes', 'first_conversion_only'})
+SOURCE_CHANGE_SCOPES = frozenset({'explicit_source_changes', 'first_conversion_only','source_or_web_profile_upgrade'})
 
 
 def explicit_source_changes(row, *, triggered=False):
@@ -140,8 +140,9 @@ def dependency_report(row):
             'warnings': ([] if checked else [
                 'Mapped unchanged sources have unknown external dependency freshness. '
                 'Dependency-only changes to unchanged sources are not counted or refreshed; '
-                'conversion recaptures dependencies only for new or proven-changed sources. '
-                'Completion covers known source changes only, not all dependency changes.'])}
+                'conversion recaptures dependencies only for new or proven-changed sources. ' +
+                ('Completion covers known source changes and explicitly eligible profile upgrades only, not all dependency changes.'
+                 if row['profile_outdated'] else 'Completion covers known source changes only, not all dependency changes.')])}
 
 
 def blockers(row, *, source_changes_triggered=False, first_conversion_triggered=False):
@@ -174,6 +175,7 @@ def plan(summary, *, boost_canary=None):
         decisions[ext] = {'state': state, 'reasons': reasons,
                           'counts': {key: row[key] for key in COUNTS}, 'workflow': FORMATS[ext][1],
                           'completion_scope': ('no_sources' if row['sources'] == 0 else
+                                               'source_or_web_profile_upgrade' if FORMATS[ext][0]=='web' and row['profile_outdated'] else
                                                'explicit_source_changes' if not row['conversion_dependencies_checked']
                                                and explicit_source_changes(row) else 'definite_backlog'),
                           **dependency_report(row)}
@@ -403,9 +405,17 @@ class GitHub:
             raise RuntimeError('publication report did not apply unify')
         validate_verification(verification, generation)
         check(self.get_run(run_id))  # A rerun during download invalidates attempt 1.
-        return {'generation': generation, 'verification': verification,
+        evidence = {'generation': generation, 'verification': verification,
                 'artifact_id': artifact['id'], 'artifact_digest': digest,
                 'run_id': run_id, 'run_attempt': 1, 'automation_id': operation['automation_id']}
+        if operation.get('phase')=='web-profile':
+            profile=publication.get('profile')
+            if (not isinstance(profile,dict) or profile.get('extension')!=operation['extension'] or
+                    any(type(profile.get(k)) is not int or profile[k]<0 for k in ('converted','identical','held')) or
+                    not 1<=sum(profile[k] for k in ('converted','identical','held'))<=10):
+                raise ValueError('invalid web profile outcome')
+            evidence['profile']={k:profile[k] for k in ('converted','identical','held')}
+        return evidence
 
     def report_artifact(self, run, name, expected_sha):
         run_id = run['id']
@@ -539,7 +549,7 @@ def validate_daily_run(run, expected_sha, *, completed=False):
                        and re.fullmatch(r'reader-search-handoff/[1-9][0-9]{0,19}', title))))
     if (not valid_title or run.get('name') not in {DAILY_NAME, title}
             or run.get('path') != '.github/workflows/' + DAILY
-            or run.get('event') not in {'workflow_dispatch', 'workflow_run', 'schedule'}
+            or run.get('event') not in {'workflow_dispatch', 'workflow_run', 'schedule','push'}
             or run.get('head_branch') != 'main' or run.get('head_sha') != expected_sha
             or type(run.get('id')) is not int or type(run.get('run_attempt')) is not int
             or run['run_attempt'] != 1
@@ -582,33 +592,40 @@ def validate_continuation(result, expected_sha, previous_run_id):
     if any(rows[ext][field] for ext in FORMATS for field in UNCERTAIN):
         raise ValueError('continuation contains pending, failure or unknown source state')
     operations = result.get('operations')
-    if (not isinstance(operations, list) or not operations or len(operations) % 2
-            or len(operations) != 2 * result.get('batches', -1)):
+    if (not isinstance(operations, list) or not operations
+            or sum(isinstance(op,dict) and op.get('phase') in {'unify','web-profile'} for op in operations)!=result.get('batches',-1)):
         raise ValueError('continuation has incomplete operation pairs')
     ids, run_ids = set(), set()
-    for index, operation in enumerate(operations):
+    pending_producer=None
+    for operation in operations:
         identifier = operation.get('automation_id', '')
-        ext = operation.get('extension')
-        expected_workflow = PUBLISH if index % 2 else FORMATS.get(ext, (None, None))[1]
+        ext = operation.get('extension'); phase=operation.get('phase')
+        expected_workflow = FORMATS.get(ext, (None, None))[1] if phase=='producer' else PUBLISH
+        if phase=='web-profile':
+            if pending_producer is not None or FORMATS.get(ext,(None,))[0]!='web' or operation.get('inputs',{}).get('operation')!='upgrade-web-profile':
+                raise ValueError('continuation has a malformed standalone web profile batch')
+        elif phase=='producer' and pending_producer is None:
+            pending_producer=ext
+        elif phase=='unify' and pending_producer==ext:
+            pending_producer=None
+        else:
+            raise ValueError('continuation operation pair differs')
         if (not OPERATION_ID.fullmatch(identifier) or identifier in ids
                 or type(operation.get('run_id')) is not int or operation['run_id'] in run_ids
                 or operation.get('run_name') != 'reader-auto/' + identifier
                 or ext not in triggered or expected_workflow is None
                 or operation.get('workflow') != expected_workflow
-                or operation.get('phase') != ('unify' if index % 2 else 'producer')
                 or operation.get('expected_sha') != expected_sha
                 or operation.get('status') != 'completed' or operation.get('conclusion') != 'success'):
             raise ValueError('continuation contains unresolved or duplicate operations')
         ids.add(identifier); run_ids.add(operation['run_id'])
-        if index % 2:
-            if ext != operations[index - 1]['extension']:
-                raise ValueError('continuation operation pair differs')
+        if phase in {'unify','web-profile'}:
             evidence = operation['publication_artifact']
             if evidence.get('run_id') != operation['run_id'] or evidence.get('run_attempt') != 1:
                 raise ValueError('continuation publication receipt run differs')
             validate_verification(evidence['verification'], evidence['generation'])
             validate_verification(operation['verification'], evidence['generation'])
-    if operations[-1]['verification']['generation'] != result['reader_generation']:
+    if pending_producer is not None or operations[-1]['verification']['generation'] != result['reader_generation']:
         raise ValueError('continuation Reader generation differs from final publication')
     if result.get('operation_ids') != [operation['automation_id'] for operation in operations]:
         raise ValueError('continuation operation IDs differ')
@@ -815,6 +832,12 @@ class Controller:
                 raise RuntimeError('Reader generation changed before first dispatch')
             triggered = [ext for ext, item in self.result['formats'].items() if item['state'] == 'triggered']
             queue = sorted(triggered, key=lambda ext: (ext != 'epub', FORMATS[ext][0] == 'text', ext))
+            if os.getenv('GITHUB_EVENT_NAME')=='push':
+                # A producer profile bump must not accidentally trigger
+                # unrelated format migrations from a routine push.
+                rows=validate_summary(current)
+                triggered=[ext for ext in triggered if FORMATS[ext][0]=='web' and rows[ext]['profile_outdated']]
+                queue=[ext for ext in queue if ext in triggered]
             if self.continuation is not None:
                 previous = self.continuation
                 validate_continuation(previous, self.expected_sha, previous['parent_run_id'])
@@ -865,12 +888,19 @@ class Controller:
                     continue
                 started = self.clock()
                 self.result['batches'] += 1
-                producer_id = self.new_id()
-                self.dispatch(FORMATS[ext][1], producer_inputs(
-                    ext, producer_id, expected_sha=self.expected_sha,
-                    search_generation=summary['search_generation'], boost_limit=boost_limit), ext, 'producer')
-                self.dispatch(PUBLISH, {'operation': 'unify', 'apply': 'true',
-                                        'automation_id': self.new_id()}, ext, 'unify')
+                if FORMATS[ext][0]=='web' and row['profile_outdated']:
+                    if self.boost_canary is not None:
+                        raise RuntimeError('ordinary canary cannot publish profile work')
+                    self.dispatch(PUBLISH, {'operation':'upgrade-web-profile','apply':'true','automation_id':self.new_id(),
+                                            'resource_json':json.dumps({'extension':ext,'search_generation':summary['search_generation'],
+                                                                        'parent_run_id':int(self.parent_run_id)},separators=(',',':'))}, ext, 'web-profile')
+                else:
+                    producer_id = self.new_id()
+                    self.dispatch(FORMATS[ext][1], producer_inputs(
+                        ext, producer_id, expected_sha=self.expected_sha,
+                        search_generation=summary['search_generation'], boost_limit=boost_limit), ext, 'producer')
+                    self.dispatch(PUBLISH, {'operation': 'unify', 'apply': 'true',
+                                            'automation_id': self.new_id()}, ext, 'unify')
                 operation = self.result['operations'][-1]
                 evidence = self.api.publication_report(operation, self.expected_sha)
                 generation = evidence['generation']
@@ -884,6 +914,13 @@ class Controller:
                 if current['reader_generation'] != generation:
                     raise RuntimeError('Reader generation changed after verification')
                 after = validate_summary(current)[ext]
+                if operation['phase']=='web-profile':
+                    profile=evidence['profile']
+                    if (row['profile_outdated']-after['profile_outdated']!=sum(profile.values())
+                            or after['profile_upgrade_deferred']-row['profile_upgrade_deferred']!=profile['held']):
+                        raise RuntimeError('web profile counts differ from the exact central outcome')
+                    aggregate=decision.setdefault('web_profile',{'converted':0,'identical':0,'held':0})
+                    for k,v in profile.items():aggregate[k]+=v
                 decision['counts'] = {key: after[key] for key in COUNTS}
                 self.update_counts(current, triggered)
                 operation['verification'] = receipt
@@ -968,7 +1005,8 @@ def live_callbacks():
     def refresh():
         with httpx.Client(timeout=30, follow_redirects=True) as client:
             return backlog.inspect(hub=hub, api=api, fs=fs, client=client, threshold=THRESHOLD, scope='all',
-                                   include_profile_upgrades=os.getenv('READER_CHM_PROFILE_REBUILD_ENABLED') == 'true')[0]
+                                   include_profile_upgrades=os.getenv('READER_CHM_PROFILE_REBUILD_ENABLED') == 'true',
+                                   include_web_profile_upgrades=os.getenv('READER_WEB_PROFILE_REBUILD_ENABLED') == 'true')[0]
 
     def verify(generation, remaining):
         with httpx.Client(timeout=min(30, remaining), follow_redirects=True) as client:
