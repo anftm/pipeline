@@ -229,6 +229,54 @@ class ManagedWebTests(unittest.TestCase):
         with self.assertRaisesRegex(managed.Hold, 'mhtml_ambiguous_resource'):
             managed.convert(raw.rsplit(p,1)[0] + b'YQ==\r\n--x--\r\n', 'mhtml', '', None, 50000)
 
+    def test_stylesheet_ids_distinguish_real_fragment_targets_from_loader_ids(self):
+        raw = ('<html><head><style id="loader">p { color: blue }</style></head>'
+               '<body><p id="body-target">正文</p><style id="css">p { color: red }</style><a href="#%63ss">回到样式位置</a>'
+               '<link id="local-css" rel="stylesheet" href="https://archive.invalid/offline.css">'
+               '<a href="#local-css">定位</a></body></html>').encode()
+        out=managed.convert(raw,'html','https://huggingface.co/',None,50000).decode()
+        doc=managed.parse_html(out)
+        self.assertIsNotNone(doc.find('body/span[@id="css"]'))
+        self.assertIsNotNone(doc.find('body/span[@id="local-css"]'))
+        self.assertIsNone(doc.find('.//*[@id="loader"]'))
+        self.assertIsNotNone(doc.find('body/p[@id="body-target"]'))
+        self.assertEqual([x.get('href') for x in doc.iter('a')],['#%63ss','#local-css'])
+        self.assertNotIn('offline.css',out)
+        self.assertEqual([n.get('id') for n in list(doc.find('body')) if n.get('id')],['body-target','css','local-css'])
+        for unsafe in (raw.replace(b'<style id="css">p { color: red }</style>',b'').replace(b'<head>',b'<head><style id="css">p{color:red}</style>'),
+                       raw.replace(b'<p id="body-target">',b'<p id="css">'),
+                       raw.replace(b'<style id="css">p { color: red }</style>',b'<input id="css">')):
+            with self.subTest(unsafe=unsafe),self.assertRaisesRegex(managed.Hold,'parity_anchors'):
+                managed.convert(unsafe,'html','https://huggingface.co/',None,50000)
+
+    def test_form_label_keeps_navigation_without_restoring_the_control(self):
+        raw=(DOC+'<label id="slug" for="checkbox" onclick="f()">说明</label>'
+             '<input id="checkbox"><a href="#slug">跳转</a>').encode()
+        cleaned=managed.convert(raw,'htm','https://huggingface.co/',None,50000).decode()
+        self.assertIn('<span id="slug">说明</span>',cleaned)
+        self.assertIn('href="#slug"',cleaned)
+        for forbidden in ('onclick','for="checkbox"','<input'):
+            self.assertNotIn(forbidden,cleaned)
+
+    def test_external_omissions_do_not_spend_fetch_budget_and_css_requires_confirmed_absence(self):
+        raw=(DOC+'<link rel="stylesheet" href="local.css">'+''.join(f'<img src="https://external.invalid/{i}.png">' for i in range(90))).encode()
+        def fetch(url):
+            if url.endswith('/local.css'):
+                raise managed.urllib.error.HTTPError(url,404,'missing',{'X-Error-Code':'EntryNotFound'},None)
+            if not url.endswith('/page.htm'):
+                self.fail('external download is forbidden')
+            return Response(raw)
+        with tempfile.TemporaryDirectory() as tmp:
+            row=managed.run(request(item(raw,'htm')),Path(tmp),fetch=fetch)['items'][0]
+            self.assertEqual(row['status'],'converted')
+            self.assertEqual(row['omissions'],{'missing_images':90,'missing_stylesheets':1})
+        look=managed.tree_lookup('https://huggingface.co/datasets/org/dataset/resolve/'+REV+'/page.htm',
+                                 managed.Downloads(100000,lambda _:Response(b'css')))
+        with patch.object(managed,'MAX_RESOURCES',1):
+            self.assertEqual(look('one.css',{'text/css'}),('text/css',b'css'))
+            with self.assertRaisesRegex(managed.Hold,'resource_count'):
+                look('two.css',{'text/css'})
+
     def test_source_validation_budgets_and_hold_isolation(self):
         raw = DOC.encode()
         with tempfile.TemporaryDirectory() as tmp:

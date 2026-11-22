@@ -27,6 +27,7 @@ from collections import Counter
 from email.parser import BytesParser
 from pathlib import Path
 from urllib.parse import parse_qsl, quote, unquote, urljoin, urlsplit
+from xml.etree.ElementTree import Element
 
 from . import convert_reader_assets as producer
 from .reader_web_profile import WEB_PROFILE
@@ -39,7 +40,8 @@ MAX_OUTPUT_BYTES = 128 * 1024 * 1024
 MAX_ITEM_SOURCE = 8 * 1024 * 1024
 MAX_DOCUMENT = 24 * 1024 * 1024
 MAX_RESOURCE = 2 * 1024 * 1024
-MAX_RESOURCES = 32
+MAX_RESOURCES = 64
+MAX_RESOURCE_REFERENCES = 512
 IMAGE_TYPES = {'.gif': 'image/gif', '.jpeg': 'image/jpeg', '.jpg': 'image/jpeg',
                '.png': 'image/png', '.webp': 'image/webp'}
 HF = 'huggingface.co'
@@ -263,8 +265,10 @@ def mhtml_body(raw):
 def tree_lookup(source_url, downloads):
     base = source_url.rsplit('/', 1)[0] + '/'
     prefix = urlsplit(base).path
+    requested = 0
 
     def lookup(value, allowed):
+        nonlocal requested
         image = 'image/png' in allowed
         parsed = urlsplit(urljoin(base, value))
         if (parsed.scheme != 'https' or parsed.netloc != HF or parsed.query or parsed.fragment
@@ -279,7 +283,14 @@ def tree_lookup(source_url, downloads):
             if image:
                 raise Hold('unsupported_embedded_content')
             return None
-        raw=downloads.get(base + quote(relative, safe='/'), MAX_RESOURCE, missing_ok=image)
+        # Only eligible same-directory request attempts consume this budget;
+        # non-fetched external resources have a separate reference cap.
+        if requested >= MAX_RESOURCES:
+            raise Hold('resource_count')
+        requested += 1
+        # Confirmed absence can fall back to Reader CSS as well. Transient
+        # errors and access/revision failures are still raised by Downloads.
+        raw=downloads.get(base + quote(relative, safe='/'), MAX_RESOURCE, missing_ok=True)
         return None if raw is None else (mime,raw)
 
     return lookup
@@ -293,14 +304,24 @@ def visible_text(node):
     return (node.text or '')+''.join(visible_text(child)+(child.tail or '') for child in node)
 
 
+def fragment_targets(root):
+    targets = set()
+    for node in root.iter('a'):
+        href = node.get('href','').strip()
+        if href.startswith('#') and len(href)>1:
+            targets.add(href[1:])
+            targets.add(unquote(href[1:]))
+    return targets
+
+
 def parity(root):
     body = root.find('body')
     if body is None:
         raise Hold('unsupported_embedded_content')
     title = root.find('head/title')
     table_tags = {'table', 'caption', 'thead', 'tbody', 'tfoot', 'tr', 'th', 'td', 'col', 'colgroup'}
-    fragments = {node.get('href','').strip()[1:] for node in root.iter('a') if node.get('href','').strip().startswith('#')}
-    non_navigation = {'input','textarea','form','button','select','option','v:shapetype'}
+    fragments = fragment_targets(root)
+    non_navigation = {'input','textarea','form','button','select','option','v:shapetype','style','link'}
     tables=[]
     stack=[(body,None)]
     while stack:
@@ -378,7 +399,6 @@ def inert_embed(node):
     attrs = {k: node.attrib[k] for k in ('id', 'lang', 'dir', 'title') if node.get(k)}
     svg = node.tag == '{http://www.w3.org/2000/svg}svg'
     if svg:
-        from xml.etree.ElementTree import Element
         ns = '{http://www.w3.org/2000/svg}'
         # Do not copy SVG markup, nested HTML, metadata or resource URLs.
         labels = [visible_text(child).strip() for child in node if child.tag in {ns+'title', ns+'desc'}]
@@ -425,7 +445,7 @@ def convert(raw, extension, url, downloads, limit, *, omissions=None):
             return None
         key = (value, allowed)
         if key not in cache:
-            if len(cache) >= MAX_RESOURCES:
+            if len(cache) >= MAX_RESOURCE_REFERENCES:
                 raise Hold('resource_count')
             cache[key] = lookup(value, allowed)
         result = cache[key]
@@ -440,6 +460,11 @@ def convert(raw, extension, url, downloads, limit, *, omissions=None):
             elif node.tag=='font':
                 # Preserve legacy navigation IDs when normalizing a passive tag.
                 node.tag='span'
+            elif node.tag=='label':
+                # The associated form control is not part of the offline
+                # Reader. The visible label itself can still be a link target.
+                node.tag='span'
+                node.attrib.pop('for',None)
             if node.tag in {'source','img'} and 'srcset' in node.attrib and not node.get('srcset','').strip(' \t\n\r\f,'):
                 node.attrib.pop('srcset')
             if extension in {'mht','mhtml'} and archival_navigation_frame(node):
@@ -515,6 +540,20 @@ def convert(raw, extension, url, downloads, limit, *, omissions=None):
             raise Hold('output_budget')
         node.set('src', f'data:{mime};base64,' + base64.b64encode(image).decode('ascii'))
 
+    # A real link to a body stylesheet keeps its target at the same location.
+    # Do not relocate a head target or guess which duplicate the reader opens.
+    fragments = fragment_targets(tree)
+    target_counts=Counter(value for node in tree.iter() for value in
+                          {node.get('id'), node.get('name') if node.tag=='a' else None} if value)
+    body_nodes=set(body.iter())
+    for parent in list(tree.iter()):
+        for node in list(parent):
+            anchor=node.get('id')
+            if node.tag in {'link','style'} and anchor and anchor in fragments:
+                if parent not in body_nodes or target_counts[anchor]!=1:
+                    raise Hold('parity_anchors')
+                parent.insert(list(parent).index(node),Element('span',{'id':anchor}))
+                node.attrib.pop('id')
     parents = {child: parent for parent in tree.iter() for child in parent if child.tag == 'link'}
     for node, parent in parents.items():
         if ('stylesheet' not in node.get('rel', '').lower().split()
@@ -524,10 +563,7 @@ def convert(raw, extension, url, downloads, limit, *, omissions=None):
         css = resource(node.get('href', ''), frozenset({'text/css'}))
         if css is None:
             # Use the built-in reader stylesheet in the absence of archived
-            # CSS. A failed request still raises above, and a linked ID is not
-            # removed as if it were an unreferenced stylesheet loader.
-            if node.get('id') and any(a.get('href','').strip()=='#'+node.get('id') for a in tree.iter('a')):
-                raise Hold('missing_stylesheet')
+            # CSS. Transient failures still raise above.
             detach(parent,node)
             missing_stylesheets+=1
             continue
