@@ -12,7 +12,7 @@ on:
         default: ''
       operation:
         type: choice
-        options: [inspect, unify, ack, retire, withdraw, reset-documents, remove-route, restore-route, verify-route, migrate-derived, resume-derived, redirect-derived, finalize-derived-redirects, replace-derived-history, replace-exact-web, verify-exact-web, replace-managed-web, verify-managed-web, prepare-managed-web, upgrade-web-profile, verify-exact-office-report, replace-exact-office-report, refresh-reader-consumers, reconcile-derived-index, reconcile-sidecar, compact-legacy-history, publish-generation, verify-generation, verify-pages-lane]
+        options: [inspect, unify, ack, retire, withdraw, reset-documents, remove-route, restore-route, verify-route, migrate-derived, resume-derived, redirect-derived, finalize-derived-redirects, replace-derived-history, replace-exact-web, verify-exact-web, replace-managed-web, verify-managed-web, prepare-managed-web, upgrade-web-profile, record-web-retirement-hints, verify-exact-office-report, replace-exact-office-report, refresh-reader-consumers, reconcile-derived-index, reconcile-sidecar, compact-legacy-history, publish-generation, verify-generation, verify-pages-lane]
         default: inspect
       resource_json:
         description: 'Migration requires root identities; optional read-only check_s3=true; apply/resume require external_writers_stopped=true'
@@ -109,8 +109,26 @@ jobs:
         run: |
           pip install playwright==1.65.2
           python -m playwright install --with-deps chromium --only-shell
+      - name: Verify or record exact historical Web retirement hints
+        if: inputs.operation == 'record-web-retirement-hints'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_S3_ACCESS_KEY_ID: ${{ inputs.apply && secrets.HF_S3_ACCESS_KEY_ID || '' }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ inputs.apply && secrets.HF_S3_SECRET_ACCESS_KEY || '' }}
+          RESOURCE_JSON: ${{ inputs.resource_json }}
+          APPLY: ${{ inputs.apply }}
+        run: |
+          set -euo pipefail
+          mkdir -p output/v3
+          args=()
+          if [[ "$APPLY" == true ]]; then args+=(--apply); fi
+          python -B -m unittest tests.test_reader_web_retirement_backfill tests.test_reader_web_retention_plan
+          python -B -m scripts.reader_web_retirement_backfill --resource-json "$RESOURCE_JSON" \
+            --output output/v3/web-retirement-hints.json "${args[@]}"
       - name: Verify and execute the central v3 operation
         id: operation
+        if: inputs.operation != 'record-web-retirement-hints'
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_INPUT_TOKEN: ${{ secrets.HF_INPUT_TOKEN }}

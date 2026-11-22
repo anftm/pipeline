@@ -179,7 +179,8 @@ class V3PublicationTests(unittest.TestCase):
                           "remove-route", "restore-route", "verify-route", "migrate-derived", "resume-derived",
                           "redirect-derived", "finalize-derived-redirects", "replace-derived-history",
                           "replace-exact-web", "verify-exact-web", "replace-managed-web", "verify-managed-web",
-                          "prepare-managed-web", "upgrade-web-profile", "verify-exact-office-report", "replace-exact-office-report",
+                          "prepare-managed-web", "upgrade-web-profile", "record-web-retirement-hints",
+                          "verify-exact-office-report", "replace-exact-office-report",
                           "refresh-reader-consumers", "reconcile-derived-index", "reconcile-sidecar",
                           "compact-legacy-history", "publish-generation", "verify-generation", "verify-pages-lane"])
         operation_step = next(step for step in workflow["jobs"]["publish"]["steps"]
