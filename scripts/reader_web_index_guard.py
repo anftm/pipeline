@@ -155,25 +155,31 @@ def _index(raw):
     return value, web._rows(value, 'files')
 
 
-def _check_change(parent_raw, target, after, ext):
+def _check_change(parent_raw, target, after, ext, expected_keys=None):
     parent, before = _index(parent_raw)
     if before.keys() != after.keys() or not web._json_equal(parent['failures'], target['failures']):
         raise ValueError('exact web change must preserve all file keys and failures')
     changed = [key for key in before if not web._json_equal(before[key], after[key])]
-    if len(changed) != 1:
-        raise ValueError('exact web change must replace exactly one file row')
-    old, new = before[changed[0]], after[changed[0]]
-    candidate = {k: v for k, v in new.items() if k != 'checkpointed_at'}
-    old_root, new_root = web._web_row(old, old=True), web._web_row(candidate, old=False)
-    if (old['extension'] != ext or new['extension'] != ext or old_root == new_root
-            or any(old[k] != new[k] for k in ('source_sha256', 'source_revision'))
-            or old['sha256'] == new['sha256']
-            or ('checkpointed_at' in old) != ('checkpointed_at' in new)
-            or old.get('checkpointed_at') != new.get('checkpointed_at')):
-        raise ValueError('exact web change must replace the derivative, not the source or watermark')
+    if expected_keys is None:
+        if len(changed) != 1:
+            raise ValueError('exact web change must replace exactly one file row')
+    elif (not isinstance(expected_keys, frozenset) or not 1 <= len(expected_keys) <= 7
+          or set(changed) != expected_keys):
+        raise ValueError('exact web change does not match sealed keys')
+    for key in changed:
+        old, new = before[key], after[key]
+        candidate = {k: v for k, v in new.items() if k != 'checkpointed_at'}
+        old_root, new_root = web._web_row(old, old=True), web._web_row(candidate, old=False)
+        if (old['key'] != candidate['key'] or old['extension'] != ext or new['extension'] != ext or old_root == new_root
+                or any(old[k] != new[k] for k in ('source_sha256', 'source_revision'))
+                or old['sha256'] == new['sha256']
+                or ('checkpointed_at' in old) != ('checkpointed_at' in new)
+                or old.get('checkpointed_at') != new.get('checkpointed_at')):
+            raise ValueError('exact web change must replace the derivative, not the source or watermark')
 
 
-def apply(store, journal, *, path, parent_sha256, target_raw, prerequisites, guard, resume=False):
+def apply(store, journal, *, path, parent_sha256, target_raw, prerequisites, guard, resume=False,
+          expected_keys=None, parent_etag=None):
     """Use a ConditionalCheckpointStore and S3Journal (or equivalent journal).
 
     Supply exact CAS-encoded target bytes with a unique checkpoint_operation and
@@ -209,9 +215,11 @@ def apply(store, journal, *, path, parent_sha256, target_raw, prerequisites, gua
     parent = checkpoints.read(web.BUCKET, path)
     if parent.raw_sha256 != parent_sha256:
         raise RuntimeError('exact web canonical parent SHA-256 differs; no claim made')
+    if parent_etag is not None and parent.etag != parent_etag:
+        raise RuntimeError('exact web canonical parent ETag differs; no claim made')
     if parent.value.get('checkpoint_operation') == operation:
         raise ValueError('checkpoint operation must differ from the exact parent')
-    _check_change(parent.raw, target, after, ext)
+    _check_change(parent.raw, target, after, ext, expected_keys)
     if journal.claim(parent_sha256, seal, guard=guard) is not True:
         raise RuntimeError('exact web index parent permit not acquired; do not write')
     observed = checkpoints.read(web.BUCKET, path)

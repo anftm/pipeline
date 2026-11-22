@@ -1,0 +1,148 @@
+"""Publish a separately attested exact ten-web batch in the central writer window."""
+from tempfile import TemporaryFile
+from . import publish_reader_v3 as v3, reader_web_batch_indexes as indexes, reader_web_batch_plan as plan
+from . import reader_image_history_publish as legacy, reader_image_history_v3 as promote
+from . import reader_web_batch_review as review_module, reader_web_index_guard as index
+from .reader_image_history_parent import CatalogParent
+from .reader_image_history_publish_journal import LegacyJournal
+from .reader_image_history_publish_s3 import LegacyRoots
+from .reader_image_history_store import S3ClaimStore
+from .reader_page_cas import ConditionalPageStore
+from .reader_stream_checkpoint_cas import ConditionalCheckpointStore
+from .reader_web_exact_apply import PointerStore, _check_pointer_phase, guard_window
+from .reader_web_exact_stage import immutable_creator
+
+B=v3.ASSETS
+SEAL='reader-web-legacy-publish-v1'
+
+
+def run(blob, bundle_sha, review_sha, proof, *, phase, external_writers_stopped):
+    if phase not in {'apply','resume-index','resume-legacy','observe-v3'}:
+        raise ValueError('explicit ten-web phase required')
+    review,data,parents,pairs=review_module.parse(blob,bundle_sha,review_sha)
+    if (proof.get('version')!=1 or proof.get('remote_writes')!=0
+            or proof.get('parent_generation')!=review['parent_generation']
+            or proof.get('pointer_sha256')!=plan.digest(data['pointer.json'])
+            or proof.get('review_sha256')!=review_sha or proof.get('bundle_sha256')!=bundle_sha):
+        raise ValueError('authority receipt does not bind this exact batch')
+    hub=v3.CentralHubStore()
+    window=lambda:guard_window(hub,external_writers_stopped)
+    window()
+    cps=ConditionalCheckpointStore();s3=cps.store;client=s3._client('vomebook')
+    transport=LegacyRoots(client);journal=LegacyJournal(client);claims=S3ClaimStore(client)
+    pointers=ConditionalPageStore(hub,s3=s3)
+    cat_parent=legacy.Version(**proof['catalog']);side_parent=legacy.Version(**proof['sidecar'])
+    before=data['sidecar-before.gz'];after=data['sidecar-after.gz'];ptr=data['pointer.json'];successor=review['target_pointer']
+    meta=review['legacy']; sx=v3.encode(successor)
+    cat_target=(meta['target_sha256'],meta['target_bytes']);side_target=(plan.digest(after),len(after))
+    if ((cat_parent.sha256,cat_parent.size)!=(meta['parent_sha256'],meta['parent_bytes'])
+        or (side_parent.sha256,side_parent.size)!=(plan.digest(before),len(before))):
+        raise ValueError('legacy parent attestation differs from the sealed batch')
+    archive=CatalogParent(client,digest=cat_parent.sha256,size=cat_parent.size,etag=cat_parent.etag)
+    expected_live=sx if phase=='observe-v3' else ptr
+    _check_pointer_phase(hub,s3,expected_live)
+    if phase!='observe-v3':
+        prior,want,packed=plan.project(hub,before,pairs)
+        if prior['generation']!=review['parent_generation'] or want!=successor or packed!=after:
+            raise ValueError('the exact published batch projection differs')
+    seal=legacy.transition_seal(SEAL,cat_parent,side_parent,cat_target,side_target,ptr)
+    def protect_input(path,raw=None,*,digest=None,length=None,mime='application/json'):
+        try:found=s3.read_bytes(B,path)
+        except FileNotFoundError:
+            if phase!='apply' or raw is None:raise
+            window();immutable_creator(client)(path,raw,mime);found=s3.read_bytes(B,path)
+        if ((raw is not None and found!=raw) or (digest is not None and plan.digest(found)!=digest)
+            or (length is not None and len(found)!=length) or hub.read_bytes(B,path)!=found):
+            raise ValueError('exact batch asset protection bytes differ: '+path)
+    pin=review['retention']['path']; targets={e:data[f'target-{e}.json'] for e in parents}
+    prereq={'review':review_sha,'sidecar':side_parent.sha256,'legacy_catalog':cat_parent.sha256,'pointer':plan.digest(ptr),'retention':review['retention']['sha256']}
+    if phase in {'apply','resume-index'}:
+        if journal.read(cat_parent.sha256) is not None:
+            raise RuntimeError('legacy parent already spent; reconcile before changing indexes')
+        permit=promote.PREFIX+plan.digest(ptr)+'.json'
+        if claims._get(permit,maximum=promote.LIMIT)[0] is not None:
+            raise RuntimeError('v3 parent already spent; reconcile before changing indexes')
+        if pointers.read_for_update(B,legacy.SIDECAR)!=(before,side_parent.etag):
+            raise ValueError('legacy sidecar parent no longer agrees')
+        for e,obj in review['canonical'].items():
+            s=cps.read(B,obj['path']); allowed=(parents[e],targets[e]) if phase=='resume-index' else (parents[e],)
+            if s.raw not in allowed or s.raw!=hub.read_bytes(B,obj['path']):
+                raise ValueError('canonical parent/view mismatch before staging: '+e)
+            if (s.raw==parents[e] and s.etag!=proof['index_etags'][e]):
+                raise ValueError('canonical parent ETag mismatch: '+e)
+            if phase=='apply' and index.S3Journal(client).read(obj['parent_sha256'],guard=lambda _:window()) is not None:
+                raise ValueError('exact canonical parent permit is already spent: '+e)
+    with TemporaryFile() as catalog_parent:
+        if phase=='apply':archive._download(legacy.CATALOG,catalog_parent,condition=cat_parent.etag)
+        else:archive.load(catalog_parent)
+        def make_plan(out):
+            catalog_parent.seek(0)
+            return plan.plan_legacy(catalog_parent,out,before=before,after=after,pairs=pairs,
+                                    timestamp=review['timestamp'],parent_sha=cat_parent.sha256)
+        with TemporaryFile() as out:
+            if make_plan(out)!=meta:raise ValueError('sealed streamed catalog plan differs')
+        if phase=='apply':archive.stage(catalog_parent,guard=window)
+        for row in review['rows']:
+            old=row['old'];protect_input(old['object'],digest=old['sha256'],length=old['bytes'])
+            protect_input(old['manifest'],digest=row['old_manifest_sha256'])
+        # Protect both old and new resources before the first index replacement.
+        for row in review['rows']:
+            new=row['new']; ident=row['id']
+            protect_input(new['object'],data[ident+'/document.html'],mime='text/html; charset=utf-8')
+            protect_input(new['manifest'],data[ident+'/document-manifest.json'])
+        protect_input(pin,data['retained.json'])
+        snapshot=meta['snapshot']['path'];protect_input(snapshot,after,mime='application/gzip')
+        def protected():
+            if window() is not True:return False
+            _check_pointer_phase(hub,s3,expected_live)
+            for path,raw in ((pin,data['retained.json']),(snapshot,after)):
+                if s3.read_bytes(B,path)!=raw or hub.read_bytes(B,path)!=raw:
+                    raise ValueError('exact batch reachability or snapshot drifted')
+            return True
+        index_journal=index.S3Journal(client)
+        def all_targets():
+            for ext,item in review['canonical'].items():
+                if cps.read(B,item['path']).raw!=targets[ext] or hub.read_bytes(B,item['path'])!=targets[ext]:
+                    raise RuntimeError('exact canonical batch target missing: '+ext)
+                expected=index._permit(item['path'],item['parent_sha256'],item['target_sha256'],prereq)
+                if index_journal.read(item['parent_sha256'],guard=lambda _:True)!=expected:
+                    raise RuntimeError('exact canonical batch permit missing: '+ext)
+        if phase in {'apply','resume-index'}:
+            def before_indexes():
+                return protected() and pointers.read_for_update(B,legacy.SIDECAR)==(before,side_parent.etag)
+            outcomes=indexes.canonical_set(checkpoints=cps,journal=index_journal,hub=hub,parents=parents,pairs=pairs,
+                       operation=review['operation'],etags=proof['index_etags'],prerequisites=prereq,guard=before_indexes,recover=phase!='apply')
+        else:outcomes={e:'observed' for e in targets}
+        def legacy_guard(_):
+            if protected() is not True:return False
+            all_targets();return True
+        if phase=='observe-v3':
+            if legacy_guard('observe') is not True:raise RuntimeError('cannot verify exact writer window')
+            c=transport.observe(legacy.CATALOG);s=transport.observe(legacy.SIDECAR)
+            if ((c.sha256,c.size)!=cat_target or (s.sha256,s.size)!=side_target or
+                journal.read(cat_parent.sha256)!=legacy.Record(seal,'legacy-observed',c.etag,s.etag)
+                or hub.digest(B,legacy.CATALOG)!=cat_target[0] or hub.read_bytes(B,legacy.SIDECAR)!=after):
+                raise ValueError('exact legacy batch successor not observed')
+            moved={'seal':seal,'catalog':c,'sidecar':s}
+        else:
+            moved=legacy.publish_route_transition(parent=cat_parent,before_sidecar=before,sidecar_etag=side_parent.etag,
+                after_sidecar=after,key=frozenset(o['key'] for o,_ in pairs),expected_catalog_sha256=cat_target[0],
+                expected_catalog_bytes=cat_target[1],expected_pointer_raw=ptr,journal=journal,observe=transport.observe,
+                reader_catalog_digest=lambda:hub.digest(B,legacy.CATALOG),cas=transport.put_once,store=hub,
+                guard=legacy_guard,resume=phase=='resume-legacy',seal_kind=SEAL,plan_catalog=make_plan)
+    def promotion_guard():
+        if window() is not True:return False
+        current=hub.read_bytes(B,v3.POINTER)
+        if current not in (ptr,sx):raise RuntimeError('Reader pointer is neither sealed state')
+        _check_pointer_phase(hub,s3,current);all_targets()
+        if any(s3.read_bytes(B,path)!=raw or hub.read_bytes(B,path)!=raw for path,raw in ((pin,data['retained.json']),(snapshot,after))):
+            raise RuntimeError('batch protection drifted')
+        for path,key in ((legacy.CATALOG,'catalog'),(legacy.SIDECAR,'sidecar')):
+            o=moved[key];h=client.head_object(Bucket='reader-assets-v2',Key=path)
+            if (h.get('ContentLength'),h.get('ETag'))!=(o.size,o.etag):raise RuntimeError('legacy successor ETag drifted')
+        return True
+    result=promote.promote_route(store=PointerStore(hub,s3,promotion_guard,ptr),client=client,
+             parent_raw=ptr,target_pointer=successor,canonical_sha256=plan.digest(after),legacy_seal=moved['seal'],
+             guard=promotion_guard,observe_only=phase=='observe-v3',permit_kind='reader-web-v3-permit')
+    return {**result,'applied':True,'canonical':outcomes,'changed_rows':10,'retention_root':pin,
+             'objects_deleted':False,'pages_pending':True,'deleted_objects':0}
