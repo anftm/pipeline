@@ -40,7 +40,7 @@ def promote_route(*, store, client, parent_raw, target_pointer, canonical_sha256
     claim = PREFIX + history._sha(parent_raw) + '.json'
     # A shared claim namespace prevents two format-specific coordinators
     # from spending the same v3 parent.
-    if permit_kind not in {'reader-image-v3-permit', 'reader-web-v3-permit'}:
+    if permit_kind not in {'reader-image-v3-permit', 'reader-web-v3-permit', 'reader-office-v3-permit'}:
         raise ValueError('unknown scoped Reader v3 permit kind')
     permit = history._encode({'version': 1, 'kind': permit_kind, 'parent_sha256': history._sha(parent_raw),
                               'pointer': target_pointer, 'canonical_sha256': canonical_sha256, 'legacy_seal': legacy_seal})

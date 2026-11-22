@@ -12,7 +12,7 @@ on:
         default: ''
       operation:
         type: choice
-        options: [inspect, unify, ack, retire, withdraw, reset-documents, remove-route, restore-route, verify-route, migrate-derived, resume-derived, redirect-derived, finalize-derived-redirects, replace-derived-history, replace-exact-web, verify-exact-web, verify-exact-office-report, refresh-reader-consumers, reconcile-derived-index, reconcile-sidecar, compact-legacy-history, publish-generation, verify-generation, verify-pages-lane]
+        options: [inspect, unify, ack, retire, withdraw, reset-documents, remove-route, restore-route, verify-route, migrate-derived, resume-derived, redirect-derived, finalize-derived-redirects, replace-derived-history, replace-exact-web, verify-exact-web, verify-exact-office-report, replace-exact-office-report, refresh-reader-consumers, reconcile-derived-index, reconcile-sidecar, compact-legacy-history, publish-generation, verify-generation, verify-pages-lane]
         default: inspect
       resource_json:
         description: 'Migration requires root identities; optional read-only check_s3=true; apply/resume require external_writers_stopped=true'
@@ -91,8 +91,8 @@ jobs:
         if: inputs.operation == 'replace-exact-web' || inputs.operation == 'verify-exact-web'
         run: python -B -m unittest tests.test_reader_mht_s3_preflight tests.test_reader_web_exact_plan tests.test_reader_web_index_guard tests.test_reader_web_exact_publication tests.test_reader_image_history_catalog tests.test_reader_image_history_publish tests.test_reader_image_history_v3
       - name: Test exact Office report preflight
-        if: inputs.operation == 'verify-exact-office-report'
-        run: python -B -m unittest tests.test_reader_exact_office_plan
+        if: inputs.operation == 'verify-exact-office-report' || inputs.operation == 'replace-exact-office-report'
+        run: python -B -m unittest tests.test_reader_exact_office_plan tests.test_reader_image_history_catalog tests.test_reader_image_history_publish tests.test_reader_image_history_v3
       - name: Test scoped Reader consumer root refresh
         if: inputs.operation == 'refresh-reader-consumers'
         run: python -B -m unittest tests.test_reader_page_consumer_refresh tests.test_reader_page_consumer_store
@@ -101,13 +101,13 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_INPUT_TOKEN: ${{ secrets.HF_INPUT_TOKEN }}
-          HF_S3_ACCESS_KEY_ID: ${{ (contains(fromJSON('["migrate-derived","resume-derived","redirect-derived","finalize-derived-redirects","replace-derived-history","replace-exact-web","verify-exact-web","verify-exact-office-report","refresh-reader-consumers","reconcile-derived-index","reconcile-sidecar","compact-legacy-history","unify","remove-route","restore-route"]'), inputs.operation) || (vars.READER_PAGES_EXACT_ENABLED == 'true' && inputs.apply && inputs.operation == 'publish-generation') || (inputs.operation == 'verify-pages-lane' && !inputs.apply)) && secrets.HF_S3_ACCESS_KEY_ID || '' }}
-          HF_S3_SECRET_ACCESS_KEY: ${{ (contains(fromJSON('["migrate-derived","resume-derived","redirect-derived","finalize-derived-redirects","replace-derived-history","replace-exact-web","verify-exact-web","verify-exact-office-report","refresh-reader-consumers","reconcile-derived-index","reconcile-sidecar","compact-legacy-history","unify","remove-route","restore-route"]'), inputs.operation) || (vars.READER_PAGES_EXACT_ENABLED == 'true' && inputs.apply && inputs.operation == 'publish-generation') || (inputs.operation == 'verify-pages-lane' && !inputs.apply)) && secrets.HF_S3_SECRET_ACCESS_KEY || '' }}
+          HF_S3_ACCESS_KEY_ID: ${{ (contains(fromJSON('["migrate-derived","resume-derived","redirect-derived","finalize-derived-redirects","replace-derived-history","replace-exact-web","verify-exact-web","verify-exact-office-report","replace-exact-office-report","refresh-reader-consumers","reconcile-derived-index","reconcile-sidecar","compact-legacy-history","unify","remove-route","restore-route"]'), inputs.operation) || (vars.READER_PAGES_EXACT_ENABLED == 'true' && inputs.apply && inputs.operation == 'publish-generation') || (inputs.operation == 'verify-pages-lane' && !inputs.apply)) && secrets.HF_S3_ACCESS_KEY_ID || '' }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ (contains(fromJSON('["migrate-derived","resume-derived","redirect-derived","finalize-derived-redirects","replace-derived-history","replace-exact-web","verify-exact-web","verify-exact-office-report","replace-exact-office-report","refresh-reader-consumers","reconcile-derived-index","reconcile-sidecar","compact-legacy-history","unify","remove-route","restore-route"]'), inputs.operation) || (vars.READER_PAGES_EXACT_ENABLED == 'true' && inputs.apply && inputs.operation == 'publish-generation') || (inputs.operation == 'verify-pages-lane' && !inputs.apply)) && secrets.HF_S3_SECRET_ACCESS_KEY || '' }}
           GH_TOKEN: ${{ github.token }}
-          GC_CENTRAL_TOKEN: ${{ inputs.operation == 'replace-exact-web' && github.token || '' }}
+          GC_CENTRAL_TOKEN: ${{ (inputs.operation == 'replace-exact-web' || inputs.operation == 'replace-exact-office-report') && github.token || '' }}
           GC_PRODUCER_TOKENS_JSON: ${{ secrets.GC_PRODUCER_TOKENS_JSON }}
           GC_AMBROSSEE_MAINTENANCE_TOKEN: ${{ secrets.GC_AMBROSSEE_MAINTENANCE_20261102 }}
-          READER_PAGES_DISPATCH_TOKEN: ${{ ((vars.READER_PAGES_EXACT_ENABLED == 'true' && inputs.apply && contains(fromJSON('["unify","publish-generation","replace-exact-web"]'), inputs.operation)) || (inputs.operation == 'verify-pages-lane' && !inputs.apply)) && secrets.READER_PAGES_DISPATCH_TOKEN || '' }}
+          READER_PAGES_DISPATCH_TOKEN: ${{ ((vars.READER_PAGES_EXACT_ENABLED == 'true' && inputs.apply && contains(fromJSON('["unify","publish-generation","replace-exact-web","replace-exact-office-report"]'), inputs.operation)) || (inputs.operation == 'verify-pages-lane' && !inputs.apply)) && secrets.READER_PAGES_DISPATCH_TOKEN || '' }}
           READER_V3_PREVIEW_FIRST: ${{ vars.READER_V3_PREVIEW_FIRST || 'false' }}
           READER_V3_DJVU_MIGRATION: ${{ vars.READER_V3_DJVU_MIGRATION || 'false' }}
           READER_DATASET_PRIMARY_ENABLED: ${{ vars.READER_DATASET_PRIMARY_ENABLED || 'false' }}
@@ -119,7 +119,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           SCHEDULE: ${{ github.event.schedule }}
           READER_PAGES_EXACT_ENABLED: ${{ vars.READER_PAGES_EXACT_ENABLED }}
-          READER_WEB_PAGES_DISPATCH_SCOPE_REVIEWED: ${{ inputs.operation == 'replace-exact-web' && vars.READER_WEB_PAGES_DISPATCH_SCOPE_REVIEWED || '' }}
+          READER_WEB_PAGES_DISPATCH_SCOPE_REVIEWED: ${{ (inputs.operation == 'replace-exact-web' || inputs.operation == 'replace-exact-office-report') && vars.READER_WEB_PAGES_DISPATCH_SCOPE_REVIEWED || '' }}
         run: |
           # Old scheduled or queued runs must not resume retirement after the
           # publisher is re-enabled. Manual dispatch is the only live entry.
@@ -148,6 +148,19 @@ jobs:
             [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
             [[ "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" == "$GITHUB_SHA" ]]
             python -B -m scripts.reader_mht_s3_preflight
+            exit 0
+          fi
+          if [[ "$OPERATION" == replace-exact-office-report ]]; then
+            set -euo pipefail
+            [[ "$APPLY" == true && "$READER_PAGES_EXACT_ENABLED" == true && -n "$GC_CENTRAL_TOKEN" ]]
+            [[ "$READER_WEB_PAGES_DISPATCH_SCOPE_REVIEWED" == true ]]
+            [[ "$GITHUB_REF" == refs/heads/main && "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" && "$GITHUB_RUN_ATTEMPT" == 1 ]]
+            [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+            [[ "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" == "$GITHUB_SHA" ]]
+            python -B -m scripts.reader_pages_release --preflight
+            mkdir -p output/v3
+            python -B -m scripts.reader_exact_office_bundle --resource-json "$RESOURCE_JSON" --output output/v3/publication.json
+            echo "changed=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           if [[ "$OPERATION" == replace-exact-web ]]; then
@@ -202,6 +215,21 @@ jobs:
             --wait-seconds 1200 --output output/v3/web-verification.json
           python -B -m scripts.reader_web_exact_live --publication output/v3/publication.json \
             --consumers output/v3/web-verification.json --output output/v3/web-object-readback.json
+      - name: Publish and verify exact Office consumer projections
+        if: steps.operation.outputs.changed == 'true' && inputs.operation == 'replace-exact-office-report'
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_INPUT_TOKEN: ${{ secrets.HF_INPUT_TOKEN }}
+          HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+          READER_PAGES_DISPATCH_TOKEN: ${{ secrets.READER_PAGES_DISPATCH_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python -B -m scripts.reader_pages_release --publication output/v3/publication.json --output output/v3/pages-release.json
+          generation=$(jq -er '.generation' output/v3/publication.json)
+          python scripts/publish_reader_v3.py verify-generation --expected-parent "$generation" \
+            --wait-seconds 1200 --output output/v3/office-verification.json
       - name: Publish the pinned projection to Pages
         if: >-
           steps.operation.outputs.apply == 'true' &&

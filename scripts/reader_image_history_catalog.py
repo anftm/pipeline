@@ -267,7 +267,8 @@ def plan_route_transition(source, target, *, now, removed, verified_delta, after
     if not isinstance(now, str) or datetime.fromisoformat(now.replace('Z', '+00:00')).tzinfo is None:
         raise ValueError('catalog timestamp must have a timezone')
     before_sha, after_sha, before_refs, after_refs = verified_delta
-    if removed not in before_refs:
+    removed = removed if isinstance(removed, frozenset) else frozenset({removed})
+    if not removed or not removed <= before_refs:
         raise ValueError('removed route reference is missing from the parent sidecar')
 
     reader = _Reader(source, max_source_bytes, max_entry_bytes)
@@ -310,7 +311,7 @@ def plan_route_transition(source, target, *, now, removed, verified_delta, after
                             if isinstance(acks, dict) and any(acks.get(surface) is True for surface in ('hf', 'pages')):
                                 raise ValueError('current catalog generation already has replacement acknowledgments')
                             previous, previous_published = name, value.get('published_at')
-                            refs = sorted((prior_refs - {removed}) | after_refs)
+                            refs = sorted((prior_refs - removed) | after_refs)
                             signature = lifecycle._generation_id({'sidecar_sha256': after_sha, 'references': refs}, None)
                             successor = lifecycle._generation_id({'signature': signature}, name)
                             snapshot = {'bucket': image.BUCKET,
@@ -321,8 +322,9 @@ def plan_route_transition(source, target, *, now, removed, verified_delta, after
                                      'references': [{'bucket': b, 'path': p} for b, p in refs],
                                      'acks': {'hf': False, 'pages': False}, 'snapshot': snapshot}
                             del prior_refs, refs
-                            if removed not in after_refs:
-                                hint = retirement.record([{'bucket': removed[0], 'path': removed[1]}], [],
+                            unreferenced = sorted(removed - after_refs)
+                            if unreferenced:
+                                hint = retirement.record([{'bucket': b, 'path': p} for b, p in unreferenced], [],
                                                          successor, 'catalog-replacement')
                             value.update(status='superseded', superseded_at=now)
                     body.write(comma + _member(name, value, max_entry_bytes))

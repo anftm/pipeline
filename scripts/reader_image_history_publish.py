@@ -163,8 +163,9 @@ def publish_route_transition(*, parent: Version, before_sidecar: bytes,
         pointer, reading = v3.current(store)
         if pointer is None or v3.encode(pointer) != v3.encode(json.loads(expected_pointer_raw)):
             raise ValueError('existing exact v3 pointer required')
-        if (reading.get('derived_pdf_redirects') or key in reading.get('suppressed_sources', [])
-                or key in reading['files']):
+        keys = key if isinstance(key, frozenset) else frozenset({key})
+        if (not keys or reading.get('derived_pdf_redirects') or keys.intersection(reading.get('suppressed_sources', []))
+                or keys.intersection(reading['files'])):
             raise ValueError('ordinary v3 unify cannot expose the selected image' if seal_kind == 'reader-image-legacy-publish-v1'
                              else 'ordinary v3 unify cannot expose the selected web route')
         control.prepare_base(reading, after_sidecar)  # Same base limits and filtering as unify.

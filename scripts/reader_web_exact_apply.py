@@ -264,7 +264,15 @@ def run(root, review_sha256, *, phase, external_writers_stopped):
                               journal=journal,observe=transport.observe,reader_catalog_digest=lambda:primary.digest(B,legacy.CATALOG),
                               cas=transport.put_once,store=primary,guard=lambda _:prior_stages(),resume=phase=='resume-legacy')
     def promote_guard():
-        prior_stages()
+        # The readback callback also runs after the v3 pointer PUT. It must
+        # accept exactly the reviewed successor without allowing a third root.
+        window();validate_assets()
+        current_raw=primary.read_bytes(B,v3.POINTER)
+        if current_raw not in (pointer_raw,v3.encode(review['target_pointer'])):
+            raise ValueError('web v3 pointer diverged from reviewed states')
+        _check_pointer_phase(primary,s3,current_raw)
+        if checkpoints.read(B,index_path).raw!=target_raw or primary.read_bytes(B,index_path)!=target_raw:
+            raise ValueError('web canonical successor drift before v3 confirmation')
         # Streaming S3 digest and independent resolver once at the transition
         # are part of moved; fresh validator checks keep both legacy roots pinned.
         for path,expected in ((legacy.CATALOG,moved['catalog']),(legacy.SIDECAR,moved['sidecar'])):
