@@ -7,7 +7,9 @@ old live roots still protect the objects when the collector checks them.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import gzip
 import hashlib
+import io
 import json
 import re
 
@@ -21,6 +23,7 @@ BUCKETS = {ASSETS, shared.PDF_PAGES_BUCKET, shared.PDF_OCR_INPUT_BUCKET}
 PREFIX = 'reader-index/gc/retirements/'
 CURSOR = 'reader-index/gc/automatic/current.json'
 KINDS = {'catalog-replacement', 'v3-replacement', 'processing-handoff'}
+MAX_COLLECTION_BYTES = 512 * 1024**2
 
 
 def encode(value):
@@ -117,11 +120,51 @@ def cursor(store):
     return value
 
 
+def collection_key(run):
+    if not re.fullmatch(r'[1-9][0-9]*', str(run)):
+        raise ValueError('invalid Reader collection run')
+    return f'reader-index/gc/{run}/collection.json'
+
+
+def read_collection(store, run):
+    path = collection_key(run)
+    try:
+        packed = store.read_bytes(ASSETS, path + '.gz')
+    except FileNotFoundError:
+        packed = None
+        raw = store.read_bytes(ASSETS, path)
+    else:
+        if (not 18 <= len(packed) <= MAX_COLLECTION_BYTES + MAX_COLLECTION_BYTES // 100 + 64
+                or not packed.startswith(b'\x1f\x8b')):
+            raise ValueError('invalid compressed Reader collection report')
+        with gzip.GzipFile(fileobj=io.BytesIO(packed)) as stream:
+            raw = stream.read(MAX_COLLECTION_BYTES + 1)
+    if not 0 < len(raw) <= MAX_COLLECTION_BYTES:
+        raise ValueError('invalid Reader collection report size')
+    value = json.loads(raw)
+    if not isinstance(value, dict):
+        raise ValueError('invalid Reader collection report')
+    if packed is not None and encode(value) != raw:
+        raise ValueError('compressed Reader collection report is not canonical')
+    return value
+
+
+def save_collection(store, run, result):
+    path = collection_key(run) + '.gz'
+    raw = encode(result)
+    if len(raw) > MAX_COLLECTION_BYTES:
+        raise ValueError('Reader collection report is outside its archive bound')
+    packed = gzip.compress(raw, compresslevel=6, mtime=0)
+    store.put_bytes(ASSETS, path, packed)
+    if store.read_bytes(ASSETS, path) != packed:
+        raise RuntimeError('Reader collection report compressed write not observed')
+
+
 def pending_plan(store):
     saved = cursor(store)
     if not saved or saved['complete']:
         return None, None
-    plan = json.loads(store.read_bytes(ASSETS, f"reader-index/gc/{saved['run_id']}/collection.json"))
+    plan = read_collection(store, saved['run_id'])
     if saved['plan_sha256'] != plan.get('plan_sha256') or saved['scope'] != plan.get('scope'):
         raise ValueError('automatic deletion plan does not match its cursor')
     if plan.get('complete') is True:

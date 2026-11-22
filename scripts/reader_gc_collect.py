@@ -670,7 +670,7 @@ def main():
         if force or result.get('complete') or time.monotonic() - last_checkpoint[0] >= 30:
             save()
             reader_gc_chm_window.require_clear(store)
-            store.put_bytes(ASSETS, f"reader-index/gc/{run}/collection.json", encode(result))
+            retirement.save_collection(store, run, result)
             if args.auto_resume:
                 reader_gc_chm_window.require_clear(store)
                 retirement.save_cursor(store, run, scope, result, result.get('complete', False))
@@ -754,7 +754,7 @@ def main():
                 scope = saved['scope']
                 args.retired_assets_only = scope == 'retired-assets'
         if args.resume_run and resume is None:
-            resume = json.loads(store.read_bytes(ASSETS, f'reader-index/gc/{args.resume_run}/collection.json'))
+            resume = retirement.read_collection(store, args.resume_run)
             if args.auto_resume and resume.get('complete'):
                 resume = None
         hints = retirement.load(store) if scheduled or args.retired_assets_only else None

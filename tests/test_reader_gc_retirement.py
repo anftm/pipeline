@@ -142,7 +142,8 @@ class RetirementTests(unittest.TestCase):
         reference = graph.ReferenceGraph(store)
         scanned = reference.build()
         plan = collect.collect(store, Mock(), reference, scanned, {}, apply=False, reader_only=True)
-        store.put(ASSETS, 'reader-index/gc/123/collection.json', plan)
+        retirement.save_collection(store, '123', plan)
+        self.assertNotIn('reader-index/gc/123/collection.json', store.objects[ASSETS])
         retirement.save_cursor(store, '123', 'unreferenced', plan, False)
         store.delete(PDF, [plan['targets'][0]['path']])
         saved, recovered = retirement.pending_plan(store)
@@ -164,6 +165,19 @@ class RetirementTests(unittest.TestCase):
         store.put(ASSETS, 'reader-index/gc/123/collection.json', {'plan_sha256': 'b' * 64, 'scope': 'unreferenced'})
         with self.assertRaisesRegex(ValueError, 'cursor'):
             retirement.pending_plan(store)
+
+    def test_gc_reports_support_legacy_and_reject_corrupt_compressed_checkpoint(self):
+        store = Store(); run = '43841173170'; path = retirement.collection_key(run)
+        result = {'complete': True, 'plan_sha256': 'a' * 64, 'scope': 'unreferenced'}
+        store.put(ASSETS, path, result)
+        self.assertEqual(retirement.read_collection(store, run), result)
+        retirement.save_collection(store, run, result)
+        self.assertEqual(retirement.read_collection(store, run), result)
+        store.put_bytes(ASSETS, path + '.gz', b'bad')
+        with self.assertRaisesRegex(ValueError, 'invalid compressed'):
+            retirement.read_collection(store, run)
+        with self.assertRaisesRegex(ValueError, 'invalid Reader collection run'):
+            retirement.read_collection(store, '../bad')
 
     def test_retention_observations_survive_failure_and_budget_limits(self):
         store = Store()
