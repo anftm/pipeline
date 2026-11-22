@@ -200,23 +200,42 @@ def mhtml_body(raw):
     body = roots[0]
     base = str(body.get('Content-Location') or '').replace('\\', '/')
     resources = {}
+    embedded_html = {}
+    ambiguous = set()
     for part in parts:
         mime = part.get_content_type()
-        if mime not in {*IMAGE_TYPES.values(), 'text/css'}:
-            continue
         location = str(part.get('Content-Location') or '').replace('\\', '/')
         cid = str(part.get('Content-ID') or '').strip().strip('<>')
         keys = ({location, urljoin(base, location)} if location else set()) | ({'cid:' + cid} if cid else set())
+        if mime=='text/html' and part is not body:
+            for key in keys:
+                embedded_html.setdefault(key, []).append(part)
+        if mime not in {*IMAGE_TYPES.values(), 'text/css'}:
+            continue
         for key in keys:
-            if key in resources and resources[key] is not part:
-                raise Hold('mhtml_ambiguous_resource')
-            resources[key] = part
+            prior = resources.get(key)
+            if prior is not None and prior is not part and (prior.get_content_type(), prior.get_payload(decode=True)) != (mime, part.get_payload(decode=True)):
+                ambiguous.add(key)
+            resources.setdefault(key, part)
 
     def lookup(value, allowed):
-        part = resources.get(value) or resources.get(urljoin(base, value.replace('\\', '/')))
-        if part is None or part.get_content_type() not in allowed:
+        keys={value, urljoin(base, value.replace('\\', '/'))}
+        if 'text/html' in allowed and keys & embedded_html.keys():
+            parts = {part for key in keys for part in embedded_html.get(key, [])}
+            if len(parts)!=1:
+                raise Hold('mhtml_ambiguous_resource')
+            part=next(iter(parts));raw=part.get_payload(decode=True) or b''
+            return 'text/html',producer.decode_html_bytes(raw,part.get_content_charset()).encode('utf-8')
+        matches = {part for key in keys if (part := resources.get(key)) is not None}
+        if keys & ambiguous:
+            raise Hold('mhtml_ambiguous_resource')
+        if not matches:
             return None
-        return part.get_content_type(), part.get_payload(decode=True) or b''
+        identities = {(part.get_content_type(), part.get_payload(decode=True) or b'') for part in matches}
+        if len(identities)!=1:
+            raise Hold('mhtml_ambiguous_resource')
+        mime, payload=next(iter(identities))
+        return (mime,payload) if mime in allowed else None
 
     return producer.decode_html_bytes(body.get_payload(decode=True) or b'', body.get_content_charset()), lookup
 
@@ -242,19 +261,37 @@ def tree_lookup(source_url, downloads):
     return lookup
 
 
+def visible_text(node):
+    # ElementTree.itertext() includes HTML comment payloads. An archived Word
+    # page can carry tens of KiB of metadata and style declarations there.
+    if not isinstance(node.tag, str) or node.tag in {'style','script','template'}:
+        return ''
+    return (node.text or '')+''.join(visible_text(child)+(child.tail or '') for child in node)
+
+
 def parity(root):
     body = root.find('body')
+    if body is None:
+        raise Hold('unsupported_embedded_content')
     title = root.find('head/title')
     table_tags = {'table', 'caption', 'thead', 'tbody', 'tfoot', 'tr', 'th', 'td', 'col', 'colgroup'}
+    fragments = {node.get('href','').strip()[1:] for node in root.iter('a') if node.get('href','').strip().startswith('#')}
+    non_navigation = {'input','textarea','form','button','select','option','v:shapetype'}
+    tables=[]
+    stack=[(body,None)]
+    while stack:
+        node,parent=stack.pop()
+        if node.tag in table_tags:
+            tables.append((node.tag,parent,tuple(node.get(k) for k in ('colspan','rowspan','scope','headers','span'))))
+            parent=len(tables)-1
+        stack.extend((child,parent) for child in reversed(list(node)))
     return {
-        'text': (' '.join(''.join(body.itertext()).split()), '' if title is None else ''.join(title.itertext())),
+        'text': (' '.join(visible_text(body).split()), '' if title is None else visible_text(title)),
         'anchors': Counter((k, node.get(k)) for node in root.iter() for k in ('id', 'name', 'href')
-                           if node.get(k) and (k == 'id' or (node.tag == 'a' and
+                           if node.get(k) and ((k == 'id' and (node.tag not in non_navigation or node.get(k) in fragments)) or (node.tag == 'a' and
                                (k == 'name' or node.get(k).strip().startswith('#'))))),
-        'tables': [(node.tag, tuple(node.get(k) for k in ('colspan', 'rowspan', 'scope', 'headers', 'span')),
-                    sum(1 for child in node if child.tag in table_tags))
-                   for node in body.iter() if node.tag in table_tags],
-        'pre': [''.join(node.itertext()) for node in body.iter('pre')],
+        'tables': tables,
+        'pre': [visible_text(node) for node in body.iter('pre')],
         'images': [(node.get('src'), node.get('alt')) for node in body.iter('img')],
     }
 
@@ -269,6 +306,36 @@ def detach(parent, node):
         else:
             parent.text = (parent.text or '') + node.tail
     parent.remove(node)
+
+
+def excluded_image(node):
+    """Recognize only known, non-semantic tracking markers. Never fetch them."""
+    if any(node.get(k) for k in ('id','alt','title','name','aria-label','data-src','srcset')):
+        return False
+    try:
+        uri=urlsplit(node.get('src','').strip())
+    except ValueError:
+        return False
+    if uri.scheme not in {'http','https'} or uri.netloc!=uri.hostname:
+        return False
+    endpoint=uri.hostname,uri.path
+    if endpoint==('zyz.wyzxsx.com','/tj/piwik.php'):
+        # The historical Piwik noscript counter has site ID and rec=1. Do not
+        # accept the whole host, nor discard a labelled or anchored image.
+        try:args=dict(parse_qsl(uri.query,max_num_fields=12))
+        except ValueError:return False
+        return (args in ({'idsite':'5'}, {'idsite':'5','rec':'1'}) and not node.get('width') and not node.get('height'))
+    return endpoint==('beacon.sina.com.cn','/a.gif') and node.get('width')=='0' and node.get('height')=='0'
+
+
+def archival_navigation_frame(node):
+    """Exact empty site-navigation iframe seen in old web snapshots."""
+    if node.tag!='iframe' or len(node) or (node.text or '').strip() or any(node.get(k) for k in ('srcdoc','title','name','aria-label')):
+        return False
+    try:u=urlsplit(node.get('src',''))
+    except ValueError:return False
+    return ((u.scheme,u.netloc,u.path,u.query,u.fragment)==('http','www.wyzxsx.com','/Article/ClassTree.asp','','')
+            and node.get('id') in (None,'UserLogin'))
 
 
 def convert(raw, extension, url, downloads, limit):
@@ -295,6 +362,28 @@ def convert(raw, extension, url, downloads, limit):
         if result is not None and not 0 < len(result[1]) <= MAX_RESOURCE:
             raise Hold('resource_byte_limit')
         return result
+
+    for parent in tree.iter():
+        for node in list(parent):
+            if node.tag=='img' and excluded_image(node):
+                detach(parent,node)
+            elif node.tag=='font':
+                # Preserve legacy navigation IDs when normalizing a passive tag.
+                node.tag='span'
+            if node.tag in {'source','img'} and 'srcset' in node.attrib and not node.get('srcset','').strip(' \t\n\r\f,'):
+                node.attrib.pop('srcset')
+            if extension in {'mht','mhtml'} and archival_navigation_frame(node):
+                part=lookup(node.get('src',''),frozenset({'text/html'}))
+                if part is not None:
+                    if len(part[1])>2048:
+                        raise Hold('unsupported_embedded_content')
+                    archive=parse_html(producer.drop_html_scripts(part[1].decode('utf-8'),web_typography=True))
+                    body=archive.find('body')
+                    if (body is None or visible_text(body).strip() or any(
+                            x.tag not in {'body','br'} for x in body.iter() if isinstance(x.tag,str))):
+                        raise Hold('unsupported_embedded_content')
+                node.tag='span'; anchor=node.get('id');node.attrib.clear()
+                if anchor:node.set('id',anchor)
 
     for node in tree.iter():
         if node.tag in {'iframe', 'frame', 'frameset', 'object', 'embed', 'video', 'audio', 'canvas',
@@ -336,6 +425,19 @@ def convert(raw, extension, url, downloads, limit):
             continue
         css = resource(node.get('href', ''), frozenset({'text/css'}))
         if css is None:
+            # The reviewed MHT's saved page carries inline layout but not
+            # this publisher's external skin. No remote stylesheet access;
+            # leave every other missing stylesheet reviewable as a hold.
+            u=urlsplit(node.get('href',''))
+            if (extension in {'mht','mhtml'} and (u.scheme,u.netloc)==('https','www.360kuai.com')
+                    and u.path.rsplit('/',1)[-1]=='sq_root_css.css' and not (u.query or u.fragment)
+                    and node.get('id')=='sq_root_css' and not node.get('name')
+                    and any((style.text or '').strip() for style in tree.iter('style'))):
+                # This is a stylesheet loader ID, not a navigation target.
+                if any(a.get('href','').strip()=='#sq_root_css' for a in tree.iter('a')):
+                    raise Hold('missing_stylesheet')
+                detach(parent,node)
+                continue
             raise Hold('missing_stylesheet')
         expansion += len(css[1])
         if expansion > limit:

@@ -111,6 +111,56 @@ class ManagedWebTests(unittest.TestCase):
             self.assertNotIn('not root', text)
             fetch.assert_called_once()
 
+    def test_comment_and_loader_ids_are_not_visible_text_or_navigation(self):
+        raw = (DOC + '<p>before<!-- archive metadata -->after</p> '
+                      '<table><tr><td><form><table><tr><td>nested</td></tr></table></form></td></tr></table>'
+                      '<input id="formState">').encode()
+        output = managed.convert(raw, 'html', 'https://huggingface.co/datasets/org/books/resolve/' + REV + '/x.html', None, 50000)
+        self.assertIn(b'beforeafter', output)
+        self.assertIn(b'nested', output)
+        self.assertNotIn(b'archive metadata', output)
+        with self.assertRaisesRegex(managed.Hold, 'parity_anchors'):
+            managed.convert(raw + b'<a href="#formState">jump</a>', 'html', 'https://huggingface.co/', None, 50000)
+
+    def test_legacy_font_target_and_empty_srcset(self):
+        raw = (DOC + '<font id="old">old title</font><a href="#old">go</a><img srcset=" , " src="data:image/png;base64,'
+               + base64.b64encode(png()).decode() + '">').encode()
+        output=managed.convert(raw,'htm','https://huggingface.co/',None,50000)
+        self.assertIn(b'<span id="old">old title</span>', output)
+        self.assertIn(b'href="#old"', output)
+        self.assertIn(b'data:image/png',output)
+        with self.assertRaisesRegex(managed.Hold,'unsupported_embedded_content'):
+            managed.convert(raw.replace(b' , ',b'alt.png 2x'),'htm','https://huggingface.co/',None,50000)
+
+    def test_mhtml_preserves_content_excludes_known_counter_and_empty_frame(self):
+        html = (DOC + '<img src="http://zyz.wyzxsx.com/tj/piwik.php?idsite=5" alt="">'
+                      '<iframe id="UserLogin" src="http://www.wyzxsx.com/Article/ClassTree.asp"></iframe>'
+                      '<img src="cid:cover" alt="illustration">').encode()
+        p = base64.b64encode(png())
+        def mime(frame):
+            return (b'Content-Type: multipart/related; boundary=x\r\n\r\n--x\r\nContent-Type: text/html; charset=utf-8\r\n\r\n'
+                    + html + b'\r\n--x\r\nContent-Type: text/html\r\nContent-Location: http://www.wyzxsx.com/Article/ClassTree.asp\r\n\r\n'
+                    + frame + b'\r\n--x\r\nContent-Type: image/png\r\nContent-ID: <cover>\r\nContent-Transfer-Encoding: base64\r\n\r\n'
+                    + p + b'\r\n--x--\r\n')
+        output = managed.convert(mime(b'<script>navigation();</script><br>'), 'mht', '', None, 50000)
+        self.assertIn(b'id="UserLogin"', output)
+        self.assertIn(b'alt="illustration"', output)
+        self.assertNotIn(b'piwik.php', output)
+        self.assertNotIn(b'<iframe', output)
+        with self.assertRaisesRegex(managed.Hold, 'unsupported_embedded_content'):
+            managed.convert(mime(b'<p>visible archived article</p>'), 'mht', '', None, 50000)
+        with self.assertRaisesRegex(managed.Hold, 'missing_image'):
+            managed.convert(mime(b'<br>').replace(b'piwik.php?idsite=5', b'photo.png'), 'mht', '', None, 50000)
+
+    def test_mhtml_duplicate_attachment_must_match_bytes(self):
+        p = base64.b64encode(png())
+        head = b'Content-Type: multipart/related; boundary=x\r\n\r\n--x\r\nContent-Type: text/html\r\n\r\n<img src=cid:cover>\r\n'
+        part = b'--x\r\nContent-Type: image/png\r\nContent-ID: <cover>\r\nContent-Transfer-Encoding: base64\r\n\r\n'
+        raw = head + part + p + b'\r\n' + part + p + b'\r\n--x--\r\n'
+        self.assertIn(b'data:image/png', managed.convert(raw, 'mhtml', '', None, 50000))
+        with self.assertRaisesRegex(managed.Hold, 'mhtml_ambiguous_resource'):
+            managed.convert(raw.rsplit(p,1)[0] + b'YQ==\r\n--x--\r\n', 'mhtml', '', None, 50000)
+
     def test_source_validation_budgets_and_hold_isolation(self):
         raw = DOC.encode()
         with tempfile.TemporaryDirectory() as tmp:
