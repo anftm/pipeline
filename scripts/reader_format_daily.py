@@ -587,7 +587,8 @@ def validate_continuation(result, expected_sha, previous_run_id):
         decision = result['formats'][ext]
         reasons = blockers(rows[ext], source_changes_triggered=
                            decision['completion_scope'] in SOURCE_CHANGE_SCOPES)
-        if reasons or bool(rows[ext]['definite_backlog']) != (ext in pending):
+        count='profile_outdated' if result.get('web_profile_only') is True else 'definite_backlog'
+        if reasons or bool(rows[ext][count]) != (ext in pending):
             raise ValueError('continuation contains blocked or inconsistent triggered formats')
     if any(rows[ext][field] for ext in FORMATS for field in UNCERTAIN):
         raise ValueError('continuation contains pending, failure or unknown source state')
@@ -692,7 +693,7 @@ def continue_dispatch(*, api, result, journal, expected_sha, current_run_id,
 
 class Controller:
     def __init__(self, *, api, refresh, verify, journal, expected_sha, enabled=False,
-                 known_writers=False, parent_run_id=None, run_attempt=1,
+                 known_writers=False, parent_run_id=None, run_attempt=1, web_profile_only=False,
                  max_batches=MAX_BATCHES, timeout_seconds=MAX_SECONDS, continuation=None, boost_canary=None,
                  clock=time.monotonic, sleep=time.sleep, new_id=lambda: uuid.uuid4().hex):
         if not isinstance(expected_sha, str) or not SHA.fullmatch(expected_sha):
@@ -706,6 +707,7 @@ class Controller:
         self.api, self.refresh, self.verify = api, refresh, verify
         self.journal, self.expected_sha = Path(journal), expected_sha
         self.enabled, self.known_writers = enabled, known_writers
+        self.web_profile_only = web_profile_only
         self.parent_run_id, self.max_batches = parent_run_id, max_batches
         self.clock, self.sleep, self.new_id = clock, sleep, new_id
         self.deadline = clock() + timeout_seconds
@@ -791,6 +793,12 @@ class Controller:
         latest = plan(summary, boost_canary=self.boost_canary)
         for ext, decision in latest['formats'].items():
             if ext not in triggered:
+                if self.web_profile_only and (FORMATS.get(ext,(None,))[0]!='web' or not decision.get('counts',{}).get('profile_outdated')):
+                    self.result['blocked'].pop(ext,None)
+                    if decision['state'] in {'triggered','blocked'}:
+                        decision=dict(decision,state='deferred',reasons=['outside this web profile bump'])
+                    self.result['formats'][ext]=decision
+                    continue
                 self.result['formats'][ext] = decision
                 if decision['state'] == 'blocked':
                     self.result['blocked'][ext] = decision['reasons']
@@ -816,6 +824,8 @@ class Controller:
         self.result = plan(summary, boost_canary=self.boost_canary)
         self.result.update(mode='run', status='running', expected_sha=self.expected_sha,
                            parent_run_id=self.parent_run_id)
+        if self.web_profile_only:
+            self.result['web_profile_only']=True
         if self.boost_canary is not None:
             self.result['boost_canary'] = self.boost_canary
         # Refuse reuse even when the previous controller crashed before its first POST.
@@ -832,7 +842,7 @@ class Controller:
                 raise RuntimeError('Reader generation changed before first dispatch')
             triggered = [ext for ext, item in self.result['formats'].items() if item['state'] == 'triggered']
             queue = sorted(triggered, key=lambda ext: (ext != 'epub', FORMATS[ext][0] == 'text', ext))
-            if os.getenv('GITHUB_EVENT_NAME')=='push':
+            if self.web_profile_only:
                 # A producer profile bump must not accidentally trigger
                 # unrelated format migrations from a routine push.
                 rows=validate_summary(current)
@@ -841,6 +851,9 @@ class Controller:
             if self.continuation is not None:
                 previous = self.continuation
                 validate_continuation(previous, self.expected_sha, previous['parent_run_id'])
+                self.web_profile_only=previous.get('web_profile_only') is True
+                if self.web_profile_only:
+                    self.result['web_profile_only']=True
                 for field in ('search_generation', 'reader_generation'):
                     if current[field] != previous[field]:
                         raise RuntimeError('continuation ' + field + ' changed')
@@ -885,6 +898,9 @@ class Controller:
                         raise RuntimeError('refreshed backlog is too small for a boosted batch')
                 if row['definite_backlog'] == 0:
                     decision['state'] = 'complete'
+                    continue
+                if self.web_profile_only and not row['profile_outdated']:
+                    decision['state']='complete'
                     continue
                 started = self.clock()
                 self.result['batches'] += 1
@@ -937,8 +953,8 @@ class Controller:
                     decision['state'] = 'canary_remaining' if after['definite_backlog'] else 'complete'
                     self.result['status'] = 'canary_complete'
                     return self.result  # Verified decrease; deliberately do not enqueue more work.
-                elif after['definite_backlog']:
-                    queue.append(ext)  # Round robin until the verified backlog reaches zero.
+                elif (after['profile_outdated'] if self.web_profile_only else after['definite_backlog']):
+                    queue.append(ext)  # Round robin until the selected backlog reaches zero.
                 else:
                     decision['state'] = 'complete'
             # Recheck previously drained formats too: a later batch cannot hide
@@ -947,7 +963,7 @@ class Controller:
             for ext in triggered:
                 reasons = blockers(final_rows[ext], source_changes_triggered=
                                    self.result['formats'][ext]['completion_scope'] in SOURCE_CHANGE_SCOPES)
-                if final_rows[ext]['definite_backlog']:
+                if final_rows[ext]['profile_outdated' if self.web_profile_only else 'definite_backlog']:
                     reasons.append('triggered format still has definite backlog')
                 if reasons:
                     self.result['formats'][ext].update(state='blocked', reasons=reasons)
@@ -1163,6 +1179,7 @@ def main(argv=None):
         controller = Controller(api=api, refresh=refresh, verify=verify, journal=args.journal,
                                 expected_sha=args.expected_sha, enabled=args.enabled,
                                 known_writers=args.known_writers_verified,
+                                web_profile_only=os.getenv('GITHUB_EVENT_NAME')=='push',
                                 parent_run_id=os.environ.get('GITHUB_RUN_ID'),
                                 run_attempt=int(os.environ.get('GITHUB_RUN_ATTEMPT', '1')),
                                 max_batches=args.max_batches, timeout_seconds=args.timeout_seconds,

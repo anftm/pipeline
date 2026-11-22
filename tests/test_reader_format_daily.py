@@ -392,6 +392,14 @@ class DailyTests(unittest.TestCase):
         self.assertEqual(json.loads(inputs['resource_json']),{'extension':'html','search_generation':SEARCH,'parent_run_id':123})
         self.assertEqual(result['formats']['html']['web_profile'],{'converted':1,'identical':0,'held':1})
 
+    def test_web_profile_bump_does_not_run_unrelated_format_backlog(self):
+        data=summary(1,'epub')
+        self.refresh.side_effect=[data]
+        report=self.controller(web_profile_only=True,parent_run_id=123).run(data)
+        self.assertEqual(report['status'],'complete')
+        self.assertEqual(self.api.posts,[])
+        self.assertEqual(report['triggered_formats'],[])
+
     def test_one_initially_dispatches_but_zero_does_not(self):
         self.refresh.side_effect = [summary(1), summary(0)]
         result = self.controller().run(summary(1))
