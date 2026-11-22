@@ -13,13 +13,13 @@ from .publish_reader_v3 import ASSETS, POINTER, CentralHubStore
 INDEX = 'documents/web/mht/index.json'
 OLD_ROOT = 'documents/web/mht/7d1b2ea8999ae052d537f9f92a28329d10ec3537ff9282222ac7c3485494b83b/'
 PINS = {
-    'catalog': ('708eb1a0f5c8c0d2247fd547d435ee841debf95e2f0ec5e01e488283d50287b7', 402381942),
-    'sidecar': ('67cd092fe3cfaa98336d903ef15c6d528fc950e666324d21fd10c7ffab06d540', None),
+    'catalog': ('9c0530f63de52e89a5ef4c86a31e34621a72d19d6e11ee50c3e1aa01e551e753', 317944578),
+    'sidecar': ('588150fe8c0a7973b468d704e2ba99dcb13d5d051ca4515525d953ad12ff5ea6', 2154574),
     'index': ('e2fa8a43f441f750a5e8b0396d2cfded82b981f66a80b42fab70a88405c865ff', None),
     'old_html': ('c77dd3e2fe5f2c84995052454e2baa235ac992ab3e66f1d142a56c26b1e24af5', 297528),
     'old_manifest': ('b637a169f53242d6a491759f2f5613939eb1728d22321d33bd2bc7f614017d6a', None),
 }
-GEN = '8a65e70fa95e5cfcd8475d7fe1164dd0b7ae0d7d8e1e1f1812530786eef3c5ed'
+GEN = '31ecd55f9d42d1ad5979f87b1b37be323686204c7f900c953daaf61e27b8e8ce'
 
 
 def review(index_store, pointer_store, legacy, hub, s3):
