@@ -21,6 +21,7 @@ import re
 import stat
 import tempfile
 import time
+import urllib.error
 import urllib.request
 from collections import Counter
 from email.parser import BytesParser
@@ -134,7 +135,7 @@ class Downloads:
         self.remaining = remaining
         self.fetch = fetch
 
-    def get(self, url, limit):
+    def get(self, url, limit, *, missing_ok=False):
         if self.remaining <= 0:
             raise Hold('source_budget')
         stream = io.BytesIO()
@@ -165,6 +166,15 @@ class Downloads:
                     raise Hold('download_response')
         except Hold:
             raise
+        except urllib.error.HTTPError as exc:
+            # A missing pinned sibling is different from a transient network
+            # error. Do not treat missing dataset, access or revision as 404 file.
+            if (missing_ok and exc.code==404 and exc.headers is not None
+                    and (exc.headers.get('X-Error-Code') or '').lower()=='entrynotfound'):
+                exc.close()
+                return None
+            exc.close()
+            raise Hold('download_failed') from exc
         except Exception as exc:
             raise Hold('download_failed') from exc
         return stream.getvalue()
@@ -202,6 +212,7 @@ def mhtml_body(raw):
     resources = {}
     embedded_html = {}
     ambiguous = set()
+    other_parts = set()
     for part in parts:
         mime = part.get_content_type()
         location = str(part.get('Content-Location') or '').replace('\\', '/')
@@ -210,7 +221,9 @@ def mhtml_body(raw):
         if mime=='text/html' and part is not body:
             for key in keys:
                 embedded_html.setdefault(key, []).append(part)
-        if mime not in {*IMAGE_TYPES.values(), 'text/css'}:
+        if not (mime in {*IMAGE_TYPES.values(), 'text/css','application/octet-stream'} or mime.startswith('image/')):
+            if not part.is_multipart():
+                other_parts.update(keys)
             continue
         for key in keys:
             prior = resources.get(key)
@@ -230,12 +243,19 @@ def mhtml_body(raw):
         if keys & ambiguous:
             raise Hold('mhtml_ambiguous_resource')
         if not matches:
+            if 'image/png' in allowed and keys & other_parts:
+                raise Hold('unsupported_embedded_content')
             return None
         identities = {(part.get_content_type(), part.get_payload(decode=True) or b'') for part in matches}
         if len(identities)!=1:
             raise Hold('mhtml_ambiguous_resource')
         mime, payload=next(iter(identities))
-        return (mime,payload) if mime in allowed else None
+        if mime not in allowed:
+            if 'image/png' in allowed:
+                # The archive contains actual bytes, not an absent image.
+                raise Hold('unsupported_embedded_content')
+            return None
+        return mime,payload
 
     return producer.decode_html_bytes(body.get_payload(decode=True) or b'', body.get_content_charset()), lookup
 
@@ -245,6 +265,7 @@ def tree_lookup(source_url, downloads):
     prefix = urlsplit(base).path
 
     def lookup(value, allowed):
+        image = 'image/png' in allowed
         parsed = urlsplit(urljoin(base, value))
         if (parsed.scheme != 'https' or parsed.netloc != HF or parsed.query or parsed.fragment
                 or not parsed.path.startswith(prefix)):
@@ -255,8 +276,11 @@ def tree_lookup(source_url, downloads):
         suffix = Path(relative).suffix.lower()
         mime = 'text/css' if suffix == '.css' else IMAGE_TYPES.get(suffix)
         if mime not in allowed:
+            if image:
+                raise Hold('unsupported_embedded_content')
             return None
-        return mime, downloads.get(base + quote(relative, safe='/'), MAX_RESOURCE)
+        raw=downloads.get(base + quote(relative, safe='/'), MAX_RESOURCE, missing_ok=image)
+        return None if raw is None else (mime,raw)
 
     return lookup
 
@@ -338,7 +362,17 @@ def archival_navigation_frame(node):
             and node.get('id') in (None,'UserLogin'))
 
 
-def convert(raw, extension, url, downloads, limit):
+def replace_missing_image(node):
+    """Preserve a useful fallback and any anchor without emitting a broken img."""
+    text=node.get('alt') or node.get('aria-label') or node.get('title') or ''
+    attributes={key:node.attrib[key] for key in ('id','lang','dir','title') if node.get(key)}
+    node.tag='span'
+    node.attrib.clear()
+    node.attrib.update(attributes)
+    node.text=text
+
+
+def convert(raw, extension, url, downloads, limit, *, omissions=None):
     if extension in {'mht', 'mhtml'}:
         text, lookup = mhtml_body(raw)
     else:
@@ -348,6 +382,7 @@ def convert(raw, extension, url, downloads, limit):
     tree = parse_html(producer.drop_html_scripts(text, web_typography=True))
     cache = {}
     expansion = 0
+    missing_images=0
 
     def resource(value, allowed):
         value = value.strip()
@@ -401,7 +436,14 @@ def convert(raw, extension, url, downloads, limit):
             types = frozenset(IMAGE_TYPES.values())
             result = resource(value, types) or resource(node.get('data-src', ''), types)
         if not result:
-            raise Hold('missing_image')
+            # An unresolved compound MHTML URI may still refer to archived
+            # bytes. Do not erase it as if it were a missing external asset.
+            opaque = ('data:', 'blob:', 'mhtml:')
+            if value.lower().startswith(opaque) or node.get('data-src','').strip().lower().startswith(opaque):
+                raise Hold('unsupported_embedded_content')
+            replace_missing_image(node)
+            missing_images+=1
+            continue
         mime, image = result
         if not 0 < len(image) <= MAX_RESOURCE:
             raise Hold('resource_byte_limit')
@@ -447,6 +489,8 @@ def convert(raw, extension, url, downloads, limit):
             raise Hold('invalid_stylesheet')
         node.attrib.clear()
 
+    if omissions is not None and missing_images:
+        omissions['missing_images']=missing_images
     expected = parity(tree)
     if not expected['text'][0] and not expected['images']:
         raise Hold('missing_content')
@@ -532,7 +576,8 @@ def run(request, output: Path, *, fetch=anonymous_fetch, request_sha256=None):
                 raise Hold('source_sha256_mismatch')
             if len(raw) >= remaining:
                 raise Hold('output_budget')
-            document = convert(raw, extension, url, downloads, min(MAX_DOCUMENT, remaining - len(raw)))
+            omissions={}
+            document = convert(raw, extension, url, downloads, min(MAX_DOCUMENT, remaining - len(raw)), omissions=omissions)
             doc_sha = digest(document)
             manifest = encode({'kind': 'web-document-stream', 'version': 1, 'path': 'document.html',
                                'source_extension': extension, 'source_sha256': item['source_sha256'],
@@ -544,6 +589,7 @@ def run(request, output: Path, *, fetch=anonymous_fetch, request_sha256=None):
                 raise Hold('output_budget')
             entry = store_entry(output, extension, bundle_id, members)
             remaining -= size
+            if omissions:row['omissions']=omissions
             row.update(status='converted', bundle_sha256=bundle_id, files={name: {
                 'path': f'{entry}/{name}', 'bytes': len(data), 'sha256': digest(data),
             } for name, data in members.items()})

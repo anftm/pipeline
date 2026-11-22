@@ -90,7 +90,8 @@ class ManagedWebTests(unittest.TestCase):
                     source = f'<p>text</p><img src="{link}">'.encode()
                     fetch = Mock(return_value=Response(source))
                     row = managed.run(request(item(source)), output, fetch=fetch)['items'][0]
-                    self.assertEqual(row['reason'], 'missing_image')
+                    self.assertEqual(row['status'], 'converted')
+                    self.assertEqual(row['omissions'], {'missing_images':1})
                     fetch.assert_called_once()
 
     def test_mhtml_root_and_cid(self):
@@ -149,8 +150,51 @@ class ManagedWebTests(unittest.TestCase):
         self.assertNotIn(b'<iframe', output)
         with self.assertRaisesRegex(managed.Hold, 'unsupported_embedded_content'):
             managed.convert(mime(b'<p>visible archived article</p>'), 'mht', '', None, 50000)
-        with self.assertRaisesRegex(managed.Hold, 'missing_image'):
-            managed.convert(mime(b'<br>').replace(b'piwik.php?idsite=5', b'photo.png'), 'mht', '', None, 50000)
+        omissions={}
+        cleaned=managed.convert(mime(b'<br>').replace(b'piwik.php?idsite=5', b'photo.png'), 'mht', '', None, 50000, omissions=omissions)
+        self.assertEqual(omissions,{'missing_images':1})
+        self.assertNotIn(b'photo.png',cleaned)
+        self.assertIn(b'alt="illustration"',cleaned)
+
+    def test_missing_picture_preserves_alt_caption_and_fragment(self):
+        raw = (DOC + '<figure><img id="missing" src="https://archive.invalid/gone.png" alt="&lt;图&gt;">'
+                     '<figcaption>原图说明</figcaption></figure><a href="#missing">图</a>').encode()
+        omitted={}
+        doc=managed.convert(raw,'html','https://huggingface.co/',None,50000,omissions=omitted)
+        body=managed.parse_html(doc.decode()).find('body')
+        self.assertEqual(omitted,{'missing_images':1})
+        self.assertEqual(body.find('figure/span').attrib,{'id':'missing'})
+        self.assertEqual(body.find('figure/span').text,'<图>')
+        self.assertEqual(body.find('figure/figcaption').text,'原图说明')
+        self.assertEqual(body.find('a').get('href'),'#missing')
+        self.assertNotIn(b'<img',doc)
+        with self.assertRaisesRegex(managed.Hold,'missing_content'):
+            managed.convert(b'<img src="https://archive.invalid/gone.png">','html','https://huggingface.co/',None,50000)
+
+    def test_only_confirmed_sibling_absence_is_omitted(self):
+        raw=(DOC + '<img src="photo.png" alt="图">').encode()
+        def fetch(status,error):
+            def fn(url):
+                if url.endswith('/photo.png'):
+                    raise managed.urllib.error.HTTPError(url,status,'error',{'X-Error-Code':error},None)
+                return Response(raw)
+            return fn
+        for status,error,wanted in ((404,'EntryNotFound','converted'),(404,'RevisionNotFound','hold'),(503,'','hold')):
+            with self.subTest(status=status,error=error), tempfile.TemporaryDirectory() as tmp:
+                row=managed.run(request(item(raw)),Path(tmp),fetch=fetch(status,error))['items'][0]
+                self.assertEqual(row['status'],wanted)
+                if wanted=='converted':self.assertEqual(row['omissions'],{'missing_images':1})
+                else:self.assertEqual(row['reason'],'download_failed')
+
+    def test_present_but_unsupported_embedded_image_still_holds(self):
+        for src in ('data:image/svg+xml,content','blob:existing','mhtml:existing!photo.png'):
+            with self.subTest(src=src),self.assertRaisesRegex(managed.Hold,'unsupported_embedded_content'):
+                managed.convert((DOC+f'<img src="{src}">').encode(),'html','https://huggingface.co/',None,50000)
+        raw = (b'Content-Type: multipart/related; boundary=x\r\n\r\n'
+               b'--x\r\nContent-Type: text/html\r\n\r\n<p>Body</p><img src="cid:part">\r\n'
+               b'--x\r\nContent-Type: text/plain\r\nContent-ID: <part>\r\n\r\narchive bytes\r\n--x--\r\n')
+        with self.assertRaisesRegex(managed.Hold, 'unsupported_embedded_content'):
+            managed.convert(raw,'mht','',None,50000)
 
     def test_mhtml_duplicate_attachment_must_match_bytes(self):
         p = base64.b64encode(png())
