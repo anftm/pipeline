@@ -59,8 +59,11 @@ def canonical(parents, pairs, operation, *, managed=False):
             key = row['key']
             if key not in keys:
                 return row
-            return ({k:v for k,v in row.items() if k != 'processing_roots'}
-                    | {k:new_by_key[key][k] for k in CHANGED})
+            next_row = ({k:v for k,v in row.items() if k != 'processing_roots'}
+                        | {k:new_by_key[key][k] for k in CHANGED})
+            if 'profile' in new_by_key[key]:
+                next_row['profile'] = new_by_key[key]['profile']
+            return next_row
         result[ext] = _encode({**parent, 'checkpoint_operation': operation,
                                'files': [replacement(row) for row in parent['files']]})
     return result

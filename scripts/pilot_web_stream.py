@@ -15,10 +15,12 @@ try:
     from .convert_reader_assets import download_source, inline_html_resources, mhtml_to_html, validate_html_content
     from .reader_assets import decode_search_payload, relative_path, source_url
     from .reader_stream_index import read_index, run_documents
+    from .reader_web_profile import WEB_PROFILE
 except ImportError:
     from convert_reader_assets import download_source, inline_html_resources, mhtml_to_html, validate_html_content
     from reader_assets import decode_search_payload, relative_path, source_url
     from reader_stream_index import read_index, run_documents
+    from reader_web_profile import WEB_PROFILE
 
 
 TARGET_BUCKET = "vomebook/reader-assets-v2"
@@ -36,7 +38,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--retry-failures", action="store_true")
     parser.add_argument("--strict", action="store_true")
     parser.add_argument("--web-typography", action="store_true",
-                        help="opt in to standalone web typography; does not rebuild checkpointed revisions")
+                        help="compatibility flag; the current standalone web profile is already the default")
     return parser.parse_args()
 
 
@@ -96,6 +98,7 @@ def build_one(item: dict, work: Path, token: str | None, bucket: str, *,
         "extension": item["extension"], "source_revision": item["revision"], "source_sha256": raw_digest,
         "mode": "document-stream", "bucket": bucket, "object": object_path, "manifest": manifest_path,
         "bytes": len(output), "sha256": output_digest,
+        **({"profile": WEB_PROFILE} if web_typography else {}),
     }, {object_path: str(html_path), manifest_path: str(manifest_file)}
 
 
@@ -113,7 +116,7 @@ def main() -> int:
         return run_documents(selected_all, bucket=args.bucket, token=token, limit=args.limit,
                              retry_failures=args.retry_failures, strict=args.strict, apply=args.apply,
                              prefix="documents/web", kind="web-document-stream-index",
-                             build=partial(build_one, web_typography=True) if args.web_typography else build_one,
+                             build=partial(build_one, web_typography=True),
                              work=Path(directory))
 
 

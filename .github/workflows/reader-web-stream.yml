@@ -176,7 +176,7 @@ jobs:
       - run: tar -xzf output/web-plan.tgz
       - *automation-gate
       - *source-guard
-      - name: Build and publish web streams
+      - name: Build and publish current-profile web streams
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}

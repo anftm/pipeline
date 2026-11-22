@@ -1,27 +1,121 @@
 name: Prepare managed web reconversion
 
 on:
+  push:
+    branches: [main]
+    paths: [scripts/reader_web_profile.py]
   workflow_dispatch:
     inputs:
+      all_outdated:
+        description: Plan and convert all active sources on an older web profile (never publishes)
+        type: boolean
+        default: false
       request_base64:
         description: Base64 UTF-8 conversion request (small batches); no credentials or private data
         required: false
         type: string
       request_sha256:
-        description: SHA-256 of the bounded request, required for either input
-        required: true
+        description: SHA-256 for an explicit request; leave blank for all_outdated
+        required: false
         type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: reader-web-reconvert-${{ inputs.request_sha256 }}
+  group: reader-web-reconvert-${{ (github.event_name == 'push' || inputs.all_outdated) && 'profile-rollout' || inputs.request_sha256 }}
   cancel-in-progress: false
 
 jobs:
+  profile-plan:
+    if: (github.event_name == 'push' || inputs.all_outdated) && github.repository == 'anftm/pipeline' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r scripts/requirements.txt
+      - id: plan
+        env:
+          REQUEST_BASE64: ${{ inputs.request_base64 }}
+          REQUEST_SHA256: ${{ inputs.request_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ -z "$REQUEST_BASE64$REQUEST_SHA256" && "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" && "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          python -B -m scripts.reader_web_profile_rollout --output output/web-profile
+          echo "matrix=$(<output/web-profile/matrix.json)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: managed-web-profile-plan
+          path: output/web-profile/
+          retention-days: 14
+          if-no-files-found: error
+  convert-profile:
+    needs: profile-plan
+    if: needs.profile-plan.result == 'success' && fromJSON(needs.profile-plan.outputs.matrix).include[0] != null
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix: ${{ fromJSON(needs.profile-plan.outputs.matrix) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r scripts/requirements.txt
+      - uses: actions/download-artifact@v8
+        with:
+          name: managed-web-profile-plan
+          path: output/web-profile
+      - env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+          [[ "$SHARD" =~ ^(html|htm|mht|mhtml)-[0-9]{3}$ && "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" && "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          python -B -m scripts.reader_web_managed_convert --request "output/web-profile/$SHARD.json" --output output/managed-web
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: managed-web-profile-${{ matrix.shard }}
+          path: output/managed-web/
+          retention-days: 14
+          if-no-files-found: error
+  profile-summary:
+    needs: [profile-plan, convert-profile]
+    if: ${{ always() && (github.event_name == 'push' || inputs.all_outdated) && needs.profile-plan.result == 'success' && (needs.convert-profile.result == 'success' || needs.convert-profile.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r scripts/requirements.txt
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: managed-web-profile-*
+          path: output/web-results
+      - run: python -B -m scripts.reader_web_profile_summary --plan output/web-results/managed-web-profile-plan --artifacts output/web-results --output output/web-summary.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: managed-web-profile-summary
+          path: output/web-summary.json
+          retention-days: 30
+          if-no-files-found: error
   convert:
-    if: github.repository == 'anftm/pipeline' && github.ref == 'refs/heads/main'
+    if: ${{ github.event_name == 'workflow_dispatch' && !inputs.all_outdated && github.repository == 'anftm/pipeline' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:

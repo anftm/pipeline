@@ -28,6 +28,7 @@ from pathlib import Path
 from urllib.parse import parse_qsl, quote, unquote, urljoin, urlsplit
 
 from . import convert_reader_assets as producer
+from .reader_web_profile import WEB_PROFILE
 
 EXTENSIONS = frozenset({'htm', 'html', 'mht', 'mhtml'})
 MAX_ROWS = 40
@@ -450,7 +451,7 @@ def run(request, output: Path, *, fetch=anonymous_fetch, request_sha256=None):
             row.update(status='hold', reason='conversion_or_local_io_failed')
         rows.append(row)
     report = {'kind': 'reader-web-managed-conversion', 'version': 1,
-              'request_sha256': request_sha256 or digest(encode(request)),
+              'request_sha256': request_sha256 or digest(encode(request)), 'profile': WEB_PROFILE,
               'items': rows, 'output_bytes': request['max_output_bytes'] - remaining,
               'dual_reader_verified': False, 'publication_ready': False, 'remote_writes': 0}
     with tempfile.TemporaryDirectory(prefix='.report-', dir=output) as temporary:

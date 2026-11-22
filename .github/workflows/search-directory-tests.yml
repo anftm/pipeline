@@ -63,11 +63,14 @@ on:
       - scripts/reader_web_exact*.py
       - scripts/reader_web_batch*.py
       - scripts/reader_web_managed*.py
+      - scripts/reader_web_profile*.py
       - .github/workflows/reader-web-reconvert.yml
+      - .github/workflows/reader-web-stream.yml
       - scripts/reader_web_index_guard.py
       - tests/test_reader_web_exact*.py
       - tests/test_reader_web_batch*.py
       - tests/test_reader_web_managed*.py
+      - tests/test_reader_web_profile_rollout.py
       - tests/test_reader_web_index_guard.py
       - tests/test_web_typography.py
       - scripts/epub_chapters.py
@@ -123,7 +126,7 @@ jobs:
       - name: Exercise local Git and LFS, concurrency and source snapshots
         run: python -B -m unittest tests.test_search_directory_sync tests.test_fetch_and_parse tests.test_sync_auth tests.test_text_encoding_retirement tests.test_search_daily_journal tests.test_search_automation_workflows tests.test_search_daily_publish tests.test_search_reader_handoff tests.test_search_gc tests.test_search_gc_s3 tests.test_search_gc_roots tests.test_search_daily_resume_workflow tests.test_reader_format_daily tests.test_reader_format_daily_workflow tests.test_reader_format_workflow_automation tests.test_reader_format_backlog tests.test_reader_format_sources tests.test_reader_text_automation tests.test_pilot_epub_chapters tests.test_epub_toc tests.test_pilot_text_stream tests.test_reader_pages_release -v
       - name: Verify web typography and exact one-row replacement
-        run: python -B -m unittest -v tests.test_web_typography tests.test_reader_web_exact_plan tests.test_reader_web_index_guard tests.test_reader_web_exact_publication tests.test_reader_web_batch_indexes tests.test_reader_web_managed_paths tests.test_reader_web_managed_convert
+        run: python -B -m unittest -v tests.test_web_typography tests.test_reader_web_exact_plan tests.test_reader_web_index_guard tests.test_reader_web_exact_publication tests.test_reader_web_batch_indexes tests.test_reader_web_managed_paths tests.test_reader_web_managed_convert tests.test_reader_web_profile_rollout
       - name: Verify image conversion, AVIF canary handoff and transparent GIF output
         run: python -B -m unittest -v tests.test_pilot_image_page_stream tests.test_reader_image_avif
       - name: Verify single-image migration and non-replay recovery

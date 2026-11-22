@@ -125,9 +125,12 @@ def _rows(index, field):
 
 def _web_row(row, *, old):
     label = "old row" if old else "candidate row"
-    extras = {"checkpointed_at", "processing_roots"} if old else set()
+    extras = {"profile"} | ({"checkpointed_at", "processing_roots"} if old else set())
     if not isinstance(row, dict) or not ROW_FIELDS <= row.keys() <= ROW_FIELDS | extras:
         raise ValueError(f"invalid {label} fields")
+    if "profile" in row and (not isinstance(row["profile"], str)
+                             or re.fullmatch(r"web-utf8-typography-v[1-9][0-9]{0,5}", row["profile"]) is None):
+        raise ValueError(f"invalid {label} profile")
     repo, path, ext = row["repo"], row["path"], row["extension"]
     if (not isinstance(repo, str) or not re.fullmatch(r"[\w.-]+/[\w.-]+", repo, re.ASCII)
             or not isinstance(path, str) or any(c in path for c in "\0\\\r\n")
