@@ -37,6 +37,43 @@ def png():
 
 
 class ManagedWebTests(unittest.TestCase):
+    def test_frameset_flattens_pinned_same_tree_children_in_order(self):
+        source_url='https://huggingface.co/datasets/org/books/resolve/'+REV+'/folder/index.htm'
+        root=('<html><head><title>总标题</title></head><frameset cols="65%,35%"><frame src="saved/正文.htm">'
+              '<frame src="saved/nav.htm"></frameset></html>').encode()
+        child=('<html lang="zh"><title>主文</title><body><h1 id="正文">正文内容</h1>'
+               '<a href="#%E6%AD%A3%E6%96%87">目录</a><pre>\n\n  x</pre></body></html>').encode()
+        sidebar='<title>附页</title><p>附页内容</p>'.encode()
+        files={source_url.rsplit('/',1)[0]+'/saved/%E6%AD%A3%E6%96%87.htm':child,
+               source_url.rsplit('/',1)[0]+'/saved/nav.htm':sidebar}
+        fetch=Mock(side_effect=lambda u:Response(files[u])); omitted={}
+        doc=managed.convert(root,'htm',source_url,managed.Downloads(80000,fetch),50000,omissions=omitted)
+        t=managed.parse_html(doc.decode()); parts=t.findall('body/section')
+        self.assertEqual([p.find('h2').text for p in parts],['主文','附页'])
+        self.assertEqual(t.find('head/title').text,'总标题')
+        self.assertEqual(parts[0].find('h1').get('id'),'正文');self.assertEqual(parts[0].find('pre').text,'\n  x')
+        self.assertEqual(omitted,{'flattened_frames':2});self.assertNotIn(b'<frame',doc)
+        self.assertEqual([x.args[0] for x in fetch.call_args_list],list(files))
+        for ref in ('https://untrusted.example/else.htm','../outside.htm','%2e%2e/escape.htm','saved/nav.htm?q=1'):
+            fetch.reset_mock()
+            bad=f'<frameset><frame src="{ref}"></frameset>'.encode()
+            with self.subTest(ref=ref), self.assertRaisesRegex(managed.Hold,'unsupported_embedded_content'):
+                managed.convert(bad,'html',source_url,managed.Downloads(80000,fetch),50000)
+            fetch.assert_not_called()
+        fetch.side_effect=lambda _:Response(child)
+        with self.assertRaisesRegex(managed.Hold,'parity_anchors'):
+            managed.convert(root,'htm',source_url,managed.Downloads(80000,fetch),50000)
+        fetch.side_effect=lambda _:Response(root)
+        with self.assertRaisesRegex(managed.Hold,'unsupported_embedded_content'):
+            managed.convert(root,'htm',source_url,managed.Downloads(80000,fetch),50000)
+
+    def test_form_is_static_container_without_changing_adjacent_text(self):
+        raw=b'<a>before</a><form action="https://untrusted.example" onsubmit="run()"><span>after</span><input name="x"></form>'
+        cleaned=managed.convert(raw,'html','https://huggingface.co/',None,50000)
+        self.assertIn(b'<a>before</a><div><span>after</span></div>',cleaned)
+        for denied in (b'<form',b'<input',b'onsubmit',b'untrusted.example'):
+            self.assertNotIn(denied,cleaned)
+
     def test_all_extensions_and_deterministic_verified_entries(self):
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp)

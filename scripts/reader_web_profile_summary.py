@@ -24,7 +24,8 @@ def summarize(plan,artifacts):
             formats.setdefault(row['extension'],Counter())[row['status']]+=1
             if row['status']=='hold':reasons[row['reason']]+=1
             report=row.get('omissions',{})
-            allowed={'missing_images','unsupported_images','cleaned_embeds','removed_srcsets','missing_stylesheets'}
+            allowed={'missing_images','unsupported_images','cleaned_embeds','removed_srcsets','missing_stylesheets',
+                     'flattened_frames','frame_child_stylesheets'}
             if not isinstance(report,dict) or report.keys()-allowed or (report and row['status']!='converted'):
                 raise ValueError('invalid web omissions')
             for key,count in report.items():

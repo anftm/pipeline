@@ -40,7 +40,7 @@ MAX_OUTPUT_BYTES = 128 * 1024 * 1024
 MAX_ITEM_SOURCE = 8 * 1024 * 1024
 MAX_DOCUMENT = 24 * 1024 * 1024
 MAX_RESOURCE = 2 * 1024 * 1024
-MAX_RESOURCES = 64
+MAX_RESOURCES = 128
 MAX_RESOURCE_REFERENCES = 512
 IMAGE_TYPES = {'.gif': 'image/gif', '.jpeg': 'image/jpeg', '.jpg': 'image/jpeg',
                '.png': 'image/png', '.webp': 'image/webp'}
@@ -417,7 +417,65 @@ EMBED_TAGS = {'iframe', 'frame', 'object', 'embed', 'video', 'audio', 'canvas',
               '{http://www.w3.org/2000/svg}svg'}
 
 
-def convert(raw, extension, url, downloads, limit, *, omissions=None):
+def flatten_frameset(tree, url, downloads, limit, omissions):
+    """Flatten one frameset of pinned, same-directory HTML into passive sections."""
+    from xml.etree.ElementTree import SubElement
+    root = tree.find('frameset')
+    if root is None or downloads is None:
+        raise Hold('unsupported_embedded_content')
+    frames = list(root.iter('frame'))
+    if not 1 <= len(frames) <= 8 or list(root.iter('noframes')):
+        raise Hold('unsupported_embedded_content')
+    base=url.rsplit('/',1)[0]+'/'
+    result=parse_html('<!doctype html><html><head></head><body></body></html>')
+    for name in ('lang','dir'):
+        if tree.get(name):result.set(name,tree.get(name))
+    original_title=tree.find('head/title')
+    if original_title is not None:
+        SubElement(result.find('head'),'title').text=visible_text(original_title)
+    body=result.find('body'); identities=set(); visited=set(); used=0; totals=Counter()
+    for frame in frames:
+        path=unquote(frame.get('src','').strip(),errors='strict')
+        if (not relative_path(path) or any(ch in path for ch in ':?#') or Path(path).suffix.lower() not in {'.html','.htm'}
+                or path in visited or frame.get('srcdoc')):
+            raise Hold('unsupported_embedded_content')
+        visited.add(path); target=base+quote(path,safe='/')
+        source=downloads.get(target,MAX_ITEM_SOURCE)
+        nested={}
+        data=convert(source,'htm',target,downloads,limit-used,omissions=nested,allow_frameset=False)
+        used+=len(data); totals.update(nested)
+        child=parse_html(data.decode('utf-8')); content=child.find('body'); title=child.find('head/title')
+        counts=Counter(v for n in content.iter() for v in {n.get('id'),n.get('name') if n.tag=='a' else None} if v)
+        own=set(counts)
+        # The combined output must not change which child a fragment targets.
+        # Refuse ambiguous or already unresolved child-local links.
+        if any(count!=1 for count in counts.values()) or identities & own or any(v not in own and unquote(v) not in own for v in
+                (a.get('href','')[1:] for a in content.iter('a') if a.get('href','').startswith('#') and len(a.get('href',''))>1)):
+            raise Hold('parity_anchors')
+        identities.update(own)
+        sec=SubElement(body,'section',{k:content.get(k) or child.get(k) for k in ('lang','dir') if content.get(k) or child.get(k)})
+        if content.get('id'):sec.set('id',content.get('id'))
+        # Child sheets could leak into other sections. Keep reviewed inline
+        # formatting, and use the reader's shared stylesheet for the result.
+        totals['frame_child_stylesheets']+=sum(1 for s in child.iter('style') if (s.text or '').strip() and s.text!=producer.WEB_READER_CSS)
+        if title is not None and visible_text(title).strip():
+            label=SubElement(sec,'h2');label.text=visible_text(title).strip();label.tail=content.text
+        else:sec.text=content.text
+        for node in list(content):sec.append(node)
+    expected=parity(result)
+    producer.preserve_pre_newlines(result)
+    serializer=producer.html5lib_shim.HTMLSerializer(quote_attr_values='always',escape_lt_in_attrs=True,omit_optional_tags=False)
+    output=producer.sanitize_web_html(serializer.render(producer.html5lib_shim.getTreeWalker('etree')(result))).encode('utf-8')
+    if len(output)>limit:raise Hold('output_budget')
+    actual=parity(parse_html(output.decode('utf-8')))
+    if expected!=actual:
+        raise Hold('frame_parity')
+    if omissions is not None:
+        omissions.update({k:v for k,v in totals.items() if v});omissions['flattened_frames']=len(frames)
+    return output
+
+
+def convert(raw, extension, url, downloads, limit, *, omissions=None, allow_frameset=True):
     if extension in {'mht', 'mhtml'}:
         text, lookup = mhtml_body(raw)
     else:
@@ -434,6 +492,8 @@ def convert(raw, extension, url, downloads, limit, *, omissions=None):
     missing_stylesheets=0
     body=tree.find('body')
     if body is None:
+        if allow_frameset and extension in {'htm','html'}:
+            return flatten_frameset(tree,url,downloads,limit,omissions)
         raise Hold('unsupported_embedded_content')
     # A title/alt label on an omitted embed is useful, but it should not be
     # the only thing standing in for an otherwise media-only document.
@@ -465,6 +525,12 @@ def convert(raw, extension, url, downloads, limit, *, omissions=None):
                 # Reader. The visible label itself can still be a link target.
                 node.tag='span'
                 node.attrib.pop('for',None)
+            elif node.tag=='form':
+                # Stripping this container during the sanitizer's HTML parse
+                # can introduce a space between unrelated navigation blocks.
+                # Preserve its position and children as an inert container.
+                attrs={key:node.attrib[key] for key in ('id','lang','dir') if node.get(key)}
+                node.tag='div';node.attrib.clear();node.attrib.update(attrs)
             if node.tag in {'source','img'} and 'srcset' in node.attrib and not node.get('srcset','').strip(' \t\n\r\f,'):
                 node.attrib.pop('srcset')
             if extension in {'mht','mhtml'} and archival_navigation_frame(node):
