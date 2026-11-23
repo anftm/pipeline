@@ -79,22 +79,84 @@ PROBE = r'''async ([format, styles]) => {
         pre: [...doc.querySelectorAll('pre')].map(x => x.textContent)},
         decoded: imgs.filter(i => i.complete && i.naturalWidth > 0).length};
     }
-    const source = inspect(new DOMParser().parseFromString(text, 'text/html'));
+    const input = new DOMParser().parseFromString(text, 'text/html');
+    const source = inspect(input);
     const r = createReaderHtmlFormat({...st}), data = r.prepareHtmlDocument(text);
-    const frame = document.createElement('iframe'); frame.sandbox = 'allow-same-origin';
-    const loaded = new Promise(resolve => frame.addEventListener('load', resolve, {once:true}));
-    frame.srcdoc = r.buildHtmlFrameSource(data); document.body.replaceChildren(frame);
-    let timer;
-    try { await Promise.race([loaded, new Promise((_, reject) => timer = setTimeout(() => reject(new Error('Reader frame timeout')), 8000))]); }
-    finally { clearTimeout(timer); }
-    const doc = frame.contentDocument;
-    st.wrapEbookTables(doc.body); r.normalizeHtmlIndent(doc);
-    await Promise.race([Promise.all([...doc.images].map(i => i.decode().catch(() => {}))), new Promise(resolve => setTimeout(resolve, 3000))]);
+    async function render(data) {
+      const frame = document.createElement('iframe'); frame.sandbox = 'allow-same-origin';
+      const loaded = new Promise(resolve => frame.addEventListener('load', resolve, {once:true}));
+      frame.srcdoc = r.buildHtmlFrameSource(data); document.body.replaceChildren(frame);
+      let timer;
+      try { await Promise.race([loaded, new Promise((_, reject) => timer = setTimeout(() => reject(new Error('Reader frame timeout')), 8000))]); }
+      finally { clearTimeout(timer); }
+      const doc = frame.contentDocument;
+      const policy = doc.head.querySelector('meta[http-equiv="Content-Security-Policy" i]');
+      const expectedPolicy = /^<meta http-equiv="Content-Security-Policy" content="([^"]+)">/.exec(st.HTML_FRAME_STYLE)?.[1];
+      if (!expectedPolicy || policy?.content !== expectedPolicy || !/(?:^|;)\s*default-src 'none'\s*(?:;|$)/.test(expectedPolicy))
+        throw new Error('Reader frame content security policy missing or not applied in head');
+      st.wrapEbookTables(doc.body); r.normalizeHtmlIndent(doc);
+      try { await Promise.race([Promise.all([...doc.images].map(i => i.decode().catch(() => {}))), new Promise(resolve => timer = setTimeout(resolve, 3000))]); }
+      finally { clearTimeout(timer); }
+      return doc;
+    }
+    const same = (a,b) => JSON.stringify(a) === JSON.stringify(b);
+    const defaultDoc = await render(data);
+    let clean = null;
+    // Only Readers that expose a real alternate archive view use the dual gate.
+    // Older site pins still have their entire default view checked below.
+    if (data.discourse && data.discourseArchive === true) {
+      const streams = input.querySelectorAll('.post-stream');
+      const owners = [...input.querySelectorAll('.post-stream .topic-post')];
+      const originals = [...input.querySelectorAll('.post-stream .topic-post .cooked')];
+      const unambiguous = streams.length === 1 && owners.length === originals.length &&
+        owners.every((owner,i) => !owner.parentElement.closest('.topic-post') &&
+          originals[i]?.closest('.topic-post') === owner && !originals[i]?.parentElement.closest('.cooked'));
+      const rendered = [...defaultDoc.querySelectorAll('.reader-forum-document > .reader-forum-post')];
+      function postFacts(post) {
+        const doc = document.implementation.createHTMLDocument();
+        doc.body.append(post.cloneNode(true));
+        const {refs, ...facts} = inspect(doc).stable;
+        return {...facts, anchors:[...post.querySelectorAll('[id],a[name]')].map(x=>[x.id,x.getAttribute('name')]),
+                spans:[...post.querySelectorAll('td,th')].map(x=>[x.colSpan,x.rowSpan]),
+                links:[...post.querySelectorAll('a[href^="#"]')].map(a=>a.getAttribute('href'))};
+      }
+      function destinations(doc,key) {
+        try { key = decodeURIComponent(key); } catch {}
+        return [...doc.querySelectorAll('[id],a[name]')].filter(node=>node.id===key ||
+          (node.localName==='a' && node.getAttribute('name')===key));
+      }
+      const references = originals.flatMap(p=>[...p.querySelectorAll('a[href^="#"]')].map(a=>a.getAttribute('href').slice(1)));
+      const postImages = [...defaultDoc.querySelectorAll('img[src]')];
+      const nl = defaultDoc.documentElement;
+      clean = {posts: originals.length, rendered: rendered.length,
+        exact: unambiguous && originals.length > 0 &&
+          same(originals.map(postFacts),rendered.map(postFacts)) &&
+          same(postImages.map(i=>i.getAttribute('src')),originals.flatMap(p=>[...p.querySelectorAll('img[src]')].map(i=>i.getAttribute('src')))) &&
+          references.every(key=>{
+            if (!key || key.toLowerCase()==='top') return true;
+            const old = destinations(input,key), current = destinations(defaultDoc,key);
+            return old.length === 1 && current.length === 1 &&
+              originals.findIndex(p=>p.contains(old[0])) === rendered.findIndex(p=>p.contains(current[0]));
+          }),
+        images: postImages.length, decoded: postImages.filter(i=>i.complete && i.naturalWidth>0).length,
+        width:nl.clientWidth,scroll:nl.scrollWidth};
+    }
+    const archive = clean ? r.prepareHtmlDocument(text, true) : null;
+    const doc = archive ? await render(archive) : defaultDoc;
     const result = inspect(doc), nl = doc.documentElement;
-    const mismatch = Object.keys(source.stable).filter(k => JSON.stringify(source.stable[k]) !== JSON.stringify(result.stable[k]));
-    return {mismatch, images: source.stable.src.length, decoded: result.decoded, width: nl.clientWidth, scroll: nl.scrollWidth};
+    const mismatch = Object.keys(source.stable).filter(k => !same(source.stable[k],result.stable[k]));
+    if (archive && (archive.discourse || archive.discourseArchive !== true)) mismatch.push('archive_mode');
+    return {mismatch, images: source.stable.src.length, decoded: result.decoded, width: nl.clientWidth, scroll: nl.scrollWidth, ...(clean ? {clean} : {})};
   };
 }'''
+
+
+def passed_replay(facts, blocked):
+    clean = facts.get('clean')
+    return (not blocked and not facts['mismatch'] and facts['images'] == facts['decoded']
+            and facts['width'] == 390 and facts['scroll'] <= 391
+            and (clean is None or (clean['exact'] is True and clean['posts'] == clean['rendered'] > 0
+                and clean['images'] == clean['decoded'] and clean['width'] == 390 and clean['scroll'] <= 391)))
 
 
 def surface(browser, modules, purify, documents):
@@ -119,8 +181,7 @@ def surface(browser, modules, purify, documents):
             blocked.clear()
             facts = page.evaluate('text => replay(text)', raw.decode('utf-8'))
             facts['blocked_requests'] = len(blocked)
-            facts['passed'] = (not blocked and not facts['mismatch'] and facts['images'] == facts['decoded']
-                               and facts['width'] == 390 and facts['scroll'] <= 391)
+            facts['passed'] = passed_replay(facts, blocked)
             results[sha] = facts
         return results
     finally:

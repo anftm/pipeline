@@ -13,6 +13,17 @@ from scripts.reader_web_profile import WEB_PROFILE
 
 
 class AutomaticWebProfileTests(unittest.TestCase):
+    def test_dual_mode_replay_never_substitutes_clean_posts_for_archive_parity(self):
+        archive = {'mismatch': [], 'images': 9, 'decoded': 9, 'width': 390, 'scroll': 390}
+        clean = {'exact': True, 'posts': 3, 'rendered': 3, 'images': 4, 'decoded': 4, 'width': 390, 'scroll': 390}
+        self.assertTrue(web.replay.passed_replay(archive, []))
+        self.assertTrue(web.replay.passed_replay(archive | {'clean': clean}, []))
+        for defects in ({'mismatch': ['body']}, {'mismatch': ['archive_mode']}, {'decoded': 8}, {'scroll': 392}):
+            self.assertFalse(web.replay.passed_replay(archive | defects | {'clean': clean}, []))
+        for defects in ({'exact': False}, {'posts': 0, 'rendered': 0}, {'rendered': 2}, {'decoded': 3}, {'scroll': 392}):
+            self.assertFalse(web.replay.passed_replay(archive | {'clean': clean | defects}, []))
+        self.assertFalse(web.replay.passed_replay(archive | {'clean': clean}, ['https']))
+
     def test_controller_scope_allows_only_one_web_extension_and_pinned_parent(self):
         p={'extension':'html','search_generation':'a'*64,'parent_run_id':23}
         self.assertEqual(web.authority_scope(p),('html','a'*64,23))
