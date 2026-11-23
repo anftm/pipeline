@@ -955,12 +955,12 @@ class PublicationArtifactTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             subject.read_report_archive(publication_zip(root='v3/'), {'publication.json'})
 
-    def test_web_profile_report_accepts_fifty_total_outcomes_but_not_more(self):
+    def test_web_profile_report_accepts_two_hundred_total_outcomes_but_not_more(self):
         self.operation.update(phase='web-profile', extension='html')
-        profile = {'extension': 'html', 'converted': 38, 'identical': 4, 'held': 8}
+        profile = {'extension': 'html', 'converted': 188, 'identical': 4, 'held': 8}
         publication = {'applied': True, 'generation': READER, 'profile': profile}
         self.replace_zip(publication_zip(publication=publication))
-        self.assertEqual(self.report()['profile'], {'converted': 38, 'identical': 4, 'held': 8})
+        self.assertEqual(self.report()['profile'], {'converted': 188, 'identical': 4, 'held': 8})
         self.replace_zip(publication_zip(publication=publication | {'profile': profile | {'held': 9}}))
         with self.assertRaisesRegex(ValueError, 'invalid web profile outcome'):
             self.report()

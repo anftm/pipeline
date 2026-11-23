@@ -8,9 +8,10 @@ from .reader_web_profile import WEB_PROFILE
 KIND=web.KIND
 B=web.BUCKET
 MAX_JOBS=100
+MAX_ROUND_ROWS=2000
 
 
-def plan(records,indexes):
+def plan(records,indexes,*,search_pins=False):
     by_key={}; holds=[]
     for ext,body in sorted(indexes.items()):
         if ext not in convert.EXTENSIONS or body.get('version')!=1 or body.get('kind')!=KIND:
@@ -29,7 +30,8 @@ def plan(records,indexes):
         if row.get('profile')==WEB_PROFILE:
             counts['current']+=1;continue
         req={'repo':row.get('repo'),'path':row.get('path'),'extension':ext,
-             'source_revision':row.get('source_revision'),'source_sha256':row.get('source_sha256')}
+             'source_revision':src.get('revision') if search_pins else row.get('source_revision'),
+             'source_sha256':row.get('source_sha256')}
         try:
             web._web_row(row,old=True)
             if (req['repo'],req['path'],row['extension'])!=(src['repo'],src['path'],ext):
@@ -37,6 +39,9 @@ def plan(records,indexes):
             convert.validate_request(request([req]))
         except (ValueError,TypeError):
             counts['held']+=1;holds.append({'key':key,'reason':'invalid_pinned_web_identity'});continue
+        if counts['queued'] >= MAX_ROUND_ROWS:
+            counts['deferred']=counts.get('deferred',0)+1
+            continue
         out[ext].append(req);counts['queued']+=1
     groups=[]
     for ext,rows in out.items():
@@ -65,7 +70,9 @@ def capture(store):
                 raise
             continue
         raw[path]=body;idx[ext]=web._json(body,'canonical '+ext)
-    groups,counts,holds=plan(records,idx)
+    # Convert against the exact current Search-pinned tree. The worker still
+    # demands the old source SHA before using the result; moved bytes stay held.
+    groups,counts,holds=plan(records,idx,search_pins=True)
     if (pointer!=store.read_bytes(B,v3.POINTER) or search!=store.read_bytes(backlog.SEARCH_BUCKET,backlog.CURRENT)
             or any(store.read_bytes(B,p)!=b for p,b in raw.items())):
         raise ValueError('live Reader or Search roots moved while planning')

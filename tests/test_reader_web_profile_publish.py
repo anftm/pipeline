@@ -55,12 +55,12 @@ class AutomaticWebProfileTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'both sites'):
                 web.replay.rejected(evidence,docs)
 
-    def test_fifty_outcomes_consume_slots_before_any_metadata_checkpoint(self):
+    def test_two_hundred_outcomes_consume_slots_before_any_metadata_checkpoint(self):
         ext, search, generation = 'html', 'b'*64, 'd'*64
-        old = {f'book-{i:02d}': {'key': f'book-{i:02d}', 'repo': 'org/books', 'path': f'book-{i:02d}.html',
+        old = {f'book-{i:03d}': {'key': f'book-{i:03d}', 'repo': 'org/books', 'path': f'book-{i:03d}.html',
                                'object': f'old/{i}/document.html', 'manifest': f'old/{i}/document-manifest.json',
-                               'source_sha256': 'a'*64, 'bytes': 2, 'sha256': 'e'*64} for i in range(54)}
-        old['book-43']['bytes'] = web.MAX_PUBLIC_WEB_BYTES + 1
+                               'source_sha256': 'a'*64, 'bytes': 2, 'sha256': 'e'*64} for i in range(204)}
+        old['book-193']['bytes'] = web.MAX_PUBLIC_WEB_BYTES + 1
         entries = {k: {'state': 'profile_outdated', 'recorded_failure': False,
                        **{f'previous_{field}': row[field] for field in ('source_sha256','object','manifest','sha256','bytes')}}
                    for k, row in old.items()}
@@ -73,7 +73,7 @@ class AutomaticWebProfileTests(unittest.TestCase):
             return {'search_generation': search, 'reader_generation': generation}, None
 
         def attempt(item, before, *, reviewed):
-            if int(before['key'][-2:]) >= 44:
+            if int(before['key'][-3:]) >= 194:
                 raise web.convert.Hold('parity_anchors')
             return before, b'ok', b'manifest', {}
 
@@ -87,12 +87,13 @@ class AutomaticWebProfileTests(unittest.TestCase):
                 patch.object(web, 'candidate', side_effect=attempt) as convert, patch.object(web, 'checkpoint_non_routing') as checkpoint, \
                 patch.dict('os.environ', {'GH_TOKEN': 'test', 'READER_WEB_PROFILE_CANDIDATE_INDEX': ''}):
             publication = web.execute({'extension': ext, 'search_generation': search, 'parent_run_id': 23}, None)
-        self.assertEqual(convert.call_count, 49)
+        self.assertLessEqual(web.daily.WEB_PROFILE_BATCH_ROWS, web.prepare.plan.MAX_MANAGED_ROWS)
+        self.assertEqual(convert.call_count, 199)
         self.assertEqual((publication['profile']['converted'], publication['profile']['identical'],
-                          publication['profile']['held']), (0, 43, 7))
-        self.assertEqual(len(checkpoint.call_args.args[4]), 43)
-        self.assertEqual(set(checkpoint.call_args.args[5]), {f'book-{i:02d}' for i in range(43, 50)})
-        self.assertEqual(publication['profile']['holds']['book-43']['error'], 'old_web_readback_size')
+                          publication['profile']['held']), (0, 193, 7))
+        self.assertEqual(len(checkpoint.call_args.args[4]), 193)
+        self.assertEqual(set(checkpoint.call_args.args[5]), {f'book-{i:03d}' for i in range(193, 200)})
+        self.assertEqual(publication['profile']['holds']['book-193']['error'], 'old_web_readback_size')
 
     def test_shared_manifest_is_deferred_before_replay_not_marked_held(self):
         ext, search, generation = 'html', 'b'*64, 'd'*64

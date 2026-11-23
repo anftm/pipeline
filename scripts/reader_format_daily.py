@@ -45,7 +45,7 @@ MAX_BATCHES = 20
 MAX_SECONDS = 5 * 60 * 60
 # Shared with the serial Web profile publisher. Identical and held outcomes
 # consume slots too; the existing managed bundle byte limits still apply.
-WEB_PROFILE_BATCH_ROWS = 50
+WEB_PROFILE_BATCH_ROWS = 200
 PUBLICATION_ARTIFACT = 'v3-publication-report'
 MAX_ARCHIVE = 8 * 1024 * 1024
 MAX_EXPANDED = 16 * 1024 * 1024
