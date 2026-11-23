@@ -1,5 +1,5 @@
 name: Reader/桶 · Daily Format Conversion
-run-name: ${{ inputs.search_source_run && format('reader-search-handoff/{0}', inputs.search_source_run) || inputs.continuation_id && format('reader-format-continuation/{0}', inputs.continuation_id) || format('Reader format backlog / {0}', github.event_name) }}
+run-name: ${{ inputs.hold_approval_sha256 && format('reader-web-hold/{0}', inputs.hold_approval_sha256) || inputs.search_source_run && format('reader-search-handoff/{0}', inputs.search_source_run) || inputs.continuation_id && format('reader-format-continuation/{0}', inputs.continuation_id) || format('Reader format backlog / {0}', github.event_name) }}
 
 on:
   push:
@@ -14,6 +14,10 @@ on:
     types: [completed]
   workflow_dispatch:
     inputs:
+      hold_approval_sha256:
+        description: Exact approved authority SHA for one previously held HTML cohort
+        type: string
+        default: ''
       search_source_run:
         description: Exact bot Search source run; only accepted with its published receipt
         type: string
@@ -65,6 +69,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     env:
+      HOLD_APPROVAL: ${{ inputs.hold_approval_sha256 }}
       READER_AUTOMATION_ENABLED: ${{ vars.READER_FORMAT_AUTOMATION_ENABLED }}
       READER_PAUSED: ${{ vars.READER_V3_AUTO_PAUSED }}
       READER_CHM_PROFILE_REBUILD_ENABLED: ${{ vars.READER_CHM_PROFILE_REBUILD_ENABLED }}
@@ -133,7 +138,25 @@ jobs:
           [[ -z "$CONTINUATION_RUN" && -z "$CONTINUATION_ID" && "$MANUAL_APPLY" == false && "$MANUAL_WRITERS" == false ]]
           [[ "$READER_AUTOMATION_ENABLED" == true && "$READER_PAUSED" != true ]]
           python -B -m scripts.search_reader_handoff verify
+      - name: Apply one exact reviewed Web hold cohort
+        if: env.HOLD_APPROVAL != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+          SEARCH_SOURCE: ${{ inputs.search_source_run }}
+          CONT_RUN: ${{ inputs.continuation_run_id }}
+          CONT_ID: ${{ inputs.continuation_id }}
+          BOOST: ${{ inputs.boost_canary }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$GITHUB_RUN_ATTEMPT" == 1 &&
+             "$REQUESTED_APPLY" == true && "$WRITERS" == true && "$WEB_PROFILE_ONLY" == true &&
+             "$READER_AUTOMATION_ENABLED" == true && "$READER_PAUSED" != true && "$READER_WEB_PROFILE_REBUILD_ENABLED" == true &&
+             -z "$SEARCH_SOURCE" && -z "$CONT_RUN" && -z "$CONT_ID" && ( -z "$BOOST" || "$BOOST" == none ) ]]
+          python -B -m scripts.reader_web_hold_dispatch
       - name: Observe exact published format backlog
+        if: env.HOLD_APPROVAL == ''
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
@@ -150,7 +173,7 @@ jobs:
             --output output/format-daily/decision.json
       - name: Convert and publish triggered formats to completion
         id: convert
-        if: env.REQUESTED_APPLY == 'true' && env.READER_AUTOMATION_ENABLED == 'true' && env.READER_PAUSED != 'true'
+        if: env.HOLD_APPROVAL == '' && env.REQUESTED_APPLY == 'true' && env.READER_AUTOMATION_ENABLED == 'true' && env.READER_PAUSED != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}

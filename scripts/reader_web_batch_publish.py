@@ -46,7 +46,7 @@ def run(blob, bundle_sha, review_sha, proof, *, phase, external_writers_stopped,
     if managed:
         from . import reader_web_hold_admission as admission
         if admission.DIGEST_FIELD in review:
-            if phase!='apply' or controller_guard is not None or not isinstance(proof.get('hold_admission'),dict):
+            if phase!='apply' or not isinstance(proof.get('hold_admission'),dict):
                 raise ValueError('managed hold replacement requires its exact hosted proof and fresh manual apply')
             from . import reader_web_hold_live as hold_live
             hold_proof=proof['hold_admission']

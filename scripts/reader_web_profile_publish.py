@@ -65,14 +65,20 @@ def _check_maintenance(hub):
     return True
 
 
-def ordinary_writer(hub, parent_id, api, *, observed=None):
+def ordinary_writer(hub, parent_id, api, *, observed=None, hold_approval=None):
     """Recheck the exact controller, child, and full competing writer inventory."""
     owner=_owner() if observed is None else observed
     _writer_context(hub, owner)
     fence=GitHubProducerFence()
     _active_owner(fence,*owner)
     parent=api.get_run(parent_id)
-    daily.validate_daily_run(parent,owner[2])
+    if hold_approval is None:
+        daily.validate_daily_run(parent,owner[2])
+    else:
+        from .reader_web_hold_dispatch import validate_parent, automation_id
+        validate_parent(parent,owner[2],hold_approval)
+        if os.getenv('WEB_PROFILE_AUTOMATION_ID')!=automation_id(parent_id,hold_approval):
+            raise RuntimeError('hold publication does not match this parent authorization')
     current=api.get_run(int(owner[0]))
     if (parent['status']!='in_progress' or parent['id']!=parent_id or str(parent_id)==owner[0]
             or current.get('display_title')!='reader-auto/'+os.getenv('WEB_PROFILE_AUTOMATION_ID','')
@@ -372,7 +378,13 @@ def execute(resource,output):
 def main():
     import argparse
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--resource-json',required=True);p.add_argument('--output',type=Path,required=True);a=p.parse_args()
-    a.output.parent.mkdir(parents=True,exist_ok=True); result=execute(json.loads(a.resource_json),a.output.parent)
+    resource=prepare.web._json(a.resource_json.encode('utf-8'),'automatic Web operation')
+    a.output.parent.mkdir(parents=True,exist_ok=True)
+    if isinstance(resource,dict) and 'hold_approval_sha256' in resource:
+        from .reader_web_hold_dispatch import apply
+        result=apply(resource)
+    else:
+        result=execute(resource,a.output.parent)
     with a.output.open('xb') as f:f.write(v3.encode(result))
 
 if __name__=='__main__':main()

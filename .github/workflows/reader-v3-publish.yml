@@ -396,9 +396,13 @@ jobs:
           generation=$(jq -er '.generation' output/v3/publication.json)
           python scripts/publish_reader_v3.py verify-generation --expected-parent "$generation" \
             --wait-seconds 1200 --output output/v3/format-automation-verification.json
-          python -B -m scripts.reader_web_profile_readback --publication output/v3/publication.json \
-            --consumers output/v3/format-automation-verification.json --resource-json "$RESOURCE_JSON" \
-            --output output/v3/web-profile-readback.json
+          if jq -e '.hold_admission != null' output/v3/publication.json >/dev/null; then
+            python -B -m scripts.reader_web_hold_finish --resource-json "$RESOURCE_JSON" --output output/v3
+          else
+            python -B -m scripts.reader_web_profile_readback --publication output/v3/publication.json \
+              --consumers output/v3/format-automation-verification.json --resource-json "$RESOURCE_JSON" \
+              --output output/v3/web-profile-readback.json
+          fi
       - name: Publish and verify exact Office consumer projections
         if: steps.operation.outputs.changed == 'true' && inputs.operation == 'replace-exact-office-report'
         env:

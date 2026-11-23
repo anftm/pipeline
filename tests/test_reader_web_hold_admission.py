@@ -5,6 +5,7 @@ import json
 import unittest
 
 from scripts import reader_web_hold_admission as admission, reader_web_hold_cleanup as cleanup
+from scripts import reader_web_hold_dispatch as dispatch
 from scripts import reader_web_batch_plan as plan, reader_web_index_guard as index
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -124,6 +125,20 @@ class HoldAdmissionTests(unittest.TestCase):
         self.assertEqual(json.loads(state[0])['failures'],[self.before['failures'][0]])
         self.assertEqual(journal.claim.call_count,1)
         cps.write_once.assert_called_once()
+
+    def test_scoped_daily_title_and_call_bind_this_approval(self):
+        sha='1'*40; approval='2'*64; title='reader-web-hold/'+approval
+        good={'name':dispatch.daily.DAILY_NAME,'display_title':title,'head_sha':sha,'head_branch':'main',
+              'event':'workflow_dispatch','path':'.github/workflows/'+dispatch.daily.DAILY,'id':23,'run_attempt':1}
+        dispatch.validate_parent(good,sha,approval)
+        for other in (good|{'run_attempt':2}, good|{'display_title':'Reader format backlog / workflow_dispatch'},
+                      good|{'event':'schedule'}, good|{'head_sha':'3'*40}):
+            with self.assertRaises(RuntimeError):dispatch.validate_parent(other,sha,approval)
+        base={dispatch.FIELD:approval,'parent_run_id':23,'search_generation':'a'*64,'extension':'html'}
+        self.assertEqual(dispatch.parse_resource(base),base)
+        self.assertNotEqual(dispatch.automation_id(23,approval),dispatch.automation_id(24,approval))
+        for bad in (base|{'extension':'mht'}, base|{'external_writers_stopped':True},base|{'parent_run_id':True}):
+            with self.assertRaises(ValueError):dispatch.parse_resource(bad)
 
     def test_budget_scope_is_separate_and_cannot_admit_combined_batch(self):
         budget = deepcopy(self.source['rows'][0])

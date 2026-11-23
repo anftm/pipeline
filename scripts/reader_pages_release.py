@@ -339,8 +339,15 @@ def main(argv=None):
             hold=result['hold_admission']
             if pins is None or (pins['code_sha'],pins['search_generation'])!=(hold['pages_commit'],hold['search_generation']):
                 raise ValueError('Web hold Pages pins differ from approved sites')
+            if result.get('hold_approval_sha256') is not None:
+                from .reader_web_hold_dispatch import FIELD, owner, resource_from_env
+                resource=resource_from_env()
+                if resource[FIELD]!=result[FIELD]:raise ValueError('managed hold Pages authorization differs')
+                active_owner=owner(store,resource)
+            else:
+                active_owner=lambda:guard_window(store,True)
             def guard():
-                return guard_window(store,True) and space_revision(client)==hold['space_commit']
+                return active_owner() and space_revision(client)==hold['space_commit']
         proof=release(generation=generation,session=session,write_store=Claims(),read_target=target,read_live=read_live_receipt,
                       verify=verify,workflow_sha=sha,pipeline_run=p,observe_only=args.observe_only,
                       expected_code_sha=pins['code_sha'] if pins is not None else None,dispatch_guard=guard)
