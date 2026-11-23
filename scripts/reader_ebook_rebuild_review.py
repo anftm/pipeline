@@ -50,8 +50,12 @@ def read_bundle(path: Path):
     return manifest, members, version
 
 
-def preview(store, plan, bundles):
-    """Preview a tiny first cohort, binding all changes to old routes and exact bytes."""
+def preview(store, plan, bundles, *, capture_parents=None):
+    """Preview a tiny first cohort, binding all changes to old routes and exact bytes.
+
+    Optionally collect exact parent bytes and projected bytes for an independent
+    guarded legacy preview; no bucket mutation is available here.
+    """
     require(1 <= len(bundles) <= 3, 'preview requires one to three exact EPUB candidates')
     require(plan.get('kind') == 'reader-ebook-full-rebuild-plan' and plan.get('remote_writes') == 0
             and not plan.get('source_heads_changed'), 'expected an exact read-only rebuild plan')
@@ -117,6 +121,9 @@ def preview(store, plan, bundles):
     successor = v3.unify(Target(), expected_canonical=sha(compressed), expected_pointer=pointer, apply=False)
     require(v3.current(store)[0] == pointer and store.read_bytes(v3.ASSETS, INDEX) == prior_raw
             and store.read_bytes(v3.ASSETS, sidecar_path) == raw_sidecar, 'preview parent changed during readback')
+    if capture_parents is not None:
+        capture_parents.update(index=prior_raw, sidecar=raw_sidecar, target_sidecar=compressed,
+                               pointer=pointer, canonical_updates=updates)
     return {'version': 1, 'kind': 'ebook-rebuild-review', 'search_generation': plan['search_generation'],
             'reader_generation': plan['reader_generation'], 'changes': changes,
             'canonical_parent_sha256': sha(prior_raw), 'target_index_sha256': sha(v3.encode(next_index)),

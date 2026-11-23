@@ -12,7 +12,7 @@ on:
         default: ''
       operation:
         type: choice
-        options: [inspect, unify, ack, retire, withdraw, reset-documents, remove-route, restore-route, verify-route, migrate-derived, resume-derived, redirect-derived, finalize-derived-redirects, replace-derived-history, replace-exact-web, verify-exact-web, replace-managed-web, verify-managed-web, prepare-managed-web, upgrade-web-profile, record-web-retirement-hints, verify-exact-office-report, replace-exact-office-report, refresh-reader-consumers, reconcile-derived-index, reconcile-sidecar, compact-legacy-history, publish-generation, verify-generation, verify-pages-lane]
+        options: [inspect, unify, ack, retire, withdraw, reset-documents, remove-route, restore-route, verify-route, migrate-derived, resume-derived, redirect-derived, finalize-derived-redirects, replace-derived-history, replace-exact-web, verify-exact-web, replace-managed-web, verify-managed-web, prepare-managed-web, upgrade-web-profile, record-web-retirement-hints, verify-exact-office-report, replace-exact-office-report, prepare-exact-ebook, replace-exact-ebook, refresh-reader-consumers, reconcile-derived-index, reconcile-sidecar, compact-legacy-history, publish-generation, verify-generation, verify-pages-lane]
         default: inspect
       resource_json:
         description: 'Migration requires root identities; optional read-only check_s3=true; apply/resume require external_writers_stopped=true'
@@ -126,9 +126,48 @@ jobs:
           python -B -m unittest tests.test_reader_web_retirement_backfill tests.test_reader_web_retention_plan
           python -B -m scripts.reader_web_retirement_backfill --resource-json "$RESOURCE_JSON" \
             --output output/v3/web-retirement-hints.json "${args[@]}"
+      - name: Prepare or publish exact same-source EPUB candidates
+        if: inputs.operation == 'prepare-exact-ebook' || inputs.operation == 'replace-exact-ebook'
+        env:
+          OPERATION: ${{ inputs.operation }}
+          APPLY: ${{ inputs.apply }}
+          RESOURCE_JSON: ${{ inputs.resource_json }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_INPUT_TOKEN: ${{ secrets.HF_INPUT_TOKEN }}
+          HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+          READER_WEB_PAGES_PROOF_TOKEN: ${{ secrets.READER_PAGES_DISPATCH_TOKEN }}
+          READER_PAGES_DISPATCH_TOKEN: ${{ inputs.operation == 'replace-exact-ebook' && secrets.READER_PAGES_DISPATCH_TOKEN || '' }}
+          READER_PAGES_EXACT_ENABLED: ${{ vars.READER_PAGES_EXACT_ENABLED }}
+          READER_EBOOK_PUBLISH_ENABLED: ${{ vars.READER_EBOOK_PUBLISH_ENABLED }}
+          READER_WEB_PAGES_DISPATCH_SCOPE_REVIEWED: ${{ vars.READER_WEB_PAGES_DISPATCH_SCOPE_REVIEWED }}
+          GC_PRODUCER_TOKENS_JSON: ${{ secrets.GC_PRODUCER_TOKENS_JSON }}
+          GC_AMBROSSEE_MAINTENANCE_TOKEN: ${{ secrets.GC_AMBROSSEE_MAINTENANCE_20261102 }}
+          GC_CENTRAL_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$GITHUB_REF" == refs/heads/main && "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" && "$GITHUB_RUN_ATTEMPT" == 1 ]]
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          [[ "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" == "$GITHUB_SHA" ]]
+          python -B -m unittest tests.test_reader_ebook_rebuild_archive tests.test_reader_ebook_canonical_guard tests.test_reader_ebook_rebuild_transport tests.test_reader_ebook_rebuild_commit
+          mkdir -p output/v3
+          if [[ "$OPERATION" == prepare-exact-ebook ]]; then
+            [[ "$APPLY" == false ]]
+            python -B -m scripts.reader_ebook_rebuild_publish --resource-json "$RESOURCE_JSON" --output output/v3/ebook-review.json
+          else
+            [[ "$APPLY" == true && "$READER_EBOOK_PUBLISH_ENABLED" == true && "$READER_PAGES_EXACT_ENABLED" == true ]]
+            [[ "$READER_WEB_PAGES_DISPATCH_SCOPE_REVIEWED" == true && -n "$GC_CENTRAL_TOKEN" ]]
+            python -B -m scripts.reader_pages_release --preflight
+            python -B -m scripts.reader_ebook_rebuild_publish --apply --resource-json "$RESOURCE_JSON" --output output/v3/publication.json
+            python -B -m scripts.reader_pages_release --publication output/v3/publication.json --output output/v3/pages-release.json
+            generation=$(jq -er '.generation' output/v3/publication.json)
+            python scripts/publish_reader_v3.py verify-generation --expected-parent "$generation" --wait-seconds 1200 \
+              --output output/v3/ebook-verification.json
+          fi
       - name: Verify and execute the central v3 operation
         id: operation
-        if: inputs.operation != 'record-web-retirement-hints'
+        if: inputs.operation != 'record-web-retirement-hints' && inputs.operation != 'prepare-exact-ebook' && inputs.operation != 'replace-exact-ebook'
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_INPUT_TOKEN: ${{ secrets.HF_INPUT_TOKEN }}

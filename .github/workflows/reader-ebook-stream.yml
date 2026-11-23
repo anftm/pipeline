@@ -343,13 +343,18 @@ jobs:
           PY
       - name: Install pinned Ubuntu Calibre and CHM tools if needed
         if: inputs.preview_stage_extension != 'epub'
-        timeout-minutes: 10
+        timeout-minutes: 16
         run: |
           set -euo pipefail
           packages=(calibre=7.6.0+ds-1build1 calibre-bin=7.6.0+ds-1build1)
           if [[ "$STAGE_EXTENSION" == chm ]]; then packages+=(p7zip-full); fi
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends "${packages[@]}"
+          opts=(-o Acquire::Retries=1 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20)
+          # The hosted image may already have signed repository indexes. Don't
+          # block on every mirror's update before trying the exact known build.
+          if ! timeout 5m sudo apt-get "${opts[@]}" install -y --no-install-recommends "${packages[@]}"; then
+            timeout 4m sudo apt-get "${opts[@]}" update
+            timeout 5m sudo apt-get "${opts[@]}" install -y --no-install-recommends "${packages[@]}"
+          fi
           QT_QPA_PLATFORM=offscreen ebook-convert --version
           if [[ "$STAGE_EXTENSION" == chm ]]; then command -v 7z; fi
       - name: Fetch audited KindleUnpack revision from upstream
