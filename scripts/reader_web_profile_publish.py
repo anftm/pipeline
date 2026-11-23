@@ -18,10 +18,11 @@ from . import reader_format_backlog as backlog, reader_format_daily as daily
 from . import publish_reader_v3 as v3, reader_web_index_guard as index
 from . import reader_web_managed_convert as convert, reader_web_managed_pages as pages
 from . import reader_web_managed_prepare as prepare, reader_web_managed_review as schema
-from . import reader_web_profile_replay as replay
+from . import reader_web_profile_replay as replay, reader_web_profile_candidates as candidates
 from . import reader_web_batch_review as batch_review, reader_web_batch_publish as publish
 from .reader_image_history_fence import _owner, _active_owner
 from .reader_image_history_publish_s3 import LegacyRoots, SIDECAR
+from .reader_image_history_store import S3ClaimStore
 from .reader_gc_fence import GitHubProducerFence
 from .reader_gc_maintenance import DURABLE_JOURNAL
 from .reader_page_cas import ConditionalPageStore
@@ -73,19 +74,21 @@ def ordinary_writer(hub, parent_id, api, *, observed=None):
     return True
 
 
-def candidate(item,old):
+def candidate(item,old,*,reviewed=None):
     # Recapture same-directory resources from the exact published revision;
     # no arbitrary external fetch. The old source digest remains the identity.
-    req={k:item[k] for k in ('repo','path','extension')}
-    req.update(source_revision=item['revision'],source_sha256=old['source_sha256'])
+    req=candidates.source_identity(item,old)
     convert.validate_request({'version':1,'max_rows':1,'max_source_bytes':convert.MAX_SOURCE_BYTES,
                               'max_output_bytes':convert.MAX_OUTPUT_BYTES,'items':[req]})
-    url=f'https://{convert.HF}/datasets/{item["repo"]}/resolve/{item["revision"]}/{quote(item["path"])}'
-    dl=convert.Downloads(convert.MAX_SOURCE_BYTES,convert.anonymous_fetch)
-    raw=dl.get(url,convert.MAX_ITEM_SOURCE)
-    if sha256(raw).hexdigest()!=old['source_sha256']:
-        raise RuntimeError('profile source bytes differ')
-    omissions={}; data=convert.convert(raw,item['extension'],url,dl,schema.MAX_DOC,omissions=omissions)
+    if reviewed is None:
+        url=f'https://{convert.HF}/datasets/{item["repo"]}/resolve/{item["revision"]}/{quote(item["path"])}'
+        dl=convert.Downloads(convert.MAX_SOURCE_BYTES,convert.anonymous_fetch)
+        raw=dl.get(url,convert.MAX_ITEM_SOURCE)
+        if sha256(raw).hexdigest()!=old['source_sha256']:
+            raise RuntimeError('profile source bytes differ')
+        omissions={}; data=convert.convert(raw,item['extension'],url,dl,schema.MAX_DOC,omissions=omissions)
+    else:
+        data,omissions=reviewed
     h=sha256(data).hexdigest(); bundle=sha256(f"{old['source_sha256']}\0{h}".encode()).hexdigest()
     root=f"documents/web/{item['extension']}/{bundle}"
     new={k:v for k,v in old.items() if k not in {'checkpointed_at','processing_roots'}}
@@ -153,7 +156,15 @@ def execute(resource,output):
     selected=daily.validate_summary(summary)[ext]
     if (summary['search_generation'],summary['reader_generation'])!=(search_generation,root['generation']) or daily.blockers(selected):
         raise RuntimeError('fresh web profile backlog became blocked')
+    pin=os.getenv('READER_WEB_PROFILE_CANDIDATE_INDEX','')
+    reviewed={}
+    if pin:
+        claims=S3ClaimStore(client)
+        def cached_get(path, ceiling):
+            return claims._get(path,maximum=ceiling)[0]
+        reviewed=candidates.load(cached_get,pin)
     pairs=[]; objects={}; same={}; holds={}; notes={}; total=0
+    reused=set()
     def hold(key, item, before, reason):
         holds[key]={'key':key,'repo':before['repo'],'path':before['path'],'extension':ext,'source_revision':item['revision'],
             'profile':WEB_PROFILE,'source_sha256':before['source_sha256'],'error':reason,'profile_upgrade_hold':True}
@@ -165,7 +176,9 @@ def execute(resource,output):
         before=old[key]
         if any(before[k]!=row['previous_'+k] for k in ('source_sha256','object','manifest','sha256','bytes')):
             raise RuntimeError('old route changed during profile scan')
-        try:new,data,manifest,omissions=candidate(item,before)
+        prepared=candidates.reuse(cached_get,reviewed,candidates.source_identity(item,before)) if reviewed else None
+        try:
+            new,data,manifest,omissions=candidate(item,before,reviewed=prepared)
         except convert.Hold as error:
             if str(error) in {'download_failed','download_timeout','download_destination','download_response'}:
                 raise
@@ -173,9 +186,11 @@ def execute(resource,output):
             continue
         notes[key]=omissions
         if new['object']==before['object']:
+            if prepared is not None:reused.add(key)
             same[key]=new;continue
         if total+len(data)>schema.MAX_CONTENT:
             break
+        if prepared is not None:reused.add(key)
         total+=len(data);i=f'{len(pairs):04d}'
         pairs.append({'id':i,'new':new,'expected_old_object':before['object']})
         objects[i+'/document.html']=data;objects[i+'/document-manifest.json']=manifest
@@ -229,7 +244,7 @@ def execute(resource,output):
             raise RuntimeError('web routing or hold checkpoint drifted')
         checkpoint_non_routing(cps,hub,path,old,same,holds,validate_search)
     ret.update(profile={'version':WEB_PROFILE,'extension':ext,'converted':len(pairs),'identical':len(same),
-                        'held':len(holds),'holds':holds,'omissions':notes,'rows':rows})
+                        'held':len(holds),'holds':holds,'omissions':notes,'rows':rows,'reused':len(reused)})
     return ret
 
 

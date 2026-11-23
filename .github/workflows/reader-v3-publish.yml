@@ -59,7 +59,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
-          python-version: '3.11'
+          python-version: ${{ inputs.operation == 'upgrade-web-profile' && '3.12' || '3.11' }}
       - run: pip install -r scripts/requirements.txt PyYAML==6.0.3
       - name: Guard automatic format publication
         if: inputs.automation_id != ''
@@ -151,6 +151,7 @@ jobs:
           SCHEDULE: ${{ github.event.schedule }}
           READER_PAGES_EXACT_ENABLED: ${{ vars.READER_PAGES_EXACT_ENABLED }}
           READER_WEB_PROFILE_REBUILD_ENABLED: ${{ vars.READER_WEB_PROFILE_REBUILD_ENABLED }}
+          READER_WEB_PROFILE_CANDIDATE_INDEX: ${{ vars.READER_WEB_PROFILE_CANDIDATE_INDEX }}
           WEB_PROFILE_AUTOMATION_ID: ${{ inputs.automation_id }}
           READER_WEB_PROFILE_PAGES_SCOPE_REVIEWED: ${{ vars.READER_WEB_PROFILE_PAGES_SCOPE_REVIEWED }}
           READER_PROFILE_PAUSED: ${{ vars.READER_V3_AUTO_PAUSED }}
