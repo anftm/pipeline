@@ -460,7 +460,7 @@ def inspect(*, hub, api, fs, client, threshold=10, observe_search=search_daily.o
     contain every checked key, including unchanged sources; absent keys remain
     unverified (for example when a format's canonical index is missing).
     """
-    if scope not in {'all', 'epub'}:
+    if scope not in {'all', 'epub', 'web'}:
         raise ValueError('invalid Reader backlog inspection scope')
     pointer_raw, manifest_raw, corpus, revisions, _observed = capture_search(hub, observe=observe_search, get=get)
     records = source_records(corpus, revisions)
@@ -486,15 +486,17 @@ def inspect(*, hub, api, fs, client, threshold=10, observe_search=search_daily.o
             raise ValueError('Reader consumer differs from the pinned projection')
         receipts[surface] = {'generation': receipt['generation'], 'projection_verified': True}
     root = 'chapters/ebook/epub'
-    canonical = matrix.read_json(fs, READER_BUCKET, root + '/index.json')
-    shards = []
-    for number in range(8):
-        value = matrix.read_json(fs, READER_BUCKET, f'{root}/index-{number:02d}.json')
-        if value:
-            shards.append((number, value))
-    epub = classify_epub(records, routes, canonical, shards, api)
+    canonical, shards, epub = None, [], {}
+    checked_extensions = set()
+    if scope != 'web':
+        canonical = matrix.read_json(fs, READER_BUCKET, root + '/index.json')
+        for number in range(8):
+            value = matrix.read_json(fs, READER_BUCKET, f'{root}/index-{number:02d}.json')
+            if value:
+                shards.append((number, value))
+        epub = classify_epub(records, routes, canonical, shards, api)
+        checked_extensions.add('epub')
     checked = dict(epub)
-    checked_extensions = {'epub'}
     image_root = None
     image_canonical, image_shards = None, []
     media_indexes, media_shards, document_indexes, web_indexes = {}, {}, {}, {}
@@ -578,16 +580,18 @@ def inspect(*, hub, api, fs, client, threshold=10, observe_search=search_daily.o
             checked.update(classify_indexed(records, routes, text_index, [], api, extensions=text_extensions,
                                             kind='text-stream-index', route_modes={'t', 'k'}))
             checked_extensions.update(text_extensions)
-        web_indexes = {}
+    if scope in {'all', 'web'}:
         for extension in FAMILIES['web'][0]:
             path = f'documents/web/{extension}/index.json'
             index = matrix.read_json(fs, READER_BUCKET, path)
+            # In a Web-only pass, also fence the appearance of a missing index.
+            if scope == 'web' or index:
+                web_indexes[path] = index
             if index:
                 checked.update(classify_indexed(records, routes, index, [], api, extensions={extension},
                                                 kind=WEB_INDEX_KIND, route_modes={'h'},
                                                 include_web_profile_upgrades=include_web_profile_upgrades))
                 checked_extensions.add(extension)
-                web_indexes[path] = index
     summaries = summarize(records, routes, checked, threshold=threshold, checked_extensions=checked_extensions)
     # Fail closed if the exact shared inputs changed. This is a point-in-time
     # observation only: it cannot fence independent writers or ABA changes.
@@ -597,12 +601,13 @@ def inspect(*, hub, api, fs, client, threshold=10, observe_search=search_daily.o
         raise ValueError('search manifest changed during backlog inspection')
     if publication.current(hub)[0] != reader_pointer:
         raise ValueError('Reader pointer changed during backlog inspection')
-    if matrix.read_json(fs, READER_BUCKET, root + '/index.json') != canonical:
-        raise ValueError('EPUB canonical index changed during backlog inspection')
-    for number in range(8):
-        latest = matrix.read_json(fs, READER_BUCKET, f'{root}/index-{number:02d}.json')
-        if latest != dict(shards).get(number, {}):
-            raise ValueError('EPUB shard index changed during backlog inspection')
+    if scope != 'web':
+        if matrix.read_json(fs, READER_BUCKET, root + '/index.json') != canonical:
+            raise ValueError('EPUB canonical index changed during backlog inspection')
+        for number in range(8):
+            latest = matrix.read_json(fs, READER_BUCKET, f'{root}/index-{number:02d}.json')
+            if latest != dict(shards).get(number, {}):
+                raise ValueError('EPUB shard index changed during backlog inspection')
     for extension, expected in extra_ebook_indexes.items():
         ebook_root = f'chapters/ebook/{extension}'
         if matrix.read_json(fs, READER_BUCKET, ebook_root + '/index.json') != expected:
@@ -650,7 +655,9 @@ def inspect(*, hub, api, fs, client, threshold=10, observe_search=search_daily.o
                'reader_consumers': receipts, 'formats': summaries, 'remote_writes': 0,
                'dispatches': 0, 'publication_ready': False, 'external_writers_verified': False,
                'suppressed_sources_excluded': len(all_records) - len(records),
-               'scope': ('published search and pinned Reader projection; exact source content checked for EPUB only'
+               'scope': ('published search and pinned Reader projection; exact source content checked for indexed Web only; dependencies may change independently'
+                         if scope == 'web' else
+                         'published search and pinned Reader projection; exact source content checked for EPUB only'
                          if scope == 'epub' else
                          'published search and pinned Reader projection; exact source content checked for indexed ebooks, office, images, media, text, web, spreadsheets and static PDFs; '
                          'HTML/Markdown dependencies may change independently and are not checked')}
@@ -702,6 +709,7 @@ def main(argv=None):
     parser.add_argument('--output', required=True, type=Path)
     parser.add_argument('--epub-details', required=True, type=Path)
     parser.add_argument('--threshold', type=int, default=10)
+    parser.add_argument('--scope', choices=('all', 'web'), default='all')
     args = parser.parse_args(argv)
     if args.output.resolve() == args.epub_details.resolve() or any(
             path.exists() or path.is_symlink() for path in (args.output, args.epub_details)):
@@ -714,7 +722,7 @@ def main(argv=None):
             with httpx.Client(timeout=90, follow_redirects=True) as client:
                 return inspect(hub=HubBucketStore(), api=HfApi(token=token),
                                fs=HfFileSystem(token=token, skip_instance_cache=True),
-                               client=client, threshold=args.threshold,
+                               client=client, threshold=args.threshold, scope=args.scope,
                                include_profile_upgrades=os.getenv('READER_CHM_PROFILE_REBUILD_ENABLED') == 'true',
                                include_web_profile_upgrades=os.getenv('READER_WEB_PROFILE_REBUILD_ENABLED') == 'true')
         summary, details = observe_stable(observe)

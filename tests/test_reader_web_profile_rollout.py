@@ -28,6 +28,21 @@ class WebProfileRolloutTests(unittest.TestCase):
         self.assertFalse(holds);self.assertEqual([len(x['items']) for _,x in groups],[40,40,1,1])
         self.assertEqual({p['source_revision'] for _,x in groups for p in x['items']},{'a'*40})
 
+    def test_two_thousand_candidates_fit_the_existing_preparation_matrix(self):
+        inputs = [sample(ext, i) for ext, count in (('html', 1949), ('htm', 31), ('mht', 19), ('mhtml', 1))
+                  for i in range(count)]
+        records = {src['key']: src for src, _ in inputs}
+        indexes = {ext: {'kind': rollout.KIND, 'version': 1,
+                         'files': [old for _, old in inputs if old['extension'] == ext]}
+                   for ext in ('html', 'htm', 'mht', 'mhtml')}
+        groups, counts, holds = rollout.plan(records, indexes)
+        self.assertFalse(holds)
+        self.assertEqual(counts['queued'], 2000)
+        self.assertLessEqual(len(groups), rollout.MAX_JOBS)
+        self.assertLessEqual(max(len(request['items']) for _, request in groups), 40)
+        selected = {(row['repo'], row['path']) for _, request in groups for row in request['items']}
+        self.assertEqual(selected, {(row['repo'], row['path']) for row in records.values()})
+
     def test_new_ingest_defaults_to_profile_without_replacing_revision_identity(self):
         args=['pilot_web_stream.py','--extension','html']
         with tempfile.TemporaryDirectory() as td:

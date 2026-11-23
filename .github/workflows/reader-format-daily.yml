@@ -138,7 +138,9 @@ jobs:
         run: |
           set -euo pipefail
           threshold=$(python -c 'from scripts.reader_format_daily import THRESHOLD; print(THRESHOLD)')
-          python -B scripts/reader_format_backlog.py --threshold "$threshold" \
+          scope=all
+          if [[ "$WEB_PROFILE_ONLY" == true && "$EXPLICIT_SEARCH_HANDOFF" != true ]]; then scope=web; fi
+          python -B scripts/reader_format_backlog.py --threshold "$threshold" --scope "$scope" \
             --output output/format-daily/summary.json --epub-details output/format-daily/epub-details.json
           if [[ "$EXPLICIT_SEARCH_HANDOFF" == 'true' ]]; then
             python -B -m scripts.search_reader_handoff check-backlog

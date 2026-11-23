@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import re
 import time
+from uuid import uuid4
 
 import httpx
 import requests
@@ -95,6 +96,12 @@ def validate_live(value, search_generation):
     for k,n in (('code_sha',40),('workflow_sha',40),('reader_generation',64),('reader_catalog_sha256',64)):
         hex_id(value.get(k),n)
     return value
+
+
+def read_live_receipt(*, get=search_daily.bounded_get):
+    # Each before/after comparison must bypass a potentially stale CDN entry.
+    # The response still has to match the exact generation, code and run.
+    return json.loads(get(f'{RECEIPT}?reader_check={uuid4().hex}'))
 
 
 def claim_key(generation, search_generation):
@@ -236,7 +243,7 @@ def pages_preflight(session, generation):
               'reader_catalog_sha256','search_generation'):
         if inputs.get(k,{}).get('type')!='string':
             raise ValueError('Pages main does not support the pinned Reader contract')
-    validate_live(json.loads(search_daily.bounded_get(RECEIPT)),generation)
+    validate_live(read_live_receipt(),generation)
     defaults.observe_pages(generation,session=session)
     return sha
 
@@ -271,8 +278,6 @@ def main():
     p=os.environ['GITHUB_RUN_ID']; assert p.isascii() and p.isdigit()
     with session_for_pages() as session,httpx.Client(timeout=40,follow_redirects=True) as client:
         initial=search_daily_journal.inspect(journal)
-        def live():
-            return json.loads(search_daily.bounded_get(RECEIPT))
         def target():
             state=search.load(journal)
             if (state is None or state.record['pending'] is not None
@@ -292,7 +297,7 @@ def main():
                 raise ValueError('live Search consumers do not match the pinned generation')
             return d
         sha=pages_preflight(session,initial['generation'])
-        proof=release(generation=generation,session=session,write_store=Claims(),read_target=target,read_live=live,
+        proof=release(generation=generation,session=session,write_store=Claims(),read_target=target,read_live=read_live_receipt,
                       verify=verify,workflow_sha=sha,pipeline_run=p)
     with args.output.open('x') as f:json.dump(proof,f,sort_keys=True)
     print('Verified Pages Reader publication',proof['status'],proof['pages_run'],flush=True)

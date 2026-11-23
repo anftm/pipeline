@@ -10,6 +10,7 @@ from io import BytesIO
 import json
 import os
 from pathlib import Path
+from time import monotonic
 from urllib.parse import quote
 from zipfile import ZipFile, ZIP_DEFLATED
 
@@ -130,6 +131,14 @@ def checkpoint_non_routing(cps,hub,path,old,index_updates,failures,guard):
 
 
 def execute(resource,output):
+    phase_start=monotonic()
+
+    def timed(phase):
+        nonlocal phase_start
+        now=monotonic()
+        print(f'Web profile {phase}: {now-phase_start:.1f}s',flush=True)
+        phase_start=now
+
     ext,search_generation,parent_id=authority_scope(resource)
     hub=v3.CentralHubStore(); api=daily.GitHub(os.environ['GH_TOKEN']); owner=_owner()
     guard=lambda:ordinary_writer(hub,parent_id,api,observed=owner)
@@ -151,11 +160,11 @@ def execute(resource,output):
     details={}
     with httpx.Client(timeout=90,follow_redirects=True) as http:
         summary,_=backlog.inspect(hub=hub,api=backlog.HfApi(token=hub.token(B)),fs=backlog.HfFileSystem(token=hub.token(B)),
-            client=http,threshold=daily.THRESHOLD,scope='all',details_out=details,include_web_profile_upgrades=True,
-            include_profile_upgrades=os.getenv('READER_CHM_PROFILE_REBUILD_ENABLED')=='true')
+            client=http,threshold=daily.THRESHOLD,scope='web',details_out=details,include_web_profile_upgrades=True)
     selected=daily.validate_summary(summary)[ext]
     if (summary['search_generation'],summary['reader_generation'])!=(search_generation,root['generation']) or daily.blockers(selected):
         raise RuntimeError('fresh web profile backlog became blocked')
+    timed('admission and Web inventory')
     pin=os.getenv('READER_WEB_PROFILE_CANDIDATE_INDEX','')
     reviewed={}
     if pin:
@@ -206,6 +215,7 @@ def execute(resource,output):
         pairs.append({'id':i,'new':new,'expected_old_object':before['object']})
         objects[i+'/document.html']=data;objects[i+'/document-manifest.json']=manifest
     if not (pairs or same or holds):raise RuntimeError('no exact profile work remains')
+    timed('load candidates and convert misses')
     replay_report=None
     if pairs:
         documents={row['new']['sha256']:objects[row['id']+'/document.html'] for row in pairs}
@@ -219,6 +229,7 @@ def execute(resource,output):
                 for member in ('document.html','document-manifest.json'):
                     del objects[row['id']+'/'+member]
         pairs=[row for row in pairs if row['new']['sha256'] not in rejected]
+    timed('dual Reader replay')
     validate_search()
     if cps.read(B,path)!=observed or hub.read_bytes(B,v3.POINTER)!=pointer_raw or hub.read_bytes(B,SIDECAR)!=side_before:
         raise RuntimeError('web batch parents moved before preparation')
@@ -247,6 +258,7 @@ def execute(resource,output):
         ret=publish.run(blob,receipt['bundle_sha256'],receipt['review_sha256'],proof,phase='apply',
                         external_writers_stopped=False,managed=True,controller_guard=validate_search)
         rows=report['rows']
+    timed('seal and commit')
     if same or holds:
         # Record non-routing outcomes only against the precise canonical
         # successor of this run (or the original index if no route moved).
@@ -254,6 +266,7 @@ def execute(resource,output):
         if cps.read(B,path).raw!=expected_raw or hub.read_bytes(B,path)!=expected_raw:
             raise RuntimeError('web routing or hold checkpoint drifted')
         checkpoint_non_routing(cps,hub,path,old,same,holds,validate_search)
+    timed('checkpoint identical and held entries')
     ret.update(profile={'version':WEB_PROFILE,'extension':ext,'converted':len(pairs),'identical':len(same),
                         'held':len(holds),'holds':holds,'omissions':notes,'rows':rows,'reused':len(reused)})
     return ret

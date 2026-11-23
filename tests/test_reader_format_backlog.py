@@ -346,6 +346,60 @@ class ReaderFormatBacklogTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'invalid Reader backlog inspection scope'):
             subject.inspect(hub=mock_hub, api=api, fs=fs, client=Mock(), scope='bogus')
 
+    def test_web_scope_preserves_web_counts_without_reading_other_indexes(self):
+        pointer = search_publication_pointer.make_pointer('1'*64, None, '2'*32)
+        payload = corpus([('a', 'html'), ('b', 'epub'), ('c', 'jpg')])
+        reader = {'generation': '3'*64}
+        web_path = 'documents/web/html/index.json'
+        paths = []
+        reads = 0
+        changed = False
+        hub = Mock()
+        hub.read_bytes.side_effect = lambda bucket, path: pointer if path == subject.CURRENT else b'manifest'
+        api = Mock(); api.repo_info.return_value = SimpleNamespace(sha=NEW)
+
+        def read_index(_fs, _bucket, path):
+            nonlocal reads
+            paths.append(path)
+            if path == web_path:
+                reads += 1
+                return {'version': 1, 'kind': subject.WEB_INDEX_KIND, 'files': [], 'failures': []}
+            if path == 'documents/web/htm/index.json' and changed and reads > 1:
+                return {'new': 'appeared'}
+            return {'files': [{'key': 'historical'}]} if path == 'pages/image/index-v2.json' else {}
+
+        def classify(*args, extensions, **kwargs):
+            if extensions == {'html'}:
+                return {item('a', 'html')['key']: {'state': 'profile_outdated'}}
+            return {item('c', 'jpg')['key']: {'state': 'not_mapped'}} if 'jpg' in extensions else {}
+
+        with patch.object(subject, 'capture_search', return_value=(pointer, b'manifest', payload, {REPO: NEW}, {})), \
+                patch.object(subject.publication, 'current', return_value=(reader, {'base_sidecar': True})), \
+                patch.object(subject.publication, 'pinned_base'), \
+                patch.object(subject.publication, 'project_sidecar', return_value={'f': {}}), \
+                patch.object(subject.publication, 'observe_consumer', return_value={'generation': reader['generation'], 'projection_verified': True}) as observed, \
+                patch.object(subject.matrix, 'read_json', side_effect=read_index), \
+                patch.object(subject, 'classify_epub', return_value={item('b')['key']: {'key': item('b')['key'], 'state': 'not_mapped'}}), \
+                patch.object(subject, 'classify_indexed', side_effect=classify):
+            summary, details = subject.inspect(hub=hub, api=api, fs=Mock(), client=Mock(), scope='web',
+                                               include_web_profile_upgrades=True)
+            self.assertEqual(len(paths), 8)
+            self.assertTrue(all(path.startswith('documents/web/') for path in paths))
+            self.assertEqual(api.repo_info.call_count, 2)
+            self.assertEqual(observed.call_count, 4)
+            self.assertEqual(details['rows'], [])
+            formats = {row['extension']: row for row in summary['formats']}
+            self.assertEqual(formats['html']['profile_outdated'], 1)
+            self.assertFalse(formats['epub']['all_source_identities_checked'])
+            all_summary, _ = subject.inspect(hub=hub, api=api, fs=Mock(), client=Mock(), scope='all',
+                                             include_web_profile_upgrades=True)
+            self.assertEqual([row for row in all_summary['formats'] if row['family'] == 'web'],
+                             [row for row in summary['formats'] if row['family'] == 'web'])
+            changed = True
+            reads = 0
+            with self.assertRaisesRegex(ValueError, 'Web source index changed'):
+                subject.inspect(hub=hub, api=api, fs=Mock(), client=Mock(), scope='web')
+
     def test_all_scope_missing_indexes_leave_mapped_sources_unverified(self):
         pointer = search_publication_pointer.make_pointer('1'*64, None, '2'*32)
         extensions = ('mobi', 'mp3', 'xlsx', 'pptx', 'txt', 'html')

@@ -679,9 +679,11 @@ def continue_dispatch(*, api, result, journal, expected_sha, current_run_id,
             save(journal, saved, exclusive=True)
             posted = True
             try:
-                api.dispatch(DAILY, {'apply': 'true', 'known_writers_coordinated': 'true',
-                                    'continuation_run_id': str(current_run_id),
-                                    'continuation_id': continuation['id']})
+                inputs = {'apply': 'true', 'known_writers_coordinated': 'true',
+                          'continuation_run_id': str(current_run_id), 'continuation_id': continuation['id']}
+                if result.get('web_profile_only') is True:
+                    inputs['web_profile_only'] = 'true'
+                api.dispatch(DAILY, inputs)
                 saved['status'] = 'dispatched'
             except DispatchRejected as error:
                 saved.update(status='dispatch_rejected', error=str(error))
@@ -866,7 +868,8 @@ class Controller:
                         raise RuntimeError('continuation ' + field + ' changed')
                 baseline = validate_summary(previous['current_summary'])
                 rows = validate_summary(current)
-                if any(rows[ext] != baseline[ext] for ext in rows):
+                compared = (ext for ext in rows if not self.web_profile_only or FORMATS[ext][0] == 'web')
+                if any(rows[ext] != baseline[ext] for ext in compared):
                     raise RuntimeError('continuation source inventory or counts changed')
                 triggered = previous['triggered_formats']
                 queue = list(previous['remaining_formats'])
@@ -1013,7 +1016,7 @@ class Controller:
         return self.result
 
 
-def live_callbacks():
+def live_callbacks(*, web_profile_only=False):
     # Keep plan/observation and unit tests independent of Hub conversion dependencies.
     import httpx
     from huggingface_hub import HfApi, HfFileSystem
@@ -1027,7 +1030,8 @@ def live_callbacks():
 
     def refresh():
         with httpx.Client(timeout=30, follow_redirects=True) as client:
-            return backlog.inspect(hub=hub, api=api, fs=fs, client=client, threshold=THRESHOLD, scope='all',
+            return backlog.inspect(hub=hub, api=api, fs=fs, client=client, threshold=THRESHOLD,
+                                   scope='web' if web_profile_only else 'all',
                                    include_profile_upgrades=os.getenv('READER_CHM_PROFILE_REBUILD_ENABLED') == 'true',
                                    include_web_profile_upgrades=os.getenv('READER_WEB_PROFILE_REBUILD_ENABLED') == 'true')[0]
 
@@ -1182,11 +1186,13 @@ def main(argv=None):
         if args.continuation_run_id:
             continuation = api.continuation_report(args.continuation_run_id, args.continuation_id,
                                                    args.expected_sha, os.environ.get('GITHUB_RUN_ID'))
-        refresh, verify = live_callbacks() if args.command == 'run' else (None, None)
+        web_profile_only = (continuation.get('web_profile_only') is True if continuation is not None else
+                            os.getenv('GITHUB_EVENT_NAME') == 'push' or os.getenv('WEB_PROFILE_ONLY') == 'true')
+        refresh, verify = live_callbacks(web_profile_only=web_profile_only) if args.command == 'run' else (None, None)
         controller = Controller(api=api, refresh=refresh, verify=verify, journal=args.journal,
                                 expected_sha=args.expected_sha, enabled=args.enabled,
                                 known_writers=args.known_writers_verified,
-                                web_profile_only=os.getenv('GITHUB_EVENT_NAME')=='push' or os.getenv('WEB_PROFILE_ONLY')=='true',
+                                web_profile_only=web_profile_only,
                                 parent_run_id=os.environ.get('GITHUB_RUN_ID'),
                                 run_attempt=int(os.environ.get('GITHUB_RUN_ATTEMPT', '1')),
                                 max_batches=args.max_batches, timeout_seconds=args.timeout_seconds,

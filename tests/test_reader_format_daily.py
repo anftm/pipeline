@@ -824,6 +824,20 @@ class ContinuationTests(unittest.TestCase):
         self.assertEqual(result['status'], 'dispatch_unknown')
         self.assertEqual(api.dispatch.call_count, 1)
 
+    def test_web_continuation_dispatch_preserves_web_only_inspection(self):
+        previous = self.prepared() | {'web_profile_only': True}
+        # Admission of a Web queue is covered separately; exercise the transport
+        # fields using the shared journal/continuation fixture.
+        api, parent, child, _operations = self.api_for_continuation(previous)
+        parent.update(status='in_progress', conclusion=None)
+        api.find_operation.side_effect = [[], [child]]
+        api.active_children = Mock(return_value=[])
+        api.dispatch = Mock()
+        with patch.object(subject, 'validate_continuation'):
+            subject.continue_dispatch(api=api, result=previous, journal=Path(self.temp.name)/'web-dispatch.json',
+                                      expected_sha=HEAD, current_run_id='100', clock=self.clock, sleep=self.clock.sleep)
+        self.assertEqual(api.dispatch.call_args.args[1]['web_profile_only'], 'true')
+
     def test_definitive_continuation_rejection_fails_without_retry(self):
         previous = self.prepared()
         for code in (403, 422):

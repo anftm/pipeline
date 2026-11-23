@@ -1,6 +1,8 @@
 """The Reader Pages operation cannot accidentally push or replay a dispatch."""
 from datetime import datetime, timezone
+import json
 from pathlib import Path
+import re
 import unittest
 
 import yaml
@@ -92,6 +94,22 @@ class ReaderPagesReleaseTests(unittest.TestCase):
         with patch.object(release,'list_runs',side_effect=self.expose_claim):
             self.assertEqual(self.execute(observe_only=True)['status'],'deployed')
         self.session.post.assert_called_once()
+
+    def test_public_receipt_observations_bypass_intermediate_caches(self):
+        get = Mock(return_value=json.dumps(self.live).encode())
+        self.assertEqual(release.read_live_receipt(get=get), self.live)
+        self.assertEqual(release.read_live_receipt(get=get), self.live)
+        urls = [call.args[0] for call in get.call_args_list]
+        self.assertEqual(len(set(urls)), 2)
+        for url in urls:
+            self.assertRegex(url, '^' + re.escape(release.RECEIPT) + r'\?reader_check=[a-f0-9]{32}$')
+
+    def test_state_drift_is_refused_during_acceptance(self):
+        self.live.update(reader_generation=READER,reader_catalog_sha256=CATALOG)
+        read_live=Mock(side_effect=[self.live,self.live | {'run_id':44}])
+        with self.assertRaisesRegex(ValueError,'changed during acceptance'):
+            self.execute(read_live=read_live)
+        self.session.post.assert_not_called()
 
     def test_state_drift_is_refused_before_claim(self):
         later={**self.live,'run_id':44}
