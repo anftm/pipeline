@@ -481,11 +481,12 @@ class GitHub:
 
 
 def read_publication_archive(raw):
-    reports = read_report_archive(raw, {'publication.json', 'format-automation-verification.json'})
+    reports = read_report_archive(raw, {'publication.json', 'format-automation-verification.json'},
+                                  optional_root='v3/')
     return reports['publication.json'], reports['format-automation-verification.json']
 
 
-def read_report_archive(raw, required):
+def read_report_archive(raw, required, *, optional_root=''):
     if not isinstance(raw, bytes) or not 0 < len(raw) <= MAX_ARCHIVE:
         raise ValueError('invalid publication archive size')
     reports = {}
@@ -494,11 +495,14 @@ def read_report_archive(raw, required):
         if not 1 <= len(members) <= 32 or sum(item.file_size for item in members) > MAX_EXPANDED:
             raise ValueError('publication archive expands beyond limits')
         seen = set()
+        # upload-artifact chooses a common parent across upload patterns. The
+        # publication artifact can be flat or rooted at the literal v3/ folder.
+        # Do not strip arbitrary directories or accept mixed layouts.
+        root = optional_root if optional_root and members[0].filename.startswith(optional_root) else ''
         for item in members:
-            name = item.filename
-            # upload-artifact uploads output/v3/*.json with a flat archive root.
-            if (not re.fullmatch(r'[A-Za-z0-9_-]+\.jsonl?', name) or name in seen
-                    or item.orig_filename != name or item.is_dir() or item.flag_bits & 1
+            name = item.filename.removeprefix(root)
+            if (item.filename != root + name or not re.fullmatch(r'[A-Za-z0-9_-]+\.jsonl?', name) or name in seen
+                    or item.orig_filename != item.filename or item.is_dir() or item.flag_bits & 1
                     or (item.external_attr >> 16) & 0o170000 not in (0, 0o100000)
                     or not 0 < item.file_size <= MAX_REPORT):
                 raise ValueError('unsafe, duplicate or oversized publication archive member')

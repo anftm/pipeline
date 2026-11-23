@@ -840,11 +840,11 @@ class ContinuationTests(unittest.TestCase):
             self.assertEqual(json.loads(journal.read_text())['status'], 'dispatch_rejected')
 
 
-def publication_zip(publication=None, verification=None, extra=()):
+def publication_zip(publication=None, verification=None, extra=(), root=''):
     output = io.BytesIO()
     with zipfile.ZipFile(output, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr('publication.json', json.dumps(publication or {'applied': True, 'generation': READER}))
-        archive.writestr('format-automation-verification.json', json.dumps(verification or receipt()))
+        archive.writestr(root + 'publication.json', json.dumps(publication or {'applied': True, 'generation': READER}))
+        archive.writestr(root + 'format-automation-verification.json', json.dumps(verification or receipt()))
         for name, data in extra:
             archive.writestr(name, data)
     return output.getvalue()
@@ -927,6 +927,19 @@ class PublicationArtifactTests(unittest.TestCase):
             self.api.request.side_effect = [self.run, inventory]
             with self.assertRaises(RuntimeError): self.report()
         self.api.download_artifact.assert_not_called()
+
+    def test_hosted_web_publication_archive_uses_v3_root(self):
+        self.operation.update(phase='web-profile', extension='htm')
+        profile={'extension':'htm', 'converted':8, 'identical':1, 'held':1}
+        publication={'applied':True, 'generation':READER, 'profile':profile}
+        self.replace_zip(publication_zip(publication=publication, root='v3/',
+                                         extra=[('v3/web-profile-readback.json', '{}')]))
+        self.assertEqual(self.report()['profile'], {'converted':8, 'identical':1, 'held':1})
+        for name in ('publication.json', 'v3/nested/report.json', 'v3/../publication.json', 'v3/v3/report.json'):
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                subject.read_publication_archive(publication_zip(root='v3/', extra=[(name, '{}')]))
+        with self.assertRaises(ValueError):
+            subject.read_report_archive(publication_zip(root='v3/'), {'publication.json'})
 
     def test_archive_paths_symlinks_duplicates_and_bombs_rejected(self):
         symlink = zipfile.ZipInfo('link.json'); symlink.external_attr = 0o120777 << 16
