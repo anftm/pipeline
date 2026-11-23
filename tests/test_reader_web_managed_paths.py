@@ -91,8 +91,24 @@ class ManagedPathsTests(unittest.TestCase):
             return httpx.Response(200,content=b'new')
         g='a'*64
         receipt={'generation':g,'complete':True,'consumers':{k:{'generation':g,'projection_verified':True} for k in ('hf','pages')}}
+        sealed={'target_pointer':{'generation':g},'rows':[row]}
         with httpx.Client(transport=httpx.MockTransport(serve)) as client:
-            self.assertEqual(live({'target_pointer':{'generation':g},'rows':[row]},receipt,{'generation':g},client)['old_and_new_verified'],1)
+            self.assertEqual(live(sealed,receipt,{'generation':g},client)['old_and_new_verified'],1)
+        for failed, message in (([502], None), ([502,503,504], httpx.HTTPStatusError),
+                                ([404], httpx.HTTPStatusError), ([200], ValueError)):
+            with self.subTest(failed=failed):
+                attempts=iter(failed); seen=[]; waits=[]
+                def transient(req):
+                    if req.url.host!='voiceofml-search.hf.space':return serve(req)
+                    status=next(attempts,None);seen.append(status)
+                    return serve(req) if status is None else httpx.Response(status,content=b'bad')
+                with httpx.Client(transport=httpx.MockTransport(transient)) as client:
+                    if message is None:
+                        self.assertEqual(live(sealed,receipt,{'generation':g},client,sleep=waits.append)['old_and_new_verified'],1)
+                        self.assertEqual((seen,waits),([502,None],[1]))
+                    else:
+                        with self.assertRaises(message):live(sealed,receipt,{'generation':g},client,sleep=waits.append)
+                        self.assertEqual((seen,waits),(failed,[1,2] if failed[0]==502 else []))
 
     def test_pages_gate_rejects_wrong_parent_and_attempt(self):
         c='a'*40; g='f'*64; ptr={'generation':g,'catalog':{'sha256':'1'*64}}

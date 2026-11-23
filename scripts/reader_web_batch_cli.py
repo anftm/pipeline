@@ -4,6 +4,7 @@ from hashlib import sha256
 import json
 import os
 from pathlib import Path
+import time
 from urllib.parse import urlencode
 
 import httpx
@@ -13,6 +14,8 @@ from .reader_image_history_store import S3ClaimStore
 from .reader_page_cas import ConditionalPageStore
 from .reader_stream_checkpoint_cas import ConditionalCheckpointStore
 from .reader_web_exact_plan import _is_sha
+
+MAX_PUBLIC_WEB_BYTES = 8 * 1024 * 1024
 
 PREFIX='reader-index/gc/web-exact-batch-inputs/v1/'
 PROOFS='reader-index/gc/web-exact-batch-authority/v1/'
@@ -33,7 +36,7 @@ def options(raw,mode):
     return d
 
 
-def live(sealed, consumer_report, publication, client):
+def live(sealed, consumer_report, publication, client, *, sleep=time.sleep):
     generation=sealed['target_pointer']['generation']
     if (publication.get('generation')!=generation or consumer_report.get('generation')!=generation
             or consumer_report.get('complete') is not True or set(consumer_report.get('consumers',{}))!={'hf','pages'}
@@ -41,21 +44,29 @@ def live(sealed, consumer_report, publication, client):
                    for a in consumer_report['consumers'].values())):
         raise ValueError('both full deployed web projections must be verified')
     def check(path,digest,size=None,*,original_object=False):
-        h=sha256();length=0
         # Retired Web Reader URLs may intentionally resolve to today's asset.
         # The exact old bytes must be checked at the immutable bucket key.
         url=('https://huggingface.co/buckets/vomebook/reader-assets-v2/resolve/'+path
              if original_object or path.endswith('/document-manifest.json')
              else 'https://voiceofml-search.hf.space/api/reader-bucket-resource?'+urlencode({'path':path}))
-        with client.stream('GET',url,
-                           headers={'Cache-Control':'no-cache'}) as response:
-            response.raise_for_status()
-            for chunk in response.iter_bytes():
-                length+=len(chunk)
-                if length>8*1024*1024:raise ValueError('public web asset exceeds reviewed cap')
-                h.update(chunk)
-        if (size is not None and length!=size) or h.hexdigest()!=digest:
-            raise ValueError('public web asset differs from sealed bytes')
+        for attempt in range(3):
+            h=sha256();length=0
+            try:
+                with client.stream('GET',url,headers={'Cache-Control':'no-cache'}) as response:
+                    response.raise_for_status()
+                    for chunk in response.iter_bytes():
+                        length+=len(chunk)
+                        if length>MAX_PUBLIC_WEB_BYTES:raise ValueError('public web asset exceeds reviewed cap')
+                        h.update(chunk)
+            except (httpx.HTTPStatusError,httpx.TransportError) as exc:
+                if attempt==2 or (isinstance(exc,httpx.HTTPStatusError) and
+                                  exc.response.status_code not in {408,429,502,503,504}):
+                    raise
+                sleep(2**attempt)
+                continue
+            if (size is not None and length!=size) or h.hexdigest()!=digest:
+                raise ValueError('public web asset differs from sealed bytes')
+            return
     for r in sealed['rows']:
         for kind in ('old','new'):
             row=r[kind]

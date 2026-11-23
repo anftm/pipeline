@@ -55,6 +55,82 @@ class AutomaticWebProfileTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'both sites'):
                 web.replay.rejected(evidence,docs)
 
+    def test_fifty_outcomes_consume_slots_before_any_metadata_checkpoint(self):
+        ext, search, generation = 'html', 'b'*64, 'd'*64
+        old = {f'book-{i:02d}': {'key': f'book-{i:02d}', 'repo': 'org/books', 'path': f'book-{i:02d}.html',
+                               'object': f'old/{i}/document.html', 'manifest': f'old/{i}/document-manifest.json',
+                               'source_sha256': 'a'*64, 'bytes': 2, 'sha256': 'e'*64} for i in range(54)}
+        old['book-43']['bytes'] = web.MAX_PUBLIC_WEB_BYTES + 1
+        entries = {k: {'state': 'profile_outdated', 'recorded_failure': False,
+                       **{f'previous_{field}': row[field] for field in ('source_sha256','object','manifest','sha256','bytes')}}
+                   for k, row in old.items()}
+        records = {k: {'extension': ext, 'revision': 'f'*40} for k in old}
+        hub = Mock(); hub.read_bytes.return_value = b'parent'
+        cps = Mock(); cps.read.return_value = SimpleNamespace(raw=b'parent')
+
+        def inspect(**kwargs):
+            kwargs['details_out'].update(rows=entries, records=records)
+            return {'search_generation': search, 'reader_generation': generation}, None
+
+        def attempt(item, before, *, reviewed):
+            if int(before['key'][-2:]) >= 44:
+                raise web.convert.Hold('parity_anchors')
+            return before, b'ok', b'manifest', {}
+
+        with patch.object(web.v3, 'CentralHubStore', return_value=hub), patch.object(web.daily, 'GitHub'), \
+                patch.object(web, 'ordinary_writer', return_value=True), patch.object(web, '_owner'), \
+                patch.object(web.v3, 'current', return_value=({'generation': generation},)), \
+                patch.object(web.pages, 'current', return_value={'search_generation': search}), \
+                patch.object(web, 'ConditionalCheckpointStore', return_value=cps), patch.object(web, 'LegacyRoots'), \
+                patch.object(web.index, '_index', return_value=(None, old)), patch.object(web.backlog, 'inspect', side_effect=inspect), \
+                patch.object(web.daily, 'validate_summary', return_value={ext: {}}), patch.object(web.daily, 'blockers', return_value=[]), \
+                patch.object(web, 'candidate', side_effect=attempt) as convert, patch.object(web, 'checkpoint_non_routing') as checkpoint, \
+                patch.dict('os.environ', {'GH_TOKEN': 'test', 'READER_WEB_PROFILE_CANDIDATE_INDEX': ''}):
+            publication = web.execute({'extension': ext, 'search_generation': search, 'parent_run_id': 23}, None)
+        self.assertEqual(convert.call_count, 49)
+        self.assertEqual((publication['profile']['converted'], publication['profile']['identical'],
+                          publication['profile']['held']), (0, 43, 7))
+        self.assertEqual(len(checkpoint.call_args.args[4]), 43)
+        self.assertEqual(set(checkpoint.call_args.args[5]), {f'book-{i:02d}' for i in range(43, 50)})
+        self.assertEqual(publication['profile']['holds']['book-43']['error'], 'old_web_readback_size')
+
+    def test_shared_manifest_is_deferred_before_replay_not_marked_held(self):
+        ext, search, generation = 'html', 'b'*64, 'd'*64
+        old = {key: {'key': key, 'object': 'old/shared/document.html',
+                     'manifest': 'old/shared/document-manifest.json', 'source_sha256': 'a'*64,
+                     'bytes': 2, 'sha256': 'e'*64} for key in ('a', 'b')}
+        entries = {k: {'state': 'profile_outdated', 'recorded_failure': False,
+                       **{f'previous_{field}': row[field] for field in ('source_sha256','object','manifest','sha256','bytes')}}
+                   for k, row in old.items()}
+        records = {k: {'extension': ext} for k in old}
+        hub = Mock(); hub.read_bytes.return_value = b'parent'
+        cps = Mock(); cps.read.return_value = SimpleNamespace(raw=b'parent')
+
+        def inspect(**kwargs):
+            kwargs['details_out'].update(rows=entries, records=records)
+            return {'search_generation': search, 'reader_generation': generation}, None
+
+        def attempt(item, before, *, reviewed):
+            key = before['key']
+            return before | {'object': f'new/{key}/document.html', 'manifest': f'new/{key}/document-manifest.json',
+                             'sha256': key*64}, key.encode(), b'manifest', {}
+
+        with patch.object(web.v3, 'CentralHubStore', return_value=hub), patch.object(web.daily, 'GitHub'), \
+                patch.object(web, 'ordinary_writer', return_value=True), patch.object(web, '_owner'), \
+                patch.object(web.v3, 'current', return_value=({'generation': generation},)), \
+                patch.object(web.pages, 'current', return_value={'search_generation': search, 'code_sha': 'f'*40}), \
+                patch.object(web, 'ConditionalCheckpointStore', return_value=cps), patch.object(web, 'LegacyRoots'), \
+                patch.object(web.index, '_index', return_value=(None, old)), patch.object(web.backlog, 'inspect', side_effect=inspect), \
+                patch.object(web.daily, 'validate_summary', return_value={ext: {}}), patch.object(web.daily, 'blockers', return_value=[]), \
+                patch.object(web, 'candidate', side_effect=attempt), \
+                patch.object(web.replay, 'verify', side_effect=RuntimeError('stop before writes')) as verify, \
+                patch.object(web, 'checkpoint_non_routing') as checkpoint, \
+                patch.dict('os.environ', {'GH_TOKEN': 'test', 'READER_WEB_PROFILE_CANDIDATE_INDEX': ''}):
+            with self.assertRaisesRegex(RuntimeError, 'stop before writes'):
+                web.execute({'extension': ext, 'search_generation': search, 'parent_run_id': 23}, None)
+        verify.assert_called_once_with({'a'*64: b'a'}, 'f'*40)
+        checkpoint.assert_not_called()
+
     def test_retirement_hint_is_idempotent_and_bound_to_old_web_routes(self):
         old = {'bucket':web.B,'object':'documents/web/html/'+'a'*64+'/document.html'}
         new = {'bucket':web.B,'object':'documents/web/html/'+'b'*64+'/document.html'}

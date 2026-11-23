@@ -43,6 +43,9 @@ DAILY_NAME = 'Reader/桶 · Daily Format Conversion'
 THRESHOLD = 1
 MAX_BATCHES = 20
 MAX_SECONDS = 5 * 60 * 60
+# Shared with the serial Web profile publisher. Identical and held outcomes
+# consume slots too; the existing managed bundle byte limits still apply.
+WEB_PROFILE_BATCH_ROWS = 50
 PUBLICATION_ARTIFACT = 'v3-publication-report'
 MAX_ARCHIVE = 8 * 1024 * 1024
 MAX_EXPANDED = 16 * 1024 * 1024
@@ -412,7 +415,7 @@ class GitHub:
             profile=publication.get('profile')
             if (not isinstance(profile,dict) or profile.get('extension')!=operation['extension'] or
                     any(type(profile.get(k)) is not int or profile[k]<0 for k in ('converted','identical','held')) or
-                    not 1<=sum(profile[k] for k in ('converted','identical','held'))<=10):
+                    not 1<=sum(profile[k] for k in ('converted','identical','held'))<=WEB_PROFILE_BATCH_ROWS):
                 raise ValueError('invalid web profile outcome')
             evidence['profile']={k:profile[k] for k in ('converted','identical','held')}
         return evidence

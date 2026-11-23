@@ -20,6 +20,7 @@ from . import reader_web_managed_convert as convert, reader_web_managed_pages as
 from . import reader_web_managed_prepare as prepare, reader_web_managed_review as schema
 from . import reader_web_profile_replay as replay, reader_web_profile_candidates as candidates
 from . import reader_web_batch_review as batch_review, reader_web_batch_publish as publish
+from .reader_web_batch_cli import MAX_PUBLIC_WEB_BYTES
 from .reader_image_history_fence import _owner, _active_owner
 from .reader_image_history_publish_s3 import LegacyRoots, SIDECAR
 from .reader_image_history_store import S3ClaimStore
@@ -30,7 +31,6 @@ from .reader_stream_checkpoint_cas import ConditionalCheckpointStore
 from .reader_web_profile import WEB_PROFILE
 
 B=v3.ASSETS
-MAX_ROWS=10
 
 
 def authority_scope(resource):
@@ -164,7 +164,7 @@ def execute(resource,output):
             return claims._get(path,maximum=ceiling)[0]
         reviewed=candidates.load(cached_get,pin)
     pairs=[]; objects={}; same={}; holds={}; notes={}; total=0
-    reused=set()
+    reused=set(); manifests=set()
     def hold(key, item, before, reason):
         holds[key]={'key':key,'repo':before['repo'],'path':before['path'],'extension':ext,'source_revision':item['revision'],
             'profile':WEB_PROFILE,'source_sha256':before['source_sha256'],'error':reason,'profile_upgrade_hold':True}
@@ -172,10 +172,13 @@ def execute(resource,output):
         item=details['records'][key]
         if item['extension']!=ext or row['state']!='profile_outdated' or row['recorded_failure'] or row.get('pending_shard_checkpoint'):
             continue
-        if len(pairs)+len(same)+len(holds)>=MAX_ROWS:break
+        if len(pairs)+len(same)+len(holds)>=daily.WEB_PROFILE_BATCH_ROWS:break
         before=old[key]
         if any(before[k]!=row['previous_'+k] for k in ('source_sha256','object','manifest','sha256','bytes')):
             raise RuntimeError('old route changed during profile scan')
+        if before['bytes']>MAX_PUBLIC_WEB_BYTES:
+            hold(key,item,before,'old_web_readback_size')
+            continue
         prepared=candidates.reuse(cached_get,reviewed,candidates.source_identity(item,before)) if reviewed else None
         try:
             new,data,manifest,omissions=candidate(item,before,reviewed=prepared)
@@ -188,8 +191,16 @@ def execute(resource,output):
         if new['object']==before['object']:
             if prepared is not None:reused.add(key)
             same[key]=new;continue
+        # Keep a shared immutable manifest for the next batch, not a hold.
+        # Each sealed replacement needs its own two independently pinned members.
+        members={before['manifest'],new['manifest']}
+        if len(members)!=2:
+            raise RuntimeError('web replacement reused its own old manifest')
+        if members & manifests:
+            continue
         if total+len(data)>schema.MAX_CONTENT:
             break
+        manifests.update(members)
         if prepared is not None:reused.add(key)
         total+=len(data);i=f'{len(pairs):04d}'
         pairs.append({'id':i,'new':new,'expected_old_object':before['object']})
