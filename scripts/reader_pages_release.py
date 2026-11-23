@@ -119,7 +119,8 @@ def put_claim_once(client, bucket, path, value):
 
 
 def release(*, generation, session, write_store, read_target, read_live, verify, workflow_sha, pipeline_run,
-            clock=time.monotonic, sleep=time.sleep, wait=960, now=None, observe_only=False, expected_code_sha=None):
+            clock=time.monotonic, sleep=time.sleep, wait=960, now=None, observe_only=False, expected_code_sha=None,
+            dispatch_guard=None):
     generation, workflow_sha=hex_id(generation,64),hex_id(workflow_sha,40)
     if expected_code_sha is not None:
         expected_code_sha=hex_id(expected_code_sha,40)
@@ -163,7 +164,11 @@ def release(*, generation, session, write_store, read_target, read_live, verify,
                'target':first,'request':{**request,'reader_refresh_id':operation}}
         if read_target()!=first or read_live()!=current:
             raise ValueError('Pages evidence or Reader/Search pin moved before dispatch')
+        if dispatch_guard is not None and dispatch_guard() is not True:
+            raise RuntimeError('Reader Pages writer window closed before claim')
         write_store.create(path,claim)
+        if dispatch_guard is not None and (dispatch_guard() is not True or read_target()!=first or read_live()!=current):
+            raise RuntimeError('Reader Pages window changed after claim; do not dispatch or retry')
         with session.post(API+'/actions/workflows/static.yml/dispatches', json={'ref':'main','inputs':claim['request']},
                           timeout=25, allow_redirects=False) as result:
             if result.status_code not in (200,204):
@@ -327,9 +332,18 @@ def main(argv=None):
         sha=pages_preflight(session,initial['generation'])
         if pins is not None and sha!=pins['code_sha']:
             raise ValueError('Pages main differs from the reviewed EPUB authority')
+        guard=None
+        if result.get('hold_admission') is not None:
+            from .reader_web_exact_apply import guard_window
+            from .reader_web_profile_replay import space_revision
+            hold=result['hold_admission']
+            if pins is None or (pins['code_sha'],pins['search_generation'])!=(hold['pages_commit'],hold['search_generation']):
+                raise ValueError('Web hold Pages pins differ from approved sites')
+            def guard():
+                return guard_window(store,True) and space_revision(client)==hold['space_commit']
         proof=release(generation=generation,session=session,write_store=Claims(),read_target=target,read_live=read_live_receipt,
                       verify=verify,workflow_sha=sha,pipeline_run=p,observe_only=args.observe_only,
-                      expected_code_sha=pins['code_sha'] if pins is not None else None)
+                      expected_code_sha=pins['code_sha'] if pins is not None else None,dispatch_guard=guard)
     with args.output.open('x') as f:json.dump(proof,f,sort_keys=True)
     print('Verified Pages Reader publication',proof['status'],proof['pages_run'],flush=True)
 

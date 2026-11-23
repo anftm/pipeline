@@ -84,6 +84,18 @@ class ReaderPagesReleaseTests(unittest.TestCase):
         self.assertFalse(self.storage.values)
         self.session.post.assert_not_called()
 
+    def test_web_writer_closes_after_claim_without_dispatch_or_replay(self):
+        self.live.update(code_sha=WORKFLOW,workflow_sha=WORKFLOW)
+        guard=Mock(side_effect=[True,False])
+        with self.assertRaisesRegex(RuntimeError,'changed after claim'):
+            self.execute(expected_code_sha=WORKFLOW,dispatch_guard=guard)
+        self.assertEqual(len(self.storage.values),1)
+        self.session.post.assert_not_called()
+        with patch.object(release,'list_runs',return_value=[]):
+            with self.assertRaises((TimeoutError,RuntimeError)):
+                self.execute(expected_code_sha=WORKFLOW,dispatch_guard=Mock(return_value=True))
+        self.session.post.assert_not_called()
+
     def test_verified_noop_does_not_claim_or_dispatch(self):
         self.live.update(reader_generation=READER,reader_catalog_sha256=CATALOG)
         self.assertEqual(self.execute()['status'],'already-deployed')
