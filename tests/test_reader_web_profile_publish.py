@@ -1,6 +1,9 @@
 """Fail-closed exact profile publisher and common lock contracts."""
 import json,unittest
+from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import ExitStack
 from pathlib import Path
+from threading import Event
 from types import SimpleNamespace
 from unittest.mock import Mock,patch
 
@@ -87,6 +90,98 @@ class AutomaticWebProfileTests(unittest.TestCase):
                          {'pages':{'documents':passes},'space':{'documents':{'a':{'passed':True}}}}):
             with self.assertRaisesRegex(ValueError,'both sites'):
                 web.replay.rejected(evidence,docs)
+
+    def test_parallel_candidate_preparation_yields_in_order_and_respects_slots(self):
+        second_ready=Event()
+        submitted=[]
+        slots=2
+        def prepare(i):
+            if i==0:
+                if not second_ready.wait(2):raise AssertionError('work did not overlap')
+                raise web.convert.Hold('source_sha256_mismatch')
+            second_ready.set()
+            return i*2
+        with ThreadPoolExecutor(max_workers=web.PREPARE_WORKERS) as pool:
+            class RecordingPool:
+                def submit(self,fn,i):
+                    submitted.append(i)
+                    return pool.submit(fn,i)
+            batch=web._prepare_candidates(RecordingPool(),range(10),prepare,lambda:slots)
+            key,first=next(batch)
+            self.assertEqual(key,0)
+            with self.assertRaisesRegex(web.convert.Hold,'source_sha256_mismatch'):
+                first.result()
+            key,second=next(batch)
+            self.assertEqual((key,second.result()),(1,2))
+            slots=0
+            self.assertEqual(list(batch),[])
+        self.assertEqual(submitted,[0,1])
+
+    def test_candidate_queue_close_cancels_unconsumed_pending_work(self):
+        pool=Mock()
+        futures=[Future() for _ in range(3)]
+        pool.submit.side_effect=futures
+        queue=web._prepare_candidates(pool,range(4),Mock(),lambda:3)
+        self.assertEqual(next(queue),(0,futures[0]))
+        futures[0].set_result(True)
+        queue.close()
+        self.assertTrue(all(f.cancelled() for f in futures[1:]))
+        self.assertEqual(pool.submit.call_count,3)
+
+    def test_cutoff_ignores_later_missing_canonical_but_consumed_corrupt_hit_is_fatal(self):
+        ext,search,generation='html','b'*64,'d'*64
+        def row(k):
+            return {'key':k,'repo':'org/docs','path':k+'.html','object':f'old/{k}/document.html',
+                    'manifest':f'old/{k}/document-manifest.json','sha256':'e'*64,'bytes':2,
+                    'source_sha256':'a'*64}
+        old={key:row(key) for key in ('a','b','d')}
+        keys=('a','b','c','d')
+        inventory={k:{'state':'profile_outdated','recorded_failure':False,
+                      **{'previous_'+f:row(k)[f] for f in ('source_sha256','object','manifest','sha256','bytes')}} for k in keys}
+        records={k:row(k)|{'extension':ext,'revision':'f'*40} for k in keys}
+        def inspect(**kwargs):
+            kwargs['details_out'].update(rows=inventory,records=records)
+            return {'search_generation':search,'reader_generation':generation},None
+        hub=Mock();hub.read_bytes.return_value=b'parent'
+        cps=Mock();cps.read.return_value=SimpleNamespace(raw=b'parent')
+        expected_bodies={'a'*64:b'a'}
+        for corrupt in (False,True):
+            with self.subTest(corrupt=corrupt),ExitStack() as ctx:
+                later_ready=Event()
+                def convert(item,before,*,reviewed):
+                    k=before['key']
+                    if k=='a' and not later_ready.wait(2):raise AssertionError('second result not prepared')
+                    if k=='b':later_ready.set()
+                    return before|{'object':f'new/{k}/document.html','manifest':f'new/{k}/document-manifest.json',
+                                   'sha256':k*64},k.encode(),b'manifest',{}
+                settings={'GH_TOKEN':'test','READER_WEB_PROFILE_CANDIDATE_INDEX':'pin' if corrupt else ''}
+                ctx.enter_context(patch.dict('os.environ',settings))
+                for owner,name,result in ((web.v3,'CentralHubStore',hub),(web.daily,'GitHub',Mock()),
+                        (web,'ordinary_writer',True),(web,'_owner',None),(web.v3,'current',({'generation':generation},)),
+                        (web.pages,'current',{'search_generation':search,'code_sha':'f'*40}),
+                        (web,'ConditionalCheckpointStore',cps),(web,'LegacyRoots',Mock()),(web,'S3ClaimStore',Mock()),
+                        (web.index,'_index',(None,old)),(web.daily,'validate_summary',{ext:{}}),
+                        (web.daily,'blockers',[]),(web.candidates,'load',{'exact':True})):
+                    ctx.enter_context(patch.object(owner,name,return_value=result))
+                ctx.enter_context(patch.object(web.backlog,'inspect',side_effect=inspect))
+                ctx.enter_context(patch.object(web.schema,'MAX_CONTENT',1))
+                candidate=ctx.enter_context(patch.object(web,'candidate',side_effect=convert))
+                if corrupt:
+                    ctx.enter_context(patch.object(web.candidates,'reuse',side_effect=ValueError('reviewed Web candidate body differs')))
+                replay=ctx.enter_context(patch.object(web.replay,'verify',side_effect=RuntimeError('cutoff before replay')))
+                checkpoint=ctx.enter_context(patch.object(web,'checkpoint_non_routing'))
+                publish_run=ctx.enter_context(patch.object(web.publish,'run'))
+                err=ValueError if corrupt else RuntimeError
+                message='body differs' if corrupt else 'cutoff before replay'
+                with self.assertRaisesRegex(err,message):
+                    web.execute({'extension':ext,'search_generation':search,'parent_run_id':23},None)
+                if corrupt:
+                    candidate.assert_not_called()
+                    replay.assert_not_called()
+                else:
+                    replay.assert_called_once_with(expected_bodies,'f'*40)
+                checkpoint.assert_not_called()
+                publish_run.assert_not_called()
 
     def test_two_hundred_outcomes_consume_slots_before_any_metadata_checkpoint(self):
         ext, search, generation = 'html', 'b'*64, 'd'*64

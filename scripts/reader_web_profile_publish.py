@@ -4,9 +4,12 @@ Select and build from live, pinned backlog under the same locks as legacy and
 v3 promotion. Failed transformations keep their published output. The normal
 format controller dispatches this operation and validates its publication.
 """
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from datetime import datetime, timezone
 from hashlib import sha256
 from io import BytesIO
+from itertools import islice
 import json
 import os
 from pathlib import Path
@@ -32,6 +35,7 @@ from .reader_stream_checkpoint_cas import ConditionalCheckpointStore
 from .reader_web_profile import WEB_PROFILE
 
 B=v3.ASSETS
+PREPARE_WORKERS=4
 
 
 def authority_scope(resource):
@@ -129,6 +133,25 @@ def candidate(item,old,*,reviewed=None):
     return new,data,manifest,omissions
 
 
+def _prepare_candidates(pool, rows, prepare_one, remaining):
+    """Overlap reads/conversions, but give the writer results in input order.
+
+    Never submit beyond a single small window or the remaining row slots.
+    No worker performs publication; only the consumer decides which rows fit.
+    """
+    rows=iter(rows)
+    while (slots:=remaining())>0:
+        group=list(islice(rows,min(PREPARE_WORKERS,slots)))
+        if not group:
+            return
+        futures=[pool.submit(prepare_one,row) for row in group]
+        try:
+            yield from zip(group,futures)
+        finally:
+            for future in futures:
+                future.cancel()
+
+
 def checkpoint_non_routing(cps,hub,path,old,index_updates,failures,guard):
     if not index_updates and not failures:return
     start=cps.read(B,path); _,rows=index._index(start.raw)
@@ -216,43 +239,54 @@ def execute(resource,output):
     def hold(key, item, before, reason):
         holds[key]={'key':key,'repo':before['repo'],'path':before['path'],'extension':ext,'source_revision':item['revision'],
             'profile':WEB_PROFILE,'source_sha256':before['source_sha256'],'error':reason,'profile_upgrade_hold':True}
-    for key,row in sorted(details['rows'].items()):
-        item=details['records'][key]
-        if item['extension']!=ext or row['state']!='profile_outdated' or row['recorded_failure'] or row.get('pending_shard_checkpoint'):
-            continue
-        if len(pairs)+len(same)+len(holds)>=daily.WEB_PROFILE_BATCH_ROWS:break
+    def eligible():
+        for key,row in sorted(details['rows'].items()):
+            item=details['records'][key]
+            if item['extension']==ext and row['state']=='profile_outdated' and not row['recorded_failure'] and not row.get('pending_shard_checkpoint'):
+                yield key,row,item
+
+    def prepare_one(entry):
+        key,row,item=entry
         before=old[key]
         if any(before[k]!=row['previous_'+k] for k in ('source_sha256','object','manifest','sha256','bytes')):
             raise RuntimeError('old route changed during profile scan')
         if before['bytes']>MAX_PUBLIC_WEB_BYTES:
-            hold(key,item,before,'old_web_readback_size')
-            continue
+            raise convert.Hold('old_web_readback_size')
         prepared=candidates.reuse(cached_get,reviewed,candidates.source_identity(item,before)) if reviewed else None
-        try:
-            new,data,manifest,omissions=candidate(item,before,reviewed=prepared)
-        except convert.Hold as error:
-            if str(error) in {'download_failed','download_timeout','download_destination','download_response'}:
-                raise
-            hold(key,item,before,str(error))
-            continue
-        notes[key]=omissions
-        if new['object']==before['object']:
-            if prepared is not None:reused.add(key)
-            same[key]=new;continue
-        # Keep a shared immutable manifest for the next batch, not a hold.
-        # Each sealed replacement needs its own two independently pinned members.
-        members={before['manifest'],new['manifest']}
-        if len(members)!=2:
-            raise RuntimeError('web replacement reused its own old manifest')
-        if members & manifests:
-            continue
-        if total+len(data)>schema.MAX_CONTENT:
-            break
-        manifests.update(members)
-        if prepared is not None:reused.add(key)
-        total+=len(data);i=f'{len(pairs):04d}'
-        pairs.append({'id':i,'new':new,'expected_old_object':before['object']})
-        objects[i+'/document.html']=data;objects[i+'/document-manifest.json']=manifest
+        return candidate(item,before,reviewed=prepared),prepared is not None
+
+    def remaining():
+        return daily.WEB_PROFILE_BATCH_ROWS-len(pairs)-len(same)-len(holds)
+
+    with ThreadPoolExecutor(max_workers=PREPARE_WORKERS) as pool, \
+            closing(_prepare_candidates(pool,eligible(),prepare_one,remaining)) as queue:
+        for (key,_,item),future in queue:
+            before=old[key]
+            try:
+                (new,data,manifest,omissions),cache_hit=future.result()
+            except convert.Hold as error:
+                if str(error) in {'download_failed','download_timeout','download_destination','download_response'}:
+                    raise
+                hold(key,item,before,str(error))
+                continue
+            notes[key]=omissions
+            if new['object']==before['object']:
+                if cache_hit:reused.add(key)
+                same[key]=new;continue
+            # Keep a shared immutable manifest for the next batch, not a hold.
+            # Each sealed replacement needs its own two independently pinned members.
+            members={before['manifest'],new['manifest']}
+            if len(members)!=2:
+                raise RuntimeError('web replacement reused its own old manifest')
+            if members & manifests:
+                continue
+            if total+len(data)>schema.MAX_CONTENT:
+                break
+            manifests.update(members)
+            if cache_hit:reused.add(key)
+            total+=len(data);i=f'{len(pairs):04d}'
+            pairs.append({'id':i,'new':new,'expected_old_object':before['object']})
+            objects[i+'/document.html']=data;objects[i+'/document-manifest.json']=manifest
     if not (pairs or same or holds):raise RuntimeError('no exact profile work remains')
     timed('load candidates and convert misses')
     replay_report=None
