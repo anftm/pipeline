@@ -16,13 +16,16 @@ from .reader_image_history_publish_s3 import CATALOG,SIDECAR
 from .reader_image_history_parent import CatalogParent
 
 
-def prepare(blob,expected,hub,legacy,client):
+def prepare(blob,expected,hub,legacy,client,*, hold_sha=None):
+    from . import reader_web_hold_admission as admission
+    hold_enabled=hold_sha is not None
     if (not isinstance(expected,str) or not web._is_sha(expected) or not 0<len(blob)<=schema.MAX_PACKED
             or sha256(blob).hexdigest()!=expected):raise ValueError('candidate archive differs from approval')
     with ZipFile(BytesIO(blob)) as z:
         infos=z.infolist(); files={x.filename:x for x in infos}
-        if (len(files)!=len(infos) or not 3<=len(infos)<=1+2*plan.MAX_MANAGED_ROWS
-                or sum(r.file_size for r in infos)>schema.MAX_CONTENT+schema.MAX_REVIEW
+        if (len(files)!=len(infos) or not 3<=len(infos)<=1+2*plan.MAX_MANAGED_ROWS+hold_enabled
+                or sum(r.file_size for r in infos)>schema.MAX_CONTENT+schema.MAX_REVIEW+
+                    (admission.MAX_REGISTRY if hold_enabled else 0)
                 or any(r.is_dir() or S_IFMT(r.external_attr>>16) not in (0,S_IFREG) for r in infos)):
             raise ValueError('candidate archive outside bounded set')
         def member(p,n):
@@ -35,11 +38,15 @@ def prepare(blob,expected,hub,legacy,client):
         if (not isinstance(request,dict) or set(request)!={'version','rows','expected_generation','timestamp'}
                 or type(request['version']) is not int or request['version']!=1 or not web._is_sha(request['expected_generation'])):
             raise ValueError('invalid managed candidate approval')
+        hold_raw=member(admission.MEMBER,admission.MAX_REGISTRY) if hold_enabled else None
+        hold_registry=admission.parse(hold_raw,hold_sha) if hold_enabled else None
+        if hold_enabled:admission.validate_approval(hold_registry,request)
         rows=request['rows']; n=len(rows)
-        if not 1<=n<=plan.MAX_MANAGED_ROWS or len(infos)!=1+2*n:raise ValueError('invalid approved row count')
+        if not 1<=n<=plan.MAX_MANAGED_ROWS or len(infos)!=1+2*n+hold_enabled:raise ValueError('invalid approved row count')
         ids=[r['id'] for r in rows]
         if (len(set(ids))!=n or any(not isinstance(i,str) or len(i)!=4 or not i.isascii() or not i.isdecimal() for i in ids)
-                or set(files)!={'approval.json'}|{f'{i}/{name}' for i in ids for name in ('document.html','document-manifest.json')}):
+                or set(files)!=({'approval.json'}|({admission.MEMBER} if hold_enabled else set())|
+                                {f'{i}/{name}' for i in ids for name in ('document.html','document-manifest.json')})):
             raise ValueError('invalid bounded approved candidate paths')
         ext=rows[0]['new']['extension'];
         if ext not in web.EXTENSIONS:raise ValueError('managed canonical extension outside allowlist')
@@ -73,10 +80,15 @@ def prepare(blob,expected,hub,legacy,client):
                                                    'resources':[{'bucket':web.BUCKET,'path':p} for p in sorted(refs)]})
     h=plan.digest(pin)
     # Keep an independently traversable manifest root outside reader-index/gc/.
-    review=v3.encode({'kind':'reader-web-managed-v1','publication_ready':False,'remote_writes':0,'operation':op,'selected':n,
+    review_fields={'kind':'reader-web-managed-v1','publication_ready':False,'remote_writes':0,'operation':op,'selected':n,
         'parent_pointer':parent,'target_pointer':successor,'timestamp':epoch,'canonical':{'path':path,'before_sha256':plan.digest(index),'after_sha256':plan.digest(target)},
         'unchanged_indexes':{},'sidecar':{'before_sha256':plan.digest(before),'after_sha256':plan.digest(packed)},'legacy':summary,'pages_parent':{},
-        'rows':reviewed,'producer_bytes':sum(r['new']['bytes'] for r in reviewed),'retention':{'path':f'reader-index/retained-web-managed-{h}.json','manifest_count':2*n,'sha256':h}})
+        'rows':reviewed,'producer_bytes':sum(r['new']['bytes'] for r in reviewed),'retention':{'path':f'reader-index/retained-web-managed-{h}.json','manifest_count':2*n,'sha256':h}}
+    if hold_enabled:
+        review_fields[admission.DIGEST_FIELD]=hold_sha
+        admission.validate_review(hold_registry,review_fields,{ext:index})
+        objects[admission.MEMBER]=hold_raw
+    review=v3.encode(review_fields)
     envelope={'review.json':review,'retention.json':pin,'pointer.json':ptr,'sidecar-before.gz':before,'sidecar-after.gz':packed,
               'canonical-before.json':index,'canonical-after.json':target,**objects}
     out=BytesIO()
@@ -93,19 +105,33 @@ def main():
     from .reader_image_history_store import S3ClaimStore
     from .reader_page_cas import ConditionalPageStore
     from . import reader_web_batch_review, reader_web_managed_pages
-    p=argparse.ArgumentParser(description=__doc__);p.add_argument('--candidate-sha256',required=True);p.add_argument('--output',type=Path,required=True);a=p.parse_args()
+    p=argparse.ArgumentParser(description=__doc__)
+    source=p.add_mutually_exclusive_group(required=True)
+    source.add_argument('--candidate-sha256');source.add_argument('--resource-json')
+    p.add_argument('--output',type=Path,required=True);a=p.parse_args()
+    option=({'candidate_sha256':a.candidate_sha256} if a.resource_json is None else
+            web._json(a.resource_json.encode('utf-8'),'managed preparation options'))
+    if (not isinstance(option,dict) or option.keys() not in ({'candidate_sha256'},{'candidate_sha256','hold_admission_sha256'})
+            or not all(web._is_sha(digest) for digest in option.values())):
+        raise ValueError('managed preparation requires exact approved digests')
+    candidate_sha=option['candidate_sha256'];hold_sha=option.get('hold_admission_sha256')
     if (os.environ.get('GITHUB_REPOSITORY')!='anftm/pipeline' or os.environ.get('GITHUB_EVENT_NAME')!='workflow_dispatch'
-            or os.environ.get('GITHUB_REF')!='refs/heads/main' or os.environ.get('GITHUB_RUN_ATTEMPT')!='1' or not web._is_sha(a.candidate_sha256)):
+            or os.environ.get('GITHUB_REF')!='refs/heads/main' or os.environ.get('GITHUB_RUN_ATTEMPT')!='1'):
         raise ValueError('requires exact hosted managed preparation')
     cps=ConditionalCheckpointStore();store=cps.store;client=store._client('vomebook');claims=S3ClaimStore(client)
-    val=claims._get(f'reader-index/gc/web-managed-approvals/v1/{a.candidate_sha256}.zip',maximum=schema.MAX_PACKED)[0]
+    val=claims._get(f'reader-index/gc/web-managed-approvals/v1/{candidate_sha}.zip',maximum=schema.MAX_PACKED)[0]
     if val is None:raise ValueError('approved immutable portable input does not exist')
     hub=v3.CentralHubStore();legacy=LegacyRoots(client)
-    bundle,receipt=prepare(val,a.candidate_sha256,hub,legacy,client)
+    bundle,receipt=prepare(val,candidate_sha,hub,legacy,client,hold_sha=hold_sha)
     r,data,parents,_=schema.parse(bundle,receipt['bundle_sha256'],receipt['review_sha256'])
     authority=reader_web_batch_review.authority(r,data,parents,checkpoints=cps,pointers=ConditionalPageStore(hub,s3=store),legacy=legacy,hub=hub,s3=store)
     authority.update(bundle_sha256=receipt['bundle_sha256'],review_sha256=receipt['review_sha256'],pages=reader_web_managed_pages.current(r['parent_pointer']))
     a.output.mkdir(exist_ok=True,parents=True)
+    if hold_sha:
+        from .reader_web_hold_live import prove
+        proof,replay=prove(r,data,parents,hub,authority['pages'])
+        authority['hold_admission']=proof
+        with (a.output/'web-hold-replay.json').open('xb') as f:f.write(v3.encode(replay))
     with (a.output/'managed-review.zip').open('xb') as f:f.write(bundle)
     with (a.output/'managed-review-receipt.json').open('xb') as f:f.write(v3.encode(receipt))
     with (a.output/'managed-authority.json').open('xb') as f:f.write(v3.encode(authority))

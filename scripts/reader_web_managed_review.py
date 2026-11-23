@@ -23,11 +23,12 @@ FIELDS={'kind','publication_ready','remote_writes','operation','selected','paren
 
 
 def parse(blob,bundle_sha,review_sha):
+    from . import reader_web_hold_admission as admission
     if not 0<len(blob)<=MAX_PACKED or plan.digest(blob)!=bundle_sha:
         raise ValueError('managed web bundle digest or size differs')
     with ZipFile(BytesIO(blob)) as z:
         info=z.infolist(); seen={x.filename:x for x in info}
-        if (len(info)!=len(seen) or not 9<=len(info)<=7+2*plan.MAX_MANAGED_ROWS or not FIXED<=seen.keys()
+        if (len(info)!=len(seen) or not 9<=len(info)<=8+2*plan.MAX_MANAGED_ROWS or not FIXED<=seen.keys()
                 or sum(x.file_size for x in info)>MAX_EXPANDED or any(x.file_size<1 or x.is_dir() or S_IFMT(x.external_attr>>16) not in (0,S_IFREG) for x in info)):
             raise ValueError('managed web ZIP shape, file type or expansion limit')
         def read(path,limit):
@@ -39,7 +40,9 @@ def parse(blob,bundle_sha,review_sha):
         raw=read('review.json',MAX_REVIEW)
         if plan.digest(raw)!=review_sha:raise ValueError('managed review differs from approved digest')
         r=web._json(raw,'managed web review')
-        if (not isinstance(r,dict) or r.keys()!=FIELDS or r['kind']!='reader-web-managed-v1'
+        hold_enabled=admission.MEMBER in seen
+        expected_fields=FIELDS|({admission.DIGEST_FIELD} if hold_enabled else set())
+        if (not isinstance(r,dict) or r.keys()!=expected_fields or r['kind']!='reader-web-managed-v1'
                 or r['publication_ready'] is not False or type(r['remote_writes']) is not int or r['remote_writes']!=0):
             raise ValueError('invalid managed web review envelope')
         n=r['selected'];rows=r['rows']
@@ -52,7 +55,8 @@ def parse(blob,bundle_sha,review_sha):
                     or not all(web._is_sha(row[k]) for k in ('old_manifest_sha256','new_manifest_sha256'))):
                 raise ValueError('invalid managed web review row')
             ids.add(row['id'])
-        if seen.keys()!=FIXED|{i+'/'+f for i in ids for f in ('document.html','document-manifest.json')}:
+        fixed=FIXED|({admission.MEMBER} if hold_enabled else set())
+        if seen.keys()!=fixed|{i+'/'+f for i in ids for f in ('document.html','document-manifest.json')}:
             raise ValueError('managed ZIP members differ from reviewed rows')
         limits={'retention.json':MAX_REVIEW,'pointer.json':8192,'sidecar-before.gz':8*1024**2,'sidecar-after.gz':8*1024**2,
                 'canonical-before.json':web.MAX_CANONICAL,'canonical-after.json':web.MAX_CANONICAL}
@@ -63,6 +67,10 @@ def parse(blob,bundle_sha,review_sha):
         expected={'path':path,'before_sha256':plan.digest(parents[ext]),'after_sha256':plan.digest(targets[ext])}
         if r['canonical']!=expected or targets[ext]!=data['canonical-after.json']:
             raise ValueError('managed canonical successor differs')
+        if hold_enabled:
+            data[admission.MEMBER]=read(admission.MEMBER,admission.MAX_REGISTRY)
+            registry=admission.parse(data[admission.MEMBER],r[admission.DIGEST_FIELD])
+            admission.validate_review(registry,r,parents)
         total=0
         for row in rows:
             new=row['new']; i=row['id'];a=i+'/document.html'; b=i+'/document-manifest.json'

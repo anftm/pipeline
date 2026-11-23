@@ -42,17 +42,32 @@ def run(blob, bundle_sha, review_sha, proof, *, phase, external_writers_stopped,
     if immutable_payload_guard is not None and controller_guard is None:
         raise ValueError('immutable payload guard requires managed controller admission')
     hub=v3.CentralHubStore()
+    hold_proof=None
+    if managed:
+        from . import reader_web_hold_admission as admission
+        if admission.DIGEST_FIELD in review:
+            if phase!='apply' or controller_guard is not None or not isinstance(proof.get('hold_admission'),dict):
+                raise ValueError('managed hold replacement requires its exact hosted proof and fresh manual apply')
+            from . import reader_web_hold_live as hold_live
+            hold_proof=proof['hold_admission']
+            hold_search=hub.read_bytes(hold_live.backlog.SEARCH_BUCKET,hold_live.backlog.CURRENT)
     def window():
         ok=controller_guard() if controller_guard is not None else guard_window(hub,external_writers_stopped)
         if ok is not True:raise RuntimeError('exact web publishing guard is absent')
         if managed:
+            if hold_proof is not None:
+                # These pins are independent of the v3 parent becoming the target.
+                if hub.read_bytes(hold_live.backlog.SEARCH_BUCKET,hold_live.backlog.CURRENT)!=hold_search:
+                    raise RuntimeError('hold admission Search changed during publication')
             for ext,expect in review['unchanged_indexes'].items():
                 if plan.digest(hub.read_bytes(B,f'documents/web/{ext}/index.json'))!=expect:
                     raise ValueError('unrelated web index moved during managed batch')
         return True
     window()
     if managed and phase!='observe-v3':
-        reader_web_managed_pages.current(review['parent_pointer'],expected=proof['pages'])
+        pages=reader_web_managed_pages.current(review['parent_pointer'],expected=proof['pages'])
+        if hold_proof is not None:
+            hold_live.prove(review,data,parents,hub,pages,prior=hold_proof)
     cps=ConditionalCheckpointStore();s3=cps.store;client=s3._client('vomebook')
     transport=LegacyRoots(client);journal=LegacyJournal(client);claims=S3ClaimStore(client)
     pointers=ConditionalPageStore(hub,s3=s3)
@@ -150,6 +165,8 @@ def run(blob, bundle_sha, review_sha, proof, *, phase, external_writers_stopped,
         if phase in {'apply','resume-index'}:
             if managed:
                 reader_web_managed_pages.current(review['parent_pointer'],expected=proof['pages'])
+                if hold_proof is not None:
+                    hold_live.pins(hub,review['parent_pointer'],hold_search,hold_proof['space_commit'])
             def before_indexes():
                 if protected() is not True:return False
                 head=client.head_object(Bucket='reader-assets-v2',Key=legacy.CATALOG)
@@ -190,5 +207,10 @@ def run(blob, bundle_sha, review_sha, proof, *, phase, external_writers_stopped,
     result=promote.promote_route(store=PointerStore(hub,s3,promotion_guard,ptr),client=client,
              parent_raw=ptr,target_pointer=successor,canonical_sha256=plan.digest(after),legacy_seal=moved['seal'],
              guard=promotion_guard,observe_only=phase=='observe-v3',permit_kind='reader-web-v3-permit')
-    return {**result,'applied':True,'canonical':outcomes,'changed_rows':len(pairs),'retention_root':pin,
-             'retirement_hint':meta['retirement_hint'],'objects_deleted':False,'pages_pending':True,'deleted_objects':0}
+    result={**result,'applied':True,'canonical':outcomes,'changed_rows':len(pairs),'retention_root':pin,
+            'retirement_hint':meta['retirement_hint'],'objects_deleted':False,'pages_pending':True,'deleted_objects':0}
+    if hold_proof is not None:
+        result['pages_pins']={k:proof['pages'][k] for k in ('code_sha','search_generation')}
+        result['hold_admission']=hold_proof
+        result['failure_notices_retained']=True
+    return result

@@ -109,8 +109,8 @@ jobs:
       - name: Test scoped Reader consumer root refresh
         if: inputs.operation == 'refresh-reader-consumers'
         run: python -B -m unittest tests.test_reader_page_consumer_refresh tests.test_reader_page_consumer_store
-      - name: Install pinned Chromium for automatic web Reader acceptance
-        if: inputs.operation == 'upgrade-web-profile'
+      - name: Install pinned Chromium for Web Reader acceptance
+        if: contains(fromJSON('["upgrade-web-profile","prepare-managed-web","verify-managed-web","replace-managed-web"]'), inputs.operation)
         run: |
           pip install playwright==1.65.2
           python -m playwright install --with-deps chromium --only-shell
@@ -276,9 +276,9 @@ jobs:
             [[ "$APPLY" == false && "$GITHUB_REF" == refs/heads/main && "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" && "$GITHUB_RUN_ATTEMPT" == 1 ]]
             [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
             [[ "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" == "$GITHUB_SHA" ]]
-            [[ "$(jq -ce 'keys' <<< "$RESOURCE_JSON")" == '["candidate_sha256"]' ]]
-            digest=$(jq -er '.candidate_sha256' <<< "$RESOURCE_JSON")
-            python -B -m scripts.reader_web_managed_prepare --candidate-sha256 "$digest" --output output/v3
+            [[ "$(jq -ce 'keys' <<< "$RESOURCE_JSON")" == '["candidate_sha256"]' ||
+               "$(jq -ce 'keys' <<< "$RESOURCE_JSON")" == '["candidate_sha256","hold_admission_sha256"]' ]]
+            python -B -m scripts.reader_web_managed_prepare --resource-json "$RESOURCE_JSON" --output output/v3
             exit 0
           fi
           if [[ "$OPERATION" == verify-managed-web || "$OPERATION" == replace-managed-web ]]; then
@@ -370,7 +370,7 @@ jobs:
           review=$(jq -ce '{bundle_sha256,review_sha256}' <<< "$RESOURCE_JSON")
           python -B -m scripts.reader_web_batch_cli live --managed --resource-json "$review" \
             --publication output/v3/publication.json --consumers output/v3/web-verification.json \
-            --output output/v3/web-batch-object-readback.json
+            --output output/v3/web-batch-object-readback.json --hold-cleanup output/v3/web-hold-cleanup.json
       - name: Publish and verify automatic web profile on both sites
         if: steps.operation.outputs.changed == 'true' && inputs.operation == 'upgrade-web-profile'
         env:

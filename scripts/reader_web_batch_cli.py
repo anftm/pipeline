@@ -15,7 +15,7 @@ from .reader_image_history_publish_s3 import LegacyRoots
 from .reader_image_history_store import S3ClaimStore
 from .reader_page_cas import ConditionalPageStore
 from .reader_stream_checkpoint_cas import ConditionalCheckpointStore
-from .reader_web_exact_plan import _is_sha
+from .reader_web_exact_plan import _is_sha, _json as strict_json
 
 PUBLIC_WEB_READERS = 4
 
@@ -44,7 +44,7 @@ def read(store,path,maximum):
 
 
 def options(raw,mode):
-    d=json.loads(raw)
+    d=strict_json(raw.encode('utf-8'),'web batch options')
     fields={'bundle_sha256','review_sha256'} if mode in ('preflight','live') else {'bundle_sha256','review_sha256','authority_sha256','phase','external_writers_stopped'}
     if (not isinstance(d,dict) or d.keys()!=fields or any(not _is_sha(d[k]) for k in fields if k.endswith('_sha256'))
             or (mode=='apply' and d['external_writers_stopped'] is not True)):
@@ -97,7 +97,10 @@ def live(sealed, consumer_report, publication, client, *, sleep=time.sleep, work
 def main():
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('mode',choices=['preflight','apply','live'])
     p.add_argument('--resource-json',required=True);p.add_argument('--output',type=Path,required=True)
-    p.add_argument('--consumers',type=Path);p.add_argument('--publication',type=Path);p.add_argument('--managed',action='store_true');a=p.parse_args()
+    p.add_argument('--consumers',type=Path);p.add_argument('--publication',type=Path);p.add_argument('--managed',action='store_true')
+    p.add_argument('--hold-cleanup',type=Path);a=p.parse_args()
+    if a.hold_cleanup and (a.mode!='live' or not a.managed or a.hold_cleanup.exists()):
+        p.error('hold cleanup requires new output and managed live verification')
     if (os.environ.get('GITHUB_REPOSITORY')!='anftm/pipeline' or os.environ.get('GITHUB_EVENT_NAME')!='workflow_dispatch'
             or os.environ.get('GITHUB_REF')!='refs/heads/main' or os.environ.get('GITHUB_RUN_ATTEMPT')!='1'):
         raise RuntimeError('first exact central main dispatch required')
@@ -115,8 +118,25 @@ def main():
     else:
         sealed,data,parents,pairs=schema.parse(blob,d['bundle_sha256'],d['review_sha256'])
         if a.mode=='live':
+            publication=json.loads(a.publication.read_bytes())
             with httpx.Client(follow_redirects=True,timeout=30) as http:
-                result=live(sealed,json.loads(a.consumers.read_bytes()),json.loads(a.publication.read_bytes()),http)
+                result=live(sealed,json.loads(a.consumers.read_bytes()),publication,http,workers=PUBLIC_WEB_READERS if a.managed else 1)
+            if a.hold_cleanup and publication.get('hold_admission') is not None:
+                from .reader_web_exact_apply import guard_window
+                from .reader_web_hold_cleanup import cleanup
+                from .reader_web_index_guard import S3Journal
+                from .reader_web_profile_readback import record_hint
+                hub=v3.CentralHubStore()
+                def guard():
+                    if v3.current(hub)[0]!=sealed['target_pointer']:
+                        raise RuntimeError('hold receipt Reader target moved')
+                    return guard_window(hub,True)
+                result['retirement_hint']=record_hint(publication,sealed['rows'],guard=guard,hub=hub,claims=store)
+                # Keep the actual readback even if notices cannot be cleared.
+                with a.output.open('xb') as f:f.write(v3.encode(result))
+                outcome=cleanup(sealed,data,publication,result,cps,hub,S3Journal(client),guard=guard)
+                with a.hold_cleanup.open('xb') as f:f.write(v3.encode(outcome))
+                return
         else:
             hub=v3.CentralHubStore()
             result=review.authority(sealed,data,parents,checkpoints=cps,pointers=ConditionalPageStore(hub,s3=s3),
@@ -130,6 +150,11 @@ def main():
                 if p!=sealed['parent_pointer'] or t!=sealed['target_pointer'] or packed!=data['sidecar-after.gz']:
                     raise ValueError('managed route projection differs from review')
                 result['pages']=reader_web_managed_pages.current(p)
+                from . import reader_web_hold_admission as admission
+                if admission.DIGEST_FIELD in sealed:
+                    from .reader_web_hold_live import prove
+                    result['hold_admission'],replay=prove(sealed,data,parents,hub,result['pages'])
+                    with a.output.with_name('web-hold-replay.json').open('xb') as f:f.write(v3.encode(replay))
             result.update(bundle_sha256=d['bundle_sha256'],review_sha256=d['review_sha256'])
     with a.output.open('xb') as f:f.write(v3.encode(result))
 
