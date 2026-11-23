@@ -2,25 +2,29 @@
 import copy,hashlib,io,json,unittest
 from collections import Counter
 from threading import Barrier, Lock
+from unittest.mock import Mock, patch
 from zipfile import ZipFile,ZIP_DEFLATED
 from scripts import reader_web_batch_plan as plan,reader_web_managed_review as schema,reader_web_managed_pages as pages
+from scripts import reader_web_batch_publish as publish,reader_web_managed_prepare as prepare
 import httpx
 from scripts import publish_reader_v3 as v3,reader_web_exact_plan as web,reader_gc_graph as gc
-from scripts.reader_web_batch_cli import live
+from scripts.reader_web_batch_cli import MAX_PUBLIC_WEB_BYTES, live
 from tests.test_reader_gc_graph import MemoryStore,ASSETS
 
 S=lambda b:hashlib.sha256(b).hexdigest()
 
 
-def fixture(n,ext='mhtml'):
+def fixture(n,ext='mhtml',*,sizes=None,old_size=2):
     rows=[]; members={}; kept={'key':'unrelated','source_sha256':'a'*64}
     for j in range(n):
-        path=f'entry-{j}.{ext}'; raw=f'<!doctype html><p>new {j}</p>'.encode(); h=S(raw); src=S(path.encode()); name=f'{j:04d}'
+        path=f'entry-{j}.{ext}'; raw=f'<!doctype html><p>new {j}</p>'.encode()
+        if sizes is not None:raw=raw.ljust(sizes[j],b' ')
+        h=S(raw); src=S(path.encode()); name=f'{j:04d}'
         def root(d):return f'documents/web/{ext}/{d}'
         old_base=root(S(('old-root:'+path).encode())); new_base=root(S(f'{src}\0{h}'.encode()))
         old={'key':'org/books\0'+path,'repo':'org/books','path':path,'extension':ext,'source_revision':'3'*40,
             'source_sha256':src,'mode':'document-stream','bucket':web.BUCKET,'object':old_base+'/document.html',
-            'manifest':old_base+'/document-manifest.json','bytes':2,'sha256':S(('old:'+path).encode()),'checkpointed_at':'old'}
+            'manifest':old_base+'/document-manifest.json','bytes':old_size,'sha256':S(('old:'+path).encode()),'checkpointed_at':'old'}
         new={k:v for k,v in old.items() if k!='checkpointed_at'}|{'object':new_base+'/document.html','manifest':new_base+'/document-manifest.json','bytes':len(raw),'sha256':h}
         doc=v3.encode({'kind':'web-document-stream','version':1,'path':'document.html','source_extension':ext,'source_sha256':src,'bytes':len(raw),'sha256':h})
         members[name+'/document.html']=raw;members[name+'/document-manifest.json']=doc
@@ -53,6 +57,43 @@ class ManagedPathsTests(unittest.TestCase):
                 pairs,m,r=fixture(n,ext);p,s,parents,p2=schema.parse(*packed(m,r));self.assertEqual((p['selected'],p2),(n,pairs))
                 with self.assertRaises(ValueError):plan.canonical(parents,pairs,r['operation'])
         with self.assertRaises(ValueError):fixture(201)
+
+    def test_managed_new_and_aggregate_size_boundaries(self):
+        mib=1024**2
+        self.assertEqual((schema.MAX_DOC,MAX_PUBLIC_WEB_BYTES,schema.MAX_CONTENT,schema.MAX_PACKED,plan.MAX_MANAGED_ROWS),
+                         (8*mib,8*mib,12*mib,16*mib,200))
+        _, m, r=fixture(2,sizes=[8*mib,4*mib],old_size=8*mib)
+        self.assertEqual(schema.parse(*packed(m,r))[0]['producer_bytes'],12*mib)
+        for sizes, message in (([8*mib+1],'member exceeds limit'),([8*mib,4*mib+1],'invalid reviewed HTML')):
+            with self.subTest(sizes=sizes), self.assertRaisesRegex(ValueError,message):
+                _, m, r=fixture(len(sizes),sizes=sizes)
+                schema.parse(*packed(m,r))
+
+    def test_oversize_managed_old_is_rejected_before_authority_or_writes(self):
+        _, m, r=fixture(1,'html')
+        old=r['rows'][0]['old']; old['bytes']=MAX_PUBLIC_WEB_BYTES+1
+        path=r['canonical']['path']; parent=json.loads(m['canonical-before.json']); parent['files'][0]=old
+        m['canonical-before.json']=v3.encode(parent)
+        error='managed old web document exceeds public readback cap'
+        with patch.object(publish.v3,'CentralHubStore') as writer, self.assertRaisesRegex(ValueError,error):
+            publish.run(*packed(m,r),{},phase='apply',external_writers_stopped=True,managed=True)
+        writer.assert_not_called()
+
+        row=r['rows'][0]; generation=r['parent_pointer']['generation']
+        approval={'version':1,'expected_generation':generation,'timestamp':r['timestamp'],
+                  'rows':[{'id':row['id'],'new':row['new'],'expected_old_object':old['object']}]}
+        out=io.BytesIO()
+        with ZipFile(out,'w',ZIP_DEFLATED) as archive:
+            archive.writestr('approval.json',v3.encode(approval))
+            for name in ('0000/document.html','0000/document-manifest.json'):
+                archive.writestr(name,m[name])
+        blob=out.getvalue()
+        hub=Mock(); hub.read_bytes.side_effect=[m['sidecar-before.gz'],m['pointer.json'],m['canonical-before.json']]
+        legacy=Mock()
+        with self.assertRaisesRegex(ValueError,error):
+            prepare.prepare(blob,S(blob),hub,legacy,None)
+        self.assertEqual([call.args[1] for call in hub.read_bytes.call_args_list],[prepare.SIDECAR,v3.POINTER,path])
+        legacy.observe.assert_not_called()
 
     def test_scope_and_extra_zip_member(self):
         pairs,m,r=fixture(4); bad=copy.deepcopy(r);bad['rows'][0]['new']['source_revision']='f'*40

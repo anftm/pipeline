@@ -18,6 +18,13 @@ def digest(raw):
 
 
 MAX_MANAGED_ROWS = 200
+MAX_PUBLIC_WEB_BYTES = 8 * 1024 * 1024
+
+
+def validate_managed_old(row):
+    web._web_row(row, old=True)
+    if row['bytes'] > MAX_PUBLIC_WEB_BYTES:
+        raise ValueError('managed old web document exceeds public readback cap')
 
 
 def canonical(parents, pairs, operation, *, managed=False):
@@ -29,7 +36,10 @@ def canonical(parents, pairs, operation, *, managed=False):
         raise ValueError('invalid web batch index set or operation')
     old_by_key, new_by_key = {}, {}
     for old, new in pairs:
-        web._web_row(old, old=True)
+        if managed:
+            validate_managed_old(old)
+        else:
+            web._web_row(old, old=True)
         web._web_row(new, old=False)
         key = old['key']
         if (key in old_by_key or key != new['key'] or old['extension'] != new['extension']

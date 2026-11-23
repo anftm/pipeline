@@ -10,13 +10,13 @@ from urllib.parse import urlencode
 
 import httpx
 from . import publish_reader_v3 as v3, reader_web_batch_publish as publish, reader_web_batch_review as review
+from .reader_web_batch_plan import MAX_PUBLIC_WEB_BYTES
 from .reader_image_history_publish_s3 import LegacyRoots
 from .reader_image_history_store import S3ClaimStore
 from .reader_page_cas import ConditionalPageStore
 from .reader_stream_checkpoint_cas import ConditionalCheckpointStore
 from .reader_web_exact_plan import _is_sha
 
-MAX_PUBLIC_WEB_BYTES = 8 * 1024 * 1024
 PUBLIC_WEB_READERS = 4
 
 

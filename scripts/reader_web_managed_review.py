@@ -15,7 +15,7 @@ from .reader_stream_checkpoint_cas import strong_etag
 MAX_PACKED=16*1024**2
 MAX_EXPANDED=40*1024**2
 MAX_REVIEW=2*1024**2
-MAX_DOC=4*1024**2
+MAX_DOC=plan.MAX_PUBLIC_WEB_BYTES
 MAX_CONTENT=12*1024**2
 FIXED={'review.json','retention.json','pointer.json','sidecar-before.gz','sidecar-after.gz','canonical-before.json','canonical-after.json'}
 FIELDS={'kind','publication_ready','remote_writes','operation','selected','parent_pointer','target_pointer','timestamp','canonical',

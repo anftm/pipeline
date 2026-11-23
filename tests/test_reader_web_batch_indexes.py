@@ -158,6 +158,16 @@ class BatchIndexesTest(unittest.TestCase):
                 (publish.plan,'plan_legacy',review['legacy'])):
                 stack.enter_context(patch.object(owner,name,return_value=result))
             mutable=stack.enter_context(patch.object(publish.indexes,'canonical_set'))
+            # A sealed entry may declare an in-bound size while the actual
+            # object has drifted. No archive snapshot or payload may be staged.
+            first_old=reviewed[0]['old']['object']
+            objects[first_old]=b'x'*(plan.MAX_PUBLIC_WEB_BYTES+1)
+            with self.assertRaisesRegex(ValueError,'asset protection bytes differ'):
+                publish.run(b'','bundle','review',proof,phase='apply',external_writers_stopped=False,
+                            managed=True,controller_guard=full,immutable_payload_guard=payload)
+            mocks['CatalogParent'].stage.assert_not_called()
+            self.assertEqual(events,[('full',None)])
+            objects[first_old]=b'old'; events.clear()
             with self.assertRaisesRegex(RuntimeError,'publishing guard is absent'):
                 publish.run(b'','bundle','review',proof,phase='apply',external_writers_stopped=False,
                             managed=True,controller_guard=full,immutable_payload_guard=payload)

@@ -51,7 +51,7 @@ def prepare(blob,expected,hub,legacy,client):
         for r in rows:
             if set(r)!={'id','new','expected_old_object'}:raise ValueError('invalid approved row fields')
             i=r['id']; new=r['new'];old=current[new['key']]
-            web._web_row(old,old=True);web._web_row(new,old=False)
+            plan.validate_managed_old(old);web._web_row(new,old=False)
             if old['object']!=r['expected_old_object']:raise ValueError('approved old object moved')
             html=member(i+'/document.html',schema.MAX_DOC); new_manifest=member(i+'/document-manifest.json',web.MAX_MANIFEST)
             old_manifest=hub.read_bytes(web.BUCKET,old['manifest']);j=web._json(old_manifest,'old web manifest')

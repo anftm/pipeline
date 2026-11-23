@@ -13,11 +13,12 @@ from itertools import islice
 import json
 import os
 from pathlib import Path
-from time import monotonic
+from time import monotonic, sleep
 from urllib.parse import quote
 from zipfile import ZipFile, ZIP_DEFLATED
 
 import httpx
+from huggingface_hub.errors import HfHubHTTPError
 from . import reader_format_backlog as backlog, reader_format_daily as daily
 from . import publish_reader_v3 as v3, reader_web_index_guard as index
 from . import reader_web_managed_convert as convert, reader_web_managed_pages as pages
@@ -82,6 +83,31 @@ def ordinary_writer(hub, parent_id, api, *, observed=None):
         raise RuntimeError('a competing Reader/Search job is still active')
     api.check_main(owner[2])
     return True
+
+
+def _read_staging_search_pointer(hub):
+    """Retry only the exact resolver GET that can interrupt immutable staging."""
+    bucket, path = backlog.SEARCH_BUCKET, backlog.CURRENT
+    url = f'https://huggingface.co/buckets/{bucket}/resolve/{path}'
+    for delay in (1, 2, None):
+        try:
+            return hub.read_bytes(bucket, path)
+        except (HfHubHTTPError, httpx.HTTPStatusError) as error:
+            if delay is None or error.response.status_code != 499:
+                raise
+            # The Hub error wrapper does not reliably expose .request itself.
+            request = error.request if isinstance(error, httpx.HTTPStatusError) else error.response.request
+            if request.method != 'GET' or str(request.url) != url:
+                raise
+            print(f'Web profile staging Search pointer GET returned 499; retrying in {delay}s', flush=True)
+            sleep(delay)
+
+
+def _check_search(hub, expected, *, immutable_staging=False):
+    raw = (_read_staging_search_pointer(hub) if immutable_staging
+           else hub.read_bytes(backlog.SEARCH_BUCKET, backlog.CURRENT))
+    if raw != expected:
+        raise RuntimeError('automatic web profile Search pointer changed')
 
 
 def _immutable_payload_guard(full_check, per_object_check, *, clock=monotonic):
@@ -193,18 +219,15 @@ def execute(resource,output):
     hub=v3.CentralHubStore(); api=daily.GitHub(os.environ['GH_TOKEN']); owner=_owner()
     guard=lambda:ordinary_writer(hub,parent_id,api,observed=owner)
     search_raw=hub.read_bytes(backlog.SEARCH_BUCKET,backlog.CURRENT)
-    def check_search():
-        if hub.read_bytes(backlog.SEARCH_BUCKET,backlog.CURRENT)!=search_raw:
-            raise RuntimeError('automatic web profile Search pointer changed')
 
     def validate_search():
-        check_search()
+        _check_search(hub, search_raw)
         return guard()
 
     def check_payload_context():
         # These conditional creates are not routed. Each still checks Search,
         # local owner, and durable maintenance, even between full inventories.
-        check_search()
+        _check_search(hub, search_raw, immutable_staging=True)
         _writer_context(hub, owner)
         return _check_maintenance(hub)
 

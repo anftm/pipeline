@@ -113,10 +113,13 @@ def run(blob, bundle_sha, review_sha, proof, *, phase, external_writers_stopped,
                                     timestamp=review['timestamp'],parent_sha=cat_parent.sha256)
         with TemporaryFile() as out:
             validate_legacy_plan(make_plan(out),meta)
-        if phase=='apply':archive.stage(catalog_parent,guard=window)
+        # Managed review rejects declared sizes above the public cap. Verify
+        # actual old bytes as well before the first managed immutable write.
+        if phase=='apply' and not managed:archive.stage(catalog_parent,guard=window)
         for row in review['rows']:
             old=row['old'];protect_input(old['object'],digest=old['sha256'],length=old['bytes'])
             protect_input(old['manifest'],digest=row['old_manifest_sha256'])
+        if phase=='apply' and managed:archive.stage(catalog_parent,guard=window)
         # Only this loop creates content-addressed, unpublished payloads.
         # The first missing payload triggers a full scan; leave staging with
         # a fresh boundary check even when retention/snapshot already exist.

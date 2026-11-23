@@ -5,11 +5,23 @@ from contextlib import ExitStack
 from pathlib import Path
 from threading import Event
 from types import SimpleNamespace
-from unittest.mock import Mock,patch
+from unittest.mock import Mock,call,patch
+
+import httpx
 
 from scripts import reader_gc_retirement as retirement, reader_web_profile_publish as web
 from scripts.reader_web_profile_readback import record_hint
 from scripts.reader_web_profile import WEB_PROFILE
+
+
+SEARCH_POINTER = ('vomebook/search-data-v1', 'published/current.json')
+SEARCH_POINTER_URL = 'https://huggingface.co/buckets/vomebook/search-data-v1/resolve/published/current.json'
+
+
+def status_error(status=499, *, method='GET', url=SEARCH_POINTER_URL):
+    request = httpx.Request(method, url)
+    return httpx.HTTPStatusError('test resolver failure', request=request,
+                                 response=httpx.Response(status, request=request))
 
 
 class AutomaticWebProfileTests(unittest.TestCase):
@@ -23,6 +35,59 @@ class AutomaticWebProfileTests(unittest.TestCase):
         for defects in ({'exact': False}, {'posts': 0, 'rendered': 0}, {'rendered': 2}, {'decoded': 3}, {'scroll': 392}):
             self.assertFalse(web.replay.passed_replay(archive | {'clean': clean | defects}, []))
         self.assertFalse(web.replay.passed_replay(archive | {'clean': clean}, ['https']))
+
+    def test_staging_search_pointer_retries_499_through_the_real_resolver_reader(self):
+        original = b'{"desired":"generation"}\n'
+        requests = []
+
+        def respond(request):
+            requests.append((request.method, str(request.url)))
+            if len(requests) <= 2:
+                return httpx.Response(499)
+            return httpx.Response(200, content=original)
+
+        hub = web.v3.CentralHubStore()
+        with httpx.Client(transport=httpx.MockTransport(respond)) as http, \
+                patch('huggingface_hub.utils.get_session', return_value=http), \
+                patch.object(hub, 'token', return_value=None), patch.object(hub, 'pace_resolver') as pace, \
+                patch.object(web, 'sleep') as sleep:
+            web._check_search(hub, original, immutable_staging=True)
+        self.assertEqual(requests, [('GET', SEARCH_POINTER_URL)] * 3)
+        self.assertEqual(pace.call_count, 3)
+        self.assertEqual(sleep.call_args_list, [call(1), call(2)])
+
+    def test_staging_search_pointer_gives_up_after_three_499s(self):
+        final = status_error()
+        hub = Mock()
+        hub.read_bytes.side_effect = [status_error(), status_error(), final]
+        with patch.object(web, 'sleep') as sleep, self.assertRaises(httpx.HTTPStatusError) as failure:
+            web._check_search(hub, b'parent', immutable_staging=True)
+        self.assertIs(failure.exception, final)
+        self.assertEqual(hub.read_bytes.call_args_list, [call(*SEARCH_POINTER)] * 3)
+        self.assertEqual(sleep.call_args_list, [call(1), call(2)])
+
+    def test_staging_search_pointer_rejects_changed_bytes_after_499(self):
+        hub = Mock()
+        hub.read_bytes.side_effect = [status_error(), b'{}\n']
+        with patch.object(web, 'sleep') as sleep, self.assertRaisesRegex(RuntimeError, 'Search pointer changed'):
+            web._check_search(hub, b'{}', immutable_staging=True)
+        sleep.assert_called_once_with(1)
+        self.assertEqual(hub.read_bytes.call_args_list, [call(*SEARCH_POINTER)] * 2)
+
+    def test_staging_retry_requires_exact_status_method_url_and_scope(self):
+        for staging, error in ((False, status_error()), (True, status_error(403)),
+                               (True, status_error(method='HEAD')), (True, status_error(method='PUT')),
+                               (True, status_error(url=SEARCH_POINTER_URL + '?other=1')),
+                               (True, status_error(url=SEARCH_POINTER_URL.replace('search-data-v1', 'reader-assets-v2'))),
+                               (True, httpx.ReadTimeout('test timeout'))):
+            with self.subTest(staging=staging, error=error), patch.object(web, 'sleep') as sleep:
+                hub = Mock()
+                hub.read_bytes.side_effect = error
+                with self.assertRaises(type(error)) as failure:
+                    web._check_search(hub, b'parent', immutable_staging=staging)
+                self.assertIs(failure.exception, error)
+                hub.read_bytes.assert_called_once_with(*SEARCH_POINTER)
+                sleep.assert_not_called()
 
     def test_controller_scope_allows_only_one_web_extension_and_pinned_parent(self):
         p={'extension':'html','search_generation':'a'*64,'parent_run_id':23}
@@ -66,6 +131,25 @@ class AutomaticWebProfileTests(unittest.TestCase):
             guard()
         with self.assertRaisesRegex(RuntimeError, 'competing writer'):
             guard()
+
+    def test_staging_499_backoff_does_not_extend_the_full_guard_window(self):
+        hub = Mock()
+        hub.read_bytes.side_effect = [status_error(), b'parent']
+        clock = Mock(return_value=0)
+        full = Mock(side_effect=[True, False])
+        context = Mock(return_value=True)
+
+        def per_object():
+            web._check_search(hub, b'parent', immutable_staging=True)
+            return context()
+
+        guard = web._immutable_payload_guard(full, per_object, clock=clock)
+        self.assertIs(guard(), True)
+        clock.return_value = 29.5
+        with patch.object(web, 'sleep', side_effect=lambda seconds: setattr(clock, 'return_value', 29.5 + seconds)):
+            self.assertIs(guard(), False)
+        context.assert_called_once_with()
+        self.assertEqual(full.call_count, 2)
 
     def test_slow_payload_read_refreshes_expired_full_inventory(self):
         clock = Mock(return_value=0)
