@@ -10,28 +10,36 @@ import re
 import zipfile
 from collections import Counter
 from pathlib import Path
-from urllib.parse import unquote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 import xml.etree.ElementTree as ET
 from html.parser import HTMLParser
 
 MAX_CHAPTER_RESOURCES = 2000
 MAX_CHAPTER_RESOURCE_BYTES = 512 * 1024 * 1024
+MAX_CACHED_STYLESHEETS = 128
+MAX_CACHED_STYLESHEET_BYTES = 1024 * 1024
 SEARCH_TEXT_PROFILE = "dom-text-v1"
 
 try:
     from .convert_reader_assets import sanitize_css, sanitize_html, sanitize_xml_document
+    from .ebook_toc_evidence import repair_volume_targets
     from .reader_assets import canonical_json, validate_chapter_manifest
 except ImportError:
     from convert_reader_assets import sanitize_css, sanitize_html, sanitize_xml_document
+    from ebook_toc_evidence import repair_volume_targets
     from reader_assets import canonical_json, validate_chapter_manifest
 
 
 def _zip_path(base: str, href: str) -> str:
-    value = unquote(str(href or "").split("#", 1)[0])
-    parsed = urlsplit(value)
+    parsed = urlsplit(str(href or ""))
     if parsed.scheme or parsed.netloc:
         raise ValueError("external EPUB resource")
-    result = posixpath.normpath(posixpath.join(base, parsed.path))
+    path = unquote(parsed.path)
+    # Reject scheme-looking or rooted paths even after decoding. Escaped
+    # literal # and ? belong to the ZIP filename, not the URI delimiter.
+    if re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", path):
+        raise ValueError("external EPUB resource")
+    result = posixpath.normpath(posixpath.join(base, path))
     if result.startswith(("/", "../")) or result == ".." or "\\" in result:
         raise ValueError("unsafe EPUB resource path")
     return result
@@ -96,23 +104,54 @@ def _node_text(node) -> str:
     return re.sub(r"\s+", " ", " ".join(node.itertext())).strip()
 
 
-def _toc_entries(archive: zipfile.ZipFile, opf_path: str, manifest: dict, names: set[str]) -> list[dict]:
-    """Read the navigation tree, independently of physical spine splits."""
+def _parse_navigation_xml(raw: bytes):
+    try:
+        return _parse_package_xml(raw)
+    except ET.ParseError as error:
+        if "undefined entity" not in str(error):
+            raise
+    # Broken EPUB navigation sometimes uses HTML named entities without a
+    # declaration. Expand only known names to XML numeric references; do not
+    # re-decode XML built-ins, numeric references, or unknown entity names.
+    def numeric(match):
+        entity = match.group(1)
+        if entity is None:
+            return match.group(0)
+        name = entity.decode('ascii')
+        value = html.entities.html5.get(name + ';')
+        if value is None or name in {'amp', 'apos', 'gt', 'lt', 'quot'}:
+            return match.group(0)
+        return ''.join(f'&#{ord(char)};' for char in value).encode('ascii')
+    return _parse_package_xml(re.sub(
+        rb'<!\[CDATA\[.*?\]\]>|<!--.*?-->|<\?.*?\?>|&([a-zA-Z][a-zA-Z0-9]+);', numeric, raw, flags=re.S))
+
+
+def _toc_entries(archive: zipfile.ZipFile, opf_path: str, manifest: dict, names: set[str],
+                 readable: set[str], preferred_ncx: str | None) -> list[dict]:
+    """Read the first usable navigation tree, independently of spine splits."""
     base = posixpath.dirname(opf_path)
-    candidates = sorted(manifest.values(), key=lambda item: "nav" not in item.get("properties", "").split())
+    def priority(item):
+        return ("nav" not in item.get("properties", "").split(), item.get('id') != preferred_ncx)
+    candidates = sorted(manifest.values(), key=priority)
+    fallback = []
     for item in candidates:
         media_type = item.get("media-type", "").lower()
-        if media_type != "application/x-dtbncx+xml" and "nav" not in item.get("properties", "").split():
+        is_nav = 'nav' in item.get('properties', '').split()
+        spine_ncx = preferred_ncx is not None and item.get('id') == preferred_ncx
+        if not (is_nav or spine_ncx or media_type == 'application/x-dtbncx+xml'):
             continue
         try:
             toc_path = _zip_path(base, item.get("href", ""))
         except ValueError:
             continue
-        if toc_path not in names:
+        # EPUB2 names its navigation item via spine@toc. Some real packages
+        # mark that exact NCX as text/xml; do not scan unrelated XML members.
+        is_ncx = media_type == 'application/x-dtbncx+xml' or (spine_ncx and toc_path.lower().endswith('.ncx'))
+        if toc_path not in names or not (is_ncx or is_nav):
             continue
         try:
-            root = ET.fromstring(archive.read(toc_path))
-        except ET.ParseError:
+            root = _parse_navigation_xml(archive.read(toc_path))
+        except (ET.ParseError, LookupError):
             continue
         entries = []
         def add(label, href, depth):
@@ -152,7 +191,7 @@ def _toc_entries(archive: zipfile.ZipFile, opf_path: str, manifest: dict, names:
                     add(_node_text(anchor), href, depth)
                 for ol in nested:
                     nav_list(ol, depth + 1)
-        if media_type == "application/x-dtbncx+xml":
+        if is_ncx and _local_name(root) == 'ncx':
             for node in root.iter():
                 if _local_name(node) == "navmap":
                     ncx(node)
@@ -163,9 +202,13 @@ def _toc_entries(archive: zipfile.ZipFile, opf_path: str, manifest: dict, names:
                     for ol in nav:
                         if _local_name(ol) == "ol":
                             nav_list(ol)
-        if entries:
+        if any(entry['source_path'] in readable for entry in entries):
             return entries
-    return []
+        # Keep the existing repair path if neither nav nor NCX names a
+        # readable document; do not let that mask an independently usable NCX.
+        if not fallback:
+            fallback = entries
+    return fallback
 
 
 def _placeholder_title(title: str) -> bool:
@@ -247,6 +290,10 @@ def bundle_toc(entries: list[dict], records: list[dict], *, preserve_targets: bo
     by_source = {record["source_path"]: record for record in reversed(records)}
     toc = []
     documents, inline_targets = {}, {}
+    label_by_target = {}
+    for entry in entries:
+        key = entry['source_path'], entry['fragment']
+        label_by_target.setdefault(key, set()).add(_normalized_label(entry['title']))
     for entry in entries:
         record = by_source.get(entry["source_path"])
         if record is None:
@@ -274,7 +321,9 @@ def bundle_toc(entries: list[dict], records: list[dict], *, preserve_targets: bo
             # Keep a usable chapter destination when the source TOC points at
             # an anchor omitted by the source document or its sanitizer.
             fragment = ""
-        if root is not None and not preserve_targets:
+        shared_by_distinct_labels = len(label_by_target[entry['source_path'], entry['fragment']]) > 1
+        if (root is not None and (not fragment or shared_by_distinct_labels)
+                and not (preserve_targets or entry.get('verified_target'))):
             fragment = usable_toc_fragment(root, fragment, title)
         if (not preserve_targets and not fragment and root is not None
                 and posixpath.basename(entry['source_path']) == 'chm-fallback.html'):
@@ -300,7 +349,7 @@ def _normalized_label(value: str) -> str:
     return re.sub(r"[\s\u00a0]+", "", str(value or "")).casefold()
 
 
-def _heading_node(root, fragment: str, title: str):
+def _heading_node(root, title: str):
     """Find the heading a navigation label names, ignoring the source anchor.
 
     Some source packages point several navigation entries at the same in-page
@@ -315,7 +364,7 @@ def _heading_node(root, fragment: str, title: str):
     for node in root.iter():
         if _local_name(node) not in {"h1", "h2", "h3", "h4", "h5", "h6", "p", "div"}:
             continue
-        text = _normalized_label(_node_text(node))
+        text = _normalized_label(_node_text(node) or node.get('title', ''))
         if not text or len(text) > 120:
             continue
         if text == label:
@@ -326,8 +375,9 @@ def _heading_node(root, fragment: str, title: str):
             candidates.append((2, node))
     if not candidates:
         return None
-    candidates.sort(key=lambda item: item[0])
-    return candidates[0][1]
+    best_score = min(score for score, _ in candidates)
+    best = [node for score, node in candidates if score == best_score]
+    return best[0] if len(best) == 1 else None
 
 
 def _chapter_headings(clean: str) -> list[str]:
@@ -350,45 +400,27 @@ def _chapter_headings(clean: str) -> list[str]:
     return labels
 
 
-def _label_matches(label: str, headings: list[str]) -> bool:
-    if not label:
-        return False
-    for heading in headings:
-        if heading == label or heading.startswith(label) or label.startswith(heading):
-            return True
-    return False
-
-
 def relocate_toc_entries(toc_entries: list[dict], records: list[dict]) -> list[dict]:
-    """Point navigation entries at the chapter that actually contains their label.
-
-    Some source packages carry a navigation anchor that names a footnote and lands in the
-    wrong physical document (duokan MOBI conversions do this for every entry), so a label
-    that is absent from its assigned chapter is looked up in the chapters that readably own
-    that heading. Entries whose label cannot be found keep their source destination.
-    """
-    headings = {}
+    """Correct repeated broken targets only when a unique heading owns the label."""
+    paths = {record['source_path'] for record in records}
+    by_label = {}
     for record in records:
-        headings[record["index"]] = _chapter_headings(record.get("clean") or "")
+        for heading in _chapter_headings(record.get('clean') or ''):
+            by_label.setdefault(heading, set()).add(record['source_path'])
+    destinations = Counter((entry['source_path'], entry['fragment']) for entry in toc_entries)
     located = []
     for entry in toc_entries:
-        label = _normalized_label(entry["title"])
-        record = next((item for item in records if item["source_path"] == entry["source_path"]), None)
-        if record is not None and _label_matches(label, headings.get(record["index"], [])):
-            located.append(dict(entry))
+        source = entry['source_path']
+        label = _normalized_label(entry['title'])
+        matches = by_label.get(label, ())
+        fragment = entry['fragment']
+        # An existing path is not overridden by a heading alone unless the
+        # source repeats its destination. Never cross chapters on fuzzy matches.
+        if (len(matches) != 1 or source in matches or
+                (source in paths and destinations[source, fragment] == 1)):
+            located.append(entry)
             continue
-        match = next((item for item in records
-                      if _label_matches(label, headings.get(item["index"], []))), None)
-        if match is None:
-            located.append(dict(entry))
-            continue
-        relocated = dict(entry)
-        relocated["source_path"] = match["source_path"]
-        # Relocating within the very same merged chapter must not discard its
-        # original page anchor. No other document can safely inherit it.
-        if record is None or match["source_path"] != record["source_path"]:
-            relocated["fragment"] = ""
-        located.append(relocated)
+        located.append(dict(entry, source_path=next(iter(matches)), fragment=''))
     return located
 
 
@@ -400,7 +432,7 @@ def usable_toc_fragment(root, fragment: str, title: str) -> str:
     jump land on the wrong verse. Without a matching heading the source anchor stays, and a
     missing anchor falls back to the chapter start.
     """
-    node = _heading_node(root, fragment, title)
+    node = _heading_node(root, title)
     if node is None:
         if not fragment:
             return ""
@@ -419,17 +451,22 @@ def usable_toc_fragment(root, fragment: str, title: str) -> str:
 def link_inline_toc(clean: str, record: dict, chapter_paths: dict[str, str],
                     records: list[dict], toc_entries: list[dict]) -> str:
     """Link plain paragraph TOCs found in EPUBs that omitted hrefs entirely."""
-    targets = {
-        re.sub(r"\s+", " ", str(item.get("title") or "")).strip(): chapter_paths[item["source_path"]]
-        for item in records
-        if item.get("source_path") in chapter_paths and item.get("title")
-    }
-    targets.update({
-        re.sub(r"\s+", " ", str(item.get("title") or "")).strip(): chapter_paths[item["source_path"]]
-        for item in toc_entries
-        if item.get("source_path") in chapter_paths and item.get("title")
-    })
-    if (len(targets) < 2 or re.search(r"<a\b", clean, re.I)
+    def targets_by_label(items):
+        result = {}
+        for item in items:
+            target = chapter_paths.get(item['source_path'])
+            label = re.sub(r'\s+', ' ', item['title']).strip()
+            if not target or not label:
+                continue
+            if item.get('fragment'):
+                target += '#' + quote(item['fragment'], safe='')
+            result.setdefault(label, set()).add(target)
+        return result
+
+    candidates = targets_by_label(records)
+    candidates.update(targets_by_label(toc_entries))
+    targets = {label: next(iter(options)) for label, options in candidates.items() if len(options) == 1}
+    if (len(targets) < 2 or re.search(r"<(?:html:)?a\b", clean, re.I)
             or not ("目录" in record.get("title", "")
                     or sum(clean.count(html.escape(title)) for title in targets) >= 2)):
         return clean
@@ -525,7 +562,7 @@ def write_search_index(output: Path, chapters: list[dict]) -> dict:
 
 def build_bundle(epub: Path, output: Path, *, fallback: str | None = None,
                  include_resources: bool = True, include_all_documents: bool = False,
-                 preserve_toc_targets: bool = False) -> dict:
+                 preserve_toc_targets: bool = False, verified_toc: list[dict] | None = None) -> dict:
     """Write chapter files and return the validated manifest.
 
     The output directory contains only files intended for a dataset commit.
@@ -547,11 +584,6 @@ def build_bundle(epub: Path, output: Path, *, fallback: str | None = None,
         chapters = []
         chapter_records = []
         resource_usage = Counter()
-        toc_entries = _toc_entries(archive, opf_path, manifest, names)
-        toc_titles = {}
-        for entry in toc_entries:
-            if not _placeholder_title(entry["title"]):
-                toc_titles.setdefault(entry["source_path"], entry["title"])
         document_items = {}
         for item in manifest.values():
             if ("nav" in item.get("properties", "").split()
@@ -578,6 +610,16 @@ def build_bundle(epub: Path, output: Path, *, fallback: str | None = None,
                 spine_paths.append(candidate)
         document_paths = spine_paths + ([path for path in sorted(document_items) if path not in spine_paths]
                                          if include_all_documents else [])
+        spine = next((node for node in opf.iter() if _local_name(node) == 'spine'), None)
+        if verified_toc is not None and not preserve_toc_targets:
+            raise ValueError('verified TOC requires exact target preservation')
+        toc_entries = verified_toc if verified_toc is not None else _toc_entries(
+            archive, opf_path, manifest, names, names.intersection(document_paths),
+                                   spine.get('toc') if spine is not None else None)
+        toc_titles = {}
+        for entry in toc_entries:
+            if not _placeholder_title(entry['title']):
+                toc_titles.setdefault(entry['source_path'], entry['title'])
         for number, source_path in enumerate(document_paths, 1):
             item = document_items[source_path]
             if source_path not in names:
@@ -614,13 +656,29 @@ def build_bundle(epub: Path, output: Path, *, fallback: str | None = None,
         if not chapter_records:
             raise ValueError("EPUB spine has no readable chapters")
         if not preserve_toc_targets:
-            toc_entries = relocate_toc_entries(toc_entries, chapter_records)
+            # Keep a verified local navigation target ahead of heading heuristics.
+            relocated = relocate_toc_entries(toc_entries, chapter_records)
+            confirmed = repair_volume_targets(
+                toc_entries, {record['source_path']: record['clean'] for record in chapter_records},
+                {record['source_path']: record['index'] for record in reversed(chapter_records)},
+                lambda path, href: _zip_path(posixpath.dirname(path), href),
+            )
+            toc_entries = [fallback if exact is original else dict(exact, verified_target=True)
+                           for original, exact, fallback in zip(toc_entries, confirmed, relocated, strict=True)]
         toc = bundle_toc(toc_entries, chapter_records, preserve_targets=preserve_toc_targets)
         # Resolve links only after every readable spine item has its final name.
         # Original filenames cannot be used after chapters move into the bundle.
         chapter_paths = {}
         for record in chapter_records:
             chapter_paths.setdefault(record["source_path"], f'chapter-{record["index"]:04d}.xhtml')
+        # Reuse the final, validated TOC destinations (including their anchors)
+        # rather than re-inferring them for text-only in-book contents.
+        inline_entries = [dict(item, source_path=chapter_records[item['chapter'] - 1]['source_path'])
+                          for item in toc]
+        # Reuse sanitized bytes by ZIP member, not by output path. CSS still
+        # lives under each chapter so its relative resource URLs are unchanged.
+        stylesheet_cache = {}
+        stylesheet_cache_remaining = MAX_CACHED_STYLESHEET_BYTES
         for record in chapter_records:
             chapter_index = record["index"]
             clean = record["clean"]
@@ -643,7 +701,7 @@ def build_bundle(epub: Path, output: Path, *, fallback: str | None = None,
                 return f'{match.group(1)}="{html.escape(target, quote=True)}"'
             clean = re.sub(r'(?<![\w:-])(href)\s*=\s*["\']([^"\']*)["\']',
                            rewrite_chapter_link, clean, flags=re.I)
-            clean = link_inline_toc(clean, record, chapter_paths, chapter_records, toc_entries)
+            clean = link_inline_toc(clean, record, chapter_paths, chapter_records, inline_entries)
             resources = record["resources"]
             if include_resources:
                 resource_bytes = sum(archive.getinfo(resource).file_size for resource in resources)
@@ -654,9 +712,16 @@ def build_bundle(epub: Path, output: Path, *, fallback: str | None = None,
                     prefix = "shared" if resource_usage[resource] > 1 and _can_share_resource(resource) else f"chapter-{chapter_index:04d}"
                     target = output / "resources" / prefix / _safe_resource_path(resource)
                     target.parent.mkdir(parents=True, exist_ok=True)
-                    data = archive.read(resource)
-                    if resource.lower().endswith(".css"):
-                        data = sanitize_css(data.decode("utf-8", "replace")).encode("utf-8")
+                    data = stylesheet_cache.get(resource)
+                    if data is None:
+                        data = archive.read(resource)
+                        if resource.lower().endswith(".css"):
+                            data = sanitize_css(data.decode("utf-8", "replace")).encode("utf-8")
+                            if (resource_usage[resource] > 1
+                                    and len(stylesheet_cache) < MAX_CACHED_STYLESHEETS
+                                    and len(data) <= stylesheet_cache_remaining):
+                                stylesheet_cache[resource] = data
+                                stylesheet_cache_remaining -= len(data)
                     if not target.exists():
                         target.write_bytes(data)
                     clean = clean.replace(

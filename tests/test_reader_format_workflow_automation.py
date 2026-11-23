@@ -127,7 +127,16 @@ gh() {
             triggers = config.get('on', config.get(True))
             self.assertEqual(set(triggers), {'workflow_dispatch'})
             schema = triggers['workflow_dispatch']['inputs']
-            self.assertLessEqual(len(schema), 11 if name in {'ebook-stream', 'image-stream'} else 10)
+            if name == 'ebook-stream':
+                stage_inputs = {'preview_stage_repo', 'preview_stage_extension', 'preview_stage_shard'}
+                self.assertLessEqual(len(schema.keys() - stage_inputs), 11)
+                self.assertLessEqual(len(schema), 25)
+                for key in stage_inputs:
+                    self.assertEqual(schema[key]['type'], 'string')
+                    self.assertFalse(schema[key].get('required', False))
+                    self.assertEqual(schema[key].get('default', ''), '')
+            else:
+                self.assertLessEqual(len(schema), 11 if name == 'image-stream' else 10)
             for key, kind, default in (('automation_id', 'string', ''), ('defer_unify', 'boolean', False),
                                        ('search_generation', 'string', ''), ('expected_sha', 'string', '')):
                 self.assertEqual(schema[key]['type'], kind)
@@ -423,6 +432,19 @@ gh() {
                     self.assertIn('plan', needs_for(job))
                     needs = {key: {'result': 'success', 'outputs': {
                         'matrix': '{"include":[{"extension":"mp3","shard":0}]}', 'count': '1'}} for key in jobs}
+                    if name == 'ebook-stream' and job_name == 'preview-stage':
+                        self.assertEqual(needs_for(job), ['plan'])
+                        self.assertEqual(job['permissions'], {'contents': 'read'})
+                        pilot = inputs_for(config, scope='all-search-repositories', preview_stage_repo='VoiceOfML/Teachers',
+                                           preview_stage_extension='azw3', preview_stage_shard='0')
+                        needs['plan']['outputs']['matrix'] = '{"include":[]}'
+                        self.assertTrue(job_runs(job, pilot, needs))
+                        for overrides in ({'apply': True}, {'scope': ''}, {'preview_stage_repo': ''}):
+                            self.assertFalse(job_runs(job, {**pilot, **overrides}, needs))
+                        for result in ('failure', 'cancelled', 'skipped'):
+                            needs['plan']['result'] = result
+                            self.assertFalse(job_runs(job, pilot, needs))
+                        continue
                     self.assertTrue(job_runs(job, inputs_for(config, apply=True), needs))
                     self.assertFalse(job_runs(job, inputs_for(config, apply=False), needs))
                     for dependency in needs_for(job):
@@ -476,7 +498,7 @@ gh() {
         self.assertIs(schema['finalize_only']['default'], False)
         self.assertIs(schema['finalize_only']['required'], False)
         jobs = config['jobs']
-        self.assertEqual(set(jobs), {'plan', 'ebook-stream', 'finalize'})
+        self.assertEqual(set(jobs), {'plan', 'ebook-stream', 'finalize', 'preview-stage'})
         self.assertEqual(config['concurrency'], {'group': 'reader-ebooks',
                                                 'cancel-in-progress': False, 'queue': 'max'})
         for finalize_only, apply, plan, producer in itertools.product(
@@ -489,6 +511,7 @@ gh() {
                 'ebook-stream': {'result': producer}}
             with self.subTest(finalize_only=finalize_only, apply=apply, plan=plan, producer=producer):
                 self.assertEqual(job_runs(jobs['plan'], values, needs), not finalize_only)
+                self.assertFalse(job_runs(jobs['preview-stage'], values, needs))
                 self.assertEqual(job_runs(jobs['ebook-stream'], values, needs),
                                  not finalize_only and apply and plan == 'success')
                 expected = apply and (plan == producer == ('skipped' if finalize_only else 'success'))

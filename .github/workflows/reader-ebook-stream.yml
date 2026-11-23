@@ -1,22 +1,27 @@
 name: Reader/桶 · Build Ebook Chapter Streams
-run-name: ${{ inputs.automation_id && format('reader-auto/{0}', inputs.automation_id) || format('Ebook chapters {0} ({1})', inputs.apply == true && 'apply' || 'plan', inputs.extension || 'all') }}
+run-name: ${{ inputs.scope == 'VoiceOfML/MLMRL-Library' && 'MLMRL-Library ebook rebuild preview' || inputs.scope != '' && format('Ebook rebuild preview ({0})', inputs.scope) || inputs.automation_id && format('reader-auto/{0}', inputs.automation_id) || format('Ebook chapters {0} ({1})', inputs.apply == true && 'apply' || 'plan', inputs.extension || 'all') }}
 
 on:
-  # Resume with reviewed, bounded manual batches; CHM remains separate.
+  # Resume with reviewed, bounded writes (CHM separate) or preview an exact-scope rebuild.
   workflow_dispatch:
     inputs:
+      scope:
+        description: 'Leave empty for legacy work; VoiceOfML/MLMRL-Library and all-search-repositories are pinned previews only'
+        required: false
+        default: ""
+        type: string
       automation_id:
         description: Optional controller correlation ID (32 lowercase hex characters)
         required: false
         default: ""
         type: string
       search_generation:
-        description: Published search generation for the automatic batch (64 lowercase hex)
+        description: Published Search generation for automation or a rebuild preview (64 lowercase hex)
         required: false
         default: ""
         type: string
       expected_sha:
-        description: Controller pipeline main commit (40 lowercase hex)
+        description: Current pipeline main commit for automation or a rebuild preview (40 lowercase hex)
         required: false
         default: ""
         type: string
@@ -32,7 +37,7 @@ on:
         type: choice
         options: [all, epub, mobi, azw3, fb2]
       limit:
-        description: Maximum attempts per shard; apply requires 1-3, plan allows 0
+        description: Attempts per repo/format/shard for previews (200); legacy apply requires 1-3 per format/shard
         required: true
         default: "1"
         type: string
@@ -40,11 +45,6 @@ on:
         description: Maximum source bytes; 0 means unlimited
         required: true
         default: "0"
-        type: string
-      workers:
-        description: Parallel builders (1-4)
-        required: true
-        default: "1"
         type: string
       retry_failures:
         description: Retry previously recorded failures
@@ -61,6 +61,15 @@ on:
         required: true
         default: false
         type: boolean
+      preview_stage_repo:
+        description: Exact public Search dataset for a local candidate preview (set all three preview_stage inputs or none)
+        type: string
+      preview_stage_extension:
+        description: Candidate preview format (epub, mobi, azw3, fb2 or chm)
+        type: string
+      preview_stage_shard:
+        description: Candidate preview shard (0-7)
+        type: string
 
 permissions:
   contents: read
@@ -73,11 +82,14 @@ concurrency:
 
 jobs:
   plan:
-    if: inputs.finalize_only != true
+    if: inputs.scope != '' || inputs.finalize_only != true
+    permissions:
+      contents: read
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     outputs:
-      matrix: ${{ steps.matrix.outputs.matrix }}
+      matrix: ${{ steps.matrix.outputs.matrix || steps.rebuild.outputs.matrix }}
+      rebuild_plan_sha256: ${{ steps.rebuild.outputs.plan_sha256 }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -87,6 +99,7 @@ jobs:
       - &automation-gate
         name: Validate automation and current main
         env:
+          SCOPE: ${{ inputs.scope }}
           AUTOMATION_ID: ${{ inputs.automation_id }}
           AUTOMATION_ENABLED: ${{ vars.READER_FORMAT_AUTOMATION_ENABLED }}
           SEARCH_GENERATION: ${{ inputs.search_generation }}
@@ -97,9 +110,29 @@ jobs:
           EXTENSION: ${{ inputs.extension }}
           EVENT_NAME: ${{ github.event_name }}
           GH_TOKEN: ${{ github.token }}
+          STAGE_REPO: ${{ inputs.preview_stage_repo }}
+          STAGE_EXTENSION: ${{ inputs.preview_stage_extension }}
+          STAGE_SHARD: ${{ inputs.preview_stage_shard }}
         run: |
           set -euo pipefail
-          if [[ "$FINALIZE_ONLY" == 'true' ]]; then
+          if [[ -n "${STAGE_REPO:-}${STAGE_EXTENSION:-}${STAGE_SHARD:-}" ]]; then
+            if [[ -z "${SCOPE:-}" || -z "${STAGE_REPO:-}" || ! "${STAGE_EXTENSION:-}" =~ ^(epub|mobi|azw3|fb2|chm)$ ||
+                  ! "${STAGE_SHARD:-}" =~ ^[0-7]$ || ( "$SCOPE" != 'all-search-repositories' && "$STAGE_REPO" != "$SCOPE" ) ]]; then
+              echo 'Candidate staging requires an exact preview repository, format and shard' >&2
+              exit 1
+            fi
+            python -c 'import sys; from scripts.search_source_registry import SOURCES; sys.exit(0 if sys.argv[1] in SOURCES else "Unknown Search dataset")' "$STAGE_REPO"
+          fi
+          if [[ -n "${SCOPE:-}" ]]; then
+            if [[ ( "$SCOPE" != 'VoiceOfML/MLMRL-Library' && "$SCOPE" != 'all-search-repositories' ) ||
+                  "$EVENT_NAME" != 'workflow_dispatch' || "$GITHUB_REPOSITORY" != 'anftm/pipeline' ||
+                  "$APPLY" != 'false' || "$FINALIZE_ONLY" == 'true' || -n "$AUTOMATION_ID" || "$DEFER_UNIFY" == 'true' ]]; then
+              echo 'Ebook rebuild requires an exact manual preview scope; it cannot apply, finalize or run with automation' >&2
+              exit 1
+            fi
+            [[ "$SEARCH_GENERATION" =~ ^[0-9a-f]{64}$ && "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+            [[ "$EXPECTED_SHA" == "$GITHUB_SHA" ]]
+          elif [[ "$FINALIZE_ONLY" == 'true' ]]; then
             [[ "$EVENT_NAME" == 'workflow_dispatch' && "$APPLY" == 'true' ]]
             [[ -z "$AUTOMATION_ID$SEARCH_GENERATION$EXPECTED_SHA" && "$DEFER_UNIFY" != 'true' ]]
             [[ "$EXTENSION" =~ ^(all|epub|mobi|azw3|fb2)$ ]]
@@ -118,6 +151,7 @@ jobs:
           remote_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)
           [[ "$remote_sha" == "$GITHUB_SHA" ]]
       - name: Fetch source metadata once
+        if: inputs.scope == ''
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           FORCE_SYNC: "true"
@@ -149,13 +183,14 @@ jobs:
             --revisions state/commits.json --output output/reader-actionable.json
           mv output/reader-actionable.json output/search_data.json
       - name: Plan pending ebook workers
+        if: inputs.scope == ''
         id: matrix
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           EXTENSION: ${{ inputs.extension || 'all' }}
           LIMIT: ${{ inputs.limit || '1' }}
           MAX_SOURCE_BYTES: ${{ inputs.max_source_bytes || '0' }}
-          WORKERS: ${{ inputs.workers || '1' }}
+          WORKERS: "1"
           APPLY: ${{ inputs.apply }}
           RETRY_FAILURES: ${{ inputs.retry_failures }}
         run: |
@@ -173,16 +208,185 @@ jobs:
           python scripts/plan_reader_stream_matrix.py "${args[@]}"
           echo "matrix=$(cat output/ebook-matrix.json)" >> "$GITHUB_OUTPUT"
       - run: tar -czf output/ebook-plan.tgz output/search_data.json state/commits.json output/ebook-matrix.json output/ebook-report.json
+        if: inputs.scope == ''
       - uses: actions/upload-artifact@v7
+        if: inputs.scope == ''
         with:
           name: reader-ebook-plan
           path: output/ebook-plan.tgz
+          retention-days: 1
+      # Preview artifacts never feed the live shard writer.
+      - name: Preview pinned ebook rebuild
+        id: rebuild
+        if: inputs.scope != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          SCOPE: ${{ inputs.scope }}
+          SEARCH_GENERATION: ${{ inputs.search_generation }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          SOURCE_REVISION: ${{ vars.READER_LIBRARY_SOURCE_REVISION }}
+          READER_GENERATION: ${{ vars.READER_LIBRARY_READER_GENERATION }}
+          EXTENSION: ${{ inputs.extension }}
+          LIMIT: ${{ inputs.limit }}
+          MAX_SOURCE_BYTES: ${{ inputs.max_source_bytes }}
+          RETRY_FAILURES: ${{ inputs.retry_failures }}
+        run: |
+          set -euo pipefail
+          if [[ "$EXTENSION" != all || "$LIMIT" != 200 || "$MAX_SOURCE_BYTES" != 0 || "$RETRY_FAILURES" != false ]]; then
+            echo 'Ebook preview requires extension=all, limit=200, max_source_bytes=0, retry_failures=false (4 target workers)' >&2
+            exit 1
+          fi
+          if [[ ! "$READER_GENERATION" =~ ^[0-9a-f]{64}$ ]]; then
+            echo 'Set the exact READER_LIBRARY_READER_GENERATION repository variable for this preview' >&2
+            exit 1
+          fi
+          source_args=()
+          case "$SCOPE" in
+            VoiceOfML/MLMRL-Library)
+              if [[ ! "$SOURCE_REVISION" =~ ^[0-9a-f]{40}$ ]]; then
+                echo 'Set the exact READER_LIBRARY_SOURCE_REVISION repository variable for the Library preview' >&2
+                exit 1
+              fi
+              source_args=(--source-revision "$SOURCE_REVISION")
+              capture_args=()
+              prefix=output/library-rebuild
+              ;;
+            all-search-repositories)
+              capture_args=(--scope all-search-repositories)
+              prefix=output/all-search-rebuild
+              ;;
+            *) exit 1 ;;
+          esac
+          mkdir -p output
+          python -m scripts.reader_ebook_rebuild "${capture_args[@]}" --search-generation "$SEARCH_GENERATION" \
+            "${source_args[@]}" --reader-generation "$READER_GENERATION" --output "$prefix-plan.json"
+          python scripts/plan_reader_stream_matrix.py --kind ebook --scope "$SCOPE" \
+            --search-generation "$SEARCH_GENERATION" --expected-sha "$EXPECTED_SHA" \
+            "${source_args[@]}" --reader-generation "$READER_GENERATION" \
+            --rebuild-plan "$prefix-plan.json" --report "$prefix-report.json" --output "$prefix-matrix.json"
+          # The exact Search and Reader reads may take time. Don't hand off a stale pipeline pin.
+          [[ "$(git rev-parse HEAD)" == "$EXPECTED_SHA" ]]
+          [[ "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" == "$EXPECTED_SHA" ]]
+          echo "matrix=$(cat "$prefix-matrix.json")" >> "$GITHUB_OUTPUT"
+          digest=$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["plan_sha256"])' "$prefix-report.json")
+          echo "plan_sha256=$digest" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v7
+        if: inputs.scope == 'VoiceOfML/MLMRL-Library'
+        with:
+          name: reader-library-ebook-rebuild-preview
+          path: |
+            output/library-rebuild-plan.json
+            output/library-rebuild-report.json
+          if-no-files-found: error
+          retention-days: 1
+      - uses: actions/upload-artifact@v7
+        if: inputs.scope == 'all-search-repositories'
+        with:
+          name: reader-all-search-repositories-ebook-rebuild-preview
+          path: |
+            output/all-search-rebuild-plan.json
+            output/all-search-rebuild-report.json
+          if-no-files-found: error
+          retention-days: 1
+
+  preview-stage:
+    needs: plan
+    if: inputs.scope != '' && inputs.apply == false && inputs.preview_stage_repo != ''
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      PLAN_SHA256: ${{ needs.plan.outputs.rebuild_plan_sha256 }}
+      PLAN_PREFIX: ${{ inputs.scope == 'VoiceOfML/MLMRL-Library' && 'library' || 'all-search' }}
+      STAGE_REPO: ${{ inputs.preview_stage_repo }}
+      STAGE_EXTENSION: ${{ inputs.preview_stage_extension }}
+      STAGE_SHARD: ${{ inputs.preview_stage_shard }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - run: pip install -r scripts/requirements.txt
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.scope == 'VoiceOfML/MLMRL-Library' && 'reader-library-ebook-rebuild-preview' || 'reader-all-search-repositories-ebook-rebuild-preview' }}
+          path: ${{ runner.temp }}/ebook-plan
+      - name: Verify plan digest and public source pin
+        env:
+          HF_HUB_DISABLE_IMPLICIT_TOKEN: '1'
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          from huggingface_hub import HfApi
+          from scripts.reader_ebook_rebuild_stage import shard_rows
+
+          path = Path(os.environ['RUNNER_TEMP']) / 'ebook-plan' / (os.environ['PLAN_PREFIX'] + '-rebuild-plan.json')
+          if not path.is_file() or path.is_symlink() or not 0 < path.stat().st_size <= 8 * 1024**2:
+              raise SystemExit('Invalid preview plan file')
+          raw = path.read_bytes()
+          if hashlib.sha256(raw).hexdigest() != os.environ['PLAN_SHA256']:
+              raise SystemExit('Preview plan SHA-256 mismatch')
+          repo = os.environ['STAGE_REPO']
+          rows = shard_rows(json.loads(raw), os.environ['STAGE_EXTENSION'], int(os.environ['STAGE_SHARD']), repo=repo)
+          revision = rows[0]['revision']
+          info = HfApi(endpoint='https://huggingface.co', token=False).repo_info(
+              repo, repo_type='dataset', revision=revision, token=False, timeout=30)
+          if info.id != repo or info.sha != revision or info.private is not False or info.gated is not False:
+              raise SystemExit('Candidate preview requires the exact public, ungated source revision')
+          PY
+      - name: Install pinned Ubuntu Calibre and CHM tools if needed
+        if: inputs.preview_stage_extension != 'epub'
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          packages=(calibre=7.6.0+ds-1build1 calibre-bin=7.6.0+ds-1build1)
+          if [[ "$STAGE_EXTENSION" == chm ]]; then packages+=(p7zip-full); fi
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends "${packages[@]}"
+          QT_QPA_PLATFORM=offscreen ebook-convert --version
+          if [[ "$STAGE_EXTENSION" == chm ]]; then command -v 7z; fi
+      - name: Fetch audited KindleUnpack revision from upstream
+        if: inputs.preview_stage_extension == 'mobi' || inputs.preview_stage_extension == 'azw3'
+        run: |
+          set -euo pipefail
+          revision=bf0ca6ece4e73494625e7950be3e259b6260774c
+          unpacker="$RUNNER_TEMP/KindleUnpack"
+          git init -q "$unpacker"
+          git -C "$unpacker" fetch --depth 1 --no-tags https://github.com/kevinhendricks/KindleUnpack.git "$revision"
+          git -C "$unpacker" checkout --detach FETCH_HEAD
+          [[ "$(git -C "$unpacker" rev-parse HEAD)" == "$revision" && -f "$unpacker/lib/kindleunpack.py" ]]
+      - name: Build local candidates only
+        run: |
+          set -euo pipefail
+          args=(--plan "$RUNNER_TEMP/ebook-plan/$PLAN_PREFIX-rebuild-plan.json" --plan-sha256 "$PLAN_SHA256"
+                --repo "$STAGE_REPO" --extension "$STAGE_EXTENSION" --shard "$STAGE_SHARD"
+                --output "$RUNNER_TEMP/ebook-candidates")
+          if [[ "$STAGE_EXTENSION" == mobi || "$STAGE_EXTENSION" == azw3 ]]; then
+            args+=(--kindle-unpacker "$RUNNER_TEMP/KindleUnpack/lib/kindleunpack.py")
+          fi
+          mkdir -m 700 "$RUNNER_TEMP/ebook-stage-home"
+          env -i HOME="$RUNNER_TEMP/ebook-stage-home" PATH="$PATH" \
+            HF_HUB_DISABLE_IMPLICIT_TOKEN=1 QT_QPA_PLATFORM=offscreen TMPDIR="$RUNNER_TEMP" \
+            python -m scripts.reader_ebook_rebuild_stage "${args[@]}"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: reader-ebook-rebuild-candidate-preview
+          path: ${{ runner.temp }}/ebook-candidates/
+          include-hidden-files: true
+          if-no-files-found: error
           retention-days: 1
 
   ebook-stream:
     needs: plan
     if: >-
-      inputs.finalize_only != true && inputs.apply == true &&
+      inputs.scope == '' && inputs.finalize_only != true && inputs.apply == true &&
       fromJSON(needs.plan.outputs.matrix).include[0] != null
     runs-on: ubuntu-24.04
     timeout-minutes: 360
@@ -223,7 +427,7 @@ jobs:
           SHARD: ${{ matrix.shard }}
           LIMIT: ${{ inputs.limit || '1' }}
           MAX_SOURCE_BYTES: ${{ inputs.max_source_bytes || '0' }}
-          WORKERS: ${{ inputs.workers || '1' }}
+          WORKERS: "1"
           RETRY_FAILURES: ${{ inputs.retry_failures }}
         run: |
           [[ "$LIMIT" =~ ^[1-3]$ && "$MAX_SOURCE_BYTES" =~ ^[0-9]+$ && "$WORKERS" =~ ^[1-4]$ && "$SHARD" =~ ^[0-7]$ ]] || exit 1
@@ -236,7 +440,7 @@ jobs:
   finalize:
     needs: [plan, ebook-stream]
     if: >-
-      always() && inputs.apply == true &&
+      always() && inputs.scope == '' && inputs.apply == true &&
       ((inputs.finalize_only == true && needs.plan.result == 'skipped' && needs.ebook-stream.result == 'skipped') ||
        (inputs.finalize_only != true && needs.plan.result == 'success' && needs.ebook-stream.result == 'success'))
     runs-on: ubuntu-24.04

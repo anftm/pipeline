@@ -28,6 +28,7 @@ class EpubTocTests(unittest.TestCase):
                 epub_chapters._zip_path('O', value)
         self.assertEqual(epub_chapters._zip_path('O/Text', '../Images/pic.png'), 'O/Images/pic.png')
         self.assertEqual(epub_chapters._zip_path('O', '../image.png'), 'image.png')
+        self.assertEqual(epub_chapters._zip_path('O', 'foo%23bar%3F.xhtml#target'), 'O/foo#bar?.xhtml')
         for value in ('https://example.invalid/book.css', '//example.invalid/book.css'):
             with self.subTest(value=value), self.assertRaisesRegex(ValueError, 'external EPUB resource'):
                 epub_chapters._zip_path('O', value)
@@ -111,7 +112,7 @@ class EpubTocTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'chapter bytes differ'):
                 epub_chapters.write_search_index(root, chapters)
 
-    def build(self, navigation, *, nav=False):
+    def build(self, navigation, *, nav=False, ncx=None, ncx_media='application/x-dtbncx+xml'):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
@@ -120,7 +121,12 @@ class EpubTocTests(unittest.TestCase):
             archive.writestr('META-INF/container.xml', '<container><rootfiles><rootfile full-path="O/content.opf"/></rootfiles></container>')
             item = ('<item id="toc" href="nav.xhtml" properties="nav" media-type="application/xhtml+xml"/>' if nav else
                     '<item id="toc" href="toc.ncx" media-type="application/x-dtbncx+xml"/>')
-            archive.writestr('O/content.opf', '<package><manifest>' + item + '<item id="a" href="book.xhtml" media-type="application/xhtml+xml"/><item id="b" href="split.xhtml" media-type="application/xhtml+xml"/></manifest><spine toc="toc"><itemref idref="a"/><itemref idref="b"/></spine></package>')
+            spine_toc = 'toc'
+            if ncx is not None:
+                spine_toc = 'alternate'
+                item += f'<item id="alternate" href="alternate.ncx" media-type="{ncx_media}"/>'
+                archive.writestr('O/alternate.ncx', ncx)
+            archive.writestr('O/content.opf', '<package><manifest>' + item + '<item id="a" href="book.xhtml" media-type="application/xhtml+xml"/><item id="b" href="split.xhtml" media-type="application/xhtml+xml"/></manifest><spine toc="' + spine_toc + '"><itemref idref="a"/><itemref idref="b"/></spine></package>')
             archive.writestr('O/nav.xhtml' if nav else 'O/toc.ncx', navigation)
             archive.writestr('O/book.xhtml', '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Unknown Text</title></head><body><h1 id="卷一">第一卷</h1><p>前文</p><h2 id="day">一月三日</h2><p>正文</p></body></html>')
             archive.writestr('O/split.xhtml', '<html><body><p>没有独立目录项的续页正文</p></body></html>')
@@ -137,6 +143,24 @@ class EpubTocTests(unittest.TestCase):
         result = self.build('<html xmlns:epub="http://www.idpf.org/2007/ops"><body><nav epub:type="landmarks"><ol><li><a href="split.xhtml">正文</a></li></ol></nav><nav epub:type="toc"><ol><li><span>日记</span><ol><li><a href="book.xhtml#day">一月三日</a></li></ol></li></ol></nav></body></html>', nav=True)
         self.assertEqual(result['toc'], [dict(title='日记', chapter=1, fragment='day', depth=0),
                                          dict(title='一月三日', chapter=1, fragment='day', depth=1)])
+
+    def test_ncx_repairs_html_named_entities_without_changing_xml_literals(self):
+        nav = ('<ncx><navMap><navPoint><navLabel><text>First&nbsp;&amp; second &amp;nbsp;</text></navLabel>'
+               '<content src="book.xhtml#day"/></navPoint></navMap></ncx>')
+        self.assertEqual(self.build(nav)['toc'], [dict(title='First & second &nbsp;', chapter=1,
+                                                       fragment='day', depth=0)])
+        self.assertEqual(self.build(nav.replace('First&nbsp;', 'First&notDeclared;'))['toc'][0]['fragment'], '')
+        self.assertEqual(epub_chapters._parse_navigation_xml(
+            b'<ncx><first><![CDATA[&nbsp;]]></first><second>&nbsp;</second></ncx>')[0].text, '&nbsp;')
+
+    def test_unusable_epub3_nav_does_not_mask_opf_ncx(self):
+        nav = '<html><body><nav role="doc-toc"><ol><li><a href="dead.xhtml">Bad</a></li></ol></nav></body></html>'
+        ncx = ('<ncx><navMap><navPoint><navLabel><text>一月三日</text></navLabel>'
+               '<content src="book.xhtml#day"/></navPoint></navMap></ncx>')
+        for media in ('application/x-dtbncx+xml', 'text/xml'):
+            with self.subTest(media=media):
+                self.assertEqual(self.build(nav, nav=True, ncx=ncx, ncx_media=media)['toc'],
+                                 [dict(title='一月三日', chapter=1, fragment='day', depth=0)])
 
     def test_unrecoverable_navigation_uses_a_stable_fallback_title(self):
         result = self.build('<ncx><navMap><navPoint><navLabel><text>Unknown Text</text></navLabel><content src="book.xhtml#missing"/></navPoint></navMap></ncx>')
@@ -197,6 +221,94 @@ class EpubTocTests(unittest.TestCase):
             self.assertEqual([(item['title'], item['chapter']) for item in result['toc']],
                              [('第二首', 2), ('第一首', 1)])
 
+    def test_rebuilds_misplaced_volume_and_alias_from_two_navigation_signals(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / 'book.epub'
+            with zipfile.ZipFile(source, 'w') as archive:
+                archive.writestr('META-INF/container.xml', '<container><rootfiles><rootfile full-path="O/book.opf"/></rootfiles></container>')
+                pages = {
+                    'contents': '<h1>Contents</h1><a href="previous.xhtml#appendix">Appendix</a>'
+                                '<a href="volume.xhtml#opening%3A2">第二卷</a>',
+                    'old': '<p id="cross-volume">Early material</p>',
+                    'previous': '<h1 id="appendix">Appendix</h1>',
+                    'volume': '<main id="opening:2"><img src="cover.png"/></main><h1 id="late">第二卷</h1>',
+                }
+                items = ''.join(f'<item id="{p}" href="{p}.xhtml" media-type="application/xhtml+xml"/>' for p in pages)
+                refs = ''.join(f'<itemref idref="{p}"/>' for p in pages)
+                archive.writestr('O/book.opf', '<package><manifest>' + items +
+                                 '<item id="toc" href="toc.ncx" media-type="application/x-dtbncx+xml"/>'
+                                 '</manifest><spine toc="toc">' + refs + '</spine></package>')
+                for page, body in pages.items():
+                    archive.writestr(f'O/{page}.xhtml', f'<html><body>{body}</body></html>')
+                archive.writestr('O/toc.ncx', '''<ncx><navMap>
+                    <navPoint><navLabel>Contents</navLabel><content src="contents.xhtml"/></navPoint>
+                    <navPoint><navLabel>Appendix</navLabel><content src="previous.xhtml#appendix"/></navPoint>
+                    <navPoint><navLabel>第二卷</navLabel><content src="old.xhtml#cross-volume"/>
+                        <navPoint><navLabel>Cover</navLabel><content src="old.xhtml#cross-volume"/></navPoint>
+                        <navPoint><navLabel>Title page</navLabel><content src="volume.xhtml"/></navPoint>
+                    </navPoint></navMap></ncx>''')
+            bundle = root / 'bundle'
+            manifest = epub_chapters.build_bundle(source, bundle)
+            self.assertEqual([(row['chapter'], row['fragment'], row['depth']) for row in manifest['toc']],
+                             [(1, '', 0), (3, 'appendix', 0), (4, 'opening:2', 0),
+                              (4, 'opening:2', 1), (4, '', 1)])
+            contents = (bundle / manifest['chapters'][0]['path']).read_text()
+            self.assertIn('href="chapter-0004.xhtml#opening%3A2"', contents)
+
+    def test_volume_repair_rejects_conflicting_evidence_and_forward_valid_target(self):
+        from scripts.ebook_toc_evidence import repair_volume_targets
+        entries = [dict(title=title, depth=depth, source_path=path, fragment=fragment)
+                   for title, depth, path, fragment in [('Contents', 0, 'toc', ''),
+                       ('Appendix', 0, 'end', ''), ('Volume II', 0, 'old', 'old'),
+                       ('Cover', 1, 'old', 'old'), ('Title', 1, 'new', '')]]
+        order = {'toc': 1, 'old': 2, 'end': 3, 'cover': 4, 'new': 5}
+        documents = {'old': '<p id="old"/>', 'new': '<h1 id="new"/>', 'cover': '<img/>'}
+        def repair(rows, links, **changes):
+            contents = '<body><a href="end">Appendix</a>' + links + '</body>'
+            return repair_volume_targets(rows, {**documents, **changes, 'toc': contents},
+                                         order, lambda _, href: href.partition('#')[0])
+        href = '<a href="new#new">Volume II</a>'
+        self.assertEqual(repair(entries, href)[2]['fragment'], 'new')
+        for links, row_changes, doc_changes in [
+            (href + '<a href="old#old">Volume II</a>', {}, {}),
+            (href, {4: dict(entries[4], source_path='old')}, {}),
+            (href, {2: dict(entries[2], source_path='cover', fragment='')}, {}),
+            (href, {}, {'new': '<body><h1 id="new"/><a name="new"/></body>'}),
+            ('<a href="new#missing">Volume II</a>', {}, {}),
+        ]:
+            rows = [row_changes.get(i, row) for i, row in enumerate(entries)]
+            with self.subTest(links=links, changes=row_changes, docs=doc_changes):
+                self.assertEqual(repair(rows, links, **doc_changes), rows)
+
+    def test_volume_contents_page_links_to_independent_child_in_next_spine_item(self):
+        from scripts.ebook_toc_evidence import repair_volume_targets
+        rows = [dict(title=name, depth=depth, source_path=path, fragment=frag)
+                for name, depth, path, frag in [('Volume I', 0, 'first', ''), ('Appendix', 1, 'end', ''),
+                    ('Volume II', 0, 'old', ''), ('Start of II', 1, 'new', 'page')]]
+        order = {'contents': 2, 'first': 5, 'old': 7, 'end': 11, 'index': 13, 'new': 14}
+        docs = {'contents': '<body><a href="first">Volume I</a><a href="index#contents">Volume II</a></body>',
+                'index': '<body id="contents"><a href="new#page">Start of II</a></body>',
+                'new': '<h1 id="page">Start of II</h1>'}
+        def repair():
+            return repair_volume_targets(rows, docs, order, lambda _, href: href.partition('#')[0])
+        rebuilt = repair()
+        self.assertEqual(rebuilt[2], dict(rows[2], source_path='index', fragment='contents'))
+        self.assertEqual(rebuilt[3], rows[3])
+        docs['index'] = '<body id="contents"><a href="new#other">Start of II</a></body>'
+        self.assertEqual(repair(), rows)
+
+    def test_unique_explicit_target_wins_over_repeated_or_remote_heading(self):
+        records = [dict(index=1, source_path='one.xhtml', title='One', clean=(
+            '<body><h1 id="early">Repeat</h1><h1 id="late">Repeat</h1>'
+            '<p id="custom">Intentional destination</p></body>')),
+            dict(index=2, source_path='two.xhtml', title='Two', clean='<h1 id="label">Other label</h1>')]
+        entries = [dict(title=title, source_path='one.xhtml', fragment=fragment, depth=0)
+                   for title, fragment in [('Repeat', 'late'), ('Other label', 'custom')]]
+        relocated = epub_chapters.relocate_toc_entries(entries, records)
+        self.assertEqual(relocated, entries)
+        self.assertEqual([item['fragment'] for item in epub_chapters.bundle_toc(relocated, records)], ['late', 'custom'])
+
     def test_published_manifest_keeps_verified_chm_anchor_with_repeated_heading(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -226,11 +338,7 @@ class EpubTocTests(unittest.TestCase):
         records=[{'index':1,'source_path':'merged.xhtml','clean':clean,'title':'合并正文'}]
         entries=[{'title':'抗日战争胜利后的新形势','source_path':'merged.xhtml',
                   'fragment':'chm-page-4','depth':0}]
-        # Trigger the relocation branch as for imperfect heading detection,
-        # while still resolving the same physical source document.
-        from unittest.mock import patch
-        with patch.object(epub_chapters,'_label_matches',side_effect=[False,True]):
-            relocated=epub_chapters.relocate_toc_entries(entries,records)
+        relocated = epub_chapters.relocate_toc_entries(entries, records)
         self.assertEqual(relocated[0]['fragment'],'chm-page-4')
         self.assertEqual(epub_chapters.bundle_toc(relocated,records)[0]['fragment'],'chm-page-4')
 
@@ -262,7 +370,7 @@ class EpubTocTests(unittest.TestCase):
             reader_assets.validate_chapter_manifest(result)
 
     def test_plain_directory_paragraphs_link_to_matching_chapters(self):
-        navigation = '<ncx><navMap><navPoint><navLabel><text>第一篇</text></navLabel><content src="book.xhtml"/></navPoint><navPoint><navLabel><text>第二篇</text></navLabel><content src="split.xhtml"/></navPoint></navMap></ncx>'
+        navigation = '<ncx><navMap><navPoint><navLabel><text>第一篇</text></navLabel><content src="book.xhtml"/></navPoint><navPoint><navLabel><text>第二篇</text></navLabel><content src="split.xhtml#section%3A2"/></navPoint></navMap></ncx>'
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
@@ -272,13 +380,25 @@ class EpubTocTests(unittest.TestCase):
             archive.writestr('O/content.opf', '<package><manifest><item id="toc" href="toc.ncx" media-type="application/x-dtbncx+xml"/><item id="a" href="book.xhtml" media-type="application/xhtml+xml"/><item id="b" href="split.xhtml" media-type="application/xhtml+xml"/></manifest><spine toc="toc"><itemref idref="a"/><itemref idref="b"/></spine></package>')
             archive.writestr('O/toc.ncx', navigation)
             archive.writestr('O/book.xhtml', '<html><body><h1>目录</h1><p>第一篇</p><p>第二篇</p><p>没有匹配</p></body></html>')
-            archive.writestr('O/split.xhtml', '<html><body><h1>第二篇</h1><p>正文</p></body></html>')
+            archive.writestr('O/split.xhtml', '<html><body><h1 id="section:2">第二篇</h1><p>正文</p></body></html>')
         bundle = root / 'bundle'
         epub_chapters.build_bundle(source, bundle)
         text = (bundle / 'chapters/chapter-0001.xhtml').read_text(encoding='utf-8')
         self.assertIn('href="chapter-0001.xhtml"', text)
-        self.assertIn('href="chapter-0002.xhtml"', text)
+        self.assertIn('href="chapter-0002.xhtml#section%3A2"', text)
         self.assertIn('>没有匹配</', text)
+
+    def test_plain_directory_does_not_overwrite_duplicate_labels_or_existing_links(self):
+        records = [dict(title='目录', source_path='toc.xhtml'), dict(title='Same', source_path='a.xhtml'),
+                   dict(title='Same', source_path='b.xhtml'), dict(title='Unique', source_path='c.xhtml'),
+                   dict(title='Other', source_path='d.xhtml')]
+        paths = {row['source_path']: row['source_path'] for row in records}
+        plain = '<html:p>Same</html:p><html:p>Unique</html:p>'
+        linked = epub_chapters.link_inline_toc(plain, records[0], paths, records, [])
+        self.assertIn('<html:p>Same</html:p>', linked)
+        self.assertIn('<a href="c.xhtml">Unique</a>', linked)
+        existing = '<html:a href="a.xhtml#verified">Same</html:a>' + plain
+        self.assertEqual(epub_chapters.link_inline_toc(existing, records[0], paths, records, []), existing)
 
     def test_unsafe_epub_paths_are_omitted_without_losing_valid_spine_content(self):
         with tempfile.TemporaryDirectory() as temporary:

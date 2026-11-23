@@ -2589,7 +2589,8 @@ def validate_office_pdf(path: Path, item: dict, work: Path, source: Path | None 
 
 
 def convert_item(item: dict, bundle: Path, reusable: dict | None = None, *,
-                 exact_source_bytes: int | None = None) -> dict:
+                 exact_source_bytes: int | None = None,
+                 exact_chm_input: tuple[Path, str, int] | None = None) -> dict:
     if str(item["extension"]).lower().lstrip(".") == "djvu":
         # A stale generic queue must not download, reuse or create a derivative.
         # Native DjVu admission/probing belongs to the account render worker.
@@ -2597,8 +2598,20 @@ def convert_item(item: dict, bundle: Path, reusable: dict | None = None, *,
     with tempfile.TemporaryDirectory(prefix="reader-convert-") as root:
         work = Path(root)
         source = work / f"source.{item['extension']}"
-        download_options = {} if exact_source_bytes is None else {"exact_bytes": exact_source_bytes}
-        digest, source_bytes = download_source(item["source_url"], source, **download_options)
+        if exact_chm_input is None:
+            download_options = {} if exact_source_bytes is None else {"exact_bytes": exact_source_bytes}
+            digest, source_bytes = download_source(item["source_url"], source, **download_options)
+        else:
+            pinned_path, digest, source_bytes = exact_chm_input
+            if (item['extension'] != 'chm' or exact_source_bytes is not None
+                    or not isinstance(digest, str) or not re.fullmatch('[0-9a-f]{64}', digest)
+                    or type(source_bytes) is not int or source_bytes <= 0
+                    or pinned_path.is_symlink() or not pinned_path.is_file()):
+                raise ValueError('requires a private, verified CHM input')
+            shutil.copyfile(pinned_path, source)
+            with source.open('rb') as stream:
+                if source.stat().st_size != source_bytes or hashlib.file_digest(stream, 'sha256').hexdigest() != digest:
+                    raise ValueError('private CHM bytes differ from the pinned input')
         if item.get("profile") == NATIVE_MEDIA_PROFILE:
             item = prepare_native_media_item(item, source)
         if item["extension"] == "asx":

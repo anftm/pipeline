@@ -26,7 +26,7 @@ try:
     from . import reader_assets, reader_lifecycle, reader_route_plan, reader_stream_index
     from . import search_daily, search_generation, search_publication_pointer, search_snapshot
     from .reader_bucket_store import HubBucketStore, retry_read
-    from .reader_chapter_profiles import CHM_PROFILE, chm_profile_upgrade
+    from .reader_chapter_profiles import CHM_PROFILE, chm_profile_upgrade, ebook_profile_upgrade
     from .reader_web_exact_plan import KIND as WEB_INDEX_KIND, _web_row
     from .reader_web_profile import WEB_PROFILE
 except ImportError:
@@ -42,7 +42,7 @@ except ImportError:
     import search_publication_pointer
     import search_snapshot
     from reader_bucket_store import HubBucketStore, retry_read
-    from reader_chapter_profiles import CHM_PROFILE, chm_profile_upgrade
+    from reader_chapter_profiles import CHM_PROFILE, chm_profile_upgrade, ebook_profile_upgrade
     from reader_web_exact_plan import KIND as WEB_INDEX_KIND, _web_row
     from reader_web_profile import WEB_PROFILE
 
@@ -212,7 +212,7 @@ def _web_profile_failure(failure):
 
 def classify_indexed(records, routes, canonical, shards, api, *, extensions, kind, route_modes, shard_count=8,
                      merge=reader_stream_index.merge_shards, include_profile_upgrades=True,
-                     include_web_profile_upgrades=False):
+                     include_web_profile_upgrades=False, include_ebook_profile_upgrades=False):
     """Compare exact source bytes without treating repository commits as content."""
     web_profile_enabled = include_web_profile_upgrades and kind == WEB_INDEX_KIND
     source = [value for value in records.values() if value['extension'] in extensions]
@@ -255,9 +255,15 @@ def classify_indexed(records, routes, canonical, shards, api, *, extensions, kin
         key, route = item['key'], routes.get(item['key'])
         entry = entries.get(key)
         staged = merged_entries.get(key)
+        ebook_target = (ebook_profile_upgrade(item['extension'], entry.get('profile'))
+                        if include_ebook_profile_upgrades and kind == 'ebook-chapter-stream-index' and entry else None)
         failure_current = any(failure.get('source_revision') == item['revision']
                               and not (kind == WEB_INDEX_KIND and item['extension'] in FAMILIES['web'][0]
                                        and _web_profile_failure(failure))
+                              and not (ebook_target and failure.get('profile') == ebook_target
+                                       and failure.get('source_sha256') == entry.get('source_sha256')
+                                       and isinstance(failure.get('source_sha256'), str)
+                                       and SHA.fullmatch(failure['source_sha256']))
                               for failure in failure_rows.get(key, []))
         row = {'key': key, 'source_revision': item['revision'], 'recorded_failure': failure_current}
         if route is None:
@@ -351,6 +357,37 @@ def classify_indexed(records, routes, canonical, shards, api, *, extensions, kin
             # An unrelated dataset revision bump cannot retry the failed rule
             # on the same bytes. A genuinely changed source is a new input.
             row['recorded_failure'] |= any(f.get('profile') == CHM_PROFILE for f in failure_rows.get(item['key'], []))
+    if include_ebook_profile_upgrades and kind == 'ebook-chapter-stream-index':
+        for item in source:
+            key, ext = item['key'], item['extension']
+            row, entry = rows[key], entries.get(key)
+            if row['state'] not in {'same_revision', 'content_unchanged'} or entry is None:
+                continue
+            target = ebook_profile_upgrade(ext, entry.get('profile'))
+            if target is None:
+                continue
+            route = routes[key]
+            digest = entry.get('source_sha256')
+            manifest = entry.get('manifest')
+            prefix = f'chapters/ebook/{ext}/{digest}/'
+            if (not isinstance(digest, str) or not SHA.fullmatch(digest)
+                    or not isinstance(manifest, str) or not manifest.startswith(prefix)
+                    or not re.fullmatch(r'[0-9a-f]{16}/chapter-manifest\.json', manifest[len(prefix):])
+                    or route.get('c', route.get('p')) != manifest
+                    or route.get('cb', route.get('b')) != READER_BUCKET
+                    or (entry.get('repo'), entry.get('path')) != (item['repo'], item['path'])):
+                row['state'] = 'route_or_index_mismatch'
+                continue
+            if (row['proof'] == 'exact-revision-git-blobs'
+                    and _lfs_identity(old[(item['repo'], entry['source_revision'], item['path'])])):
+                row['state'] = 'source_identity_unknown'
+                continue
+            if any(f.get('profile') == target and f.get('source_sha256') == digest for f in failure_rows.get(key, [])):
+                row.update(profile_upgrade_deferred=True,
+                           profile_upgrade_deferred_reason='current_ebook_profile_failed')
+                continue
+            row.update(state='profile_outdated', previous_profile=entry.get('profile'),
+                       previous_manifest=manifest, previous_source_sha256=digest, target_profile=target)
     if web_profile_enabled:
         for item in source:
             key = item['key']
@@ -393,9 +430,10 @@ def classify_indexed(records, routes, canonical, shards, api, *, extensions, kin
     return rows
 
 
-def classify_epub(records, routes, canonical, shards, api):
+def classify_epub(records, routes, canonical, shards, api, *, include_ebook_profile_upgrades=False):
     return classify_indexed(records, routes, canonical, shards, api, extensions={'epub'},
-                            kind='ebook-chapter-stream-index', route_modes={'e'})
+                            kind='ebook-chapter-stream-index', route_modes={'e'},
+                            include_ebook_profile_upgrades=include_ebook_profile_upgrades)
 
 
 def summarize(records: dict, routes: dict, checked_rows: dict, *, threshold: int = 10,
@@ -453,14 +491,14 @@ def summarize(records: dict, routes: dict, checked_rows: dict, *, threshold: int
 
 def inspect(*, hub, api, fs, client, threshold=10, observe_search=search_daily.observe_consumers,
             get=search_daily.bounded_get, scope='all', details_out=None, include_profile_upgrades=True,
-            include_web_profile_upgrades=False):
+            include_web_profile_upgrades=False, include_ebook_profile_upgrades=False):
     """Return the legacy pair; optionally expose the accepted full capture.
 
     details_out is populated only after all final pin checks succeed. Its rows
     contain every checked key, including unchanged sources; absent keys remain
     unverified (for example when a format's canonical index is missing).
     """
-    if scope not in {'all', 'epub', 'web'}:
+    if scope not in {'all', 'epub', 'ebook', 'web'}:
         raise ValueError('invalid Reader backlog inspection scope')
     pointer_raw, manifest_raw, corpus, revisions, _observed = capture_search(hub, observe=observe_search, get=get)
     records = source_records(corpus, revisions)
@@ -494,7 +532,8 @@ def inspect(*, hub, api, fs, client, threshold=10, observe_search=search_daily.o
             value = matrix.read_json(fs, READER_BUCKET, f'{root}/index-{number:02d}.json')
             if value:
                 shards.append((number, value))
-        epub = classify_epub(records, routes, canonical, shards, api)
+        epub = classify_epub(records, routes, canonical, shards, api,
+                             include_ebook_profile_upgrades=include_ebook_profile_upgrades)
         checked_extensions.add('epub')
     checked = dict(epub)
     image_root = None
@@ -502,8 +541,7 @@ def inspect(*, hub, api, fs, client, threshold=10, observe_search=search_daily.o
     media_indexes, media_shards, document_indexes, web_indexes = {}, {}, {}, {}
     extra_ebook_indexes, extra_ebook_shards = {}, {}
     text_path, text_index = None, None
-    if scope == 'all':
-        extra_ebook_indexes, extra_ebook_shards = {}, {}
+    if scope in {'all', 'ebook'}:
         for extension in ('mobi', 'azw3', 'fb2', 'chm'):
             ebook_root = f'chapters/ebook/{extension}'
             index = matrix.read_json(fs, READER_BUCKET, ebook_root + '/index.json')
@@ -516,10 +554,12 @@ def inspect(*, hub, api, fs, client, threshold=10, observe_search=search_daily.o
                     parts.append((number, value))
             checked.update(classify_indexed(records, routes, index, parts, api, extensions={extension},
                                             kind='ebook-chapter-stream-index', route_modes={'e'},
-                                            include_profile_upgrades=include_profile_upgrades))
+                                            include_profile_upgrades=include_profile_upgrades,
+                                            include_ebook_profile_upgrades=include_ebook_profile_upgrades))
             checked_extensions.add(extension)
             extra_ebook_indexes[extension] = index
             extra_ebook_shards[extension] = dict(parts)
+    if scope == 'all':
         office_extensions = set(FAMILIES['office-chapters'][0])
         checked.update(classify_indexed(records, routes, canonical, [], api, extensions=office_extensions,
                                         kind='ebook-chapter-stream-index', route_modes={'e'}))
@@ -659,6 +699,8 @@ def inspect(*, hub, api, fs, client, threshold=10, observe_search=search_daily.o
                          if scope == 'web' else
                          'published search and pinned Reader projection; exact source content checked for EPUB only'
                          if scope == 'epub' else
+                         'published search and pinned Reader projection; exact source content checked for ebook and CHM only'
+                         if scope == 'ebook' else
                          'published search and pinned Reader projection; exact source content checked for indexed ebooks, office, images, media, text, web, spreadsheets and static PDFs; '
                          'HTML/Markdown dependencies may change independently and are not checked')}
     details = {'version': 1, 'kind': 'reader-epub-content-backlog',
@@ -709,7 +751,7 @@ def main(argv=None):
     parser.add_argument('--output', required=True, type=Path)
     parser.add_argument('--epub-details', required=True, type=Path)
     parser.add_argument('--threshold', type=int, default=10)
-    parser.add_argument('--scope', choices=('all', 'web'), default='all')
+    parser.add_argument('--scope', choices=('all', 'ebook', 'web'), default='all')
     args = parser.parse_args(argv)
     if args.output.resolve() == args.epub_details.resolve() or any(
             path.exists() or path.is_symlink() for path in (args.output, args.epub_details)):
@@ -724,7 +766,8 @@ def main(argv=None):
                                fs=HfFileSystem(token=token, skip_instance_cache=True),
                                client=client, threshold=args.threshold, scope=args.scope,
                                include_profile_upgrades=os.getenv('READER_CHM_PROFILE_REBUILD_ENABLED') == 'true',
-                               include_web_profile_upgrades=os.getenv('READER_WEB_PROFILE_REBUILD_ENABLED') == 'true')
+                               include_web_profile_upgrades=os.getenv('READER_WEB_PROFILE_REBUILD_ENABLED') == 'true',
+                               include_ebook_profile_upgrades=os.getenv('READER_EBOOK_PROFILE_INVENTORY_ENABLED') == 'true')
         summary, details = observe_stable(observe)
     except Exception as error:
         diagnostic = args.output.with_name(args.output.stem + '-failure.json')

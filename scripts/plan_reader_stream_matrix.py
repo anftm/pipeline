@@ -8,17 +8,18 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 
 from huggingface_hub import HfFileSystem
 
 try:
     from .reader_assets import bucket_conversion_contract, decode_search_payload, relative_path
-    from .reader_stream_index import merge_shards, reusable_entry, unchanged_sources, validate_index
+    from .reader_stream_index import merge_shards, reusable_entry, shard_for, unchanged_sources, validate_index
     from .reader_bucket_store import retry_read
     from .pilot_media_stream import MEDIA_EXTENSIONS
 except ImportError:
     from reader_assets import bucket_conversion_contract, decode_search_payload, relative_path
-    from reader_stream_index import merge_shards, reusable_entry, unchanged_sources, validate_index
+    from reader_stream_index import merge_shards, reusable_entry, shard_for, unchanged_sources, validate_index
     from reader_bucket_store import retry_read
     from pilot_media_stream import MEDIA_EXTENSIONS
 
@@ -36,6 +37,12 @@ KINDS = {
     "static-pdf": {"extensions": ("ppt", "pptx", "pps", "wps", "ps"), "sharded": False},
 }
 
+LIBRARY_SCOPE = "VoiceOfML/MLMRL-Library"
+ALL_SEARCH_SCOPE = "all-search-repositories"
+REBUILD_SHARDS = 8
+REBUILD_ATTEMPTS = 200
+REBUILD_WORKERS = 4
+
 
 def args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
@@ -52,6 +59,12 @@ def args() -> argparse.Namespace:
     p.add_argument("--retry-failures", action="store_true")
     p.add_argument("--verify-source-sha", action="store_true")
     p.add_argument("--report", type=Path)
+    p.add_argument("--scope", help=f"read-only ebook rebuild scope: {LIBRARY_SCOPE} or {ALL_SEARCH_SCOPE}")
+    p.add_argument("--rebuild-plan", type=Path)
+    p.add_argument("--search-generation")
+    p.add_argument("--source-revision")
+    p.add_argument("--reader-generation")
+    p.add_argument("--expected-sha")
     return p.parse_args()
 
 
@@ -142,8 +155,120 @@ def completed_entries(index: dict, retry_failures: bool = False,
     return completed
 
 
+def rebuild_preview(a: argparse.Namespace) -> int:
+    """Validate the preview handoff, never produce a live-worker matrix."""
+    if (a.kind != "ebook" or a.scope not in (LIBRARY_SCOPE, ALL_SEARCH_SCOPE)
+            or a.rebuild_plan is None or a.report is None or a.extensions
+            or a.shard_index is not None or a.shard_count != REBUILD_SHARDS
+            or a.retry_failures or a.verify_source_sha):
+        raise ValueError("Ebook preview requires an exact rebuild scope, eight shards and no legacy filters")
+    all_search = a.scope == ALL_SEARCH_SCOPE
+    pins = {"search_generation": a.search_generation}
+    if all_search:
+        if a.source_revision is not None:
+            raise ValueError("All-Search preview uses the Search generation, not a singular source revision")
+    else:
+        pins["source_revision"] = a.source_revision
+    pins["reader_generation"] = a.reader_generation
+    for field, value in pins.items():
+        pattern = r"[0-9a-f]{40}" if field == "source_revision" else r"[0-9a-f]{64}"
+        if not isinstance(value, str) or not re.fullmatch(pattern, value):
+            raise ValueError(f"Ebook preview requires an immutable {field}")
+    if not a.expected_sha or not re.fullmatch(r"[0-9a-f]{40}", a.expected_sha):
+        raise ValueError("Ebook preview requires a pinned pipeline SHA")
+    if len({path.resolve() for path in (a.rebuild_plan, a.output, a.report)}) != 3:
+        raise ValueError("Ebook plan, report and matrix paths must be distinct")
+
+    raw = a.rebuild_plan.read_bytes()
+    plan = json.loads(raw)
+    if (not isinstance(plan, dict) or plan.get("kind") != "reader-ebook-full-rebuild-plan"
+            or type(plan.get("version")) is not int or plan["version"] != 1
+            or type(plan.get("shards")) is not int or plan["shards"] != REBUILD_SHARDS
+            or type(plan.get("max_attempts_per_shard")) is not int or plan["max_attempts_per_shard"] != REBUILD_ATTEMPTS
+            or type(plan.get("remote_writes")) is not int or plan["remote_writes"] != 0
+            or any(plan.get(field) != value for field, value in pins.items())
+            or plan.get("publication_ready", False) is not False
+            or plan.get("expected_sha", a.expected_sha) != a.expected_sha):
+        raise ValueError("Ebook rebuild plan differs from the read-only preview pins")
+    rows = plan.get("rows")
+    if all_search:
+        revisions, unmapped = plan.get("source_revisions"), plan.get("unmapped")
+        if (plan.get("scope") != ALL_SEARCH_SCOPE or "repo" in plan or "source_revision" in plan
+                or not isinstance(revisions, dict) or not revisions
+                or any(not re.fullmatch(r"VoiceOfML/[A-Za-z0-9._-]+", repo)
+                       or not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{40}", revision)
+                       for repo, revision in revisions.items())
+                or not isinstance(unmapped, list)):
+            raise ValueError("All-Search rebuild plan requires a sealed repository revision map and unmapped rows")
+        changed = plan.get("source_heads_changed", [])
+        if (not isinstance(changed, list) or any(not isinstance(repo, str) or repo not in revisions for repo in changed)
+                or len(set(changed)) != len(changed)):
+            raise ValueError("All-Search source head changes must name unique pinned repositories")
+    else:
+        if plan.get("repo") != LIBRARY_SCOPE:
+            raise ValueError("Library rebuild plan differs from the scoped repository")
+        revisions, unmapped = {LIBRARY_SCOPE: a.source_revision}, []
+    if not isinstance(rows, list) or not (rows or unmapped):
+        raise ValueError("Ebook rebuild plan contains no chapter sources")
+
+    seen = set()
+    extensions = sorted(KINDS["ebook"]["extensions"])
+    counts = {repo: {ext: [0] * REBUILD_SHARDS for ext in extensions} for repo in sorted(revisions)}
+    for scheduled, sources in ((True, rows), (False, unmapped)):
+        for row in sources:
+            if not isinstance(row, dict):
+                raise ValueError("invalid ebook rebuild source")
+            repo, key, path, ext, shard = (row.get(f) for f in ("repo", "key", "path", "extension", "shard"))
+            if (not isinstance(repo, str) or repo not in revisions or row.get("revision") != revisions[repo]
+                    or not isinstance(path, str) or "\\" in path or any(ord(c) < 32 or ord(c) == 127 for c in path)
+                    or any(part in {"", ".", ".."} for part in path.split("/")) or key != f"{repo}\0{path}"
+                    or not isinstance(ext, str) or ext not in counts[repo] or not path.lower().endswith("." + ext)
+                    or ((scheduled or "shard" in row)
+                        and (type(shard) is not int or shard != shard_for(key, REBUILD_SHARDS)))
+                    or key in seen):
+                raise ValueError("Ebook rebuild source differs from the scoped plan or shard assignment")
+            seen.add(key)
+            old_digest, old_manifest = row.get("source_sha256"), row.get("old_manifest")
+            size = row.get("bytes")
+            if not scheduled:
+                if type(size) is not int or size < 0 or old_manifest is not None:
+                    raise ValueError("Invalid unmapped ebook rebuild source")
+                continue
+            if (type(size) is not int or size <= 0
+                    or not isinstance(old_digest, str) or not re.fullmatch(r"[0-9a-f]{64}", old_digest)
+                    or not isinstance(old_manifest, str) or not re.fullmatch(
+                        rf"chapters/ebook/{ext}/{old_digest}/[0-9a-f]{{16}}/chapter-manifest\.json", old_manifest)):
+                raise ValueError("Ebook rebuild source lacks a pinned prior chapter route")
+            counts[repo][ext][shard] += 1
+            if counts[repo][ext][shard] > REBUILD_ATTEMPTS:
+                raise ValueError(f"Ebook rebuild exceeds 200 attempts for {repo} {ext} shard {shard}; "
+                                 "refusing a partial plan")
+
+    if all_search:
+        report_kind = "reader-all-search-repositories-ebook-rebuild-preview"
+        totals = {"source_revisions": revisions, "source_heads_changed": changed,
+                  "attempts_by_repo_format_and_shard": counts, "unmapped": len(unmapped)}
+    else:
+        report_kind = "reader-library-ebook-rebuild-preview"
+        totals = {"attempts_by_format_and_shard": counts[LIBRARY_SCOPE]}
+    report = {"version": 1, "kind": report_kind, "scope": a.scope,
+              **pins, "expected_sha": a.expected_sha, "plan_sha256": hashlib.sha256(raw).hexdigest(),
+              "shard_count": REBUILD_SHARDS, "max_attempts_per_shard": REBUILD_ATTEMPTS,
+              "workers": REBUILD_WORKERS, **totals, "sources": len(rows),
+              "remote_writes": 0, "publication_ready": False}
+    a.report.parent.mkdir(parents=True, exist_ok=True)
+    a.report.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    a.output.parent.mkdir(parents=True, exist_ok=True)
+    a.output.write_text('{"include":[]}\n', encoding="utf-8")
+    print(json.dumps(report, ensure_ascii=False))
+    return 0
+
+
 def main() -> int:
     a = args()
+    if any(getattr(a, field, None) is not None for field in
+           ("scope", "rebuild_plan", "search_generation", "source_revision", "reader_generation", "expected_sha")):
+        return rebuild_preview(a)
     if a.shard_count < 1:
         raise ValueError("shard-count must be positive")
     shard_index = getattr(a, 'shard_index', None)
@@ -218,7 +343,7 @@ def main() -> int:
                     completed.update(completed_entries(combined, a.retry_failures, expected))
                 pending = [x for x in candidates if completed.get(x["key"]) != x["revision"] and
                             x["key"] not in unchanged and
-                            int.from_bytes(hashlib.sha256(x["key"].encode()).digest()[:8], "big") % a.shard_count == shard]
+                            shard_for(x["key"], a.shard_count) == shard]
                 pending_count += len(pending)
                 if pending:
                     include.append({"extension": extension, "shard": shard})

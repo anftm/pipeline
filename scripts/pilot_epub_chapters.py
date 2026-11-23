@@ -33,7 +33,7 @@ try:
         converted_output, doc_to_html_fallback, looks_like_html, run_libreoffice,
     )
     from .reader_bucket import index_path, read_bytes
-    from .reader_chapter_profiles import CHM_PROFILE, chm_profile_upgrade
+    from .reader_chapter_profiles import CHM_PROFILE, EPUB_PROFILE as V10_EPUB_PROFILE, LEGACY_EBOOK_PROFILE, chm_profile_upgrade
     from .recover_chm import recover as recover_chm
     from . import reader_lifecycle
     from .reader_assets import (
@@ -48,7 +48,7 @@ except ImportError:
         converted_output, doc_to_html_fallback, looks_like_html, run_libreoffice,
     )
     from reader_bucket import index_path, read_bytes
-    from reader_chapter_profiles import CHM_PROFILE, chm_profile_upgrade
+    from reader_chapter_profiles import CHM_PROFILE, EPUB_PROFILE as V10_EPUB_PROFILE, LEGACY_EBOOK_PROFILE, chm_profile_upgrade
     from recover_chm import recover as recover_chm
     import reader_lifecycle
     from reader_assets import (
@@ -64,7 +64,7 @@ SUPPORTED_EXTENSIONS = {"epub", "mobi", "azw3", "fb2", "chm", "doc", "docx", "od
 OFFICE_EXTENSIONS = {"doc", "docx", "odt", "rtf"}
 OFFICE_ROOT = "chapters/ebook/epub"
 OFFICE_PROFILE = "office-epub-chapters-v1-flow-512"
-EPUB_PROFILE = "epub-chapters-v9-cover-toc"
+EPUB_PROFILE = LEGACY_EBOOK_PROFILE  # live worker; v10 is staged until guarded publication exists
 OFFICE_FLOW_SIZE_KB = 512
 OFFICE_COMMAND_TIMEOUT_SECONDS = 900
 OFFICE_LARGE_DOC_BYTES = 3 * 1024 * 1024
@@ -103,7 +103,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def download(url: str, target: Path, token: str | None) -> None:
+def download(url: str, target: Path, token: str | None, *, expected_bytes: int | None = None) -> str | None:
     for attempt in range(len(SOURCE_RETRY_DELAYS) + 1):
         request = urllib.request.Request(url)
         request.add_header("User-Agent", "VoiceOfML-Reader-CHM/1.0")
@@ -111,9 +111,25 @@ def download(url: str, target: Path, token: str | None) -> None:
             request.add_header("Authorization", f"Bearer {token}")
         try:
             with urllib.request.urlopen(request, timeout=180) as response:
-                payload = response.read()
-            target.write_bytes(payload)
-            return
+                if expected_bytes is None:
+                    target.write_bytes(response.read())
+                else:
+                    if expected_bytes <= 0:
+                        raise ValueError('invalid exact source length')
+                    remaining = expected_bytes
+                    digest = hashlib.sha256()
+                    with target.open('wb') as stream:
+                        while remaining:
+                            block = response.read(min(1024 * 1024, remaining))
+                            if not block or len(block) > remaining:
+                                raise ValueError('downloaded ebook differs from exact source length')
+                            stream.write(block)
+                            digest.update(block)
+                            remaining -= len(block)
+                        if response.read(1):
+                            raise ValueError('downloaded ebook exceeds exact source length')
+                    return digest.hexdigest()
+            return None
         except urllib.error.HTTPError as error:
             if error.code not in SOURCE_TRANSIENT_HTTP_CODES or attempt >= len(SOURCE_RETRY_DELAYS):
                 raise
@@ -501,14 +517,39 @@ def select_records(path: Path, revisions: dict, max_bytes: int, extension_filter
     return selected
 
 
-def build_one(item: dict, work: Path, token: str | None, bucket: str) -> tuple[dict, dict[str, str]]:
+def build_one(item: dict, work: Path, token: str | None, bucket: str, *,
+              kindle_unpacker: Path | None = None, native_epub_profile: bool = False) -> tuple[dict, dict[str, str]]:
     work.mkdir(parents=True, exist_ok=True)
     extension = item["extension"]
     source = work / f"source.{extension}"
-    download(source_url(item["repo"], item["revision"], item["path"]), source, token)
-    source_bytes = source.read_bytes()
-    source_digest = hashlib.sha256(source_bytes).hexdigest()
-    if extension in OFFICE_EXTENSIONS:
+    pinned_digest = item.get('source_sha256')
+    location = source_url(item["repo"], item["revision"], item["path"])
+    if pinned_digest is None:
+        download(location, source, token)
+        with source.open('rb') as stream:
+            source_digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+    else:
+        source_digest = download(location, source, token, expected_bytes=item['source_bytes'])
+    source_size = source.stat().st_size
+    if pinned_digest is not None and (pinned_digest != source_digest or item['source_bytes'] != source_size):
+        raise ValueError('downloaded ebook differs from the exact rebuild source')
+    if native_epub_profile and extension == 'epub' and pinned_digest is None:
+        raise ValueError('native EPUB candidate requires a pinned source')
+    profile = V10_EPUB_PROFILE if native_epub_profile and extension == 'epub' else chapter_profile(extension)
+    if kindle_unpacker is not None and extension in {'mobi', 'azw3'}:
+        if pinned_digest is None:
+            raise ValueError('native Kindle candidate requires a pinned source')
+        try:
+            from . import reader_kindle_native
+        except ImportError:
+            import reader_kindle_native
+        chapter_source, native = reader_kindle_native.convert(source, work, kindle_unpacker)
+        bundle = work / 'bundle'
+        manifest = build_bundle(chapter_source, bundle, preserve_toc_targets=True, verified_toc=native)
+        reader_kindle_native.verify_bundle(native, bundle, manifest)
+        profile = reader_kindle_native.CANDIDATE_PROFILE
+        root_extension = extension
+    elif extension in OFFICE_EXTENSIONS:
         legacy_html = None
         if extension == "doc":
             try:
@@ -528,15 +569,15 @@ def build_one(item: dict, work: Path, token: str | None, bucket: str) -> tuple[d
         contract = bucket_conversion_contract(item["repo"], item["path"], extension, item["source_bytes"])
         if contract is None:
             raise ValueError("no CHM conversion contract")
-        profile, mode, output_name = contract
+        chm_conversion_profile, mode, output_name = contract
         converted_root = work / "converted"
         try:
             converted = convert_item({
                 "key": f"{item['repo']}\0{item['path']}", "repo": item["repo"], "path": item["path"],
                 "extension": extension, "source_revision": item["revision"], "source_url": source_url(
                     item["repo"], item["revision"], item["path"]), "source_bytes": item["source_bytes"],
-                "profile": profile, "reader_mode": mode, "output_name": output_name,
-            }, converted_root)
+                "profile": chm_conversion_profile, "reader_mode": mode, "output_name": output_name,
+            }, converted_root, exact_chm_input=(source, source_digest, source_size))
             if converted.get('source_sha256') != source_digest:
                 raise ValueError('CHM converter downloaded bytes different from the pinned input')
             if not converted.get("chapter_manifest") or converted.get("chapter_bundle_error"):
@@ -576,11 +617,10 @@ def build_one(item: dict, work: Path, token: str | None, bucket: str) -> tuple[d
         bundle = work / "bundle"
         manifest = build_bundle(chapter_source, bundle)
         root_extension = extension
-    if extension == "chm":
-        # Bind the conversion profile to the immutable chapter manifest. A
-        # successful profile upgrade must produce a new live route even when
-        # the rendered chapters happen to be byte-for-byte identical.
-        manifest = {**manifest, 'conversion_profile': chapter_profile(extension)}
+    if extension == 'chm' or profile != chapter_profile(extension):
+        # Bind the conversion profile to the immutable chapter manifest, even
+        # if all rendered chapter bytes happen to be unchanged.
+        manifest = {**manifest, 'conversion_profile': profile}
         (bundle / 'chapter-manifest.json').write_text(
             json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2) + '\n', encoding='utf-8')
     version = bundle_version(bundle)
@@ -595,8 +635,8 @@ def build_one(item: dict, work: Path, token: str | None, bucket: str) -> tuple[d
         "key": f"{item['repo']}\0{item['path']}", "repo": item["repo"], "path": item["path"],
         "source_extension": extension, "extension": root_extension, "source_revision": item["revision"],
         "source_sha256": source_digest,
-        "source_bytes": len(source_bytes), "mode": "chapter-stream", "bucket": bucket,
-        "profile": chapter_profile(extension),
+        "source_bytes": source_size, "mode": "chapter-stream", "bucket": bucket,
+        "profile": profile,
         "root": root, "manifest": f"{root}/chapter-manifest.json",
         "chapter_count": len(manifest["chapters"]),
         "search_index": f"{root}/epub-search-index.json.gz",

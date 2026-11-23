@@ -107,7 +107,7 @@ def validate_summary(summary):
                 raise ValueError('invalid count: ' + ext + '/' + field)
         if (row['definite_backlog'] != row['not_mapped'] + row['source_content_changed'] + row['profile_outdated']
                 or row['profile_outdated'] + row['profile_upgrade_deferred'] > row['source_content_unchanged']
-                or ((row['profile_outdated'] or row['profile_upgrade_deferred']) and family not in {'chm','web'})
+                or ((row['profile_outdated'] or row['profile_upgrade_deferred']) and family not in {'chm','web','ebook'})
                 or sum(row[k] for k in ('not_mapped', 'source_content_changed', 'source_content_unchanged',
                                         'source_identity_unknown', 'mapped_content_not_checked')) != row['sources']):
             raise ValueError('inconsistent source counts: ' + ext)
@@ -157,6 +157,10 @@ def blockers(row, *, source_changes_triggered=False, first_conversion_triggered=
     if (row['sources'] and row['conversion_dependencies_checked'] is not True and not dependency_only_unknown
             and not explicit_source_changes(row, triggered=source_changes_triggered or first_conversion_triggered)):
         reasons.append('conversion_dependencies_checked is not true')
+    if FORMATS[row['extension']][0] == 'ebook' and row['profile_outdated']:
+        # Ordinary checkpoint writers publish directly to live shards. A
+        # same-source batch must enter the verified serial publisher instead.
+        reasons.append('ebook profile upgrades require reviewed serial publication')
     if FORMATS[row['extension']][1] is None:
         reasons.append('no automatic workflow')
     return reasons
@@ -1033,7 +1037,8 @@ def live_callbacks(*, web_profile_only=False):
             return backlog.inspect(hub=hub, api=api, fs=fs, client=client, threshold=THRESHOLD,
                                    scope='web' if web_profile_only else 'all',
                                    include_profile_upgrades=os.getenv('READER_CHM_PROFILE_REBUILD_ENABLED') == 'true',
-                                   include_web_profile_upgrades=os.getenv('READER_WEB_PROFILE_REBUILD_ENABLED') == 'true')[0]
+                                   include_web_profile_upgrades=os.getenv('READER_WEB_PROFILE_REBUILD_ENABLED') == 'true',
+                                   include_ebook_profile_upgrades=os.getenv('READER_EBOOK_PROFILE_INVENTORY_ENABLED') == 'true')[0]
 
     def verify(generation, remaining):
         with httpx.Client(timeout=min(30, remaining), follow_redirects=True) as client:

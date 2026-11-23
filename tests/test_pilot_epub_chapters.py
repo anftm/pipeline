@@ -37,6 +37,32 @@ class ChmChapterPilotTests(unittest.TestCase):
             self.assertEqual(target.read_bytes(), b"CHM")
             sleep.assert_called_once_with(23)
 
+    def test_scoped_download_refuses_short_or_extra_bytes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary) / 'book.epub'
+            for expected in (3, 5, 2):
+                with self.subTest(expected=expected), patch.object(
+                    pilot_epub_chapters.urllib.request, 'urlopen', return_value=io.BytesIO(b'EPUB'),
+                ), self.assertRaisesRegex(ValueError, 'exact source length'):
+                    pilot_epub_chapters.download('https://example.test/book.epub', target, None,
+                                                expected_bytes=expected)
+            with patch.object(pilot_epub_chapters.urllib.request, 'urlopen', return_value=io.BytesIO(b'EPUB')):
+                actual = pilot_epub_chapters.download('https://example.test/book.epub', target, None, expected_bytes=4)
+            self.assertEqual(actual, pilot_epub_chapters.hashlib.sha256(b'EPUB').hexdigest())
+            self.assertEqual(target.read_bytes(), b'EPUB')
+
+    def test_private_chm_input_fails_on_bad_digest_before_network_or_conversion(self):
+        from scripts import convert_reader_assets as converter
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            path = root/'book.chm'
+            path.write_bytes(b'CHM')
+            with patch.object(converter, 'download_source') as download, self.assertRaisesRegex(
+                    ValueError, 'private CHM bytes differ'):
+                converter.convert_item({'extension': 'chm'}, root/'candidate',
+                                       exact_chm_input=(path, '0'*64, 3))
+            download.assert_not_called()
+
     def test_existing_index_only_treats_not_found_as_an_empty_index(self):
         fs = unittest.mock.Mock()
         fs.open.side_effect = FileNotFoundError("missing index")
@@ -190,7 +216,9 @@ class ChmChapterPilotTests(unittest.TestCase):
             def download(_url, target, _token):
                 target.write_bytes(source_bytes)
 
-            def convert(queue_item, output):
+            def convert(queue_item, output, *, exact_chm_input):
+                copied, digest, size = exact_chm_input
+                self.assertEqual((copied.read_bytes(), digest, size), (source_bytes, source_digest, len(source_bytes)))
                 chapter_root = output / "objects" / "chapters" / "epub-chapters"
                 (chapter_root / "chapters").mkdir(parents=True)
                 (chapter_root / "chapters" / "chapter-0001.xhtml").write_text("<p>body</p>")

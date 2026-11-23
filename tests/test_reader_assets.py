@@ -11,6 +11,7 @@ import unittest
 import urllib.error
 import urllib.request
 import zipfile
+from contextlib import nullcontext
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
@@ -220,6 +221,45 @@ class ReaderAssetContractTests(unittest.TestCase):
             self.assertEqual([item["title"] for item in manifest["chapters"]], ["第一章：开始", "第二章：继续"])
             self.assertTrue((output / "resources/shared/OEBPS/images/x.png").is_file())
             self.assertTrue((output / "epub-search-index.json.gz").is_file())
+
+    def test_chapter_bundle_reuses_sanitized_stylesheets_without_sharing_paths(self):
+        with tempfile.TemporaryDirectory() as work:
+            root = Path(work)
+            epub = root / "book.epub"
+            with zipfile.ZipFile(epub, "w") as archive:
+                archive.writestr("META-INF/container.xml", '<container><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>')
+                archive.writestr("OEBPS/content.opf", '<package><manifest>'
+                                 '<item id="a" href="a.xhtml" media-type="application/xhtml+xml"/>'
+                                 '<item id="b" href="b.xhtml" media-type="application/xhtml+xml"/>'
+                                 '</manifest><spine><itemref idref="a"/><itemref idref="b"/></spine></package>')
+                for chapter in ("a", "b"):
+                    archive.writestr(f"OEBPS/{chapter}.xhtml", '<html xmlns="http://www.w3.org/1999/xhtml">'
+                                     '<head><link rel="stylesheet" href="a/style.css"/>'
+                                     '<link rel="stylesheet" href="b/style.css"/></head><body><p>正文</p></body></html>')
+                archive.writestr("OEBPS/a/style.css", 'p{color:red;cursor:url(https://example.test/a.cur)}')
+                archive.writestr("OEBPS/b/style.css", '@import "https://example.test/b.css";')
+
+            def build(label, **limits):
+                output = root / label
+                caps = patch.multiple(epub_chapters, **limits) if limits else nullcontext()
+                with caps, patch.object(epub_chapters, "sanitize_css", wraps=epub_chapters.sanitize_css) as sanitize:
+                    epub_chapters.build_bundle(epub, output)
+                files = {path.relative_to(output).as_posix(): path.read_bytes()
+                         for path in output.rglob("*") if path.is_file()}
+                return sanitize.call_count, files
+
+            calls, files = build("cached")
+            self.assertEqual(calls, 2)  # Includes the stylesheet sanitized to empty bytes.
+            for chapter in ("chapter-0001", "chapter-0002"):
+                self.assertEqual(files[f"resources/{chapter}/OEBPS/a/style.css"], b"p{color:red;}")
+                self.assertEqual(files[f"resources/{chapter}/OEBPS/b/style.css"], b"")
+                for folder in ("a", "b"):
+                    self.assertIn(f'../resources/{chapter}/OEBPS/{folder}/style.css"'.encode(),
+                                  files[f"chapters/{chapter}.xhtml"])
+            for label, limits in (("entry-limited", {"MAX_CACHED_STYLESHEETS": 1}),
+                                  ("byte-limited", {"MAX_CACHED_STYLESHEET_BYTES": 1})):
+                with self.subTest(label=label):
+                    self.assertEqual(build(label, **limits), (3, files))
 
     def test_chm_chapter_bundle_keeps_nonspine_pages_and_fragments(self):
         with tempfile.TemporaryDirectory() as root:

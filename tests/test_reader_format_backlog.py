@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from scripts import reader_format_backlog as subject
-from scripts import reader_assets, reader_stream_index, search_publication_pointer, search_snapshot
+from scripts import reader_assets, reader_chapter_profiles, reader_stream_index, search_publication_pointer, search_snapshot
 
 OLD, NEW, SHA_A, SHA_B = 'a' * 40, 'b' * 40, '1' * 64, '2' * 64
 REPO = 'VoiceOfML/Test'
@@ -77,6 +77,34 @@ class ReaderFormatBacklogTests(unittest.TestCase):
         self.assertEqual(result[item('git-changed')['key']]['proof'], 'exact-revision-git-blobs')
         self.assertEqual(result[item('git-changed')['key']]['previous_git_blob'], '3' * 40)
         self.assertFalse(any(path == 'same.epub' for _repo, _rev, paths in api.calls for path in paths))
+
+    def test_same_source_legacy_ebook_profiles_enter_opt_in_rebuild_backlog(self):
+        for extension, (target, predecessors) in reader_chapter_profiles.EBOOK_REBUILDS.items():
+            for prior in (*predecessors, target, 'future-profile'):
+                with self.subTest(extension=extension, prior=prior):
+                    source = item('book', extension)
+                    key = source['key']
+                    entry = dict(key=key, repo=source['repo'], path=source['path'], source_revision=NEW,
+                                 source_sha256=SHA_A, profile=prior, source_extension=extension,
+                                 bucket=subject.READER_BUCKET,
+                                 manifest=f'chapters/ebook/{extension}/{SHA_A}/'+ 'd'*16+'/chapter-manifest.json')
+                    index = dict(version=1, kind='ebook-chapter-stream-index', files=[entry], failures=[])
+                    def classify(enabled):
+                        return subject.classify_indexed({key: source}, {key: route(entry)}, index, [], Metadata({}),
+                            extensions={extension}, kind=index['kind'], route_modes={'e'},
+                            include_ebook_profile_upgrades=enabled)[key]
+                    self.assertEqual(classify(False)['state'], 'same_revision')
+                    res = classify(True)
+                    if prior in predecessors:
+                        self.assertEqual(res['state'], 'profile_outdated')
+                        self.assertEqual(res['target_profile'], target)
+                        index['failures'] = [dict(key=key, source_revision=NEW, source_sha256=SHA_A, profile=target)]
+                        self.assertTrue(classify(True)['profile_upgrade_deferred'])
+                        self.assertFalse(classify(True)['recorded_failure'])
+                        index['failures'] = [dict(key=key, source_revision=NEW, profile='unrelated')]
+                        self.assertTrue(classify(True)['recorded_failure'])
+                    else:
+                        self.assertEqual(res['state'], 'same_revision')
 
     def test_switching_lfs_to_git_does_not_infer_content_change(self):
         records = {item('book')['key']: item('book')}; entry = row('book')

@@ -104,6 +104,16 @@ class DailyTests(unittest.TestCase):
         options.update(kwargs)
         return subject.Controller(**options)
 
+    def test_ebook_profile_backlog_never_routes_to_old_writing_worker(self):
+        for ext in ('epub', 'mobi', 'azw3', 'fb2'):
+            with self.subTest(extension=ext):
+                report = summary(0, ext, profile_outdated=30, definite_backlog=30)
+                self.assertEqual(subject.validate_summary(report)[ext]['profile_outdated'], 30)
+                decision = subject.plan(report)['formats'][ext]
+                self.assertEqual(decision['state'], 'blocked')
+                self.assertIn('ebook profile upgrades require reviewed serial publication', decision['reasons'])
+                self.assertEqual(subject.plan(summary(10, ext))['formats'][ext]['state'], 'triggered')
+
     def test_threshold_for_all_supported_formats_and_exclusions(self):
         for ext, (_family, workflow, _limit) in subject.FORMATS.items():
             for count in (0, 1, 9, 10, 11):
@@ -376,7 +386,7 @@ class DailyTests(unittest.TestCase):
         self.assertEqual(result['formats']['chm']['counts']['profile_outdated'], 0)
         self.assertEqual(result['status'], 'complete')
         with self.assertRaisesRegex(ValueError, 'inconsistent source counts'):
-            subject.plan(summary(0, 'epub', definite_backlog=1, profile_outdated=1))
+            subject.plan(summary(0, 'txt', definite_backlog=1, profile_outdated=1))
 
     def test_web_profile_replacement_is_one_central_operation_and_reports_held_rows(self):
         before=summary(0,'html',definite_backlog=2,profile_outdated=2,conversion_dependencies_checked=False)

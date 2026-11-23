@@ -69,6 +69,7 @@ jobs:
       READER_PAUSED: ${{ vars.READER_V3_AUTO_PAUSED }}
       READER_CHM_PROFILE_REBUILD_ENABLED: ${{ vars.READER_CHM_PROFILE_REBUILD_ENABLED }}
       READER_WEB_PROFILE_REBUILD_ENABLED: ${{ vars.READER_WEB_PROFILE_REBUILD_ENABLED }}
+      READER_EBOOK_PROFILE_INVENTORY_ENABLED: ${{ vars.READER_EBOOK_PROFILE_INVENTORY_ENABLED }}
       REQUESTED_APPLY: ${{ github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_run' || (github.event_name == 'workflow_dispatch' && inputs.search_source_run != '') || inputs.apply }}
       WEB_PROFILE_ONLY: ${{ github.event_name == 'push' || inputs.web_profile_only }}
       WRITERS: ${{ github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_run' || (github.event_name == 'workflow_dispatch' && inputs.search_source_run != '') || inputs.known_writers_coordinated }}
