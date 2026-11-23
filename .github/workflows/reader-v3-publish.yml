@@ -155,7 +155,10 @@ jobs:
           set -euo pipefail
           [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$GITHUB_REF" == refs/heads/main && "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" && "$GITHUB_RUN_ATTEMPT" == 1 ]]
           [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
-          [[ "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" == "$GITHUB_SHA" ]]
+          # Read the public Git ref directly; this exact checkout gate does not need
+          # an Actions installation API request or a cached local tracking ref.
+          main=$(GIT_TERMINAL_PROMPT=0 timeout 30s git -c http.extraHeader= -c http.https://github.com/.extraheader= -c credential.helper= ls-remote --exit-code https://github.com/anftm/pipeline.git refs/heads/main)
+          [[ "$main" == "$GITHUB_SHA"$'\trefs/heads/main' ]] || { echo 'Exact EPUB workflow: Pipeline main moved' >&2; exit 1; }
           python -B -m unittest tests.test_reader_ebook_rebuild_archive tests.test_reader_ebook_canonical_guard tests.test_reader_ebook_rebuild_transport tests.test_reader_ebook_rebuild_commit tests.test_reader_ebook_recovery_inputs tests.test_reader_ebook_recovery_state tests.test_reader_ebook_rebuild_recover
           mkdir -p output/v3
           if [[ "$OPERATION" == prepare-exact-ebook ]]; then

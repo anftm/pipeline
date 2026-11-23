@@ -13,6 +13,9 @@ class CentralEbookWorkflowTests(unittest.TestCase):
         self.assertEqual(job['concurrency']['group'], 'daily-sync')
         entry = next(s for s in job['steps'] if s.get('name') == 'Prepare or publish exact same-source EPUB candidates')
         run = entry['run']
+        self.assertIn('ls-remote --exit-code https://github.com/anftm/pipeline.git refs/heads/main', run)
+        self.assertIn('[[ "$main" == "$GITHUB_SHA"$\'\\trefs/heads/main\' ]]', run)
+        self.assertNotIn('gh api', run)
         preview, recovery = run.split('elif [[ "$OPERATION" == recover-exact-ebook ]]; then', 1)
         recovery, apply = recovery.rsplit('\nelse\n', 1)
         self.assertIn('[[ "$APPLY" == false && "$RECOVERY_PHASE" == inspect ]]', preview)
