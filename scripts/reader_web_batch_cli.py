@@ -1,5 +1,6 @@
 """Digest-addressed central preflight, apply and public acceptance for reviewed ten web routes."""
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 from hashlib import sha256
 import json
 import os
@@ -16,6 +17,21 @@ from .reader_stream_checkpoint_cas import ConditionalCheckpointStore
 from .reader_web_exact_plan import _is_sha
 
 MAX_PUBLIC_WEB_BYTES = 8 * 1024 * 1024
+PUBLIC_WEB_READERS = 4
+
+
+def bounded_web_reads(check, rows, workers):
+    if type(workers) is not int or not 1 <= workers <= PUBLIC_WEB_READERS:
+        raise ValueError('invalid public Web read concurrency')
+    if workers==1 or len(rows)<2:
+        for row in rows:
+            check(row)
+        return
+    # Submit one bounded wave at a time so failed proof does not start later rows.
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for start in range(0,len(rows),workers):
+            for _ in pool.map(check,rows[start:start+workers]):
+                pass
 
 PREFIX='reader-index/gc/web-exact-batch-inputs/v1/'
 PROOFS='reader-index/gc/web-exact-batch-authority/v1/'
@@ -36,7 +52,7 @@ def options(raw,mode):
     return d
 
 
-def live(sealed, consumer_report, publication, client, *, sleep=time.sleep):
+def live(sealed, consumer_report, publication, client, *, sleep=time.sleep, workers=1):
     generation=sealed['target_pointer']['generation']
     if (publication.get('generation')!=generation or consumer_report.get('generation')!=generation
             or consumer_report.get('complete') is not True or set(consumer_report.get('consumers',{}))!={'hf','pages'}
@@ -67,12 +83,15 @@ def live(sealed, consumer_report, publication, client, *, sleep=time.sleep):
             if (size is not None and length!=size) or h.hexdigest()!=digest:
                 raise ValueError('public web asset differs from sealed bytes')
             return
-    for r in sealed['rows']:
+    def check_row(r):
         for kind in ('old','new'):
             row=r[kind]
             check(row['object'],row['sha256'],row['bytes'],original_object=kind=='old')
             check(row['manifest'],r[kind+'_manifest_sha256'])
-    return {'generation':generation,'old_and_new_verified':len(sealed['rows']),'both_projections_verified':True,'deleted_objects':0}
+
+    rows=sealed['rows']
+    bounded_web_reads(check_row,rows,workers)
+    return {'generation':generation,'old_and_new_verified':len(rows),'both_projections_verified':True,'deleted_objects':0}
 
 
 def main():

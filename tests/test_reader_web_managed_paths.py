@@ -1,5 +1,7 @@
 """Managed preparation admits bounded cohorts without extending old gates."""
 import copy,hashlib,io,json,unittest
+from collections import Counter
+from threading import Barrier, Lock
 from zipfile import ZipFile,ZIP_DEFLATED
 from scripts import reader_web_batch_plan as plan,reader_web_managed_review as schema,reader_web_managed_pages as pages
 import httpx
@@ -109,6 +111,39 @@ class ManagedPathsTests(unittest.TestCase):
                     else:
                         with self.assertRaises(message):live(sealed,receipt,{'generation':g},client,sleep=waits.append)
                         self.assertEqual((seen,waits),(failed,[1,2] if failed[0]==502 else []))
+
+    def test_parallel_public_readback_is_bounded_and_checks_every_member(self):
+        g='a'*64
+        proof={'generation':g,'complete':True,'consumers':{k:{'generation':g,'projection_verified':True}
+                                                               for k in ('hf','pages')}}
+        rows=[]; expected={}
+        for i in range(8):
+            row={}
+            for kind in ('old','new'):
+                digest=S(f'{i}/{kind}'.encode())
+                prefix=f'documents/web/html/{digest}'
+                obj,manifest=prefix+'/document.html',prefix+'/document-manifest.json'
+                body=f'{kind}{i}'.encode(); manifest_body=f'manifest{i}{kind}'.encode()
+                row[kind]={'object':obj,'manifest':manifest,'bytes':len(body),'sha256':S(body)}
+                row[kind+'_manifest_sha256']=S(manifest_body)
+                expected[obj]=body; expected[manifest]=manifest_body
+            rows.append(row)
+        wave=Barrier(4, timeout=5); lock=Lock(); calls=Counter()
+        def serve(req):
+            key=req.url.params.get('path') or req.url.path.split('/resolve/',1)[1]
+            with lock: calls[key]+=1
+            if key in {r['old']['object'] for r in rows[:4]}:wave.wait()
+            return httpx.Response(200,content=expected[key])
+        scope={'target_pointer':{'generation':g},'rows':rows}
+        with httpx.Client(transport=httpx.MockTransport(serve)) as client:
+            self.assertEqual(live(scope,proof,{'generation':g},client,workers=4)['old_and_new_verified'],8)
+            self.assertEqual(calls,Counter({key:1 for key in expected}))
+            with self.assertRaisesRegex(ValueError,'concurrency'):
+                live(scope,proof,{'generation':g},client,workers=5)
+            calls.clear(); expected[rows[0]['old']['object']]=b'BAD!'
+            with self.assertRaisesRegex(ValueError,'differs from sealed bytes'):
+                live(scope,proof,{'generation':g},client,workers=4)
+            self.assertTrue(all(r['old']['object'] not in calls for r in rows[4:]))
 
     def test_pages_gate_rejects_wrong_parent_and_attempt(self):
         c='a'*40; g='f'*64; ptr={'generation':g,'catalog':{'sha256':'1'*64}}

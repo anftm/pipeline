@@ -5,7 +5,7 @@ import httpx
 from . import reader_gc_retirement as retirement
 from .reader_format_daily import GitHub
 from .reader_image_history_store import S3ClaimStore
-from .reader_web_batch_cli import live
+from .reader_web_batch_cli import PUBLIC_WEB_READERS, live
 from .reader_web_profile_publish import authority_scope, ordinary_writer
 from .publish_reader_v3 import ASSETS, CentralHubStore, current, encode
 
@@ -48,7 +48,7 @@ def main():
         raise ValueError('profile readback scope differs')
     with httpx.Client(follow_redirects=True,timeout=30) as http:
         out=live({'target_pointer':{'generation':result['generation']},'rows':profile['rows']},
-                 json.loads(a.consumers.read_bytes()),result,http)
+                 json.loads(a.consumers.read_bytes()),result,http,workers=PUBLIC_WEB_READERS)
     if n and a.resource_json is not None:
         extension, _, parent_id = authority_scope(json.loads(a.resource_json))
         if extension != profile['extension']:

@@ -181,6 +181,7 @@ class V3PublicationTests(unittest.TestCase):
                           "replace-exact-web", "verify-exact-web", "replace-managed-web", "verify-managed-web",
                           "prepare-managed-web", "upgrade-web-profile", "record-web-retirement-hints",
                           "verify-exact-office-report", "replace-exact-office-report",
+                          "prepare-exact-ebook", "replace-exact-ebook",
                           "refresh-reader-consumers", "reconcile-derived-index", "reconcile-sidecar",
                           "compact-legacy-history", "publish-generation", "verify-generation", "verify-pages-lane"])
         operation_step = next(step for step in workflow["jobs"]["publish"]["steps"]
