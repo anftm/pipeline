@@ -1,3 +1,4 @@
+from contextlib import ExitStack
 from copy import deepcopy
 import json
 from types import SimpleNamespace
@@ -7,7 +8,7 @@ from scripts import reader_web_batch_indexes as batch, reader_web_batch_plan as 
 from scripts import reader_web_index_guard as guard, reader_web_batch_publish as publish
 from scripts.reader_stream_checkpoint_cas import ConditionalCheckpointStore
 from tests.test_reader_web_index_guard import MemoryS3, BUCKET, encode
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 def rows():
@@ -87,6 +88,85 @@ class BatchIndexesTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError,'spent-but-unconfirmed'):self.execute(recover=True)
         self.assertEqual(self.put_paths(),first)
         self.assertNotIn(self.paths['mht'],first)
+
+    def test_managed_payload_creates_use_scoped_guard_and_stop_on_failed_full_exit(self):
+        from scripts import reader_web_managed_review, reader_web_managed_pages
+
+        events, objects, data, reviewed = [], {}, {}, []
+        cat_sha = 'a'*64
+        before, after, ptr = b'before', b'after', b'parent'
+        data.update({'sidecar-before.gz':before, 'sidecar-after.gz':after, 'pointer.json':ptr,
+                     'retained.json':b'retention'})
+        objects.update({'retention':b'retention', 'snapshot':after, publish.legacy.SIDECAR:before})
+        missing = []
+        for i in range(197):
+            ident = str(i)
+            root = 'documents/web/html/'+plan.digest(ident.encode())
+            old = {'object':f'old/{i}/document.html','manifest':f'old/{i}/document-manifest.json',
+                   'bytes':3,'sha256':plan.digest(b'old')}
+            new = {'object':root+'/document.html','manifest':root+'/document-manifest.json'}
+            reviewed.append({'id':ident,'old':old,'new':new,'old_manifest_sha256':plan.digest(b'old')})
+            objects.update((name,b'old') for name in (old['object'], old['manifest']))
+            for name in ('document.html','document-manifest.json'):
+                raw = f'{name}-{i}'.encode()
+                data[ident+'/'+name] = raw
+                key = root+'/'+name
+                if i<195 or (i==195 and name=='document.html'):
+                    objects[key]=raw
+                else:
+                    missing.append(key)
+        def read(layer, key):
+            if key in missing:
+                events.append((layer,key))
+            if key not in objects:
+                raise FileNotFoundError(key)
+            return objects[key]
+        def create(key, raw, mime):
+            self.assertNotIn(key,objects)
+            events.append(('create',key))
+            objects[key]=raw
+        def full():
+            events.append(('full',None))
+            return not all(key in objects for key in missing)
+        def payload():
+            events.append(('payload',None))
+            return True
+        review={'parent_generation':'parent','parent_pointer':{},'target_pointer':{},'unchanged_indexes':{},
+                'legacy':{'target_sha256':'b'*64,'target_bytes':10,'parent_sha256':cat_sha,'parent_bytes':3,
+                          'snapshot':{'path':'snapshot'}},'retention':{'path':'retention','sha256':'pin'},
+                'canonical':{},'rows':reviewed,'timestamp':'2026-11-23T00:00:00Z'}
+        proof={'version':1,'remote_writes':0,'parent_generation':'parent','pointer_sha256':plan.digest(ptr),
+               'bundle_sha256':'bundle','review_sha256':'review','pages':{},
+               'catalog':{'sha256':cat_sha,'size':3,'etag':'cat'},
+               'sidecar':{'sha256':plan.digest(before),'size':len(before),'etag':'side'}}
+        s3=Mock();s3.read_bytes.side_effect=lambda _,key:read('s3',key)
+        cp=Mock(store=s3);hub=Mock();hub.read_bytes.side_effect=lambda _,key:read('resolver',key)
+        roots=Mock();roots.observe.return_value=SimpleNamespace(sha256=cat_sha,size=3,etag='cat')
+        journal=Mock();journal.read.return_value=None
+        claims=Mock();claims._get.return_value=(None,None)
+        pointers=Mock();pointers.read_for_update.return_value=(before,'side')
+        mocks={'CentralHubStore':hub,'ConditionalCheckpointStore':cp,'LegacyRoots':roots,'LegacyJournal':journal,
+               'S3ClaimStore':claims,'ConditionalPageStore':pointers,'CatalogParent':Mock(),
+               'immutable_creator':create}
+        with ExitStack() as stack:
+            for target,spec in mocks.items():
+                owner=publish.v3 if target=='CentralHubStore' else publish
+                stack.enter_context(patch.object(owner,target,return_value=spec))
+            for owner, name, result in ((reader_web_managed_review,'parse',(review,data,{},[])),
+                (reader_web_managed_pages,'current',{}),(publish,'_check_pointer_phase',None),
+                (publish.plan,'project',({'generation':'parent'},{},after)),
+                (publish.plan,'plan_legacy',review['legacy'])):
+                stack.enter_context(patch.object(owner,name,return_value=result))
+            mutable=stack.enter_context(patch.object(publish.indexes,'canonical_set'))
+            with self.assertRaisesRegex(RuntimeError,'publishing guard is absent'):
+                publish.run(b'','bundle','review',proof,phase='apply',external_writers_stopped=False,
+                            managed=True,controller_guard=full,immutable_payload_guard=payload)
+        expected=[('full',None)]
+        for key in missing:
+            expected.extend((('s3',key),('payload',None),('create',key),('s3',key),('resolver',key)))
+        self.assertEqual(events,expected+[('full',None)])
+        mutable.assert_not_called()
+        journal.claim.assert_not_called()
 
     def test_legacy_review_round_trip_preserves_plan_identity(self):
         actual={'retirement_hint':('reader-index/hint.json',{'objects':['one']}),'bytes':42}

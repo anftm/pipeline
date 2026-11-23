@@ -23,7 +23,8 @@ def validate_legacy_plan(actual, reviewed):
         raise ValueError('sealed streamed catalog plan differs')
 
 
-def run(blob, bundle_sha, review_sha, proof, *, phase, external_writers_stopped, managed=False, controller_guard=None):
+def run(blob, bundle_sha, review_sha, proof, *, phase, external_writers_stopped, managed=False,
+        controller_guard=None, immutable_payload_guard=None):
     if phase not in {'apply','resume-index','resume-legacy','observe-v3'}:
         raise ValueError('explicit ten-web phase required')
     if managed:
@@ -38,6 +39,8 @@ def run(blob, bundle_sha, review_sha, proof, *, phase, external_writers_stopped,
         raise ValueError('authority receipt does not bind this exact batch')
     if controller_guard is not None and (not managed or phase!='apply' or external_writers_stopped is not False):
         raise ValueError('controller admission is restricted to fresh managed apply')
+    if immutable_payload_guard is not None and controller_guard is None:
+        raise ValueError('immutable payload guard requires managed controller admission')
     hub=v3.CentralHubStore()
     def window():
         ok=controller_guard() if controller_guard is not None else guard_window(hub,external_writers_stopped)
@@ -68,11 +71,12 @@ def run(blob, bundle_sha, review_sha, proof, *, phase, external_writers_stopped,
         if prior['generation']!=review['parent_generation'] or want!=successor or packed!=after:
             raise ValueError('the exact published batch projection differs')
     seal=legacy.transition_seal(SEAL,cat_parent,side_parent,cat_target,side_target,ptr)
-    def protect_input(path,raw=None,*,digest=None,length=None,mime='application/json'):
+    def protect_input(path,raw=None,*,digest=None,length=None,mime='application/json',guard=window):
         try:found=s3.read_bytes(B,path)
         except FileNotFoundError:
             if phase!='apply' or raw is None:raise
-            window();immutable_creator(client)(path,raw,mime);found=s3.read_bytes(B,path)
+            if guard() is not True:raise RuntimeError('immutable Web staging guard is absent')
+            immutable_creator(client)(path,raw,mime);found=s3.read_bytes(B,path)
         if ((raw is not None and found!=raw) or (digest is not None and plan.digest(found)!=digest)
             or (length is not None and len(found)!=length) or hub.read_bytes(B,path)!=found):
             raise ValueError('exact batch asset protection bytes differ: '+path)
@@ -113,11 +117,16 @@ def run(blob, bundle_sha, review_sha, proof, *, phase, external_writers_stopped,
         for row in review['rows']:
             old=row['old'];protect_input(old['object'],digest=old['sha256'],length=old['bytes'])
             protect_input(old['manifest'],digest=row['old_manifest_sha256'])
-        # Protect both old and new resources before the first index replacement.
+        # Only this loop creates content-addressed, unpublished payloads.
+        # The first missing payload triggers a full scan; leave staging with
+        # a fresh boundary check even when retention/snapshot already exist.
+        payload_guard = window if immutable_payload_guard is None else immutable_payload_guard
         for row in review['rows']:
             new=row['new']; ident=row['id']
-            protect_input(new['object'],data[ident+'/document.html'],mime='text/html; charset=utf-8')
-            protect_input(new['manifest'],data[ident+'/document-manifest.json'])
+            protect_input(new['object'],data[ident+'/document.html'],mime='text/html; charset=utf-8',guard=payload_guard)
+            protect_input(new['manifest'],data[ident+'/document-manifest.json'],guard=payload_guard)
+        if immutable_payload_guard is not None:
+            window()
         protect_input(pin,data['retained.json'])
         snapshot=meta['snapshot']['path'];protect_input(snapshot,after,mime='application/gzip')
         def protected():

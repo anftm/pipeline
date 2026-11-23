@@ -43,19 +43,28 @@ def authority_scope(resource):
     return resource['extension'],resource['search_generation'],resource['parent_run_id']
 
 
-def ordinary_writer(hub, parent_id, api, *, observed=None):
-    """Narrow admission within existing daily-controller and publisher locks.
-
-    This is not the out-of-band fence used by manual exact operations. Require
-    the current opted-in repository's common maintenance and writer boundary;
-    additionally stop on any active, non-own Reader/Search workflow.
-    """
-    owner=_owner() if observed is None else observed
+def _writer_context(hub, owner):
     if (_owner()!=owner or owner[1]!='1' or os.getenv('READER_WEB_PROFILE_REBUILD_ENABLED')!='true'
             or os.getenv('READER_WEB_PROFILE_PAGES_SCOPE_REVIEWED')!='true'
             or os.getenv('READER_PROFILE_PAUSED')=='true'):
         raise RuntimeError('automatic web profile writer is not active')
-    v3.assert_writer(hub); fence=GitHubProducerFence()
+    v3.assert_writer(hub)
+
+
+def _check_maintenance(hub):
+    state=json.loads(hub.read_bytes(B,DURABLE_JOURNAL))
+    if (state.get('kind')!='reader-maintenance-journal' or state.get('version')!=1 or state.get('restored') is not True
+            or state.get('callback_recovery_required') is True or
+            (state.get('callback_mutation_started') and state.get('callback_committed') is not True)):
+        raise RuntimeError('ordinary Reader maintenance state is not cleared')
+    return True
+
+
+def ordinary_writer(hub, parent_id, api, *, observed=None):
+    """Recheck the exact controller, child, and full competing writer inventory."""
+    owner=_owner() if observed is None else observed
+    _writer_context(hub, owner)
+    fence=GitHubProducerFence()
     _active_owner(fence,*owner)
     parent=api.get_run(parent_id)
     daily.validate_daily_run(parent,owner[2])
@@ -64,15 +73,33 @@ def ordinary_writer(hub, parent_id, api, *, observed=None):
             or current.get('display_title')!='reader-auto/'+os.getenv('WEB_PROFILE_AUTOMATION_ID','')
             or current.get('actor',{}).get('login')!='github-actions[bot]'):
         raise RuntimeError('exact in-progress controller required')
-    state=json.loads(hub.read_bytes(B,DURABLE_JOURNAL))
-    if (state.get('kind')!='reader-maintenance-journal' or state.get('version')!=1 or state.get('restored') is not True
-            or state.get('callback_recovery_required') is True or
-            (state.get('callback_mutation_started') and state.get('callback_committed') is not True)):
-        raise RuntimeError('ordinary Reader maintenance state is not cleared')
+    _check_maintenance(hub)
     if any(str(row['id'])!=owner[0] for row in api.active_children(parent_id)):
         raise RuntimeError('a competing Reader/Search job is still active')
     api.check_main(owner[2])
     return True
+
+
+def _immutable_payload_guard(full_check, per_object_check, *, clock=monotonic):
+    """Recheck the full writer inventory at most once per 30s of payload staging."""
+    last_scan = None
+
+    def check():
+        nonlocal last_scan
+        previous, last_scan = last_scan, None
+        if previous is not None and clock() - previous < 30:
+            if per_object_check() is not True:
+                return False
+            if clock() - previous < 30:
+                last_scan = previous
+                return True
+        now = clock()
+        if full_check() is not True:
+            return False
+        last_scan = now
+        return True
+
+    return check
 
 
 def candidate(item,old,*,reviewed=None):
@@ -143,10 +170,22 @@ def execute(resource,output):
     hub=v3.CentralHubStore(); api=daily.GitHub(os.environ['GH_TOKEN']); owner=_owner()
     guard=lambda:ordinary_writer(hub,parent_id,api,observed=owner)
     search_raw=hub.read_bytes(backlog.SEARCH_BUCKET,backlog.CURRENT)
-    def validate_search():
+    def check_search():
         if hub.read_bytes(backlog.SEARCH_BUCKET,backlog.CURRENT)!=search_raw:
             raise RuntimeError('automatic web profile Search pointer changed')
+
+    def validate_search():
+        check_search()
         return guard()
+
+    def check_payload_context():
+        # These conditional creates are not routed. Each still checks Search,
+        # local owner, and durable maintenance, even between full inventories.
+        check_search()
+        _writer_context(hub, owner)
+        return _check_maintenance(hub)
+
+    payload_guard = _immutable_payload_guard(validate_search, check_payload_context)
     validate_search()
     root=v3.current(hub)[0]
     # This proof is used before the first data mutation and sealed to the
@@ -256,7 +295,8 @@ def execute(resource,output):
         (output/'web-profile-authority.json').write_bytes(v3.encode(proof))
         (output/'web-profile-review.json').write_bytes(v3.encode({'target':report['target_pointer'],'rows':report['rows']}))
         ret=publish.run(blob,receipt['bundle_sha256'],receipt['review_sha256'],proof,phase='apply',
-                        external_writers_stopped=False,managed=True,controller_guard=validate_search)
+                        external_writers_stopped=False,managed=True,controller_guard=validate_search,
+                        immutable_payload_guard=payload_guard)
         rows=report['rows']
     timed('seal and commit')
     if same or holds:

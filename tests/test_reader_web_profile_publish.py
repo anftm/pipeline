@@ -32,6 +32,39 @@ class AutomaticWebProfileTests(unittest.TestCase):
             h.read_bytes.return_value=json.dumps(state|{'callback_mutation_started':True}).encode()
             with self.assertRaisesRegex(RuntimeError,'maintenance'):web.ordinary_writer(h,10,auth,observed=owner)
 
+    def test_200_payload_pairs_keep_per_object_checks_without_400_full_inventories(self):
+        full, per_object = Mock(return_value=True), Mock(return_value=True)
+        clock = Mock(return_value=0)
+        guard = web._immutable_payload_guard(full, per_object, clock=clock)
+        for second in range(400):
+            clock.return_value=second
+            self.assertIs(guard(), True)
+        self.assertEqual(full.call_count, 14)
+        self.assertEqual(per_object.call_count, 386)
+
+    def test_payload_guard_does_not_cache_a_failed_boundary_or_ignore_live_state(self):
+        full = Mock(side_effect=[False, True, RuntimeError('competing writer')])
+        local = Mock(side_effect=RuntimeError('Search or maintenance moved'))
+        guard = web._immutable_payload_guard(full, local, clock=lambda: 0)
+        self.assertIs(guard(), False)
+        self.assertIs(guard(), True)
+        with self.assertRaisesRegex(RuntimeError, 'maintenance moved'):
+            guard()
+        with self.assertRaisesRegex(RuntimeError, 'competing writer'):
+            guard()
+
+    def test_slow_payload_read_refreshes_expired_full_inventory(self):
+        clock = Mock(return_value=0)
+        full = Mock(return_value=True)
+        def slow():
+            clock.return_value=40
+            return True
+        guard = web._immutable_payload_guard(full, slow, clock=clock)
+        self.assertTrue(guard())
+        clock.return_value=25
+        self.assertTrue(guard())
+        self.assertEqual(full.call_count, 2)
+
     def test_metadata_holds_and_identical_results_do_not_change_route(self):
         old={'a':{'key':'a','object':'unchanged'},'b':{'key':'b','object':'keep'}}
         value={'version':1,'kind':'web-document-stream-index','files':list(old.values()),'failures':[]}
