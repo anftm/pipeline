@@ -1,6 +1,7 @@
 """Fake S3/Reader only: actual transport, planner, and journal code."""
 import gzip
 import io
+import json
 from dataclasses import asdict
 from hashlib import sha256
 from pathlib import Path
@@ -13,6 +14,7 @@ from botocore.exceptions import ClientError
 
 from scripts import reader_ebook_rebuild_transport as subject, reader_lifecycle as lifecycle
 from scripts.reader_bucket_store import S3NotFound
+from scripts.reader_image_history_publish_journal import PREFIX as LEGACY_JOURNAL_PREFIX
 from scripts.reader_image_history_store import WriteUnconfirmed
 
 B, index, legacy, v3 = subject.BUCKET, subject.index, subject.legacy, subject.v3
@@ -37,6 +39,7 @@ class MemoryS3:
     def __init__(self):
         self.meta = SimpleNamespace(config=SimpleNamespace(retries={'total_max_attempts': 1}))
         self.data, self.read_etags, self.puts = {}, {}, []
+        self.etags = {}
         self.lose_response = lambda _: False
 
     def _location(self, bucket):
@@ -51,7 +54,7 @@ class MemoryS3:
         if path not in self.data:
             raise S3NotFound(path)
         raw = self.data[path]
-        self.read_etags[bucket, path] = tag(raw)
+        self.read_etags[bucket, path] = self.etags.get(path, tag(raw))
         return raw
 
     def get_object(self, *, Bucket, Key):
@@ -60,7 +63,7 @@ class MemoryS3:
             raw = self.read_bytes(B, Key)
         except S3NotFound:
             raise s3_error('NoSuchKey', 404) from None
-        return {'Body': io.BytesIO(raw), 'ETag': tag(raw), 'ContentLength': len(raw),
+        return {'Body': io.BytesIO(raw), 'ETag': self.read_etags[B, Key], 'ContentLength': len(raw),
                 'ResponseMetadata': {'HTTPStatusCode': 200}}
 
     def put_object(self, *, Bucket, Key, Body, **kwargs):
@@ -70,12 +73,13 @@ class MemoryS3:
         self.puts.append((Key, condition))
         prior = self.data.get(Key)
         if (condition.get('IfNoneMatch') == '*' and prior is not None or
-                'IfMatch' in condition and (prior is None or condition['IfMatch'] != tag(prior))):
+                'IfMatch' in condition and (prior is None or condition['IfMatch'] != self.etags.get(Key, tag(prior)))):
             raise s3_error('PreconditionFailed', 412)
         raw = Body if isinstance(Body, bytes) else Body.read()
         if 'ContentLength' in kwargs:
             assert len(raw) == kwargs['ContentLength']
         self.data[Key] = raw
+        self.etags.pop(Key, None)
         if self.lose_response(Key):
             raise TimeoutError('lost write response')
         return {'ETag': tag(raw), 'ResponseMetadata': {'HTTPStatusCode': 200, 'RetryAttempts': 0}}
@@ -152,6 +156,8 @@ class TransportTests(unittest.TestCase):
             canonical_replacements=[asdict(self.spec)], canonical_parent_sha256=digest(self.parent_index),
             target_index_sha256=digest(self.target_index), sidecar_parent_sha256=digest(self.before),
             target_sidecar_sha256=digest(self.after), reader_generation=pointer['generation'],
+            pointer_parent_sha256=digest(self.parent_pointer), parent_etags=dict(canonical=tag(self.parent_index),
+                catalog=tag(self.legacy_raw), sidecar=tag(self.before), pointer=tag(self.parent_pointer)),
             target_pointer=target_pointer, legacy=summary, changes=[dict(key=self.key, source_sha256=source,
                 prior_manifest=self.spec.old_manifest, prior_manifest_sha256=digest(old_manifest),
                 new_manifest=self.spec.new_manifest, members=self.members)])
@@ -189,6 +195,7 @@ class TransportTests(unittest.TestCase):
         before = list(self.s3.puts)
         self.assertEqual(promoted, self.io.promote(review=self.review, parent_raw=self.parent_pointer,
                                                   legacy_result=moved, observe_only=True))
+        self.assertEqual(self.canonical(staged, resume=True)['status'], 'observed')
         self.assertEqual(self.s3.puts, before)
         mutable = [pair for pair in before if pair[0] in {index.INDEX, legacy.CATALOG, legacy.SIDECAR, v3.POINTER}]
         self.assertEqual(mutable, [(index.INDEX, {'IfMatch': tag(self.parent_index)}),
@@ -233,6 +240,142 @@ class TransportTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'staged EPUB member'):
             self.canonical(staged)
         self.assertEqual(self.s3.puts, before)
+
+    def test_exact_downstream_claims_block_canonical_before_any_write(self):
+        staged = self.stage()
+        catalog_sha = self.legacy_parent.sha256
+        legacy_key = LEGACY_JOURNAL_PREFIX + catalog_sha + '.json'
+        v3_key = subject.v3_permit.PREFIX + digest(self.parent_pointer) + '.json'
+        # A claim for another SHA or a re-encoded pointer is not the parent claim.
+        self.s3.data[LEGACY_JOURNAL_PREFIX + '0' * 64 + '.json'] = b'unrelated'
+        self.s3.data[subject.v3_permit.PREFIX + digest(self.parent_pointer.lstrip()) + '.json'] = b'unrelated'
+        self.assertTrue(subject.LegacyJournal(self.s3).claim(catalog_sha, legacy.Record('b' * 64, 'catalog-permitted')))
+        before = list(self.s3.puts)
+        with self.assertRaisesRegex(ValueError, 'legacy catalog parent already claimed'):
+            self.canonical(staged)
+        self.assertEqual(self.s3.puts, before)
+        del self.s3.data[legacy_key]
+        self.s3.data[v3_key] = b'existing'
+        with self.assertRaisesRegex(ValueError, 'v3 parent already claimed'):
+            self.canonical(staged)
+        self.assertEqual(self.s3.puts, before)
+        del self.s3.data[v3_key]
+        self.assertEqual(self.canonical(staged)['status'], 'written')
+
+    def test_unknown_legacy_claim_absence_blocks_canonical(self):
+        staged = self.stage()
+        key = LEGACY_JOURNAL_PREFIX + self.legacy_parent.sha256 + '.json'
+        get = self.s3.get_object
+
+        def denied(**kwargs):
+            if kwargs['Key'] == key:
+                raise s3_error('AccessDenied', 403)
+            return get(**kwargs)
+
+        before = list(self.s3.puts)
+        with patch.object(self.s3, 'get_object', side_effect=denied), self.assertRaises(ClientError):
+            self.canonical(staged)
+        self.assertEqual(self.s3.puts, before)
+
+    def test_legacy_parent_and_pointer_drift_block_canonical_before_claim(self):
+        staged = self.stage()
+        before = list(self.s3.puts)
+        for path, label in ((legacy.CATALOG, 'legacy catalog'), (legacy.SIDECAR, 'legacy sidecar'),
+                            (v3.POINTER, 'v3 pointer')):
+            for source, state, changed in (('S3', self.s3.data, b'stale'), ('Hub', self.reader.stale, b'stale'),
+                                           ('ETag only', self.s3.etags, '"same-bytes-new-etag"')):
+                with self.subTest(path=path, source=source), patch.dict(state, {path: changed}):
+                    with self.assertRaisesRegex(ValueError, label + ' parent differs'):
+                        self.canonical(staged)
+                    self.assertEqual(self.s3.puts, before)
+
+    def test_canonical_distinguishes_raw_and_compact_legacy_sidecar_pins(self):
+        staged = self.stage()
+        before = list(self.s3.puts)
+        # The same decoded sidecar with different gzip bytes is not the reviewed parent.
+        repacked = gzip.compress(gzip.decompress(self.before), mtime=1)
+        with patch.dict(self.s3.data, {legacy.SIDECAR: repacked}), patch.dict(
+                self.s3.etags, {legacy.SIDECAR: tag(self.before)}):
+            with self.assertRaisesRegex(ValueError, 'legacy sidecar parent differs'):
+                self.canonical(staged)
+        # The legacy planner hashes compact JSON, not the gzip bytes used by CAS.
+        for phase, packed, message in (('before', self.before, 'legacy sidecar parent differs'),
+                                       ('after', self.after, 'staged legacy snapshot missing or differs')):
+            with self.subTest(phase=phase), patch.dict(self.review['legacy'], {f'{phase}_sidecar_sha256': digest(packed)}):
+                with self.assertRaisesRegex(ValueError, message):
+                    self.canonical(staged)
+        self.assertEqual(self.s3.puts, before)
+
+    def test_staged_snapshot_drift_blocks_canonical_before_claim(self):
+        staged = self.stage()
+        before = list(self.s3.puts)
+        path = self.review['legacy']['snapshot']['path']
+        for stale in (self.s3.data, self.reader.stale):
+            with patch.dict(stale, {path: self.after[:-1]}):
+                with self.assertRaisesRegex(ValueError, 'staged legacy snapshot missing or differs'):
+                    self.canonical(staged)
+                self.assertEqual(self.s3.puts, before)
+        del self.s3.data[path]
+        with self.assertRaisesRegex(ValueError, 'staged legacy snapshot missing or differs'):
+            self.canonical(staged)
+        self.assertEqual(self.s3.puts, before)
+
+    def test_downstream_permit_appearing_after_claim_blocks_cas(self):
+        staged = self.stage()
+        before = list(self.s3.puts)
+
+        def after_claim(phase):
+            if phase == 'canonical:claim-readback':
+                self.s3.data[subject.v3_permit.PREFIX + digest(self.parent_pointer) + '.json'] = b'other permit'
+            return True
+
+        self.guard.side_effect = after_claim
+        with self.assertRaisesRegex(ValueError, 'v3 parent already claimed'):
+            self.canonical(staged)
+        self.assertEqual(self.s3.puts, before + [(index.PERMIT_PREFIX + digest(self.parent_index) + '.json',
+                                                  {'IfNoneMatch': '*'})])
+        self.assertEqual(self.s3.data[index.INDEX], self.parent_index)
+
+    def test_promotion_requires_original_pointer_etag_before_permit(self):
+        self.canonical(self.stage())
+        moved = self.legacy()
+        self.s3.etags[v3.POINTER] = '"same-bytes-new-etag"'
+        before = list(self.s3.puts)
+        with self.assertRaisesRegex(ValueError, 'reviewed v3 pointer ETag differs'):
+            self.io.promote(review=self.review, parent_raw=self.parent_pointer, legacy_result=moved)
+        self.assertEqual(self.s3.puts, before)
+
+    def test_promotion_cannot_adopt_a_new_etag_at_cas(self):
+        self.canonical(self.stage())
+        moved = self.legacy()
+        before = list(self.s3.puts)
+        read = subject._ReviewedPointerStore.read_for_update
+
+        def drift(store, bucket, path):
+            self.s3.etags[v3.POINTER] = '"same-bytes-new-etag"'
+            return read(store, bucket, path)
+
+        with patch.object(subject._ReviewedPointerStore, 'read_for_update', drift):
+            with self.assertRaisesRegex(ValueError, 'reviewed v3 pointer ETag differs'):
+                self.io.promote(review=self.review, parent_raw=self.parent_pointer, legacy_result=moved)
+        self.assertIn((subject.v3_permit.PREFIX + digest(self.parent_pointer) + '.json',
+                       {'IfNoneMatch': '*'}), self.s3.puts[len(before):])
+        self.assertNotIn(v3.POINTER, [key for key, _ in self.s3.puts[len(before):]])
+        self.assertEqual(self.s3.data[v3.POINTER], self.parent_pointer)
+
+    def test_legacy_accepts_sealed_json_plan_but_rejects_different_hint(self):
+        planned = self.review['legacy']
+        sealed = json.loads(v3.encode(self.review))
+        self.assertNotEqual(planned['retirement_hint'], sealed['legacy']['retirement_hint'])
+        self.review = sealed
+        self.canonical(self.stage())
+        before = list(self.s3.puts)
+        hint = sealed['legacy']['retirement_hint']
+        with patch.dict(sealed['legacy'], {'retirement_hint': [hint[0], {**hint[1], 'generation': '0' * 32}]}):
+            with self.assertRaisesRegex(ValueError, 'streamed legacy proposal differs'):
+                self.legacy()
+        self.assertEqual(self.s3.puts, before)
+        self.assertEqual(self.legacy()['catalog_sha256'], planned['target_sha256'])
 
     def test_legacy_lost_catalog_response_only_advances_unspent_sidecar(self):
         self.canonical(self.stage())

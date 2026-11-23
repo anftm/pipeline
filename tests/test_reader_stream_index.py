@@ -83,6 +83,24 @@ class ReaderStreamCheckpointTests(unittest.TestCase):
         self.assertEqual(index.merge_shards(later_canonical, [(shard, {"files": [new]})],
                                            "fixture", {"epub"})["files"], later_canonical["files"])
 
+    def test_ebook_finalizer_does_not_revert_exact_same_source_epub_upgrade(self):
+        old = {'key': 'repo\0book.epub', 'source_extension': 'epub', 'source_sha256': 'a' * 64,
+               'source_revision': 'old', 'profile': 'epub-chapters-v9-cover-toc', 'manifest': 'old-route'}
+        upgraded = {**old, 'profile': index.EPUB_PROFILE, 'manifest': 'new-route'}
+        kind = 'ebook-chapter-stream-index'
+        shard = index.shard_for(old['key'], 8)
+        for profile in (None, 'epub-chapters-v8-bucket', old['profile']):
+            for extra in ({}, {'checkpointed_at': '2026-11-23T10:00:00Z', 'source_revision': 'new'}):
+                with self.subTest(profile=profile, extra=extra):
+                    stale = {**old, 'profile': profile, **extra}
+                    result = index.merge_shards({'files': [upgraded]}, [(shard, {'files': [stale]})], kind, {'epub'})
+                    self.assertEqual(result['files'], [upgraded])
+        for incoming in ({**old, 'source_sha256': 'b' * 64}, {**old, 'profile': 'epub-v11'},
+                         {**upgraded, 'manifest': 'superseding-route'}):
+            with self.subTest(incoming=incoming):
+                self.assertEqual(index.merge_shards({'files': [upgraded]}, [(shard, {'files': [incoming]})],
+                                                    kind, {'epub'})['files'], [incoming])
+
     def test_content_is_protected_and_uploaded_before_checkpoint(self):
         events = []
         entry = {"key": "repo\0book.html", "source_revision": "rev", "object": "documents/web/html/hash/document.html"}

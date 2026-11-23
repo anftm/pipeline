@@ -1,12 +1,16 @@
 """The Reader Pages operation cannot accidentally push or replay a dispatch."""
+from contextlib import ExitStack, redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
+import hashlib
+import io
 import json
 from pathlib import Path
 import re
+from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import MagicMock, Mock, patch
 
 import yaml
-from unittest.mock import MagicMock, Mock, patch
 
 from scripts import reader_pages_release as release
 
@@ -72,11 +76,81 @@ class ReaderPagesReleaseTests(unittest.TestCase):
         self.verify.assert_called_once_with(READER)
         self.assertEqual(result['pages_run'],43)
 
+    def test_epub_pins_reject_pages_code_or_workflow_drift_before_claim(self):
+        with self.assertRaisesRegex(ValueError,'workflow differs'):
+            self.execute(expected_code_sha=CODE)
+        with self.assertRaisesRegex(ValueError,'deployment differs'):
+            self.execute(expected_code_sha=WORKFLOW)
+        self.assertFalse(self.storage.values)
+        self.session.post.assert_not_called()
+
     def test_verified_noop_does_not_claim_or_dispatch(self):
         self.live.update(reader_generation=READER,reader_catalog_sha256=CATALOG)
         self.assertEqual(self.execute()['status'],'already-deployed')
         self.session.post.assert_not_called()
         self.assertFalse(self.storage.values)
+
+    def test_observe_only_without_claim_requires_verified_exact_deployment(self):
+        self.live.update(code_sha=WORKFLOW,workflow_sha=WORKFLOW)
+        with patch.object(self.storage,'create') as create, patch.object(release,'list_runs') as runs:
+            with self.assertRaisesRegex(ValueError,'no Reader Pages claim'):
+                self.execute(expected_code_sha=WORKFLOW,observe_only=True)
+            self.live.update(reader_generation=READER,reader_catalog_sha256=CATALOG,workflow_sha=CODE)
+            with self.assertRaisesRegex(ValueError,'deployment workflow differs'):
+                self.execute(expected_code_sha=WORKFLOW,observe_only=True)
+            self.live['workflow_sha']=WORKFLOW
+            self.assertEqual(self.execute(expected_code_sha=WORKFLOW,observe_only=True)['status'],'already-deployed')
+        self.verify.assert_called_once_with(READER)
+        create.assert_not_called()
+        runs.assert_not_called()
+        self.session.post.assert_not_called()
+
+    def test_epub_release_dispatches_once_then_reconciles_original_already_live_run(self):
+        self.live.update(code_sha=WORKFLOW,workflow_sha=WORKFLOW)
+        with patch.object(self.storage,'create',wraps=self.storage.create) as create:
+            with patch.object(release,'list_runs',side_effect=self.expose_claim):
+                original=self.execute(expected_code_sha=WORKFLOW)
+            [claim]=self.storage.values.values()
+            for observe_only in (False,True):
+                with self.subTest(observe_only=observe_only), patch.object(release,'list_runs',return_value=[self.run_record()]) as runs:
+                    self.assertEqual(self.execute(expected_code_sha=WORKFLOW,observe_only=observe_only,pipeline_run='1000'),original)
+                    runs.assert_called_once_with(self.session,created=claim['created'])
+        self.assertEqual(original['status'],'deployed')
+        self.assertEqual(original['operation'],claim['operation'])
+        create.assert_called_once()
+        self.session.post.assert_called_once()
+
+    def test_already_live_receipt_does_not_hide_conflicting_claim(self):
+        self.live.update(code_sha=WORKFLOW,workflow_sha=WORKFLOW)
+        self.session.post.side_effect=TimeoutError('response lost')
+        with self.assertRaisesRegex(TimeoutError,'response lost'):
+            self.execute(expected_code_sha=WORKFLOW)
+        [claim]=self.storage.values.values()
+        self.expose_claim()
+        self.live.update(run_id=44,reader_refresh_id='3'*32)
+        self.session.post.reset_mock()
+        with patch.object(self.storage,'create') as create:
+            for opts in ({'observe_only':True}, {'expected_code_sha':WORKFLOW}):
+                with self.subTest(opts=opts), patch.object(release,'list_runs',return_value=[self.run_record()]) as runs:
+                    with self.assertRaisesRegex(ValueError,'public receipt does not match the claimed request'):
+                        self.execute(**opts)
+                    runs.assert_called_once_with(self.session,created=claim['created'])
+        self.verify.assert_not_called()
+        create.assert_not_called()
+        self.session.post.assert_not_called()
+
+    def test_epub_already_live_receipt_does_not_hide_conflicting_claim_workflow_pin(self):
+        self.live['code_sha']=WORKFLOW
+        self.session.post.side_effect=TimeoutError('response lost')
+        with self.assertRaisesRegex(TimeoutError,'response lost'):
+            self.execute(workflow_sha=CODE)
+        self.live.update(reader_generation=READER,reader_catalog_sha256=CATALOG,workflow_sha=WORKFLOW)
+        with patch.object(release,'list_runs') as runs:
+            with self.assertRaisesRegex(ValueError,'Existing Pages claim differs'):
+                self.execute(expected_code_sha=WORKFLOW)
+        self.verify.assert_not_called()
+        runs.assert_not_called()
+        self.session.post.assert_called_once()
 
     def test_lost_response_spends_claim_even_when_rediscovering_with_new_code(self):
         self.session.post.side_effect=TimeoutError('response lost')
@@ -149,6 +223,70 @@ class ReaderPagesReleaseTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'dedicated non-admin'):
                 release.session_for_pages()
 
+    def test_observe_only_cli_with_synthesized_epub_publication(self):
+        # Match the publication envelope produced by the explicit EPUB Pages recovery phase.
+        head,pointer_raw=b'settled Search head',b'exact Search pointer'
+        journal_pins={'generation':SEARCH,'head_sha256':hashlib.sha256(head).hexdigest(),
+                      'pointer_sha256':hashlib.sha256(pointer_raw).hexdigest()}
+        self.target['search_head']=journal_pins['head_sha256']
+        self.live['code_sha']=WORKFLOW
+        with patch.object(release,'list_runs',side_effect=self.expose_claim):
+            original=self.execute(expected_code_sha=WORKFLOW)
+        self.session.post.reset_mock()
+        self.session.__enter__.return_value=self.session
+        self.verify.reset_mock()
+        env={'GITHUB_REPOSITORY':'anftm/pipeline','GITHUB_REF':'refs/heads/main',
+             'GITHUB_WORKFLOW_REF':'anftm/pipeline/.github/workflows/reader-v3-publish.yml@refs/heads/main',
+             'GITHUB_RUN_ATTEMPT':'1','GITHUB_RUN_ID':'1000'}
+        publication={'applied':True,'generation':READER,'pages_pins':{'code_sha':WORKFLOW,'search_generation':SEARCH}}
+        with TemporaryDirectory() as tmp, ExitStack() as stack:
+            source,output=Path(tmp)/'publication.json',Path(tmp)/'pages-release.json'
+            args=['--publication',str(source),'--output',str(output),'--observe-only']
+            def use(obj,name,**kwargs):
+                return stack.enter_context(patch.object(obj,name,**kwargs))
+            stack.enter_context(patch.dict(release.os.environ,env,clear=True))
+            stack.enter_context(redirect_stdout(io.StringIO()))
+            store=use(release.reader,'CentralHubStore')
+            use(release.reader,'assert_writer')
+            use(release.reader,'current',return_value=({'generation':READER,'catalog':{'sha256':CATALOG}},{'base_sidecar':True}))
+            use(release.reader,'verify_generation',side_effect=self.verify)
+            journal=use(release.search,'S3TransitionStore').return_value
+            journal.read_pointer.return_value=pointer_raw
+            use(release.search,'load',return_value=Mock(head_raw=head,record={'pending':None}))
+            use(release.search_daily_journal,'inspect',return_value=journal_pins)
+            use(release.search_daily,'inspect_published',return_value={'generation':SEARCH})
+            use(release.defaults,'observe_pages')
+            use(release,'session_for_pages',return_value=self.session)
+            preflight=use(release,'pages_preflight',return_value=WORKFLOW)
+            use(release,'Claims',return_value=self.storage)
+            use(release,'read_live_receipt',side_effect=lambda:dict(self.live))
+            use(release,'list_runs',return_value=[self.run_record()])
+            use(release.httpx,'Client')
+            create=use(self.storage,'create')
+
+            source.write_text(json.dumps({k:v for k,v in publication.items() if k!='pages_pins'}))
+            with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as missing:
+                release.main(args)
+            self.assertEqual(missing.exception.code,2)
+            store.assert_not_called()
+            source.write_text(json.dumps({**publication,'pages_pins':{'code_sha':WORKFLOW,'search_generation':OLD}}))
+            with self.assertRaisesRegex(ValueError,'Search generation differs from the reviewed EPUB authority'):
+                release.main(args)
+            preflight.assert_not_called()
+            self.assertFalse(output.exists())
+
+            source.write_text(json.dumps(publication))
+            with patch.object(self.storage,'read',return_value=None), patch.dict(self.live,{'reader_generation':OLD}):
+                with self.assertRaisesRegex(ValueError,'no Reader Pages claim'):
+                    release.main(args)
+            self.assertFalse(output.exists())
+
+            release.main(args)
+            self.assertEqual(json.loads(output.read_bytes()),original)
+            create.assert_not_called()
+        self.session.post.assert_not_called()
+        self.verify.assert_called_once()
+
     def test_workflow_preflights_before_promotion_and_keeps_legacy_migration_fence(self):
         flow=yaml.safe_load(Path('.github/workflows/reader-v3-publish.yml').read_text())
         steps=flow['jobs']['publish']['steps']
@@ -173,6 +311,14 @@ class ReaderPagesReleaseTests(unittest.TestCase):
         self.assertLess(publish.index('check-page-window'),publish.index('reader_pages_release --publication'))
         self.assertIn('"$OPERATION" == unify || "$OPERATION" == publish-generation',publish)
         self.assertIn('else\n  python scripts/publish_search_reader_index.py --pinned-only',publish)
+
+    def test_persisted_null_claim_is_not_an_absent_claim(self):
+        claims=release.Claims.__new__(release.Claims)
+        claims.reader=Mock()
+        claims.reader.read_bytes.side_effect=[FileNotFoundError(),b'null']
+        self.assertIsNone(claims.read('key'))
+        with self.assertRaisesRegex(ValueError,'invalid Reader Pages claim'):
+            claims.read('key')
 
     def test_claim_write_has_create_only_condition_and_no_automatic_retry(self):
         client=Mock()

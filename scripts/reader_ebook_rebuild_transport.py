@@ -19,6 +19,7 @@ from pathlib import Path
 from . import publish_reader_v3 as v3, reader_ebook_canonical_guard as index
 from . import reader_ebook_rebuild_review as review_io
 from . import reader_epub_immutable as immutable, reader_epub_protection as protection
+from . import reader_image_history_catalog as legacy_catalog
 from . import reader_image_history_publish as legacy, reader_image_history_v3 as v3_permit
 from . import search_snapshot
 from .reader_exact_office_stage import plan_legacy  # Same compact chapter route format.
@@ -105,6 +106,16 @@ def _digest_pin(value):
     return value
 
 
+def _v3_permit_path(parent_sha):
+    return v3_permit.PREFIX + _digest_pin(parent_sha) + '.json'
+
+
+def _compact_sidecar_sha(packed):
+    # plan_legacy records the decoded, canonically encoded sidecar identity;
+    # raw review pins and the snapshot reference hash the actual gzip bytes.
+    return _sha(v3.encode(legacy_catalog._sidecar(packed)))
+
+
 class _GuardedLegacyClient:
     """Check the live lease after the streaming PUT helper has hashed the body."""
 
@@ -117,6 +128,16 @@ class _GuardedLegacyClient:
     def put_object(self, **kwargs):
         self.check('legacy:put:' + kwargs['Key'])
         return self.client.put_object(**kwargs)
+
+
+class _ReviewedPointerStore(PointerStore):
+    def __init__(self, reader, s3, guard, parent_raw, parent_etag):
+        super().__init__(reader, s3, guard, parent_raw)
+        self.parent_etag = strong_etag(parent_etag)
+
+    def put_if_match(self, bucket, path, raw, etag):
+        _require(etag == self.parent_etag, 'exact reviewed v3 pointer ETag differs')
+        return super().put_if_match(bucket, path, raw, etag)
 
 
 class GuardedTransport:
@@ -207,15 +228,56 @@ class GuardedTransport:
         return {'sha256': seal, 'members_verified': True, 'both_roots_protected': True}
 
     @staticmethod
-    def _snapshot(review, after_sidecar):
+    def _snapshot_ref(review):
         summary = review['legacy']
         ref = summary['snapshot']
-        name = summary['generation']
+        name, size = summary['generation'], ref['bytes']
         _require(isinstance(name, str) and re.fullmatch(r'[0-9a-f]{32}', name) and
+                 type(size) is int and 0 < size <= legacy_catalog.MAX_SIDECAR_BYTES and
                  ref == {'bucket': BUCKET, 'path': f'reader-index/generations/{name}/reader_assets.json.gz',
-                         'sha256': _sha(after_sidecar), 'bytes': len(after_sidecar)} and
-                 ref['sha256'] == review['target_sidecar_sha256'], 'legacy snapshot differs from exact review')
+                         'sha256': _digest_pin(review['target_sidecar_sha256']), 'bytes': size},
+                 'legacy snapshot differs from exact review')
+        return ref
+
+    @classmethod
+    def _snapshot(cls, review, after_sidecar):
+        ref = cls._snapshot_ref(review)
+        _require((_sha(after_sidecar), len(after_sidecar)) == (ref['sha256'], ref['bytes']),
+                 'legacy snapshot differs from exact review')
         return ref['path']
+
+    def _verify_snapshot(self, ref, compact_sha):
+        path = ref['path']
+        raw, _ = self.claims.transport._get(path, maximum=ref['bytes'])
+        _require(raw is not None and (_sha(raw), len(raw)) == (ref['sha256'], ref['bytes']) and
+                 self.reader.read_bytes(BUCKET, path) == raw and _compact_sidecar_sha(raw) == compact_sha,
+                 'exact staged legacy snapshot missing or differs')
+
+    def _verify_downstream_parents(self, review):
+        """Require unspent downstream lanes and the original live parents before a write."""
+        summary = review['legacy']
+        catalog_sha = _digest_pin(summary['parent_sha256'])
+        pointer_sha = _digest_pin(review['pointer_parent_sha256'])
+        tags = review['parent_etags']
+        _require(LegacyJournal(self.client).read(catalog_sha) is None, 'legacy catalog parent already claimed')
+        _require(self.claims.transport._get(_v3_permit_path(pointer_sha), maximum=v3_permit.LIMIT)[0] is None,
+                 'v3 parent already claimed')
+
+        # The catalog can be hundreds of MiB: keep only the streamed identity.
+        actual = self.roots.observe(legacy.CATALOG)
+        _require((actual.sha256, actual.size, actual.etag) ==
+                 (catalog_sha, summary['parent_bytes'], strong_etag(tags['catalog'])) and
+                 self.reader.digest(BUCKET, legacy.CATALOG) == catalog_sha, 'reviewed legacy catalog parent differs')
+
+        sidecar, etag = self.controls.read_for_update(BUCKET, legacy.SIDECAR)
+        _require(0 < len(sidecar) <= legacy_catalog.MAX_SIDECAR_BYTES and
+                 _sha(sidecar) == _digest_pin(review['sidecar_parent_sha256']) and
+                 etag == strong_etag(tags['sidecar']) and self.reader.read_bytes(BUCKET, legacy.SIDECAR) == sidecar and
+                 _compact_sidecar_sha(sidecar) == summary['before_sidecar_sha256'], 'reviewed legacy sidecar parent differs')
+        pointer, etag = self.controls.read_for_update(BUCKET, v3.POINTER)
+        _require(0 < len(pointer) <= v3_permit.LIMIT and _sha(pointer) == pointer_sha and
+                 etag == strong_etag(tags['pointer']) and self.reader.read_bytes(BUCKET, v3.POINTER) == pointer,
+                 'reviewed v3 pointer parent differs')
 
     @staticmethod
     def _stage_permit(review, receipt):
@@ -226,7 +288,7 @@ class GuardedTransport:
     def stage(self, *, review, review_sha256, bundles, after_sidecar, observe_only=False):
         """Stage one leased attempt; an interrupted attempt is observation-only."""
         _require(type(observe_only) is bool, 'explicit staging mode required')
-        self._check('stage:begin')
+        self._check('stage:observe-begin' if observe_only else 'stage:begin')
         records, prior, members = self._stage_plan(review, review_sha256)
         snapshot = self._snapshot(review, after_sidecar)
         changes = {row['key']: row for row in review['changes']}
@@ -271,7 +333,7 @@ class GuardedTransport:
         self._verify_stage(records, prior, members)
         _require(self.s3.read_bytes(BUCKET, snapshot) == self.reader.read_bytes(BUCKET, snapshot) == after_sidecar,
                  'exact legacy snapshot not observed')
-        self._check('stage:readback')
+        self._check('stage:observe-readback' if observe_only else 'stage:readback')
         return receipt
 
     def canonical(self, *, review, review_sha256, staged, parent_raw, parent_etag, resume=False):
@@ -284,15 +346,20 @@ class GuardedTransport:
         receipt = self._receipt(review_sha256, records, members)
         _require(staged == receipt, 'staging receipt does not bind this exact review')
         stage_key, permit = self._stage_permit(review, receipt)
+        snapshot = self._snapshot_ref(review)
 
         def guard(phase):
-            if phase in {'claim', 'put', 'resume-readback', 'readback'}:
+            writing = phase in {'claim', 'put'}
+            if writing or phase in {'resume-readback', 'readback'}:
                 _require(self.claims.transport._get(stage_key, maximum=CLAIM_LIMIT)[0] == permit,
                          'exact spent staging permit not observed')
                 self._verify_stage(records, prior, members)
-            if phase in {'claim', 'put', 'readback', 'resume-readback'}:
-                expected = target if phase in {'readback', 'resume-readback'} else parent_raw
+                self._verify_snapshot(snapshot, review['legacy']['after_sidecar_sha256'])
+                expected = parent_raw if writing else target
                 _require(self.reader.read_bytes(BUCKET, index.INDEX) == expected, 'canonical Reader view differs')
+            # Observation may follow a partially or fully completed downstream attempt.
+            if writing:
+                self._verify_downstream_parents(review)
             return self._check('canonical:' + phase)
 
         status = index.apply(self.checkpoints, self.claims, parent_raw=parent_raw, parent_etag=parent_etag,
@@ -336,7 +403,9 @@ class GuardedTransport:
                                   old={s.key: {'manifest': s.old_manifest} for s in specs},
                                   new={s.key: {'manifest': s.new_manifest} for s in specs},
                                   now=review['timestamp'], parent_sha=parent.sha256)
-            _require(summary == review['legacy'], 'streamed legacy proposal differs from exact review')
+            # The planner's retirement hint contains tuples; the sealed JSON has lists.
+            _require(v3.encode(summary) == v3.encode(review['legacy']),
+                     'streamed legacy proposal differs from exact review')
             return summary
 
         def guard(phase):
@@ -362,13 +431,13 @@ class GuardedTransport:
         target = review['target_pointer']
         _require(parent['generation'] == review['reader_generation'] != target['generation'],
                  'v3 parent must be the original reviewed pointer')
-        expected_sha = review.get('pointer_parent_sha256')
-        if expected_sha is not None:
-            _require(_sha(parent_raw) == expected_sha, 'exact v3 parent bytes differ from review')
-        observed, _ = self.controls.read_for_update(BUCKET, v3.POINTER)
+        _require(_sha(parent_raw) == review['pointer_parent_sha256'], 'exact v3 parent bytes differ from review')
+        observed, etag = self.controls.read_for_update(BUCKET, v3.POINTER)
         allowed = (parent_raw, v3.encode(target)) if allow_target else (parent_raw,)
         _require(observed in allowed and self.reader.read_bytes(BUCKET, v3.POINTER) == observed,
                  'exact v3 pointer views differ from reviewed phase')
+        if observed == parent_raw:
+            _require(etag == strong_etag(review['parent_etags']['pointer']), 'exact reviewed v3 pointer ETag differs')
         return observed
 
     def promote(self, *, review, parent_raw, legacy_result, observe_only=False):
@@ -389,29 +458,29 @@ class GuardedTransport:
                  legacy_result['unify']['expected_pointer'] == json.loads(parent_raw),
                  'legacy result does not bind the reviewed v3 parent and legacy targets')
 
-        def guard():
+        def guard(*, allow_target=False):
             self._canonical_live(review)
-            self._pointer_state(review, parent_raw, allow_target=True)
             for path, expected in ((legacy.CATALOG, catalog), (legacy.SIDECAR, sidecar)):
                 actual = self.roots.observe(path)
                 _require((actual.sha256, actual.size, actual.etag) == (expected.sha256, expected.size, expected.etag)
                          and self.reader.digest(BUCKET, path) == expected.sha256, 'legacy root differs before promotion')
             _require(journal.read(claim_id) == legacy.Record(seal, 'legacy-observed', catalog.etag, sidecar.etag),
                      'durable legacy result differs before promotion')
+            self._pointer_state(review, parent_raw, allow_target=allow_target)
             return self._check('v3:write-or-readback')
 
-        store = PointerStore(self.reader, self.s3, guard, parent_raw)
+        store = _ReviewedPointerStore(self.reader, self.s3, guard, parent_raw, review['parent_etags']['pointer'])
         # The existing route promotion helper only permits image/web/Office
         # kinds. Use its shared parent-claim namespace and exact protocol, with
         # an EPUB seal (never masquerade as another format or create a new lane).
         parent = json.loads(parent_raw)
-        path = v3_permit.PREFIX + _sha(parent_raw) + '.json'
+        path = _v3_permit_path(_sha(parent_raw))
         permit = v3.encode({'version': 1, 'kind': 'reader-ebook-rebuild-v3-permit', 'parent_sha256': _sha(parent_raw),
                             'pointer': target, 'canonical_sha256': side_sha, 'legacy_seal': seal})
         transport = self.claims.transport
 
         def inspect():
-            guard()
+            guard(allow_target=True)
             pointer, reading = v3.current(store)
             _require(pointer == target and store.read_bytes(BUCKET, v3.POINTER) == v3.encode(target) and
                      reading.get('parent_generation') == parent['generation'], 'exact v3 successor not observed; do not replay')
@@ -428,7 +497,6 @@ class GuardedTransport:
         guard()
         if not transport._put(path, permit, maximum=v3_permit.LIMIT, IfNoneMatch='*'):
             raise RuntimeError('v3 permit not acquired; do not replay')
-        self._pointer_state(review, parent_raw, allow_target=False)
         guard()
         _require(v3.unify(store, apply=True, **options).get('pointer') == target, 'v3 write produced different pointer')
         return inspect()

@@ -149,6 +149,26 @@ def validate_successor(parent_raw, target_raw, *, reviewed, operation_id):
         raise ValueError('target differs from the exact reviewed EPUB successor')
 
 
+def permit(parent_raw, parent_etag, target_raw, reviewed, operation_id, prerequisites):
+    """Return the exact canonical claim path and bytes for write or observation."""
+    strong_etag(parent_etag)
+    reviewed = tuple(reviewed)
+    validate_successor(parent_raw, target_raw, reviewed=reviewed, operation_id=operation_id)
+    pins = dict(prerequisites) if isinstance(prerequisites, Mapping) else {}
+    if (not {'review', 'stage'} <= pins.keys() or len(pins) > 32
+            or any(not isinstance(k, str) or not re.fullmatch(r'[a-z][a-z0-9_-]{0,63}', k)
+                   or not _hex(v, 64) for k, v in pins.items())):
+        raise ValueError('exact review, stage, and prerequisite SHA-256 pins are required')
+    parent_sha = sha256(parent_raw).hexdigest()
+    path = f'{PERMIT_PREFIX}{parent_sha}.json'
+    seal = _encode({'version': 1, 'kind': 'reader-ebook-canonical-permit', 'state': 'spent',
+                    'bucket': BUCKET, 'index': INDEX, 'parent_sha256': parent_sha, 'parent_etag': parent_etag,
+                    'target_sha256': sha256(target_raw).hexdigest(), 'operation': operation_id,
+                    'replacements_sha256': sha256(_encode([asdict(spec) for spec in sorted(
+                        reviewed, key=lambda spec: spec.key)])).hexdigest(), 'prerequisites': pins})
+    return path, seal
+
+
 def apply(checkpoints, journal, *, parent_raw, parent_etag, target_raw, reviewed, operation_id,
           prerequisites, guard, resume=False):
     """Spend one permit and attempt one CAS, or explicitly observe an exact spent permit.
@@ -168,21 +188,7 @@ def apply(checkpoints, journal, *, parent_raw, parent_etag, target_raw, reviewed
     """
     if type(resume) is not bool or not callable(guard):
         raise ValueError('explicit boolean resume and a fresh guard are required')
-    strong_etag(parent_etag)
-    reviewed = tuple(reviewed)
-    validate_successor(parent_raw, target_raw, reviewed=reviewed, operation_id=operation_id)
-    pins = dict(prerequisites) if isinstance(prerequisites, Mapping) else {}
-    if (not {'review', 'stage'} <= pins.keys() or len(pins) > 32
-            or any(not isinstance(k, str) or not re.fullmatch(r'[a-z][a-z0-9_-]{0,63}', k)
-                   or not _hex(v, 64) for k, v in pins.items())):
-        raise ValueError('exact review, stage, and prerequisite SHA-256 pins are required')
-    parent_sha = sha256(parent_raw).hexdigest()
-    permit_path = f'{PERMIT_PREFIX}{parent_sha}.json'
-    seal = _encode({'version': 1, 'kind': 'reader-ebook-canonical-permit', 'state': 'spent',
-                    'bucket': BUCKET, 'index': INDEX, 'parent_sha256': parent_sha, 'parent_etag': parent_etag,
-                    'target_sha256': sha256(target_raw).hexdigest(), 'operation': operation_id,
-                    'replacements_sha256': sha256(_encode([asdict(spec) for spec in sorted(
-                        reviewed, key=lambda spec: spec.key)])).hexdigest(), 'prerequisites': pins})
+    permit_path, seal = permit(parent_raw, parent_etag, target_raw, reviewed, operation_id, prerequisites)
 
     def check(phase):
         if guard(phase) is not True:

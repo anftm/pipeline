@@ -16,10 +16,12 @@ from huggingface_hub import HfApi, HfFileSystem
 
 try:
     from . import reader_lifecycle
+    from .reader_chapter_profiles import EPUB_PROFILE, ebook_profile_upgrade
     from .shared import batch_bucket_files_with_retry, hash_file
     from .reader_bucket_store import S3_RETRY_CODES, retry_read, retry_s3, s3_error_code
 except ImportError:
     import reader_lifecycle
+    from reader_chapter_profiles import EPUB_PROFILE, ebook_profile_upgrade
     from shared import batch_bucket_files_with_retry, hash_file
     from reader_bucket_store import S3_RETRY_CODES, retry_read, retry_s3, s3_error_code
 
@@ -68,6 +70,17 @@ def merge_indexes(previous: dict, entries: list[dict], failures: list[dict], kin
     errors = {entry["key"]: entry for entry in previous.get("failures", [])}
     for entry in entries:
         old = files.get(entry["key"], {})
+        # The exact EPUB publisher advances the canonical profile without
+        # rewriting shards. A subsequent finalizer must not restore a known
+        # predecessor for the same source bytes, even if it has a timestamp.
+        source = old.get('source_sha256')
+        if (kind == 'ebook-chapter-stream-index' and old.get('profile') == EPUB_PROFILE
+                and old.get('source_extension', old.get('extension')) == 'epub'
+                and entry.get('source_extension', entry.get('extension')) == 'epub'
+                and isinstance(source, str) and re.fullmatch(r'[0-9a-f]{64}', source)
+                and entry.get('source_sha256') == source
+                and ebook_profile_upgrade('epub', entry.get('profile')) == EPUB_PROFILE):
+            continue
         if old.get("checkpointed_at", "") > entry.get("checkpointed_at", ""):
             continue
         files[entry["key"]] = entry

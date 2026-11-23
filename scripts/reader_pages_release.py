@@ -119,12 +119,18 @@ def put_claim_once(client, bucket, path, value):
 
 
 def release(*, generation, session, write_store, read_target, read_live, verify, workflow_sha, pipeline_run,
-            clock=time.monotonic, sleep=time.sleep, wait=960, now=None, observe_only=False):
+            clock=time.monotonic, sleep=time.sleep, wait=960, now=None, observe_only=False, expected_code_sha=None):
     generation, workflow_sha=hex_id(generation,64),hex_id(workflow_sha,40)
+    if expected_code_sha is not None:
+        expected_code_sha=hex_id(expected_code_sha,40)
+        if expected_code_sha!=workflow_sha:
+            raise ValueError('Pages workflow differs from reviewed source')
     first=read_target()
     if first['reader_generation']!=generation:
         raise ValueError('Expected Reader generation is not current')
     current=validate_live(read_live(),first['search_generation'])
+    if expected_code_sha is not None and current['code_sha']!=expected_code_sha:
+        raise ValueError('Pages deployment differs from reviewed source')
 
     def accepted(value):
         verify(generation)
@@ -133,13 +139,19 @@ def release(*, generation, session, write_store, read_target, read_live, verify,
 
     def loaded(value):
         return (value.get('reader_generation'),value.get('reader_catalog_sha256')) == (generation,first['reader_catalog_sha256'])
-    if loaded(current):
-        accepted(current)
-        return {'kind':'reader-pages-release','status':'already-deployed','pages_run':current['run_id'],
-                'code_sha':current['code_sha']}
+    already_loaded=loaded(current)
     path=claim_key(generation,first['search_generation'])
-    prior=write_store.read(path)
+    # For exact EPUB releases and explicit observation, a live projection does
+    # not settle a recorded intent unless it came from the original run.
+    check_claim=observe_only or expected_code_sha is not None or not already_loaded
+    prior=write_store.read(path) if check_claim else None
     if prior is None:
+        if already_loaded:
+            if expected_code_sha is not None and current['workflow_sha']!=expected_code_sha:
+                raise ValueError('Pages deployment workflow differs from reviewed source')
+            accepted(current)
+            return {'kind':'reader-pages-release','status':'already-deployed','pages_run':current['run_id'],
+                    'code_sha':current['code_sha']}
         if observe_only:
             raise ValueError('no Reader Pages claim to observe')
         now=now or datetime.now(timezone.utc)
@@ -169,6 +181,9 @@ def release(*, generation, session, write_store, read_target, read_live, verify,
                 or request['search_generation']!=first['search_generation']):
             raise ValueError('invalid recorded Reader Pages claim')
         hex_id(request['reader_code_sha'],40)
+        if expected_code_sha is not None and (request['reader_code_sha']!=expected_code_sha
+                                              or claim['workflow_sha']!=expected_code_sha):
+            raise ValueError('Existing Pages claim differs from reviewed source')
     deadline=clock()+wait
     while True:
         r=matching_run(list_runs(session,created=claim['created']),claim)
@@ -205,7 +220,9 @@ class Claims:
         try: raw=self.reader.read_bytes(READER_ASSETS_BUCKET,path)
         except FileNotFoundError:return None
         if not 0<len(raw)<=32768:raise ValueError('invalid Reader Pages claim size')
-        return json.loads(raw)
+        value=json.loads(raw)
+        if not isinstance(value,dict):raise ValueError('invalid Reader Pages claim')
+        return value
 
     def create(self,path,value):
         put_claim_once(self.writer,self.bucket,path,value)
@@ -248,18 +265,19 @@ def pages_preflight(session, generation):
     return sha
 
 
-def main():
+def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--publication',type=Path)
     parser.add_argument('--output',type=Path)
     parser.add_argument('--preflight',action='store_true')
-    args=parser.parse_args()
+    parser.add_argument('--observe-only',action='store_true',help='reconcile a pinned EPUB publication without claiming or dispatching')
+    args=parser.parse_args(argv)
     if (os.environ.get('GITHUB_REPOSITORY')!='anftm/pipeline' or os.environ.get('GITHUB_REF')!='refs/heads/main'
             or os.environ.get('GITHUB_WORKFLOW_REF')!='anftm/pipeline/.github/workflows/reader-v3-publish.yml@refs/heads/main'
             or os.environ.get('GITHUB_RUN_ATTEMPT')!='1'):
         raise ValueError('requires exact central first-attempt workflow')
     if args.preflight:
-        if args.publication or args.output:
+        if args.publication or args.output or args.observe_only:
             parser.error('--preflight is a separate read-only check')
         with session_for_pages() as session:
             search_live=search_daily.inspect_published()
@@ -273,11 +291,21 @@ def main():
     result=json.loads(args.publication.read_bytes())
     if result.get('applied') is not True:raise ValueError('Reader publication did not apply')
     generation=hex_id(result.get('generation'),64)
+    pins=result.get('pages_pins')
+    if pins is not None:
+        if not isinstance(pins,dict) or set(pins)!={'code_sha','search_generation'}:
+            raise ValueError('invalid EPUB Pages authority pins')
+        hex_id(pins['code_sha'],40)
+        hex_id(pins['search_generation'],64)
+    elif args.observe_only:
+        parser.error('--observe-only requires exact EPUB Pages pins in the publication')
     store=reader.CentralHubStore();reader.assert_writer(store)
     journal=search.S3TransitionStore()
     p=os.environ['GITHUB_RUN_ID']; assert p.isascii() and p.isdigit()
     with session_for_pages() as session,httpx.Client(timeout=40,follow_redirects=True) as client:
         initial=search_daily_journal.inspect(journal)
+        if pins is not None and initial['generation']!=pins['search_generation']:
+            raise ValueError('Search generation differs from the reviewed EPUB authority')
         def target():
             state=search.load(journal)
             if (state is None or state.record['pending'] is not None
@@ -297,8 +325,11 @@ def main():
                 raise ValueError('live Search consumers do not match the pinned generation')
             return d
         sha=pages_preflight(session,initial['generation'])
+        if pins is not None and sha!=pins['code_sha']:
+            raise ValueError('Pages main differs from the reviewed EPUB authority')
         proof=release(generation=generation,session=session,write_store=Claims(),read_target=target,read_live=read_live_receipt,
-                      verify=verify,workflow_sha=sha,pipeline_run=p)
+                      verify=verify,workflow_sha=sha,pipeline_run=p,observe_only=args.observe_only,
+                      expected_code_sha=pins['code_sha'] if pins is not None else None)
     with args.output.open('x') as f:json.dump(proof,f,sort_keys=True)
     print('Verified Pages Reader publication',proof['status'],proof['pages_run'],flush=True)
 
