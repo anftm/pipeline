@@ -175,19 +175,6 @@ class EpubPlanTests(unittest.TestCase):
         self.assertEqual(original['sources'],later['sources'])
         self.assertEqual(original['selection_mode'],later['selection_mode'])
 
-    def test_workflow_is_explicitly_readonly_and_bounded(self):
-        import yaml
-        from pathlib import Path
-        path = Path(__file__).resolve().parents[1] / '.github/workflows/reader-epub-exact-plan.yml'
-        flow = yaml.load(path.read_text(), Loader=yaml.BaseLoader)
-        self.assertEqual(set(flow['on']), {'workflow_dispatch'})
-        self.assertEqual(flow['permissions'], {'contents': 'read'})
-        self.assertEqual(flow['concurrency']['queue'], 'max')
-        commands = '\n'.join(x.get('run', '') for x in flow['jobs']['plan']['steps'])
-        self.assertIn('scripts/reader_epub_plan.py --shard', commands)
-        for forbidden in ('--apply', 'git push', 'workflow run', 'delete'):
-            self.assertNotIn(forbidden, commands)
-
     def test_ordinary_git_blob_change_requires_two_different_full_ids(self):
         values = list(data());row = values[1]['rows'][0]
         row.update(proof='exact-revision-git-blobs', previous_git_blob='7'*40, current_git_blob='8'*40)

@@ -6,7 +6,6 @@ No credentials are passed to the EPUB parser and no bucket object is written.
 """
 from __future__ import annotations
 
-import argparse
 import hashlib
 import json
 import os
@@ -20,14 +19,10 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-import httpx
-from huggingface_hub import HfApi, HfFileSystem
-
 try:
     from . import epub_chapters, reader_assets, reader_epub_plan, reader_format_backlog as backlog, search_snapshot
     from . import reader_lifecycle
     from .report_office_chapter_coverage import verify_bundle_payload
-    from .reader_bucket_store import HubBucketStore
 except ImportError:
     import epub_chapters
     import reader_assets
@@ -36,7 +31,6 @@ except ImportError:
     import search_snapshot
     import reader_lifecycle
     from report_office_chapter_coverage import verify_bundle_payload
-    from reader_bucket_store import HubBucketStore
 
 
 MAX_SOURCE = 128 * 1024 * 1024
@@ -442,34 +436,6 @@ def bound_staging_plan(plan: dict, report: dict, output: Path, *, validate_sourc
     return body
 
 
-def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--shard', type=int, required=True)
-    parser.add_argument('--output', type=Path, required=True)
-    args = parser.parse_args(argv)
-    token = os.environ.get('HF_TOKEN')
-    with httpx.Client(timeout=90, follow_redirects=True) as client:
-        plan = reader_epub_plan.inspect(hub=HubBucketStore(), api=HfApi(token=token), fs=HfFileSystem(token=token),
-                                        client=client, shard=args.shard, operation=os.urandom(16).hex())
-        report = build(plan, args.output, token=token)
-        # Freshly inspect after local conversion. A different selection or source
-        # identity cannot be accepted as a reproducible current shadow.
-        stage_preview = staging_plan(plan, report, args.output)
-        current = reader_epub_plan.inspect(hub=HubBucketStore(), api=HfApi(token=token), fs=HfFileSystem(token=token),
-                                           client=client, shard=args.shard, operation=plan['operation'])
-        if current != plan:
-            raise ValueError('EPUB plan changed during local shadow build')
-    target = args.output / 'report.json'
-    with target.open('x', encoding='utf8') as stream:
-        json.dump(report, stream, ensure_ascii=False, sort_keys=True, indent=2);stream.write('\n')
-    with (args.output / 'staging-preview.json').open('x', encoding='utf8') as stream:
-        json.dump(stage_preview, stream, ensure_ascii=False, sort_keys=True, indent=2);stream.write('\n')
-    print(json.dumps({'kind': report['kind'], 'plan_sha256': report['plan_sha256'],
-                      'sources': len(report['sources']), 'remote_writes': 0, 'publication_ready': False},
-                     ensure_ascii=False, sort_keys=True), flush=True)
-    return 0
-
-
 if __name__ == '__main__':
     if len(sys.argv) == 4 and sys.argv[1] == '--_parse':
         resource.setrlimit(resource.RLIMIT_FSIZE, (PARSER_FILE_LIMIT, PARSER_FILE_LIMIT))
@@ -477,4 +443,4 @@ if __name__ == '__main__':
         resource.setrlimit(resource.RLIMIT_AS, (PARSER_ADDRESS_BYTES, PARSER_ADDRESS_BYTES))
         epub_chapters.build_bundle(Path(sys.argv[2]), Path(sys.argv[3]))
     else:
-        raise SystemExit(main())
+        raise SystemExit('Use the EPUB batch or exact publication entry point')

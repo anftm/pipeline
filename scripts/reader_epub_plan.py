@@ -8,9 +8,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
-import json
 import re
-from pathlib import Path
 
 try:
     from . import pilot_epub_chapters as builder
@@ -292,37 +290,3 @@ def inspect_one(*, hub, api, fs, client, shard, operation, threshold=100, offset
     body.pop('plan_sha256')
     body['plan_sha256']=hashlib.sha256(search_snapshot.canonical(body)).hexdigest()
     return body
-
-
-def main(argv=None):
-    import argparse
-    import os
-    import secrets
-    import httpx
-    from huggingface_hub import HfApi, HfFileSystem
-    try:
-        from .reader_bucket_store import HubBucketStore
-    except ImportError:
-        from reader_bucket_store import HubBucketStore
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--shard', required=True, type=int)
-    parser.add_argument('--output', required=True, type=Path)
-    args = parser.parse_args(argv)
-    if args.output.exists() or args.output.is_symlink():
-        raise ValueError('EPUB plan output must be a new file')
-    token = os.environ.get('HF_TOKEN')
-    with httpx.Client(timeout=90, follow_redirects=True) as client:
-        plan = inspect(hub=HubBucketStore(), api=HfApi(token=token), fs=HfFileSystem(token=token),
-                       client=client, shard=args.shard, operation=secrets.token_hex(16))
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    with args.output.open('x', encoding='utf8') as stream:
-        json.dump(plan, stream, ensure_ascii=False, sort_keys=True, indent=2)
-        stream.write('\n')
-    print(json.dumps({'kind': plan['kind'], 'plan_sha256': plan['plan_sha256'], 'shard': plan['shard'],
-                      'selected': len(plan['sources']), 'remote_writes': 0, 'publication_ready': False},
-                     ensure_ascii=False, sort_keys=True), flush=True)
-    return 0
-
-
-if __name__ == '__main__':
-    raise SystemExit(main())

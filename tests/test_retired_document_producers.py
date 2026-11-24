@@ -10,7 +10,7 @@ RETIRED_WORKFLOWS = {
     'exact-stale-run-delete.yml', 'force-ocr-book.yml', 'pdf-lane-watchdog.yml',
     'publish-ccrd-ocr.yml', 'reader-ocr-audit.yml', 'reader-ocr-repin.yml',
     'reader-publish-text.yml', 'reader-v3-build.yml', 'stage-ccrd-ocr-text.yml',
-    'pdf-account-publish.yml',
+    'pdf-account-publish.yml', 'reader-epub-exact-plan.yml', 'reader-epub-shadow.yml', 'reader-epub-one-shadow.yml',
 }
 
 
@@ -60,6 +60,15 @@ class RetiredDocumentProducerTests(unittest.TestCase):
                                     self.assertIn('inputs.apply == true', job['if'])
                                 continue
                             self.assertNotIn('scripts/' + script, run)
+
+    def test_retired_maintenance_implementations_are_absent(self):
+        scripts = ROOT.parents[1] / 'scripts'
+        for name in ('exact_stale_run_delete.py', 'pdf_health.py', 'plan_pdf_health.py', 'publish_pdf_health.py',
+                     'pdf_progress_report.py', 'proofread_delivery_shadow.py', 'reader_epub_one_shadow.py'):
+            with self.subTest(script=name):
+                self.assertFalse((scripts / name).exists())
+                for workflow in ROOT.glob('*.yml'):
+                    self.assertNotIn('scripts/' + name, workflow.read_text(), workflow.name)
 
     def test_worker_is_an_inert_inventory_sentinel(self):
         workflow = yaml.safe_load((ROOT / 'pdf-account-worker.yml').read_text())
@@ -119,7 +128,13 @@ class RetiredDocumentProducerTests(unittest.TestCase):
         self.assertEqual(inputs['operation']['options'],
                          ['inspect', 'unify', 'ack', 'retire', 'withdraw', 'reset-documents',
                           'remove-route', 'restore-route', 'verify-route', 'migrate-derived', 'resume-derived',
-                          'redirect-derived', 'reconcile-derived-index', 'reconcile-sidecar', 'compact-legacy-history', 'publish-generation', 'verify-generation'])
+                          'redirect-derived', 'finalize-derived-redirects', 'replace-derived-history',
+                          'replace-exact-web', 'verify-exact-web', 'replace-managed-web', 'verify-managed-web',
+                          'prepare-managed-web', 'upgrade-web-profile', 'record-web-retirement-hints',
+                          'verify-exact-office-report', 'replace-exact-office-report', 'prepare-exact-ebook',
+                          'replace-exact-ebook', 'recover-exact-ebook', 'refresh-reader-consumers',
+                          'reconcile-derived-index', 'reconcile-sidecar', 'compact-legacy-history',
+                          'publish-generation', 'verify-generation', 'verify-pages-lane'])
         self.assertEqual(inputs['operation']['default'], 'inspect')
         self.assertFalse(inputs['apply']['default'])
 
