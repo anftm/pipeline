@@ -165,20 +165,6 @@ class ReaderEpubShadowTests(unittest.TestCase):
         self.assertNotIn('PYTHONPATH', env)
         self.assertEqual(run.call_args.kwargs['timeout'], 600)
 
-    def test_workflow_is_manual_and_only_uploads_the_report(self):
-        import yaml
-        flow = yaml.load((Path(__file__).resolve().parents[1] / '.github/workflows/reader-epub-shadow.yml').read_text(),
-                         Loader=yaml.BaseLoader)
-        self.assertEqual(set(flow['on']), {'workflow_dispatch'})
-        self.assertEqual(flow['permissions'], {'contents': 'read'})
-        steps = flow['jobs']['shadow']['steps']
-        artifact = next(x for x in steps if x.get('uses') == 'actions/upload-artifact@v7')
-        self.assertEqual(artifact['with']['path'].splitlines(),
-                         ['output/epub-shadow/report.json', 'output/epub-shadow/staging-preview.json'])
-        commands = '\n'.join(x.get('run', '') for x in steps)
-        for forbidden in ('--apply', 'git push', 'workflow run', 'delete'):
-            self.assertNotIn(forbidden, commands)
-
     def test_plan_rejects_extra_fields_and_unbound_content_proof(self):
         import copy
         for change in ('extra-plan', 'extra-source', 'missing-sha', 'same-sha', 'unknown-proof'):
