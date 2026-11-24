@@ -67,6 +67,7 @@ on:
       - scripts/build_reader_web_profile_candidate_index.py
       - scripts/reader_web_retirement_backfill.py
       - scripts/reader_web_retention_plan.py
+      - scripts/reader_web_profile_readback.py
       - tests/test_reader_web_retirement_backfill.py
       - tests/test_reader_web_retention_plan.py
       - .github/workflows/reader-web-reconvert.yml

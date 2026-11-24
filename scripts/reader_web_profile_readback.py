@@ -1,5 +1,7 @@
 """Verify exact public replacements after the daily controller's profile batch."""
 import argparse,json,os
+from datetime import datetime, timezone
+from hashlib import sha256
 from pathlib import Path
 import httpx
 from . import reader_gc_retirement as retirement
@@ -39,16 +41,50 @@ def record_hint(publication, rows, *, guard, hub, claims):
     return path
 
 
+def retention_evidence(result, *, publication_raw, consumer_raw, now=None):
+    """Anchor the Web-only clock to completed object and dual-consumer readback."""
+    published = json.loads(publication_raw)
+    consumers = json.loads(consumer_raw)
+    n = published['changed_rows']
+    if type(n) is int and n == 0:
+        return None
+    if (type(n) is not int or not 1 <= n <= 200 or n != len(published['profile']['rows'])
+            or n != published['profile']['converted'] or type(result.get('old_and_new_verified')) is not int
+            or result['old_and_new_verified'] != n
+            or result.get('both_projections_verified') is not True
+            or result.get('generation') != published['generation']
+            or consumers.get('generation') != published['generation'] or consumers.get('complete') is not True
+            or set(consumers.get('consumers', {})) != {'hf', 'pages'}):
+        raise ValueError('Web retention evidence differs from the completed publication')
+    now = now or datetime.now(timezone.utc)
+    if now.utcoffset() is None:
+        raise ValueError('Web retention clock requires timezone')
+    for surface, receipt in consumers['consumers'].items():
+        if (receipt.get('surface') != surface or receipt.get('projection_verified') is not True
+                or receipt.get('generation') != published['generation']):
+            raise ValueError('Web retention evidence requires both verified projections')
+        checked = datetime.fromisoformat(receipt['checked_at'].replace('Z', '+00:00'))
+        if checked.utcoffset() is None or checked > now:
+            raise ValueError('invalid Web consumer verification time')
+    return {'generation': result['generation'], 'old_and_new_verified': n,
+            'both_projections_verified': True, 'verified_at': now.astimezone(timezone.utc).isoformat(),
+            'publication_sha256': sha256(publication_raw).hexdigest(),
+            'consumers_sha256': sha256(consumer_raw).hexdigest()}
+
+
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     for name in ('publication','consumers','output'):p.add_argument('--'+name,type=Path,required=True)
     p.add_argument('--resource-json')
-    a=p.parse_args();result=json.loads(a.publication.read_bytes()); profile=result['profile']; n=result['changed_rows']
+    a=p.parse_args(); publication_raw=a.publication.read_bytes(); consumer_raw=a.consumers.read_bytes()
+    result=json.loads(publication_raw); profile=result['profile']; n=result['changed_rows']
     if type(n) is not int or n!=profile['converted'] or n!=len(profile['rows']):
         raise ValueError('profile readback scope differs')
     with httpx.Client(follow_redirects=True,timeout=30) as http:
         out=live({'target_pointer':{'generation':result['generation']},'rows':profile['rows']},
-                 json.loads(a.consumers.read_bytes()),result,http,workers=PUBLIC_WEB_READERS)
+                 json.loads(consumer_raw),result,http,workers=PUBLIC_WEB_READERS)
+    if n:
+        out['web_rollback_verification']=retention_evidence(out, publication_raw=publication_raw, consumer_raw=consumer_raw)
     if n and a.resource_json is not None:
         extension, _, parent_id = authority_scope(json.loads(a.resource_json))
         if extension != profile['extension']:
