@@ -26,7 +26,10 @@ def registry(obj):
 
 class HoldAdmissionTests(unittest.TestCase):
     def setUp(self):
-        self.source = {'version': 1, 'scope': 'replay_holds', 'search_generation': '9'*64,
+        self.make_batch('replay_holds', 21)
+
+    def make_batch(self, scope, count):
+        self.source = {'version': 1, 'scope': scope, 'search_generation': '9'*64,
                        'pages_commit': '8'*40, 'space_commit': '7'*40,
                        'reader_parent': {'generation': '6'*64, 'catalog_sha256': '5'*64}, 'rows': []}
         self.pointer = {'version': 1, 'kind': 'reader-reading-pointer', 'generation': '6'*64,
@@ -35,10 +38,10 @@ class HoldAdmissionTests(unittest.TestCase):
                        'failures': [{'key': 'not-in-cohort', 'error': 'unrelated'}]}
         self.report = {site: {'sha': self.source[field], 'documents': {}} for site, field in
                        [('search', 'pages_commit'), ('hf-search', 'space_commit')]}
-        self.review = {'kind': 'reader-web-managed-v1', 'selected': 21, 'rows': [], 'parent_pointer': self.pointer}
+        self.review = {'kind': 'reader-web-managed-v1', 'selected': count, 'rows': [], 'parent_pointer': self.pointer}
         self.approval = {'version': 1, 'expected_generation': '6'*64, 'rows': [], 'timestamp': '2026-11-23T00:00:00+00:00'}
         self.routes = {}
-        for i in range(21):
+        for i in range(count):
             path = f'目录/{i}.html'
             source, target = digest(path.encode()), digest(f'new:{i}'.encode())
             identity = {'key': 'example/books\0'+path, 'repo': 'example/books', 'path': path, 'extension': 'html',
@@ -104,23 +107,32 @@ class HoldAdmissionTests(unittest.TestCase):
         admission.validate_review(self.registry, self.review, self.parents)
 
     def test_cleanup_preserves_routed_rows_and_unrelated_notices_after_readback(self):
+        self.check_cleanup()
+
+    def test_residual_cleanup_requires_exact_readback_and_preserves_other_notices(self):
+        self.make_batch('residual_replay_holds', 17)
+        self.check_cleanup()
+
+    def check_cleanup(self):
+        count = self.review['selected']
         self.review['target_pointer']={'generation':'e'*64}
         pairs=[(r['old'],r['new']) for r in self.review['rows']]
         raw=plan.canonical(self.parents,pairs,'a'*32,managed=True)['html']
         data={admission.MEMBER:encode(self.source),'target-html.json':raw}
         publication={'generation':'e'*64,'failure_notices_retained':True,'hold_admission':self.proof()}
-        rb={'generation':'e'*64,'both_projections_verified':True,'old_and_new_verified':21,'deleted_objects':0}
+        rb={'generation':'e'*64,'both_projections_verified':True,'old_and_new_verified':count,'deleted_objects':0}
         state=[raw]; cps=Mock(); hub=Mock(); journal=Mock(); journal.read.return_value=None; journal.claim.return_value=True
         cps.read.side_effect=lambda *_:SimpleNamespace(raw=state[0],etag='"etag"')
         hub.read_bytes.side_effect=lambda *_:state[0]
         def write(_b,_p,val,_e,**_kw):state[0]=index._encode(val); return 'written'
         cps.write_once.side_effect=write
         with patch.object(cleanup.v3,'current',return_value=(self.review['target_pointer'],)):
-            with self.assertRaises(ValueError):
-                cleanup.cleanup(self.review,data,publication,rb|{'both_projections_verified':False},cps,hub,journal,guard=lambda:True)
+            for wrong in ({'both_projections_verified': False}, {'old_and_new_verified': count+1}):
+                with self.assertRaisesRegex(ValueError, 'exact sealed hold publication and readback'):
+                    cleanup.cleanup(self.review,data,publication,rb|wrong,cps,hub,journal,guard=lambda:True)
             journal.claim.assert_not_called()
             result=cleanup.cleanup(self.review,data,publication,rb,cps,hub,journal,guard=lambda:True)
-        self.assertEqual(result['removed_count'],21)
+        self.assertEqual(result['removed_count'],count)
         self.assertEqual(json.loads(state[0])['files'],json.loads(raw)['files'])
         self.assertEqual(json.loads(state[0])['failures'],[self.before['failures'][0]])
         self.assertEqual(journal.claim.call_count,1)
@@ -167,6 +179,60 @@ class HoldAdmissionTests(unittest.TestCase):
                                          pages_commit=self.source['pages_commit'], space_commit=self.source['space_commit'],
                                          reader_pointer=self.pointer, routes={key: self.routes[key]}, report=report)
         self.assertEqual((proof['scope'], proof['selected']), ('output_budget', 1))
+
+    def test_residual_scope_is_exact_and_separate(self):
+        previous = self.source
+        self.make_batch('residual_replay_holds', 17)
+        admission.validate_approval(self.registry, self.approval)
+        proof = self.proof()
+        self.assertEqual((proof['scope'], proof['selected']), ('residual_replay_holds', 17))
+        self.assertEqual(self.proof(prior_proof=proof), proof)
+        with self.assertRaisesRegex(ValueError, 'prior proof'):
+            self.proof(prior_proof=proof | {'scope': 'replay_holds'})
+        with self.assertRaisesRegex(ValueError, 'candidate SHA set'):
+            self.proof(report=self.report | {'hf-search': self.report['hf-search'] | {'documents': {}}})
+        report = deepcopy(self.report)
+        next(iter(report['hf-search']['documents'].values())).pop('clean')
+        with self.assertRaisesRegex(ValueError, 'clean replay failed'):
+            self.proof(report=report)
+        for scope, rows, count in [
+            ('residual_replay_holds', self.source['rows'][:-1], 17),
+            ('residual_replay_holds', self.source['rows'] + previous['rows'][17:18], 17),
+            ('residual_replay_holds', previous['rows'], 17),
+            ('replay_holds', self.source['rows'], 21),
+            ('output_budget', self.source['rows'], 1),
+        ]:
+            with self.subTest(scope=scope, rows=len(rows)), self.assertRaisesRegex(ValueError, f'exactly {count} rows'):
+                registry(self.source | {'scope': scope, 'rows': rows})
+        for fields in ({'error': 'output_budget'}, {'extension': 'htm'}):
+            bad = deepcopy(self.source)
+            bad['rows'][0]['failure'].update(fields)
+            with self.subTest(fields=fields), self.assertRaisesRegex(ValueError, 'invalid exact profile-upgrade hold'):
+                registry(bad)
+
+    def test_residual_approved_identity_cannot_be_substituted(self):
+        self.make_batch('residual_replay_holds', 17)
+        for identity in ('key', 'original', 'body'):
+            changed, approval = deepcopy((self.source, self.approval))
+            row, new = changed['rows'][0], approval['rows'][0]['new']
+            hold, candidate = row['failure'], row['candidate']
+            if identity == 'key':
+                new.update(path='other.html', key=new['repo']+'\0other.html')
+                hold.update(path=new['path'], key=new['key'])
+            elif identity == 'original':
+                source = digest(b'different original')
+                new['source_sha256'] = hold['source_sha256'] = candidate['source_sha256'] = row['old_source_sha256'] = source
+            else:
+                new['sha256'] = candidate['sha256'] = digest(b'different body')
+            root = 'documents/web/html/'+digest(f"{new['source_sha256']}\0{new['sha256']}".encode())
+            new.update(object=root+'/document.html', manifest=root+'/document-manifest.json')
+            with self.subTest(identity=identity):
+                # Each replacement is well-formed and matches its own registry, not the approved one.
+                admission.validate_approval(registry(changed), approval)
+                with self.assertRaisesRegex(ValueError, 'registry digest'):
+                    admission.parse(encode(changed), self.registry.sha256)
+                with self.assertRaisesRegex(ValueError, 'one-to-one|pinned hold candidate'):
+                    admission.validate_approval(self.registry, approval)
 
     def test_registry_is_addressed_by_raw_digest_and_rows_are_copies(self):
         raw = encode(self.source)

@@ -26,7 +26,12 @@ MAX_CONTENT = 12 * 1024**2
 WIDTH = 390
 MAX_SCROLL = WIDTH + 1
 
-_SCOPES = {'replay_holds': (21, 'reader_replay_mismatch'), 'output_budget': (1, 'output_budget')}
+# The separately approved registry SHA pins membership; scope pins count and reason.
+_SCOPES = {
+    'replay_holds': (21, 'reader_replay_mismatch'),
+    'output_budget': (1, 'output_budget'),
+    'residual_replay_holds': (17, 'reader_replay_mismatch'),
+}
 _NEW_PROOF = object()
 REGISTRY_FIELDS = {'version', 'scope', 'search_generation', 'pages_commit', 'space_commit', 'reader_parent', 'rows'}
 HOLD_FIELDS = {'key', 'repo', 'path', 'extension', 'source_revision', 'source_sha256',
